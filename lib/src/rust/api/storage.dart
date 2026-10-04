@@ -427,7 +427,10 @@ Future<bool> hasPendingWipe() =>
 /// the next Welcome starts from a clean slate, keeping only the wipe marker (removed
 /// last), any single-instance lock and the profile registry, and what Hollow wrote
 /// beside the dir. The same sweep as the wipe itself. Idempotent.
-Future<void> performPendingWipe() =>
+///
+/// True when it finished a destroy, which ends the profile (Dart's profile list then
+/// forgets it); false for a cancelled link's throwaway.
+Future<bool> performPendingWipe() =>
     RustLib.instance.api.crateApiStoragePerformPendingWipe();
 
 /// A read pointer that moved: Dart adopts `message_id` as the seen pointer for

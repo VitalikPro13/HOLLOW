@@ -251,8 +251,7 @@ pub(crate) fn build_friend_request(
 
     // Our name and avatar sealed to the target, so its incoming card shows who is
     // asking while the relay carrying the request cannot read it (A28).
-    let sealed_card = super::profile_card::own_card(master_keypair, db_path, db_passphrase)
-        .and_then(|card| super::profile_card::seal_for(&card, target_master, requested_at));
+    let sealed_card = super::profile_card::sealed_own_card(master_keypair, target_master, requested_at, db_path, db_passphrase);
 
     HavenMessage::FriendRequest {
         requested_at,
@@ -305,8 +304,8 @@ pub(crate) fn deposit_own_card(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Some(sealed_card) = super::profile_card::own_card(master_keypair, db_path, db_passphrase)
-        .and_then(|card| super::profile_card::seal_for(&card, requester_master, requested_at))
+    let Some(sealed_card) =
+        super::profile_card::sealed_own_card(master_keypair, requester_master, requested_at, db_path, db_passphrase)
     else {
         return;
     };
@@ -318,9 +317,9 @@ pub(crate) fn deposit_own_card(
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: inbox_room });
 }
 
-/// Keep the card a target sealed back to a request of ours. Only the pair key of a
-/// pending outgoing row stamped `requested_at` opens it, so it speaks for that target
-/// alone. Out of line so the swarm's request handler holds no store.
+/// Keep the card and avatar thumbnail a target sealed back to a request of ours. Only
+/// the pair key of a pending outgoing row stamped `requested_at` opens it, so it speaks
+/// for that target alone. Out of line so the swarm's request handler holds no store.
 pub(crate) async fn take_friend_card(
     event_tx: &mpsc::Sender<NetworkEvent>,
     local_master: &str,
@@ -329,17 +328,21 @@ pub(crate) async fn take_friend_card(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let rows = crate::storage::MessageStore::open(db_path, db_passphrase)
-        .and_then(|st| st.load_friends(Some("pending")))
-        .unwrap_or_default();
-    let card = rows
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let rows = store.load_friends(Some("pending")).unwrap_or_default();
+    let Some(opened) = rows
         .iter()
         .filter(|(_, _, direction, stamp, _)| direction == "outgoing" && *stamp == requested_at)
-        .find_map(|(master, ..)| super::profile_card::open_from(sealed_card, local_master, master, requested_at));
-    if let Some(card) = card
-        && super::profile_card::store_card(&card, None, db_path, db_passphrase)
-    {
-        let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: card.master }).await;
+        .find_map(|(master, ..)| super::profile_card::open_from(sealed_card, local_master, master, requested_at))
+    else {
+        return;
+    };
+    let card_written = super::profile_card::store_card(&opened.card, None, db_path, db_passphrase);
+    let thumb_written =
+        super::profile_card::keep_thumb(&store, &opened.card.master, "outgoing", requested_at, opened.thumb.as_deref());
+    drop(store);
+    if card_written || thumb_written {
+        let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: opened.card.master }).await;
     }
 }
 
@@ -2999,7 +3002,7 @@ mod tests {
         let card = crate::node::types::SignedCard {
             master: target.peer_id(), display_name: "Target".into(), avatar_hash: String::new(), updated_at: 7, sig, pk,
         };
-        let seal = |at: i64| crate::node::profile_card::seal_for(&card, &me.peer_id(), at).unwrap();
+        let seal = |at: i64| crate::node::profile_card::seal_for(&card, None, &me.peer_id(), at).unwrap();
         let name = || store.load_profile(&target.peer_id()).ok().flatten().map(|p| p.display_name);
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
@@ -3007,5 +3010,123 @@ mod tests {
         assert_eq!(name(), None, "a card answering another request of ours");
         super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), &db, &pass).await;
         assert_eq!(name().as_deref(), Some("Target"));
+    }
+
+    fn avatar_png(green: u8) -> Vec<u8> {
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(128, 128, image::Rgba([200, green, 40, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        png
+    }
+
+    fn thumb_store(name: &str) -> (crate::test_tmp::TestDir, String, String, crate::storage::MessageStore) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join(name).to_str().unwrap().to_string();
+        let pass = "ce".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        (tmp, db, pass, store)
+    }
+
+    /// Decision D: a card's thumbnail lands only on our own pending row of the request
+    /// it answers, and never in the signed avatar column.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_card_thumb_lands_only_on_the_pending_row_it_answers() {
+        use base64::Engine as _;
+        let _g = crate::node::resolver::test_lock();
+        let (me, target) = (NativeKeypair::from_secret_bytes(&[66; 32]), NativeKeypair::from_secret_bytes(&[67; 32]));
+        crate::node::dm_room::register(&me);
+        crate::node::dm_room::register(&target);
+        let (_tmp, db, pass, store) = thumb_store("thumbs.db");
+        let face = avatar_png(90);
+        let hash = super::profile_blob_hash(Some(&face));
+        let payload = crate::node::crypto_handler::card_signing_payload(&target.peer_id(), 7, "Target", &hash);
+        let pk = base64::engine::general_purpose::STANDARD.encode(target.public_key_protobuf());
+        let (Some(sig), Some(pk)) = crate::node::crypto_handler::sign_message(&target, &pk, &payload) else { panic!("signs") };
+        let card = crate::node::types::SignedCard {
+            master: target.peer_id(), display_name: "Target".into(), avatar_hash: hash, updated_at: 7, sig, pk,
+        };
+        let thumb = crate::node::image_convert::encode_card_thumb(&face).unwrap();
+        let seal = |at: i64| crate::node::profile_card::seal_for(&card, Some(&thumb), &me.peer_id(), at).unwrap();
+        let t = target.peer_id();
+        let shown = || store.load_avatar_for_display(&t).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), &db, &pass).await;
+        assert_eq!(shown(), None, "no row of ours");
+        store.save_friend(&t, "pending", "outgoing", 100).unwrap();
+        super::take_friend_card(&tx, &me.peer_id(), 50, &seal(50), &db, &pass).await;
+        assert_eq!(shown(), None, "a card answering another request of ours");
+
+        // The store's own gate, for every row the card's request did not make.
+        let some = Some(thumb.as_slice());
+        let keep = |dir: &str, at: i64| crate::node::profile_card::keep_thumb(&store, &t, dir, at, some);
+        assert!(!keep("incoming", 100), "another direction");
+        assert!(!keep("outgoing", 99), "another stamp");
+        for (status, dir) in [("accepted", ""), ("declined", ""), ("accepted", "outgoing")] {
+            store.save_friend(&t, status, dir, 100).unwrap();
+            assert!(!keep(dir, 100), "the {status} row");
+        }
+        store.remove_friend(&t).unwrap();
+        assert!(!keep("outgoing", 100), "no row");
+        assert_eq!(shown(), None);
+
+        store.save_friend(&t, "pending", "outgoing", 100).unwrap();
+        while rx.try_recv().is_ok() {}
+        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), &db, &pass).await;
+        let kept = shown().expect("our pending request shows the target's thumb");
+        assert!(crate::node::image_convert::webp_header_dimensions(&kept).is_some(), "a WebP we encoded");
+        assert_eq!(store.load_avatar(&t).unwrap(), None, "the signed avatar column holds no thumb");
+        assert!(matches!(rx.try_recv(), Ok(crate::node::NetworkEvent::ProfileUpdated { .. })), "the row is told to repaint");
+        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), &db, &pass).await;
+        assert!(rx.try_recv().is_err(), "a replayed card repaints nothing");
+    }
+
+    /// Decision D: the thumb stands in after an accept until the full profile holds the
+    /// avatar or signs that there is none, and a declined row keeps no picture.
+    #[test]
+    fn a_card_thumb_stands_in_only_until_the_full_profile_decides() {
+        fn full(store: &crate::storage::MessageStore, peer: &str, at: i64, avatar: Option<&[u8]>, signed: &str) -> bool {
+            let proof = crate::storage::ProfileProof { sig: "s", pk: "p", avatar_hash: signed, banner_hash: "", assets_hash: "" };
+            store.save_profile(peer, "Name", "", "", at, avatar, None, "", None, None, Some(proof), None, None, None, None).unwrap()
+        }
+        let (_tmp, _db, _pass, store) = thumb_store("standin.db");
+        let thumb = crate::node::image_convert::encode_card_thumb(&avatar_png(10)).unwrap();
+        let face = avatar_png(220);
+        let hash = super::profile_blob_hash(Some(&face));
+        let pending_with_thumb = |peer: &str| {
+            store.save_friend(peer, "pending", "incoming", 100).unwrap();
+            assert!(crate::node::profile_card::keep_thumb(&store, peer, "incoming", 100, Some(&thumb)));
+        };
+
+        pending_with_thumb("friend");
+        store.save_friend("friend", "accepted", "", 100).unwrap();
+        assert_eq!(store.load_avatar_for_display("friend").unwrap().as_deref(), Some(thumb.as_slice()), "after the accept");
+        assert!(full(&store, "friend", 1, None, &hash));
+        assert_eq!(store.load_avatar_for_display("friend").unwrap().as_deref(), Some(thumb.as_slice()), "until the bytes are pulled");
+        assert!(full(&store, "friend", 2, Some(&face), &hash));
+        assert_eq!(store.load_avatar_for_display("friend").unwrap(), Some(face.clone()), "the full avatar replaces it");
+        assert!(full(&store, "friend", 3, Some(&[]), ""));
+        assert_eq!(store.load_avatar_for_display("friend").unwrap(), None, "and a cleared avatar shows no old thumb");
+
+        pending_with_thumb("faceless");
+        assert!(full(&store, "faceless", 1, None, ""));
+        assert_eq!(store.load_avatar_for_display("faceless").unwrap(), None, "a profile that signs no avatar");
+
+        pending_with_thumb("declined");
+        store.save_friend("declined", "declined", "", 100).unwrap();
+        assert_eq!(store.load_avatar_for_display("declined").unwrap(), None, "a declined row");
+        store.save_friend("declined", "pending", "incoming", 200).unwrap();
+        assert_eq!(store.load_avatar_for_display("declined").unwrap(), None, "and a re-add brings none back");
+
+        pending_with_thumb("recarded");
+        assert!(store.save_profile_card("recarded", "Still faced", 8, &hash, None).unwrap());
+        assert_eq!(store.load_avatar_for_display("recarded").unwrap().as_deref(), Some(thumb.as_slice()), "a card with an avatar");
+        assert!(store.save_profile_card("recarded", "Still faced", 8, &hash, Some(&face)).unwrap());
+        assert_eq!(store.load_avatar_for_display("recarded").unwrap(), Some(face.clone()), "its pulled avatar wins");
+        assert!(store.save_profile_card("recarded", "Faceless now", 9, "", None).unwrap());
+        assert_eq!(store.load_avatar_for_display("recarded").unwrap(), None, "a newer card that signs no avatar");
     }
 }

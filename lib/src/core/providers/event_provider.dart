@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
-import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
@@ -208,7 +207,7 @@ class EventStreamNotifier extends Notifier<bool> {
     // Relaunch via the shared waiter-script helper (app_relaunch.dart): a
     // directly-spawned copy dies against the native single-instance forwarder.
     await Future<void>.delayed(const Duration(milliseconds: 1200));
-    await relaunchApp();
+    await relaunchAfterWipe();
   }
 
   void start() {

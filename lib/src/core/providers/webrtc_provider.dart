@@ -1,7 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
-import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
@@ -49,17 +48,6 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
   WebRtcState build() => const WebRtcState();
 
   void _wireCallbacks() {
-    _service!.onProgress = (transferId, bytesDone, totalBytes) {
-      // Raw byte counts ride as "chunks": the widget uses the ratio. Clamped,
-      // because ciphertext is slightly larger than plaintext.
-      final clamped = bytesDone.clamp(0, totalBytes);
-      ref.read(fileTransferProvider.notifier).onFileProgress(
-            transferId,
-            clamped,
-            totalBytes,
-          );
-    };
-
     _service!.onSendComplete = (transferId) {
       debugPrint('[HOLLOW-WEBRTC] Provider: send complete $transferId');
     };

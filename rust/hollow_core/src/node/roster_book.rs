@@ -153,9 +153,10 @@ pub(crate) fn write_bootstrap(data_dir: &std::path::Path, roster: &Roster) -> Re
 /// Bring our own roster up to date at start, and return it with its fold.
 ///
 /// A bootstrap file is merged first. Without a roster, a device its own 0.11 list
-/// names claims its legacy seat (and removes what that list had revoked), a device
-/// the list does not name asks to join, and a brand-new database claims a legacy seat
-/// for a fresh identity. With a roster, a device that is nothing in it asks to join.
+/// names (or the only device, with no list) takes its seat: by signing the identity's
+/// first recovery with the phrase 0.11 stored here, else by a legacy claim, and either
+/// way removes what that list had revoked. A device the list does not name asks to
+/// join. With a roster, a device that is nothing in it asks to join.
 pub(crate) fn ensure_own(
     store: &MessageStore,
     master: &NativeKeypair,
@@ -186,16 +187,32 @@ pub(crate) fn ensure_own(
         Some(r) => r,
         None => {
             let mut r = Roster::new(&own);
-            match store.load_device_list(&own).ok().flatten() {
+            let old = store.load_device_list(&own).ok().flatten();
+            let seat = match &old {
                 Some(old) if old.devices.iter().any(|d| d == &me) => {
-                    r.add_legacy(roster::sign_legacy(master, &me));
-                    for gone in old.revoked.iter().filter(|g| **g != me) {
-                        r.add_removal(roster::sign_removal(device, &own, roster::LEGACY_BASE, gone, &[]));
+                    Some((old.devices.clone(), old.revoked.iter().filter(|g| **g != me).cloned().collect::<Vec<_>>()))
+                }
+                Some(_) => None,
+                None => Some((vec![me.clone()], Vec::new())),
+            };
+            if let Some((kept, revoked)) = seat {
+                let base = match stored_phrase_recovery(store, &own) {
+                    Some(recovery) => {
+                        sign_upgrade(&mut r, master, &recovery, device, &kept);
+                        hollow_log!("[HOLLOW-ROSTER] The phrase 0.11 stored signed this identity's first recovery");
+                        r.base()
                     }
+                    None => {
+                        r.add_legacy(roster::sign_legacy(master, &me));
+                        roster::LEGACY_BASE.to_string()
+                    }
+                };
+                for gone in &revoked {
+                    r.add_removal(roster::sign_removal(device, &own, &base, gone, &[]));
+                }
+                if old.is_some() {
                     hollow_log!("[HOLLOW-ROSTER] Claimed this device's seat from the 0.11 list");
                 }
-                Some(_) => {}
-                None => r.add_legacy(roster::sign_legacy(master, &me)),
             }
             r
         }
@@ -212,22 +229,55 @@ pub(crate) fn ensure_own(
     }
     let roster = roster.reverified();
     let _ = save(store, &roster, &state, &own, &me);
-    // The phrase has been typed on 0.12 somewhere, so no copy of it stays here.
-    if !roster.r_pub.is_empty() {
-        let _ = store.delete_setting(STORED_PHRASE);
-    }
     (roster, state)
 }
 
-/// Where 0.11 kept the recovery phrase, read once for the upgrade and then erased.
+/// The upgrade, signed by the phrase 0.11 stored: the same recovery on every device of
+/// the identity, an admission for each device the 0.11 list kept and this one, and this
+/// device's consent first so that what it signs next has standing. Never the master id:
+/// anyone holding the master key could consent as it (G1).
+fn sign_upgrade(r: &mut Roster, master: &NativeKeypair, recovery: &NativeKeypair, device: &NativeKeypair, kept: &[String]) {
+    let me = device.peer_id();
+    let own = master.peer_id();
+    r.add_consent(roster::sign_consent(device, &own));
+    let r_pub = roster::r_pub_of(recovery);
+    let _ = r.add_phrase_statement(&r_pub, Some(roster::sign_upgrade_recovery(master, recovery)), None);
+    let devices: BTreeSet<&String> = kept.iter().chain(std::iter::once(&me)).filter(|d| **d != own).collect();
+    for d in devices {
+        let _ = r.add_phrase_statement(&r_pub, None, Some(roster::sign_upgrade_admit(master, recovery, d)));
+    }
+}
+
+/// Where 0.11 kept the recovery phrase. It stays until the person confirms it on this
+/// device or types the phrase here: a key being pinned never erases it.
 pub(crate) const STORED_PHRASE: &str = "recovery_mnemonic";
 
-/// The recovery key the phrase kept by an identity from before 0.12 derives, when that
-/// phrase is still stored here and belongs to `master`.
-fn stored_phrase_key(store: &MessageStore, master: &str) -> Option<String> {
+/// The recovery key of the phrase an identity from before 0.12 stored, when that
+/// phrase is still here and belongs to `master`.
+fn stored_phrase_recovery(store: &MessageStore, master: &str) -> Option<NativeKeypair> {
     let phrase = zeroize::Zeroizing::new(store.load_setting(STORED_PHRASE).ok().flatten()?);
-    let (_, recovery) = crate::identity::recovery::recovery_key_for(master, &phrase).ok()?;
-    Some(roster::r_pub_of(&recovery))
+    crate::identity::recovery::recovery_key_for(master, &phrase).ok().map(|(_, recovery)| recovery)
+}
+
+fn stored_phrase_key(store: &MessageStore, master: &str) -> Option<String> {
+    stored_phrase_recovery(store, master).map(|r| roster::r_pub_of(&r))
+}
+
+/// Whether `recovery` already roots our roster. A roster start-up has not built yet is
+/// built first, so a confirmation never races the upgrade.
+pub(crate) fn rooted_by(
+    master: &NativeKeypair,
+    device: &NativeKeypair,
+    recovery: &NativeKeypair,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Result<bool, String> {
+    let store = MessageStore::open(db_path, db_passphrase)?;
+    let roster = match load_strict(&store, &master.peer_id())? {
+        Some(r) => r,
+        None => ensure_own(&store, master, device, db_path).0,
+    };
+    Ok(!roster.recoveries.is_empty() && roster.r_pub == roster::r_pub_of(recovery))
 }
 
 /// What a roster for our own master may teach us. While the phrase an identity from
@@ -1371,10 +1421,10 @@ mod tests {
         assert!(state.pending.contains(&restored.device.peer_id()), "a device the old list never named must ask");
     }
 
-    /// The bootstrap a phrase wrote is imported once, and a stored 0.11 phrase is gone
-    /// the moment the identity has a recovery key.
+    /// The bootstrap a phrase wrote is imported once. A stored 0.11 phrase outlives
+    /// the recovery key being pinned: only the person confirming it erases it.
     #[test]
-    fn the_bootstrap_is_imported_and_the_stored_phrase_erased() {
+    fn the_bootstrap_is_imported_and_a_pinned_key_keeps_the_stored_phrase() {
         let _g = guard();
         let me = Observer::new(0x01, 0x02);
         me.store().save_setting(STORED_PHRASE, "abandon abandon").unwrap();
@@ -1382,7 +1432,103 @@ mod tests {
         let (roster, state) = me.own();
         assert!(state.protected && roster.r_pub == r_pub_of(&kp(0x03)));
         assert!(!me.dir().join(BOOTSTRAP_FILE).exists(), "the bootstrap is consumed");
-        assert_eq!(me.store().load_setting(STORED_PHRASE).unwrap(), None, "the stored phrase outlived the recovery key");
+        assert_eq!(
+            me.store().load_setting(STORED_PHRASE).unwrap().as_deref(),
+            Some("abandon abandon"),
+            "a pinned key erased the stored phrase",
+        );
+    }
+
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    /// One device of the identity `PHRASE` derives, holding `list` as its 0.11 device
+    /// list and, when `stored`, the phrase 0.11 kept.
+    fn legacy_device(device: u8, list: &[&str], revoked: &[&str], stored: bool) -> Observer {
+        let (master, _) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        let me = Observer::with_master(master, device);
+        let ids = |v: &[&str]| v.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+        let old = super::super::crypto_handler::build_signed_device_list(&me.master, 4, ids(list), ids(revoked));
+        let json = serde_json::to_string(&old).unwrap();
+        me.store().save_device_list(&me.master.peer_id(), &json, old.version, &old.devices, 0).unwrap();
+        if stored {
+            me.store().save_setting(STORED_PHRASE, PHRASE).unwrap();
+        }
+        me
+    }
+
+    /// Decision C (C-IDENTITY-06). The first 0.12 start of a device its 0.11 list seats
+    /// signs the identity's first recovery with the stored phrase, before anything is
+    /// heard: the same base whichever device does it, the list's devices admitted (never
+    /// the master id, which anyone holding the master key can consent as), what it
+    /// revoked removed, and the stored phrase kept for the person to confirm. A device
+    /// the list does not name still asks to join.
+    #[test]
+    fn authz_the_first_start_roots_a_legacy_identity_in_its_stored_phrase() {
+        let _g = guard();
+        let (master, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        let own = master.peer_id();
+        let (sibling, gone) = (kp(0x03), kp(0x05));
+        let me = legacy_device(0x02, &[&kp(0x02).peer_id(), &sibling.peer_id(), &own], &[&gone.peer_id()], true);
+        let (roster, state) = me.own();
+        let upgrade_base = roster::base_id(&own, &r_pub_of(&recovery), &roster::sign_upgrade_recovery(&master, &recovery));
+        assert!(state.protected && roster.r_pub == r_pub_of(&recovery), "not rooted in the stored phrase: {state:?}");
+        assert_eq!(state.base, upgrade_base);
+        assert_eq!(state.members, BTreeSet::from([me.device.peer_id()]));
+        assert_eq!(me.store().load_setting(STORED_PHRASE).unwrap().as_deref(), Some(PHRASE), "the upgrade erased the stored phrase");
+        assert_eq!(me.own().0, roster, "a second start signed again");
+
+        // The sibling counts once it consents; the revoked device and the master id never do.
+        let mut later = roster.clone();
+        for d in [&sibling, &gone, &master] {
+            later.add_consent(sign_consent(d, &own));
+        }
+        merge_for_test(&me.store(), &later, &own, &me.device.peer_id());
+        let s = me.state_of(&own);
+        assert!(s.is_member(&sibling.peer_id()), "the list's sibling was left out: {s:?}");
+        assert!(!s.is_member(&gone.peer_id()));
+        assert!(roster.removals.iter().any(|r| r.device == gone.peer_id() && r.base == upgrade_base), "the 0.11 revocation was dropped");
+        assert!(!s.is_member(&own), "G1: the master id was admitted");
+
+        let unnamed = legacy_device(0x09, &[&kp(0x02).peer_id()], &[], true);
+        let (_, state) = unnamed.own();
+        assert!(!state.protected && state.pending.contains(&unnamed.device.peer_id()), "an unnamed device signed: {state:?}");
+    }
+
+    /// Decision C, the multi-device trap. Two devices of one identity upgrade apart,
+    /// their 0.11 lists out of step (the older still names a device the newer revoked),
+    /// and a device is linked on 0.12 in between: both meet in one base, both stay,
+    /// the linked device survives the second upgrade and the revoked one stays out.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn authz_two_legacy_devices_upgrading_apart_meet_in_one_base() {
+        let _g = guard();
+        let (a_id, b_id, x, linked) = (kp(0x02).peer_id(), kp(0x03).peer_id(), kp(0x05), kp(0x07));
+        let a = legacy_device(0x02, &[&a_id, &b_id, &x.peer_id()], &[], true);
+        let b = legacy_device(0x03, &[&a_id, &b_id], &[&x.peer_id()], true);
+        let own = a.master.peer_id();
+
+        a.own();
+        vouch(&a.master, &a.device, &linked.peer_id(), &a.db, &a.pass).unwrap();
+        let (mut ra, _) = own_of(&a);
+        ra.add_consent(sign_consent(&linked, &own));
+        ra.add_consent(sign_consent(&x, &own));
+        merge_for_test(&a.store(), &ra, &own, &a.device.peer_id());
+        assert!(a.state_of(&own).is_member(&linked.peer_id()));
+
+        b.own();
+        let ((ra, _), (rb, _)) = (own_of(&a), own_of(&b));
+        a.ingest(&b_id, &rb).await;
+        b.ingest(&a_id, &ra).await;
+        let (sa, sb) = (a.state_of(&own), b.state_of(&own));
+        assert!(sa.protected, "{sa:?}");
+        assert_eq!(sa.base, sb.base, "the two upgrades started two bases");
+        assert_eq!(sa.members, BTreeSet::from([a_id.clone(), b_id.clone(), linked.peer_id()]), "{sa:?}");
+        assert_eq!(sb.members, sa.members);
+        assert!(sa.removed.contains_key(&x.peer_id()), "the newer list's revocation was lost: {sa:?}");
+    }
+
+    fn own_of(o: &Observer) -> (Roster, RosterState) {
+        own(&o.master.peer_id(), &o.db, &o.pass).unwrap()
     }
 
     /// Design ID-1.5. Once the phrase is the root, a destroy order signed by the master
@@ -1543,12 +1689,12 @@ mod tests {
 
     /// C-IDENTITY-06. While an identity from before 0.12 keeps its phrase here, a
     /// recovery key a master-key holder publishes is never taken for our own master,
-    /// nor kept from before: the forged key's device is nobody, the stored phrase stays
-    /// until it has signed on 0.12, and the real phrase still recovers.
+    /// nor kept from before: the forged key's device is nobody, the stored phrase stays,
+    /// and the real phrase still recovers. The legacy roster below (a build from before
+    /// the upgrade signed anything) has no pinned key, so the stored phrase alone refuses.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn authz_a_recovery_key_from_the_network_never_locks_out_our_own_phrase() {
-        const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let _g = guard();
         let (master, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
         let me = Observer::with_master(master, 0x02);
@@ -1559,7 +1705,7 @@ mod tests {
 
         me.store().save_setting(STORED_PHRASE, PHRASE).unwrap();
         let (_, state) = me.own();
-        assert!(!state.protected && state.is_member(&me.device.peer_id()));
+        assert!(state.protected && state.is_member(&me.device.peer_id()));
         me.ingest(&thief.peer_id(), &forged).await;
         assert!(!me.state_of(&own_master).is_member(&thief.peer_id()), "a forged recovery key admitted its device");
         me.own();
@@ -1567,19 +1713,22 @@ mod tests {
         let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, &me.db, &me.pass)
             .expect("the real phrase was locked out");
         assert!(state.protected && state.is_member(&me.device.peer_id()));
-        me.own();
-        assert_eq!(stored_phrase(&me), None, "the phrase outlived its own recovery");
 
-        // A forged key held from before this device knew better goes at start.
+        // A forged key a legacy roster took from before this device knew better goes
+        // at start, and one arriving now is never taken.
         let (master, _) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
         let held = Observer::with_master(master, 0x09);
         held.store().save_setting(STORED_PHRASE, PHRASE).unwrap();
-        held.own();
-        let merged = load(&held.store(), &own_master).unwrap().merged(&forged.verified(now_ms()));
+        let legacy = Roster::legacy_for_test(&held.master, &[&held.device]).verified(now_ms());
+        let merged = legacy.merged(&forged.verified(now_ms()));
+        assert_eq!(merged.r_pub, r_pub_of(&kp(0x04)), "control: a legacy roster takes the first key it sees");
         let state = fold(&held.store(), &merged);
         save(&held.store(), &merged, &state, &own_master, &held.device.peer_id()).unwrap();
         let (roster, state) = held.own();
         assert!(roster.r_pub.is_empty() && !state.is_member(&thief.peer_id()), "a forged key stayed pinned: {state:?}");
+        held.ingest(&thief.peer_id(), &forged).await;
+        let (roster, state) = own_of(&held);
+        assert!(roster.r_pub.is_empty() && !state.is_member(&thief.peer_id()), "a forged key was taken: {state:?}");
         assert_eq!(stored_phrase(&held).as_deref(), Some(PHRASE));
     }
 

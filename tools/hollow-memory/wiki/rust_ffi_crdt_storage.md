@@ -365,8 +365,10 @@ Signature: `fn load_setting(key: String) -> Result<Option<String>, String>`. Loa
 
 ### The recovery phrase is never stored (design ID-1)
 `save_mnemonic` and `get_mnemonic` are gone (HOL-SEC-076). A pre-0.12 identity's stored
-`recovery_mnemonic` is read once by `api/roster.rs::stored_phrase_for_upgrade` and erased by
-the first recovery; exports and imports scrub it (`scrub_device_secrets`).
+`recovery_mnemonic` signs the identity's first recovery at the first 0.12 start
+(`roster_book::ensure_own`, session 35) and stays until the person confirms it on this device
+(`api/roster.rs::confirm_stored_phrase`) or types the phrase for any phrase operation; a pinned
+key never erases it. Exports and imports scrub it (`scrub_device_secrets`).
 
 ## Verified Peers / RAT Files (storage.rs)
 

@@ -50,4 +50,31 @@ void main() {
       expect(parseWireTransferId(buf, 1), isNull);
     });
   });
+
+  group('rtcStreamIdFits', () {
+    // One transfer's id, as Rust's file_stream_id / shard_stream_id derive it.
+    final streamId = '0123456789abcdef' * 4;
+
+    test('a file or shard stream opens only under a stream id', () {
+      for (final kind in ['file', 'shard']) {
+        expect(rtcStreamIdFits(kind, streamId), isTrue, reason: kind);
+        for (final id in [
+          '0123456789abcdef0123456789abcdef', // a bare file id
+          streamId.toUpperCase(),
+          '${streamId.substring(1)}g',
+          '${streamId.substring(2)}:7',
+          'link_ABC123',
+        ]) {
+          expect(rtcStreamIdFits(kind, id), isFalse, reason: '$kind $id');
+        }
+      }
+    });
+
+    test('a share chunk keeps its own id shape', () {
+      const chunk = '0123456789abcdef0123456789abcdef:7';
+      expect(rtcStreamIdFits('share_chunk', chunk), isTrue);
+      expect(isStreamTransferId(chunk), isFalse);
+      expect(parseWireTransferId(_frame(streamId), 1), streamId);
+    });
+  });
 }

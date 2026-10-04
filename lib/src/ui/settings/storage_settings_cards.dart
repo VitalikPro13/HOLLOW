@@ -6,6 +6,7 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/services/recording_service.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -181,6 +182,33 @@ class DataFolderRow extends StatelessWidget {
               'Portable mode keeps your identity and files with the app '
               'folder.'),
       ],
+    );
+  }
+}
+
+/// Where call and screen recordings go. Every profile shares the folder; a wipe
+/// takes only the recordings its own identity made.
+class RecordingsFolderRow extends StatelessWidget {
+  const RecordingsFolderRow({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return SettingsRow(
+      title: 'Recordings',
+      subtitleWidget: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SelectableText(
+            RecordingService.recordingsFolderPath,
+            style:
+                HollowTypography.monoSmall.copyWith(color: hollow.textSecondary),
+          ),
+          const Text('Call and screen recordings are saved here. Erasing this '
+              'identity also deletes the ones you made with it.'),
+        ],
+      ),
     );
   }
 }

@@ -209,10 +209,11 @@ async fn dispatch_one(
     file_id: &str,
     device: &str,
     room: &str,
+    local_device: &str,
 ) {
     // Only the device already streaming it can resume: another stream is its own.
     let offset = pending_ws_transfers
-        .get(file_id)
+        .get(&super::file_handler::file_stream_id(file_id, device, local_device))
         .filter(|s| s.sender == device)
         .map(|s| s.bytes_received)
         .unwrap_or(0);
@@ -300,6 +301,7 @@ async fn advance(
                 file_id,
                 &device,
                 &room,
+                local_device,
             )
             .await;
         }

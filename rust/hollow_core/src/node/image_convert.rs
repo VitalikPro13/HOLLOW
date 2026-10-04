@@ -472,6 +472,47 @@ mod tests {
         }
     }
 
+    /// Decision D: our card thumb is a few KB at the card side, and an animated avatar
+    /// gives its first frame.
+    #[test]
+    fn our_card_thumb_is_small_and_shows_the_first_frame() {
+        let png_of = |img: &image::RgbaImage| {
+            let mut png = Vec::new();
+            img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png).unwrap();
+            png
+        };
+        let patterned = image::RgbaImage::from_fn(512, 512, |x, y| {
+            let n = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)).wrapping_mul(2_246_822_519);
+            image::Rgba([(n >> 24) as u8, (n >> 16) as u8, (n >> 8) as u8, 255])
+        });
+        let thumb = encode_card_thumb(&png_of(&patterned)).expect("a busy avatar fits the ladder");
+        assert!(thumb.len() <= CARD_THUMB_MAX_BYTES, "{} bytes", thumb.len());
+        assert_eq!(webp_header_dimensions(&thumb), Some((CARD_THUMB_DIM, CARD_THUMB_DIM)));
+
+        // Noise at the card side, too heavy for the cap at full quality: never sent oversize.
+        let mut seed = 0x9E37_79B9u32;
+        let noise = image::RgbaImage::from_fn(CARD_THUMB_DIM, CARD_THUMB_DIM, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            image::Rgba([seed as u8, (seed >> 8) as u8, (seed >> 16) as u8, 255])
+        });
+        let full_quality = encode_lossy_webp_still(noise.as_raw(), CARD_THUMB_DIM, CARD_THUMB_DIM, 100.0).unwrap();
+        assert!(full_quality.len() > CARD_THUMB_MAX_BYTES, "precondition: {} bytes", full_quality.len());
+        let heavy = encode_card_thumb(&png_of(&noise));
+        assert!(heavy.as_ref().is_none_or(|t| t.len() <= CARD_THUMB_MAX_BYTES), "{:?} bytes", heavy.map(|t| t.len()));
+
+        let gif = make_test_gif(64, 64);
+        let (anim_webp, ..) = convert_animation_to_webp(&gif, WebpQuality::Balanced).unwrap();
+        assert!(is_animated_webp(&anim_webp));
+        for (what, avatar) in [("GIF", gif), ("animated WebP", anim_webp)] {
+            let thumb = encode_card_thumb(&avatar).unwrap_or_else(|| panic!("{what} gives a thumb"));
+            let px = load_bounded(&thumb).unwrap().to_rgba8().get_pixel(48, 48).0;
+            assert!(px[0] > 200 && px[2] < 60, "{what}: the first (red) frame, got {px:?}");
+        }
+        assert!(encode_card_thumb(b"not an image").is_none());
+    }
+
     /// PNG's chunk CRC (IEEE, reflected), so a hand-built header is a header
     /// a real decoder accepts rather than one it rejects for the wrong reason.
     fn png_crc32(bytes: &[u8]) -> u32 {
@@ -2004,6 +2045,36 @@ pub(crate) fn peer_thumb_for_display(b64: &str) -> Option<(String, u32, u32)> {
         m.insert(key, out.clone());
     }
     out
+}
+
+/// Side of the avatar thumbnail a friend-request card carries, a ceiling on receive.
+pub(crate) const CARD_THUMB_DIM: u32 = 96;
+/// Byte ceiling of that thumbnail, on both ends.
+pub(crate) const CARD_THUMB_MAX_BYTES: usize = 8 * 1024;
+
+/// Our card thumbnail: the avatar's first frame, square at [`CARD_THUMB_DIM`], under
+/// [`CARD_THUMB_MAX_BYTES`]. `None` when no rung of the ladder fits.
+pub(crate) fn encode_card_thumb(avatar: &[u8]) -> Option<Vec<u8>> {
+    process_still_square(avatar, CARD_THUMB_DIM, CARD_THUMB_MAX_BYTES, &[60.0, 40.0, 20.0], "Card thumb").ok()
+}
+
+/// A peer's card thumbnail as we keep and paint it: our own re-encode through
+/// [`peer_thumb_for_display`], or `None` for anything over the byte or side ceiling or
+/// that does not decode, dropped whole.
+pub(crate) fn card_thumb_for_display(b64: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let engine = base64::engine::general_purpose::STANDARD;
+    // A bound on the work before decoding; the byte cap below is the rule.
+    if b64.is_empty() || b64.len() > 4 * CARD_THUMB_MAX_BYTES {
+        return None;
+    }
+    let raw = engine.decode(b64).ok()?;
+    let (w, h) = webp_header_dimensions(&raw)?;
+    if raw.len() > CARD_THUMB_MAX_BYTES || w > CARD_THUMB_DIM || h > CARD_THUMB_DIM {
+        return None;
+    }
+    let (ours, ..) = peer_thumb_for_display(b64)?;
+    engine.decode(ours).ok()
 }
 
 /// Header-only validation for image bytes that came from a PEER.

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import '../../rust/api/network.dart' as network_api;
+import '../../rust/api/wipe.dart' as wipe_api;
 import '../perf_sentinel.dart';
 import 'macos_version.dart';
 import 'video_thumbnail_service.dart';
@@ -52,17 +53,20 @@ class RecordingService {
   String? get currentFilePath => _currentFilePath;
   DateTime? get startedAt => _startedAt;
 
-  /// Returns the directory where recordings are saved. Created if missing.
-  Future<Directory> get recordingsDir async {
+  /// Where recordings are saved, whether or not the folder exists yet. Every
+  /// profile on the computer shares it.
+  static String get recordingsFolderPath {
     final home = Platform.environment['HOME'] ??
         Platform.environment['USERPROFILE'] ??
         Directory.systemTemp.path;
-    final base = Platform.isMacOS
+    return Platform.isMacOS
         ? p.join(home, 'Movies', 'Hollow Recordings')
-        : Platform.isWindows
-            ? p.join(home, 'Videos', 'Hollow Recordings')
-            : p.join(home, 'Videos', 'Hollow Recordings');
-    final dir = Directory(base);
+        : p.join(home, 'Videos', 'Hollow Recordings');
+  }
+
+  /// Returns the directory where recordings are saved. Created if missing.
+  Future<Directory> get recordingsDir async {
+    final dir = Directory(recordingsFolderPath);
     if (!dir.existsSync()) {
       dir.createSync(recursive: true);
     }
@@ -89,6 +93,9 @@ class RecordingService {
 
     final dir = await recordingsDir;
     final outFile = p.join(dir.path, _timestampedFileName());
+    // Listed before the recorder starts, so wiping this profile takes even a
+    // recording a crash cut short, and never another profile's.
+    await wipe_api.rememberRecording(path: outFile);
 
     // macOS: ScreenCaptureKit + AVAssetWriter, Windows: Graphics Capture + MF.
     // Both produce MP4 (H.264 + AAC) with mic and system audio natively.

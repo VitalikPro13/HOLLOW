@@ -124,9 +124,6 @@ class WebRtcService {
   /// Timestamp of last keepalive ping sent per peer (for RTT measurement).
   final Map<String, DateTime> _pingSentAt = {};
 
-  /// Progress callback (transferId, bytesDone, totalBytes).
-  void Function(String transferId, int bytesDone, int totalBytes)? onProgress;
-
   void Function(String transferId)? onSendComplete;
 
   /// Called when a receive completes (transferId, tempPath, senderPeerId, kind, shardIndex).
@@ -218,6 +215,14 @@ class WebRtcService {
       if (resolveIdentity(conn.peerId) == wantId) return conn;
     }
     return null;
+  }
+
+  /// The open channel to exactly the device [peerId], never a sibling's.
+  _PeerConn? _openConnForDevice(String peerId, [_Lane lane = _Lane.general]) {
+    final conn = _connsFor(lane)[peerId];
+    return conn?.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen
+        ? conn
+        : null;
   }
 
   /// Check if a peer has an active GENERAL data channel (device<->master aware).
@@ -512,7 +517,9 @@ class WebRtcService {
     // Share chunks ride the dedicated STUN-only lane and NEVER fall back to the
     // general (TURN-capable) channel — falling back is the whole bug.
     final lane = kind == 'share_chunk' ? _Lane.share : _Lane.general;
-    final conn = _openConnForIdentity(peerId, lane);
+    final conn = rtcSendMayUseSibling(kind)
+        ? _openConnForIdentity(peerId, lane)
+        : _openConnForDevice(peerId, lane);
     if (conn == null) {
       _log('[HOLLOW-WEBRTC-DART] No ${_tag(lane)} data channel for $peerId, '
           'failing transfer $transferId');
@@ -1228,8 +1235,7 @@ class WebRtcService {
 
       if (transfer.bytesReceived - transfer.lastProgressReport >= 512 * 1024
           || transfer.bytesReceived >= transfer.totalSize) {
-        onProgress?.call(transfer.transferId, transfer.bytesReceived, transfer.totalSize);
-        transfer.lastProgressReport = transfer.bytesReceived;
+        _reportProgress(transfer);
       }
 
       if (transfer.bytesReceived >= transfer.totalSize) {
@@ -1267,6 +1273,11 @@ class WebRtcService {
         kind = 'share_chunk';
       } else {
         kind = 'file';
+      }
+      if (!rtcStreamIdFits(kind, id)) {
+        _log('[HOLLOW-SECURITY] Dropped $kind stream from $peerId: $id is not '
+            'a stream id');
+        return;
       }
 
       final now = DateTime.now();
@@ -1317,13 +1328,27 @@ class WebRtcService {
       sink.add(payload);
       transfer.bytesReceived = payload.length;
 
-      onProgress?.call(id, transfer.bytesReceived, transfer.totalSize);
-      transfer.lastProgressReport = transfer.bytesReceived;
+      _reportProgress(transfer);
 
       if (transfer.bytesReceived >= transfer.totalSize) {
         _completeIncomingTransfer(id);
       }
     }
+  }
+
+  /// A file stream's progress goes to Rust, which knows which file its stream id
+  /// names; the id alone names no card.
+  void _reportProgress(_IncomingTransfer transfer) {
+    transfer.lastProgressReport = transfer.bytesReceived;
+    if (transfer.kind != 'file') return;
+    network_api
+        .webrtcTransferProgress(
+          transferId: transfer.transferId,
+          senderPeerId: transfer.senderPeerId,
+          bytesReceived: BigInt.from(transfer.bytesReceived),
+          totalBytes: BigInt.from(transfer.totalSize),
+        )
+        .catchError((_) {});
   }
 
   /// The connection a stream frame arrived on, lane included: a peer's Share

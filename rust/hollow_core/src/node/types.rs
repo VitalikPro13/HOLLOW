@@ -170,9 +170,9 @@ pub(crate) struct SignedCard {
     pub pk: String,
 }
 
-/// A [`SignedCard`] sealed to one friend-request target under a key only the two
-/// identities can derive (`profile_card::seal_for`): the relay that carries the
-/// request never reads the name.
+/// A [`SignedCard`] and a thumbnail of its avatar, sealed to one friend-request target
+/// under a key only the two identities can derive (`profile_card::seal_for`): the
+/// relay that carries the request never reads the name or sees the face.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SealedCard {
     #[serde(default)]
@@ -1177,6 +1177,9 @@ pub(crate) enum NodeCommand {
     /// `chunk_index` is only meaningful when kind == "share_chunk"; for "file" / "shard" it's ignored.
     WebRtcTransferComplete { transfer_id: String, temp_path: String, sender_peer_id: String, kind: String, shard_index: u16, chunk_index: u32 },
     WebRtcSendComplete { transfer_id: String },
+    /// Bytes of a data-channel file stream received so far; shown on the card of the file
+    /// the stream id names, never on an id alone.
+    WebRtcTransferProgress { transfer_id: String, sender_peer_id: String, bytes_received: u64, total_bytes: u64 },
     WebRtcTransferFailed { transfer_id: String, peer_id: String, error: String },
     // -- Voice call commands --
     CallSendSignal { peer_id: String, signal_type: String, payload: String },
@@ -1475,6 +1478,7 @@ impl NodeCommand {
             Self::WebRtcSendSignal { .. } => "WebRtcSendSignal",
             Self::WebRtcTransferComplete { .. } => "WebRtcTransferComplete",
             Self::WebRtcSendComplete { .. } => "WebRtcSendComplete",
+            Self::WebRtcTransferProgress { .. } => "WebRtcTransferProgress",
             Self::WebRtcTransferFailed { .. } => "WebRtcTransferFailed",
             Self::CallSendSignal { .. } => "CallSendSignal",
             Self::SetCallPresence { .. } => "SetCallPresence",
@@ -4526,7 +4530,7 @@ pub(crate) struct PendingFileStream {
     pub size: u64,
 }
 
-/// A completed file stream whose FileHeader has not landed yet.
+/// A completed file stream whose FileHeader has not landed yet, held under its stream id.
 pub(crate) struct EarlyStream {
     pub temp_path: std::path::PathBuf,
     pub size: u64,

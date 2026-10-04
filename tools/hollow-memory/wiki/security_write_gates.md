@@ -275,7 +275,7 @@ coverage: `file_request_gate_refuses_stranger_and_serves_guest_public`.
 
 | Write | Site | Gate |
 |---|---|---|
-| Stream reassembly temp file (`.ws_recv_{id}.tmp`, `.webrtc_recv_{id}.tmp`) | `ws_stream_transfer::parse_id` (Rust, WS relay lane), `wire_transfer_id.dart::parseWireTransferId` (Dart, WebRTC lane) | The 64-byte wire id NAMES the file, so the parser is the gate: `[A-Za-z0-9:_-]` only (own ids are 32-hex, `hex:index`, `link_<code>`), anything else drops the frame before a path exists. Before 0.10.2 the raw id reached `format!` unchecked; on Windows a `/../` id walked out of the files dir (Win32 collapses `..` lexically), POSIX was safe only because `.ws_recv_` is not a directory. Precondition was an established peer, impact create/truncate/delete of any `*.tmp` path. Same family as `safe_file_name()` (section 6 of `feedback_sender_controlled_filename_sanitization`) |
+| Stream reassembly temp file (`.ws_recv_{id}.tmp`, `.webrtc_recv_{id}.tmp`) | `ws_stream_transfer::parse_id` (Rust, WS relay lane), `wire_transfer_id.dart::parseWireTransferId` (Dart, WebRTC lane) | The 64-byte wire id NAMES the file, so the parser is the gate: `[A-Za-z0-9:_-]` only (own ids are 32-hex, `hex:index`, `link_<code>`), anything else drops the frame before a path exists. File and shard first frames open only under a 64-hex stream id (`ws_stream_transfer::is_stream_id`, Dart `rtcStreamIdFits`); link snapshots and share chunks keep their own shapes. Before 0.10.2 the raw id reached `format!` unchecked; on Windows a `/../` id walked out of the files dir (Win32 collapses `..` lexically), POSIX was safe only because `.ws_recv_` is not a directory. Precondition was an established peer, impact create/truncate/delete of any `*.tmp` path. Same family as `safe_file_name()` (section 6 of `feedback_sender_controlled_filename_sanitization`) |
 | Update manifest (`fetch_version_manifest`) | `api/updater.rs::verify_manifest_signature` | `manifest.json.sig` (base64 Ed25519 over the manifest's EXACT bytes) must `verify_strict` against a key in `MANIFEST_SIGNING_PUBKEYS`; the sidecar rides the same URL + cache-buster. The download host can serve bytes, it cannot mint a signature. Dart then treats only a strictly NEWER `latest` as an update (`version_compare.dart`), so a replayed old signed manifest is not a downgrade lever. Signing: `rust/hollow_manifest` + `scripts/sign_manifest.ps1`, key outside the repo |
 | Update zip on disk, then extracted into the app dir (`download_update` + `apply_update`) | `api/updater.rs::download_inner` | https only; SHA-256 accumulated while streaming and compared to the `sha256_<platform>` field of the SIGNED manifest before the file is kept (mismatch, cancel or any error deletes it and ends the stream with `DownloadProgress.error`). An entry without a checksum for the platform is refused in Dart before the first byte. `extract_zip_to` keeps its own path-traversal rejection |
 
@@ -390,6 +390,24 @@ COLD LAUNCH can only destroy locally. The master and device keys are wrapped by 
 real password, so nothing can be signed and no socket can be authenticated; scopes
 (b) and (c) reach the network only when the node is already running, which is what a
 mobile App Lock re-unlock looks like. The local erase always runs.
+
+What the local erase takes (session 35, decisions A and B): everything under the root
+(`sweep_root`), Hollow's own files beside it (`Outside`), and the call and screen
+recordings THIS profile listed in its keyless `recordings.list` (`remember_recording`
+before the recorder starts; `erase_recordings` inside `sweep_root` unlinks only regular
+files named `Hollow_<stamp>.mp4`, plus the ffmpeg log, directly in a real `Hollow
+Recordings` folder, then that folder if empty; a held one stays listed for the boot
+wipe). The marker says `destroy`, so `perform_pending_wipe` tells a finished destroy
+from a cancelled link; a finished destroy takes only that profile's entry and pin out
+of profiles.json (`registryAfterWipe`, never the whole file) and restarts into another
+profile that holds an identity, or Welcome (`relaunchAfterWipe`,
+`settleProfileAfterBootWipe`). Another profile is erased only through
+`erase_profile_at` (absolute, not the running one, empty or holding an identity; a
+debug log alone proves nothing, it sits beside the Windows exe). Tests:
+`a_wipe_takes_this_profiles_recordings_and_nothing_else`,
+`the_boot_wipe_tells_a_destroy_from_a_cancelled_link`,
+`erasing_another_profile_takes_its_recordings_and_refuses_the_running_one`,
+`test/profile_wipe_test.dart`, `test/wipe_profile_guard_test.dart`.
 
 
 ## 14. Files, vault, recovery, share and relay gates (security audit session 6, 2026-09-27)
@@ -686,6 +704,16 @@ Slice reports: `reports/planned/security/audit/phase_ef/`. Findings HOL-SEC-128.
 | Notifications while locked | `system_notification_provider` `_contentAllowed`, push posters, NSE `~locked` marker | One neutral notification, no reply. HOL-SEC-155. `notification_lock_test.dart` |
 
 Friend requests always ride the target's inbox as well as live sends (`social::handle_send_friend_request`), so a device the requester cannot see still hears them; a sibling's removal leaves the DM room. Residuals: AR-21..AR-31.
+
+
+## 29. Session 35 (2026-10-04): decisions A-E and the phase E+F leftovers
+
+| Path | Site | Gate |
+|---|---|---|
+| `friends.card_thumb` (a pending friend's avatar thumbnail) | swarm `FriendRequest` arm (incoming row), `social::take_friend_card` (`FriendCard`, outgoing row), both via `profile_card::keep_thumb` | Only from a sealed card `open_from` opened under the two masters' pair key as the requester's own; `image_convert::card_thumb_for_display` drops anything over 8 KiB or 96 px a side or undecodable and keeps our own re-encode; the UPDATE lands only on the pending row of that direction stamped with that request's `requested_at`. Never in `user_profiles.avatar`, never re-served (`load_avatar_for_display` feeds only `get_avatar`); a decline clears it, a stored, cleared or signed-empty avatar or a faceless newer card retires it. Tests `a_card_thumb_lands_only_on_the_pending_row_it_answers`, `an_oversize_or_garbage_thumb_is_dropped_whole`, harness `a_pending_request_shows_each_side_a_thumb_until_the_full_avatar` |
+| File-lane transfers: send temps, early arrivals, which file a stream completes (decision E) | `file_handler::{file_stream_id, file_of_stream, stream_to_peer}`, the Olm and MLS header arms | Every file transfer streams under its own id, SHA-256 over `hollow-file-stream1` + file id + sending device + receiving device, which both ends derive; bytes complete only the file whose pending header their own sender gave us, then hash to the file id as before; early bytes wait under their stream id; a data-channel send streams from a temp of its own and a repeat of a running one rides the relay; stream frames carry no file id. Harness `a_channel_file_streams_to_each_device_under_its_own_id_and_temp`, `two_devices_pulling_one_file_at_once_each_get_their_own_stream`, `a_file_from_two_holders_crosses_on_the_relay_and_the_asked_one_lands`, `a_dm_file_between_fresh_installs_streams_under_the_sending_device` |
+| A legacy identity's first recovery (decision C) | `roster_book::ensure_own` via `sign_upgrade` (first start, before the node connects); `api/roster.rs::confirm_stored_phrase` | Only with no roster held yet, the 0.11 stored phrase deriving our master's recovery key, and a legacy seat (the list names this device, or there is no list). One fixed recovery (`UPGRADE_RECOVERY_AT_MS`, keep = the recovery key's own id) every device signs alike, phrase admissions for this device and the list's kept devices (never the master id, G1), removals for its revoked ones, so devices upgrading apart meet in one base. The stored phrase goes only with a confirmation on this device or a typed phrase op; the confirmation signs nothing when the phrase already roots the roster. Tests `authz_a_legacy_identity_pins_its_phrase_before_a_forger_can`, `authz_two_legacy_devices_upgrading_apart_meet_in_one_base`, `confirming_the_stored_phrase_after_the_upgrade_only_erases_it` |
+| Olm session setup | `olm_manager::open_prekey`, `create_outbound_session` | A PreKey with the truncated MAC of v1 is refused on every path; a small-order identity, one-time or base key (`small_order`, one agreement with a fixed scalar) is refused before any session. HOL-SEC-161. `a_prekey_with_a_truncated_mac_never_opens_a_session`, `a_small_order_key_never_starts_a_session` |
 
 ---
 

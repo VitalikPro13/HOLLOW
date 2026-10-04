@@ -644,7 +644,8 @@ async fn run_event_loop(
     // -- Pending stream transfer state --
     let mut pending_file_streams: HashMap<String, PendingFileStream> = HashMap::new();
     // Early-arrival file streams: WebRTC bytes arrived before the FileHeader.
-    // Key: file_id. Parked only through `file_handler::park_early_stream`.
+    // Key: stream id (`file_handler::file_stream_id`). Parked only through
+    // `file_handler::park_early_stream`.
     let mut early_file_streams: HashMap<String, EarlyStream> = HashMap::new();
     let mut pending_shard_streams: HashMap<String, PendingShardStream> = HashMap::new();
 
@@ -732,7 +733,7 @@ async fn run_event_loop(
     // carries TURN and a Share on it would push multi-GB through the relay.
     let mut webrtc_share_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Pending WebRTC sends — stored so we can retry via WSS on failure.
-    // Key: transfer_id, Value: (peer_id, kind, id, source_path, total_size)
+    // Key: transfer_id (one per transfer), Value: (peer_id, kind, id, own temp, total_size)
     let mut pending_webrtc_sends: HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)> = HashMap::new();
 
     // At-rest file protection (issue 78): the key ring has to be live before any
@@ -2863,17 +2864,20 @@ async fn run_event_loop(
                                 &mut share_registry, &bundle_keypair, &event_tx,
                                 transfer_id, chunk_index, temp_path,
                             ).await;
-                        } else if kind == "file" && declined_file_ids.contains(&transfer_id) {
+                        } else if let Some(file_id) = (kind == "file")
+                            .then(|| file_handler::declined_stream(&declined_file_ids, &transfer_id, &sender_peer_id, &device_peer_id))
+                            .flatten()
+                        {
                             // Auto-download gate (issue #41): discard pushed bytes
                             // for a declined file (see the BinaryDirect twin).
-                            hollow_log!("[HOLLOW-FILE] Discarding declined pushed WebRTC transfer {transfer_id}");
+                            hollow_log!("[HOLLOW-FILE] Discarding declined pushed WebRTC transfer of {file_id}");
                             let _ = tokio::fs::remove_file(&temp_path).await;
                             let _ = event_tx.send(NetworkEvent::FileFailed {
-                                file_id: transfer_id.clone(),
+                                file_id,
                                 error: "auto_download_off".to_string(),
                             }).await;
                         } else if let Some(repull) = file_handler::handle_webrtc_transfer_complete(
-                            transfer_id, temp_path, sender_peer_id, kind, shard_index,
+                            transfer_id, temp_path, sender_peer_id, kind, shard_index, &device_peer_id,
                             &mut pending_file_streams, &mut pending_shard_streams,
                             &mut pending_vault_downloads, &mut early_file_streams,
                             &bundle_keypair, &event_tx,
@@ -2893,9 +2897,22 @@ async fn run_event_loop(
                             transfer_id, &mut pending_webrtc_sends,
                         );
                     }
+                    NodeCommand::WebRtcTransferProgress { transfer_id, sender_peer_id, bytes_received, total_bytes } => {
+                        let file_id = file_handler::stream_file_label(
+                            &transfer_id, &sender_peer_id, &device_peer_id,
+                            &pending_file_streams, &pending_file_asks, &pending_public_file_requests,
+                        );
+                        if let Some(file_id) = file_id.filter(|f| !declined_file_ids.contains(f)) {
+                            let _ = event_tx.send(NetworkEvent::FileProgress {
+                                file_id,
+                                chunks_received: u32::try_from(bytes_received.min(total_bytes)).unwrap_or(u32::MAX),
+                                total_chunks: u32::try_from(total_bytes).unwrap_or(u32::MAX),
+                            }).await;
+                        }
+                    }
                     NodeCommand::WebRtcTransferFailed { transfer_id, peer_id, error } => {
                         file_handler::handle_webrtc_transfer_failed(
-                            transfer_id, peer_id, error,
+                            transfer_id, peer_id, error, &device_peer_id,
                             &mut webrtc_peers, &mut pending_webrtc_sends,
                             &pending_file_streams, &mut early_file_streams,
                             &ws_cmd_tx, &ws_room_peers, &event_tx,
@@ -4782,27 +4799,36 @@ async fn run_event_loop(
                         };
                         if let Some(completed) = super::ws_stream_transfer::ws_stream_receive(
                             &mut pending_ws_transfers, &from, &data,
-                            |kind, id| file_handler::stream_ceiling(
-                                kind, id, &from, &pending_file_streams, &requested_file_receipts,
-                                &pending_file_asks, &pending_public_file_requests, &pending_link_snapshots,
-                            ),
+                            |kind, id| super::ws_stream_transfer::StreamExpect {
+                                ceiling: file_handler::stream_ceiling(
+                                    kind, id, &from, &device_peer_id, &pending_file_streams, &requested_file_receipts,
+                                    &pending_file_asks, &pending_public_file_requests, &pending_link_snapshots,
+                                ),
+                                file_id: matches!(kind, super::ws_stream_transfer::StreamKind::File).then(|| file_handler::stream_file_label(
+                                    id, &from, &device_peer_id, &pending_file_streams, &pending_file_asks, &pending_public_file_requests,
+                                )).flatten(),
+                            },
                         ) {
                             // Auto-download gate (issue #41): the sender queues its push before our
                             // decline could reach it, so bytes for a declined file are deleted here
                             // instead of being parked forever in early_file_streams.
-                            if declined_file_ids.contains(&completed.id) {
-                                hollow_log!("[HOLLOW-FILE] Discarding declined pushed stream {} ({} bytes)", completed.id, completed.size);
+                            let declined = matches!(completed.kind, super::ws_stream_transfer::StreamKind::File)
+                                .then(|| file_handler::declined_stream(&declined_file_ids, &completed.id, &from, &device_peer_id))
+                                .flatten();
+                            if let Some(file_id) = declined {
+                                hollow_log!("[HOLLOW-FILE] Discarding declined pushed stream of {file_id} ({} bytes)", completed.size);
                                 let _ = tokio::fs::remove_file(&completed.temp_path).await;
                                 // Clear any transfer state the UI picked up from a
                                 // progress tick that raced the decline — without
                                 // this the bubble shows a spinner at 100% forever.
                                 let _ = event_tx.send(NetworkEvent::FileFailed {
-                                    file_id: completed.id.clone(),
+                                    file_id,
                                     error: "auto_download_off".to_string(),
                                 }).await;
                             } else if let Some(repull) = file_handler::handle_completed_stream(
                                 completed,
                                 &from,
+                                &device_peer_id,
                                 &mut pending_file_streams,
                                 &mut pending_shard_streams,
                                 &mut pending_vault_downloads,
@@ -6007,27 +6033,27 @@ async fn run_event_loop(
             _ = stream_progress_timer.tick() => {
                 arm_started = Some(("timer", "stream_progress", std::time::Instant::now()));
                 // Snapshot progress under lock, then emit events outside lock.
-                let snapshot: Vec<(String, u64, u64)> = {
+                let snapshot: Vec<(String, Option<String>, u64, u64)> = {
                     let Ok(map) = super::ws_stream_transfer::stream_progress().lock() else { continue };
                     map.iter().map(|(id, p)| {
-                        (id.clone(), p.bytes_received.load(std::sync::atomic::Ordering::Relaxed), p.total_bytes)
+                        (id.clone(), p.file_id.clone(), p.bytes_received.load(std::sync::atomic::Ordering::Relaxed), p.total_bytes)
                     }).collect()
                 };
-                for (file_id, received, total) in snapshot {
+                for (stream_id, file_id, received, total) in snapshot {
                     if received == 0 { continue; }
-                    // Declined pushed streams (auto-download off, issue #41) still
-                    // transit — never surface their progress, the UI is showing a
-                    // manual Download button for this file.
-                    if declined_file_ids.contains(&file_id) { continue; }
                     // Link snapshot ids carry a "link_" prefix so they emit real-byte
                     // LinkProgress (drives the device-link bar) instead of FileProgress.
-                    if let Some(link_id) = file_id.strip_prefix("link_") {
+                    if let Some(link_id) = stream_id.strip_prefix("link_") {
                         let _ = event_tx.send(NetworkEvent::LinkProgress {
                             link_id: link_id.to_string(),
                             bytes_received: received,
                             total_bytes: total,
                         }).await;
-                    } else {
+                    } else if let Some(file_id) = file_id {
+                        // Declined pushed streams (auto-download off, issue #41) still
+                        // transit — never surface their progress, the UI is showing a
+                        // manual Download button for this file.
+                        if declined_file_ids.contains(&file_id) { continue; }
                         let _ = event_tx.send(NetworkEvent::FileProgress {
                             file_id,
                             chunks_received: (received / (1024 * 1024)).max(1) as u32,
@@ -8670,6 +8696,8 @@ async fn handle_incoming_request(
                     }
                     let already_complete = file_handler::file_bytes_on_disk(&store, &fid);
                     drop(store);
+                    // The stream this header's bytes ride from its sender to us.
+                    let stream_id = file_handler::file_stream_id(&fid, peer_str, device_peer_id);
                     // A committed card belongs to the author its id names, whoever delivered it.
                     let card_owner = match author.as_deref() {
                         Some(a) if super::file_commit::is_committed_id(&fid) => a.to_string(),
@@ -8788,7 +8816,7 @@ async fn handle_incoming_request(
                         // stop — no re-request, no re-register. Still emit FileHeaderReceived
                         // below so the sender-side UI/late-joiner stays consistent.
                         pending_file_streams.remove(&fid);
-                        if let Some(early) = early_file_streams.remove(&fid) {
+                        if let Some(early) = early_file_streams.remove(&stream_id) {
                             let _ = tokio::fs::remove_file(&early.temp_path).await;
                         }
                         hollow_log!("[HOLLOW-FILE] FileHeader for {fid} ignored — already complete on disk");
@@ -8926,7 +8954,7 @@ async fn handle_incoming_request(
                         && share_ref.is_none() && aes_key.is_some()
                     {
                         declined_file_ids.insert(fid.clone());
-                        if let Some(early) = early_file_streams.remove(&fid) {
+                        if let Some(early) = early_file_streams.remove(&stream_id) {
                             let _ = tokio::fs::remove_file(&early.temp_path).await;
                         }
                         hollow_log!("[HOLLOW-FILE] Auto-download gate declined pushed file {fid} ({size} bytes, {auto_dl_key}) — metadata kept, manual download available");
@@ -8968,11 +8996,11 @@ async fn handle_incoming_request(
                         hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (streamed transfer)");
 
                         // Check if WebRTC bytes already arrived before this FileHeader (race condition).
-                        if let Some(EarlyStream { temp_path, size: file_size, sender, .. }) = early_file_streams.remove(&fid) {
+                        if let Some(EarlyStream { temp_path, size: file_size, sender, .. }) = early_file_streams.remove(&stream_id) {
                             hollow_log!("[HOLLOW-FILE] Early arrival found for {fid} — processing now");
                             let request = super::ws_stream_transfer::StreamRequest {
                                 kind: super::ws_stream_transfer::StreamKind::File,
-                                id: fid.clone(),
+                                id: stream_id,
                                 size: file_size,
                                 temp_path,
                             };
@@ -8980,7 +9008,7 @@ async fn handle_incoming_request(
                             // Early-arrival path is File-only; link snapshots never route here.
                             let mut empty_link_snapshots = HashMap::new();
                             file_handler::handle_completed_stream(
-                                request, &sender,
+                                request, &sender, device_peer_id,
                                 pending_file_streams, pending_shard_streams,
                                 &mut empty_vault_dl, early_file_streams,
                                 &mut empty_link_snapshots,
@@ -11018,7 +11046,7 @@ async fn handle_incoming_request(
                                     mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref,
                                     thumb, voice, author, sha256, false,
                                     requested_file_receipts, declined_file_ids,
-                                    ws_cmd_tx, ws_room_peers,
+                                    ws_cmd_tx, ws_room_peers, device_peer_id,
                                     db_path, db_passphrase,
                                 ).await;
                             }
@@ -12023,12 +12051,15 @@ async fn handle_incoming_request(
             // A stranger's request holds no profile in our DB and the sender is often
             // gone before it can push one, so its card rides sealed in the request. It
             // opens only as the requester's own card; anything else drops JUST the card,
-            // before the event, never the request.
-            if let Some(card) = sealed_card.as_ref().and_then(|sealed| {
+            // before the event, never the request. Its thumbnail waits for the pending
+            // row this request makes.
+            let mut request_thumb = None;
+            if let Some(opened) = sealed_card.as_ref().and_then(|sealed| {
                 super::profile_card::open_from(sealed, master_peer_str, &req_master_early, requested_at)
             }) {
-                if super::profile_card::store_card(&card, None, db_path, db_passphrase) {
-                    let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: card.master }).await;
+                request_thumb = Some(opened.thumb);
+                if super::profile_card::store_card(&opened.card, None, db_path, db_passphrase) {
+                    let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: opened.card.master }).await;
                 }
             }
 
@@ -12088,6 +12119,7 @@ async fn handle_incoming_request(
             // Save as pending incoming, keyed by the sender's MASTER, since
             // friendships key on the master. A cold resolver returns the device id
             // itself, which the device-list ingest re-key later migrates.
+            let mut thumb_kept = false;
             {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let master = super::resolver::resolve(&peer_str);
@@ -12095,7 +12127,13 @@ async fn handle_incoming_request(
                         let _ = store.migrate_friend_to_master(&peer_str, &master);
                     }
                     let _ = store.save_friend(&master, "pending", "incoming", requested_at);
+                    if let Some(thumb) = request_thumb.take() {
+                        thumb_kept = super::profile_card::keep_thumb(&store, &master, "incoming", requested_at, thumb.as_deref());
+                    }
                 }
+            }
+            if thumb_kept {
+                let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: req_master_early.clone() }).await;
             }
 
             // No DM room yet: the requester waits in it, and the relay shows a room's
@@ -13121,7 +13159,7 @@ async fn handle_incoming_request(
                 None, None,
                 None, false, author, sha256, true,
                 requested_file_receipts, declined_file_ids,
-                ws_cmd_tx, ws_room_peers,
+                ws_cmd_tx, ws_room_peers, device_peer_id,
                 db_path, db_passphrase,
             ).await;
         }
@@ -13581,13 +13619,14 @@ async fn handle_incoming_request(
                                     );
                                 }
 
+                                    let stream_id = file_handler::file_stream_id(&file_id, device_peer_id, peer_str);
                                     if offset > 0 {
                                         // Resumed transfer: skip FileHeader, stream from offset via WS.
                                         if let Some(room) = ws_room_for_peer(ws_room_peers, &peer_str) {
                                             super::ws_stream_transfer::ws_stream_send(
                                                 ws_cmd_tx, &room, &peer_str,
                                                 &super::ws_stream_transfer::StreamKind::File,
-                                                &file_id, &temp_path, enc.ciphertext.len() as u64,
+                                                &stream_id, &temp_path, enc.ciphertext.len() as u64,
                                                 offset,
                                             ).await;
                                         }
@@ -13598,17 +13637,11 @@ async fn handle_incoming_request(
                                             ws_cmd_tx, ws_room_peers,
                                             webrtc_peers, pending_webrtc_sends, event_tx,
                                             &peer_str, &super::ws_stream_transfer::StreamKind::File,
-                                            &file_id, &temp_path, enc.ciphertext.len() as u64,
+                                            &stream_id, &temp_path, enc.ciphertext.len() as u64,
                                         ).await;
                                         hollow_log!("[HOLLOW-FILE] Streamed file {} to {peer_str}", file_id);
                                     }
-                                    // Clean up the re-served ciphertext temp once the WS-relay
-                                    // stream is queued. A WebRTC send still in flight owns the
-                                    // temp, so only delete when none is pending, or every file
-                                    // re-request leaks a duplicate encrypted copy.
-                                    if !pending_webrtc_sends.contains_key(&file_id) {
-                                        let _ = tokio::fs::remove_file(&temp_path).await;
-                                    }
+                                    let _ = tokio::fs::remove_file(&temp_path).await;
                             }
                         }
                 }

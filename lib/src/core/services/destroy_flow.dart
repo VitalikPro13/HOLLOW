@@ -5,11 +5,13 @@ import 'package:flutter/foundation.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/crash_log.dart';
 import 'package:hollow/src/core/duress_result.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/desktop_notification_service.dart';
 import 'package:hollow/src/core/services/push_hints_cache.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:path_provider/path_provider.dart';
 
 export 'package:hollow/src/core/duress_result.dart';
@@ -40,6 +42,33 @@ Future<void> clearLocalSecretsAfterDestroy() async {
   } catch (e) {
     debugPrint('[HOLLOW] destroy: push unregister skipped: $e');
   }
+}
+
+/// Whether this profile's wipe left work for the next launch. Swappable in tests.
+@visibleForTesting
+Future<bool> Function() wipeUnfinished = storage_api.hasPendingWipe;
+
+/// How a wipe restarts the app. Swappable in tests.
+@visibleForTesting
+Future<Never> Function() relaunchForWipe = relaunchApp;
+
+/// Every wipe restarts through here, because a wipe touches only its own
+/// profile. A finished one makes the profile list forget this profile first, so
+/// Hollow opens another profile or Welcome; an unfinished one restarts into the
+/// same profile, whose boot wipe finishes the job before the list moves on.
+Future<Never> relaunchAfterWipe() async {
+  try {
+    if (!await wipeUnfinished()) await forgetWipedProfile(runningProfileRoot());
+  } catch (_) {}
+  return relaunchForWipe();
+}
+
+/// A boot wipe that just finished destroying this profile: the profile list
+/// forgets it, and Hollow restarts when the next launch opens another profile.
+Future<void> settleProfileAfterBootWipe() async {
+  final root = runningProfileRoot();
+  await forgetWipedProfile(root);
+  if (nextLaunchLeaves(root)) await relaunchForWipe();
 }
 
 /// A launch that finds no identity on a phone: a wipe the push extension or
@@ -79,10 +108,10 @@ Future<Never> Function() onDuressAtPrompt = endSessionAfterDuress;
 
 /// Ends the session after a duress code exactly as the launch prompt does:
 /// nothing on screen says anything, the local secrets go, and the app starts
-/// over at Welcome (a phone closes). Never returns.
+/// over (a phone closes). Never returns.
 Future<Never> endSessionAfterDuress() async {
   await clearLocalSecretsAfterDestroy();
-  return relaunchApp();
+  return relaunchAfterWipe();
 }
 
 /// Every Settings call that takes a typed password goes through here. A duress

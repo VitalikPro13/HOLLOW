@@ -28,9 +28,9 @@ Columns:
 | C-02 | Nothing another identity sends can wipe, lock or destroy data on my devices. Only my recovery phrase (or a permission it signed for one device) orders my devices destroyed remotely; my own duress secret typed on a device wipes that device. | P-01, all peers, P-08 | WP 23.1 | Fixed on local main (HOL-SEC-001, HOL-SEC-077; reworded with design ID-1), retest at release |
 | C-03 | A removed device stops getting anything at once: everyone who has seen the removal stops sending it DMs, server messages and media keys, and its old sessions are dropped. It locks, and erases itself after three days unless the recovery phrase is typed on it. | P-01, P-08 | WP 3.6 | Fixed on local main (HOL-SEC-077, design ID-1; note 1), retest at release |
 | C-04 | A replayed older roster never brings back a removed device. | P-01, all peers | WP 3.2 | Fixed on local main (HOL-SEC-079: a flood of anyone's statements pushed removals out; HOL-SEC-080: a removed device's own vouchee kept itself; the relay holds removals too, HOL-SEC-078), retest at release |
-| C-05 | Linking a new device hands my identity only to that device, and only after I confirm on a device I already hold. The relay never holds a secret that opens a link transfer; a relay that answers the code gets one guess. | P-01, P-02, all peers | WP 3.4 | Fixed on local main (HOL-SEC-002, reworded 2026-10-01), retest at release |
+| C-05 | Linking a new device hands my identity only to that device, and only after I confirm on a device I already hold. The relay never holds a secret that opens a link transfer; a relay that answers the code gets one guess. | P-01, P-02, all peers | WP 3.4 | Fixed on local main (HOL-SEC-002, reworded 2026-10-01; HOL-SEC-162: the code screens now say the code is only for a device you hold), retest at release |
 | C-06 | A copy of my identity file is useless without my machine (keychain mode) or my password (password mode). | P-09 | WP 2.3, 23.1 | Believed; "no protection" mode excluded by design |
-| C-07 | Typing the duress secret destroys local data and shows nothing, and checking it costs the same as checking the real secret. | P-09 | WP 23.1 | Believed |
+| C-07 | Typing the duress secret destroys local data and shows nothing, and checking it costs the same as checking the real secret. | P-09 | WP 23.1 | Fixed on local main (HOL-SEC-156: a wipe left Hollow files, log lines and the push registration behind; HOL-SEC-157: a duress code typed at a Settings prompt left the session running), retest at release |
 
 ## Direct messages and friends
 
@@ -38,7 +38,7 @@ Columns:
 |---|---|---|---|---|
 | C-08 | Only the two people in a DM (and their own devices) can read it. The relay, the network and everyone else see ciphertext. | P-01, P-02, all peers | WP 4 | Believed |
 | C-09 | A message shown as coming from a person was signed by that person's master key, and its text, attachments and album binding are exactly what they signed. | P-01, all peers | WP 15 | Believed |
-| C-10 | The relay cannot insert itself into a key exchange, and cannot make me encrypt to a device that is not really my contact's. | P-01 | WP 23.1 (MITM) | Believed (fixed 0.8.2) |
+| C-10 | The relay cannot insert itself into a key exchange, and cannot make me encrypt to a device that is not really my contact's. | P-01 | WP 23.1 (MITM) | Believed (fixed 0.8.2; HOL-SEC-145 and HOL-SEC-161 hardened session setup in 0.12) |
 | C-11 | Comparing safety numbers verifies the person, and I am warned when a verified contact gains a new device. | P-01, all peers | contact verification | Believed |
 | C-12 | A friend request or accept creates a friendship only with the identity that signed it, and an accept only answers a request I actually sent. | P-01, all peers | friend accept binding | Believed |
 | C-13 | A blocked identity's DMs, requests, calls and files are dropped before they are stored or notified, from every one of their devices. | P-04, P-06 | WP 12.14 | Believed |
@@ -59,7 +59,7 @@ Columns:
 
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
-| C-21 | Call, voice, video and screen-share media are readable only by the participants. The relay, TURN and a media forwarder see ciphertext only. | P-01, P-02, P-10 | WP 6 | Believed; see lead L-01 |
+| C-21 | Call, voice, video and screen-share media are readable only by the participants. The relay, TURN and a media forwarder see ciphertext only. | P-01, P-02, P-10 | WP 6 | Fixed on local main (HOL-SEC-140: a share could pass the forwarder before it was encrypted); L-01 SFrame nonces checked safe; WP 6.3 corrected (a DM call's camera and gossip-forwarded voice are DTLS-SRTP only, still participants only), retest at release |
 | C-22 | My screen share streams only to people who asked to watch it. | all peers | #38 | Believed |
 | C-23 | Inside a call, a participant cannot make their media appear to come from another participant. | P-05 | none | Withdrawn: not promised, accepted risk AR-03 |
 
@@ -69,7 +69,7 @@ Columns:
 |---|---|---|---|---|
 | C-24 | A fully malicious relay sees routing metadata only: device peer ids, which rooms they are in, and the timing and size of traffic. From that it can tell which devices belong together and who talks to whom. It never reads content, profiles, names, server or channel details, friend lists, read state or any other data. | P-01 | WP 3.1, 23.1 | Reworded 2026-09-28 (Vitalik); held for 0.12 with HOL-SEC-062 (design A-D1) and HOL-SEC-072 (meetings), see note 2 |
 | C-25 | A malicious relay can delay or drop traffic, but cannot forge a message, a server change, a device list, a friend accept or a destroy order. | P-01 | WP 23.1 | Believed |
-| C-26 | Apple, Google and UnifiedPush distributors receive only a wake-up and a sender id, never message content. | P-11 | WP 13 | Believed |
+| C-26 | Apple, Google and UnifiedPush distributors never receive message content. A wake carries only the sender's device id and, for a channel, the server and channel ids and a mention flag; UnifiedPush gets them encrypted. | P-11 | WP 13 | Reworded 2026-10-04 (Vitalik, AR-26): the old wording left out the channel fields (C-RP-05); WP 13.1 and the privacy policy corrected; encrypted FCM/APNs wakes in 0.12.x |
 | C-27 | Reading a message with a link preview makes no request from my device to the linked site. | P-12 | WP 23.1 | Believed |
 | C-28 | An invite link never reveals the server id to the website that serves it. | P-12 | deep linking | Believed |
 
@@ -77,7 +77,7 @@ Columns:
 
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
-| C-29 | Nothing a peer sends can write a file outside Hollow's own folders or choose where it lands. | all peers | filename sanitisation | Believed (fixed twice) |
+| C-29 | Nothing a peer sends can write a file outside Hollow's own folders or choose where it lands. | all peers | filename sanitisation | Fixed a third time on local main (HOL-SEC-129: link snapshots, backups and archives from someone else could write anywhere), retest at release |
 | C-30 | File contents are end-to-end encrypted in transit, and content files at rest are unreadable without the identity. | P-01, P-02, P-09 | WP 7, 23.1 | Believed |
 | C-31 | An emote, sticker, avatar or banner shown for a hash is exactly the bytes of that hash, and assets nobody asked for are dropped. | P-01, all peers | asset rail | Believed |
 | C-32 | A support or Twitch credential on a profile was issued by the shop's pinned root for that identity and cannot be moved to anyone else. | all peers | WP 19, 20 | Believed |
@@ -86,16 +86,16 @@ Columns:
 
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
-| C-33 | The app installs only updates signed by Hollow's offline release key and never offers a downgrade. | P-10 | WP 23.4 | Believed |
+| C-33 | The app installs only updates signed by Hollow's offline release key and never offers a downgrade. | P-10 | WP 23.4 | Holds (HOL-SEC-147 fixed: a manifest version reached file names and update scripts); residuals AR-21 (no freshness: the host can withhold an update) and AR-22 (Android signing key), stated in WP 23.4 |
 | C-34 | A Flatpak installed from Hollow's repository accepts only bundles signed by Hollow's key. | P-10 | WP 23.4 | Believed |
 
 ## The device in someone else's hands
 
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
-| C-35 | With App Lock on, no message content, name or notification is visible until unlock, and nothing appears above the lock screen. | P-09 | app lock | Believed |
-| C-36 | Someone holding my locked phone cannot guess my App Lock PIN by copying the app's data. | P-09 | none yet | Undecided; see lead L-07 |
-| C-37 | Logs never contain message content, keys, codes or passphrases. | P-09, support channels | logging rules | Believed |
+| C-35 | With App Lock on, no message content, name or notification is visible until unlock, and nothing appears above the lock screen. | P-09 | app lock | Fixed on local main (HOL-SEC-155: notifications showed content and a reply box, a link could open above the lock), retest at release |
+| C-36 | Someone who copies my locked phone's app data pays an Argon2id derivation for every App Lock PIN guess, and a new PIN has at least six digits; a passphrase puts guessing out of reach. | P-09 | WP 2.6 | Decided 2026-10-04 (Vitalik): six-digit minimum (HOL-SEC-159), offline guessing without hardware limits accepted as AR-24 |
+| C-37 | Logs never contain message content, keys, codes or passphrases. | P-09, support channels | logging rules | Fixed on local main (HOL-SEC-142: call keys reached the debug log; HOL-SEC-160: log lines and the support export held names and the link code), the C++ log filter checked in the regression pass |
 
 ## What we do not promise
 
@@ -110,6 +110,10 @@ adds):
 - Trust on first use: identities are verified by comparing safety numbers.
 - Sender authenticity of media frames inside a group call (see C-23).
 - The relay sees which device ids share which rooms, and that is how it routes.
+- Recovery after a copied MLS state: a member's leaf keys are not refreshed on a
+  schedule yet, so a one-time copy keeps reading until that leaf changes (AR-25).
+- Apple and Google see stable device, server and channel ids in FCM and APNs
+  wakes until those are encrypted (AR-26).
 
 ## Notes
 
@@ -125,8 +129,8 @@ adds):
 2. **C-24 and the relay assumption.** WP 23.3 assumes the relay is
    honest-but-curious. The Matrix attacks of 2022 all came from a malicious
    homeserver, and anyone can run a Hollow relay. This audit assumes an
-   actively malicious relay (P-01) everywhere. WP 23.3 gets rewritten at
-   close-out.
+   actively malicious relay (P-01) everywhere. WP 23.3 rewritten to that
+   assumption on 2026-10-04.
    Reworded 2026-09-28: the old text also promised that the relay never learns
    contact lists or which devices belong to one person. Routing alone gives both
    away: every device of a person joins the same rooms (its own `inbox:{master}`
@@ -134,7 +138,7 @@ adds):
    a two-person room. Hiding that takes cover traffic or a mixnet, which would
    cost bandwidth and battery and still fall to timing analysis on a small
    network, so the claim now promises what the design can keep: the relay reads
-   no data, only routing. WP 3.1 follows at close-out.
+   no data, only routing. WP 3.1 rewritten to match on 2026-10-04.
    Held for 0.12 (HOL-SEC-062, 2026-09-29). The relay sees routing metadata: which
    devices join an identity's inbox room, so it can group one person's devices;
    room names; sizes and timing; a file transfer's id; a share room's root hash;
@@ -145,3 +149,7 @@ adds):
    ID-1R (2026-10-02): the relay keeps each identity's roster in RAM to decide who
    reads its inbox. Rosters already rode in the clear as roster notices, so it
    learns nothing it could not read before.
+   Phase E+F (2026-10-04): push preferences now carry only the settings that
+   differ from the default (HOL-SEC-160) and the media forwarder keeps no sessions
+   on disk; WP 12.7 and 23.1 now list what the relay holds in memory (rosters,
+   push registrations and preferences, parked ciphertext).

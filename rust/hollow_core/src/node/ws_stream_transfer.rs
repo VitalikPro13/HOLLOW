@@ -43,7 +43,8 @@ pub enum StreamKind {
 #[derive(Debug)]
 pub struct StreamRequest {
     pub kind: StreamKind,
-    /// Hex identifier (file id for files, `vault_ops::shard_stream_id` for shards).
+    /// The transfer's wire id: `file_handler::file_stream_id` for files,
+    /// `vault_ops::shard_stream_id` for shards.
     pub id: String,
     /// Total bytes to transfer.
     pub size: u64,
@@ -51,11 +52,26 @@ pub struct StreamRequest {
     pub temp_path: PathBuf,
 }
 
-/// Tracks bytes received per file_id. Polled by the event loop to emit FileProgress events.
+/// Tracks bytes received per stream. Polled by the event loop to emit FileProgress events.
 #[derive(Debug, Clone)]
 pub struct StreamProgress {
     pub bytes_received: Arc<AtomicU64>,
     pub total_bytes: u64,
+    /// The file the stream carries, when we expected it; progress is shown only for those.
+    pub file_id: Option<String>,
+}
+
+/// What a receiver expects of a stream it is about to open.
+pub struct StreamExpect {
+    /// The most bytes the stream may declare.
+    pub ceiling: u64,
+    /// The file it carries, when a header or an ask of ours names it.
+    pub file_id: Option<String>,
+}
+
+/// Whether `id` has the shape of a file or shard stream id: 64 lowercase hex.
+pub(crate) fn is_stream_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Global progress map.
@@ -354,12 +370,12 @@ fn abandon(pending: &mut HashMap<String, WsTransferState>, id: &str) {
 /// BinaryDirect arrives. Returns `Some(StreamRequest)` when the transfer is complete
 /// (all bytes received).
 ///
-/// `ceiling` names the most bytes a new stream of that kind and id may declare.
+/// `expect` says what a new stream of that kind and id may declare and which file it carries.
 pub fn ws_stream_receive(
     pending: &mut HashMap<String, WsTransferState>,
     from: &str,
     data: &[u8],
-    ceiling: impl Fn(&StreamKind, &str) -> u64,
+    expect: impl Fn(&StreamKind, &str) -> StreamExpect,
 ) -> Option<StreamRequest> {
     if data.is_empty() {
         return None;
@@ -411,6 +427,10 @@ pub fn ws_stream_receive(
             TYPE_LINK => (StreamKind::LinkSnapshot, 73),
             _ => (StreamKind::File, 73),
         };
+        if matches!(kind, StreamKind::File | StreamKind::Shard { .. }) && !is_stream_id(&id) {
+            hollow_log!("[HOLLOW-WS-STREAM] Dropped stream frame: {id} is not a stream id");
+            return None;
+        }
 
         let payload = &data[payload_start..];
 
@@ -433,7 +453,7 @@ pub fn ws_stream_receive(
         if payload.len() as u64 > total_size {
             return None;
         }
-        let limit = ceiling(&kind, &id);
+        let StreamExpect { ceiling: limit, file_id } = expect(&kind, &id);
         if total_size > limit {
             hollow_log!("[HOLLOW-SECURITY] Dropped stream {id} from {from}: it declares {total_size} bytes, {limit} allowed");
             return None;
@@ -464,6 +484,7 @@ pub fn ws_stream_receive(
                 map.insert(id.clone(), StreamProgress {
                     bytes_received: counter.clone(),
                     total_bytes: total_size,
+                    file_id,
                 });
             }
             Some(counter)
@@ -595,9 +616,55 @@ mod tests {
         frame
     }
 
-    /// No ceiling, for the tests that are not about it.
-    fn open(_: &StreamKind, _: &str) -> u64 {
-        u64::MAX
+    /// No ceiling and no file, for the tests that are not about them.
+    fn open(_: &StreamKind, _: &str) -> StreamExpect {
+        StreamExpect { ceiling: u64::MAX, file_id: None }
+    }
+
+    /// A stream id, as a sender derives one.
+    fn sid(tag: &str) -> String {
+        super::super::file_handler::file_stream_id(tag, "sender", "receiver")
+    }
+
+    /// A file or shard stream opens only under a stream id; other kinds keep their own
+    /// ids, which only the general allowlist judges.
+    #[test]
+    fn a_file_or_shard_stream_opens_only_under_a_stream_id() {
+        // Opened streams are temps in the files folder: a throwaway one.
+        let _g = super::super::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+        let mut pending = HashMap::new();
+        let shard = |id: &str| {
+            let mut frame = vec![TYPE_SHARD];
+            frame.extend_from_slice(&pad_id(id));
+            frame.extend_from_slice(&10u64.to_le_bytes());
+            frame.extend_from_slice(&3u16.to_le_bytes());
+            frame.extend_from_slice(&[1u8; 4]);
+            frame
+        };
+        let hex32 = "0123456789abcdef0123456789abcdef";
+        for id in [hex32.to_string(), "AB".repeat(32), "g".repeat(64), format!("{hex32}:7"), "link_ABC123".into()] {
+            ws_stream_receive(&mut pending, "peer", &first_frame(&id, 10, &[1u8; 4]), open);
+            ws_stream_receive(&mut pending, "peer", &shard(&id), open);
+            assert!(pending.is_empty(), "a file or shard stream opened under {id:?}");
+        }
+        let id = sid("ok");
+        assert!(is_stream_id(&id));
+        ws_stream_receive(&mut pending, "peer", &first_frame(&id, 10, &[1u8; 4]), open);
+        assert!(pending.contains_key(&id), "a file stream under its stream id was refused");
+        abandon(&mut pending, &id);
+        ws_stream_receive(&mut pending, "peer", &shard(&id), open);
+        assert!(pending.contains_key(&id), "a shard stream under its stream id was refused");
+        abandon(&mut pending, &id);
+
+        let mut link = vec![TYPE_LINK];
+        link.extend_from_slice(&pad_id("link_ABC123"));
+        link.extend_from_slice(&10u64.to_le_bytes());
+        link.extend_from_slice(&[1u8; 4]);
+        ws_stream_receive(&mut pending, "peer", &link, open);
+        assert!(pending.contains_key("link_ABC123"), "a link snapshot keeps its own id");
+        abandon(&mut pending, "link_ABC123");
     }
 
     /// A-F7: a stream may not declare more than we expect of it. With no header and no
@@ -606,10 +673,11 @@ mod tests {
     #[test]
     fn a_stream_cannot_declare_past_its_ceiling() {
         use super::super::file_transfer::DEFAULT_MAX_FILE_SIZE;
-        let ceiling = |kind: &StreamKind, id: &str| {
-            super::super::file_handler::stream_ceiling(
-                kind, id, "mallory", &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(),
-            )
+        let ceiling = |kind: &StreamKind, id: &str| StreamExpect {
+            ceiling: super::super::file_handler::stream_ceiling(
+                kind, id, "mallory", "us", &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(),
+            ),
+            file_id: None,
         };
         let temps_of = |id: &str| {
             let prefix = format!(".ws_recv_{id}.");
@@ -619,7 +687,7 @@ mod tests {
         };
         let mut pending = HashMap::new();
 
-        let huge = "f7_unasked_huge";
+        let huge = &sid("f7_unasked_huge");
         ws_stream_receive(&mut pending, "mallory", &first_frame(huge, DEFAULT_MAX_FILE_SIZE + 17, &[1u8; 8]), ceiling);
         let (opened, left) = (pending.contains_key(huge), temps_of(huge) > 0);
         abandon(&mut pending, huge);
@@ -635,7 +703,7 @@ mod tests {
         abandon(&mut pending, "f7_share");
         assert!(!opened, "A-F7: a share chunk opened a stream on this lane");
 
-        let within = "f7_within_limit";
+        let within = &sid("f7_within_limit");
         ws_stream_receive(&mut pending, "mallory", &first_frame(within, DEFAULT_MAX_FILE_SIZE + 16, &[1u8; 8]), ceiling);
         let opened = pending.contains_key(within);
         abandon(&mut pending, within);
@@ -655,7 +723,7 @@ mod tests {
     /// declared, and one peer cannot hold more than its share of open streams.
     #[test]
     fn a_stream_belongs_to_the_peer_that_opened_it() {
-        let id = "h8_owned_stream";
+        let id = &sid("h8_owned_stream");
         let data = vec![0x5Au8; 1000];
         let mut pending = HashMap::new();
         assert!(ws_stream_receive(&mut pending, "bob", &first_frame(id, 1000, &data[..500]), open).is_none());
@@ -665,13 +733,13 @@ mod tests {
         assert_eq!(std::fs::read(&done.temp_path).unwrap(), data);
         let _ = std::fs::remove_file(&done.temp_path);
 
-        let over = "h9_past_declared";
+        let over = &sid("h9_past_declared");
         assert!(ws_stream_receive(&mut pending, "mallory", &first_frame(over, 10, &[1u8; 5]), open).is_none());
         assert!(ws_stream_receive(&mut pending, "mallory", &continuation(over, &[1u8; 4096]), open).is_none(), "wrote past its size");
         assert!(!pending.contains_key(over));
 
         for i in 0..MAX_RECV_STREAMS_PER_SENDER + 4 {
-            ws_stream_receive(&mut pending, "mallory", &first_frame(&format!("h9_open_{i}"), 1 << 20, &[1u8; 8]), open);
+            ws_stream_receive(&mut pending, "mallory", &first_frame(&sid(&format!("h9_open_{i}")), 1 << 20, &[1u8; 8]), open);
         }
         let held = pending.len();
         for (_, state) in pending.drain() {
@@ -682,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_single_chunk_file_roundtrip() {
-        let id = "test_file_001";
+        let id = &sid("test_file_001");
         let file_data = b"hello world file data";
         let total_size = file_data.len() as u64;
 
@@ -698,7 +766,7 @@ mod tests {
         let result = ws_stream_receive(&mut pending, "peer", &chunk, open);
         assert!(result.is_some());
         let req = result.unwrap();
-        assert_eq!(req.id, id);
+        assert_eq!(&req.id, id);
         assert_eq!(req.size, total_size);
         assert!(matches!(req.kind, StreamKind::File));
 
@@ -710,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_single_chunk_shard_roundtrip() {
-        let id = "test_shard_001";
+        let id = &sid("test_shard_001");
         let shard_data = b"shard bytes here";
         let total_size = shard_data.len() as u64;
         let shard_index: u16 = 3;
@@ -727,7 +795,7 @@ mod tests {
         let result = ws_stream_receive(&mut pending, "peer", &chunk, open);
         assert!(result.is_some());
         let req = result.unwrap();
-        assert_eq!(req.id, id);
+        assert_eq!(&req.id, id);
         assert!(matches!(req.kind, StreamKind::Shard { shard_index: 3 }));
 
         let contents = std::fs::read(&req.temp_path).unwrap();
@@ -737,7 +805,7 @@ mod tests {
 
     #[test]
     fn test_multi_chunk_reassembly() {
-        let id = "test_multi_001";
+        let id = &sid("test_multi_001");
         let file_data = vec![0xABu8; 1000]; // 1000 bytes, will split into chunks
         let total_size = file_data.len() as u64;
 
@@ -752,7 +820,7 @@ mod tests {
         let mut pending = HashMap::new();
         let result = ws_stream_receive(&mut pending, "peer", &first, open);
         assert!(result.is_none()); // Not complete yet.
-        assert!(pending.contains_key(id));
+        assert!(pending.contains_key(id.as_str()));
 
         // Continuation chunk: remaining 500 bytes.
         let mut cont = Vec::new();
@@ -763,7 +831,7 @@ mod tests {
         let result = ws_stream_receive(&mut pending, "peer", &cont, open);
         assert!(result.is_some());
         let req = result.unwrap();
-        assert_eq!(req.id, id);
+        assert_eq!(&req.id, id);
         assert_eq!(req.size, total_size);
 
         let contents = std::fs::read(&req.temp_path).unwrap();
@@ -775,7 +843,7 @@ mod tests {
     /// same id at once: each reassembles its own bytes.
     #[test]
     fn two_streams_of_one_id_never_share_a_temp_file() {
-        let id = "two_streams_one_id";
+        let id = &sid("two_streams_one_id");
         let (ours, theirs) = (vec![0xA1u8; 1000], vec![0xB2u8; 1000]);
         let (mut here, mut there) = (HashMap::new(), HashMap::new());
         assert!(ws_stream_receive(&mut here, "holder_one", &first_frame(id, 1000, &ours[..500]), open).is_none());

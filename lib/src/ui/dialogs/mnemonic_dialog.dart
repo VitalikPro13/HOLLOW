@@ -40,9 +40,9 @@ void showMnemonicDialog(BuildContext context, String mnemonic) {
   );
 }
 
-/// The first start of an identity from before the phrase became its root: the
-/// phrase it stored is shown one last time, checked, made the root, and erased.
-/// "Later" keeps it stored and leaves a reminder.
+/// An identity from before the phrase became its root: the phrase it stored, which
+/// its first 0.12 start already made the root, is shown one last time, checked,
+/// and erased. "Later" keeps it stored and leaves a reminder.
 Future<bool> showPhraseUpgradeDialog(BuildContext context, String stored) async {
   final container = ProviderScope.containerOf(context, listen: false);
   final done = await showHollowDialog<bool>(
@@ -56,12 +56,7 @@ Future<bool> showPhraseUpgradeDialog(BuildContext context, String stored) async 
           'the copy you keep matches it.',
       laterAllowed: true,
       onConfirmed: () async {
-        final status = await roster_api.rosterStatus();
-        final keep = status.devices
-            .where((d) => d.state == 'member' && !d.thisDevice)
-            .map((d) => d.devicePeerId)
-            .toList();
-        await roster_api.recoverWithPhrase(phrase: stored, keep: keep);
+        await roster_api.confirmStoredPhrase(phrase: stored);
         await container.read(homeSetupProvider.notifier).markPhraseSaved();
         container.invalidate(phraseUpgradePendingProvider);
       },

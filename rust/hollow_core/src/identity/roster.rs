@@ -24,6 +24,10 @@ pub(crate) const PENDING_MATURITY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 pub(crate) const REMOVAL_GRACE_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 /// How far past our clock a phrase statement may be dated.
 const MAX_FUTURE_SKEW_MS: i64 = 10 * 60 * 1000;
+/// When the recovery an identity from before 0.12 signs at its first 0.12 start is
+/// dated (2020-01-01): fixed, so each of its devices signs the very same statement,
+/// and older than any phrase typed on 0.12, so a typed recovery supersedes it.
+pub(crate) const UPGRADE_RECOVERY_AT_MS: i64 = 1_577_836_800_000;
 /// A roster bigger than this on the wire is dropped whole.
 pub(crate) const MAX_ROSTER_BYTES: usize = 256 * 1024;
 /// Ceilings that keep the largest roster under `MAX_ROSTER_BYTES`. Vouches and removals
@@ -288,6 +292,19 @@ pub(crate) fn sign_phrase_admit(
         sig_r: sign(recovery, &payload),
         sig_m: sign(master, &payload),
     }
+}
+
+/// The upgrade's recovery. It keeps only the recovery key's own id, which no device
+/// can consent as without the phrase, so the base is the same whichever device signs
+/// first and nothing vouched or removed in it is lost when another device upgrades;
+/// the devices themselves come in by [`sign_upgrade_admit`].
+pub(crate) fn sign_upgrade_recovery(master: &NativeKeypair, recovery: &NativeKeypair) -> Recovery {
+    sign_recovery(master, recovery, UPGRADE_RECOVERY_AT_MS, &[recovery.peer_id()], false)
+}
+
+/// The phrase admits `device` into the upgrade's base, and into no base typed later.
+pub(crate) fn sign_upgrade_admit(master: &NativeKeypair, recovery: &NativeKeypair, device: &str) -> PhraseAdmit {
+    sign_phrase_admit(master, recovery, UPGRADE_RECOVERY_AT_MS + 1, device)
 }
 
 pub(crate) fn sign_vouch(by: &NativeKeypair, master: &str, base: &str, device: &str) -> Vouch {

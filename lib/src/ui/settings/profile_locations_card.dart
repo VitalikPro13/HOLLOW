@@ -245,6 +245,23 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     }
   }
 
+  /// The profile Hollow opens after erasing the running one, or null for Welcome.
+  String? _profileAfterErasing(ProfileRow row) {
+    final rows = _buildRows();
+    final next = registryAfterWipe(
+      _registry,
+      row.path,
+      runningRoot: _runningRoot,
+      profilePaths: rows.map((r) => r.path),
+      holdsIdentity: profileHasIdentity,
+    ).activePath;
+    if (next == null) return null;
+    for (final r in rows) {
+      if (sameProfilePath(r.path, next)) return r.name;
+    }
+    return null;
+  }
+
   Future<void> _confirmErase(ProfileRow row) async {
     final isRunning = sameProfilePath(row.path, _runningRoot);
 
@@ -259,6 +276,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
         name: row.name,
         path: row.path,
         isRunning: isRunning,
+        opensNext: isRunning ? _profileAfterErasing(row) : null,
         challenge: challenge,
       ),
     );
@@ -273,7 +291,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
       try {
         await wipe_api.destroyLocal();
         await clearLocalSecretsAfterDestroy();
-        await relaunchApp();
+        await relaunchAfterWipe();
       } catch (e) {
         if (mounted) {
           setState(() => _busy = false);
@@ -303,18 +321,14 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     }
     setState(() => _busy = true);
     try {
-      final dir = Directory(row.path);
-      if (dir.existsSync()) {
-        await for (final entity in dir.list(followLinks: false)) {
-          final name = entity.path.split(Platform.pathSeparator).last;
-          // Same keep-list as Rust's perform_pending_wipe: the registry is
-          // app-level config and stale locks are harmless.
-          if (name == 'profiles.json' || name.endsWith('.lock')) continue;
-          await entity.delete(recursive: true);
-        }
-      }
+      // The wipe routine itself, so this profile's recordings go with it.
+      await wipe_api.eraseProfileAt(dataDir: row.path);
+      await forgetWipedProfile(row.path);
       if (mounted) {
-        setState(() => _busy = false);
+        setState(() {
+          _busy = false;
+          _registry = readProfileRegistrySync();
+        });
         HollowToast.show(context, 'Profile data erased',
             type: HollowToastType.info);
       }
@@ -476,12 +490,17 @@ class _EraseProfileDialog extends StatefulWidget {
   final String name;
   final String path;
   final bool isRunning;
+
+  /// The profile the restart opens after erasing the running one; null opens
+  /// first-time setup.
+  final String? opensNext;
   final _EraseChallenge challenge;
 
   const _EraseProfileDialog({
     required this.name,
     required this.path,
     required this.isRunning,
+    required this.opensNext,
     required this.challenge,
   });
 
@@ -501,6 +520,14 @@ class _EraseProfileDialogState extends State<_EraseProfileDialog> {
   }
 
   bool get _needsChallenge => widget.challenge != _EraseChallenge.none;
+
+  String get _restartLine {
+    if (!widget.isRunning) return '';
+    final next = widget.opensNext;
+    return next == null
+        ? ' Hollow will restart to finish and open first-time setup.'
+        : ' Hollow will restart to finish and open the "$next" profile.';
+  }
 
   Future<void> _confirm() async {
     if (_checking) return;
@@ -564,15 +591,14 @@ class _EraseProfileDialogState extends State<_EraseProfileDialog> {
         children: [
           HollowDialogText(
             'This permanently deletes the identity key, message history, '
-            'and downloaded files of "${widget.name}":',
+            'downloaded files, and recordings of "${widget.name}":',
           ),
           const SizedBox(height: HollowSpacing.xs),
           Text(widget.path, style: HollowTypography.monoSmall),
           const SizedBox(height: HollowSpacing.sm),
           HollowDialogText(
             'Without its 24-word recovery phrase this identity cannot be '
-            'restored.${widget.isRunning ? ' Hollow will restart to finish and '
-                'open first-time setup.' : ''}',
+            'restored.$_restartLine',
           ),
           if (_needsChallenge) ...[
             const SizedBox(height: HollowSpacing.md),

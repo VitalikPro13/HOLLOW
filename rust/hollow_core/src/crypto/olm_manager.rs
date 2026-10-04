@@ -107,6 +107,14 @@ fn fail(stale: bool, why: String) -> OlmFail {
     if stale { OlmFail::Stale(why) } else { OlmFail::Unreadable(why) }
 }
 
+/// Whether `key` has small order, so a key agreement with it is the same for every
+/// secret. vodozemac does not check (its 3DH reads no `was_contributory`), so session
+/// setup does: one agreement with a fixed scalar comes out all zero exactly then.
+fn small_order(key: &Curve25519PublicKey) -> bool {
+    let probe = x25519_dalek::StaticSecret::from([0x5a; 32]);
+    !probe.diffie_hellman(&x25519_dalek::PublicKey::from(key.to_bytes())).was_contributory()
+}
+
 fn ciphertext_digest(ciphertext: &[u8]) -> [u8; 16] {
     use sha2::{Digest, Sha256};
     let full = Sha256::digest(ciphertext);
@@ -308,6 +316,9 @@ impl OlmManager {
             .map_err(|e| format!("Invalid identity key: {e}"))?;
         let their_otk = Curve25519PublicKey::from_base64(their_otk_b64)
             .map_err(|e| format!("Invalid one-time key: {e}"))?;
+        if small_order(&their_identity_key) || small_order(&their_otk) {
+            return Err("Refused a small-order key".to_string());
+        }
 
         let session = self.account.create_outbound_session(
             SessionConfig::version_2(),
@@ -339,6 +350,10 @@ impl OlmManager {
             OlmMessage::PreKey(m) => m,
             OlmMessage::Normal(_) => return Err(OlmFail::Unreadable("Expected PreKeyMessage but got Normal".to_string())),
         };
+        // We only ever start v2 sessions; the 8-byte MAC of v1 is someone else's choice.
+        if message.message().mac_truncated() {
+            return Err(OlmFail::Unreadable("PreKey asks for a truncated MAC".to_string()));
+        }
         let session_id = message.session_id();
 
         if let Some(session) = self.sessions.get_mut(peer_id).filter(|s| s.session_id() == session_id) {
@@ -377,6 +392,9 @@ impl OlmManager {
         }
         let their_identity_key = Curve25519PublicKey::from_base64(their_identity_key_b64)
             .map_err(|e| OlmFail::Unreadable(format!("Invalid identity key: {e}")))?;
+        if small_order(&their_identity_key) || small_order(&message.base_key()) {
+            return Err(OlmFail::Unreadable("PreKey carries a small-order key".to_string()));
+        }
         let InboundCreationResult { session, plaintext } = self
             .account
             .create_inbound_session(their_identity_key, &message)
@@ -1273,5 +1291,57 @@ mod tests {
             let (mt, _) = alice.encrypt(BOB, format!("Chunk {i}").as_bytes()).unwrap();
             assert_eq!(mt, 1, "After receiving reply, outbound session produces Normal");
         }
+    }
+
+    /// Curve25519 points of small order (libsodium's list): any key agreement with one
+    /// is the same for everybody.
+    const ZERO_POINT: [u8; 32] = [0; 32];
+    const ORDER_8_POINT: [u8; 32] = [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a,
+        0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00,
+    ];
+
+    /// HOL-SEC-161. Hollow only starts v2 sessions, so a PreKey asking for the 8-byte
+    /// MAC of v1 comes from someone else's client and opens nothing.
+    #[test]
+    fn a_prekey_with_a_truncated_mac_never_opens_a_session() {
+        let alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let bob_identity = Curve25519PublicKey::from_base64(&bob.identity_key_base64()).unwrap();
+        let bob_otk = Curve25519PublicKey::from_base64(&bob.generate_one_time_key()).unwrap();
+        let mut v1 = alice.account.create_outbound_session(SessionConfig::version_1(), bob_identity, bob_otk);
+        let (kind, bytes) = v1.encrypt(b"short tag").to_parts();
+        assert_eq!(kind, 0);
+
+        let opened = bob.open_prekey(ALICE, &alice.identity_key_base64(), &bytes, BOB);
+        assert!(opened.is_err(), "a v1 PreKey opened a session");
+        assert!(!bob.has_session(ALICE));
+    }
+
+    /// HOL-SEC-161. A small-order key would make our share of the 3DH a constant
+    /// anyone can compute, so no session is ever built on one.
+    #[test]
+    fn a_small_order_key_never_starts_a_session() {
+        assert!(small_order(&Curve25519PublicKey::from_bytes(ZERO_POINT)));
+        assert!(small_order(&Curve25519PublicKey::from_bytes(ORDER_8_POINT)));
+        let honest = OlmManager::new();
+        assert!(!small_order(&Curve25519PublicKey::from_base64(&honest.identity_key_base64()).unwrap()));
+
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let bob_identity = bob.identity_key_base64();
+        let bob_otk = bob.generate_one_time_key();
+        assert!(alice.create_outbound_session(BOB, &BASE64.encode(ZERO_POINT), &bob_otk).is_err());
+        assert!(alice.create_outbound_session(BOB, &bob_identity, &BASE64.encode(ORDER_8_POINT)).is_err());
+        assert!(!alice.has_session(BOB));
+        alice.create_outbound_session(BOB, &bob_identity, &bob_otk).unwrap();
+
+        // Inbound: a PreKey whose identity key is small order, named as the sender's.
+        let (_, mut bytes) = alice.encrypt(BOB, b"hello").unwrap();
+        let real = Curve25519PublicKey::from_base64(&alice.identity_key_base64()).unwrap().to_bytes();
+        let at = bytes.windows(32).position(|w| w == real).expect("the PreKey carries the identity key");
+        bytes[at..at + 32].copy_from_slice(&ORDER_8_POINT);
+        let refused = bob.open_prekey(ALICE, &BASE64.encode(ORDER_8_POINT), &bytes, BOB).expect_err("opened");
+        assert!(refused.to_string().contains("small-order"), "refused for another reason: {refused}");
     }
 }

@@ -64,11 +64,45 @@ fn seal_aad(requester: &str, target: &str, requested_at: i64) -> Vec<u8> {
     [SEAL_DOMAIN, b"\0", requester.as_bytes(), b"\0", target.as_bytes(), &requested_at.to_le_bytes()].concat()
 }
 
+/// What a sealed card holds: the signed card and a base64 WebP thumbnail of its
+/// avatar, which only the two sides of a pending friend request ever see.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SealedBody {
+    #[serde(flatten)]
+    card: SignedCard,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    thumb: String,
+}
+
+/// A sealed card that opened: the card, and its thumbnail as we may keep and paint it.
+pub(crate) struct OpenedCard {
+    pub card: SignedCard,
+    pub thumb: Option<Vec<u8>>,
+}
+
+/// Our card and our avatar's thumbnail, sealed to the other side of a pending friend
+/// request stamped `requested_at`.
+pub(crate) fn sealed_own_card(
+    master_keypair: &NativeKeypair,
+    other_master: &str,
+    requested_at: i64,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<SealedCard> {
+    let card = own_card(master_keypair, db_path, db_passphrase)?;
+    let thumb = (!card.avatar_hash.is_empty())
+        .then(|| own_avatar(&card.master, db_path, db_passphrase))
+        .flatten()
+        .and_then(|avatar| super::image_convert::encode_card_thumb(&avatar));
+    seal_for(&card, thumb.as_deref(), other_master, requested_at)
+}
+
 /// Our card sealed to one friend-request target: only the two identities can open
-/// it, so the relay that carries the request never reads the name.
-pub(crate) fn seal_for(card: &SignedCard, target_master: &str, requested_at: i64) -> Option<SealedCard> {
+/// it, so the relay that carries the request never reads the name or sees the face.
+pub(crate) fn seal_for(card: &SignedCard, thumb: Option<&[u8]>, target_master: &str, requested_at: i64) -> Option<SealedCard> {
     use aes_gcm::aead::{Aead, Payload};
-    let plain = serde_json::to_vec(card).ok()?;
+    let thumb = thumb.map(|t| base64::engine::general_purpose::STANDARD.encode(t)).unwrap_or_default();
+    let plain = serde_json::to_vec(&SealedBody { card: card.clone(), thumb }).ok()?;
     let mut nonce = [0u8; 12];
     getrandom::fill(&mut nonce).ok()?;
     let aad = seal_aad(&card.master, target_master, requested_at);
@@ -80,8 +114,8 @@ pub(crate) fn seal_for(card: &SignedCard, target_master: &str, requested_at: i64
 }
 
 /// The card a friend request from `requester_master` sealed to us, if it opens and
-/// is that requester's own.
-pub(crate) fn open_from(sealed: &SealedCard, local_master: &str, requester_master: &str, requested_at: i64) -> Option<SignedCard> {
+/// is that requester's own. A thumbnail that fails its gate is dropped, never the card.
+pub(crate) fn open_from(sealed: &SealedCard, local_master: &str, requester_master: &str, requested_at: i64) -> Option<OpenedCard> {
     use aes_gcm::aead::{Aead, Payload};
     let engine = base64::engine::general_purpose::STANDARD;
     let nonce: [u8; 12] = engine.decode(&sealed.nonce).ok()?.try_into().ok()?;
@@ -90,8 +124,26 @@ pub(crate) fn open_from(sealed: &SealedCard, local_master: &str, requester_maste
     let plain = seal_cipher(local_master, requester_master)?
         .decrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: &ct, aad: &aad })
         .ok()?;
-    let card: SignedCard = serde_json::from_slice(&plain).ok()?;
-    (card.master == requester_master && card_holds(&card)).then_some(card)
+    let SealedBody { card, thumb } = serde_json::from_slice(&plain).ok()?;
+    if card.master != requester_master || !card_holds(&card) {
+        return None;
+    }
+    // Unsigned on purpose: only the pair key seals it, and its owner may show any picture.
+    let thumb = super::image_convert::card_thumb_for_display(&thumb);
+    Some(OpenedCard { card, thumb })
+}
+
+/// Keep a sealed card's thumbnail on the pending friend row of the request it came
+/// with (`master`, `direction`, `requested_at`), and nowhere else. `None` clears an
+/// older one. Returns whether the row changed.
+pub(crate) fn keep_thumb(
+    store: &crate::storage::MessageStore,
+    master: &str,
+    direction: &str,
+    requested_at: i64,
+    thumb: Option<&[u8]>,
+) -> bool {
+    store.set_friend_card_thumb(master, direction, requested_at, thumb).unwrap_or(false)
 }
 
 fn stored(card: &SignedCard) -> crate::storage::messages::StoredCard {
@@ -275,10 +327,93 @@ mod tests {
 
         let own = seal_as(&genuine_card(&c, "Cee"), &c_id, &b_id, 100);
         assert!(open_from(&own, &b_id, &c_id, 100).is_some(), "the requester's own card opens");
+        assert!(open_from(&own, &b_id, &c_id, 100).unwrap().thumb.is_none(), "a bare card carries no thumb");
 
         // C holds A's genuine signed card and seals it inside its own request to B.
         let borrowed = seal_as(&genuine_card(&a, "Ay"), &c_id, &b_id, 100);
         assert!(open_from(&borrowed, &b_id, &c_id, 100).is_none(), "C cannot show B someone else's card");
         assert!(open_from(&borrowed, &b_id, &a_id, 100).is_none(), "nor can it pass for a request from A");
+    }
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 3) as u8, (y * 5) as u8, 90, 255]));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    }
+
+    /// Decision D: a pending request's card carries a thumbnail of the avatar, and what
+    /// comes out the other side is our own re-encode of it.
+    #[test]
+    fn a_sealed_card_carries_its_thumb_reencoded() {
+        let (a, b) = (keypair(44), keypair(45));
+        for k in [&a, &b] {
+            crate::node::dm_room::register(k);
+        }
+        let (a_id, b_id) = (a.peer_id(), b.peer_id());
+        let card = genuine_card(&a, "Ay");
+        let thumb = crate::node::image_convert::encode_card_thumb(&png(512, 512)).unwrap();
+
+        let opened = open_from(&seal_for(&card, Some(&thumb), &b_id, 100).unwrap(), &b_id, &a_id, 100).expect("opens");
+        assert_eq!(opened.card, card);
+        let shown = opened.thumb.expect("the thumb rides inside the seal");
+        assert_ne!(shown, thumb, "the peer's bytes were kept as they came");
+        let (w, h) = crate::node::image_convert::webp_header_dimensions(&shown).expect("a WebP");
+        assert!(w <= crate::node::image_convert::CARD_THUMB_DIM && h <= crate::node::image_convert::CARD_THUMB_DIM);
+
+        let bare = open_from(&seal_for(&card, None, &b_id, 100).unwrap(), &b_id, &a_id, 100).expect("opens");
+        assert!(bare.thumb.is_none(), "no thumb sealed, none shown");
+    }
+
+    /// Decision D: a thumb over the byte or side ceiling, or one that does not decode,
+    /// is dropped whole; the card it came with still opens.
+    #[test]
+    fn an_oversize_or_garbage_thumb_is_dropped_whole() {
+        use crate::node::image_convert::{CARD_THUMB_MAX_BYTES, convert_to_webp_lossless, convert_to_webp_preview, encode_card_thumb};
+        let engine = base64::engine::general_purpose::STANDARD;
+        let (a, b) = (keypair(46), keypair(47));
+        for k in [&a, &b] {
+            crate::node::dm_room::register(k);
+        }
+        let (a_id, b_id) = (a.peer_id(), b.peer_id());
+        let card = genuine_card(&a, "Ay");
+        let seal_body = |thumb: String| {
+            let plain = serde_json::to_vec(&SealedBody { card: card.clone(), thumb }).unwrap();
+            let ct = seal_cipher(&a_id, &b_id)
+                .unwrap()
+                .encrypt(aes_gcm::Nonce::from_slice(&[7u8; 12]), Payload { msg: &plain, aad: &seal_aad(&a_id, &b_id, 100) })
+                .unwrap();
+            SealedCard { nonce: engine.encode([7u8; 12]), ct: engine.encode(ct) }
+        };
+
+        let fits = encode_card_thumb(&png(256, 256)).unwrap();
+        assert!(open_from(&seal_body(engine.encode(&fits)), &b_id, &a_id, 100).unwrap().thumb.is_some(), "control");
+        let padded = |len: usize| {
+            let mut t = fits.clone();
+            t.resize(len, 0);
+            engine.encode(t)
+        };
+        let (wide, ..) = convert_to_webp_preview(&png(97, 8), 200).unwrap();
+        let noise = image::RgbaImage::from_fn(64, 64, |x, y| {
+            let n = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)).wrapping_mul(2_246_822_519);
+            image::Rgba([(n >> 24) as u8, (n >> 16) as u8, (n >> 8) as u8, 255])
+        });
+        let mut noise_png = Vec::new();
+        noise.write_to(&mut std::io::Cursor::new(&mut noise_png), image::ImageFormat::Png).unwrap();
+        let (heavy, ..) = convert_to_webp_lossless(&noise_png).unwrap();
+        assert!((CARD_THUMB_MAX_BYTES + 1..3 * CARD_THUMB_MAX_BYTES).contains(&heavy.len()), "{} bytes", heavy.len());
+        for (what, thumb) in [
+            ("a real WebP over the cap", engine.encode(&heavy)),
+            ("one byte over the cap", padded(CARD_THUMB_MAX_BYTES + 1)),
+            ("far over the cap", padded(64 * 1024)),
+            ("a side over the ceiling", engine.encode(&wide)),
+            ("an undecodable body", engine.encode(&fits[..48])),
+            ("not a WebP", engine.encode(png(8, 8))),
+            ("not base64", "%%%".to_string()),
+        ] {
+            let opened = open_from(&seal_body(thumb), &b_id, &a_id, 100).unwrap_or_else(|| panic!("{what}: the card was lost"));
+            assert_eq!(opened.card.display_name, "Ay");
+            assert!(opened.thumb.is_none(), "{what} was kept");
+        }
     }
 }

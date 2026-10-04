@@ -456,7 +456,7 @@ On WebRTC failure, `handle_webrtc_transfer_failed()` retries via WSS (sender) or
 | Path | Content | Lifetime |
 |------|---------|----------|
 | `~/.hollow/files/{file_id}.{ext}` | Full file (DMs, <6 servers, all images) | Persistent |
-| `~/.hollow/files/.stream_send_{file_id}.tmp` | AES-encrypted ciphertext for in-progress sends | Deleted after send completes |
+| `~/.hollow/files/.stream_send_{stream_id}.tmp` | AES-encrypted ciphertext staged for one data-channel send (`file_stream_id`, session 35) | Deleted on `WebRtcSendComplete`, or after the relay retry |
 | `~/.hollow/files/{file_id}.chunk.{idx}` | Individual chunks during assembly | Deleted after assembly |
 | `~/.hollow/vault/{server_id}/{shard_key}.shard` | Erasure-coded shards (6+ servers) | Retention-based |
 | `~/.hollow/vault_cache/{content_id}.{ext}` | LRU-evicted decrypted cache | 1 GB cap |

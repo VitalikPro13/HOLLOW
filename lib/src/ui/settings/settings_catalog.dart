@@ -146,6 +146,7 @@ const List<SettingsSearchEntry> kSettingsSearchIndex = [
   SettingsSearchEntry('Download automatically', SettingsCategory.storage, 'auto download threshold'),
   SettingsSearchEntry('Image quality', SettingsCategory.storage, 'webp compression lossless'),
   SettingsSearchEntry('Data folder', SettingsCategory.storage, 'location path'),
+  SettingsSearchEntry('Recordings', SettingsCategory.storage, 'record screen call video folder'),
   SettingsSearchEntry('Profiles', SettingsCategory.storage, 'switch identity folder'),
   SettingsSearchEntry('Updates', SettingsCategory.about, 'version update install check'),
   SettingsSearchEntry("What's new", SettingsCategory.about, 'changelog release notes'),

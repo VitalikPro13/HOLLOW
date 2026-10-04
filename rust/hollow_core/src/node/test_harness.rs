@@ -505,6 +505,12 @@ impl MockRelay {
         inner.inbox_owners.get(&format!("inbox:{master}")).cloned().unwrap_or_default()
     }
 
+    /// The recovery key the relay pinned for `master`, empty while it holds none.
+    pub(crate) fn inbox_recovery_key(&self, master: &str) -> String {
+        let inner = self.inner.lock().unwrap();
+        inner.inbox_rosters.get(master).map(|held| held.roster.r_pub.clone()).unwrap_or_default()
+    }
+
     /// Move the relay's first sight of `device`'s pending join for `master` back by
     /// `by_ms`, as if that much time had passed at the relay.
     pub(crate) fn age_inbox_wait(&self, master: &str, device: &str, by_ms: i64) {
@@ -2496,6 +2502,26 @@ async fn spawn_node_seeded(
     roster: Option<crate::identity::roster::Roster>,
 ) -> TestNode {
     let master = NativeKeypair::from_secret_bytes(&seed_bytes(master_tag));
+    let device_id = NativeKeypair::from_secret_bytes(&seed_bytes(device_tag)).peer_id();
+    let master_id = master.peer_id();
+    spawn_node_staged(relay, master, device_tag, friend_masters, |store| {
+        // Pre-seed our roster (C5: simulate the imported source database).
+        if let Some(roster) = &roster {
+            super::roster_book::merge_for_test(store, roster, &master_id, &device_id);
+        }
+    })
+    .await
+}
+
+/// Spawn under any master key (one a phrase derives, say), with `stage` writing to
+/// the node's database before it starts.
+async fn spawn_node_staged(
+    relay: &MockRelay,
+    master: NativeKeypair,
+    device_tag: u8,
+    friend_masters: &[&str],
+    stage: impl FnOnce(&crate::storage::MessageStore),
+) -> TestNode {
     let device = NativeKeypair::from_secret_bytes(&seed_bytes(device_tag));
     let passphrase = passphrase_for(&master);
 
@@ -2519,10 +2545,7 @@ async fn spawn_node_seeded(
         for fm in friend_masters {
             store.save_friend(fm, "accepted", "outgoing", 0).expect("seed friend");
         }
-        // Pre-seed our roster (C5: simulate the imported source database).
-        if let Some(roster) = &roster {
-            super::roster_book::merge_for_test(&store, roster, &master.peer_id(), &device.peer_id());
-        }
+        stage(&store);
         mgr
     };
     let crypto_store = CryptoStore::open(db_path.clone(), passphrase.clone()).expect("crypto store");
@@ -8352,6 +8375,417 @@ async fn shard_streams_of_one_file_from_two_holders_cross_and_all_land() {
         crate::node::at_rest::read_all(std::path::Path::new(&path)).expect("read the rebuilt file"),
         plaintext,
     );
+}
+
+// ── File transfers in flight at once ───────────────────────────────────────────
+//
+// One file streams to several devices at once, and one device can take a file from two
+// holders at once: each transfer has its own stream id, temp and retry entry.
+
+/// A three-member server of fresh installs (device != master), owner first, with its
+/// MLS group formed. Each `(master, device)` tag pair is one identity.
+async fn fanout_trio(relay: &MockRelay, tags: [(u8, u8); 3]) -> (TestNode, TestNode, TestNode, String) {
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let masters: Vec<String> = tags.iter().map(|(m, _)| id(*m)).collect();
+    for (m, d) in tags {
+        assert_ne!(id(m), id(d), "a fresh install's device is not its master");
+        super::resolver::seed_self(&id(m), &[id(d)]);
+        super::resolver::update_many(&id(m), [id(d).as_str()]);
+    }
+    let mut nodes = Vec::new();
+    for (i, (m, d)) in tags.iter().enumerate() {
+        let friends: Vec<&str> = masters.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, f)| f.as_str()).collect();
+        nodes.push(spawn_node_full(relay, *m, *d, &friends, Some(&[*d])).await);
+    }
+    let mut b = nodes.pop().expect("three nodes");
+    let mut a = nodes.pop().expect("three nodes");
+    let mut o = nodes.pop().expect("three nodes");
+    expect_dm_pair_ready(relay, &o, &a, 30).await;
+    expect_dm_pair_ready(relay, &o, &b, 30).await;
+    expect_dm_pair_ready(relay, &a, &b, 30).await;
+
+    let server_id = create_server_and_wait(&mut o, "Fan Out").await;
+    for node in [&mut a, &mut b] {
+        node.cmd_tx
+            .send(NodeCommand::JoinServer {
+                server_id: server_id.clone(),
+                twitch_proof_json: None,
+                nsfw_confirmed: false,
+                owner_pin: None,
+                join_key: invite_key(&server_id),
+            })
+            .await
+            .unwrap();
+        let joined = wait_event(node, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "{} joins the server", node.device_id);
+    }
+    expect_mls_group(&[&o, &a, &b], &server_id, 30).await;
+    for node in [&o, &a, &b] {
+        assert!(
+            wait_until(20, async || node.live_server_state(&server_id).await.is_some_and(|s| {
+                masters.iter().all(|m| s.is_member(m))
+            }))
+            .await,
+            "{} sees all three members",
+            node.device_id,
+        );
+    }
+    drain_events(&mut o);
+    drain_events(&mut a);
+    drain_events(&mut b);
+    (o, a, b, server_id)
+}
+
+/// A file that spans three relay frames.
+fn fanout_bytes() -> Vec<u8> {
+    (0..600_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect()
+}
+
+/// `node` posts the file at `path` into `server_id`'s #general and returns its file id.
+async fn post_fanout_file(node: &mut TestNode, server_id: &str, path: &std::path::Path, mid: &str) -> String {
+    node.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.to_string()),
+            channel_id: Some(general_channel_of(server_id)),
+            file_path: path.to_str().unwrap().to_string(),
+            message_id: mid.to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let mut fid = None;
+    wait_event(node, std::time::Duration::from_secs(15), |ev| {
+        if let NetworkEvent::FileCompleted { file_id, .. } = ev {
+            fid = Some(file_id.clone());
+        }
+        fid.is_some()
+    })
+    .await;
+    fid.expect("the sender keeps its own copy")
+}
+
+/// The data-channel file sends `node` hands Dart, as (peer, transfer id, temp), until
+/// there are `n` of them.
+async fn data_channel_file_sends(node: &mut TestNode, n: usize) -> Vec<(String, String, String)> {
+    let mut sends = Vec::new();
+    wait_event(node, std::time::Duration::from_secs(20), |ev| {
+        if let NetworkEvent::WebRtcSendFile { peer_id, transfer_id, file_path, kind, .. } = ev
+            && kind == "file"
+        {
+            sends.push((peer_id.clone(), transfer_id.clone(), file_path.clone()));
+        }
+        sends.len() == n
+    })
+    .await;
+    sends
+}
+
+/// Dart's part of a send whose bytes cross `to`'s data channel: the receiver's copy of
+/// the sender's temp, reported as a completed transfer.
+async fn cross_data_channel(to: &TestNode, from: &TestNode, transfer_id: &str, temp: &str) {
+    let received = crate::node::file_transfer::files_dir().join(format!(".webrtc_recv_{transfer_id}.tmp"));
+    std::fs::copy(temp, &received).expect("the receiver's copy off the data channel");
+    to.cmd_tx
+        .send(NodeCommand::WebRtcTransferComplete {
+            transfer_id: transfer_id.to_string(),
+            temp_path: received.to_string_lossy().into_owned(),
+            sender_peer_id: from.device_id.clone(),
+            kind: "file".into(),
+            shard_index: 0,
+            chunk_index: 0,
+        })
+        .await
+        .unwrap();
+}
+
+/// Wait for `node` to complete `fid`, which only happens once the bytes hash to the
+/// file id, and check it holds `plaintext` as that file.
+async fn expect_file_lands(node: &mut TestNode, fid: &str, plaintext: &[u8]) {
+    let done = wait_event(node, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if file_id == fid)
+    })
+    .await;
+    assert!(done, "{} never completed {fid}", node.device_id);
+    let disk = node.file_meta(fid).and_then(|m| m.disk_path).expect("a completed file has a path");
+    assert!(
+        crate::node::at_rest::read_all(std::path::Path::new(&disk)).expect("read the file") == plaintext,
+        "{} holds other bytes as {fid}",
+        node.device_id,
+    );
+}
+
+/// The temps named `prefix*` left in the files folder.
+fn transfer_temps(prefix: &str) -> Vec<String> {
+    std::fs::read_dir(crate::node::file_transfer::files_dir())
+        .map(|dir| {
+            dir.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(prefix))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The send temps left in the files folder.
+fn send_temps() -> Vec<String> {
+    transfer_temps(".stream_send_")
+}
+
+/// O posts a file into a three-member server, and both other members' devices take it
+/// over their data channels at once. Each send has its own transfer id and temp; A's
+/// crosses its channel with its progress shown on the file's card, B's fails there and
+/// lands over the relay; both hold the file's bytes and no send temp outlives its send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_channel_file_streams_to_each_device_under_its_own_id_and_temp() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let (mut o, mut a, mut b, server_id) = fanout_trio(&relay, [(231, 232), (233, 234), (235, 236)]).await;
+    for dev in [&a.device_id, &b.device_id] {
+        o.cmd_tx.send(NodeCommand::WebRtcPeerConnected { peer_id: dev.clone() }).await.unwrap();
+    }
+    let plaintext = fanout_bytes();
+    let src = global_tmp.path().join("fanout.bin");
+    std::fs::write(&src, &plaintext).expect("write the file");
+    let fid = post_fanout_file(&mut o, &server_id, &src, "fanout-push").await;
+
+    let sends = data_channel_file_sends(&mut o, 2).await;
+    assert_eq!(sends.len(), 2, "O sends the file over both data channels: {sends:?}");
+    assert_ne!(sends[0].1, sends[1].1, "two devices' sends of one file share a transfer id");
+    assert_ne!(sends[0].2, sends[1].2, "two devices' sends of one file share a temp");
+    let to = |node: &TestNode| sends.iter().find(|s| s.0 == node.device_id).cloned().expect("a send to each member device");
+    let (to_a, to_b) = (to(&a), to(&b));
+
+    let header = wait_event(&mut a, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::FileHeaderReceived { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(header, "A takes the file's header");
+    a.cmd_tx
+        .send(NodeCommand::WebRtcTransferProgress {
+            transfer_id: to_a.1.clone(),
+            sender_peer_id: o.device_id.clone(),
+            bytes_received: 1000,
+            total_bytes: plaintext.len() as u64 + 16,
+        })
+        .await
+        .unwrap();
+    let shown = wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::FileProgress { file_id, chunks_received: 1000, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(shown, "A's data-channel progress never reached the file's card");
+    cross_data_channel(&a, &o, &to_a.1, &to_a.2).await;
+    o.cmd_tx.send(NodeCommand::WebRtcSendComplete { transfer_id: to_a.1.clone() }).await.unwrap();
+    // One receiver at a time: the harness's nodes share one files folder.
+    expect_file_lands(&mut a, &fid, &plaintext).await;
+    o.cmd_tx
+        .send(NodeCommand::WebRtcTransferFailed { transfer_id: to_b.1.clone(), peer_id: b.device_id.clone(), error: "data channel closed".into() })
+        .await
+        .unwrap();
+    expect_file_lands(&mut b, &fid, &plaintext).await;
+    assert!(wait_until(10, async || send_temps().is_empty()).await, "a send temp outlived its send: {:?}", send_temps());
+}
+
+/// A and B pull a file O holds, at once, over their data channels. Each send has its own
+/// transfer id and temp; A's bytes beat their header and wait under their own stream
+/// until it lands, B's send fails and lands over the relay; both hold the file's bytes
+/// and no send temp outlives its send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn two_devices_pulling_one_file_at_once_each_get_their_own_stream() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let (mut o, mut a, mut b, server_id) = fanout_trio(&relay, [(237, 238), (239, 240), (241, 242)]).await;
+    // A and B keep the card and decline the push: only a pull brings them the bytes.
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("server:{server_id}"), false)]),
+    );
+    let plaintext = fanout_bytes();
+    let src = global_tmp.path().join("pulled.bin");
+    std::fs::write(&src, &plaintext).expect("write the file");
+    let fid = post_fanout_file(&mut o, &server_id, &src, "fanout-pull").await;
+    for node in [&mut a, &mut b] {
+        let declined = wait_event(node, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::FileFailed { file_id, error } if *file_id == fid && error == "auto_download_off")
+        })
+        .await;
+        assert!(declined, "{} declines the pushed file", node.device_id);
+    }
+    expect_relay_drained(&relay, &o, "pushed").await;
+    flush_frames(&relay, &mut a).await;
+    flush_frames(&relay, &mut b).await;
+    let kept = transfer_temps(".ws_recv_");
+    assert!(kept.is_empty(), "a declined push was kept: {kept:?}");
+
+    relay.hold_direct(&o.device_id, &a.device_id);
+    for dev in [&a.device_id, &b.device_id] {
+        o.cmd_tx.send(NodeCommand::WebRtcPeerConnected { peer_id: dev.clone() }).await.unwrap();
+    }
+    for node in [&a, &b] {
+        node.cmd_tx
+            .send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: o.master_id.clone(), chunks: Vec::new() })
+            .await
+            .unwrap();
+    }
+    let sends = data_channel_file_sends(&mut o, 2).await;
+    assert_eq!(sends.len(), 2, "O serves both pulls over their data channels: {sends:?}");
+    assert_ne!(sends[0].1, sends[1].1, "two pulls of one file share a transfer id");
+    assert_ne!(sends[0].2, sends[1].2, "two pulls of one file share a temp");
+    let to = |node: &TestNode| sends.iter().find(|s| s.0 == node.device_id).cloned().expect("a send to each puller");
+    let (to_a, to_b) = (to(&a), to(&b));
+
+    cross_data_channel(&a, &o, &to_a.1, &to_a.2).await;
+    o.cmd_tx.send(NodeCommand::WebRtcSendComplete { transfer_id: to_a.1.clone() }).await.unwrap();
+    // A has its bytes before their header: a round trip through its loop, then the header.
+    a.debug_snapshot().await;
+    relay.release_held(&o.device_id, &a.device_id);
+    // One receiver at a time: the harness's nodes share one files folder.
+    expect_file_lands(&mut a, &fid, &plaintext).await;
+    o.cmd_tx
+        .send(NodeCommand::WebRtcTransferFailed { transfer_id: to_b.1.clone(), peer_id: b.device_id.clone(), error: "data channel closed".into() })
+        .await
+        .unwrap();
+    expect_file_lands(&mut b, &fid, &plaintext).await;
+    assert!(wait_until(10, async || send_temps().is_empty()).await, "a send temp outlived its send: {:?}", send_temps());
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+}
+
+/// B pulls a file from A while O's push of the same file to B is still on the relay.
+/// Both streams open at once on B's relay lane, the one whose header B holds (A's)
+/// lands, and B never needs to ask again: a second answer from A would stay held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_file_from_two_holders_crosses_on_the_relay_and_the_asked_one_lands() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let (mut o, mut a, mut b, server_id) = fanout_trio(&relay, [(243, 244), (245, 246), (247, 248)]).await;
+    relay.hold_streams(&o.device_id, &b.device_id);
+    let plaintext = fanout_bytes();
+    let src = global_tmp.path().join("crossed.bin");
+    std::fs::write(&src, &plaintext).expect("write the file");
+    let fid = post_fanout_file(&mut o, &server_id, &src, "fanout-cross").await;
+    expect_file_lands(&mut a, &fid, &plaintext).await;
+    let header = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::FileHeaderReceived { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(header, "B takes O's header");
+    assert!(wait_until(20, async || relay.held_stream_count(&o.device_id, &b.device_id) >= 3).await, "O's push to B waits on the relay");
+
+    relay.hold_streams(&a.device_id, &b.device_id);
+    b.cmd_tx
+        .send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: a.device_id.clone(), chunks: Vec::new() })
+        .await
+        .unwrap();
+    assert!(wait_until(20, async || relay.held_stream_count(&a.device_id, &b.device_id) >= 3).await, "A answers B's pull");
+    flush_frames(&relay, &mut b).await;
+    relay.release_streams_interleaved(&[&o.device_id, &a.device_id], &b.device_id);
+    relay.hold_streams(&a.device_id, &b.device_id);
+
+    expect_file_lands(&mut b, &fid, &plaintext).await;
+    // Anything B asked A for since has reached A, and A's answer the relay.
+    expect_relay_drained(&relay, &b, "asked-again").await;
+    flush_frames(&relay, &mut a).await;
+    expect_relay_drained(&relay, &a, "served-again").await;
+    assert_eq!(relay.held_stream_count(&a.device_id, &b.device_id), 0, "B had to ask A again");
+}
+
+/// A DM file from one fresh install (device != master) to another lands over the relay
+/// and over a data channel: both ends name its stream by the sending DEVICE, never the
+/// master, and the data-channel send leaves no temp behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_dm_file_between_fresh_installs_streams_under_the_sending_device() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let ((a_m, a_d), (b_m, b_d)) = ((249u8, 250u8), (251u8, 252u8));
+    for (m, d) in [(a_m, a_d), (b_m, b_d)] {
+        super::resolver::seed_self(&id(m), &[id(d)]);
+        super::resolver::update_many(&id(m), [id(d).as_str()]);
+    }
+    let mut a = spawn_node_full(&relay, a_m, a_d, &[&id(b_m)], Some(&[a_d])).await;
+    let mut b = spawn_node_full(&relay, b_m, b_d, &[&id(a_m)], Some(&[b_d])).await;
+    assert!(a.device_id != a.master_id && b.device_id != b.master_id, "fresh installs");
+    expect_dm_pair_ready(&relay, &a, &b, 30).await;
+
+    let send_dm = async |node: &mut TestNode, to: &str, path: &std::path::Path, mid: &str| {
+        node.cmd_tx
+            .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+                peer_id: Some(to.to_string()),
+                server_id: None,
+                channel_id: None,
+                file_path: path.to_str().unwrap().to_string(),
+                message_id: mid.to_string(),
+                message_text: String::new(),
+                vthumb: None,
+                override_width: None,
+                override_height: None,
+                share_ref: None,
+                voice: false,
+                poster: None,
+                album: None,
+            })))
+            .await
+            .unwrap();
+        let mut fid = None;
+        wait_event(node, std::time::Duration::from_secs(15), |ev| {
+            if let NetworkEvent::FileCompleted { file_id, .. } = ev {
+                fid = Some(file_id.clone());
+            }
+            fid.is_some()
+        })
+        .await;
+        fid.expect("the sender keeps its own copy")
+    };
+
+    let relayed = fanout_bytes();
+    let src = global_tmp.path().join("dm_relayed.bin");
+    std::fs::write(&src, &relayed).expect("write the file");
+    let fid = send_dm(&mut a, &b.master_id, &src, "dm-relayed").await;
+    expect_file_lands(&mut b, &fid, &relayed).await;
+
+    a.cmd_tx.send(NodeCommand::WebRtcPeerConnected { peer_id: b.device_id.clone() }).await.unwrap();
+    let crossed: Vec<u8> = relayed.iter().rev().copied().collect();
+    let src = global_tmp.path().join("dm_crossed.bin");
+    std::fs::write(&src, &crossed).expect("write the file");
+    let fid = send_dm(&mut a, &b.master_id, &src, "dm-crossed").await;
+    let sends = data_channel_file_sends(&mut a, 1).await;
+    let to_b = sends.iter().find(|s| s.0 == b.device_id).cloned().expect("a send over B's data channel");
+    let header = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::FileHeaderReceived { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(header, "B takes the file's header");
+    cross_data_channel(&b, &a, &to_b.1, &to_b.2).await;
+    a.cmd_tx.send(NodeCommand::WebRtcSendComplete { transfer_id: to_b.1.clone() }).await.unwrap();
+    expect_file_lands(&mut b, &fid, &crossed).await;
+    assert!(wait_until(10, async || send_temps().is_empty()).await, "a send temp outlived its send: {:?}", send_temps());
 }
 
 /// A-V4: an order to delete vault content counts only from a member holding Manage
@@ -21198,7 +21632,7 @@ async fn friend_request_carries_a_sealed_card() {
         requested_at,
         carried_bundle: None,
         device_list: Some(c_list),
-        sealed_card: super::profile_card::seal_for(&forged, &b_master, requested_at),
+        sealed_card: super::profile_card::seal_for(&forged, None, &b_master, requested_at),
     };
     relay.inject_direct(&inbox, &c_dev, &b.device_id, serde_json::to_vec(&frame).unwrap());
     assert!(
@@ -21212,6 +21646,87 @@ async fn friend_request_carries_a_sealed_card() {
 
     drop(a);
     drop(b);
+}
+
+// Decision D (session 35): while a friend request is pending each side shows a small
+// thumbnail of the other's avatar, sealed inside the card both ways, and the full
+// avatar replaces it once the request is accepted. Device and master seeds differ, as
+// on every real install.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn a_pending_request_shows_each_side_a_thumb_until_the_full_avatar() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let a = spawn_node_with_friends(&relay, 131, 132, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, 133, 134, &[]).await;
+    let face = |red: u8| {
+        use image::{Rgba, RgbaImage};
+        let mut png = Vec::new();
+        RgbaImage::from_pixel(128, 128, Rgba([red, 120, 60, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        png
+    };
+    let (a_face, b_face) = (face(30), face(220));
+    for (node, name, avatar) in [(&a, "Ann", &a_face), (&b, "Ben", &b_face)] {
+        node.cmd_tx
+            .send(NodeCommand::UpdateProfile {
+                display_name: name.to_string(),
+                status: String::new(),
+                about_me: String::new(),
+                avatar_bytes: Some(avatar.clone()),
+                banner_bytes: None,
+                twitch_username: String::new(),
+                showcase_board: None,
+                showcase_assets: None,
+                avatar_frame: None,
+                avatar_anim: None,
+                banner_anim: None,
+                support_creds: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            wait_until(10, async || node.store().load_avatar(&node.master_id).ok().flatten().is_some()).await,
+            "{name} holds its own avatar",
+        );
+    }
+    let shown = |node: &TestNode, of: &str| node.store().load_avatar_for_display(of).ok().flatten();
+    let is_thumb = |bytes: &[u8], full: &[u8]| {
+        use super::image_convert::CARD_THUMB_DIM;
+        bytes != full
+            && super::image_convert::webp_header_dimensions(bytes).is_some_and(|(w, h)| w <= CARD_THUMB_DIM && h <= CARD_THUMB_DIM)
+    };
+
+    a.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::FriendRequestReceived { .. })).await,
+        "B must see A's request",
+    );
+    let b_sees = shown(&b, &a.master_id).expect("B's incoming row shows a picture of A");
+    assert!(is_thumb(&b_sees, &a_face), "a small thumbnail, not the full avatar");
+    assert_eq!(b.store().load_avatar(&a.master_id).unwrap(), None, "the thumb never sits in the signed avatar column");
+    assert!(
+        wait_until(10, async || shown(&a, &b.master_id).is_some_and(|t| is_thumb(&t, &b_face))).await,
+        "B's card back shows A's outgoing row a thumbnail of B",
+    );
+    assert_eq!(a.friend_status(&b.master_id).as_deref(), Some("pending"));
+
+    b.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: a.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || shown(&a, &b.master_id).as_deref() == Some(b_face.as_slice())).await,
+        "after the accept A shows B's full avatar, got {:?} bytes",
+        shown(&a, &b.master_id).map(|b| b.len()),
+    );
+    assert!(
+        wait_until(15, async || shown(&b, &a.master_id).as_deref() == Some(a_face.as_slice())).await,
+        "and B shows A's",
+    );
+    drop((a, b));
 }
 
 // DECLINE IS STICKY. Reject writes a "declined" tombstone preserving the original
@@ -36689,6 +37204,103 @@ async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
     assert_ne!(super::resolver::resolve(&t2_dev), o_master);
 
     drop((o, f, t, t2));
+}
+
+/// C-IDENTITY-06. An identity from before 0.12 starts on 0.12: the phrase its device
+/// kept signs the first recovery before the node connects, so its friend, its sibling
+/// (which kept no copy of the phrase) and the relay pin the real recovery key first.
+/// A master-key holder's forged recovery, told to everyone the way a phrase change is,
+/// is then refused everywhere and the owner's devices stay members.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_legacy_identity_pins_its_phrase_before_a_forger_can() {
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const A_DEV: u8 = 201;
+    const B_DEV: u8 = 202;
+    const F_MASTER: u8 = 203;
+    const T_DEV: u8 = 204;
+    const GONE: u8 = 205;
+    const FAKE_R: u8 = 206;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).expect("phrase");
+    let o_master = o.peer_id();
+    let real = crate::identity::roster::r_pub_of(&recovery);
+    let (a_dev, b_dev, t_dev) = (tag_kp(A_DEV).peer_id(), tag_kp(B_DEV).peer_id(), tag_kp(T_DEV).peer_id());
+    let f_master = tag_kp(F_MASTER).peer_id();
+    // The 0.11 list every party held before the upgrade.
+    let list = super::crypto_handler::build_signed_device_list(
+        &o, 3, vec![a_dev.clone(), b_dev.clone()], vec![tag_kp(GONE).peer_id()],
+    );
+    let list_json = serde_json::to_string(&list).expect("list json");
+    let old_list = |store: &crate::storage::MessageStore| {
+        store.save_device_list(&o_master, &list_json, list.version, &list.devices, 0).expect("0.11 list");
+    };
+    // What a node holds of the owner's roster: the pinned key and the members.
+    let view = |node: &TestNode| {
+        let store = node.store();
+        super::roster_book::load(&store, &o_master)
+            .map(|r| (r.r_pub.clone(), super::roster_book::fold(&store, &r).members))
+            .unwrap_or_default()
+    };
+
+    let f = spawn_node_staged(&relay, tag_kp(F_MASTER), F_MASTER, &[&o_master], |s| old_list(s)).await;
+    let b = spawn_node_staged(&relay, o.clone(), B_DEV, &[&f_master], |s| old_list(s)).await;
+    let a = spawn_node_staged(&relay, o.clone(), A_DEV, &[&f_master], |s| {
+        old_list(s);
+        s.save_setting("recovery_mnemonic", PHRASE).expect("stored phrase");
+    })
+    .await;
+
+    let both = |members: &std::collections::BTreeSet<String>| members.contains(&a_dev) && members.contains(&b_dev);
+    for (who, node) in [("the friend", &f), ("the sibling", &b)] {
+        assert!(
+            wait_until(20, async || { let (key, members) = view(node); key == real && both(&members) }).await,
+            "{who} must pin the real recovery key and count both devices first, got {:?}",
+            view(node),
+        );
+    }
+    assert!(
+        wait_until(10, async || {
+            let owners = relay.inbox_owners(&o_master);
+            relay.inbox_recovery_key(&o_master) == real && owners.contains(&a_dev) && owners.contains(&b_dev)
+        })
+        .await,
+        "the relay must pin the real recovery key first, owners {:?}",
+        relay.inbox_owners(&o_master),
+    );
+
+    // A master-key holder's own recovery key, told to everyone as a phrase change is.
+    let forged = crate::identity::roster::Roster::genesis(&o, &tag_kp(FAKE_R), &tag_kp(T_DEV), super::roster_book::now_ms());
+    let t = spawn_node_staged(&relay, o.clone(), T_DEV, &[&f_master], |s| {
+        super::roster_book::merge_for_test(s, &forged, &o_master, &t_dev);
+    })
+    .await;
+    assert!(wait_until(10, async || relay.online_devices().contains(&t_dev)).await, "the forger connects");
+    t.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: Vec::new() }).await.unwrap();
+    let heard = |node: &TestNode| super::roster_book::load(&node.store(), &o_master).is_some_and(|r| r.has_consent(&t_dev));
+    assert!(
+        wait_until(20, async || heard(&f) && heard(&b) && heard(&a)).await,
+        "the forged roster must reach the friend and both devices",
+    );
+
+    for (who, node) in [("the friend", &f), ("the sibling", &b), ("the owner's device", &a)] {
+        let (key, members) = view(node);
+        assert_eq!(key, real, "{who} took the forged recovery key");
+        assert!(both(&members) && !members.contains(&t_dev), "{who} counts {members:?}");
+    }
+    assert_eq!(relay.inbox_recovery_key(&o_master), real, "the relay took the forged recovery key");
+    let owners = relay.inbox_owners(&o_master);
+    assert!(both(&owners.iter().cloned().collect()) && !owners.contains(&t_dev), "inbox owners {owners:?}");
+    assert_eq!(
+        a.store().load_setting("recovery_mnemonic").unwrap().as_deref(),
+        Some(PHRASE),
+        "the stored phrase went before the person confirmed it",
+    );
+
+    drop((a, b, f, t));
 }
 
 /// G1: the relay lets whoever holds a key log in as that key's id, so a stolen backup

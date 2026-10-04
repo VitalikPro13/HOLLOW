@@ -175,12 +175,20 @@ identity from before 0.12 runs on the `legacy` base:
   is a pending join like any restored backup.
 - Contacts keep their 0.11 device links as a fallback for a master until that master's
   first roster arrives, which replaces them.
-- The app asks, once, to confirm the recovery phrase: that signs the identity's first
-  recovery, keeping the devices the person confirms. From then on legacy claims count
-  for nothing.
+- A device that still holds the phrase 0.11 stored signs the identity's first recovery
+  itself at that first start, before it connects (session 35, decision C): one fixed
+  statement every device of the identity signs alike (dated 2020-01-01, keeping only the
+  recovery key's own id), a phrase admission for itself and every device its 0.11 list
+  kept, and a removal in that base for every id the list revoked. Devices that upgrade at
+  different times with lists out of step therefore meet in one base, and the union of
+  admissions and removals decides. From then on legacy claims count for nothing.
+- The app still asks, once, to confirm the phrase. The confirmation
+  (`confirm_stored_phrase`) only erases the stored copy when the phrase already roots the
+  roster, and signs a recovery as before when it does not.
 
-**Residual (legacy only):** until the phrase is confirmed, anyone holding the master
-key can still sign a legacy claim, as today. Once confirmed, the identity is protected.
+**Residual (legacy only):** for an identity none of whose devices kept the 0.11 phrase,
+anyone holding the master key can still sign a legacy claim until the phrase is typed, as
+today. Once the identity has a recovery, it is protected.
 
 ## 6. The link handshake (HOL-SEC-002)
 
@@ -387,8 +395,8 @@ plain union (a stolen phone can force the phrase, never win against it).
 
 ## 10. Residuals
 
-- **Legacy identities** until their phrase is confirmed: the master key still admits a
-  device (a legacy claim), as before 0.12.
+- **Legacy identities** none of whose devices kept the 0.11 phrase, until the phrase is
+  typed: the master key still admits a device (a legacy claim), as before 0.12.
 - **First contact with a thief ahead:** someone who meets the identity for the first time
   after a master-key holder published a forged recovery key pins the forged one. Everyone
   who already knew the identity keeps the real one, and the owner's devices see the

@@ -280,7 +280,9 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
         ),
         const SizedBox(height: HollowSpacing.lg),
         const HollowDialogText(
-          'Keep this device online until the transfer finishes.',
+          'Type it only on a device you hold. Nobody from Hollow will ever ask '
+          'you for this code. Keep this device online until the transfer '
+          'finishes.',
         ),
       ],
       actions: [
@@ -651,7 +653,8 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
     return _phase(
       title: 'Add this device?',
       subtitle: '$who typed your code. Adding it sends it your full history '
-          'and identity, and it becomes one of your devices.',
+          'and identity, and it becomes one of your devices. Add it only if '
+          'that device is in your hands right now.',
       children: [_scopeToggles(hollow)],
       actions: [
         HollowButton.ghost(

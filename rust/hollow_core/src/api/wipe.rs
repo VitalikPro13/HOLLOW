@@ -15,6 +15,15 @@ const SIGNAL_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
 
 const MARKER: &str = "pending_wipe.marker";
 
+/// What a destroy writes in the marker, so the boot wipe that finishes it can tell
+/// an ended identity (the profile list forgets it) from a cancelled link's throwaway.
+pub(crate) const DESTROY_MARK: &[u8] = b"destroy";
+
+/// The recordings this profile made, one absolute path a line. They sit in a folder
+/// every profile shares, and the list must still be readable once the keys are gone.
+const RECORDINGS: &str = "recordings.list";
+const RECORDINGS_FOLDER: &str = "Hollow Recordings";
+
 const KEY_FILES: &[&str] = &[
     "identity.key",
     "identity.device",
@@ -31,6 +40,7 @@ const PLAINTEXT_FILES: &[&str] = &[
     "hollow_crash.log.old",
     "push_debug.log",
     "push_lines.json",
+    RECORDINGS,
 ];
 
 /// What a wipe leaves in the root: the profile registry (app-level config, names
@@ -57,6 +67,78 @@ fn is_pasted_image(name: &str) -> bool {
     (10..=14).contains(&stamp.len())
         && stamp.bytes().all(|b| b.is_ascii_digit())
         && ["png", "jpg", "gif", "bmp", "webp"].contains(&ext)
+}
+
+/// `Hollow_YYYY-MM-DD_HH-MM-SS.mp4`, the name `recording_service.dart` gives one.
+fn is_recording_name(name: &str) -> bool {
+    let Some(stamp) = name.strip_prefix("Hollow_").and_then(|r| r.strip_suffix(".mp4")) else {
+        return false;
+    };
+    stamp.len() == 19
+        && stamp.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 | 13 | 16 => b == b'-',
+            10 => b == b'_',
+            _ => b.is_ascii_digit(),
+        })
+}
+
+/// Where Hollow puts a recording: absolute, its own name, directly in a folder
+/// named `Hollow Recordings`.
+fn is_recording_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path.file_name().and_then(|n| n.to_str()).is_some_and(is_recording_name)
+        && path.parent().and_then(Path::file_name).is_some_and(|n| n == RECORDINGS_FOLDER)
+}
+
+/// The recorder's ffmpeg log beside a recording (Linux).
+fn recorder_log(recording: &Path) -> PathBuf {
+    let mut name = recording.as_os_str().to_owned();
+    name.push(".stderr.log");
+    PathBuf::from(name)
+}
+
+fn read_recordings(root: &Path) -> Vec<PathBuf> {
+    std::fs::read_to_string(root.join(RECORDINGS))
+        .map(|list| list.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
+        .unwrap_or_default()
+}
+
+fn write_recordings(root: &Path, recordings: &[PathBuf]) -> std::io::Result<()> {
+    let lines: Vec<String> =
+        recordings.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let staged = root.join("recordings.list.tmp");
+    std::fs::write(&staged, lines.join("\n"))?;
+    std::fs::rename(&staged, root.join(RECORDINGS))
+}
+
+/// Unlinks the recordings this profile listed, then each folder they leave empty.
+/// Only regular files under Hollow's own names in a real `Hollow Recordings` folder,
+/// and never zeroed: gigabytes would hold up a wipe nothing waits on. Returns the
+/// ones still held open, such as a recording being written right now.
+fn erase_recordings(root: &Path) -> Vec<PathBuf> {
+    let mut held = Vec::new();
+    let mut folders: Vec<PathBuf> = Vec::new();
+    for recording in read_recordings(root) {
+        let Some(folder) = recording.parent().filter(|_| is_recording_path(&recording)) else {
+            continue;
+        };
+        if !std::fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        for path in [recorder_log(&recording), recording.clone()] {
+            let regular = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file());
+            if regular && std::fs::remove_file(&path).is_err() && !held.contains(&recording) {
+                held.push(recording.clone());
+            }
+        }
+        if !folders.iter().any(|f| f == folder) {
+            folders.push(folder.to_path_buf());
+        }
+    }
+    for folder in folders {
+        let _ = std::fs::remove_dir(folder);
+    }
+    held
 }
 
 /// Where Hollow writes beside the data root rather than under it.
@@ -139,10 +221,12 @@ fn scrub(path: &Path) {
     }
 }
 
-/// Removes everything in `root` but what a wipe keeps. True when nothing else is
-/// left; false when something survived, such as a database Windows holds open.
+/// Removes everything in `root` but what a wipe keeps, and the recordings it listed.
+/// True when nothing else is left; false when something survived, such as a
+/// database Windows holds open.
 #[frb(ignore)]
 pub(crate) fn sweep_root(root: &Path) -> bool {
+    let held = erase_recordings(root);
     for name in PLAINTEXT_FILES {
         zero_and_remove(&root.join(name));
     }
@@ -159,6 +243,11 @@ pub(crate) fn sweep_root(root: &Path) -> bool {
         };
         clean &= gone.is_ok();
     }
+    // A recording still being written goes at the next launch, once its writer died.
+    if !held.is_empty() {
+        let _ = write_recordings(root, &held);
+        clean = false;
+    }
     clean
 }
 
@@ -174,15 +263,25 @@ pub(crate) fn destroy_data_root(root: &Path) -> Result<(), String> {
     destroy_with(root, &Outside::of_this_process(root))
 }
 
-fn destroy_with(root: &Path, outside: &Outside) -> Result<(), String> {
-    // 1. The marker first, so a kill halfway through resumes at the next launch.
-    std::fs::write(root.join(MARKER), b"1")
-        .map_err(|e| format!("Failed to stash the wipe marker: {e}"))?;
+/// The marker goes first, so a kill halfway through resumes at the next launch.
+fn mark_destroy(root: &Path) -> Result<(), String> {
+    std::fs::write(root.join(MARKER), DESTROY_MARK)
+        .map_err(|e| format!("Failed to stash the wipe marker: {e}"))
+}
 
-    // 2. Keys. Everything else is only as readable as these are.
+/// Everything else under a root is only as readable as these are.
+fn zero_keys(root: &Path) {
     for name in KEY_FILES {
         zero_and_remove(&root.join(name));
     }
+}
+
+fn destroy_with(root: &Path, outside: &Outside) -> Result<(), String> {
+    // 1. The marker.
+    mark_destroy(root)?;
+
+    // 2. Keys.
+    zero_keys(root);
     // TRAP: the keystore is process-wide, not rooted at `root`, and `delete_key`
     // clears the legacy slot too, so a harness run would erase a real credential.
     #[cfg(not(test))]
@@ -226,6 +325,64 @@ pub fn destroy_local() -> Result<(), String> {
     // The relay stops waking this phone for an identity that is gone.
     let _ = super::network::send_node_command(NodeCommand::UnregisterPushToken);
     out
+}
+
+/// Erases a profile this process is not running (Settings, desktop): the same
+/// routine against its root, marker and keys first. What belongs to the running
+/// process (keystore slots, its log, the shared temp folder) is not touched.
+#[frb]
+pub fn erase_profile_at(data_dir: String) -> Result<(), String> {
+    let root = PathBuf::from(&data_dir);
+    if !root.is_absolute() {
+        return Err("That folder doesn't look like Hollow data, so it stays.".into());
+    }
+    if !root.exists() {
+        return Ok(());
+    }
+    if same_folder(&root, &crate::identity::data_dir()?) {
+        return Err("Hollow is using that profile right now.".into());
+    }
+    if !looks_like_a_profile(&root) {
+        return Err("That folder doesn't look like Hollow data, so it stays.".into());
+    }
+    mark_destroy(&root)?;
+    zero_keys(&root);
+    if sweep_root(&root) {
+        let _ = std::fs::remove_file(root.join(MARKER));
+    }
+    Ok(())
+}
+
+fn same_folder(a: &Path, b: &Path) -> bool {
+    matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
+
+/// An empty folder or one holding an identity, never a folder of somebody else's.
+/// A debug log alone proves nothing: on Windows one sits beside the executable.
+fn looks_like_a_profile(root: &Path) -> bool {
+    let Ok(mut entries) = std::fs::read_dir(root) else { return false };
+    entries.next().is_none()
+        || ["identity.key", "identity.device", "messages.db", MARKER]
+            .iter()
+            .any(|name| root.join(name).exists())
+}
+
+/// Lists a recording this profile is about to make, so the profile's wipe takes it.
+/// Only Hollow's own names in a `Hollow Recordings` folder are accepted; entries no
+/// longer on disk drop off.
+#[frb]
+pub fn remember_recording(path: String) -> Result<(), String> {
+    let recording = PathBuf::from(&path);
+    if path.contains(['\n', '\r']) || !is_recording_path(&recording) {
+        return Err("Not a Hollow recording".into());
+    }
+    let root = crate::identity::data_dir()?;
+    let mut listed: Vec<PathBuf> = read_recordings(&root)
+        .into_iter()
+        .filter(|p| *p != recording && std::fs::symlink_metadata(p).is_ok())
+        .collect();
+    listed.push(recording);
+    write_recordings(&root, &listed).map_err(|e| format!("Couldn't note the recording: {e}"))
 }
 
 /// `scope` is `device` | `device_revoke` | `identity`; its signal never blocks the wipe.
@@ -473,6 +630,207 @@ mod tests {
         for path in &kept {
             assert!(path.exists(), "the wipe took what is not Hollow's: {}", path.display());
         }
+    }
+
+    fn list_recordings(root: &Path, paths: &[&PathBuf]) {
+        let lines: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        std::fs::write(root.join("recordings.list"), lines.join("\n")).unwrap();
+    }
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"a recording").unwrap();
+    }
+
+    /// Recordings live in a folder every profile shares. The wipe takes exactly the
+    /// ones this profile listed (with a recorder's log beside one), then a folder
+    /// they leave empty; another profile's recordings, anything else in the folder
+    /// and a listed path that is not Hollow's own stay.
+    #[test]
+    fn a_wipe_takes_this_profiles_recordings_and_nothing_else() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        seed_root(&root);
+        let shared = tmp.path().join("Videos").join("Hollow Recordings");
+        let only_ours = tmp.path().join("Movies").join("Hollow Recordings");
+        let mine = [
+            shared.join("Hollow_2026-10-01_10-00-00.mp4"),
+            shared.join("Hollow_2026-10-01_10-00-00.mp4.stderr.log"),
+            only_ours.join("Hollow_2026-10-02_11-30-05.mp4"),
+        ];
+        let theirs = shared.join("Hollow_2026-10-03_09-15-00.mp4");
+        let not_hollows = [
+            shared.join("holiday.mp4"),
+            shared.join("Hollow_2026-10-01.mp4"),
+            tmp.path().join("Other").join("Hollow_2026-10-01_10-00-00.mp4"),
+        ];
+        for path in mine.iter().chain(not_hollows.iter()).chain([&theirs]) {
+            touch(path);
+        }
+        list_recordings(&root, &[&mine[0], &mine[2], &not_hollows[0], &not_hollows[1], &not_hollows[2]]);
+
+        destroy_with(&root, &Outside::default()).expect("wipe");
+
+        for path in &mine {
+            assert!(!path.exists(), "this profile's recording survived: {}", path.display());
+        }
+        assert!(!only_ours.exists(), "a folder only this profile used stays behind");
+        for path in not_hollows.iter().chain([&theirs]) {
+            assert!(path.exists(), "the wipe took what is not this profile's: {}", path.display());
+        }
+        assert_eq!(survivors(&root), Vec::<String>::new(), "the list outlived the wipe");
+    }
+
+    /// A wipe killed after its key step finishes at the next launch, recordings
+    /// included: their list needs no key to read.
+    #[test]
+    fn the_boot_wipe_takes_the_recordings_after_the_keys_are_gone() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let folder = tmp.path().join("Videos").join("Hollow Recordings");
+        let recording = folder.join("Hollow_2026-10-04_08-00-00.mp4");
+        touch(&recording);
+        list_recordings(&root, &[&recording]);
+        std::fs::write(root.join("messages.db"), b"ciphertext nobody can open").unwrap();
+        std::fs::write(root.join(MARKER), b"destroy").unwrap();
+
+        // SAFETY: serialized by the crate test lock.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &root) };
+        super::super::storage::perform_pending_wipe().expect("boot wipe");
+
+        assert!(!recording.exists(), "the boot wipe left a recording");
+        assert!(!folder.exists(), "the emptied folder stays behind");
+        assert_eq!(survivors(&root), Vec::<String>::new());
+    }
+
+    /// A recording being written while the wipe runs (a destroy order arriving
+    /// mid-call) cannot be unlinked yet: it stays listed and the marker stays, so
+    /// the next launch takes it once the recorder is gone.
+    #[test]
+    fn a_recording_still_being_written_goes_at_the_next_launch() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        seed_root(&root);
+        let recording =
+            tmp.path().join("Videos").join("Hollow Recordings").join("Hollow_2026-10-04_09-00-00.mp4");
+        touch(&recording);
+        list_recordings(&root, &[&recording]);
+
+        let pin = Pin::hold(&recording);
+        destroy_with(&root, &Outside::default()).expect("wipe");
+        assert!(root.join(MARKER).exists(), "a held recording must resume at the next launch");
+        drop(pin);
+
+        // SAFETY: serialized by the crate test lock.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &root) };
+        assert!(super::super::storage::perform_pending_wipe().expect("boot wipe"));
+        assert!(!recording.exists(), "the recording outlived both wipes");
+        assert_eq!(survivors(&root), Vec::<String>::new());
+    }
+
+    /// The boot wipe says whether it ended an identity: only a destroy makes the
+    /// profile list forget the profile, never a cancelled link's throwaway.
+    #[test]
+    fn the_boot_wipe_tells_a_destroy_from_a_cancelled_link() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        seed_root(&root);
+        // SAFETY: serialized by the crate test lock.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &root) };
+
+        let pin = Pin::hold(&root.join("files").join("a.bin"));
+        destroy_data_root(&root).expect("wipe");
+        drop(pin);
+        assert!(super::super::storage::perform_pending_wipe().expect("boot wipe"));
+
+        super::super::storage::stash_pending_wipe().expect("link cancelled");
+        assert!(!super::super::storage::perform_pending_wipe().expect("boot wipe"));
+    }
+
+    /// Only Hollow's own recording names in a `Hollow Recordings` folder go on the
+    /// list, and what is no longer on disk drops off it.
+    #[test]
+    fn only_hollows_own_recordings_go_on_the_list() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        // SAFETY: serialized by the crate test lock.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &root) };
+        let folder = tmp.path().join("Videos").join("Hollow Recordings");
+        let first = folder.join("Hollow_2026-10-04_10-00-00.mp4");
+        let second = folder.join("Hollow_2026-10-04_11-00-00.mp4");
+
+        for refused in [
+            folder.join("notes.txt"),
+            folder.join("Hollow_2026-10-04.mp4"),
+            tmp.path().join("Documents").join("Hollow_2026-10-04_10-00-00.mp4"),
+            PathBuf::from("Hollow Recordings").join("Hollow_2026-10-04_10-00-00.mp4"),
+        ] {
+            let path = refused.display().to_string();
+            assert!(remember_recording(path.clone()).is_err(), "listed {path}");
+        }
+        let smuggled = format!("{}\n{}", tmp.path().join("victim").display(), first.display());
+        assert!(remember_recording(smuggled).is_err(), "a second line rode in");
+        assert!(!root.join(RECORDINGS).exists());
+
+        remember_recording(first.display().to_string()).expect("first");
+        remember_recording(second.display().to_string()).expect("second");
+        assert_eq!(read_recordings(&root), vec![second.clone()], "a recording never written stays listed");
+
+        touch(&second);
+        remember_recording(first.display().to_string()).expect("first again");
+        assert_eq!(read_recordings(&root), vec![second, first]);
+    }
+
+    /// Erasing a profile this process is not running takes that profile's keys, data
+    /// and recordings, keeps the registry, and refuses the running profile and a
+    /// folder of somebody else's files.
+    #[test]
+    fn erasing_another_profile_takes_its_recordings_and_refuses_the_running_one() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let running = tmp.path().join("running");
+        let other = tmp.path().join("other");
+        let stranger = tmp.path().join("stranger");
+        for dir in [&running, &other, &stranger] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        seed_root(&running);
+        seed_root(&other);
+        std::fs::write(stranger.join("thesis.docx"), b"somebody's work").unwrap();
+        let recording =
+            tmp.path().join("Videos").join("Hollow Recordings").join("Hollow_2026-10-04_12-00-00.mp4");
+        touch(&recording);
+        list_recordings(&other, &[&recording]);
+        // SAFETY: serialized by the crate test lock.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &running) };
+
+        assert!(erase_profile_at(running.display().to_string()).is_err());
+        assert!(running.join("identity.key").exists(), "the running profile was touched");
+        assert!(erase_profile_at(stranger.display().to_string()).is_err());
+        assert!(stranger.join("thesis.docx").exists());
+        // The Windows install folder: the debug log sits beside the executable.
+        let install = tmp.path().join("install");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join("hollow_debug.log"), b"log").unwrap();
+        std::fs::write(install.join("hollow.exe"), b"MZ").unwrap();
+        assert!(erase_profile_at(install.display().to_string()).is_err());
+        assert!(install.join("hollow.exe").exists(), "the install folder was swept");
+
+        erase_profile_at(other.display().to_string()).expect("erase");
+        assert_eq!(survivors(&other), Vec::<String>::new());
+        assert!(other.join("profiles.json").exists(), "the registry is every profile's");
+        assert!(!other.join(MARKER).exists(), "a finished erase leaves no marker");
+        assert!(!recording.exists(), "the erased profile's recording survived");
     }
 
     /// Something the wipe could not remove (Windows keeps an open database) keeps

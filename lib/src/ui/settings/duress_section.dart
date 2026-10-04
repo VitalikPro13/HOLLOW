@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
@@ -309,7 +308,7 @@ class _AccountDangerZoneCardState extends ConsumerState<AccountDangerZoneCard> {
     if (destroyed != true || !mounted) return;
     setState(() => _busyScope = initialScope);
     await clearLocalSecretsAfterDestroy();
-    await relaunchApp();
+    await relaunchAfterWipe();
   }
 }
 
@@ -468,9 +467,9 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const HollowDialogText(
-            'Typed at the unlock prompt, this code deletes your data and '
-            'restarts Hollow at first-time setup. It never shows an error, and '
-            'there is no undo.',
+            'Typed at the unlock prompt, this code deletes your data on this '
+            'device and restarts Hollow. It never shows an error, and there is '
+            'no undo.',
           ),
           const SizedBox(height: HollowSpacing.lg),
           const SettingsFieldLabel(label: 'App password'),
@@ -638,8 +637,8 @@ class _DestroyDialogState extends State<_DestroyDialog>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const HollowDialogText(
-            'Hollow deletes your messages, files and keys, then restarts and '
-            'opens first-time setup.',
+            'Hollow deletes your messages, files and keys on this device, then '
+            'restarts.',
           ),
           const SizedBox(height: HollowSpacing.lg),
           _ScopePicker(

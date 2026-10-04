@@ -229,6 +229,39 @@ void main() {
       }
     });
 
+    test('a file or shard stream opens only under a stream id', () {
+      final recv = body('void _onDataChannelMessage(');
+      final shaped = recv.indexOf('if (!rtcStreamIdFits(kind, id)) {');
+      expect(shaped, isNot(-1));
+      expect(shaped, lessThan(recv.indexOf('rtcStreamOpen(_transfers')));
+      expect(recv.substring(shaped, recv.indexOf('\n      }', shaped)),
+          contains('return;'));
+    });
+
+    test('a file or shard send rides only its own device\'s channel', () {
+      expect(rtcSendMayUseSibling('file'), isFalse);
+      expect(rtcSendMayUseSibling('shard'), isFalse);
+      expect(rtcSendMayUseSibling('share_chunk'), isTrue);
+      final send = body('Future<void> sendFile(');
+      expect(
+          send,
+          contains('rtcSendMayUseSibling(kind)\n'
+              '        ? _openConnForIdentity(peerId, lane)\n'
+              '        : _openConnForDevice(peerId, lane);'));
+      expect(body('_PeerConn? _openConnForDevice('),
+          isNot(contains('resolveIdentity')));
+    });
+
+    test('file progress goes to Rust by stream id, never to a card by id', () {
+      expect(body('void _reportProgress('),
+          contains('network_api\n        .webrtcTransferProgress('));
+      final provider = File('lib/src/core/providers/webrtc_provider.dart')
+          .readAsStringSync();
+      expect(provider, isNot(contains('onFileProgress(')),
+          reason: 'a stream id reached the file cards as if it were a file id');
+      expect(src, isNot(contains('onProgress')));
+    });
+
     test('continuations are judged before a byte is written', () {
       final recv = body('void _onDataChannelMessage(');
       final writes = recv.indexOf('transfer.sink.add(');

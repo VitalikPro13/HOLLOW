@@ -425,7 +425,8 @@ pub fn get_avatar(peer_id: String) -> Result<Option<Vec<u8>>, String> {
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.load_avatar(&peer_id)
+    // A pending friend shows its card thumb until the full avatar lands.
+    ms.load_avatar_for_display(&peer_id)
 }
 
 /// Get only the banner bytes for a peer (lazy load for profile card/DM header).
@@ -1963,17 +1964,21 @@ pub fn has_pending_wipe() -> Result<bool, String> {
 /// the next Welcome starts from a clean slate, keeping only the wipe marker (removed
 /// last), any single-instance lock and the profile registry, and what Hollow wrote
 /// beside the dir. The same sweep as the wipe itself. Idempotent.
+///
+/// True when it finished a destroy, which ends the profile (Dart's profile list then
+/// forgets it); false for a cancelled link's throwaway.
 #[frb]
-pub fn perform_pending_wipe() -> Result<(), String> {
+pub fn perform_pending_wipe() -> Result<bool, String> {
     let marker = pending_wipe_marker_path()?;
     let data_dir = crate::identity::data_dir()?;
     std::fs::read_dir(&data_dir).map_err(|e| format!("Failed to read data dir for wipe: {e}"))?;
+    let destroyed = std::fs::read(&marker).is_ok_and(|m| m == crate::api::wipe::DESTROY_MARK);
     crate::api::wipe::sweep_root(&data_dir);
     crate::api::wipe::clear_beside(&data_dir);
     // Last, whatever the sweep left: a marker that never clears would refuse every
     // new identity, and a crash before this line re-runs the wipe next launch.
     let _ = std::fs::remove_file(&marker);
-    Ok(())
+    Ok(destroyed)
 }
 
 #[cfg(test)]

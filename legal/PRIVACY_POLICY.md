@@ -1,6 +1,6 @@
 # Hollow: Privacy Policy
 
-**Last updated: September 25, 2026**
+**Last updated: October 4, 2026**
 
 Hollow is built on one principle: your conversations are yours. We cannot read your messages, listen to your calls, or identify you. This policy explains what data exists, where it exists, and what we can and cannot access.
 
@@ -18,7 +18,7 @@ Hollow is a fully distributed, encrypted communication platform. There is no cen
 
 - **Your identity** is a cryptographic keypair (Ed25519) generated on your device from a BIP-39 mnemonic phrase. We never see or store this keypair.
 - **Messages** are end-to-end encrypted using the Olm/Double Ratchet protocol (for direct messages) and OpenMLS (for group/server channels). Only the intended recipients can decrypt them.
-- **Voice and video calls** are peer-to-peer (WebRTC) with SFrame encryption (AES-128-GCM). Call content never passes through our infrastructure in a readable form.
+- **Voice and video calls** are peer-to-peer (WebRTC) and encrypted between the participants (DTLS-SRTP), with an extra end-to-end layer (SFrame, AES-128-GCM) on voice, voice-channel video and screen shares. Call content never passes through our infrastructure in a readable form.
 - **Files** are encrypted and transferred peer-to-peer. In smaller communities (under 6 members) and direct messages, files are fully replicated to all participants. In larger communities, files use an erasure-coded shard system where encrypted fragments are distributed across peers; no single peer (including us) holds a complete file.
 - **All local data** is stored in an encrypted database (SQLCipher) on your device.
 
@@ -30,21 +30,22 @@ Hollow uses a WebSocket relay server for signaling and message routing. The rela
 
 - Encrypted message payloads (opaque binary blobs that the relay cannot decrypt)
 - Cryptographic peer IDs (not tied to any real-world identity)
-- Room membership for active connections (held in memory only, lost on restart)
+- Room membership for active connections: which device IDs are in which rooms (held in memory only, lost on restart). Room identifiers are opaque, but this lets the relay tell which devices belong to one person and which devices share a conversation
+- Each identity's roster, the signed list of the devices that belong to it, so the relay knows which devices may collect that identity's offline messages (held in memory only, carried across relay updates like the buffers below)
 - Temporary display nicknames, if you claim one (held in memory only, released when you disconnect)
 
 **Offline delivery (in-memory, encrypted).** To deliver messages sent while you are offline, the relay can hold end-to-end encrypted payloads in memory for a limited time, 3 days by default. You can adjust or disable this for your own messages in Settings, and server owners can disable it for their channels. These buffers contain only ciphertext the relay cannot read, are subject to small volume caps, and are deleted on delivery or expiry. They exist only in the relay's memory. When we update the relay software, the running process hands them to its replacement in memory, so an update does not lose them. They are never written to disk, and they are gone if the server reboots or loses power. The server runs without swap and without crash dumps, so its memory cannot spill onto its disk. The buffer is a convenience, not a requirement. If the relay never held a message, you still receive it directly from your peers when you are both online.
 
 **Fair-use accounting (in-memory).** To keep the relay usable for everyone, it keeps per-IP-address counters in memory: the number of simultaneous connections and the rate of new connections. There is no data volume counter. These counters exist only in memory, are never written to disk or to logs, and are lost on restart. When the relay's network link is saturated, capacity is shared fairly between client addresses by the operating system's network queue; this involves no per-user accounting and records nothing.
 
-**Push notification tokens (mobile).** If you use Hollow on Android or iOS, the relay holds your device's push token in memory only (never on disk) so it can send a wake signal when a message arrives while the app is closed. It is carried across relay updates the same way as the buffers above and is gone when the server reboots. See "Push notifications (mobile)" below.
+**Push notification tokens (mobile).** If you use Hollow on Android or iOS, the relay holds your device's push token in memory only (never on disk) so it can send a wake signal when a message arrives while the app is closed. It also holds the notification settings you changed from the default (servers and channels you muted or set to mentions only, and the device IDs of people whose DMs you muted), so it can skip the pushes you turned off. Both are carried across relay updates the same way as the buffers above and are gone when the server reboots. See "Push notifications (mobile)" below.
 
 **What the relay does NOT have access to:**
 
 - Message content, file content, or call content
 - Your IP address in application logs (the relay does not log IP addresses; they are used only transiently in memory for the fair-use counters above)
 - Your real name, email, phone number, or any identifying information
-- Which servers you are a member of or who you communicate with (room identifiers are opaque hashes)
+- What your servers and channels are called, who the people behind the device IDs are, or what anyone says (room identifiers are opaque; the relay sees only which device IDs share a room)
 - Any historical data; apart from the temporary encrypted offline-delivery buffers above, the relay retains nothing after delivery, and no record of user activity is ever written to disk
 
 ## TURN relay server
@@ -55,8 +56,8 @@ For voice and video calls where a direct peer-to-peer connection cannot be estab
 
 On Android and iOS, Hollow uses Firebase Cloud Messaging (Google) and the Apple Push Notification service to wake the app when a message arrives while it is closed. What this means for your data:
 
-- Push payloads **never contain message content**, only an opaque wake signal and cryptographic peer IDs. The actual message is fetched in encrypted form and decrypted on your device.
-- Google and Apple can see that your device received a push notification and when, but never what a message says or who anyone is in any real-world sense.
+- Push payloads **never contain message content**. A wake carries the sender's device ID and, for a server message, the server and channel IDs and whether you were mentioned. The actual message is fetched in encrypted form and decrypted on your device.
+- Google and Apple can see that your device received a push notification and when, and the IDs above, but never what a message says. The IDs are random and contain no names, but they do not change, so Google or Apple could tell that several phones are in the same server or hear from the same device, and connect that to the accounts they already know. If you use UnifiedPush on Android, the IDs are encrypted and the push service sees only that a wake arrived. We plan to encrypt them for Google and Apple as well.
 - The relay holds your device's push token in memory only; it is never written to disk.
 
 Desktop platforms do not use any push service. Notifications on desktop are generated entirely locally.
@@ -64,7 +65,7 @@ Desktop platforms do not use any push service. Notifications on desktop are gene
 ## In-app reporting and blocking
 
 - **Blocking** is entirely local. Your block list is stored only on your device in the encrypted database. It is never sent to us and we cannot see it.
-- **Reporting** a user sends the reported account's cryptographic peer ID and a category (e.g., spam, harassment) to the relay. The relay stores a count of reports per reported account and category. So that the same report is not counted twice, it also stores a one-way fingerprint of each report, keyed with a secret that never leaves the relay; without that secret the fingerprint reveals nothing about who filed the report. Your report reaches the relay over your own connection, but the relay does not store who sent it. No message content is (or can be) included in a report; we cannot decrypt any conversation.
+- **Reporting** a user sends the reported account's cryptographic peer ID and a category (e.g., spam, harassment) to the relay. The relay stores a count of reports per reported account and category. So that the same report is not counted twice, it also stores a one-way fingerprint of each report, keyed with a secret that never leaves the relay's server; without that secret the fingerprint reveals nothing about who filed the report. The secret sits on the same disk, so someone who copied that disk could check whether one particular person reported one particular account, a single guess at a time, but could not list who reported whom. Your report reaches the relay over your own connection, but the relay does not store who sent it. No message content is (or can be) included in a report; we cannot decrypt any conversation.
 
 ## Infrastructure and hosting
 
@@ -143,7 +144,9 @@ Hollow stores the following data locally on your device in an encrypted database
 - Server membership and channel data
 - Downloaded files and media
 
-This data never leaves your device in an unencrypted form. If you delete the Hollow application, this data is removed from your device.
+This data never leaves your device in an unencrypted form, and it is kept out of iCloud and Android device backups. If you delete the Hollow application, this data is removed from your device.
+
+Call and screen recordings you make on a computer are ordinary video files in your Videos folder (Movies on a Mac), under Hollow Recordings, and Hollow does not encrypt them. Erasing an identity also deletes the recordings made with it; recordings from other profiles on the same computer, and anything else in that folder, stay.
 
 ## Third-party services
 

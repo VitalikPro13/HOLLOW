@@ -17,6 +17,11 @@ const Duration kRtcStreamTakeoverIdle = Duration(seconds: 10);
 /// sender, so our own bursts never meet that cap.
 const int kMaxRtcSendsPerConn = 8;
 
+/// Whether a send of [kind] may ride a sibling device's channel when the target
+/// device has none open. A file or shard stream id names the one device it is for,
+/// so those ride that device's own channel or fail over to Rust's relay retry.
+bool rtcSendMayUseSibling(String kind) => kind == 'share_chunk';
+
 /// The most bytes a data channel stream of [kind] may declare.
 int rtcStreamCeiling(String kind) => switch (kind) {
       'shard' => kRtcSendLimit + kRtcGcmTag + kRtcShardHeaderSlack,

@@ -480,11 +480,16 @@ pub fn set_duress_code(
     }
     let permission = match (scope.as_str(), phrase.as_deref()) {
         (crate::identity::duress::SCOPE_IDENTITY, Some(p)) => Some(super::roster::destroy_permission(p)?),
-        (crate::identity::duress::SCOPE_IDENTITY, None) => {
-            // Only an identity with no recovery key yet can erase everywhere without one.
-            super::roster::destroy_order(None, notify_friends)?;
-            None
-        }
+        // The phrase stored before 0.12 signs it while it is here, so the code keeps
+        // its reach once that copy is erased.
+        (crate::identity::duress::SCOPE_IDENTITY, None) => match super::roster::stored_phrase() {
+            Some(stored) => Some(super::roster::destroy_permission(&stored)?),
+            None => {
+                // Only an identity with no recovery key yet can erase everywhere without one.
+                super::roster::destroy_order(None, notify_friends)?;
+                None
+            }
+        },
         _ => None,
     };
     crate::identity::duress::set_code(&duress_code, &scope, notify_friends, permission.as_ref())?;
@@ -1037,6 +1042,26 @@ mod duress_tests {
         let cfg = duress::probe(CODE).expect("the code opens its slot");
         let perm = cfg.permission.expect("the slot holds the permission");
         let recovery = crate::identity::recovery::keys_from_phrase(PHRASE).expect("phrase").1;
+        assert_eq!(perm.r_pub, recovery.public_key_bytes(), "signed by this identity's recovery key");
+        encryption::clear_session_key();
+    }
+
+    /// An identity from before 0.12 still holding its stored phrase: the "everywhere"
+    /// scope set without a typed phrase takes the stored one's permission, so the code
+    /// keeps its reach once that copy is confirmed and erased.
+    #[test]
+    fn duress_everywhere_takes_the_stored_phrase_while_it_is_here() {
+        let (master, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).expect("phrase");
+        let (_g, tmp) = temp_identity_of(master);
+        unlock();
+        let db = tmp.path().join("messages.db").to_str().expect("utf-8").to_string();
+        let pass = crate::api::storage::derive_db_key_public().expect("db key");
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).expect("migrate");
+        crate::storage::MessageStore::open(&db, &pass).expect("open").save_setting("recovery_mnemonic", PHRASE).expect("stored phrase");
+
+        set_duress_code(PASSWORD.into(), CODE.into(), duress::SCOPE_IDENTITY.into(), false, None)
+            .expect("the stored phrase signs the permission");
+        let perm = duress::probe(CODE).and_then(|c| c.permission).expect("the slot holds the permission");
         assert_eq!(perm.r_pub, recovery.public_key_bytes(), "signed by this identity's recovery key");
         encryption::clear_session_key();
     }

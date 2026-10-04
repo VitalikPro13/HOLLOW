@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `changed`, `ctx`, `delegation_from`, `destroy_order`, `destroy_permission`, `erase_stored_phrase`
+// These functions are ignored because they are not marked as `pub`: `changed`, `ctx`, `delegation_from`, `destroy_order`, `destroy_permission`, `erase_stored_phrase`, `stored_phrase`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Ctx`
 
 /// What our own roster says about every device, this one first.
@@ -14,8 +14,7 @@ Future<RosterStatus> rosterStatus() =>
     RustLib.instance.api.crateApiRosterRosterStatus();
 
 /// Type the phrase to make it the root of the identity: a recovery keeping this
-/// device and `keep`. Every other device stops counting at once. Also the one-time
-/// confirmation of an identity from before 0.12, which erases the stored phrase.
+/// device and `keep`. Every other device stops counting at once.
 Future<void> recoverWithPhrase({
   required String phrase,
   required List<String> keep,
@@ -46,6 +45,13 @@ Future<bool> checkRecoveryPhrase({required String phrase}) =>
 /// at the upgrade and erased once confirmed. `None` once it is gone.
 Future<String?> storedPhraseForUpgrade() =>
     RustLib.instance.api.crateApiRosterStoredPhraseForUpgrade();
+
+/// The one-time confirmation of the phrase an identity from before 0.12 stored. Where
+/// the phrase already roots the roster (the first 0.12 start signed with it), the
+/// stored copy is only erased: a recovery signed now would supersede the upgrade's and
+/// drop every device vouched since. Otherwise it signs a recovery keeping every member.
+Future<void> confirmStoredPhrase({required String phrase}) =>
+    RustLib.instance.api.crateApiRosterConfirmStoredPhrase(phrase: phrase);
 
 /// This device vouches for a device waiting to join.
 Future<void> approveDevice({required String devicePeerId}) => RustLib

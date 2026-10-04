@@ -3938,6 +3938,26 @@ pub fn webrtc_share_chunk_complete(
     Ok(())
 }
 
+/// Report bytes received so far on a WebRTC file stream; Rust shows them on the card of
+/// the file the stream id names.
+#[frb]
+pub fn webrtc_transfer_progress(
+    transfer_id: String,
+    sender_peer_id: String,
+    bytes_received: u64,
+    total_bytes: u64,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+    // Progress is cosmetic: never wait on a full command channel for it.
+    cmd_tx
+        .try_send(node::NodeCommand::WebRtcTransferProgress { transfer_id, sender_peer_id, bytes_received, total_bytes })
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
 /// Notify Rust that a WebRTC file send completed, so it cleans up the temp file.
 #[frb]
 pub fn webrtc_send_complete(transfer_id: String) -> Result<(), String> {

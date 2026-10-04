@@ -19,15 +19,27 @@ the stored legacy phrase later erased.
 
 ## Fix
 
-A device that still holds its identity's legacy stored phrase drops any recovery key that
-phrase does not derive, on ingest and at start-up.
+A device that still holds its identity's 0.11 stored phrase drops any recovery key that
+phrase does not derive, on ingest and at start-up (session 34). Since session 35 (decision
+C) such a device, at its first 0.12 start and before it connects, signs the identity's
+first recovery with that phrase: one fixed statement every device of the identity signs
+alike, the devices its 0.11 list kept admitted by the phrase and the ones it revoked
+removed in that base, so contacts, its other devices and the relay pin the real key first.
+A pinned key no longer erases the stored phrase; only the person confirming it, or typing
+the phrase on that device, does, and the confirmation signs nothing new when the phrase
+already roots the roster.
 
 ## Residual risk
 
-Contacts, the relay and a 0.12-linked device of a legacy identity still pin the first key
-they see during the legacy window (AR-15's first-contact case).
+Contacts, the relay and linked devices still pin the first key they see for an identity
+none of whose devices kept the 0.11 phrase (or whose only such device is missing from its
+0.11 list), until the phrase is typed there; and a contact that first hears of the identity
+after a master-key holder published a forged key pins that one (AR-15's first-contact case).
 
 ## Test
 
 `authz_a_recovery_key_from_the_network_never_locks_out_our_own_phrase` (failed: a forged key
-admitted its device).
+admitted its device), `authz_a_legacy_identity_pins_its_phrase_before_a_forger_can`,
+`authz_the_first_start_roots_a_legacy_identity_in_its_stored_phrase`,
+`authz_two_legacy_devices_upgrading_apart_meet_in_one_base`,
+`confirming_the_stored_phrase_after_the_upgrade_only_erases_it`.

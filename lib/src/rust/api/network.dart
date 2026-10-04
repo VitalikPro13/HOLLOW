@@ -893,6 +893,20 @@ Future<void> webrtcShareChunkComplete({
   chunkIndex: chunkIndex,
 );
 
+/// Report bytes received so far on a WebRTC file stream; Rust shows them on the card of
+/// the file the stream id names.
+Future<void> webrtcTransferProgress({
+  required String transferId,
+  required String senderPeerId,
+  required BigInt bytesReceived,
+  required BigInt totalBytes,
+}) => RustLib.instance.api.crateApiNetworkWebrtcTransferProgress(
+  transferId: transferId,
+  senderPeerId: senderPeerId,
+  bytesReceived: bytesReceived,
+  totalBytes: totalBytes,
+);
+
 /// Notify Rust that a WebRTC file send completed, so it cleans up the temp file.
 Future<void> webrtcSendComplete({required String transferId}) => RustLib
     .instance

@@ -141,8 +141,7 @@ fn erase_stored_phrase(db_path: &str, db_passphrase: &str) {
 }
 
 /// Type the phrase to make it the root of the identity: a recovery keeping this
-/// device and `keep`. Every other device stops counting at once. Also the one-time
-/// confirmation of an identity from before 0.12, which erases the stored phrase.
+/// device and `keep`. Every other device stops counting at once.
 #[frb]
 pub fn recover_with_phrase(phrase: String, keep: Vec<String>) -> Result<(), String> {
     let c = ctx()?;
@@ -200,6 +199,36 @@ pub fn stored_phrase_for_upgrade() -> Result<Option<String>, String> {
     let c = ctx()?;
     let store = MessageStore::open(&c.db_path, &c.db_passphrase)?;
     Ok(store.load_setting("recovery_mnemonic")?.filter(|p| !p.trim().is_empty()))
+}
+
+/// The one-time confirmation of the phrase an identity from before 0.12 stored. Where
+/// the phrase already roots the roster (the first 0.12 start signed with it), the
+/// stored copy is only erased: a recovery signed now would supersede the upgrade's and
+/// drop every device vouched since. Otherwise it signs a recovery keeping every member.
+#[frb]
+pub fn confirm_stored_phrase(phrase: String) -> Result<(), String> {
+    let c = ctx()?;
+    let (master, recovery) = crate::identity::recovery::recovery_key_for(&c.master.peer_id(), &phrase)?;
+    if crate::node::roster_book::rooted_by(&master, &c.device, &recovery, &c.db_path, &c.db_passphrase)? {
+        erase_stored_phrase(&c.db_path, &c.db_passphrase);
+        return Ok(());
+    }
+    let (keep, no_wait) = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase)
+        .map(|(_, s)| (s.members.into_iter().collect::<Vec<_>>(), s.no_wait))
+        .unwrap_or_default();
+    changed(&c, |c| {
+        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, &c.db_path, &c.db_passphrase)
+            .map(|_| ())
+    })
+}
+
+/// The phrase this identity stored before 0.12, while it is still here.
+pub(crate) fn stored_phrase() -> Option<zeroize::Zeroizing<String>> {
+    let c = ctx().ok()?;
+    let store = MessageStore::open(&c.db_path, &c.db_passphrase).ok()?;
+    let phrase = zeroize::Zeroizing::new(store.load_setting("recovery_mnemonic").ok().flatten()?);
+    crate::identity::recovery::recovery_key_for(&c.master.peer_id(), &phrase).ok()?;
+    Some(phrase)
 }
 
 /// This device vouches for a device waiting to join.
@@ -298,5 +327,74 @@ mod tests {
         assert!(stored_phrase_for_upgrade().is_err());
         assert!(!tmp.path().join("identity.key").exists(), "no key was minted");
         assert!(!tmp.path().join("identity.device").exists(), "no device key was minted");
+    }
+
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    /// An identity from before 0.12 on disk: `PHRASE`'s master, a device key, a database
+    /// holding the stored phrase and, when given, a 0.11 list naming those devices.
+    fn legacy_identity_on_disk(dir: &std::path::Path, list: Option<&[String]>) -> Ctx {
+        let (master, _) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        let device = NativeKeypair::from_secret_bytes(&[0x5b; 32]);
+        for (name, kp) in [("identity.key", &master), ("identity.device", &device)] {
+            std::fs::write(dir.join(name), kp.to_protobuf_encoding().unwrap()).unwrap();
+        }
+        let c = ctx().unwrap();
+        MessageStore::migrate_auto_vacuum_once(&c.db_path, &c.db_passphrase).unwrap();
+        let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+        store.save_setting("recovery_mnemonic", PHRASE).unwrap();
+        if let Some(devices) = list {
+            let old = crate::node::crypto_handler::build_signed_device_list(&master, 2, devices.to_vec(), Vec::new());
+            let json = serde_json::to_string(&old).unwrap();
+            store.save_device_list(&master.peer_id(), &json, old.version, &old.devices, 0).unwrap();
+        }
+        c
+    }
+
+    /// Decision C. Once the first 0.12 start signed the upgrade with the stored phrase,
+    /// confirming that phrase signs nothing (a recovery dated now would drop every
+    /// device vouched since) and only erases the stored copy, which the start kept.
+    #[test]
+    fn confirming_the_stored_phrase_after_the_upgrade_only_erases_it() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = legacy_identity_on_disk(tmp.path(), None);
+        let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+        let (upgraded, state) = crate::node::roster_book::ensure_own(&store, &c.master, &c.device, &c.db_path);
+        drop(store);
+        assert!(state.protected, "the first start signed no recovery");
+        assert_eq!(stored_phrase_for_upgrade().unwrap().as_deref(), Some(PHRASE), "the start erased the stored phrase");
+
+        confirm_stored_phrase(PHRASE.into()).unwrap();
+        let (held, _) = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase).unwrap();
+        assert_eq!(held, upgraded, "the confirmation signed a new recovery");
+        assert_eq!(stored_phrase_for_upgrade().unwrap(), None, "the confirmation kept the stored phrase");
+    }
+
+    /// A device its 0.11 list does not name signed nothing at start: confirming the
+    /// stored phrase there roots the identity, keeping this device.
+    #[test]
+    fn confirming_the_stored_phrase_signs_where_the_start_did_not() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let other = NativeKeypair::from_secret_bytes(&[0x5c; 32]).peer_id();
+        let c = legacy_identity_on_disk(tmp.path(), Some(std::slice::from_ref(&other)));
+        let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+        let (_, state) = crate::node::roster_book::ensure_own(&store, &c.master, &c.device, &c.db_path);
+        drop(store);
+        assert!(!state.protected && state.pending.contains(&c.device.peer_id()));
+
+        confirm_stored_phrase(PHRASE.into()).unwrap();
+        let (_, state) = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase).unwrap();
+        assert!(state.protected && state.is_member(&c.device.peer_id()), "{state:?}");
+        assert_eq!(stored_phrase_for_upgrade().unwrap(), None);
     }
 }

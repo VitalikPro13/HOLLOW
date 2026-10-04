@@ -575,8 +575,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
   }
 
-  /// An identity from before 0.12 still holds the phrase it stored: shown once,
-  /// checked, made the root, erased. "Later" leaves a Home reminder.
+  /// An identity from before 0.12 still holds the phrase it stored (already its
+  /// root): shown once, checked, erased. "Later" leaves a Home reminder.
   Future<void> _offerPhraseUpgrade() async {
     // The stored phrase is on screen in this dialog: never under a locked app.
     await _untilUnlocked();
@@ -793,13 +793,16 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (_initialized) return;
     _initialized = true;
 
-    // Backing out of "Link a device" leaves a throwaway identity. Wipe the data
-    // dir HERE, before the node starts and before the pending link import: with
-    // SQLCipher handles open, Windows keeps messages.db and the next identity
-    // loads forever.
+    // Backing out of "Link a device" leaves a throwaway identity, and a wipe the
+    // last session could not finish leaves its marker. Wipe the data dir HERE,
+    // before the node starts and before the pending link import: with SQLCipher
+    // handles open, Windows keeps messages.db and the next identity loads
+    // forever. A finished destroy also takes this profile off the profile list.
     try {
       if (await storage_api.hasPendingWipe()) {
-        await storage_api.performPendingWipe();
+        if (await storage_api.performPendingWipe()) {
+          await settleProfileAfterBootWipe();
+        }
       }
     } catch (e) {
       debugPrint('[HOLLOW] Pending data-dir wipe failed: $e');

@@ -8,9 +8,9 @@
 
 ## Abstract
 
-Hollow is a fully distributed, end-to-end encrypted communication platform. There are no central servers that store messages, files, or metadata. Members of a server collectively host it. The relay is a zero-knowledge signaling pipe that routes encrypted blobs between peers without any ability to read, modify, or store them.
+Hollow is a fully distributed, end-to-end encrypted communication platform. There are no central servers that store messages, files, or metadata. Members of a server collectively host it. The relay is a zero-knowledge signaling pipe that routes encrypted blobs between peers. It cannot read or alter them, and the ciphertext it holds for offline members lives only in its memory.
 
-Hollow provides real-time text messaging, voice and video calls, screen sharing, file sharing, and distributed storage, all with end-to-end encryption. A single human identity can run on multiple devices (multi-device sync), and mobile clients receive push notifications without ever exposing message content to Apple or Google. The protocol is designed so that even a fully compromised relay operator learns nothing beyond which peer IDs are connected and which rooms they occupy.
+Hollow provides real-time text messaging, voice and video calls, screen sharing, file sharing, and distributed storage, all with end-to-end encryption. A single human identity can run on multiple devices (multi-device sync), and mobile clients receive push notifications without ever exposing message content to Apple or Google. The protocol is designed so that even a fully compromised relay operator learns only routing metadata: which device IDs are connected, which rooms they share, and when and how much they send (§12.7).
 
 This document describes the Hollow protocol as implemented in the Beta release. It covers the cryptographic architecture, networking model, synchronization protocol, multi-device identity model, push-notification privacy design, and security properties. It describes the system at the protocol level rather than as an implementation guide, so that its security properties can be evaluated independently of the source code.
 
@@ -51,7 +51,7 @@ The client is a native application for Windows, macOS, Linux, Android, and iOS (
 
 ### 1.1 Design Goals
 
-- **Zero-knowledge relay:** the relay sees room membership and peer IDs. It cannot read message contents, encryption keys, file data, or any application-layer semantics.
+- **Zero-knowledge relay:** the relay sees routing metadata (peer IDs, room membership, timing and size). It cannot read message contents, encryption keys, file data, or any application-layer semantics.
 - **No accounts:** identity is a cryptographic keypair derived from a BIP-39 mnemonic. There is no email, phone number, or username registration.
 - **Forward secrecy:** DM sessions use the Double Ratchet algorithm. Server sessions use MLS epoch rotation. Compromising a long-term key does not reveal past messages.
 - **Decentralized state:** server metadata (channels, members, roles, settings) is synchronized via CRDTs with no authoritative source. Any online member can act as a sync peer.
@@ -157,7 +157,7 @@ Total: 119 bytes. The ciphertext contains the AES-256-GCM encrypted keypair (68-
 
 **Duress code.** A password-protected identity that prompts at launch may carry a second secret, typed at the same prompt, that never unlocks and always destroys. It lives in a sibling slot with the same HKEYV1 layout and its own salt; the slot exists whenever password protection does, holding random bytes under a random key when no duress code is set, and its plaintext has a fixed size, so neither the disk nor the timing of an unlock attempt reveals whether a code is configured. Every typed secret is processed against both slots before any decision is made. The duress code must differ from the password, and a password change that would collide with it is refused. The person typing it sees no error and no confirmation: the data is destroyed and the application returns to its first-launch screen.
 
-**Destruction.** One local routine erases an installation in a fixed order: a resume marker, then the identity key files and the OS keystore slot, then the database that holds every per-file key (§2.4), then the content directories. It never waits on the network; an unreachable device still erases itself, and the marker finishes anything the platform refused to unlink at the next launch. Three scopes build on it. The device alone. The device plus its own removal: it signs a removal of itself into the person's roster (§3.2), so the person's other devices and friends stop routing to it, and a removal stays final within the roster's base even against a modified client that still holds the shared master key. And the whole identity: a destruction order (master, issue time, optional target devices, friend flag) signed with the recovery key, which only the recovery phrase produces, reaches online devices over the sibling lanes and offline devices through the relay, which parks the opaque signed order under each target device id and hands it over as the first frame after that device next authenticates, with no retention limit. The relay is a courier only: it cannot read, forge or retarget an order, and a receiving device verifies the recovery-key signature itself against the key it pinned for the identity, refuses an order issued before it was linked (so a device linked after a destruction is never wiped by a replay) or older than one it has already applied, and acknowledges both a completed wipe and a permanent rejection so the relay stops re-sending. An identity whose phrase has not been confirmed since 0.12 has no recovery key yet and keeps the earlier master-signed order. Friends may be told: the conversation is marked destroyed, the contact's verified status is dropped, and a later roster from the same master (the phrase recreating the identity, which nothing can prevent) raises a warning that the identity has come back and must be verified again. A duress code entered at a cold launch destroys the local device only, because with the wrong password nothing can be signed. A duress code set from a running node can destroy every device instead: the phrase, typed once when the code is set, signs a permission for that one device to issue the order, and the duress slot keeps the permission, never the phrase or the recovery key. Removing the device voids it.
+**Destruction.** One local routine erases an installation in a fixed order: a resume marker, then the identity key files and the OS keystore slot, then the database that holds every per-file key (§2.4), then the content directories and the call and screen recordings this profile made, which live outside the data folder (each profile keeps a list of its own, so recordings from other profiles in the same folder stay). On a desktop with several profiles a wipe touches only its own: the profile list forgets it, and Hollow restarts into another profile or first-time setup. It never waits on the network; an unreachable device still erases itself, and the marker finishes anything the platform refused to unlink at the next launch. Three scopes build on it. The device alone. The device plus its own removal: it signs a removal of itself into the person's roster (§3.2), so the person's other devices and friends stop routing to it, and a removal stays final within the roster's base even against a modified client that still holds the shared master key. And the whole identity: a destruction order (master, issue time, optional target devices, friend flag) signed with the recovery key, which only the recovery phrase produces, reaches online devices over the sibling lanes and offline devices through the relay, which parks the opaque signed order under each target device id and hands it over as the first frame after that device next authenticates, with no retention limit. The relay is a courier only: it cannot read, forge or retarget an order, and a receiving device verifies the recovery-key signature itself against the key it pinned for the identity, refuses an order issued before it was linked (so a device linked after a destruction is never wiped by a replay) or older than one it has already applied, and acknowledges both a completed wipe and a permanent rejection so the relay stops re-sending. An identity from before 0.12 gets its recovery key at the first 0.12 start of any device that kept the phrase 0.11 stored (§3.2); one with no such device has no recovery key until the phrase is typed, and keeps the earlier master-signed order until then. Friends may be told: the conversation is marked destroyed, the contact's verified status is dropped, and a later roster from the same master (the phrase recreating the identity, which nothing can prevent) raises a warning that the identity has come back and must be verified again. A duress code entered at a cold launch destroys the local device only, because with the wrong password nothing can be signed. A duress code set from a running node can destroy every device instead: the phrase, typed once when the code is set, signs a permission for that one device to issue the order, and the duress slot keeps the permission, never the phrase or the recovery key. Removing the device voids it.
 
 ### 2.4 Local Storage Encryption
 
@@ -175,20 +175,20 @@ Two recovery methods are implemented:
 
 **Phrase recovery:** The 24-word BIP-39 phrase regenerates the identity keypair and the recovery key (§3.2). Typed on a new install, it admits that device at once; typed on an existing device, it can start the identity over with only the devices the person picks. Server memberships and message history re-sync from peers.
 
-**Encrypted backup:** Full account state (identity key + encrypted database + optional vault shards) is exported as a passphrase-protected `.hollow` file. The passphrase is processed through Argon2id (64 MB memory cost, ~500ms per attempt) to derive an AES-256-GCM encryption key. Brute-force resistant by design. A backup holds no recovery phrase and no device secrets (no Olm account or sessions, no MLS signing identity), and a device restored from one joins the identity only once another device approves it, the phrase is typed on it, or seven days pass with nobody refusing it, unless the person used the phrase to turn that wait off (§3.6).
+**Encrypted backup:** Full account state (identity key + encrypted database + optional vault shards) is exported as a passphrase-protected `.hollow` file. The passphrase, at least 12 characters, is processed through Argon2id (64 MB memory cost, ~500ms per attempt) to derive an AES-256-GCM encryption key. A backup holds no recovery phrase and no device secrets (no Olm account or sessions, no MLS signing identity), and a device restored from one joins the identity only once another device approves it, the phrase is typed on it, or seven days pass with nobody refusing it, unless the person used the phrase to turn that wait off (§3.6).
 
 ### 2.6 App Lock (Mobile)
 
 Mobile clients add an **App Lock** that gates application launch behind a PIN, password, or biometric authentication:
 
-- **PIN / password lock:** a numeric PIN or a password is processed through the **same Argon2id + AES-256-GCM identity-at-rest pipeline** described in §2.3. A PIN is cryptographically identical to a password (it is simply numeric input), so there is no separate, weaker code path.
+- **PIN / password lock:** a numeric PIN or a password is processed through the **same Argon2id + AES-256-GCM identity-at-rest pipeline** described in §2.3. A PIN is cryptographically identical to a password (it is simply numeric input), so there is no separate, weaker code path. A new PIN has at least six digits. Nothing limits attempts in hardware, so someone holding a copy of the app's data can try PINs offline at the cost of one Argon2id derivation each; a password closes that gap.
 - **Biometric layer:** biometric unlock is a *layer on top of* a PIN/password, not an independent lock type. A copy of the PIN/password secret is stored in the OS secure enclave (Android Keystore / iOS Keychain) and released only after a successful `local_auth` biometric check. The underlying identity encryption is always the Argon2id path; biometrics gate retrieval of the secret.
 - **Pre-unlock marker:** the lock-type marker and any biometric secret are stored in OS-backed secure storage (Keystore/Keychain), *not* in SQLCipher, because they must be readable *before* the encrypted database is unlocked at launch.
 - **Self-heal:** a stored biometric secret that fails to unlock the identity is deleted to avoid a failing-biometric loop. Mnemonic recovery resets the identity to plaintext.
 
 As with desktop at-rest protection, the database remains sealed until the Argon2id key derivation completes (typically 1.5–3 seconds), and protection is never silently enabled. The 24-word mnemonic is the sole universal recovery path.
 
-Both platforms lock the same way over a running node: at launch, after a chosen idle span, after a short time in the background on a phone, or on demand, an opaque cover replaces the interface while presence, messages and calls continue underneath, and the same password prompt opens it again. Nothing navigates above the cover while it is up: a notification tapped then is held until the lock lifts, and a call answered from the lock screen runs without showing its screen or its conversation. The prompt offers only to end a running call. By default the unlock secret is held by the operating system's keystore so the application starts without a prompt and the lock is the only prompt; a duress code (§2.3) typed there runs with the keys in memory, so its identity-wide scopes fire. The person may instead require the password before the application starts, which keeps the key unreachable without it; a duress code typed at that prompt destroys that device only.
+Both platforms lock the same way over a running node: at launch, after a chosen idle span, after a short time in the background on a phone, or on demand, an opaque cover replaces the interface while presence, messages and calls continue underneath, and the same password prompt opens it again. Nothing navigates above the cover while it is up: a notification tapped then is held until the lock lifts, a link opened from outside waits for the unlock too, and a call answered from the lock screen runs without showing its screen or its conversation. While locked, notifications read only "New message", with no name, avatar, text or reply action, and toasts shown before the lock are withdrawn. The prompt offers only to end a running call. By default the unlock secret is held by the operating system's keystore so the application starts without a prompt and the lock is the only prompt; a duress code (§2.3) typed there runs with the keys in memory, so its identity-wide scopes fire. The person may instead require the password before the application starts, which keeps the key unreachable without it; a duress code typed at that prompt destroys that device only.
 
 ---
 
@@ -204,7 +204,7 @@ Each physical device *additionally* holds its own **independent, randomly genera
 
 The device key drives identity **only at the transport layer**: relay authentication (a distinct relay socket per device) and signaling. Everything else stays master-keyed. The rooms a device joins are all *master-derived* (`inbox:{master}`, the DM room code, the server ID), so a device authenticates as itself yet occupies its identity's rooms.
 
-**Security property.** Because each device presents a distinct random peer ID while joining master-derived rooms, **the relay never learns that two peer IDs belong to one person.** The device-to-person collapse happens entirely on the client side, on the observing peer. The relay requires zero multi-device awareness and remains a dumb pipe.
+**What the relay can tell.** Each device presents its own random peer ID, but every device of a person joins that person's rooms, among them the inbox room that only the person's devices can prove they own, and the relay holds each identity's roster in memory to decide who may read that inbox (§3.2, §12.7). The relay can therefore tell which device IDs belong to one person. It reads nothing those devices send. Showing several devices as one person is done by the client of whoever is looking.
 
 The device key shares the same at-rest protection as the master key (§2.3): both files are wrapped by the same session key, and a protection change rewrites both.
 
@@ -395,7 +395,7 @@ The recovery paths above key on a *missing* group. A group that is present but *
 
 Two mechanisms close this gap:
 
-- **Epoch hints:** a member advertises its current epoch for a group alongside the plaintext first-contact synchronization exchange, at voice-channel join, and from the media heal ladder. A hint is advisory and deliberately powerless: a member that learns it may itself be behind sends a throttled probe to the group authority; a hint can never cause a group to be dropped (that would hand any peer a remote group-reset primitive).
+- **Epoch hints:** a member advertises its current epoch for a group alongside the first-contact synchronization exchange, at voice-channel join, and from the media heal ladder. A hint is advisory and deliberately powerless: a member that learns it may itself be behind sends a throttled probe to the group authority; a hint can never cause a group to be dropped (that would hand any peer a remote group-reset primitive).
 - **Commit catch-up:** every member retains a short ring of recently broadcast commit messages per group. When a member learns from a hint that another is behind, exactly one of them answers, and *which* one is elected with the member that is behind excluded from the candidate set. The authority cannot serve itself: the server-wide group prefers the owner as its committer (§5.3), so an owner that missed an epoch it did not author would otherwise be nominated as its own rescuer while the member actually holding the newer epoch stood down as non-authoritative, and neither would act. Excluding the lagging peer makes the asker and the answerer compute the same single responder. A probe addressed to a specific member is answered by that member directly, without a second election, because the asker chose it from a view of the membership the answerer may not share. The elected responder replays the missed commits, in order, directly to the member that is behind. The member applies them through the same validated path as live commits: each is accepted only if it advances the group by exactly one epoch, so a forged or gapped replay is refused before it can trigger any destructive recovery. Catch-up replays material that was already broadcast to the whole room, so it discloses nothing new; the requester must be a current member.
 
 Catch-up converges a stale member in one round trip **without generating new commits**. This matters because the fallback repair, removing and re-adding the member's leaves, advances the epoch for everyone and re-keys all media, so under churn repair-by-re-add can cascade. Re-add remains the fallback when the cache cannot bridge the gap.
@@ -404,14 +404,16 @@ Preserving that distinction requires the cheap path to be given the chance to ru
 
 ### 5.4 Epoch and Key Rotation
 
-Every membership change advances the MLS **epoch**. Each epoch derives fresh encryption keys. An attacker who compromises keys from one epoch cannot decrypt messages from other epochs.
+Every membership change advances the MLS **epoch**, and each epoch derives fresh encryption keys. Forward secrecy has a margin: so that late messages still decrypt, a member keeps the secrets of the three previous epochs and up to 512 skipped message keys per sender before deleting them.
+
+Recovery after a compromise is weaker than MLS allows. Members do not yet refresh their own leaf keys on a schedule, and the commits that only add members carry no path update, so someone who copies one member's MLS state keeps reading that server's traffic until that member's leaf is replaced: by a repair, a rejoin, or a removal commit the member makes itself. Taking that copy needs the member's unlocked database or malware on the device, which could read the same traffic live anyway. Scheduled self-updates are planned.
 
 ### 5.4.1 State Persistence Invariants
 
 The MLS group state persisted to SQLCipher comprises the signature keypair, the credential, and the serialized group (ratchet tree, secret tree, and epoch). Three invariants keep group membership self-consistent across restarts and reconnections:
 
 - **Persist on encrypt:** encrypting a message advances the sender's secret-tree generation. The group state is persisted immediately after every encrypt, so a restart cannot reuse a stale generation (which the receiver would reject as secret reuse).
-- **Sync requests are plaintext.** After a reconnection a peer's MLS epoch may be stale, so synchronization requests and other idempotent coordination probes are sent as plaintext envelopes (§5.6) rather than MLS-encrypted. CRDT broadcasts fall back to plaintext if MLS encryption fails.
+- **Sync requests ride Olm.** After a reconnection a peer's MLS epoch may be stale, so synchronization requests and other coordination probes travel in the pairwise Olm channel rather than under MLS (§5.6). Every server-state change also goes to the members' devices under Olm next to its MLS broadcast, so a member at a skewed epoch still receives it.
 - **Decryption failure triggers resync.** A peer that cannot decrypt a message it should be able to read treats this as evidence of a missed epoch and immediately synchronizes from the sender.
 
 ### 5.5 Targeted Peer-to-Peer Encryption
@@ -420,15 +422,17 @@ Server-context operations that target a specific peer (shard requests/responses,
 
 ### 5.6 Reconnection Caveat
 
-After a WebSocket reconnection, a peer's MLS epoch may be stale. Messages that must work immediately after reconnection (sync requests, shard coordination, voice channel state changes) are sent as plaintext `HavenMessage` envelopes. This is a deliberate design choice: these messages are idempotent probes that carry no sensitive content.
+After a WebSocket reconnection, a peer's MLS epoch may be stale. Messages that must work right after a reconnection (sync requests, shard coordination, voice channel state changes) therefore travel in the pairwise Olm channel to each device instead of under MLS.
+
+None of them crosses the relay in the clear. Since 0.12 every relay frame is signed by the sending device and bound to its room and route, and every message type has a fixed lane: the relay may read routing data only, while content and state changes ride Olm, MLS, or, for meeting lobbies and Hollow Share, a key carried in the link. Public channels (§11.6) stay readable by design.
 
 ### 5.7 Conferences (Ad-Hoc MLS Groups)
 
-Conferences are meetings between peers who may share no server and no prior relationship. A conference is a *virtual server*: a single identifier (`conf:` followed by a random 128-bit value carried only in URL fragments, never in server-visible paths) is the relay room code, the MLS group key, and the voice-channel context. Because conferences have no CRDT state, none of the server synchronization machinery applies to them.
+Conferences are meetings between peers who may share no server and no prior relationship. A conference is a *virtual server*: a single identifier (`conf:` followed by 40 hex characters of a hash over the host's master ID and a random nonce, so the identifier itself names its host; carried only in URL fragments, never in server-visible paths) is the relay room code, the MLS group key, and the voice-channel context. Because conferences have no CRDT state, none of the server synchronization machinery applies to them.
 
-**Admission is the cryptography.** The host of a meeting creates a fresh MLS group per session, so attendees of a past meeting cannot decrypt a future one. A prospective joiner enters the relay room and broadcasts a join request carrying a fresh KeyPackage, a display name, an avatar *hash* (never image bytes), and optionally a salted hash of an access code. Until the host commits an MLS `add` for that KeyPackage, the joiner observes only ciphertext: the waiting room is a key-distribution boundary, not a UI convention. Removal from a meeting is an MLS `remove` commit, and the SFrame media key rotates away from the removed member before any user-interface teardown occurs.
+**Admission is the cryptography.** The host of a meeting creates a fresh MLS group per session, so attendees of a past meeting cannot decrypt a future one. A prospective joiner enters the relay room and broadcasts a join request, sealed under the key the meeting link carries, with a fresh KeyPackage, a display name, an avatar *hash* (never image bytes), and optionally a salted hash of an access code. Until the host commits an MLS `add` for that KeyPackage, the joiner observes only ciphertext: the waiting room is a key-distribution boundary, not a UI convention. Removal from a meeting is an MLS `remove` commit, and the SFrame media key rotates away from the removed member before any user-interface teardown occurs.
 
-Membership checks for conference voice signaling substitute the missing CRDT membership test with an MLS one: a plaintext voice-channel announcement is accepted only if its sender's device identifier appears in the conference group's leaf credential set, which only an admitted member can achieve.
+Membership checks for conference voice signaling substitute the missing CRDT membership test with an MLS one: a voice-channel announcement is accepted only if its sender's device identifier appears in the conference group's leaf credential set, which only an admitted member can achieve.
 
 **Conference chat is ephemeral by construction.** Chat lines are MLS application messages attributed by the authenticated leaf credential (not the transport sender, which is unauthenticated framing). They are never written to the local database, never enter relay availability buffers, and receiving nodes drop any attempt to route persistent channel-message envelopes under a conference identifier. When the meeting ends, the group is discarded and no record of the conversation exists anywhere.
 
@@ -472,12 +476,14 @@ change who can listen, which for a DM call is the call itself ending.
 
 SFrame E2EE is applied to:
 
-- **Voice calls** (1:1 DM calls and server voice channels)
-- **Video calls** (1:1 DM calls and server voice channels)
+- **Voice** (1:1 DM calls and server voice channels)
+- **Camera video** in server voice channels
 - **Screen sharing video** (1:1 DM screen share and server voice channel screen share)
 - **Screen sharing audio** (platform-dependent transport; see §6.8)
 
-All media types using WebRTC media tracks (audio tracks, video tracks, and screen share video tracks) are encrypted with the same SFrame key for a given session or epoch.
+Two media paths carry no SFrame layer today: the camera video of a 1:1 DM call, and voice audio that a participant forwards along the gossip tree of a large voice channel (§6.5). Both are still DTLS-SRTP from one participant to another, with the DTLS fingerprints exchanged over Olm or MLS, so the relay and TURN see only ciphertext; what they lack is the second, end-to-end layer that SFrame adds on every other path.
+
+Every SFrame-protected track in a session or epoch uses the same key.
 
 Voice and video calls are available on all platforms, including mobile (Android and iOS), with the same SFrame encryption. Screen-share sending and system-audio capture are likewise available on every platform: Windows, macOS, Linux, Android (MediaProjection + AudioPlaybackCapture), and iOS (a ReplayKit Broadcast Upload Extension). The platform-specific capture paths are described in §6.8.
 
@@ -566,7 +572,9 @@ File metadata (name, size, AES key, nonce, and, for images and videos, a small p
 
 ### 7.3 Image Processing
 
-All images are auto-converted to Balanced WebP on send (~95% smaller than PNG/JPEG; similar quality). Metadata (EXIF, GPS, camera info) is stripped before transmission. Configurable quality tiers: Lossless (100%), Balanced (50%), Small (30%).
+All images are auto-converted to Balanced WebP on send (~95% smaller than PNG/JPEG; similar quality). Configurable quality tiers: Lossless (100%), Balanced (50%), Small (30%).
+
+**Location and camera metadata.** Photos and videos lose their location, camera and capture-time metadata before they leave the device, on every send path including vault uploads and large files sent through Hollow Share. The stripping works in place on the container (MP4 and MOV, WebM and MKV, AVI, HEIF and AVIF, JPEG, PNG, WebP) without decoding the media, so a video keeps its exact streams. A file of one of these types that cannot be parsed is refused with a message rather than sent as it is. Three cases keep their metadata: timed GPS tracks inside fragmented MP4, subtitle tracks, and TIFF or RAW images sent as plain files.
 
 Image sends additionally embed a tiny (≤32 px) placeholder thumbnail inside the encrypted `FileHeader`; video sends embed a size-bounded poster frame the same way. Receivers enforce an independent size cap on this field before storing or displaying it. Because the thumbnail rides the same encrypted envelope as the rest of the file metadata, it reveals nothing to the relay.
 
@@ -876,7 +884,7 @@ Server emote sets are capped and gated by a dedicated permission bit (§11.2); n
 
 **Animated server icons** apply the split retroactively to a field that predates the rail: the small still icon remains inline in replicated server state (older clients and pre-join surfaces keep working unchanged), while an animated upload additionally publishes only the hash of a size-bounded animated variant, whose bytes ride the rail under the same requested-only, receiver-verified rules. Animation never rides state snapshots, sync frames, or pre-join wire paths.
 
-**Avatar frames** extend the same separation to a *personal* profile, where the pressure runs the other way. A profile update is pushed to everyone who synchronises with its owner, so any decoration carried inline is paid for by every recipient whether or not they ever look at it. The profile therefore carries only a short identifier: either a procedurally drawn built-in, which costs nothing on the wire, or the hash of an uploaded image whose bytes travel the rail on demand and are the first thing evicted under a client's own cache bound. The identifier is validated on ingest against exactly three permitted shapes, and an unrecognised value is treated as absent rather than as a clear, so a malformed field from a future client cannot erase what a recipient already holds. That validation is not cosmetic: the field arrives in plaintext on the unencrypted profile path and is used to key a network request, so an unconstrained string would let a sender direct a recipient's fetches.
+**Avatar frames** extend the same separation to a *personal* profile, where the pressure runs the other way. A profile update is pushed to everyone who synchronises with its owner, so any decoration carried inline is paid for by every recipient whether or not they ever look at it. The profile therefore carries only a short identifier: either a procedurally drawn built-in, which costs nothing on the wire, or the hash of an uploaded image whose bytes travel the rail on demand and are the first thing evicted under a client's own cache bound. The identifier is validated on ingest against exactly three permitted shapes, and an unrecognised value is treated as absent rather than as a clear, so a malformed field from a future client cannot erase what a recipient already holds. That validation is not cosmetic: the field is whatever the sender put there, and it is used to key a network request, so an unconstrained string would let a sender direct a recipient's fetches.
 
 **Animated avatars and banners follow the frame's reasoning to its conclusion.** They were the
 last profile media whose bytes travelled inline, and they are the costliest case of the pressure
@@ -887,11 +895,9 @@ still is what a recipient sees by default and what a client predating the split 
 nothing degrades to a blank; the animation travels the rail on demand and is evictable like any
 other asset, so a recipient who never opens a profile card never pays for its animation, and one
 who evicts it loses motion rather than a face. The hash is validated on ingest exactly as the
-frame identifier is, for the same reason: it arrives in plaintext on the unencrypted profile path
-and keys a network request. It is deliberately outside the profile signature, on the same
-reasoning that excludes the frame: substituting one decoration hash for another swaps art the
-substituter already possesses, while the still image that the signature does cover continues to
-render beneath it.
+frame identifier is, for the same reason: the sender chooses it and it keys a network request.
+Since 0.12 the frame and both animation hashes sit inside the profile signature with every other
+field, so nobody but the profile's owner can swap one decoration for another.
 
 A consequence worth stating plainly: because the still and the animation are separate objects
 with separate lifetimes, a recipient's view of someone's avatar can be *behind* in motion while
@@ -1097,18 +1103,23 @@ For peers behind symmetric NATs, the relay provides time-limited TURN credential
 | Data | Visible to Relay |
 |------|-----------------|
 | Peer IDs (in memory) | Yes (not logged to disk) |
-| Room membership (in memory) | Yes (not logged to disk) |
+| Room membership (in memory) | Yes (not logged to disk). Room codes are opaque, but the relay sees which device IDs share a room, so it can group a person's devices and see which devices share a conversation |
 | Topic subscriptions (in memory) | Yes: the relay knows which channel topics each peer subscribes to within a room (not logged to disk) |
+| Rosters (in memory) | Yes: each identity's roster of signed device statements, which decides who may read its inbox (§3.2) |
+| Push registrations and preferences (in memory) | Yes, for phones: the push token and the notification settings that differ from the default (server and channel levels, the device IDs of muted DM senders), §13.3 |
+| Parked frames (in memory) | Ciphertext only: offline buffers and channel rings (§12.13), destruction orders waiting for a device (§2.3), join requests sealed to a server's join key |
 | Connection timestamps | **No** (relay logging is disabled; volatile journal with 1h retention) |
 | Message contents | **No** (encrypted) |
 | Encryption keys | **No** |
 | File contents | **No** (encrypted) |
 | Message signatures | **No** (inside encrypted envelope) |
 | User profiles | **No** (encrypted) |
-| Voice/video media | **No** (P2P, not relayed) |
-| File transfer bytes | **No** (P2P, not relayed) |
-| IP addresses | **No** (relay does not log IPs; TURN logging disabled) |
+| Voice/video media | **No**: direct by default; when TURN or the forwarder carries it, only ciphertext (§6.4) |
+| File transfer bytes | Ciphertext only, when a transfer falls back to the relay stream (§7.2) |
+| IP addresses | In memory only, for connection limits; never logged (TURN logging disabled) |
 | User reports | Partially: per-target abuse-category **counts** are persisted (§12.14); the reporter's identity is never written in readable form, only inside a keyed fingerprint |
+
+Everything the relay holds in memory is carried across a relay software update in memory and is gone after a reboot of the machine (§12.13).
 
 ### 12.8 Access Keys (Optional, for Self-Hosted Relays)
 
@@ -1180,6 +1191,8 @@ A global byte budget bounds total buffer memory with oldest-first eviction. Beca
 
 A third use of the same buffer closes the friend-request gap. A friend request to a stranger is addressed to a master identity, not a device, and no socket authenticates as a master; the relay therefore holds such a request in the recipient master's inbox buffer and replays it only to a device that **proves ownership of that identity**. The proof is the device's own roster (§3), presented when it joins its `inbox:{master}` room. The relay keeps one roster per identity, folds every roster shown for it into that one with the same rules every client uses, and lets a device own the inbox only while it is a member of the result. A removal or a newer recovery, once any device has shown it, therefore stays, the first recovery key the relay holds is pinned, and a change that drops a member closes the inbox to it at once. Holding the master key, from a backup or a stolen device, opens nothing once the phrase is the identity's root. Only for a member does the relay replay the buffered requests, and, unlike the delete-on-replay direct-message tier, it retains them until expiry so every device of the identity collects the request independently; the recipient deduplicates on its local friend record. The request itself carries the sender's single-use Olm prekey and master-signed profile as end-to-end material the relay cannot use, so a first friendship and its first messages can complete even when the two parties are never online at the same moment. As everywhere else the property is availability, not authority: the buffered request is signed and verified end to end, and its absence degrades only to the pre-existing behaviour of requiring both parties online at once.
 
+While a request is pending, each side sees the other's name, signed by its master, and a small copy of its avatar (96 pixels, at most 8 KiB): the request carries the requester's, and the target leaves its own in the requester's inbox. Both are sealed under a key only the two identities can derive. The receiver re-encodes the thumbnail before showing it and keeps it only on the row of that request; the full profile follows once the request is accepted.
+
 The answer travels the same road. A decline is deposited into the requester's own inbox buffer under the same ownership-proof replay, so the requester learns of it on its next boot with no overlap and stops re-presenting the request. Because that answer can arrive late, out of order, or replayed for the whole retention window, it is bound to the request it answers: it carries the request's timestamp and the decliner's master-signed device list, the requester verifies the list and attributes the answer to the master it names (never to a bare device id, which a peer that has never met the decliner cannot resolve), and it acts only on the still-pending request that timestamp identifies. A replayed answer can therefore never remove a friendship formed afterwards, nor a request made after the decline; and a decliner that sees the same request re-presented answers it again, so the outcome converges even when the relay's copy of the answer has expired.
 
 An acceptance is bound the same way. It carries the timestamp of the request it answers, and the requester refuses an acceptance that names an older request than the one it currently holds, so a copy the relay parked for a room the requester had already left, or replayed from its inbox buffer, cannot turn a later request into a friendship nobody consented to. A removal leaves a local tombstone, and an acceptance that answers no open request is refused whether or not it carries a timestamp, which closes the window between two legitimate copies of the same acceptance and a removal that lands between them. Acceptances travel through the pair's deterministic direct-message room rather than whichever shared room the device was last seen in, so a copy for a device that is absent parks under that room alone. An acceptance without a timestamp comes from an older client and is honoured while a request is open.
@@ -1204,14 +1217,14 @@ Mobile operating systems terminate background processes, so a Hollow client cann
 
 ### 13.1 The Core Privacy Guarantee
 
-**The push payload carries zero message content.** It is exactly `{type: "wake", sender: <peer_id>}` for a DM, or `{type: "channel_wake", sender, server, channel, mention}` for a channel message. Carrying ciphertext in the push, *even encrypted*, was deliberately rejected, because the push body's size, timing, and frequency would themselves leak metadata to Apple and Google.
+**The push payload carries zero message content.** It is exactly `{type: "wake", sender: <peer_id>}` for a DM, or `{type: "channel_wake", sender, server, channel, mention}` for a channel message. Message ciphertext never rides the push: the message is fetched from Hollow's relay after the wake.
 
 Consequently:
 
-- **What Apple/Google learn:** that *some* message arrived for a device token, plus an opaque sender peer ID (a `12D3KooW…` identifier, not a human name) and, for channels, opaque server/channel IDs and a single mention bit. They never see message text, message size, or who-is-who beyond opaque IDs. Push timing is coarsened by debouncing (§13.3).
+- **What Apple/Google learn:** that *some* message arrived for a device token, plus the sender's device peer ID (a `12D3KooW…` identifier, not a human name) and, for channels, the server and channel IDs and a single mention bit. They never see message text or size. These IDs are random, but they are stable: a provider that sees the same server ID arrive at many phones learns that those phones share a server, and the same sender ID together with reply timing lets it connect device IDs to the accounts it already knows. Push timing is coarsened by debouncing (§13.3). UnifiedPush already encrypts this block to the device (§13.7); doing the same for Firebase and APNs is planned.
 - **How E2EE is preserved:** the message *content* travels exclusively over Hollow's own existing E2EE channels (Olm for DMs, MLS for channels) between the client and Hollow's own relay, and is decrypted **on-device**. Apple and Google are pure wake-up couriers, categorically outside the content path.
 
-A small push-relay sidecar service holds the Firebase/APNs credentials and emits only the empty `{wake, sender}` payload; the relay itself never contacts a push service with content.
+A small push-relay sidecar service holds the Firebase/APNs credentials and emits only this wake payload; the relay itself never contacts a push service with content.
 
 ### 13.2 Direct Message Push Flow
 
@@ -1227,7 +1240,7 @@ The same privacy invariants extend to server channels. After the normal room bro
 
 The relay buffers offline channel messages under a separate per-peer cap and applies two filters before contacting the push sidecar:
 
-- **Push preferences:** a RAM-only per-peer registry (server-level and per-channel mute levels, plus the device identifiers of muted direct-message senders), re-sent by the client on every reconnect and carried across relay software updates in memory like the offline buffers (§12.13), lets the relay suppress unwanted pushes. Filtering must happen relay-side because an iOS alert push cannot be suppressed after delivery. (This leaks a coarse "this peer wants pushes for this server" signal to Hollow's own relay, never to Apple/Google, in exchange for the suppression working at all.)
+- **Push preferences:** a RAM-only per-peer registry, re-sent by the client on every reconnect and carried across relay software updates in memory like the offline buffers (§12.13), lets the relay suppress unwanted pushes. The client sends only what differs from the default: a server set to mentions-only or muted, a channel with a level of its own, and the device identifiers of muted direct-message senders; a server the relay holds no entry for gets every push. Filtering must happen relay-side because an iOS alert push cannot be suppressed after delivery. In exchange, Hollow's own relay (never Apple or Google) learns which servers and channels a phone has muted and whose DMs it silenced.
 - **Anti-spam debounce:** non-mention pushes are debounced per server (and capped while continuously offline); mentions use a much shorter debounce; a small per-peer floor applies across all servers.
 
 A channel wake causes the fetch node to join the **server** room and decrypt the buffered messages via the persisted MLS group state. If the device's MLS epoch is stale (it missed a commit while offline), decryption fails gracefully to a content-free banner, and the app self-heals via normal channel sync on next open.
@@ -1617,11 +1630,11 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 | Local storage | SQLCipher (AES-256-CBC) | 256-bit | Database encryption at rest |
 | Content files | AES-256-GCM, chunked, per-file random key held in SQLCipher | 256-bit key, 96-bit nonce (64-bit file prefix + chunk index) | Attachment, media and cache encryption at rest; row deletion is the erase |
 | Backup encryption | Argon2id + AES-256-GCM | 256-bit (64 MB memory cost) | Brute-force resistant account backup |
-| Device list | Ed25519-signed, versioned | 256-bit | Master-signed binding of a person's devices and revocations |
+| Roster | Ed25519 statements by devices; recoveries signed by the recovery key and the master | 256-bit | Which devices belong to a person; the recovery phrase is the root (§3.2) |
 | Duress slot | Argon2id + AES-256-GCM (own salt, fixed-size plaintext) | 256-bit key, 128-bit salt | A second secret that destroys instead of unlocking; indistinguishable on disk and in timing |
-| Destruction order | Ed25519-signed by the master, issue-time bound | 256-bit | Identity-wide wipe delivered by siblings or parked on the relay for offline devices |
+| Destruction order | Ed25519, signed by the recovery key (or by a device holding the phrase's permission), issue-time bound | 256-bit | Identity-wide wipe delivered by siblings or parked on the relay for offline devices |
 | Per-device transport key | Ed25519 (random per device) | 256-bit | Per-device relay authentication; decouples device ID from identity |
-| Device-link transfer | Argon2id + AES-256-GCM (`.hollow` backup) | 256-bit | Encrypted identity + DB transfer to a new device (code = passphrase) |
+| Device-link transfer | SPAKE2 on a 10-character code, then AES-256-GCM (`.hollow` backup under a random key) | 256-bit | Identity + DB transfer to a new device; the relay never sees the code's secret part (§3.4) |
 | Mobile app lock | Argon2id + AES-256-GCM (+ OS secure enclave for biometric) | 256-bit | PIN/password/biometric launch lock over the identity-at-rest key |
 | Twitch verification | Ed25519-signed proof | 256-bit | Verifiable community membership proof |
 | Support credential | RSABSSA-SHA384-PSS-Deterministic (RFC 9474) blind signature, Ed25519 chain to a pinned root | RSA-3072 per listing, Ed25519 256-bit | Unlinkable, offline-verifiable proof that an identity bought a piece of art |
@@ -1635,12 +1648,12 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 | Threat | Protection |
 |--------|------------|
 | Message content interception | E2EE (Olm for DMs, MLS for servers). Only intended recipients hold decryption keys. |
-| Relay compromise | Zero-knowledge design. A fully compromised relay learns only peer IDs and room membership (both in memory, not logged to disk). |
-| Push-provider metadata harvesting | Empty wake-up pushes (`{wake, sender}` only). Apple/Google never receive message text, size, or content; all content is fetched from Hollow's relay and decrypted on-device. |
+| Relay compromise | The relay reads no content. A fully compromised relay learns routing metadata: peer IDs, which rooms they share, timing and size, each identity's roster, and a phone's push token and non-default notification settings, all held in memory and never logged to disk (§12.7). Every frame it forwards is signed by the sending device, so it cannot forge one in a device's name. |
+| Push-provider metadata harvesting | Wake-up pushes carry no content: a sender device ID and, for channels, server and channel IDs and a mention bit (§13.1). Apple/Google never receive message text, size, or content; all content is fetched from Hollow's relay and decrypted on-device. The stable IDs let them link phones that share a server or a conversation until those fields are encrypted for them as UnifiedPush already does. |
 | Link-preview IP harvesting | Previews are fetched once, by the sender, and travel inside the encrypted message. A recipient's device makes no request to the previewed site to render the card, so posting a link into a large room reveals nothing about who read it. Without this, a link in a busy channel would enumerate its readers to whoever controls the URL. Playing an embedded video is the sole exception and requires an explicit tap, on a target the signature already covers. |
 | Device-list tampering | A person's devices are a roster of statements, each signed by a device or by the recovery key (§3.2). The master key alone admits no device, every device signs its own consent, and an older roster cannot bring back a removed device. |
 | Stolen/lost device | Remove it from any other device: contacts drop its sessions and MLS leaf at once, and it locks and erases itself after three days. A stolen device cannot keep the identity: the recovery phrase, typed on any device, starts over with only the devices you pick. A backup file restored elsewhere waits until one of your devices approves it. |
-| Voice/video eavesdropping | SFrame E2EE. Media is encrypted per-frame. TURN servers see only ciphertext. |
+| Voice/video eavesdropping | DTLS-SRTP between participants, plus SFrame per-frame E2EE on voice, voice-channel video and screen shares (§6.3). TURN servers and the forwarder see only ciphertext. |
 | File content interception | AES-256-GCM per file. Relay and TURN see only encrypted bytes. |
 | Man-in-the-middle on key exchange | Authenticated Olm key exchange + Ed25519 identity binding. |
 | Storage shard snooping | Encrypt-then-erasure-code. Shards are encrypted; reconstructing all shards yields only ciphertext. |
@@ -1662,14 +1675,14 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 - **Local device compromise:** if an attacker has access to an unlocked device with the decrypted database open, they can read everything. This is true of any E2EE system. Identity at-rest protection (§2.3) mitigates offline attacks: the identity file is encrypted via DPAPI/Keychain (machine-bound) or a user password (Argon2id), so a stolen identity file is useless without the original machine or password. However, a live session with the wrapping key in memory remains vulnerable.
 - **Relay availability attacks:** a malicious relay can selectively drop or delay messages. The current single-relay architecture has no failover. Multi-relay support is designed but not yet deployed.
 - **Quantum computing:** all key exchanges use Curve25519. Migration to ML-KEM (Kyber) is planned but not prioritized for the beta.
-- **Trust-on-first-use (TOFU):** peer identity verification relies on out-of-band fingerprint comparison. There is no certificate authority or web of trust. The recovery key is trusted on first sight too: someone who first meets an identity after a thief with its master key published a forged one keeps the forged one, while everyone who already knew the identity keeps the real one.
+- **Trust-on-first-use (TOFU):** peer identity verification relies on out-of-band fingerprint comparison. There is no certificate authority or web of trust. The recovery key is trusted on first sight too: someone who first meets an identity after a thief with its master key published a forged one keeps the forged one, while everyone who already knew the identity keeps the real one. An identity from before 0.12 publishes its real key at the first 0.12 start of a device that kept the phrase, so a forger has to act before that.
 - **Someone who has your recovery phrase** is you to Hollow: they can recover the identity and remove your devices. Hollow never stores the phrase; keep your copy offline.
 
 ### 23.3 Relay Operator Trust Assumptions
 
-The relay operator is assumed to be **honest-but-curious**: the relay faithfully forwards messages but may attempt to read or log traffic. The protocol is designed so that curiosity yields nothing useful.
+The design assumes the relay may be **actively malicious**, not merely curious: anyone can run a relay, and the published attacks on federated messengers came from hostile servers. Such a relay learns routing metadata (§12.7) and can drop or delay what it carries. It cannot forge a message, a server change, a roster statement, a friend accept or a destruction order, because each is signed by a device or key the relay does not hold. Withholding is its real power: a relay that keeps a device removal from one contact leaves that contact sending to the removed device until it hears of the removal another way.
 
-The relay operator is also assumed to be potentially **unreliable**: the relay may go offline, and clients auto-reconnect with exponential backoff.
+The relay is also assumed to be **unreliable**: it may go offline, and clients auto-reconnect with exponential backoff.
 
 The relay operator is **not trusted** with: message contents, encryption keys, file data, user profiles, message signatures, or any application-layer semantics.
 
@@ -1682,7 +1695,9 @@ The host that serves release archives and the version manifest is assumed to be 
 - **No downgrade prompt.** Only a manifest whose latest version is strictly newer than the running build is presented as an update, so a replayed older manifest, still validly signed, cannot walk installs back to a build with known defects.
 - **Transport.** Update downloads are accepted over HTTPS only.
 
-Auxiliary feeds served from the same location (release notes, service status) are display-only and unsigned; nothing fetched through them is executed or installed. Outside this mechanism sit the signing key itself, which lives with the release engineer and never in the repository, and the installers distributed through the website, which rely on platform code signing rather than the manifest.
+What the manifest does not give is freshness. It carries no expiry and the client keeps no record of the newest version it has seen, so whoever controls the host can keep serving an older, validly signed manifest and hold back a newer release; it can withhold an update, never install one. The desktop updater checks the downloaded archive against the signed digest only, not against the operating system's code signature. On Android, releases are signed with a certificate generated on the release machine and kept off the repository; holding that file is holding the signing key.
+
+Auxiliary feeds served from the same location (release notes, service status) are display-only and unsigned; nothing fetched through them is executed or installed, and news posts render no remote images. Outside this mechanism sit the signing key itself, which lives with the release engineer and never in the repository, and the installers distributed through the website, which rely on platform code signing rather than the manifest.
 
 **Linux.** A Linux client is installed either as a portable directory or as a Flatpak, and the manifest carries a separate pinned archive for each, so an install can only ever fetch the artifact its own kind can apply. The portable kind replaces its own directory in place once the running process has exited and restores the previous build if the new one does not stay up. The Flatpak kind cannot modify its own read-only deployment at all: it hands the verified bundle to the host's Flatpak installer through the sandbox's host-command interface, and the restart is likewise performed from the host, since nothing started inside the sandbox outlives the application. The same bundles are also published in a self-hosted repository whose commits and summaries carry a GPG signature under a key embedded in every bundle and repository description, so the system-level update path verifies the publisher independently of the transport; an unsigned bundle is refused over an installation that originates from that repository.
 
@@ -1696,7 +1711,8 @@ Auxiliary feeds served from the same location (release notes, service status) ar
 - **No social recovery:** Shamir's Secret Sharing for key recovery via trusted contacts is designed but not implemented.
 - **No web client:** Windows, macOS, Linux, Android, and iOS are supported. A Flutter Web build is a future target with no working build today.
 - **Mobile media constraints:** voice and video calls (with SFrame E2EE), file transfer, DMs, MLS servers, vault, archive, and screen sharing with system audio (§6.8) all work on mobile. The remaining gap: the large-file Share transport (>34 MB, STUN-only) is excluded on mobile because it does not survive carrier-grade NAT. macOS below 13.0 cannot send screen-share audio (no capture API).
-- **Files are not encrypted at rest:** SQLCipher encrypts messages and metadata, but downloaded file attachments (`~/.hollow/files/`), vault shards, and vault cache are stored as plaintext on disk. AES-256-GCM at-rest file encryption keyed from the identity is planned.
+- **MLS post-compromise recovery:** members do not refresh their own leaf keys on a schedule yet (§5.4). Periodic self-update commits are planned.
+- **Push metadata at Apple and Google:** Firebase and APNs wakes carry stable IDs in the clear (§13.1). Encrypting them to the device, as the UnifiedPush path already does, is planned.
 
 ---
 

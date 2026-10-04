@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
@@ -79,7 +78,7 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
       debugPrint('[HOLLOW] erase after removal failed: $e');
     }
     await clearLocalSecretsAfterDestroy();
-    await relaunchApp();
+    await relaunchAfterWipe();
   }
 
   Future<void> _confirmErase() async {
@@ -87,7 +86,7 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
       context: context,
       title: 'Erase this device?',
       message: 'Hollow deletes your messages, files and keys on this device, '
-          'then restarts at first-time setup.',
+          'then restarts.',
       confirmLabel: 'Erase',
       destructive: true,
     );

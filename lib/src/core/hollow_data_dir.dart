@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 String? _cached;
 bool _portable = false;
 bool _pinned = false;
+bool _forcedPortable = false;
 
 /// True when the app is running in portable mode: a `portable.txt` marker (or
 /// an already-created `hollow_data` folder) next to the executable moved the
@@ -117,6 +118,7 @@ Future<void> initHollowDataDir({bool forcePortable = false}) async {
     final dir = Directory(_cached!);
     if (!dir.existsSync()) dir.createSync(recursive: true);
   } else {
+    _forcedPortable = forcePortable;
     // Profile pin (issue #47) beats portable MARKER detection ON PURPOSE: an
     // installed copy with a hollow_data folder next to the exe must be able to
     // switch back to its OS-default profile. A pure stick has no profiles.json.
@@ -242,3 +244,38 @@ bool get dataDirEnvOverrideActive {
 /// empty and waiting for first-time setup.
 bool profileHasIdentity(String path) =>
     File('$path${Platform.pathSeparator}identity.key').existsSync();
+
+/// The data root a launch would open now, by [initHollowDataDir]'s precedence.
+String nextLaunchRoot() {
+  final env = Platform.environment['HOLLOW_DATA_DIR'];
+  if (env != null && env.isNotEmpty) return env;
+  final portable = portableCandidatePath();
+  if (_forcedPortable && portable != null) return portable;
+  final pin = readProfileRegistrySync().activePath;
+  if (pin != null) return pin;
+  final bootNote = portableDetectionNote;
+  final detected = _portableDataRoot(false);
+  portableDetectionNote = bootNote;
+  return detected ?? defaultDesktopDataRoot();
+}
+
+/// True when a launch now would open a different profile than [root].
+bool nextLaunchLeaves(String root) {
+  if (Platform.isAndroid || Platform.isIOS) return false;
+  return !sameProfilePath(nextLaunchRoot(), root);
+}
+
+/// Settles profiles.json after the profile at [wipedRoot] was wiped, by
+/// [registryAfterWipe]. Phones have no profiles.
+Future<void> forgetWipedProfile(String wipedRoot) async {
+  if (Platform.isAndroid || Platform.isIOS) return;
+  final registry = readProfileRegistrySync();
+  final next = registryAfterWipe(
+    registry,
+    wipedRoot,
+    runningRoot: runningProfileRoot(),
+    profilePaths: listProfileRows(registry).map((r) => r.path),
+    holdsIdentity: profileHasIdentity,
+  );
+  await saveProfileRegistryIfChanged(registry, next);
+}

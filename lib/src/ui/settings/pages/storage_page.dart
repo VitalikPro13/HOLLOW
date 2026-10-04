@@ -24,7 +24,11 @@ class StorageSettingsPage extends StatelessWidget {
         if (desktop)
           const SettingsSection(
             title: 'On this computer',
-            children: [DataFolderRow(), ProfileLocationsCard()],
+            children: [
+              DataFolderRow(),
+              RecordingsFolderRow(),
+              ProfileLocationsCard(),
+            ],
           ),
         const StorageAdvancedSettings(),
       ],

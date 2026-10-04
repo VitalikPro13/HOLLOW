@@ -945,6 +945,9 @@ impl MessageStore {
         // `support_creds` requires a valid signature from every master, so there is no
         // baseline left to learn. The column stays so existing databases open unchanged.
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN support_creds_signed INTEGER NOT NULL DEFAULT 0;");
+        // The avatar thumbnail a pending request's sealed card carried. Never in
+        // `user_profiles.avatar`, whose bytes must hash to the signed avatar hash.
+        migrate(conn, "ALTER TABLE friends ADD COLUMN card_thumb BLOB;");
 
         // -- Migration: content_id column on files (vault ↔ file_id link) --
         migrate(conn, "ALTER TABLE files ADD COLUMN content_id TEXT;");
@@ -3341,6 +3344,11 @@ impl MessageStore {
                 params![peer_id],
             ).map_err(|e| format!("Failed to clear showcase assets: {e}"))?;
         }
+        // A pending request's thumb stands in only until the full profile holds the
+        // avatar or signs that there is none.
+        if avatar_val.is_some() || avatar_is_clear || profile_avatar_hash == Some("") {
+            self.retire_card_thumb(peer_id)?;
+        }
         Ok(true)
     }
 
@@ -3373,6 +3381,9 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to save profile card: {e}"))?;
         if written > 0 {
+            if avatar_hash.is_empty() {
+                self.retire_card_thumb(peer_id)?;
+            }
             return Ok(true);
         }
         // The same card again, now with the bytes it was pulled for.
@@ -3454,6 +3465,20 @@ impl MessageStore {
             Some(Err(e)) => Err(format!("Failed to read profile row: {e}")),
             None => Ok(None),
         }
+    }
+
+    /// The avatar to paint for a peer: its stored still, else the card thumb on its
+    /// friend row. Never for re-serving: a thumb is no signed avatar.
+    pub fn load_avatar_for_display(&self, peer_id: &str) -> Result<Option<Vec<u8>>, String> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(
+                    (SELECT avatar FROM user_profiles WHERE peer_id = ?1),
+                    (SELECT card_thumb FROM friends WHERE peer_id = ?1))",
+                params![peer_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to load avatar: {e}"))
     }
 
     /// Load only the avatar blob for a peer.
@@ -4300,7 +4325,8 @@ impl MessageStore {
                 // than the store on every re-delivery, so the mailbox replays it and the receiver
                 // re-notifies forever. MAX(), not blind assign, so an out-of-order older copy never
                 // walks the row backwards. Accepted and declined rows keep their ORIGINAL time: the
-                // declined tombstone IS the freshness baseline a re-add has to beat.
+                // declined tombstone IS the freshness baseline a re-add has to beat. A card
+                // thumb outlives only a pending or accepted row.
                 "INSERT INTO friends (peer_id, status, direction, requested_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(peer_id) DO UPDATE SET
@@ -4308,11 +4334,43 @@ impl MessageStore {
                    requested_at = CASE WHEN ?2 = 'pending'
                                        THEN MAX(requested_at, ?4)
                                        ELSE requested_at END,
-                   updated_at = ?5",
+                   updated_at = ?5,
+                   card_thumb = CASE WHEN ?2 IN ('pending', 'accepted') THEN card_thumb END",
                 params![peer_id, status, direction, requested_at, now],
             )
             .map_err(|e| format!("Failed to save friend: {e}"))?;
         Ok(())
+    }
+
+    /// Keep the avatar thumbnail a sealed card carried, only on the pending row of the
+    /// request it came with. Returns whether the row changed.
+    pub fn set_friend_card_thumb(
+        &self,
+        peer_id: &str,
+        direction: &str,
+        requested_at: i64,
+        thumb: Option<&[u8]>,
+    ) -> Result<bool, String> {
+        self.conn
+            .execute(
+                "UPDATE friends SET card_thumb = ?4
+                 WHERE peer_id = ?1 AND status = 'pending' AND direction = ?2 AND requested_at = ?3
+                   AND card_thumb IS NOT ?4",
+                params![peer_id, direction, requested_at, thumb],
+            )
+            .map(|n| n > 0)
+            .map_err(|e| format!("Failed to save card thumb: {e}"))
+    }
+
+    /// Drop a friend's card thumb once a full profile or a newer card decides the avatar.
+    fn retire_card_thumb(&self, peer_id: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE friends SET card_thumb = NULL WHERE peer_id = ?1 AND card_thumb IS NOT NULL",
+                params![peer_id],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("Failed to retire card thumb: {e}"))
     }
 
     /// Remove a friend entry entirely.

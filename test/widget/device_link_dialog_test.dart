@@ -203,6 +203,28 @@ void main() {
     expect(_Link.enteredCode, 'AB3CD4EFGH');
   });
 
+  // HOL-SEC-162: someone talked into reading the code out gets a prompt that
+  // looks like their own phone's, so both screens say who the code is for.
+  testWidgets('the code screen says the code is never shared', (tester) async {
+    await _pump(
+      tester,
+      const DeviceLinkState(phase: LinkPhase.showingCode, code: 'AB3CD4EFGH'),
+    );
+    showDeviceLinkDialog(_host, mode: DeviceLinkMode.showCode);
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('Nobody from Hollow will ever ask'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the approval asks for the device in hand', (tester) async {
+    await _pump(tester, confirm);
+    showDeviceLinkDialog(_host, mode: DeviceLinkMode.showCode);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('in your hands right now'), findsOneWidget);
+  });
+
   testWidgets('receiving shows the shared progress bar', (tester) async {
     await _pump(
       tester,

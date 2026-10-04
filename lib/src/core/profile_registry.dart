@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 /// Profile registry (issue #47): switch and erase identities.
 ///
 /// A "profile" is just a data root. The registry records which one is pinned
@@ -54,10 +56,16 @@ class ProfileRegistry {
   }
 }
 
+/// Moves the default root, and with it profiles.json, into a test's own folder.
+@visibleForTesting
+String? debugDefaultDesktopDataRoot;
+
 /// The default per-OS data root, mirroring Rust's `dirs::data_dir()/hollow`
 /// resolved through env vars. Where a non-portable, non-pinned install keeps its
 /// data, and where profiles.json anchors. Desktop only.
 String defaultDesktopDataRoot() {
+  final debugRoot = debugDefaultDesktopDataRoot;
+  if (debugRoot != null) return debugRoot;
   final env = Platform.environment;
   if (Platform.isWindows) {
     final appData = env['APPDATA'];
@@ -115,15 +123,53 @@ ProfileRegistry readProfileRegistrySync() {
   }
 }
 
+String _encodeRegistry(ProfileRegistry registry) =>
+    const JsonEncoder.withIndent('  ').convert(<String, dynamic>{
+      'version': 1,
+      if (registry.activePath != null) 'active': registry.activePath,
+      'profiles': registry.custom.map((p) => p.toJson()).toList(),
+    });
+
 /// Persist the registry. Creates the anchor dir if needed (a portable-only
 /// user has no AppData dir until they first use the switcher).
 Future<void> saveProfileRegistry(ProfileRegistry registry) async {
   final file = File(profileRegistryPath());
   await file.parent.create(recursive: true);
-  final json = <String, dynamic>{
-    'version': 1,
-    if (registry.activePath != null) 'active': registry.activePath,
-    'profiles': registry.custom.map((p) => p.toJson()).toList(),
-  };
-  await file.writeAsString(const JsonEncoder.withIndent('  ').convert(json));
+  await file.writeAsString(_encodeRegistry(registry));
+}
+
+/// Persists [next] only when it differs from [current], so an install with one
+/// profile never gains a profiles.json.
+Future<void> saveProfileRegistryIfChanged(
+    ProfileRegistry current, ProfileRegistry next) async {
+  if (_encodeRegistry(current) == _encodeRegistry(next)) return;
+  await saveProfileRegistry(next);
+}
+
+/// The registry once the profile at [wipedRoot] is wiped: its entry goes, the
+/// rest stays. If the next launch would have opened it, the pin moves to the
+/// first other profile in [profilePaths] that still holds an identity, or
+/// clears so that launch opens Welcome. A wipe touches only its own profile.
+ProfileRegistry registryAfterWipe(
+  ProfileRegistry registry,
+  String wipedRoot, {
+  required String runningRoot,
+  required Iterable<String> profilePaths,
+  required bool Function(String path) holdsIdentity,
+}) {
+  final custom = [
+    for (final p in registry.custom)
+      if (!sameProfilePath(p.path, wipedRoot)) p,
+  ];
+  final pin = registry.activePath;
+  final opensWiped = sameProfilePath(pin ?? runningRoot, wipedRoot);
+  if (!opensWiped) return ProfileRegistry(activePath: pin, custom: custom);
+  String? next;
+  for (final path in profilePaths) {
+    if (!sameProfilePath(path, wipedRoot) && holdsIdentity(path)) {
+      next = path;
+      break;
+    }
+  }
+  return ProfileRegistry(activePath: next, custom: custom);
 }

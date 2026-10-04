@@ -74,5 +74,10 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   private, link-local or metadata address on any hop, no proxy. HOL-SEC-148.
 - Vault shard streams ride `vault_ops::shard_stream_id(cid, si, from, to)`, never the
   content id (one id per transfer, both ends derive it).
+- File streams likewise ride `file_handler::file_stream_id(fid, from_device, to_device)`
+  (session 35, decision E): never the file id on the wire, a send temp per transfer
+  (`.stream_send_{stream_id}.tmp`), bytes complete only the file whose pending header their
+  own sender gave us (`file_of_stream`), early bytes wait under their stream id. Dart sends a
+  file or shard only on that exact device's data channel, never a sibling's.
 - Any zip we unpack names entries via `enclosed_name()` against an allowlist and a size
   budget (snapshot import, archive viewer, updater). HOL-SEC-129.
