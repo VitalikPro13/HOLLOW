@@ -12394,6 +12394,8 @@ async fn handle_incoming_request(
             for master in social::take_sibling_removals(&removed, ceiling, db_path, db_passphrase) {
                 pending_friend_accepts.remove(&master);
                 pending_friend_requests.remove(&master);
+                // Out of their DM room as on the device that removed them (C-OLM-02).
+                social::leave_dm_room(ws_cmd_tx, local_peer_str, &master);
                 let _ = event_tx.send(NetworkEvent::FriendRemoved { peer_id: master }).await;
             }
 

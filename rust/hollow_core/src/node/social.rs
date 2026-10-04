@@ -671,29 +671,27 @@ pub(crate) async fn handle_send_friend_request(
     );
 
     let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
-    if !targets.is_empty() {
-        for t in &targets {
-            send_message_to_peer(
-                &ws_cmd_tx, &ws_room_peers,
-                t, request_msg.clone(),
-            );
-        }
-        // We only joined the TARGET's inbox to DELIVER the request, so leave now rather
-        // than linger in their inbox set. WS commands are ordered on one channel, so
-        // this leave is processed AFTER the SendDirect above, and the accept comes back
-        // via the shared DM room, not the inbox.
-        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
-            room_code: inbox_room.clone(),
-        });
-    } else {
-        // Peer not in any WS room yet: queue the request AND deposit it into the
-        // target's master-keyed mailbox. The queue alone only ever fired while both
-        // people were online at once, because a targeted send to a master reaches
-        // nobody. The deposit is buffered by the relay under the master and collected
-        // on the target's next boot, when it joins its inbox with an ownership proof.
+    for t in &targets {
+        send_message_to_peer(ws_cmd_tx, ws_room_peers, t, request_msg.clone());
+    }
+    // The mailbox copy, always: the devices we see live are only some of theirs (one
+    // may be away, or our view of a room stale), and it reaches every one that proves
+    // it owns the inbox, now or on its next boot. A device that took the live copy
+    // drops this one as a repeat.
+    deposit_friend_request_to_inbox(ws_cmd_tx, &master, &request_msg);
+    if targets.is_empty() {
+        // The queue re-sends live once one of their devices shows up in a room we share.
         pending_friend_requests.insert(peer_id_str.clone(), now);
-        deposit_friend_request_to_inbox(ws_cmd_tx, &master, &request_msg);
         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id_str} not reachable yet, deposited friend request in inbox:{master} and queued it");
+    } else {
+        // We joined their inbox only to deliver, so leave it; commands are ordered on
+        // one channel, so the leaves land after the sends, and the accept comes back
+        // through the DM room.
+        let master_inbox = format!("inbox:{master}");
+        if master_inbox != inbox_room {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: master_inbox });
+        }
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: inbox_room.clone() });
     }
 
     let _ = event_tx.send(NetworkEvent::FriendRequestReceived {

@@ -685,7 +685,7 @@ Slice reports: `reports/planned/security/audit/phase_ef/`. Findings HOL-SEC-128.
 | Typed secrets | `api/identity.rs` `open_typed_secret`; Dart `withTypedSecret` | Every Settings prompt checks both slots and ends the session like a duress unlock. HOL-SEC-157 |
 | Notifications while locked | `system_notification_provider` `_contentAllowed`, push posters, NSE `~locked` marker | One neutral notification, no reply. HOL-SEC-155. `notification_lock_test.dart` |
 
-Residuals: AR-21..AR-29; the re-add regression from the DM-room rule is being fixed (tmp4.txt NEXT SESSION 35).
+Friend requests always ride the target's inbox as well as live sends (`social::handle_send_friend_request`), so a device the requester cannot see still hears them; a sibling's removal leaves the DM room. Residuals: AR-21..AR-31.
 
 ---
 

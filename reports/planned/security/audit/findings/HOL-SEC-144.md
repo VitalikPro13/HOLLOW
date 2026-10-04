@@ -37,3 +37,12 @@ a relay-side purge). Avatar bytes on pending requests now arrive only after an a
 `authz_a_cancelled_request_leaves_its_dm_room`,
 `authz_a_removal_takes_both_sides_out_of_the_dm_room`,
 `authz_a_block_drops_dms_still_queued_for_the_blocked_friend`.
+
+Found while proving it: a friend request reached only the target devices the requester
+could see at that moment (a mailbox copy went out only when it saw none), so a device out
+of view never heard it; the new DM-room rule made that subset smaller and a re-add test
+flaky. Every request now also goes to the target's inbox (a device that took the live copy
+drops the second as a duplicate), and a removal heard from a sibling leaves the DM room
+too. Tests `a_friend_request_reaches_the_target_devices_the_requester_cannot_see` (failed
+before), `authz_a_removal_reaches_an_online_sibling_and_never_undoes_a_readd` (20/20 in a
+loop, was 2 of 6 failing). Mutation 2/2.

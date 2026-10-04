@@ -1,7 +1,7 @@
 # HOL-SEC-130: A restored backup the owner refused gained the power to remove every owner device by waiting seven days
 
 ```
-ID:          HOL-SEC-130                 Status: Fixed (2026-10-04, session 34), relay deploy pending its canary
+ID:          HOL-SEC-130                 Status: Fixed (2026-10-04, session 34), relay deployed 2026-10-04 after ASan and release canaries
 Severity:    High (Impact H: every owner device locked at contacts, at the relay and on itself, erased after three days unless the phrase is typed, repeatable after each recovery; Exploitability M: a stolen backup with its passphrase, or any device that ever held the master key)
 Category:    Access control
 Component:   rust/hollow_core/src/identity/roster.rs (fold), relay-uws/src/roster.h

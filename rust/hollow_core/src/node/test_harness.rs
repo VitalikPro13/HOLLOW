@@ -32139,6 +32139,11 @@ async fn authz_a_removal_reaches_an_online_sibling_and_never_undoes_a_readd() {
     a1.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: b_master.clone() }).await.unwrap();
     assert!(drops_friend(&mut a2, &b_master).await, "an online sibling kept the friend we removed");
     assert!(!is_friend(&a2, &b_master), "the sibling still lists the friend we removed");
+    let room = super::types::dm_room_code(&m_master, &b_master);
+    assert!(
+        wait_until(10, async || !relay.room_devices(&room).contains(&a2.device_id)).await,
+        "a sibling that heard of our removal stays in the ex-friend's DM room",
+    );
     let ended: i64 = a1
         .store()
         .load_setting(&format!("friend_removed:{b_master}"))
@@ -39290,5 +39295,49 @@ async fn authz_a_block_drops_dms_still_queued_for_the_blocked_friend() {
     assert!(
         !b.dm_thread(&a.master_id).iter().any(|m| m.text == "written before the block"),
         "a DM queued before the block reached the blocked friend",
+    );
+}
+
+/// A friend request reaches every device of its target: the requester sends it live
+/// to the devices it can see and leaves a copy in the target's mailbox for the rest.
+/// Here B, a co-member, sees only A2 while A1 is away, and A1 still hears the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_friend_request_reaches_the_target_devices_the_requester_cannot_see() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let a_master = tag_kp(241).peer_id();
+    super::resolver::seed_self(&a_master, &[tag_kp(242).peer_id(), tag_kp(243).peer_id()]);
+    let mut a1 = spawn_node_with_friends(&relay, 241, 242, &[]).await;
+    let inbox = format!("inbox:{a_master}");
+    assert!(wait_until(10, async || relay.room_devices(&inbox).contains(&a1.device_id)).await, "A1 is up before A2 keys it");
+    let mut a2 = spawn_node_with_friends(&relay, 241, 243, &[]).await;
+    expect_siblings_ready(&relay, &a1, &a2, 15).await;
+    let mut b = spawn_node_with_friends(&relay, 244, 244, &[]).await;
+    let server_id = create_server_and_wait(&mut a2, "Co-members").await;
+    b.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut b, &server_id, 20).await, "B joins A2's server");
+
+    relay.set_online(&a1.device_id, false);
+    assert!(
+        wait_until(20, async || {
+            b.known_devices(&a_master).contains(&a2.device_id)
+                && b.sees_peer(&a2.device_id).await
+                && !b.sees_peer(&a1.device_id).await
+        })
+        .await,
+        "B sees A2 alone",
+    );
+    drain_events(&mut a1);
+    drain_events(&mut a2);
+    b.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: a_master.clone() }).await.unwrap();
+    let asked = |ev: &NetworkEvent| matches!(ev, NetworkEvent::FriendRequestReceived { .. });
+    assert!(wait_event(&mut a2, std::time::Duration::from_secs(15), asked).await, "control: A2 takes the request live");
+    relay.set_online(&a1.device_id, true);
+    assert!(
+        wait_event(&mut a1, std::time::Duration::from_secs(15), asked).await,
+        "A1 never heard a request sent while the requester saw only A2",
     );
 }

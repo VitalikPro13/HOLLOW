@@ -1,7 +1,7 @@
 # HOL-SEC-154: A destroy order could be dated in the future, judged without our roster, or have its targets re-split
 
 ```
-ID:          HOL-SEC-154                 Status: Fixed (2026-10-04, session 34), relay mirror deploy pending its canary
+ID:          HOL-SEC-154                 Status: Fixed (2026-10-04, session 34), relay mirror deployed 2026-10-04 after ASan and release canaries
 Severity:    Low
 Category:    Access control / Canonicalisation
 Component:   rust/hollow_core/src/node/destroy.rs, crypto_handler.rs (verify_destroy_identity), storage/messages.rs, relay-uws/src/kill_order.h

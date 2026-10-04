@@ -1,7 +1,7 @@
 # HOL-SEC-128: One join frame from any identity crashed the relay and lost every buffer
 
 ```
-ID:          HOL-SEC-128                 Status: Fixed (2026-10-04, session 34), relay deploy pending its canary
+ID:          HOL-SEC-128                 Status: Fixed (2026-10-04, session 34), relay deployed 2026-10-04 after ASan and release canaries
 Severity:    High (Impact H: every offline buffer, ring, push token, kill order, join lock and roster lost, repeatable; Exploitability H: any authenticated identity, one frame)
 Category:    Relay / Availability
 Component:   relay-uws/src/ws_handler.cpp (inbox_owner_by_roster, subscribe), new client_json.h
