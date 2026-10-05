@@ -11,6 +11,140 @@ app instances driven by the probe) on Windows and on the Mac mini's iOS Simulato
 a scan of every app log for refusal lines during honest journeys. Every bug found got a
 test that fails without its fix, checked by reverting the fix (a mutation run).
 
+The final pass on the finished 0.12 tree (session 36) is the next section; the
+sessions 23 and 24 pass follows it.
+
+## Final pass before release (session 36, 2026-10-05)
+
+**Tree:** local `main` at `a2638379` plus this session's two fixes, uncommitted. The
+Mac mini was brought to the same tree without git (an LF archive of the diff, checked
+by the tree hash).
+
+| Suite | Result |
+|---|---|
+| Rust (`cargo nextest run --lib`) | 1498 passed, 9 skipped (3 new tests) |
+| clippy on changed lines | nothing |
+| Windows fleet, `scripts/fleet_all.ps1` (28 items, fresh build and identities) | 28 pass (27 first time; `fleet_destroy` after its gates were brought in line with HOL-SEC-156) |
+| iOS Simulators, 10 phone scenarios plus `mobile_call` and `mobile_voice_kick` | all pass |
+| New checks for the s35 decisions and the s34 device lists | see below |
+| 0.11.1 clients against today's relay (`fleet_device_link` built from `v0.11.1-beta`) | 22 of 22 |
+| Load-timing tests from s35 | 5 of 5 alone each, and about 20 s each inside the full suite |
+
+Evidence is under `build/fleet_out/kept/session36/` and `build/fleet_out/all/`
+(gitignored). The refusal scans were read item by item: every line is one of the
+classes explained in the session 24 section, plus the three below.
+
+**The s35 decisions, proven live**
+- A (recordings) and B (a wipe touches only its profile): `scripts/fleet_profile_wipe.ps1`,
+  5 of 5. Two profiles in a scratch APPDATA and home; profile B records a real call
+  (5 MB file) into a shared `Hollow Recordings` folder that also holds profile A's
+  recording and a stranger's file; B destroys this device. Only B's recording goes,
+  `profiles.json` drops B and pins A, B's root is empty, no old debug log survives,
+  A is untouched.
+- C (legacy phrase): a 0.11.1 two-device identity, its friend and a 0.11 server were
+  made with the 0.11.1 build, then started on 0.12. Every device signed the first
+  recovery from its stored phrase and claimed its seat, the phrase prompt confirmed and
+  erased on one device and stayed as a reminder on the other ("Later"), DMs and the old
+  server work in every direction. It found bug 2 below and findings 1 and 2.
+- D (request thumbnails): `regress_request_thumb`, both pending rows show the other
+  side's avatar, the still one and the first frame of the animated one.
+- E (per-transfer stream ids): `regress_two_device_file`, on the fleet
+  `fleet_device_link -KeepUp` leaves: a server file to both devices of one identity at
+  once, a file from the linked device to its sibling and a friend, a DM file to both
+  devices. All six copies are byte-identical to their sources.
+
+**The s34 device lists**
+- Voice calls with kicks: `regress_voice_kick` (Windows) and `mobile_voice_kick`
+  (phones). Found bug 1.
+- Joins on a busy server: `regress_busy_join`, the joiner holds all 16 messages, from
+  before and during its join.
+- DM and server re-add: `fleet_friend_readd` 6 of 6, kick and rejoin in `moderation`
+  and both kick scenarios.
+- Desktop locked toasts: `regress_locked_toast`, a DM while locked posts only the
+  neutral toast (`locked toast posted`), the message is there after unlock.
+- Wipe traces on Windows: `fleet_destroy` and `fleet_profile_wipe`, empty roots, no
+  debug log, the OS temp names gone.
+- iOS: the App Group data, push hints, push diag and `Documents/hollow` all carry the
+  backup exclusion; App Lock on writes only `{"~locked":true}` into the hints and turns
+  the switcher cover on; the snapshot iOS takes for the app switcher is the blank cover
+  while locked and the screen while unlocked (decoded from SplashBoard); the PIN opens
+  the app after a restart (the this-device keychain class round trip); turning the lock
+  off clears the hints and the cover.
+- Cross-platform: a friend request, DMs both ways and a voice call between Windows and
+  an iPhone Simulator.
+
+**Bugs found and fixed (each with a harness test, mutation-checked)**
+
+1. **A member kicked from a server while in its voice channel stayed in a ghost call.**
+   The kick's teardown removed the server state before the auto-leave ran, and the
+   auto-leave only left when the state existed; the owner's delete never called it.
+   The kicked device kept the room on screen and redialled the others every 20 to 30 s
+   (they refused it, so no media flowed). Fix: the auto-leave treats a server we no
+   longer hold as one we are out of, and the delete op (plaintext and MLS twin) and the
+   sync-reconciled eviction call it. Tests `a_kicked_member_leaves_its_own_voice_call`,
+   `a_deleted_servers_call_ends_for_every_member`. Proven on Windows and the phones.
+2. **The two devices of an upgraded 0.11 identity stopped counting each other.** A
+   0.11 link copied the stored phrase, so each device upgrades on its own at its first
+   0.12 start with only its own consent, and nothing told the sibling: both showed "Only
+   this device is linked", sibling sync stopped and one device refused the other's MLS
+   rebind. Fix: a start that builds the first roster from a 0.11 list announces it once
+   it connects, the way a phrase change does (own room, contacts, mailbox). Test
+   `a_legacy_identity_whose_devices_both_kept_the_phrase_stays_one_identity` asserts
+   the announce on the wire, since the harness's shared resolver hides the split
+   itself; the fleet upgrade proved the fix (two devices on each, sibling sync running).
+
+**Findings left open (decisions for Vitalik)**
+
+1. Two devices of a 0.11 identity that upgrade at the same moment each rebind their
+   MLS leaf in a server they share and fork the group. The forked device misses live
+   posts there (each arrives seconds later through the Olm sync fallback) until it
+   reconnects or restarts, which heals it. A decrypt failure at our own epoch sends no
+   fork probe. Proposed: probe with the `epoch_auth` digest on such a failure.
+2. Friends of an upgrading multi-device identity see "added a new device" for a device
+   they already knew, because the first 0.12 roster they hold carries one consent and
+   becomes the baseline. The 0.11 list cannot help: the roster replaces it in the same
+   row. Proposed: a device the stored roster already admitted is not new when only its
+   consent arrives.
+3. The "Recording saved" toast covers the call bar's hang-up button while it shows.
+4. On a phone, a member kicked while viewing a channel stays on that channel's page
+   of the lost server.
+5. Every joiner logs `Ignoring ServerJoinResolved from non-member` for its own join:
+   the resolution arrives after its snapshot and before it can place the owner's
+   device. Harmless; a quiet return for our own join would remove it.
+6. A wipe deletes the legacy keychain slot `com.hollow.identity.wrapping_key` along with
+   its own per-profile slot. On macOS (no DPAPI fallback) another profile that never
+   started since the per-profile slots came in would lose its key.
+7. A share-backed DM file's first share offer can arrive before the receiver has heard
+   the sender's "have" and is dropped; the next tick connects (about 11 s).
+
+**New refusal classes seen on honest traffic, explained**
+- `Ignoring ServerJoinResolved from non-member` on a joiner (finding 5).
+- `Not answering a door ask ... no device of a member` while a joiner is not admitted
+  yet (D1 working).
+- `Dropped RtcShareOffer ... proved no link to a share we hold` (finding 7).
+- After the 0.11 upgrade: 0.11 frames the relay still held, refused as `Unsealed`.
+
+**Not covered, and why**
+- The iOS notification extension's neutral banner: `simctl push` delivered the alert
+  without running the extension. Needs a real iPhone and APNs.
+- macOS App Lock launch secret after the keychain class change: needs the signed
+  build (the data-protection keychain wants the team's entitlement). Check it on the
+  notarized release build.
+- Shares through the media forwarder: the forwarder on the box predates s34 and gave
+  0.12 clients no session, so the viewer fell back to the direct route (which works).
+  The new forwarder deploys on release day; then run `regress_voice3` with
+  `HOLLOW_FORCE_RELAY_ROUTE=1` and expect "assigned to infra forwarder" with no
+  `direct_failed`.
+- Android (FLAG_SECURE, recents, clipboard, neutral banners) and a real FCM push to a
+  closed phone: Vitalik.
+
+**Fleet tooling changed**
+- `fleet_destroy.ps1`: the order and wipe gates judge by the exit and the empty root
+  when the wipe erased the debug log (HOL-SEC-156), and say so in a note.
+- New: `fleet_profile_wipe.ps1`, scenarios `regress_request_thumb`,
+  `regress_two_device_file`, `regress_voice_kick`, `regress_busy_join`,
+  `regress_locked_toast`, `mobile_call`, `mobile_voice_kick`.
+
 ## Results at the end of session 24
 
 | Suite | Result |

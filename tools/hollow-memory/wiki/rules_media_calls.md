@@ -146,6 +146,10 @@ whitelist) stay in CLAUDE.md.
 - Server voice seats are re-judged at the loop head (`voice_handler::unseat_unqualified`):
   a kick, ban, lost channel sight or roster removal drops the device from the call at
   every member. HOL-SEC-138.
+- Our OWN seat ends with the server: `auto_leave_invisible_voice_channels` treats a server
+  whose state is gone as one we are out of, and the kick/ban teardown, the delete op (both
+  twins) and the sync-reconciled eviction all call it. A teardown that removes the state
+  first and skips the call leaves a ghost call redialling the others (session 36).
 - The Share lane answers only a peer that proved one of our share links
   (`holds_a_link_we_serve`); Always relay does not cover files over 34 MB (Settings says
   so). HOL-SEC-141.

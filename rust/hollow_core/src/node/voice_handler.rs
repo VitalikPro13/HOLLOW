@@ -1282,13 +1282,38 @@ pub(crate) async fn handle_voice_channel_leave(
 
 // ── Auto-leave on lost visibility ────────────────────────────────────
 
-/// After a role, visibility, kick or ban op applies, leave any voice channel we
-/// are IN but can no longer SEE. Mirrors the text-channel UI eviction for the
-/// active call: a participant who loses access must drop it, and the SFrame key
-/// rotates for the rest via the subgroup removal that already ran. Runs on the
-/// affected node itself, so it works regardless of which screen is focused.
+/// After a role, visibility, kick, ban or delete op applies, leave any voice
+/// channel we are IN but can no longer SEE. Mirrors the text-channel UI eviction
+/// for the active call: a participant who loses access must drop it, and the
+/// SFrame key rotates for the rest via the subgroup removal that already ran.
+/// Runs on the affected node itself, so it works regardless of which screen is
+/// focused. Boxed: it is awaited from the swarm's largest futures.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn auto_leave_invisible_voice_channels(
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    bundle_keypair: &NativeKeypair,
+    crypto_store: &CryptoStore,
+    voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    gossip_overlays: &HashMap<String, super::gossip::GossipOverlay>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    server_id: &str,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) {
+    Box::pin(auto_leave_invisible_voice_channels_inner(
+        mls, ws_cmd_tx, ws_room_peers, server_states, bundle_keypair, crypto_store,
+        voice_channel_participants, voice_channel_gossip_mode, gossip_overlays,
+        local_peer_str, device_peer_id, server_id, event_tx,
+    ))
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn auto_leave_invisible_voice_channels_inner(
     mls: &mut Option<MlsManager>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -1314,10 +1339,11 @@ pub(crate) async fn auto_leave_invisible_voice_channels(
         })
         .filter_map(|(vc_key, _)| vc_key.strip_prefix(&prefix).map(|c| c.to_string()))
         .filter(|cid| {
-            // Leave if we were removed from the server entirely (kick or ban means
-            // we cannot be in any of its calls), or a restricted channel's
-            // visibility now excludes us. Both checks collapse device to master.
-            server_states.get(server_id).is_some_and(|s| {
+            // Leave if we were removed from the server entirely (kick, ban, or the
+            // owner's delete, which drains every member), its state is already torn
+            // down, or a restricted channel's visibility now excludes us. Both
+            // checks collapse device to master.
+            server_states.get(server_id).is_none_or(|s| {
                 !s.is_member(local_peer_str)
                     || (s.channel_uses_subgroup(cid) && !s.can_see_channel(local_peer_str, cid))
             })
@@ -1325,7 +1351,7 @@ pub(crate) async fn auto_leave_invisible_voice_channels(
         .collect();
 
     for cid in leaving {
-        hollow_log!("[HOLLOW-VC] Auto-leaving restricted voice channel {cid} in {server_id} — visibility lost");
+        hollow_log!("[HOLLOW-VC] Auto-leaving voice channel {cid} in {server_id}: we can no longer be in it");
         handle_voice_channel_leave(
             server_id.to_string(), cid,
             mls, ws_cmd_tx, ws_room_peers,

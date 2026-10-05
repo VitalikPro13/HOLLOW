@@ -1,0 +1,519 @@
+{
+ "peers": [
+  "a",
+  "b",
+  "c"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Add a server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "vck-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:vck-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "all",
+   "op": "tap",
+   "target": "text:Hide",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "long_press",
+   "target": "text:vck-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create channel",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "dialog > text:Voice",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Voice",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "dialog > type:EditableText",
+   "value": "room-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:room-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "long_press",
+   "target": "text:vck-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Invite people",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Add a server",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Add a server",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:room-${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:room-${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:vck-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:room-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:vck-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:room-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "c",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "text:vck-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "text:room-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:probe-b",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:probe-c",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:probe-a",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:probe-c",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "semantics:probe-a",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "semantics:probe-b",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "mvk-01-three"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "a kicks c from c's tile: c's own call must end (the ghost-room fix), a and b drop to two"
+  },
+  {
+   "peer": "a",
+   "op": "long_press",
+   "target": "text:probe-c",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Kick member",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "dialog > text:Kick",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Kick",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "gone": "text:vck-${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "gone": "semantics:Leave the room",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "idle",
+   "timeout_ms": 10000,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "semantics:probe-c",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "semantics:probe-c",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "c",
+   "op": "expect_count",
+   "target": "semantics:Leave the room",
+   "value": 0
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "mvk-02-c-kicked"
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "long_press",
+   "target": "text:vck-${RUN}",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Delete server",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Delete server",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "text:vck-${RUN}",
+   "timeout_ms": 30000,
+   "soft": true
+  }
+ ]
+}

@@ -1,0 +1,277 @@
+{
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_A"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Friends",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_A}"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:${PEER_A}",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Friends, 1 friend request",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Friends",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Accept friend request",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Accept friend request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "the accepted friend must reach the UI on BOTH sides, not just the friends table"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:probe-b",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:probe-a",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:probe-a"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "field",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "field",
+   "value": "dm from b ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:dm from b ${RUN}",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:dm from b ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:probe-b"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "field",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "dm from a ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:dm from a ${RUN}",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:dm from a ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "log",
+   "message": "b calls a from the open DM; a answers; both reach an active call; b hangs up"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Voice call",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Accept",
+   "timeout_ms": 45000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "mc-01-ringing"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Accept",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "active",
+   "timeout_ms": 45000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "active",
+   "timeout_ms": 45000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "active",
+   "timeout_ms": 2000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "mc-02-in-call"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Leave the call",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "idle",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "idle",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "mc-03-after"
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "all",
+   "op": "log",
+   "message": "nothing to undo: every run restores the fixture data directories, so the friendship and the DMs are gone before the next one starts."
+  }
+ ]
+}

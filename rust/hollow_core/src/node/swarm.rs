@@ -836,9 +836,16 @@ async fn run_event_loop(
     // misattributed. A no-op self-mapping on a pre-multi-device install.
     // Our own roster comes up to date here (design ID-1), and the resolver holds its
     // members only: holding the master key makes no device one of ours.
+    // A first 0.12 start builds the roster from the 0.11 list with only this device's
+    // consent; every device holding the old phrase does so alone, so each tells its
+    // siblings once connected or none of them counts the others.
+    let mut announce_first_roster = false;
     {
         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             super::resolver::warm_from_store(&store);
+            let own_master = master_keypair.peer_id();
+            announce_first_roster = super::roster_book::load(&store, &own_master).is_none()
+                && store.load_device_list(&own_master).ok().flatten().is_some();
             let (_roster, own_state) =
                 super::roster_book::ensure_own(&store, &master_keypair, &device_keypair, &db_path);
             drop(store);
@@ -3490,6 +3497,11 @@ async fn run_event_loop(
                                 &ws_cmd_tx, &local_peer_str, &device_peer_id, server_states.keys(),
                                 &db_path, &db_passphrase,
                             );
+                            if std::mem::take(&mut announce_first_roster) {
+                                super::roster_book::announce_phrase_change(
+                                    &ws_cmd_tx, &local_peer_str, server_states.keys(), &db_path, &db_passphrase,
+                                );
+                            }
                         }
                         // ASYNC FRIENDING: re-deposit every still-pending outgoing request into the
                         // target's master-keyed mailbox. A target we hold no DEVICE for is unreachable
@@ -7180,6 +7192,13 @@ async fn apply_remote_crdt_op_inner(
                     voice_channel_participants, voice_channel_gossip_mode,
                     gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
                 ).await;
+            } else if matches!(&op.payload, CrdtPayload::ServerDeleted { .. }) {
+                voice_handler::auto_leave_invisible_voice_channels(
+                    mls, ws_cmd_tx, ws_room_peers, server_states,
+                    bundle_keypair, crypto_store,
+                    voice_channel_participants, voice_channel_gossip_mode,
+                    gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
+                ).await;
             }
         }
     }
@@ -9948,6 +9967,14 @@ async fn handle_incoming_request(
                         let banned_now = state.is_banned(&local_peer_str);
                         let evicted_sub_cids: Vec<String> = state.subgroup_channel_ids();
                         let pending = pending_server_joins.contains_key(&server_id);
+                        if deleted_now || banned_now || (kicked_now && !pending) {
+                            voice_handler::auto_leave_invisible_voice_channels(
+                                mls, ws_cmd_tx, ws_room_peers, server_states,
+                                bundle_keypair, crypto_store,
+                                voice_channel_participants, voice_channel_gossip_mode,
+                                gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
+                            ).await;
+                        }
                         if deleted_now {
                             // Owner tombstoned the server while we were offline. Leave the
                             // MLS group; keep the shell so we relay the tombstone onward.
@@ -11075,6 +11102,9 @@ async fn handle_incoming_request(
                                             | crate::crdt::operations::CrdtPayload::LabelUpdated { .. }
                                     ))
                                     .unwrap_or(false);
+                                let deletes_server = sniffed_op.as_ref().is_some_and(|o| {
+                                    matches!(o.payload, crate::crdt::operations::CrdtPayload::ServerDeleted { .. })
+                                });
                                 let only_cid = if affects_subgroups {
                                     sniffed_op.and_then(|o| match o.payload {
                                         crate::crdt::operations::CrdtPayload::ChannelVisibilityChanged { channel_id, .. }
@@ -11118,6 +11148,13 @@ async fn handle_incoming_request(
                                             state, &sid, local_peer_str, only_cid.as_deref(),
                                         );
                                     }
+                                    voice_handler::auto_leave_invisible_voice_channels(
+                                        mls, ws_cmd_tx, ws_room_peers, server_states,
+                                        bundle_keypair, crypto_store,
+                                        voice_channel_participants, voice_channel_gossip_mode,
+                                        gossip_overlays, local_peer_str, device_peer_id, &sid, event_tx,
+                                    ).await;
+                                } else if deletes_server {
                                     voice_handler::auto_leave_invisible_voice_channels(
                                         mls, ws_cmd_tx, ws_room_peers, server_states,
                                         bundle_keypair, crypto_store,

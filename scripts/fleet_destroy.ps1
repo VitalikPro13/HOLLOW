@@ -928,8 +928,13 @@ try {
     if ($bGone -lt 0) { Add-Note "b's process was still alive 30s after the confirm" }
     if ($bZeroed.Count -gt 0) { Add-Note "b's wipe zeroed but could not unlink: $($bZeroed -join ', ')" }
     if ($bRemnants.Count -gt 0) { Add-Note "b's data root still holds: $($bRemnants -join ', ')" }
-    if ($bAccepted.Count -eq 0) { Add-Note "b never logged that it accepted the order" }
-    if ($bGone -ge 0 -and $bRemnants.Count -eq 0 -and $bAccepted.Count -ge 1 -and $bWiped.Count -ge 1) {
+    # The wipe erases the debug log first (HOL-SEC-156), so once it is gone the
+    # exit and the empty root are the only witnesses left.
+    $bLogErased = -not (Test-Path (Get-PeerLogPath 'b'))
+    if ($bLogErased) { Add-Note "b's debug log was erased by its wipe; G4a judged on the exit and the empty root" }
+    if ($bAccepted.Count -eq 0 -and -not $bLogErased) { Add-Note "b never logged that it accepted the order" }
+    if ($bGone -ge 0 -and $bRemnants.Count -eq 0 -and
+        (($bAccepted.Count -ge 1 -and $bWiped.Count -ge 1) -or $bLogErased)) {
         Set-Gate 'G4a b wiped and exited on the order from a' 'PASS'
         Say "PASS G4a: b exited ${bGone}s after the confirm with an empty root" 'Green'
     } else {
@@ -950,8 +955,10 @@ try {
     if ($aGone -lt 0) { Add-Note "a's process was still alive 90s after the confirm" }
     if ($aZeroed.Count -gt 0) { Add-Note "a's wipe zeroed but could not unlink: $($aZeroed -join ', ')" }
     if ($aRemnants.Count -gt 0) { Add-Note "a's data root still holds: $($aRemnants -join ', ')" }
-    if ($aFriends.Count -eq 0) { Add-Note 'a never logged an announcement to its friends, so "Tell my friends" may not have been on' }
-    if ($aGone -ge 0 -and $aRemnants.Count -eq 0 -and $aOrder.Count -ge 1 -and $aWiped.Count -ge 1) {
+    $aLogErased = -not (Test-Path (Get-PeerLogPath 'a'))
+    if ($aFriends.Count -eq 0 -and -not $aLogErased) { Add-Note 'a never logged an announcement to its friends, so "Tell my friends" may not have been on' }
+    if ($aGone -ge 0 -and $aRemnants.Count -eq 0 -and
+        (($aOrder.Count -ge 1 -and $aWiped.Count -ge 1) -or $aLogErased)) {
         Set-Gate 'G4b a wiped and exited last, after publishing' 'PASS'
         Say "PASS G4b: a exited ${aGone}s after the confirm with an empty root" 'Green'
     } else {
@@ -1001,8 +1008,10 @@ try {
     Say "d data root (right after its process went):" 'DarkGray'
     foreach ($line in $dInventory) { Write-Host "     $line" -ForegroundColor Gray }
     Write-LogHits 'd' '[HOLLOW-DESTROY]' 6 | Out-Null
-    if ($dParked.Count -eq 0) { Add-Note 'd was never handed a parked order at auth' }
-    if ($dAccepted.Count -eq 0) { Add-Note 'd never logged that it accepted the order' }
+    $dLogErased = -not (Test-Path (Get-PeerLogPath 'd'))
+    if ($dLogErased) { Add-Note "d's debug log was erased by its wipe; G6a judged on the exit before going live and the empty root" }
+    if ($dParked.Count -eq 0 -and -not $dLogErased) { Add-Note 'd was never handed a parked order at auth' }
+    if ($dAccepted.Count -eq 0 -and -not $dLogErased) { Add-Note 'd never logged that it accepted the order' }
     if ($dGone -lt 0) { Add-Note "d's process was still alive 90s after it launched" }
     # destroy_local leaves the node RUNNING for the Dart side's last steps, and a
     # device that took the order while still booting keeps answering until it
@@ -1019,7 +1028,7 @@ try {
         Add-Note "d holds key files written AFTER the wipe, not the destroyed ones: $($dRewritten -join ', ')"
     }
     if ($dRemnants.Count -gt 0) { Add-Note "d's data root still holds: $($dRemnants -join ', ')" }
-    $dOrderTaken = ($dParked.Count -ge 1 -and $dAccepted.Count -ge 1 -and $dGone -ge 0)
+    $dOrderTaken = ((($dParked.Count -ge 1 -and $dAccepted.Count -ge 1) -or $dLogErased) -and $dGone -ge 0)
     # Only the DESTROYED bytes surviving is a failure of the feature. A name
     # rewritten after the wipe is untidy, and the marker takes it at the next
     # launch, which G6b is the gate for.

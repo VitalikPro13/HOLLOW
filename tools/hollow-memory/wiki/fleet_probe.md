@@ -891,3 +891,49 @@ too, so index 0 and a wait on `text:No friends yet`). Both steps were soft, so c
 while a and c stayed friends. The removal is now a helper that returns whether the friendship is
 actually gone, the cleanup gate fails when it is not, and the gate is named for everything the run
 creates rather than only its servers.
+
+## The final 0.12 pass (session 36, 2026-10-05)
+
+Report: `reports/shipped/security/REGRESSION_PASS_0.12.md`, section "Final pass before
+release". New journeys and scenarios, and what each needs:
+
+- `scripts/fleet_profile_wipe.ps1` (peers e, f, g staged from `build\fleet\a`): two
+  profiles with APPDATA and USERPROFILE pointed into `D:\dev\tmp\s36-profiles`, so
+  `profiles.json` and `Videos\Hollow Recordings` are scratch copies (Dart reads both from
+  the environment, Rust accepts a recording by its folder's name). Never point a wipe at
+  the real `%APPDATA%\hollow`.
+- `regress_request_thumb` (fresh a, c), `regress_locked_toast` (fresh a, b; it writes the
+  shared `flutter_secure_storage.dat`, so copy it aside and back), `regress_voice_kick`,
+  `regress_busy_join` (a, b, c), `regress_two_device_file` (attach to
+  `fleet_device_link.ps1 -KeepUp`), and on the phones `mobile_call`, `mobile_voice_kick`.
+- The forwarder lane: `HOLLOW_FORCE_RELAY_ROUTE=1` in the environment of
+  `fleet.ps1 -Scenario regress_voice3` makes the viewer report `route=relay`.
+- A 0.11.1 fleet: `git worktree add --detach D:/dev/wt/s36-legacy v0.11.1-beta`, then run
+  that tree's own `fleet.ps1 -Build` and `fleet_device_link.ps1 -KeepUp` with `TEMP` and
+  `TMP` set to a scratch folder: fixtures and run dirs follow `$env:TEMP` and Stop-Fleet
+  only kills processes under that tree's `build\fleet`, so it never touches the main
+  fleet. Copy its run dirs to new peers of the main fleet to start them on 0.12.
+
+Traps, each of which cost a rerun:
+- The avatar crop dialog's `Apply` is not under the `dialog` target: use `text:Apply`.
+- A DM call shows a compact row in the chat; `semantics:Open the call` opens the stage,
+  where `semantics:Call controls > semantics:More` holds "Record the call".
+- The "Recording saved" toast covers the stage's hang-up while it shows: wait for it to
+  go before `semantics:Leave the call`.
+- On a phone, a new server's row starts collapsed: tap the server's name before its
+  room, or the room's text matches offstage and the tap does nothing. In a phone voice
+  room, the tiles carry `semantics:<name>`; "a, b and c" is only on the Chats card.
+- `wait_for` sees built rows only: the oldest messages of a long channel are read with
+  `channel_rows` (the database), not text.
+- Scenario cleanup runs even with `-Keep`, and `fleet_device_link`'s cleanup deletes its
+  server even with `-KeepUp`. To inspect a failing state, run a copy through
+  `-ScenarioFile` with an empty cleanup.
+- `Reset-PeerMailbox` only AFTER the last command a dying peer is sent; resetting before
+  the Destroy tap hid the tap from the peer.
+- `powershell -File x.ps1 -Only a,b` passes "a,b" as one string: split it in the script.
+- `simctl push` delivers an alert without running the notification extension, so the
+  NSE cannot be proven on a Simulator. The app switcher snapshot can: SplashBoard keeps it
+  as KTX under the app's data container, and `sips -s format png` decodes it.
+- The harness shares one resolver across nodes, so a sibling that never heard its
+  sibling's consent still looks fine there; the two-device 0.11 upgrade split showed up
+  only in the fleet.

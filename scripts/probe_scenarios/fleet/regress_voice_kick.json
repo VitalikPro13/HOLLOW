@@ -1,0 +1,615 @@
+{
+ "peers": [
+  "a",
+  "b",
+  "c"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "b",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_B"
+  },
+  {
+   "peer": "c",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_C"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "vck-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:vck-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "vck-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "the voice room is made before anyone joins, so it rides the join snapshot"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create channel",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "dialog > text:Create channel",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Voice",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "value": "room-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:room-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:vck-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "server:vck-${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "vck-${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "channel:room-${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "server:vck-${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "c",
+   "op": "open_server",
+   "name": "vck-${RUN}"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "channel:room-${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "key:member:${PEER_B}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "key:member:${PEER_C}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "each peer joins, mutes at once (shared mic), then opens the room's stage with a second click"
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Mute",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Unmute",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Mute",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Unmute",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "c",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Mute",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "semantics:Unmute",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "c",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "all",
+   "op": "log",
+   "message": "three participant rows in every sidebar, and every row carries the muted mark"
+  },
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "target": "type:_VoiceParticipantRow",
+   "count": 3,
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "target": "type:_VoiceParticipantRow > icon:micOff",
+   "count": 3,
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "vck-01-three"
+  },
+  {
+   "peer": "all",
+   "op": "dump",
+   "name": "vck-01-three"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "a kicks c while c sits in the voice room: c drops from the call everywhere and loses the server (HOL-SEC-138)"
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "key:member:${PEER_C}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "key:member:${PEER_C}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Kick member",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "dialog > text:Kick",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Kick",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "key:member:${PEER_C}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "gone": "server:vck-${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "gone": "semantics:Leave the room",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:_VoiceParticipantRow",
+   "count": 2,
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "type:_VoiceParticipantRow",
+   "count": 2,
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "expect_count",
+   "target": "type:_VoiceParticipantRow",
+   "value": 2
+  },
+  {
+   "peer": "b",
+   "op": "expect_count",
+   "target": "type:_VoiceParticipantRow",
+   "value": 2
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 2000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 2000
+  },
+  {
+   "peer": "c",
+   "op": "expect_count",
+   "target": "semantics:Leave the room",
+   "value": 0
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "vck-02-c-kicked"
+  },
+  {
+   "peer": "all",
+   "op": "dump",
+   "name": "vck-02-c-kicked"
+  },
+  {
+   "peer": "c",
+   "op": "log",
+   "message": "a kick is not a ban: c rejoins with the invite and can enter the room again"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "server:vck-${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "c",
+   "op": "open_server",
+   "name": "vck-${RUN}"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "channel:room-${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "c",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Mute",
+   "index": 0
+  },
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "target": "type:_VoiceParticipantRow",
+   "count": 3,
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "vck-03-c-back"
+  },
+  {
+   "peer": "all",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0
+  },
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "gone": "semantics:Leave the room",
+   "timeout_ms": 30000
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Stop sharing",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "all",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:vck-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Server settings"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "the confirm's button, scoped to the dialog: the settings page behind it has a 'Delete server' button too"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "server:vck-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "server:vck-${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "gone": "server:vck-${RUN}",
+   "timeout_ms": 90000
+  }
+ ]
+}

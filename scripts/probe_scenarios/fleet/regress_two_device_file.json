@@ -1,0 +1,383 @@
+{
+ "peers": [
+  "a",
+  "b",
+  "c"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "log",
+   "message": "Attach to fleet_device_link.ps1 -KeepUp: a and b are ONE identity, c their friend. a makes a server, c joins, b holds it as a's sibling."
+  },
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "twodev-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:twodev-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:twodev-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "server:twodev-${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "server:twodev-${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "all",
+   "op": "open_server",
+   "name": "twodev-${RUN}"
+  },
+  {
+   "peer": "all",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "target": "hint:Message #general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "log",
+   "message": "c posts a file while BOTH of the identity's devices are online"
+  },
+  {
+   "peer": "c",
+   "op": "attach_file",
+   "path": "${REPO}/build/s36_fixtures/twodev_c.bin"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "file c to both ${RUN}"
+  },
+  {
+   "peer": "c",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:file c to both ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:file c to both ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:file c to both ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 25000
+  },
+  {
+   "peer": "a",
+   "op": "export_attachment",
+   "file": "twodev_c",
+   "dest": "${REPO}/build/fleet_out/twodev/a_twodev_c.bin"
+  },
+  {
+   "peer": "b",
+   "op": "export_attachment",
+   "file": "twodev_c",
+   "dest": "${REPO}/build/fleet_out/twodev/b_twodev_c.bin"
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "td-01-c-file-on-both",
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "log",
+   "message": "b (the linked device) posts a file: c and its own sibling a both take it"
+  },
+  {
+   "peer": "b",
+   "op": "attach_file",
+   "path": "${REPO}/build/s36_fixtures/twodev_b.bin"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "file b to all ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:file b to all ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:file b to all ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:file b to all ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 25000
+  },
+  {
+   "peer": "a",
+   "op": "export_attachment",
+   "file": "twodev_b",
+   "dest": "${REPO}/build/fleet_out/twodev/a_twodev_b.bin"
+  },
+  {
+   "peer": "c",
+   "op": "export_attachment",
+   "file": "twodev_b",
+   "dest": "${REPO}/build/fleet_out/twodev/c_twodev_b.bin"
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "td-02-b-file-on-all",
+   "soft": true
+  },
+  {
+   "peer": "c",
+   "op": "log",
+   "message": "c sends a DM file to the identity: both devices take it"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "type:_FriendChip > semantics:probe-a",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "type:ChatComposerRow > type:EditableText",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:_FriendChip > semantics:probe-c",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendChip > semantics:probe-c",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "attach_file",
+   "path": "${REPO}/build/s36_fixtures/twodev_dm.bin"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "type:ChatComposerRow > type:EditableText"
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "type:ChatComposerRow > type:EditableText",
+   "value": "dm file to both ${RUN}"
+  },
+  {
+   "peer": "c",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:dm file to both ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:dm file to both ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:dm file to both ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 25000
+  },
+  {
+   "peer": "a",
+   "op": "export_attachment",
+   "file": "twodev_dm",
+   "dest": "${REPO}/build/fleet_out/twodev/a_twodev_dm.bin"
+  },
+  {
+   "peer": "b",
+   "op": "export_attachment",
+   "file": "twodev_dm",
+   "dest": "${REPO}/build/fleet_out/twodev/b_twodev_dm.bin"
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "td-03-dm-file-on-both",
+   "soft": true
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:twodev-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Server settings"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "server:twodev-${RUN}",
+   "timeout_ms": 30000
+  }
+ ]
+}

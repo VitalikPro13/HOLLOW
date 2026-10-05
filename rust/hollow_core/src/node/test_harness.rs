@@ -35911,6 +35911,50 @@ async fn authz_a_kicked_member_loses_its_voice_seat_at_every_participant() {
     );
 }
 
+/// Our own seat in a server's call, ended by Rust: a leave of our device in that
+/// channel, which Dart's `onLocalLeft` turns into the teardown of the live call.
+async fn expect_own_call_ended(node: &mut TestNode, server_id: &str, cid: &str) {
+    let dev = node.device_id.clone();
+    let ended = wait_event(node, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelLeft { server_id: s, channel_id: c, peer_id, is_self: true }
+            if s == server_id && c == cid && *peer_id == dev)
+    })
+    .await;
+    assert!(ended, "{dev} lost the server and still sits in its voice call");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_kicked_member_leaves_its_own_voice_call() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut b, mut m, server_id) = vault_trio(&relay, 45, 46, 47).await;
+    let cid = new_voice_channel(&o, &[&b, &m], &server_id).await;
+    sit_all_in_voice(&mut [&mut o, &mut b, &mut m], &server_id, &cid).await;
+
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: m.master_id.clone() }).await.unwrap();
+    expect_own_call_ended(&mut m, &server_id, &cid).await;
+    assert!(m.live_server_state(&server_id).await.is_none(), "control: M tore the server down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_deleted_servers_call_ends_for_every_member() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut b, mut m, server_id) = vault_trio(&relay, 48, 49, 50).await;
+    let cid = new_voice_channel(&o, &[&b, &m], &server_id).await;
+    sit_all_in_voice(&mut [&mut o, &mut b, &mut m], &server_id, &cid).await;
+
+    o.cmd_tx.send(NodeCommand::DeleteServer { server_id: server_id.clone() }).await.unwrap();
+    expect_own_call_ended(&mut b, &server_id, &cid).await;
+    expect_own_call_ended(&mut m, &server_id, &cid).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_who_loses_sight_of_a_voice_channel_loses_its_seat() {
@@ -37301,6 +37345,68 @@ async fn authz_a_legacy_identity_pins_its_phrase_before_a_forger_can() {
     );
 
     drop((a, b, f, t));
+}
+
+/// A 0.11 link copied the stored phrase, so BOTH devices of a legacy identity upgrade on
+/// their own at their first 0.12 start, each with only its own consent. Each must still
+/// count the other: a device that upgraded tells its siblings, the one away included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_legacy_identity_whose_devices_both_kept_the_phrase_stays_one_identity() {
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const A_DEV: u8 = 211;
+    const B_DEV: u8 = 212;
+    const F_MASTER: u8 = 213;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let (o, _recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).expect("phrase");
+    let o_master = o.peer_id();
+    let (a_dev, b_dev) = (tag_kp(A_DEV).peer_id(), tag_kp(B_DEV).peer_id());
+    let f_master = tag_kp(F_MASTER).peer_id();
+    let list = super::crypto_handler::build_signed_device_list(&o, 2, vec![a_dev.clone(), b_dev.clone()], vec![]);
+    let list_json = serde_json::to_string(&list).expect("list json");
+    let legacy = |store: &crate::storage::MessageStore, phrase: bool| {
+        store.save_device_list(&o_master, &list_json, list.version, &list.devices, 0).expect("0.11 list");
+        if phrase {
+            store.save_setting("recovery_mnemonic", PHRASE).expect("stored phrase");
+        }
+    };
+    let members = |node: &TestNode| {
+        let store = node.store();
+        super::roster_book::load(&store, &o_master)
+            .map(|r| super::roster_book::fold(&store, &r).members)
+            .unwrap_or_default()
+    };
+    let both = |m: &std::collections::BTreeSet<String>| m.contains(&a_dev) && m.contains(&b_dev);
+
+    let f = spawn_node_staged(&relay, tag_kp(F_MASTER), F_MASTER, &[&o_master], |s| legacy(s, false)).await;
+    let b = spawn_node_staged(&relay, o.clone(), B_DEV, &[&f_master], |s| legacy(s, true)).await;
+    assert!(wait_until(10, async || relay.online_devices().contains(&b_dev)).await, "B connects");
+    let a = spawn_node_staged(&relay, o.clone(), A_DEV, &[&f_master], |s| legacy(s, true)).await;
+
+    for (who, node) in [("device A", &a), ("device B", &b), ("the friend", &f)] {
+        assert!(
+            wait_until(20, async || both(&members(node))).await,
+            "{who} must count both devices of the upgraded identity, got {:?}",
+            members(node),
+        );
+    }
+    // The harness shares one resolver, so the counts above hold even when no roster
+    // crossed; outside it a sibling hears the other's consent only from this notice.
+    let own_room = super::roster_book::own_room(&o_master);
+    for dev in [&a_dev, &b_dev] {
+        assert!(
+            wait_until(10, async || {
+                relay.wiretap().frames.iter().any(|f| f.from == *dev && f.room == own_room && f.kind() == "roster_notice")
+            })
+            .await,
+            "{dev} upgraded and never told its siblings",
+        );
+    }
+    drop((a, b, f));
 }
 
 /// G1: the relay lets whoever holds a key log in as that key's id, so a stolen backup

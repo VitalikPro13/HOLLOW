@@ -369,6 +369,12 @@ Signature: `fn load_setting(key: String) -> Result<Option<String>, String>`. Loa
 (`roster_book::ensure_own`, session 35) and stays until the person confirms it on this device
 (`api/roster.rs::confirm_stored_phrase`) or types the phrase for any phrase operation; a pinned
 key never erases it. Exports and imports scrub it (`scrub_device_secrets`).
+A 0.11 link copied the stored phrase, so every device of the identity upgrades on its own
+with only its own consent; a start that builds the first roster from a 0.11 list therefore
+announces it once it connects (`swarm.rs` `announce_first_roster` ->
+`roster_book::announce_phrase_change`), or the siblings never count each other (session 36,
+test `a_legacy_identity_whose_devices_both_kept_the_phrase_stays_one_identity`; the harness's
+shared resolver hides the split itself, the fleet upgrade showed it).
 
 ## Verified Peers / RAT Files (storage.rs)
 

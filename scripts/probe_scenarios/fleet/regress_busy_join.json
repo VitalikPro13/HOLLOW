@@ -1,0 +1,698 @@
+{
+ "peers": [
+  "a",
+  "b",
+  "c"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "c",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_C"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "busy-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:busy-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "busy-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:busy-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "server:busy-${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "busy-${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "all",
+   "op": "log",
+   "message": "a and b talk before c arrives"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "pre 1 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:pre 1 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "pre 2 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:pre 2 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "pre 3 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:pre 3 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "pre 4 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:pre 4 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "pre 5 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:pre 5 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "pre 6 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:pre 6 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "log",
+   "message": "c joins WHILE a and b keep posting"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "during 1 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:during 1 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "during 2 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:during 2 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "during 3 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:during 3 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "during 4 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:during 4 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "during 5 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:during 5 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "during 6 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:during 6 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "during 7 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:during 7 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "during 8 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:during 8 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "server:busy-${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "during 9 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:during 9 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "during 10 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:during 10 ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "open_server",
+   "name": "busy-${RUN}"
+  },
+  {
+   "peer": "c",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "all",
+   "op": "log",
+   "message": "c shows the newest posts; the list builds only what is on screen, so the oldest are read from c's database (channel_rows) after a scroll"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:during 10 ${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:during 8 ${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:during 5 ${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "c",
+   "op": "channel_rows",
+   "limit": 40
+  },
+  {
+   "peer": "c",
+   "op": "wheel",
+   "target": "text:during 5 ${RUN}",
+   "dy": -3000,
+   "frames": 10,
+   "soft": true
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:pre 1 ${RUN}",
+   "timeout_ms": 30000,
+   "soft": true
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "c is in ${RUN}"
+  },
+  {
+   "peer": "c",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:c is in ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:c is in ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:c is in ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "after c ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:after c ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:after c ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "key:member:${PEER_C}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "busy-01-joined"
+  },
+  {
+   "peer": "all",
+   "op": "dump",
+   "name": "busy-01-joined"
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:busy-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Server settings"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "server:busy-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "server:busy-${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "gone": "server:busy-${RUN}",
+   "timeout_ms": 90000
+  }
+ ]
+}
