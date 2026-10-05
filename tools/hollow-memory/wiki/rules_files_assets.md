@@ -64,8 +64,8 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   ids are BARE. **ONE block asset per message**, gated at send (`exceedsAssetLimit`),
   never on receive. Pack import re-hashes, never re-encodes. `project_stickers_phase5`,
   `feedback_antialiased_seam_bleed`.
-- Shop UI ONLY behind `shopAvailableProvider` (the store verdict AND
-  `shopUnlockedProvider`). CLI for packs: `rust/hollow_art`. `project_shop_app_client`.
+- Shop UI ONLY behind `shopAvailableProvider` (the store verdict, always on elsewhere
+  since 0.12). CLI for packs: `rust/hollow_art`. `project_shop_app_client`.
 - A thumbnail from a peer (file-card blur, video poster, link-card thumb) reaches Dart
   ONLY via `image_convert::peer_thumb_for_display` (pure-Rust decode + our own re-encode,
   or dropped); never change the stored bytes, they sit inside the author's signature.

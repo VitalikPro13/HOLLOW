@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/android_platform.dart';
-import 'package:hollow/src/core/providers/shop_unlock_provider.dart';
 
 /// Store builds show NO shop UI at all (Apple 3.1.1 / Play policy): no gallery,
 /// no prices, no import, no redeem. The safest sentence is no sentence.
@@ -71,10 +70,6 @@ class ShopAvailability {
 
 /// The effective shop gate: watch this, never [ShopAvailability.available]
 /// directly, so a widget test can override the verdict.
-///
-/// Two things have to agree. [ShopAvailability.available] is the STORE verdict,
-/// fixed for the life of the process. [shopUnlockedProvider] is the install's
-/// own answer, flipped by seven taps. A store build stays false regardless.
 final shopAvailableProvider = Provider<bool>(
-  (ref) => ShopAvailability.available && ref.watch(shopUnlockedProvider),
+  (ref) => ShopAvailability.available,
 );

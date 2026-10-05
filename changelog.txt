@@ -1,3 +1,100 @@
+v0.12 - Hollow Shop, New Design, Albums, Media Viewer & UnifiedPush (BREAKING for all older versions)
+
+BREAKING CHANGE: 0.12 cannot talk to 0.11 or anything older. Everything it sends is now signed by the device that sent it and anything unsigned is refused, so messages, calls, friend requests and servers all fail between versions. Everyone needs to update together. Your identity, friends, servers and history carry over, and Hollow asks you once to confirm your recovery phrase, then stops keeping a copy of it. Invite and meeting links made before 0.12 no longer work, so ask for a new one. A meeting room made before 0.12 has to be made again. If you run your own relay, update it before anyone on it updates the app, since 0.12 cannot sign in to an older relay.
+
+SECURITY
+
+- Important security fixes
+
+HOLLOW SHOP
+
+- The Hollow Shop is open, with avatars, banners, frames and bundles made by independent artists
+- Buy opens the piece on the artist's own Ko-fi, and Hollow takes no cut
+- The files are yours to keep, with no DRM
+- Try any piece on your own profile card before you buy it
+- The code from your order mail puts a supporter badge on your profile without the shop learning who you are
+- The Shop is on desktop and on the Android app from our website, but not on iOS or in app store builds
+
+PRIVACY & PROTECTION
+
+- App Lock now works on every platform, at launch and whenever you step away
+- A duress code typed at the lock quietly erases your data instead of unlocking
+- You can destroy your identity on all your devices at once, even the ones that are offline
+- Files, images and voice messages are now encrypted on disk too, not only your messages
+
+DESIGN
+
+- Every screen on desktop and phone is redesigned in one shared style, with Onest as the new font
+- Menus and dialogs are solid instead of blurred glass
+- Motion is calmer, and switching conversations or tabs is now instant
+- The animated background is now off by default, with a switch in Appearance
+
+HOME
+
+- Home is now an inbox of your conversations, with filters for unread messages and mentions
+- Friend requests and anything else waiting on you sit at the top of Home
+- A side panel on Home shows news, your relay and who is in a voice room
+- The phone's Chats tab opens on the same inbox
+
+CHAT
+
+- Send up to ten files together as an album, shown as one mosaic
+- Images, GIFs and videos open in a new viewer where you can zoom and step through everything shared in the conversation
+- The chat is redesigned, with names in each person's own color and one picker for emoji, GIFs and stickers
+- Compact message display is a new option in Appearance
+- The typing indicator floats above the composer instead of pushing the messages up
+- Message previews show what was sent instead of raw codes like [file:...]
+- A failed send puts your text back in the composer
+
+CALLS & VOICE
+
+- Direct message calls, voice rooms and meetings share one call screen, with camera and screen share always in reach
+- An outgoing call shows Calling with a Cancel button while it rings
+- Phones get the same call screen, which you can minimize and reopen with a tap
+- Direct messages now show call lines such as "Voice call, 4 minutes" and "Missed call"
+- Fixed Disconnect in the dock leaving a meeting half open
+
+YOUR DEVICES
+
+- Reading a conversation on one device marks it read on the others, and your own messages no longer count as unread
+- Catch-up now checks the last 30 days for gaps, so a device that was offline no longer loses older messages for good
+- A direct message you send now reaches your offline devices too, without waking your phone
+
+NOTIFICATIONS
+
+- A new Notifications page in Settings shows whether Hollow is allowed to notify you and can send a test
+- Muting a direct message now stops it waking your phone
+- macOS notifications now reach Notification Center, grouped by conversation with an inline Reply
+- Android phones can be woken through a UnifiedPush app such as ntfy instead of Google
+
+SETTINGS & FRIENDS
+
+- Settings and server settings now take the main window on desktop, so the dock and a call stay in reach
+- Settings search now finds single settings
+- The Friends Manager is rebuilt around Friends, Requests and Add friend tabs, and removing a friend now asks first
+
+PROFILES
+
+- The profile popup, game card and Welcome screen are redesigned
+- The showcase is edited in place on your profile and can hold one wide artwork across both boards
+
+DESKTOP
+
+- Full screen now works on Windows, and F11 toggles it
+- A video no longer restarts when it goes full screen
+- The dock carries your call controls on every screen, and in Dock mode the title bar folds into the header
+
+FIXES
+
+- A dialog now shows its error in place, so you can try again without losing what you typed
+- Fixed device linking hanging on "Sending your data" when something went wrong
+
+SELF-HOSTING
+
+- A self-hosted relay can now wake Android phones through UnifiedPush, with no Google account
+- Up to five of your devices can share one access key on a self-hosted relay
+- The self-hosting guide now covers running the relay without Docker
+
 v0.11.1 - Linux Call Audio, Self-Hosted Relays, Personal Emotes & Relay Restarts
 
 LINUX

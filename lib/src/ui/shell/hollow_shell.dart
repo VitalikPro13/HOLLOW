@@ -108,7 +108,6 @@ import 'package:hollow/src/ui/server_settings/server_settings_place.dart';
 import 'package:hollow/src/ui/settings/settings_place.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
-import 'package:hollow/src/core/providers/shop_unlock_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
@@ -991,9 +990,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await ref.read(rosterGateProvider.notifier).refresh();
     _armRosterGate();
     _maybeOfferLongerPin();
-    // Whether the shop has been woken up here. The dock bar watches the gate on
-    // the first frame, so it loads here, never in build().
-    await ref.read(shopUnlockedProvider.notifier).load();
     // Display size (issue #20): loadSetting throws until the store is open.
     await ref.read(uiScaleProvider.notifier).load();
     await ref.read(chatTextScaleProvider.notifier).load();

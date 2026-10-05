@@ -539,7 +539,7 @@ bug class, so the rows live here. HOL-SEC-063..068.
 
 | Write | Where | Gate |
 |---|---|---|
-| An authenticated socket | `relay-uws/src/ws_handler.cpp` :: handle_auth | v2: a signature over the relay's own domain, the nonce handed to THIS socket (one attempt) and every flag (`auth_v2_message`); v1 only while `ACCEPT_AUTH_V1` (off once 0.12 ships) |
+| An authenticated socket | `relay-uws/src/ws_handler.cpp` :: handle_auth | v2: a signature over the relay's own domain, the nonce handed to THIS socket (one attempt) and every flag (`auth_v2_message`); v1 refused since 0.12 (`ACCEPT_AUTH_V1` = 0) |
 | A room slot for a fetch socket | handle_join (fetch branch) | Never over a slot its device's full socket holds; tracked in the socket's own `fetch_rooms`; no roster, presence or listing |
 | Inbox owner status | `inbox_owner_by_roster` -> `RosterBook::show` (0.12); `inbox_owner_proved` (0.11, only while `ACCEPT_DEVICE_LIST_INBOX_PROOF`) | 0.12: the shown roster is folded into the one the relay holds for that master (same rules as the apps, section 22) and the socket owns the inbox only while its device is a member; a shown roster decides on its own; a change drops every owner it no longer counts. 0.11: the master-signed list verifies, names this socket, is not older than the newest seen, the room is that master's inbox, and the held roster is neither protected nor removed this device. Kept through plain re-joins of the same socket |
 | Who hears whom in an inbox | `receives_in_room` (every fan-out, roster, presence, discovery, check_peers) | Owners only; a deposit for the master reaches the owners live and the mailbox |

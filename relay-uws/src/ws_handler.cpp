@@ -240,12 +240,11 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
                          bool suppress_peer_left = false);
 
 // Pre-0.12 clients sign only `hollow-ws-auth:{peer}:{ts}` and cannot ask for a
-// challenge. Turn this off once 0.12 is out: until then a v1 frame captured by
-// another relay still replays here, as it always has for 0.11 clients.
-// This and the other three release-day switches take a -D override so
+// challenge, so a v1 frame captured by another relay would replay here: refused.
+// This and the other three 0.11 switches take a -D override so
 // test/run_live.sh can run the relay with them off as well as on.
 #ifndef HOLLOW_ACCEPT_AUTH_V1
-#define HOLLOW_ACCEPT_AUTH_V1 1
+#define HOLLOW_ACCEPT_AUTH_V1 0
 #endif
 static constexpr bool ACCEPT_AUTH_V1 = HOLLOW_ACCEPT_AUTH_V1;
 
@@ -470,10 +469,9 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
 static constexpr char INBOX_ROOM_PREFIX[] = "inbox:";
 
 // 0.11 clients prove an inbox with a master-signed device list, which anyone
-// holding the master key can sign. Turn this off once 0.12 is out; until then
-// such a list opens only an inbox whose roster the phrase does not yet root.
+// holding the master key can sign, so only the roster proves an inbox.
 #ifndef HOLLOW_ACCEPT_DEVICE_LIST_INBOX_PROOF
-#define HOLLOW_ACCEPT_DEVICE_LIST_INBOX_PROOF 1
+#define HOLLOW_ACCEPT_DEVICE_LIST_INBOX_PROOF 0
 #endif
 static constexpr bool ACCEPT_DEVICE_LIST_INBOX_PROOF = HOLLOW_ACCEPT_DEVICE_LIST_INBOX_PROOF;
 
@@ -1633,11 +1631,11 @@ static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
     // No logging — reporter/target peer ids are user-identifying.
 }
 
-// Pre-0.12 members register rings unsigned. Turn this off once 0.12 is out: from
-// then on only the server's authority (ring_auth.h) creates, extends or stops a ring,
-// and an unsigned request only keeps existing rings from idling out.
+// Pre-0.12 members register rings unsigned. Only the server's authority
+// (ring_auth.h) creates, extends or stops a ring; an unsigned request only keeps
+// existing rings from idling out.
 #ifndef HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL
-#define HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL 1
+#define HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL 0
 #endif
 static constexpr bool ACCEPT_UNSIGNED_RING_CONTROL = HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL;
 
@@ -2360,10 +2358,9 @@ static bool nickname_binding_is_stale(RelayState& state, const std::string& nick
 }
 
 // Pre-0.12 clients claim a nickname with a self-reported master and no signature.
-// Turn this off once 0.12 is out: from then on a claim counts only when the master
-// it names signed it for the claiming device.
+// A claim counts only when the master it names signed it for the claiming device.
 #ifndef HOLLOW_ACCEPT_UNSIGNED_NICKNAME_CLAIMS
-#define HOLLOW_ACCEPT_UNSIGNED_NICKNAME_CLAIMS 1
+#define HOLLOW_ACCEPT_UNSIGNED_NICKNAME_CLAIMS 0
 #endif
 static constexpr bool ACCEPT_UNSIGNED_NICKNAME_CLAIMS = HOLLOW_ACCEPT_UNSIGNED_NICKNAME_CLAIMS;
 static constexpr int64_t NICKNAME_CLAIM_SKEW_MS = 300 * 1000;

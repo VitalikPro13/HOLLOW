@@ -20,9 +20,9 @@
   <launchable type="desktop-id">com.anonlisten.Hollow.desktop</launchable>
   <content_rating type="oars-1.1" />
   <releases>
-    <release version="0.11.1" date="2026-09-10">
+    <release version="0.12.0" date="2026-10-05">
       <description>
-        <p>Linux fixes</p>
+        <p>Hollow Shop, new design, albums, media viewer, App Lock and UnifiedPush</p>
       </description>
     </release>
   </releases>

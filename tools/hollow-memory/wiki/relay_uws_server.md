@@ -14,7 +14,7 @@ Binary name: `hollow-relay`
   (`auth_challenge`); the auth frame (`v:2`) signs `hollow-ws-auth2`, the relay's domain
   (`auth_domain(--domain)`: lowercase, no port), the nonce, device, time, mode
   (`full`/`fetch`/`guest`) and SHA-256 of the license key. One attempt per nonce. v1 is
-  accepted only while `ACCEPT_AUTH_V1` (turned off once 0.12 ships).
+  refused since 0.12 (`ACCEPT_AUTH_V1` = 0, deployed 2026-10-05).
 - **Fetch sockets**: rooms in `PerSocketData::fetch_rooms`, never over a full socket's
   slot, no roster/presence, never in `discover_peers`; `leave` passes the socket as
   `expected_ws`; close leaves only its own slots.
@@ -38,7 +38,7 @@ Binary name: `hollow-relay`
   charged to the member who last showed it; snapshot codec v7 (JSON + first-sight ages);
   restore takes it as held, unverified. The 0.11 master-signed list (`inbox_proof`,
   `inbox_owner_proved`, version marks) is read only while
-  `ACCEPT_DEVICE_LIST_INBOX_PROOF` (off once 0.12 ships) and never for an identity whose
+  `ACCEPT_DEVICE_LIST_INBOX_PROOF` (off since 0.12) and never for an identity whose
   held roster is protected or for a device it removed. Crypto: `roster_crypto.h`
   (`peer_id_key` = base58 decode, refuses ids over 64 chars; `verify_ed25519_raw`).
 - **Rings** (`ring_auth.h`, `ring_evict.h`): control signed by the change key of the
@@ -66,11 +66,12 @@ Binary name: `hollow-relay`
 - **Nicknames**: `nickname_proof` holds the master's signature (`nickname_claim_message`
   in validate.h); resolve returns it; unsigned claims only while
   `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`.
-- **Release day**: four switches go off once 0.12 ships: `ACCEPT_AUTH_V1`,
+- **The 0.11 switches are OFF since 0.12 (deployed 2026-10-05)**: `ACCEPT_AUTH_V1`,
   `ACCEPT_UNSIGNED_RING_CONTROL`, `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`,
-  `ACCEPT_DEVICE_LIST_INBOX_PROOF`. Each is `HOLLOW_ACCEPT_<NAME>` (default 1,
-  overridable with `-D`): release day flips the four `#define ... 1` defaults to 0;
-  afterwards drop the `on` build from `test/run_live.sh`.
+  `ACCEPT_DEVICE_LIST_INBOX_PROOF`. Each is `HOLLOW_ACCEPT_<NAME>` (default 0,
+  overridable with `-D`); `test/run_live.sh` still builds both settings. The live
+  probes on the box (`~/relay-next/relay_probe.py`, `inbox_probe.py`) expect the
+  refusals.
 - **Live handler tests (session 32)**: `test/run_live.sh` (called last by `run_tests.sh`)
   builds the real relay twice, every switch 1 and every switch 0, listens on 127.0.0.1
   only (`HOLLOW_RELAY_TEST_LOOPBACK`), self-signed cert, random port, and drives it with

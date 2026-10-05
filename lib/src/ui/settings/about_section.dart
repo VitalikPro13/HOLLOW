@@ -64,7 +64,6 @@ class AboutTab extends ConsumerWidget {
                     style: HollowTypography.heading
                         .copyWith(color: hollow.textPrimary),
                   ),
-                  // Seven taps here wake the Hollow Shop; shared with mobile.
                   VersionEggTapTarget(
                     child: Text.rich(
                       TextSpan(children: [

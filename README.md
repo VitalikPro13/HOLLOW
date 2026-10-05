@@ -81,14 +81,14 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 | Platform | Links |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.11.1-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.11.1-win64.zip) |
-| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.11.1.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.11.1-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.11.1-linux.tar.gz) |
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.11.1-android.apk) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.12.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.12.0-win64.zip) |
+| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.12.0.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.12.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.12.0-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.12.0-android.apk) |
 | iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
 | Web | Not planned |
 
-Current Progress: App Store is in progress, and something else too (big big secret!) Self-hosting is improved with the new [guide](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/SELF_HOSTING.md) that contains all explanations, Linux audio fixes plus other stuff. Changelog is available, as always.
+Current Progress: Hollow Shop is LIVE! The "big secret" is finally here, so you can buy cool avatars/banners/frames straight from artist's Ko-fi page! They receive all the revenue and you get a one-time activation code that will give you a nice badge on your profile, showing that you supported an artist! The standalone [shop](https://shop.anonlisten.com/) is also available. Besides it, tons of important security fixes and improvements to the app. Self-hosters, please refer to the [guide](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/SELF_HOSTING.md#moving-to-012) to update your relay for the new version and secure it!
 
 ## Tech Stack
 

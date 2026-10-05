@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-10-05-v0120",
+    "date": "October 05, 2026",
+    "title": "v0.12 - Hollow Shop, New Design, Albums, Media Viewer & UnifiedPush (BREAKING for all older versions)",
+    "body": "Please update your clients! Self-hosters, update your relay according to the [guide](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/SELF_HOSTING.md#moving-to-012) to make the relay work with this new version and have the important patches! You can also read the changelog from inside the app now! Just click on the 'What's new in 0.12 button' and it will popup!\n\nOne of the most important updates to me is the release of Hollow Shop! You can buy cool stuff for your profile like avatars/banners/frames, and directly support the artist! It all works through Ko-fi, and after payment, you receive the one-time activation code that grants you a badge to your profile, which confirms that you actually supported the artist. 100% of the profits go to them, Hollow doesn't take any cuts.\n\nSecurity was also patched... a lot. That's why there are tons of breaking changes. Previous version is basically dead. The app is actually secure now. Plus, the entire UI was also reworked to be consistent and follow the standards with design principles. So yeah, that's the whole thing. It took me a bit too long, but it was worth it. As always, enjoy!"
+  },
+  {
     "id": "2026-09-10-v0111",
     "date": "September 10, 2026",
     "title": "v0.11.1 - Linux Call Audio, Self-Hosted Relays, Personal Emotes & Relay Restarts",
