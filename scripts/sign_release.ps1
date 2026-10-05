@@ -28,7 +28,8 @@
 
 param(
     [string]$Path = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\windows\x64\runner\Release'),
-    [string]$Thumbprint = '6330CDE02590CD9503CDD96F124B6656947F4D9C'
+    [string]$Thumbprint = '6330CDE02590CD9503CDD96F124B6656947F4D9C',
+    [int]$MaxAttempts = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,19 +66,14 @@ if (-not $files) { throw "No .exe/.dll files found under $Path" }
 Write-Host "Signing $($files.Count) file(s) in '$Path'" -ForegroundColor Cyan
 Write-Host '(You will be prompted for the card PIN.)' -ForegroundColor Cyan
 
-# --- Sign (single batch call; one PIN prompt) ---
-& $signtool sign `
-    /sha1 $Thumbprint `
-    /fd sha256 `
-    /tr http://time.certum.pl `
-    /td sha256 `
-    /v `
-    @files
-if ($LASTEXITCODE -ne 0) { throw "signtool sign failed (exit $LASTEXITCODE)." }
+# --- Sign (one batch call, one PIN prompt; retried for the files that missed) ---
+. (Join-Path $PSScriptRoot 'sign_common.ps1')
+Invoke-SigntoolWithRetry -Signtool $signtool -Thumbprint $Thumbprint -Files $files -MaxAttempts $MaxAttempts
 
 # --- Verify ---
 Write-Host "`nVerifying signatures..." -ForegroundColor Cyan
 & $signtool verify /pa @files
+if ($LASTEXITCODE -ne 0) { throw "signtool verify failed (exit $LASTEXITCODE)." }
 if ($LASTEXITCODE -ne 0) { throw "signtool verify failed (exit $LASTEXITCODE)." }
 
 Write-Host "`nAll files signed and verified successfully." -ForegroundColor Green

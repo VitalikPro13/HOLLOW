@@ -127,7 +127,10 @@ if (-not $SkipBuild) {
     Step 1 'flutter build windows --release'
     Push-Location $repo
     try {
-        & flutter build windows --release
+        # flutter_win.ps1 swaps Strawberry Perl's cmake for Visual Studio's, which
+        # webcrypto's Windows build hook needs. Its own process keeps that PATH
+        # away from step 6: the Android hook needs Strawberry's ninja.
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'flutter_win.ps1') build windows --release
         if ($LASTEXITCODE -ne 0) { throw "flutter build failed with exit code $LASTEXITCODE" }
     } finally { Pop-Location }
 } else { Step 1 'flutter build (SKIPPED)' }
@@ -242,6 +245,9 @@ if (-not $SkipAndroid) {
         # already in the output (2026-09-06, the 0.11 APK shipped 0.10.1's core
         # after a SQLCipher/OpenSSL compile error), so the log is scanned for it.
         $apkLog = Join-Path $env:TEMP 'hollow_build_apk.log'
+        # AGP refuses to start when ANDROID_SDK_HOME sits beside ANDROID_USER_HOME
+        # (it reads the former as the parent of .android, so the two disagree).
+        if ($env:ANDROID_USER_HOME) { Remove-Item Env:ANDROID_SDK_HOME -ErrorAction SilentlyContinue }
         cmd /c "flutter build apk --release 2>&1" | Tee-Object -FilePath $apkLog
         if ($LASTEXITCODE -ne 0) { throw "flutter build apk failed with exit code $LASTEXITCODE" }
         $native = Select-String -Path $apkLog -Pattern '^SEVERE:|error occurred in cc-rs|warning: build failed' | Select-Object -First 3

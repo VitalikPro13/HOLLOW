@@ -194,11 +194,11 @@ A relay is an island. Two people on different relays cannot see each other, send
 messages to each other, or share a server, even if they know each other's IDs.
 There is no bridging between relays, by design.
 
-Invite links made in version 0.11.1 and later carry the relay address. When
-someone on another relay opens one, the app asks whether they want to switch. If
-they say yes, the app restarts on your relay, and their servers on the old relay
-go quiet until they switch back. Older links do not carry the address, so tell
-people your relay address alongside the link.
+Invite links carry the relay address. When someone on another relay opens one,
+the app asks whether they want to switch. If they say yes, the app restarts on
+your relay, and their servers on the old relay go quiet until they switch back.
+Links made before 0.12 no longer work, so send new ones once everyone has
+updated.
 
 ## Push notifications on phones
 
@@ -232,9 +232,12 @@ which works and costs the sender more upload.
 
 **Restart persistence** needs the relay to run without Docker. On the official
 relay, offline message buffers survive a restart through a systemd handoff.
-Under Docker there is no such handoff, so buffers, channel history rings and
-push registrations end when the container stops, and upgrading the relay empties
-them. Certificate renewals no longer restart anything, so those cost nothing. A
+Under Docker there is no such handoff, so buffers, channel history rings, push
+registrations and destroy orders end when the container stops, and upgrading the
+relay empties them. A destroy order is how Destroy my identity everywhere
+reaches a device that is offline when you press it. If the container restarts
+before that device comes back, the order is gone and the device keeps its data.
+Certificate renewals no longer restart anything, so those cost nothing. A
 relay set up as in [Without Docker](#without-docker) gets the handoff too.
 
 Everything else is the same relay. The GIF, emote and game cover services are
@@ -290,6 +293,23 @@ docker compose up -d
 This restarts the relay, which empties the offline buffers. Anything waiting for
 a member who is offline is lost, so pick a quiet moment.
 
+### Moving to 0.12
+
+0.12 can't talk to 0.11, and the two can't share a relay either. The 0.12 app
+can't sign in to an older relay, and a 0.11 app can't sign in to an updated one.
+So update the relay first, then everyone's app, in one go:
+
+1. Update the relay as above, or as in [Without Docker](#without-docker) if you
+   run it that way.
+2. Run `sudo sh deploy/harden-host.sh` again. Since 0.11.1 it also turns the
+   firewall's log off, keeps relay lines out of `/var/log`, turns kdump off and
+   tightens SSH. It changes only what isn't set yet.
+3. Run `sudo bash deploy/check-host.sh`. Every check should say `ok`.
+4. Then everyone on your relay updates the app. Until they do, they can't
+   connect. Invite links made before 0.12 stop working, so send new ones.
+
+Nothing in `.env` changes, and no new ports open.
+
 ## Ports
 
 | Port | Protocol | Needed by | When |
@@ -342,6 +362,15 @@ timedatectl
 Logins carry a signed timestamp with a 60 second window, so a clock that is
 minutes out rejects every login while everything else looks fine.
 
+**Nobody can connect after updating the app to 0.12.** The relay is older than
+0.12 and can't answer the new sign-in. Update the relay, as in
+[Moving to 0.12](#moving-to-012).
+
+**Some members connect and others can't.** From 0.12 the app signs the exact
+address it connected to, and the relay only accepts its own `RELAY_HOST`
+(`--domain` without Docker). Everyone has to type that address. A second name
+pointing at the same VPS won't sign in.
+
 **The app says the relay has no TURN server.** `TURN_SECRET` is empty, or coturn
 is not running. Check `docker compose ps` for coturn, and that
 `COMPOSE_PROFILES=turn` is set in `.env`.
@@ -356,9 +385,21 @@ line back.
 ## What the relay holds and never writes
 
 The relay keeps no message log, no account, and no record of who talks to whom.
-What it holds while it runs is a list of which connections are in which rooms,
-and ciphertext waiting for people who are offline, which is deleted on delivery
-or after its expiry. It cannot decrypt any of it.
+While it runs, it holds:
+
+- which connections are in which rooms, and which channels each one follows
+- ciphertext waiting for people who are offline, deleted on delivery or after
+  its expiry
+- each identity's signed list of its devices, so only that person's devices can
+  collect what is waiting for them
+- for each server, the public keys that guard who joins it, which also name its
+  owner
+- destroy orders waiting for a device that is offline
+- for each phone, where to send its wake-ups and its notification settings,
+  muted servers and conversations included
+- temporary nicknames and one-time device link codes
+
+It cannot decrypt the ciphertext, and nothing on the list is message content.
 
 None of that is written to the disk. That promise depends on the host, which is
 why `harden-host.sh` turns swap off and keeps the journal in memory. Swap would
@@ -745,6 +786,9 @@ sudo systemctl restart hollow-relay
 Offline messages survive this restart. If `push-sidecar` changed, run
 `npm install --omit=optional --omit=dev` in it and
 `sudo systemctl restart hollow-push` as well.
+
+For the move to 0.12, [Moving to 0.12](#moving-to-012) applies here too: the
+relay first, then the host script and the check, then the apps.
 
 ### When something is wrong
 

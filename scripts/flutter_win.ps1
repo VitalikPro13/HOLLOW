@@ -31,9 +31,11 @@ if (-not (Test-Path "$nasmDir\nasm.exe")) {
 
 # A failed run leaves a CMakeCache that pins the Ninja generator, and CMake
 # reuses it forever, so a poisoned cache has to go before the next attempt.
+# Android builds use Ninja on purpose; their caches stay.
 $caches = Get-ChildItem '.dart_tool\hooks_runner' -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue
 foreach ($cache in $caches) {
-    if (Select-String -Path $cache.FullName -Pattern '^CMAKE_GENERATOR:INTERNAL=Ninja$' -Quiet) {
+    if ((Select-String -Path $cache.FullName -Pattern '^CMAKE_GENERATOR:INTERNAL=Ninja$' -Quiet) -and
+        -not (Select-String -Path $cache.FullName -Pattern '^ANDROID_ABI:' -Quiet)) {
         Write-Host "[flutter_win] removing a Ninja-pinned hook cache: $($cache.DirectoryName)"
         Remove-Item -Recurse -Force $cache.DirectoryName
     }

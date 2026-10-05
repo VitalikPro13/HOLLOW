@@ -20,7 +20,8 @@
 
 param(
     [Parameter(Mandatory = $true)][string]$File,
-    [string]$Thumbprint = '6330CDE02590CD9503CDD96F124B6656947F4D9C'
+    [string]$Thumbprint = '6330CDE02590CD9503CDD96F124B6656947F4D9C',
+    [int]$MaxAttempts = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,14 +53,8 @@ if (-not $cert.HasPrivateKey) {
 Write-Host "Signing: $File" -ForegroundColor Cyan
 Write-Host '(You will be prompted for the card PIN.)' -ForegroundColor Cyan
 
-& $signtool sign `
-    /sha1 $Thumbprint `
-    /fd sha256 `
-    /tr http://time.certum.pl `
-    /td sha256 `
-    /v `
-    $File
-if ($LASTEXITCODE -ne 0) { throw "signtool sign failed (exit $LASTEXITCODE)." }
+. (Join-Path $PSScriptRoot 'sign_common.ps1')
+Invoke-SigntoolWithRetry -Signtool $signtool -Thumbprint $Thumbprint -Files @($File) -MaxAttempts $MaxAttempts
 
 & $signtool verify /pa /v $File
 if ($LASTEXITCODE -ne 0) { throw "signtool verify failed (exit $LASTEXITCODE)." }
