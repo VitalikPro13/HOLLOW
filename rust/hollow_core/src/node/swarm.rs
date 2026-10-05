@@ -3410,6 +3410,9 @@ async fn run_event_loop(
                                 if let Ok(ep) = mls_mgr.epoch(&sid) {
                                     snap.mls_epoch.insert(sid.clone(), ep);
                                 }
+                                if let Some(auth) = mls_mgr.epoch_auth_digest(&sid) {
+                                    snap.mls_epoch_auth.insert(sid.clone(), auth);
+                                }
                             }
                         }
                         for peer in olm.session_peer_ids() {
@@ -4042,9 +4045,9 @@ async fn run_event_loop(
                                                     hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {peer_id} for bootstrap (PeerJoined)");
                                                     if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, &crypto_store, sid, false) {
                                                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                        send_message_to_peer(
+                                                        crate::node::crypto_handler::send_key_package_to_identity_of(
                                                             &ws_cmd_tx, &ws_room_peers,
-                                                            &peer_id, HavenMessage::MlsKeyPackage {
+                                                            &peer_id, &HavenMessage::MlsKeyPackage {
                                                                 server_id: sid.clone(),
                                                                 key_package: kp_b64,
                                                                 channel_id: None,
@@ -4610,9 +4613,9 @@ async fn run_event_loop(
                                             hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {pid_str} for bootstrap (RoomMembers)");
                                             if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, &crypto_store, sid, false) {
                                                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                send_message_to_peer(
+                                                crate::node::crypto_handler::send_key_package_to_identity_of(
                                                     &ws_cmd_tx, &ws_room_peers,
-                                                    pid_str, HavenMessage::MlsKeyPackage {
+                                                    pid_str, &HavenMessage::MlsKeyPackage {
                                                         server_id: sid.clone(),
                                                         key_package: kp_b64,
                                                         channel_id: None,
@@ -5601,7 +5604,7 @@ async fn run_event_loop(
                     // ours, since receivers refuse commits from an unbound leaf.
                     crate::node::crypto_handler::rebind_unbound_leaves(
                         mls_mgr, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                        &server_states, &mut mls_bootstrap_requested, &local_peer_str,
+                        &server_states, &mut mls_bootstrap_requested, &local_peer_str, &device_peer_id,
                     ).await;
 
                     // Phase 1b: leaves our view removed (a leave, a missed removal commit).
@@ -5636,6 +5639,15 @@ async fn run_event_loop(
                         }
                         let (server_id, channel_id) = crate::crypto::split_group_key(&group_key);
                         let Some(state) = server_states.get(&server_id) else { continue };
+                        let re_added: Vec<String> = queued_adds.iter().map(|(p, _)| p.clone()).collect();
+                        if !super::conference::is_conference_sid(&server_id)
+                            && !crate::node::crypto_handler::we_commit_for_our_identity(
+                                mls_mgr, &group_key, &local_peer_str, &device_peer_id, &ws_room_peers, &re_added,
+                            )
+                        {
+                            hollow_log!("[HOLLOW-MLS] Leaving {group_key}'s commit to a lower device of ours");
+                            continue;
+                        }
                         let rules = super::mls_authority::GroupRules::Server {
                             state, channel: channel_id.as_deref(),
                         };
@@ -9953,7 +9965,7 @@ async fn handle_incoming_request(
                                         target.as_deref().unwrap_or_default(),
                                     );
                                 } else {
-                                    send_raw_to_peer(ws_cmd_tx, ws_room_peers, peer_str, data);
+                                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, peer_str, data);
                                     hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to join responder {peer_str} for {server_id} (no bootstrap target yet)");
                                 }
                             }
@@ -10570,6 +10582,13 @@ async fn handle_incoming_request(
                 .is_some_and(|s| s.members_list().iter()
                     .any(|m| super::resolver::same_identity(&m.peer_id, &sender_master)));
             if !sender_is_member {
+                // Right after a join, ours or a co-joiner's, its resolution can land before
+                // we can place the device that sent it. Ignored all the same, but only a
+                // sender we CAN place is a refusal worth flagging.
+                if sender_master == peer_str {
+                    hollow_log!("[HOLLOW-CRDT] A join resolution for {server_id} from {peer_str}, a device we cannot place yet, needs nothing");
+                    return;
+                }
                 hollow_log!("[HOLLOW-SECURITY] Ignoring ServerJoinResolved from non-member {peer_str} for {server_id}");
                 return;
             }
@@ -11563,18 +11582,10 @@ async fn handle_incoming_request(
                 && super::resolver::same_identity(peer_str, local_peer_str)
                 && peer_str != device_peer_id
                 && mls.as_ref().is_some_and(|m| {
-                    if !m.has_group(&group_key) {
-                        return false;
-                    }
-                    // If several of OUR OWN device leaves currently hold the group, only the
-                    // lowest-id one re-adds (deterministic single re-adder → no glare). The
-                    // sender's (regenerating) leaf is excluded from this tiebreak set.
-                    let our_leaves: Vec<String> = m.group_leaves(&group_key)
-                        .into_iter()
-                        .filter(|l| l.bound().is_some_and(|b| b.master == local_peer_str) && l.id() != peer_str)
-                        .map(|l| l.id().to_string())
-                        .collect();
-                    our_leaves.iter().map(|s| s.as_str()).min() == Some(&device_peer_id[..])
+                    m.has_group(&group_key)
+                        && crate::node::crypto_handler::we_commit_for_our_identity(
+                            m, &group_key, local_peer_str, device_peer_id, ws_room_peers, &[peer_str.to_string()],
+                        )
                 });
             if sibling_readd {
                 hollow_log!("[HOLLOW-MLS] Sibling re-add: adding our own sibling {peer_str}'s regenerated leaf to {group_key} (bypassing coordinator election)");
@@ -11918,15 +11929,15 @@ async fn handle_incoming_request(
                 match crate::node::crypto_handler::mint_group_key_package(mls_mgr, crypto_store, &group_key, false) {
                     Ok(kp_bytes) => {
                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                        send_message_to_peer(
+                        crate::node::crypto_handler::send_key_package_to_identity_of(
                             ws_cmd_tx, ws_room_peers,
-                            peer_str, HavenMessage::MlsKeyPackage {
+                            peer_str, &HavenMessage::MlsKeyPackage {
                                 server_id,
                                 key_package: kp_b64,
                                 channel_id: kpr_channel_id,
                             },
                         );
-                        // The repair's Welcome from this requester may replace our group.
+                        // The repair's Welcome from this requester's identity may replace our group.
                         mls_mgr.note_key_request_answered(&group_key, &requester_master);
                     }
                     Err(e) => hollow_log!("[HOLLOW-MLS] Failed to generate KeyPackage: {e}"),

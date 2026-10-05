@@ -1545,6 +1545,8 @@ pub(crate) struct DebugSnapshotReply {
     pub mls_members: std::collections::HashMap<String, Vec<String>>,
     /// server_id -> current MLS epoch.
     pub mls_epoch: std::collections::HashMap<String, u64>,
+    /// server_id -> digest of the current epoch: equal epochs, different digests = a fork.
+    pub mls_epoch_auth: std::collections::HashMap<String, String>,
     /// peer DEVICE id -> Olm session status: "none" | "unconfirmed" | "confirmed".
     pub olm_sessions: std::collections::HashMap<String, String>,
     /// peer DEVICE id -> the id of the Olm session we encrypt with; both sides of a

@@ -175,6 +175,25 @@ Convenience wrapper: checks if a group exists for `server_id`, gets the member l
 
 The coordinator is responsible for processing MLS membership changes (adding/removing members via commits).
 
+**ONE device per identity commits (2026-10-05, s37).** The elections above pick an IDENTITY, and
+every device of an identity hears what is sent to it, so two online owner devices both committed a
+joiner's KeyPackage at one epoch (a fork), and two upgrading 0.11 devices both rebound in place.
+`crypto_handler::we_commit_for_our_identity(mls, group_key, master, device, rooms, skip)`: true when
+no LOWER-id online device of ours holds a leaf in this group as we see it (roster member, not
+revoked; `skip` = devices being re-added). It gates the batch commit (Phase 2), the in-place rebind
+(`rebind_unbound_leaves`: a device that deferred and is still unbound after `MLS_BOOTSTRAP_TIMEOUT`
+rebinds itself) and the sibling re-add. Leaf-aware on purpose: a presence-only choice deferred to a
+sibling with no copy of the group, which never acts. Every KeyPackage goes to every online device
+of the target's identity (`send_key_package_to_identity_of`), so the committing one holds it.
+Fork heal: `epoch_catchup_responder` falls back to the lowest online master OTHER than the one
+behind; `MlsManager::epoch_auth_digest_at` keeps the digest of recent epochs (as deep as the commit
+cache), so a probe from an epoch we passed with a different digest is a fork, not a catch-up; of
+two forks the one held by the authority's lowest online device (`acting_device`, presence only, so
+both forks agree) stays, and a responder facing that device asks it for a repair instead of
+repairing it; a digest-less hint (`SyncRequest.mls_epoch`) has its own cooldown key so it never
+silences the digest probe. Tests `two_devices_of_the_owner_add_a_joiner_once`,
+`a_fork_between_the_owners_devices_heals_without_a_restart`.
+
 **Committer vs catch-up authority — these are DIFFERENT elections and must stay that way (2026-08-27).**
 `elect_server_coordinator` prefers the OWNER for the server group, because a single authoritative
 committer keeps epochs linear. `group_authority` mirrors that for "who speaks for this group".
@@ -754,3 +773,5 @@ Derived from the two **master** identities, never Olm keys or device ids:
 Tables: `security_alerts` (alert_id PK, peer_id MASTER, kind, detail, created_at, acknowledged_at) and `olm_key_pins` (device_peer_id PK — per-DEVICE, since each device of one identity legitimately has its own Olm key).
 
 Harness coverage: `friend_is_warned_when_a_new_device_joins_their_contact` (test_harness.rs) proves the alert rides a device list that genuinely propagated, that first contact is silent, and that a re-ingest does not re-warn.
+
+**Since ID-1 the detection site is `roster_book::ingest_inner`** (members before vs after a contact's roster fold). A 0.11 identity's devices each upgrade on their own, so a friend's first 0.12 roster carries one consent and the sibling's later consent read as a new device (s36 finding). A device the upgrade's phrase admitted (`Roster::upgrade_admitted`: phrase admits at `UPGRADE_RECOVERY_AT_MS + 1`, only while the upgrade's base is current) and already in the friend's SAVED roster is not news when its consent arrives; any other device still alerts. Tests `an_upgraded_identitys_own_devices_are_no_news_to_its_friends`, `only_the_upgrades_own_base_counts_its_admissions`.

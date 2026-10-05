@@ -76,6 +76,59 @@ class HollowToast {
   }
 }
 
+final _keepClearBoxes = <_ToastKeepClearState>{};
+_HollowToastWidgetState? _shownToast;
+
+/// Marks [child] as something no toast covers (the call bar and its hang-up):
+/// while it is on screen, a toast that would overlap it rises above it.
+class ToastKeepClear extends StatefulWidget {
+  final Widget child;
+
+  const ToastKeepClear({super.key, required this.child});
+
+  @override
+  State<ToastKeepClear> createState() => _ToastKeepClearState();
+}
+
+class _ToastKeepClearState extends State<ToastKeepClear> {
+  bool _onstage = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _keepClearBoxes.add(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // A route under an opaque one stays mounted with its tickers off: out of
+    // sight, with a stale rect.
+    _onstage = TickerMode.valuesOf(context).enabled;
+    _shownToast?._placeLater();
+  }
+
+  @override
+  void dispose() {
+    _keepClearBoxes.remove(this);
+    _shownToast?._placeLater();
+    super.dispose();
+  }
+
+  /// This box in [target]'s coordinates, or null while out of sight.
+  Rect? rectIn(RenderBox target) {
+    final box = context.findRenderObject();
+    if (!_onstage || box is! RenderBox || !box.attached || !box.hasSize) {
+      return null;
+    }
+    return MatrixUtils.transformRect(
+        box.getTransformTo(target), Offset.zero & box.size);
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
 class _HollowToastWidget extends StatefulWidget {
   final String message;
   final HollowToastType type;
@@ -95,10 +148,15 @@ class _HollowToastWidgetState extends State<_HollowToastWidget>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _opacity;
+  final _cardKey = GlobalKey();
+  double _restingBottom = 0;
+  double _rise = 0;
+  bool _placeQueued = false;
 
   @override
   void initState() {
     super.initState();
+    _shownToast = this;
     _controller = AnimationController(
       vsync: this,
       duration: HollowDurations.normal,
@@ -116,8 +174,46 @@ class _HollowToastWidgetState extends State<_HollowToastWidget>
 
   @override
   void dispose() {
+    if (identical(_shownToast, this)) _shownToast = null;
     _controller.dispose();
     super.dispose();
+  }
+
+  /// Re-places the toast once this frame is laid out, when every
+  /// [ToastKeepClear] box is where it will be drawn.
+  void _placeLater() {
+    if (_placeQueued) return;
+    _placeQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _placeQueued = false;
+      if (mounted) _keepClear();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  void _keepClear() {
+    final overlay = Overlay.of(context).context.findRenderObject();
+    final card = _cardKey.currentContext?.findRenderObject();
+    if (overlay is! RenderBox || card is! RenderBox) return;
+    if (!overlay.hasSize || !card.hasSize) return;
+    final area = overlay.size;
+    final size = card.size;
+    final zones = [
+      for (final box in _keepClearBoxes)
+        if (box.rectIn(overlay) case final rect?)
+          rect.inflate(HollowSpacing.md),
+    ]..sort((a, b) => b.bottom.compareTo(a.bottom));
+    var rise = 0.0;
+    for (final zone in zones) {
+      final toast = Rect.fromLTWH(
+        (area.width - size.width) / 2,
+        area.height - _restingBottom - rise - size.height,
+        size.width,
+        size.height,
+      );
+      if (toast.overlaps(zone)) rise = area.height - _restingBottom - zone.top;
+    }
+    if (rise != _rise) setState(() => _rise = rise);
   }
 
   IconData _iconForType(HollowToastType type) {
@@ -146,10 +242,11 @@ class _HollowToastWidgetState extends State<_HollowToastWidget>
     final isMobileLayout = media.size.width < 600;
     final navClearance =
         isMobileLayout ? 56 + media.viewPadding.bottom : 0.0;
-    final bottom = 32 + media.viewInsets.bottom + navClearance;
+    _restingBottom = 32 + media.viewInsets.bottom + navClearance;
+    _placeLater();
 
     return Positioned(
-      bottom: bottom,
+      bottom: _restingBottom + _rise,
       left: 0,
       right: 0,
       child: Center(
@@ -164,6 +261,7 @@ class _HollowToastWidgetState extends State<_HollowToastWidget>
             child: Material(
               color: Colors.transparent,
               child: Container(
+                key: _cardKey,
                 constraints: const BoxConstraints(maxWidth: 400),
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.lg,

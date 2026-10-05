@@ -707,7 +707,7 @@ async fn ingest_inner(
             .ok()
             .flatten()
     };
-    let Some((prev, now, changed)) = folded else { return Ingested::default() };
+    let Some((prev, now, changed, upgrade_admitted)) = folded else { return Ingested::default() };
 
     let newly_revoked: Vec<String> = prev
         .members
@@ -726,7 +726,13 @@ async fn ingest_inner(
         if !added.is_empty() {
             super::destroy::note_identity_reappeared(event_tx, db_path, db_passphrase, &master).await;
         }
-        let before: Vec<String> = prev.members.iter().cloned().collect();
+        // A 0.11 identity's devices each upgrade on their own, so a device the upgrade
+        // admitted before its consent reached us was known already.
+        let before: Vec<String> = if prev.members.is_empty() {
+            Vec::new()
+        } else {
+            prev.members.iter().chain(&upgrade_admitted).cloned().collect()
+        };
         let after: Vec<String> = now.members.iter().cloned().collect();
         super::security_alerts::note_new_devices(
             event_tx, db_path, db_passphrase, local_master, &master, &before, &after,
@@ -757,7 +763,8 @@ async fn ingest_inner(
 }
 
 /// The store half of [`ingest`], on the blocking pool: merge, fold, save, re-key the
-/// friend row. `(members as last saved, the fold now, whether anything changed)`.
+/// friend row. `(members as last saved, the fold now, whether anything changed, the
+/// devices the saved roster's upgrade admitted)`.
 fn fold_in(
     db_path: &str,
     db_passphrase: &str,
@@ -765,7 +772,7 @@ fn fold_in(
     sender: &str,
     local_master: &str,
     local_device: &str,
-) -> Option<(RosterState, RosterState, bool)> {
+) -> Option<(RosterState, RosterState, bool, BTreeSet<String>)> {
     let master = incoming.master.as_str();
     let store = MessageStore::open(db_path, db_passphrase).ok()?;
     let stored = load(&store, master);
@@ -818,7 +825,8 @@ fn fold_in(
             hollow_log!("[HOLLOW-FRIENDS] Re-keyed friend {dev} -> master {master}");
         }
     }
-    Some((prev, now, changed))
+    let upgrade_admitted = stored.as_ref().map(Roster::upgrade_admitted).unwrap_or_default();
+    Some((prev, now, changed, upgrade_admitted))
 }
 
 /// What a change to our own roster means for this device: removed, back, or asked.

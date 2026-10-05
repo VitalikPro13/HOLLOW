@@ -32,6 +32,10 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 - `HollowToast` from non-widget code passes `overlayState:`
   (`hollowNavigatorKey.currentState?.overlay`); `Overlay.of(navKey.currentContext)`
   throws; run teardown BEFORE the toast. `feedback_toast_from_nonwidget_overlaystate`.
+- A toast never covers a `ToastKeepClear` box (the call bar wraps itself in one): it rises
+  above any marked box it would overlap, once laid out, and stays put when nothing is in the way;
+  a box under an opaque route (tickers off) does not count. Wrap any new floating control a toast
+  could hide. Test `test/widget/toast_keep_clear_test.dart`.
 - A raw `OverlayEntry` host (emoji/sticker/GIF pickers) sits ABOVE every pushed route, so
   its dialogs render BEHIND it (#76): the host steps aside (`EmojiPickerBody.onModalFlow`
   -> `Offstage`). `feedback_overlay_entry_dialog_behind_host`.

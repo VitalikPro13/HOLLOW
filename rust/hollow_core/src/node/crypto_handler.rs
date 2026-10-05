@@ -1731,6 +1731,41 @@ pub(crate) fn server_bootstrap_target(
     elect_coordinator(&members, local_peer, ws_room_peers).filter(|c| c != local_peer)
 }
 
+/// The device that acts for `master` in a fork: its lowest-id online device. By
+/// presence alone, so two devices already on different forks agree which one it is.
+fn acting_device(
+    master: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Option<String> {
+    online_devices_for(ws_room_peers, master)
+        .into_iter()
+        .filter(|d| super::resolver::is_device_of(d, master) && !super::resolver::is_revoked(d))
+        .min()
+}
+
+/// Whether this device commits for our identity in `group_key`: no lower-id online
+/// device of ours holds a leaf there as we see it, leaving out `skip` (devices being
+/// re-added). Every device of an identity hears what is sent to it, and two of them
+/// committing at one epoch fork the group; one without the group cannot commit.
+pub(crate) fn we_commit_for_our_identity(
+    mls: &MlsManager,
+    group_key: &str,
+    local_master: &str,
+    local_device: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    skip: &[String],
+) -> bool {
+    !mls.group_leaves(group_key).iter().any(|leaf| {
+        let id = leaf.id();
+        id < local_device
+            && leaf.bound().is_none_or(|b| b.master == local_master)
+            && !skip.iter().any(|s| s == id)
+            && super::resolver::is_device_of(id, local_master)
+            && !super::resolver::is_revoked(id)
+            && ws_room_peers.values().any(|peers| peers.contains(id))
+    })
+}
+
 pub(crate) fn is_mls_coordinator(
     mls: &MlsManager,
     server_id: &str,
@@ -2597,6 +2632,29 @@ pub(crate) fn send_message_to_peer_in_room(
     });
 }
 
+/// Send a KeyPackage to `peer` and to every other online device of its identity:
+/// whichever device asked, only the identity's [`acting_device`] commits it.
+pub(crate) fn send_key_package_to_identity_of(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    peer_str: &str,
+    msg: &HavenMessage,
+) {
+    let data = serde_json::to_vec(msg).unwrap_or_default();
+    for dev in online_devices_for(ws_room_peers, peer_str) {
+        if dev != peer_str {
+            send_raw_to_peer(ws_cmd_tx, ws_room_peers, &dev, data.clone());
+        }
+    }
+    if let Some(room) = send_room_for_peer(ws_room_peers, peer_str) {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+            room_code: room,
+            target_peer: peer_str.to_string(),
+            data,
+        });
+    }
+}
+
 /// Send pre-serialized bytes to a specific peer via the WS relay.
 /// Use in broadcast loops to serialize once and send the same bytes to each peer.
 pub(crate) fn send_raw_to_peer(
@@ -2876,6 +2934,7 @@ pub(crate) async fn rebind_unbound_leaves(
     server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
     local_peer_str: &str,
+    local_device: &str,
 ) {
     for group_key in mls_mgr.unbound_own_groups() {
         if mls_bootstrap_requested
@@ -2889,8 +2948,13 @@ pub(crate) async fn rebind_unbound_leaves(
         let authority = group_authority(state, channel_id.as_deref(), local_peer_str, ws_room_peers);
         let we_are_authority =
             authority.as_deref().is_some_and(|a| super::resolver::same_identity(a, local_peer_str));
+        // Two devices of the authority that upgrade together would each rebind and fork
+        // the group: one rebinds, the others are re-added by it. A device that already
+        // asked and is still unbound rebinds itself, as the sibling may never come.
+        let we_act = mls_bootstrap_requested.contains_key(&group_key)
+            || we_commit_for_our_identity(mls_mgr, &group_key, local_peer_str, local_device, ws_room_peers, &[]);
 
-        if we_are_authority && mls_mgr.can_rebind_in_place(&group_key) {
+        if we_are_authority && we_act && mls_mgr.can_rebind_in_place(&group_key) {
             let commit = match mls_mgr.rebind_own_leaf(&group_key) {
                 Ok(commit) => commit,
                 Err(e) => {
@@ -2918,7 +2982,9 @@ pub(crate) async fn rebind_unbound_leaves(
             continue;
         }
 
-        let target = if we_are_authority {
+        let target = if we_are_authority && !we_act {
+            Some(local_peer_str.to_string())
+        } else if we_are_authority {
             epoch_catchup_responder(state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str)
         } else {
             authority
@@ -3025,10 +3091,11 @@ fn epoch_catchup_responder(
         })
         .cloned()
         .collect();
-    // `elect_coordinator` always counts US as a candidate, so filter again:
-    // when WE are the one behind the answer must never be ourselves.
-    elect_coordinator(&candidates, local_peer, ws_room_peers)
-        .filter(|c| !super::resolver::same_identity(c, behind))
+    // We always count as online, so when WE are the one behind the answer is the
+    // lowest of the rest, never nobody because we sort first.
+    online_master_identities(&candidates, local_peer, ws_room_peers)
+        .into_iter()
+        .find(|c| !super::resolver::same_identity(c, behind))
 }
 
 /// React to a peer's MLS epoch hint (`SyncRequest.mls_epoch` / `MlsEpochProbe`),
@@ -3094,8 +3161,10 @@ pub(crate) fn handle_epoch_hint(
         return;
     }
 
-    let forked = their_epoch == own_epoch
-        && their_epoch_auth.is_some_and(|theirs| mls_mgr.epoch_auth_digest(&group_key).as_deref() != Some(theirs));
+    // Our digest at THEIR epoch: a peer still at an epoch we passed can hold a fork of
+    // it, and a catch-up from our cache could never apply there.
+    let ours_then = if their_epoch <= own_epoch { mls_mgr.epoch_auth_digest_at(&group_key, their_epoch) } else { None };
+    let forked = their_epoch_auth.is_some_and(|theirs| ours_then.as_deref().is_some_and(|ours| ours != theirs));
     if their_epoch < own_epoch || forked {
         // ONE responder, no room-wide echo, elected with the peer that is behind
         // excluded so a stale AUTHORITY still gets an answer. A direct probe skips it.
@@ -3106,7 +3175,12 @@ pub(crate) fn handle_epoch_hint(
             return;
         }
         let from_master = super::resolver::resolve(from_peer);
-        let cd_key = format!("{group_key}|{from_master}");
+        // A hint without a digest cannot show a fork, so it must never hold back the
+        // probe that can.
+        let cd_key = match their_epoch_auth {
+            Some(_) => format!("{group_key}|{from_master}"),
+            None => format!("{group_key}|{from_master}|hint"),
+        };
         if epoch_hint_cooldown.get(&cd_key).is_some_and(|t| t.elapsed() < EPOCH_HINT_COOLDOWN) {
             return;
         }
@@ -3129,6 +3203,25 @@ pub(crate) fn handle_epoch_hint(
                 );
             }
             None => {
+                // Of two forks the one the authority's acting device holds stays, or
+                // two sides would keep repairing each other onto their own.
+                if forked && is_authoritys_acting_device(state, channel_id, local_peer_str, ws_room_peers, from_peer) {
+                    hollow_log!(
+                        "[HOLLOW-MLS] {from_peer} holds the fork of {group_key} that stays (epoch {their_epoch}); asking it to repair ours"
+                    );
+                    // Stated at THEIR epoch, where the two forks differ, even when ours
+                    // has moved on since.
+                    send_message_to_peer(
+                        ws_cmd_tx, ws_room_peers, from_peer,
+                        HavenMessage::MlsEpochProbe {
+                            server_id: server_id.to_string(),
+                            channel_id: channel_id.map(|c| c.to_string()),
+                            epoch: their_epoch,
+                            epoch_auth: ours_then,
+                        },
+                    );
+                    return;
+                }
                 // A fork, or the cache cannot bridge: repair them. Their fresh
                 // KeyPackage replaces their leaf in one commit and its Welcome
                 // carries them to our epoch.
@@ -3150,6 +3243,21 @@ pub(crate) fn handle_epoch_hint(
             server_id, channel_id, local_peer_str, epoch_hint_cooldown,
         );
     }
+}
+
+/// Whether `device` is the [`acting_device`] of the group's authority, an identity
+/// other than ours.
+fn is_authoritys_acting_device(
+    state: &crate::crdt::server_state::ServerState,
+    channel_id: Option<&str>,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    device: &str,
+) -> bool {
+    group_authority(state, channel_id, local_peer, ws_room_peers)
+        .filter(|a| !super::resolver::same_identity(a, local_peer))
+        .and_then(|a| acting_device(&super::resolver::resolve(&a), ws_room_peers))
+        .is_some_and(|d| d == device)
 }
 
 /// Probe the group authority with our current epoch ("am I behind?").

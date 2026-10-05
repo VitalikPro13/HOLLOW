@@ -568,6 +568,20 @@ impl Roster {
             && self.removals.len() <= MAX_REMOVALS
     }
 
+    /// The devices the upgrade's phrase admitted, while the current base is still the
+    /// upgrade's: a recovery typed later admits by its own statements.
+    pub(crate) fn upgrade_admitted(&self) -> BTreeSet<String> {
+        match self.current_recovery() {
+            Some(c) if c.at == UPGRADE_RECOVERY_AT_MS => self
+                .phrase_admits
+                .iter()
+                .filter(|p| p.at_ms == UPGRADE_RECOVERY_AT_MS + 1)
+                .map(|p| p.device.clone())
+                .collect(),
+            _ => BTreeSet::new(),
+        }
+    }
+
     /// The base every new device statement must name.
     pub(crate) fn base(&self) -> String {
         self.current_recovery()
@@ -928,6 +942,27 @@ mod tests {
         assert!(s.protected);
         assert_eq!(s.members, BTreeSet::from([d.peer_id()]));
         assert_eq!(s.base, r.verified(NOW).base());
+    }
+
+    #[test]
+    fn only_the_upgrades_own_base_counts_its_admissions() {
+        let id = Id::new();
+        let (d1, d2, d3) = (kp(10), kp(11), kp(12));
+        let r_pub = r_pub_of(&id.r);
+        let mut r = Roster::new(&id.master());
+        r.add_phrase_statement(&r_pub, Some(sign_upgrade_recovery(&id.m, &id.r)), None).unwrap();
+        for d in [&d1, &d2] {
+            r.add_phrase_statement(&r_pub, None, Some(sign_upgrade_admit(&id.m, &id.r, &d.peer_id()))).unwrap();
+        }
+        r.add_phrase_statement(&r_pub, None, Some(sign_phrase_admit(&id.m, &id.r, NOW - 1_000, &d3.peer_id()))).unwrap();
+        let r = r.verified(NOW);
+        assert_eq!(r.upgrade_admitted(), BTreeSet::from([d1.peer_id(), d2.peer_id()]), "a later admission is not the upgrade's");
+
+        let mut typed = r.clone();
+        typed
+            .add_phrase_statement(&r_pub, Some(sign_recovery(&id.m, &id.r, NOW - 500, &[d1.peer_id()], false)), None)
+            .unwrap();
+        assert!(typed.verified(NOW).upgrade_admitted().is_empty(), "a typed recovery's base owes the upgrade nothing");
     }
 
     #[test]

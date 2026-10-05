@@ -80,6 +80,9 @@ struct RelayInner {
     /// (sender, target) pairs whose stream frames (0x02) the relay holds back, in order,
     /// until the test releases or loses them.
     held_streams: HashMap<(String, String), Vec<BufferedMsg>>,
+    /// (sender, target) pairs whose 0x03 room broadcasts the relay holds back, in order,
+    /// until the test releases them: two devices act before either hears the other.
+    held_broadcasts: HashMap<(String, String), Vec<WsEvent>>,
     /// Devices whose outgoing data frames are kept, so a test can replay one
     /// later (a captured older announce is a replay, not a forgery).
     recording: HashSet<String>,
@@ -972,6 +975,23 @@ impl MockRelay {
         }
     }
 
+    /// Hold back every 0x03 room broadcast from one device to another until
+    /// [`Self::release_broadcasts`].
+    pub(crate) fn hold_broadcasts(&self, from: &str, target: &str) {
+        self.inner.lock().unwrap().held_broadcasts.entry((from.to_string(), target.to_string())).or_default();
+    }
+
+    /// Deliver, in order, what [`Self::hold_broadcasts`] kept, and stop holding.
+    pub(crate) fn release_broadcasts(&self, from: &str, target: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        let held = inner.held_broadcasts.remove(&(from.to_string(), target.to_string())).unwrap_or_default();
+        if let Some(conn) = inner.conns.get(target).filter(|c| c.online) {
+            for event in held {
+                let _ = conn.event_tx.send(event);
+            }
+        }
+    }
+
     pub(crate) fn set_broadcast_deaf(&self, peer_id: &str, deaf: bool) {
         let mut inner = self.inner.lock().unwrap();
         if deaf {
@@ -1659,7 +1679,7 @@ impl RelayInner {
     /// `broadcast_deaf` devices (the backpressure-drop lever). Presence events
     /// keep using `broadcast_except` directly — the real relay's drop hits
     /// data frames on a wedged socket, not the membership protocol.
-    fn broadcast_data_except(&self, room: &str, from: &str, event: WsEvent) -> u64 {
+    fn broadcast_data_except(&mut self, room: &str, from: &str, event: WsEvent) -> u64 {
         let members: Vec<String> = self
             .rooms
             .get(room)
@@ -1668,6 +1688,10 @@ impl RelayInner {
         let mut delivered = 0u64;
         for m in members {
             if m == from || self.broadcast_deaf.contains(&m) || !self.shares(room, &m, from) {
+                continue;
+            }
+            if let Some(held) = self.held_broadcasts.get_mut(&(from.to_string(), m.clone())) {
+                held.push(event.clone());
                 continue;
             }
             if let Some(conn) = self.conns.get(&m).filter(|c| c.online) {
@@ -2310,6 +2334,13 @@ impl TestNode {
         self.debug_snapshot()
             .await
             .and_then(|s| s.mls_epoch.get(server_id).copied())
+    }
+
+    /// The epoch and its digest for `group_key`: two nodes agree on the group only when
+    /// both match, since forks share epoch numbers.
+    pub(crate) async fn mls_epoch_state(&self, group_key: &str) -> Option<(u64, String)> {
+        let snap = self.debug_snapshot().await?;
+        Some((*snap.mls_epoch.get(group_key)?, snap.mls_epoch_auth.get(group_key)?.clone()))
     }
 
     /// Olm session status with a peer DEVICE id: "none" | "unconfirmed" |
@@ -26339,7 +26370,11 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // a late door with nothing to poll (11.0 s).
     // 2026-10-04: C-MLS-01's replayed-KeyPackage test proves an absence over two held
     // commit retries (4.5 s).
-    const BUDGET_MS: u64 = 700_950;
+    // 2026-10-05: the one-committer and upgrade tests added four spawn staggers and two
+    // absence proofs, a commit the second owner device never makes and an alert a
+    // friend never records, plus the poll of `quiet_agreed_group`, which must see a
+    // group stay unchanged (12.5 s).
+    const BUDGET_MS: u64 = 713_450;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -30299,6 +30334,224 @@ async fn a_same_epoch_fork_heals_through_the_probe() {
     }
     assert!(healed, "the forked member was repaired and reads the owner again");
     drain_events(&mut o);
+}
+
+/// Wait until every node holds `group_key` at one epoch with one digest, unchanged
+/// across two batch ticks. `None` at the deadline.
+async fn quiet_agreed_group(nodes: &[&TestNode], group_key: &str, secs: u64) -> Option<(u64, String)> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let (mut last, mut since) = (None, std::time::Instant::now());
+    while std::time::Instant::now() < deadline {
+        let mut states = Vec::new();
+        for n in nodes {
+            states.push(n.mls_epoch_state(group_key).await);
+        }
+        let agreed = states[0].clone().filter(|s| states.iter().all(|x| x.as_ref() == Some(s)));
+        if agreed.is_some() && agreed == last {
+            if since.elapsed() >= std::time::Duration::from_millis(4500) {
+                return agreed;
+            }
+        } else {
+            (last, since) = (agreed, std::time::Instant::now());
+        }
+        sleep_ms(500).await;
+    }
+    None
+}
+
+/// Every online device of the owner hears a joiner's KeyPackage. Both committing it at
+/// one epoch forks the group, and the device on the losing side stops reading the
+/// server live, so only one device of an identity commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn two_devices_of_the_owner_add_a_joiner_once() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const M_MASTER: u8 = 175;
+    const B_DEV: u8 = 176;
+    const C_DEV: u8 = 177;
+    const V_MASTER: u8 = 178;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    let v_master = NativeKeypair::from_secret_bytes(&seed_bytes(V_MASTER)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&m_master]).await;
+    sleep_ms(1500).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&v_master]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&v_master]).await;
+    expect_dm_pair_ready(&relay, &v, &b, 15).await;
+    expect_dm_pair_ready(&relay, &v, &c, 15).await;
+    expect_siblings_ready(&relay, &b, &c, 15).await;
+    drain_events(&mut b);
+    drain_events(&mut c);
+    drain_events(&mut v);
+
+    let server_id = create_server_and_wait(&mut b, "Two Device Owner").await;
+    expect_mls_leaf(&b, &server_id, &c.device_id, 30).await;
+    assert!(
+        quiet_agreed_group(&[&b, &c], &server_id, 30).await.is_some(),
+        "both devices of the owner hold one group before anyone joins",
+    );
+
+    // The owner's devices hear each other only after both batch ticks have passed,
+    // as when their ticks fall within one network delay of each other.
+    relay.hold_broadcasts(&b.device_id, &c.device_id);
+    relay.hold_broadcasts(&c.device_id, &b.device_id);
+    v.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(&server_id),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut v, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "V joins",
+    );
+    expect_mls_leaf(&v, &server_id, &v.device_id, 20).await;
+    // Absence proof: the device that does not commit must not, across its batch ticks.
+    sleep_ms(5000).await;
+    relay.release_broadcasts(&b.device_id, &c.device_id);
+    relay.release_broadcasts(&c.device_id, &b.device_id);
+    let agreed = quiet_agreed_group(&[&b, &c, &v], &server_id, 40).await;
+    assert!(
+        agreed.is_some(),
+        "the owner's devices and the joiner must hold ONE group, got b={:?} c={:?} v={:?}",
+        b.mls_epoch_state(&server_id).await,
+        c.mls_epoch_state(&server_id).await,
+        v.mls_epoch_state(&server_id).await,
+    );
+    drop((b, c, v));
+}
+
+/// The 0.11 upgrade's fork, healed live: the owner's lowest device holds one fork of
+/// the server group alone, its other device and a member hold another at the same
+/// epoch. The fork of the owner's acting device stays, every other copy is repaired
+/// onto it, and nobody repairs anyone back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_fork_between_the_owners_devices_heals_without_a_restart() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    // The owner's master sorts first, as in the fleet run: its devices' own probes
+    // then need a responder of another identity.
+    let (m_tag, v_tag) = if tag_kp(180).peer_id() < tag_kp(181).peer_id() { (180, 181) } else { (181, 180) };
+    let (low_tag, high_tag) = if tag_kp(182).peer_id() < tag_kp(183).peer_id() { (182, 183) } else { (183, 182) };
+    let m_master = tag_kp(m_tag).peer_id();
+    let v_master = tag_kp(v_tag).peer_id();
+    super::resolver::seed_self(&m_master, &[tag_kp(low_tag).peer_id(), tag_kp(high_tag).peer_id()]);
+
+    let mut v = spawn_node_with_friends(&relay, v_tag, v_tag, &[&m_master]).await;
+    sleep_ms(1500).await;
+    let mut low = spawn_node_with_friends(&relay, m_tag, low_tag, &[&v_master]).await;
+    sleep_ms(1500).await;
+    let mut high = spawn_node_with_friends(&relay, m_tag, high_tag, &[&v_master]).await;
+    expect_dm_pair_ready(&relay, &v, &low, 15).await;
+    expect_dm_pair_ready(&relay, &v, &high, 15).await;
+    expect_siblings_ready(&relay, &low, &high, 15).await;
+    drain_events(&mut low);
+    drain_events(&mut high);
+    drain_events(&mut v);
+
+    let server_id = create_server_and_wait(&mut low, "Upgrade Fork").await;
+    expect_mls_leaf(&low, &server_id, &high.device_id, 30).await;
+    v.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(&server_id),
+        })
+        .await
+        .unwrap();
+    expect_mls_leaf(&v, &server_id, &v.device_id, 20).await;
+    let (epoch, _) = quiet_agreed_group(&[&low, &high, &v], &server_id, 40).await.expect("one group before the fork");
+
+    // Only `low` merges a self-update of V's leaf, then drops off while V's escalated
+    // heal has `high`, now the owner's acting device, repair V: same epoch, two forks.
+    let mut hostile = hostile_mls_copy(&v, v_tag, &server_id).await;
+    let fork = hostile.self_update_commit(&server_id);
+    relay.inject_direct(&server_id, &v.device_id, &low.device_id, frame(&super::types::HavenMessage::MlsCommit {
+        server_id: server_id.clone(),
+        commit: b64(&fork),
+        channel_id: None,
+        epoch: Some(epoch + 1),
+    }));
+    assert!(wait_until(5, async || low.mls_epoch(&server_id).await == Some(epoch + 1)).await, "low merged the fork");
+    relay.set_online(&low.device_id, false);
+    v.cmd_tx
+        .send(NodeCommand::VoiceSframeHeal {
+            server_id: server_id.clone(),
+            channel_id: "general".to_string(),
+            peer_id: high.device_id.clone(),
+            escalate: true,
+        })
+        .await
+        .unwrap();
+    assert!(
+        quiet_agreed_group(&[&high, &v], &server_id, 30).await.is_some_and(|(e, _)| e == epoch + 1),
+        "high repaired V's leaf without low",
+    );
+    relay.start_wiretap();
+    relay.set_online(&low.device_id, true);
+    let (low_now, high_now) = (low.mls_epoch_state(&server_id).await, high.mls_epoch_state(&server_id).await);
+    assert!(
+        low_now.as_ref().zip(high_now.as_ref()).is_some_and(|(l, h)| l.0 == h.0 && l.1 != h.1),
+        "the owner's devices hold two forks at one epoch, got low={low_now:?} high={high_now:?}",
+    );
+
+    // Everyone keeps posting, so each side fails on the other's posts and asks: a fork
+    // healed both ways at once would swap sides instead of closing.
+    let general = general_channel_of(&server_id);
+    let mut agreed = None;
+    for round in 0..8 {
+        for (who, node) in [("v", &v), ("low", &low), ("high", &high)] {
+            node.cmd_tx
+                .send(NodeCommand::SendChannelMessage {
+                    server_id: server_id.clone(),
+                    channel_id: general.clone(),
+                    text: format!("after the upgrade {who} {round}"),
+                    message_id: format!("upgrade-fork-{who}-{round}"),
+                    reply_to_mid: None,
+                    link_preview: None,
+                })
+                .await
+                .unwrap();
+        }
+        agreed = quiet_agreed_group(&[&low, &high, &v], &server_id, 8).await;
+        if agreed.is_some() {
+            break;
+        }
+    }
+    let (healed_at, _) = agreed.unwrap_or_else(|| panic!("the fork never healed"));
+    assert!(healed_at <= epoch + 6, "the repair ran away to epoch {healed_at} from {}", epoch + 1);
+    // Which fork stays is decided, not raced: the owner's acting device is never moved.
+    let tap = relay.wiretap();
+    assert!(
+        tap.frames.iter().any(|f| f.to.as_deref() == Some(v.device_id.as_str()) && f.kind() == "mls_welcome"),
+        "the tap must see the repairs' Welcomes",
+    );
+    assert!(
+        !tap.frames.iter().any(|f| f.to.as_deref() == Some(low.device_id.as_str()) && f.kind() == "mls_welcome"),
+        "the owner's acting device was repaired onto another fork",
+    );
+    drain_events(&mut low);
+    drain_events(&mut high);
+    drain_events(&mut v);
 }
 
 // ---------------------------------------------------------------------------
@@ -37407,6 +37660,91 @@ async fn a_legacy_identity_whose_devices_both_kept_the_phrase_stays_one_identity
         );
     }
     drop((a, b, f));
+}
+
+/// A friend of an upgrading 0.11 identity hears each device's first 0.12 roster on its
+/// own. The upgrade admitted both devices, so neither is news when its consent arrives;
+/// a device the identity links afterwards still is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn an_upgraded_identitys_own_devices_are_no_news_to_its_friends() {
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const A_DEV: u8 = 214;
+    const B_DEV: u8 = 215;
+    const F_MASTER: u8 = 216;
+    const C_DEV: u8 = 217;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, _recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).expect("phrase");
+    let o_master = o.peer_id();
+    let (a_dev, b_dev, c_dev) = (tag_kp(A_DEV).peer_id(), tag_kp(B_DEV).peer_id(), tag_kp(C_DEV).peer_id());
+    let f_master = tag_kp(F_MASTER).peer_id();
+    let list = super::crypto_handler::build_signed_device_list(&o, 2, vec![a_dev.clone(), b_dev.clone()], vec![]);
+    let list_json = serde_json::to_string(&list).expect("list json");
+    let legacy = |store: &crate::storage::MessageStore, phrase: bool| {
+        store.save_device_list(&o_master, &list_json, list.version, &list.devices, 0).expect("0.11 list");
+        if phrase {
+            store.save_setting("recovery_mnemonic", PHRASE).expect("stored phrase");
+        }
+    };
+    let roster_of = |node: &TestNode| {
+        let store = node.store();
+        super::roster_book::load(&store, &o_master)
+            .map(|r| super::roster_book::fold(&store, &r))
+            .unwrap_or_default()
+    };
+    let new_devices = |node: &TestNode| -> Vec<String> {
+        node.security_alerts()
+            .into_iter()
+            .filter(|r| r.kind == super::security_alerts::KIND_NEW_DEVICE)
+            .map(|r| r.detail)
+            .collect()
+    };
+
+    let f = spawn_node_staged(&relay, tag_kp(F_MASTER), F_MASTER, &[&o_master], |s| legacy(s, false)).await;
+    let b = spawn_node_staged(&relay, o.clone(), B_DEV, &[&f_master], |s| legacy(s, true)).await;
+    // F holds B's first roster, A's consent missing from it, before A starts.
+    assert!(
+        wait_until(20, async || roster_of(&f).is_member(&b_dev)).await,
+        "F takes B's upgraded roster, got {:?}",
+        roster_of(&f).members,
+    );
+    assert!(!roster_of(&f).is_member(&a_dev), "A's consent reached F before A started");
+    let a = spawn_node_staged(&relay, o.clone(), A_DEV, &[&f_master], |s| legacy(s, true)).await;
+    assert!(
+        wait_until(20, async || {
+            let m = roster_of(&f).members;
+            m.contains(&a_dev) && m.contains(&b_dev)
+        })
+        .await,
+        "F counts both devices, got {:?}",
+        roster_of(&f).members,
+    );
+    // Absence proof: no alert lands after the second consent either.
+    sleep_ms(1000).await;
+    assert!(new_devices(&f).is_empty(), "F was told the upgrade's own devices are new: {:?}", new_devices(&f));
+
+    // A device the upgrade never admitted, linked later by A's vouch: news.
+    let mut linked = super::roster_book::load(&a.store(), &o_master).expect("A holds its roster");
+    linked.add_vouch(crate::identity::roster::sign_vouch(&tag_kp(A_DEV), &o_master, &linked.base(), &c_dev));
+    linked.add_consent(crate::identity::roster::sign_consent(&tag_kp(C_DEV), &o_master));
+    let c = spawn_node_staged(&relay, o.clone(), C_DEV, &[&f_master], |s| {
+        super::roster_book::merge_for_test(s, &linked, &o_master, &c_dev);
+    })
+    .await;
+    assert!(
+        wait_until(30, async || roster_of(&f).is_member(&c_dev)).await,
+        "F counts the approved device, got {:?}",
+        roster_of(&f).members,
+    );
+    assert!(
+        wait_until(10, async || new_devices(&f) == vec![c_dev.clone()]).await,
+        "F must be told about the approved device and only it: {:?}",
+        new_devices(&f),
+    );
+    drop((a, b, c, f));
 }
 
 /// G1: the relay lets whoever holds a key log in as that key's id, so a stolen backup

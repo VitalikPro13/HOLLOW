@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
@@ -198,19 +199,21 @@ class CallStageBar extends ConsumerWidget {
       }
     }
 
-    return Semantics(
-      container: true,
-      label: 'Call controls',
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: hollow.overlay,
-          borderRadius: BorderRadius.circular(hollow.radiusLg),
-          border: Border.all(color: hollow.border),
-          boxShadow: HollowShadows.float,
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xs),
-          child: Row(mainAxisSize: MainAxisSize.min, children: row),
+    return ToastKeepClear(
+      child: Semantics(
+        container: true,
+        label: 'Call controls',
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: hollow.overlay,
+            borderRadius: BorderRadius.circular(hollow.radiusLg),
+            border: Border.all(color: hollow.border),
+            boxShadow: HollowShadows.float,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(HollowSpacing.xs),
+            child: Row(mainAxisSize: MainAxisSize.min, children: row),
+          ),
         ),
       ),
     );

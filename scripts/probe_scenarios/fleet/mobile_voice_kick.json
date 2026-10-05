@@ -438,6 +438,23 @@
    "value": 0
   },
   {
+   "peer": "c",
+   "op": "log",
+   "message": "c's page of the lost server's channel closes on its own: c lands on the Chats tab, not on #room"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "gone": "type:MobileChatRoute",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "semantics:Conferences",
+   "timeout_ms": 10000
+  },
+  {
    "peer": "all",
    "op": "shot",
    "name": "mvk-02-c-kicked"

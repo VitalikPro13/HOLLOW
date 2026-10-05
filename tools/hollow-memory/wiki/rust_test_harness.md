@@ -83,7 +83,7 @@ The GAP between the two layers is where multi-device bugs hide, so both exist on
   `raw_crdt_member_keys` (should be MASTER ids; a leaked device id = a `canonicalize_members` bug),
   `MockRelay::online_devices`/`room_devices`.
 - **Live crypto (async, via `DebugSnapshot`):** `TestNode::mls_members(sid)` (raw device leaves),
-  `mls_epoch(sid)`, `olm_status(device)` ("none"/"unconfirmed"/"confirmed"/"absent"), `debug_snapshot()`.
+  `mls_epoch(sid)`, `olm_status(device)` (2026-10-05: `mls_epoch_state(group)` = (epoch, digest), since forks share epoch numbers; `quiet_agreed_group(nodes, group, secs)` waits for one epoch AND digest unchanged across two batch ticks; `MockRelay::hold_broadcasts(from, to)` / `release_broadcasts` DELAY 0x03 room broadcasts between two devices, which is how two devices act before either hears the other) ("none"/"unconfirmed"/"confirmed"/"absent"), `debug_snapshot()`.
   These round-trip a `#[cfg(test)] NodeCommand::DebugSnapshot { reply: oneshot }` that the event loop
   answers from its LIVE in-memory `mls`/`olm` (owned by the loop, otherwise unreadable). The variant +
   its dispatch arm are `cfg(test)`-gated so they don't exist in release (the command match has no

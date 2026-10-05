@@ -11,8 +11,91 @@ app instances driven by the probe) on Windows and on the Mac mini's iOS Simulato
 a scan of every app log for refusal lines during honest journeys. Every bug found got a
 test that fails without its fix, checked by reverting the fix (a mutation run).
 
-The final pass on the finished 0.12 tree (session 36) is the next section; the
-sessions 23 and 24 pass follows it.
+The five findings the final pass left open were fixed in session 37 (next section);
+the final pass on the finished 0.12 tree (session 36) follows it, then the sessions 23
+and 24 pass.
+
+## The final pass's five findings, fixed (session 37, 2026-10-05)
+
+**Tree:** local `main` at `7da4d17e` plus this session's fixes, committed locally. The Mac
+mini was brought to `7da4d17e` by `git push mini` (its stale tree discarded on
+Vitalik's word), then given the diff as LF files (`git diff --stat` identical).
+
+| Suite | Result |
+|---|---|
+| Rust (`cargo nextest run --lib`) | 1502 passed, 9 skipped (4 new tests) |
+| clippy on changed lines | nothing |
+| Flutter (`flutter test`) | 1951 passed, 3 skipped (2 new test files) |
+| `flutter analyze` | 0 errors, nothing on changed files |
+| Windows fleet: `server_invite_message`, `voice_channel`, `regress_channels`, `fleet_pending_join` | pass, twice |
+| `fleet_profile_wipe` | 7 of 7 |
+| 0.11.1 two-device upgrade (x, y, z from the s36 seed) | twice, posts live both ways |
+| iOS Simulators: `mobile_voice_kick` | pass, ends on Chats |
+
+1. **MLS fork when two devices of one identity commit at one epoch.** Worse than the
+   0.11 upgrade alone: every device of an identity hears what is sent to it, and the
+   coordinator elections pick an identity, so two online devices of a server's owner
+   both committed a joiner's KeyPackage whenever their batch ticks fell within one
+   network delay, and two upgrading 0.11 devices both rebound their leaf in place.
+   And the heal never started: a forked device whose identity sorts first elected
+   nobody to probe. Fixed in both halves:
+   - one device per identity commits in a group: the lowest online one holding a leaf
+     there as we see it (`we_commit_for_our_identity`), for the batch commit, the
+     in-place rebind and the sibling re-add; a device that deferred its rebind and is
+     still unbound after the bootstrap timeout rebinds itself; every KeyPackage goes
+     to every online device of the target's identity, so the committing device holds
+     it whoever asked;
+   - the heal: the catch-up responder is the lowest online member other than the one
+     behind; each copy of a group keeps the digest of its recent epochs, so a probe
+     from an epoch we passed is judged forked instead of served a catch-up that can
+     never apply; of two forks the one the authority's lowest online device holds
+     stays (a responder facing it asks it for a repair), so the two sides never
+     repair each other back; a digest-less epoch hint has its own cooldown and no
+     longer silences the probe that carries the digest.
+   Tests `two_devices_of_the_owner_add_a_joiner_once` (`MockRelay::hold_broadcasts`
+   reproduces the crossing commits) and `a_fork_between_the_owners_devices_heals_without_a_restart`
+   (the fleet's shape: the owner's lowest device alone on one fork, everyone posting;
+   the wiretap shows that device is never moved). Mutation: the commit gate, the
+   responder fallback, the epoch history, the fork rule and the cooldown split each
+   fail a test when reverted. Fleet: the 0.11.1 two-device identity and its friend
+   upgraded at once from the s36 seed (twice): one in-place rebind, the sibling
+   re-added in the same commit, every post read live by the other two, no decrypt
+   failure after the replayed 0.11 frames at start-up.
+2. **Friends saw "added a new device" for an upgraded identity's own device.** A
+   device the upgrade's phrase admitted (`Roster::upgrade_admitted`, only while the
+   upgrade's base is current), already in the friend's saved roster, is not news when
+   its consent arrives; any other device still alerts. Tests
+   `an_upgraded_identitys_own_devices_are_no_news_to_its_friends` (rosters arrive one
+   at a time, a device linked later by a vouch still alerts) and
+   `only_the_upgrades_own_base_counts_its_admissions`. Fleet: the friend `z` took the
+   identity's roster with one member and then two and recorded no alert (s36 recorded
+   one for `x`); the one alert it shows was already in the 0.11.1 seed, since none
+   was recorded during the run.
+3. **The "Recording saved" toast covered the call bar.** A `ToastKeepClear` marks the
+   call bar; a toast that would overlap a marked box rises above it, and stays put
+   when nothing is in the way. `fleet_profile_wipe` now taps hang-up while the toast
+   is on screen: 7 runs, all gates pass (`build/fleet_out/s37/finding3_toast_before_after.png`).
+   The script also points HOME at its scratch folder now: launched from Git Bash it
+   had left a test recording in the real `Videos\Hollow Recordings` (removed).
+4. **A phone kicked from a server stayed on its channel page.** The page leaves when
+   its server leaves `serverListProvider` (not while the list is still loading, never
+   for a DM). Widget test `mobile_chat_route_server_gone_test.dart`; `mobile_voice_kick`
+   on the iOS Simulators now ends with the kicked phone on Chats
+   (`build/fleet_out/s37/finding4_kick_before_after.png`).
+5. **Joiners logged `Ignoring ServerJoinResolved from non-member`.** A resolution from
+   a device we cannot place yet (right after a join, ours or a co-joiner's) is logged
+   quietly; one from a placed identity that is not a member keeps the security line.
+   The refusal scans of `server_invite_message`, `voice_channel`, `regress_channels`
+   and `fleet_pending_join` hold no such line (3 quiet lines instead).
+
+Remaining refusal lines in those scans are classes already explained below (Olm glare,
+a fresh joiner refusing an RTC offer from a device it cannot place yet) plus a held
+commit overtaken by a newer one, which is the commit judge working.
+
+**Seen, not changed:** the s36 seed holds a second old 0.11 server where only `y` and
+`z` keep a group (`x` does not count its own identity a member there) and each takes
+itself for the group's authority, so both rebind their leaf in it; it behaved the
+same in s36, and only that seed's 0.11 data has it.
 
 ## Final pass before release (session 36, 2026-10-05)
 

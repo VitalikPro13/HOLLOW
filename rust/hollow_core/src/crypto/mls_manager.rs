@@ -402,6 +402,10 @@ pub(crate) struct MlsManager {
     /// unbuffered room broadcast. Deliberately NOT persisted: after a restart the
     /// responder simply cannot bridge and falls back to a repair.
     commit_cache: HashMap<String, VecDeque<(u64, String)>>,
+    /// RAM-only ring of `(epoch, epoch_auth_digest)` for the epochs this copy of the
+    /// group passed through, as deep as `commit_cache`: a probe from an older epoch
+    /// whose digest differs from ours there comes from a fork, not from behind.
+    epoch_digests: HashMap<String, VecDeque<(u64, String)>>,
     held_commits: HashMap<String, Vec<HeldCommit>>,
     held_welcomes: HashMap<String, HeldWelcome>,
     /// A meeting's only committer, by master: the host that admitted us, or ourselves
@@ -454,6 +458,7 @@ impl MlsManager {
             legacy: None,
             groups,
             commit_cache: HashMap::new(),
+            epoch_digests: HashMap::new(),
             held_commits: HashMap::new(),
             held_welcomes: HashMap::new(),
             pinned_committers: HashMap::new(),
@@ -740,6 +745,8 @@ impl MlsManager {
 
         hollow_log!("[HOLLOW-MLS] Created MLS group for server {server_id}");
         self.groups.insert(server_id.to_string(), group);
+        self.epoch_digests.remove(server_id);
+        self.note_epoch(server_id);
         Ok(())
     }
 
@@ -879,6 +886,7 @@ impl MlsManager {
             .map_err(|e| format!("Failed to merge pending commit: {e:?}"))?;
 
         hollow_log!("[HOLLOW-MLS] Merged pending commit for server {server_id}, epoch: {:?}", group.epoch());
+        self.note_epoch(server_id);
         Ok(())
     }
 
@@ -1019,6 +1027,7 @@ impl MlsManager {
             let _ = old.delete(self.provider.storage());
         }
         self.commit_cache.remove(group_key);
+        self.epoch_digests.remove(group_key);
         self.held_commits.remove(group_key);
         // We are seated; a held Welcome must not replace this group later.
         self.held_welcomes.remove(group_key);
@@ -1027,6 +1036,7 @@ impl MlsManager {
             .map_err(|e| format!("Failed to create group from Welcome: {e:?}"))?;
         hollow_log!("[HOLLOW-MLS] Joined MLS group for server {group_key}, epoch: {:?}", group.epoch());
         self.groups.insert(group_key.to_string(), group);
+        self.note_epoch(group_key);
         Ok(())
     }
 
@@ -1331,6 +1341,9 @@ impl MlsManager {
             }
             Verdict::Refuse(_) => {}
         }
+        if matches!(verdict, Verdict::Accept) {
+            self.note_epoch(server_id);
+        }
         Ok(verdict)
     }
 
@@ -1375,7 +1388,9 @@ impl MlsManager {
                 }
             }
         }
-        if !matches!(ruling, Some(Verdict::Accept)) && !kept.is_empty() {
+        if matches!(ruling, Some(Verdict::Accept)) {
+            self.note_epoch(group_key);
+        } else if !kept.is_empty() {
             self.held_commits.insert(group_key.to_string(), kept);
         }
         ruling.map(Ok)
@@ -1457,6 +1472,29 @@ impl MlsManager {
         Some(hex::encode(&hasher.finalize()[..16]))
     }
 
+    /// [`Self::epoch_auth_digest`] as this copy of the group had it at `epoch`, when
+    /// it is the current epoch or a recent one we passed through.
+    pub fn epoch_auth_digest_at(&self, group_key: &str, epoch: u64) -> Option<String> {
+        if self.epoch(group_key).ok()? == epoch {
+            return self.epoch_auth_digest(group_key);
+        }
+        self.epoch_digests
+            .get(group_key)?
+            .iter()
+            .find(|(e, _)| *e == epoch)
+            .map(|(_, digest)| digest.clone())
+    }
+
+    fn note_epoch(&mut self, group_key: &str) {
+        let (Ok(epoch), Some(digest)) = (self.epoch(group_key), self.epoch_auth_digest(group_key)) else { return };
+        let ring = self.epoch_digests.entry(group_key.to_string()).or_default();
+        ring.retain(|(e, _)| *e < epoch);
+        ring.push_back((epoch, digest));
+        while ring.len() > COMMIT_CACHE_CAP + 1 {
+            ring.pop_front();
+        }
+    }
+
     /// Remove MLS group for a server (on server delete/leave).
     pub fn remove_group(&mut self, server_id: &str) {
         if let Some(mut group) = self.groups.remove(server_id) {
@@ -1466,6 +1504,7 @@ impl MlsManager {
         // Cached commits belong to the dropped incarnation: a fresh Welcome lands us past
         // them, and serving them would produce partial catch-ups that end behind the group.
         self.commit_cache.remove(server_id);
+        self.epoch_digests.remove(server_id);
         self.held_commits.remove(server_id);
         self.held_welcomes.remove(server_id);
         self.pinned_committers.remove(server_id);

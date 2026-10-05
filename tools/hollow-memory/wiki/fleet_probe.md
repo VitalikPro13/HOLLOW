@@ -902,6 +902,10 @@ release". New journeys and scenarios, and what each needs:
   `profiles.json` and `Videos\Hollow Recordings` are scratch copies (Dart reads both from
   the environment, Rust accepts a recording by its folder's name). Never point a wipe at
   the real `%APPDATA%\hollow`.
+  Since s37 it also points HOME there: Dart reads HOME BEFORE USERPROFILE, and Git Bash
+  exports HOME, so a run launched from the Bash tool put a test recording into the real
+  `Videos\Hollow Recordings`. Any sandboxing script sets HOME too. The script now taps
+  hang-up WHILE the "Recording saved" toast shows (shot `pw-01b-saved-toast`).
 - `regress_request_thumb` (fresh a, c), `regress_locked_toast` (fresh a, b; it writes the
   shared `flutter_secure_storage.dat`, so copy it aside and back), `regress_voice_kick`,
   `regress_busy_join` (a, b, c), `regress_two_device_file` (attach to

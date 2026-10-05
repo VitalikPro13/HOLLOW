@@ -6,7 +6,7 @@
 #   powershell -File scripts\fleet_profile_wipe.ps1 -SkipBuild  # build\fleet\a is current
 #
 # The two profiles never touch the real ones: the instance under test runs with
-# APPDATA and USERPROFILE pointed into a scratch folder, so profiles.json and
+# APPDATA, USERPROFILE and HOME (read first, and Git Bash sets it) pointed into a scratch folder, so profiles.json and
 # `Videos\Hollow Recordings` both live there. Rust accepts a recording by its
 # folder's NAME, so the scratch folder is a real recordings folder to it.
 #
@@ -100,7 +100,7 @@ function Stop-Peer($peer) {
     Start-Sleep -Milliseconds 1500
 }
 
-# e runs with the scratch APPDATA and USERPROFILE; everything else is the
+# e runs with the scratch APPDATA, USERPROFILE and HOME; everything else is the
 # fleet's usual launch. Child processes (the relaunch waiter) inherit both.
 function Start-PeerProcess($peer, $dataDir, [hashtable]$extraEnv) {
     $dest = Join-Path $script:FleetStageRoot $peer
@@ -188,7 +188,7 @@ try {
     if (Test-Path $fData) { Remove-Item $fData -Recurse -Force }
     & robocopy (Join-Path $fixtureRoot 'f') $fData /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
     Start-PeerProcess 'f' $fData $null | Out-Null
-    $ePid = Start-PeerProcess 'e' $profileB @{ APPDATA = $appData; USERPROFILE = $home2 }
+    $ePid = Start-PeerProcess 'e' $profileB @{ APPDATA = $appData; USERPROFILE = $home2; HOME = $home2 }
     Wait-ForConnected 'e'
     Wait-ForConnected 'f'
     Step f @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_F' }
@@ -229,9 +229,9 @@ try {
     Step e @{ op = 'tap'; target = 'semantics:Call controls > semantics:More'; index = 0 }
     Step e @{ op = 'wait_for'; target = 'menu > text:Stop recording'; timeout_ms = 10000 }
     Step e @{ op = 'tap'; target = 'menu > text:Stop recording'; index = 0 }
-    # The "Recording saved" toast sits over the call bar's hang-up while it shows.
+    # The hang-up must stay reachable while the "Recording saved" toast shows.
     Step e @{ op = 'wait_for'; target = 'contains:Recording saved'; timeout_ms = 15000 }
-    Step e @{ op = 'wait_for'; gone = 'contains:Recording saved'; timeout_ms = 30000 }
+    Step e @{ op = 'shot'; name = 'pw-01b-saved-toast' }
     Step e @{ op = 'tap'; target = 'semantics:Leave the call'; index = 0 }
     Step e @{ op = 'wait_for'; provider = 'callStatus'; equals = 'idle'; timeout_ms = 30000 }
 

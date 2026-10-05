@@ -106,6 +106,7 @@ The phone's server settings are the desktop pages under `SettingsDensity(touch: 
 **File:** `lib/src/ui/mobile/mobile_chat_route.dart`
 **Class:** `MobileChatRoute extends ConsumerStatefulWidget`
 **Purpose:** Shared chat view for both DM and channel conversations. Pushes onto root navigator (bottom nav disappears).
+**Leaves with its server (2026-10-05):** a channel page (not a DM, not a `conf:` meeting) listens to `serverListProvider.select((s) => s.containsKey(serverId))` and leaves when the server drops out (kick, ban, delete, our own leave), never while `serverListLoadStateProvider` is still loading; `_leaveRoute` pops when on top, else `removeRoute` on this route only. Test `test/widget/mobile_chat_route_server_gone_test.dart`; fleet `mobile_voice_kick` ends on Chats. The server settings SUB-pages do not do this yet (tmp4 DEFERRED item 4).
 
 ### Constructor
 | Parameter | Type | Description |

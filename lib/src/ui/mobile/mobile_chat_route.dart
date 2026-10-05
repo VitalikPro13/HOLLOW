@@ -1529,6 +1529,33 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     // or a demotion); the CRDT already propagated, so this only pops the route.
     if (!widget.isDm && widget.serverId != null && widget.channelId != null) {
       ref.listen(visibleChannelsProvider, _onVisibleChannelsChanged);
+      // Kicked, banned, deleted or left from any device: the page leaves with
+      // its server. A meeting is never in the server list.
+      if (!widget.serverId!.startsWith('conf:')) {
+        ref.listen(
+            serverListProvider.select((s) => s.containsKey(widget.serverId)),
+            _onServerListedChanged);
+      }
+    }
+  }
+
+  void _onServerListedChanged(bool? wasListed, bool listed) {
+    if (listed || !mounted || _routeDeactivated) return;
+    // A list that has not finished loading is filling in, not losing a server.
+    if (!ref.read(serverListLoadStateProvider).loaded) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _leaveRoute());
+  }
+
+  /// Leaves the stack wherever this route sits in it, so a page opened above
+  /// it (a DM from a member's profile) is not the one that goes.
+  void _leaveRoute() {
+    if (!mounted || _routeDeactivated) return;
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isActive || route.isFirst) return;
+    if (route.isCurrent) {
+      Navigator.of(context).pop();
+    } else {
+      Navigator.of(context).removeRoute(route);
     }
   }
 
