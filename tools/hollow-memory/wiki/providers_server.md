@@ -216,7 +216,9 @@ Computes the set of online member peer IDs for a given server. Watches three sou
 2. `invisiblePeersProvider` — set of peers with invisible status
 3. `serverMembersProvider(serverId)` — the member list
 
-Logic: filters members to those whose `peerId` exists in `connectedPeers` AND is NOT in `invisiblePeers`. Returns the resulting `Set<String>`. On `loading` or `error` from the members async, returns empty set `{}`.
+Logic: filters members to those whose `peerId` exists in `connectedPeers` AND is NOT in `invisiblePeers`. Returns the resulting `Set<String>`. On `loading` or `error` from the members async, returns empty set `{}`. It never contains US (our own devices never appear in presence), which the file-holder pick in `channel_chat_provider` relies on.
+
+**`onlineMemberCountProvider(serverId)`** (2026-10-06) is the number the "N online · M members" lines show (server settings Overview and the phone's server settings header): the others online plus us, counted the way the member list does (`!invisibleMode`). Before it those lines said "3 online" with all four members online.
 
 ---
 

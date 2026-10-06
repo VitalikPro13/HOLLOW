@@ -602,7 +602,13 @@ static NODE: OnceLock<Mutex<Option<NodeState>>> = OnceLock::new();
 static TOKIO_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 // Event receiver — stored separately so watch_network_events() can take ownership.
-static EVENT_RX: OnceLock<Mutex<Option<mpsc::Receiver<node::NetworkEvent>>>> = OnceLock::new();
+static EVENT_RX: OnceLock<Mutex<Option<EventFeed>>> = OnceLock::new();
+
+/// The node's events on their way to Dart, and the CRDT actor some of them wait on.
+struct EventFeed {
+    rx: mpsc::Receiver<node::NetworkEvent>,
+    crdt_store: CrdtStore,
+}
 
 // License key — set from Dart before start_node().
 static LICENSE_KEY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -618,7 +624,7 @@ fn get_relay_domain() -> &'static Mutex<Option<String>> {
     RELAY_DOMAIN.get_or_init(|| Mutex::new(None))
 }
 
-fn get_event_rx() -> &'static Mutex<Option<mpsc::Receiver<node::NetworkEvent>>> {
+fn get_event_rx() -> &'static Mutex<Option<EventFeed>> {
     EVENT_RX.get_or_init(|| Mutex::new(None))
 }
 
@@ -1576,11 +1582,13 @@ pub fn start_node() -> Result<String, String> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<node::NodeCommand>(100);
 
     let cmd_tx_clone = cmd_tx.clone();
+    let feed_store = crdt_store.clone();
     let (peer_id_str, handle) = rt
         .block_on(node::spawn_node(id.keypair, id.device_keypair, event_tx, cmd_rx, cmd_tx_clone, olm, crypto_store, crdt_store, license_key, initial_invisible, relay_domain))
         .map_err(|e| format!("Failed to start node: {e}"))?;
 
-    *get_event_rx().lock().map_err(|e| format!("Lock poisoned: {e}"))? = Some(event_rx);
+    *get_event_rx().lock().map_err(|e| format!("Lock poisoned: {e}"))? =
+        Some(EventFeed { rx: event_rx, crdt_store: feed_store });
 
     *guard = Some(NodeState {
         local_peer_id: peer_id_str.clone(),
@@ -1596,7 +1604,7 @@ pub fn start_node() -> Result<String, String> {
 /// Must be called after `start_node()`. Can only be called once per node lifetime.
 #[frb]
 pub fn watch_network_events(sink: StreamSink<NetworkEvent>) -> Result<(), String> {
-    let rx = get_event_rx()
+    let feed = get_event_rx()
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?
         .take()
@@ -1604,17 +1612,45 @@ pub fn watch_network_events(sink: StreamSink<NetworkEvent>) -> Result<(), String
 
     let rt = get_runtime();
     rt.spawn(async move {
-        event_forwarding_task(rx, sink).await;
+        event_forwarding_task(feed, sink).await;
     });
 
     Ok(())
 }
 
-async fn event_forwarding_task(
-    mut rx: mpsc::Receiver<node::NetworkEvent>,
-    sink: StreamSink<NetworkEvent>,
-) {
-    while let Some(event) = rx.recv().await {
+/// Events Dart answers by reading server state back from SQLCipher, which the
+/// CRDT actor writes on its own connection after the node queued the write.
+fn reads_persisted_server_state(event: &node::NetworkEvent) -> bool {
+    use node::NetworkEvent as E;
+    matches!(
+        event,
+        E::ServerCreated { .. }
+            | E::ServerUpdated { .. }
+            | E::ServerJoined { .. }
+            | E::ServerJoinParked { .. }
+            | E::PendingJoinUpdated { .. }
+            | E::ServerDeleted { .. }
+            | E::SyncCompleted { .. }
+            | E::ChannelAdded { .. }
+            | E::ChannelRemoved { .. }
+            | E::ChannelRenamed { .. }
+            | E::MemberJoined { .. }
+            | E::MemberLeft { .. }
+            | E::RoleChanged { .. }
+            | E::PublicChannelConfigChanged { .. }
+    )
+}
+
+/// How long one event may wait on the CRDT actor before it goes to Dart anyway.
+const CRDT_COMMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+async fn event_forwarding_task(mut feed: EventFeed, sink: StreamSink<NetworkEvent>) {
+    while let Some(event) = feed.rx.recv().await {
+        // Dart re-reads the server on these. Read before the commit, it shows the
+        // state one change behind: a rename appears only with the next one.
+        if reads_persisted_server_state(&event) {
+            let _ = tokio::time::timeout(CRDT_COMMIT_WAIT, feed.crdt_store.committed()).await;
+        }
         let ffi_event = to_ffi_event(event);
         if sink.add(ffi_event).is_err() {
             hollow_log!("[HOLLOW] Event stream sink closed, stopping forwarding");
@@ -1629,8 +1665,8 @@ async fn event_forwarding_task(
 pub fn poll_network_event() -> Option<NetworkEvent> {
     let rx_lock = get_event_rx();
     let mut guard = rx_lock.lock().ok()?;
-    let rx = guard.as_mut()?;
-    rx.try_recv().ok().map(to_ffi_event)
+    let feed = guard.as_mut()?;
+    feed.rx.try_recv().ok().map(to_ffi_event)
 }
 
 /// Get the local peer ID. Returns None if the node hasn't started.

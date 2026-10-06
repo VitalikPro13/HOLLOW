@@ -97,6 +97,16 @@
 #   FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Build -Peers a,b
 #   FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b
 #   FLEET_BACKEND=android pwsh scripts/fleet_send.ps1 -Command '[{"peer":"a","op":"look"}]'
+#
+# ## A mixed phone fleet (FLEET_ANDROID_PEERS, pwsh on macOS)
+#
+# The named peers run on Android emulators, every other peer in an iOS
+# Simulator, so one scenario drives an iPhone and an Android phone together.
+# Peer letters stay unique across both: build/fleet_out/<peer> is shared.
+#
+#   FLEET_ANDROID_PEERS=a,b pwsh scripts/fleet.ps1 -Build -Peers a,b,c,d   # builds the app and the APK
+#   FLEET_ANDROID_PEERS=a,b pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b,c,d
+#   FLEET_ANDROID_PEERS=a,b pwsh scripts/fleet_send.ps1 -Command '[{"peer":"c","op":"look"}]'
 
 param(
     # A file in scripts\probe_scenarios\fleet (without .json).
@@ -160,26 +170,18 @@ $script:FleetVars = @{ RUN = (Get-Date -Format 'HHmmss'); REPO = ($repoRoot.Repl
 
 $stageRoot   = $script:FleetStageRoot
 $outRoot     = $script:FleetOutRoot
-if (Test-SimBackend) {
-    # Fixtures under $HOME rather than the temp dir, which macOS purges after
-    # three idle days; a run directory does not exist here, each peer's data
-    # lives inside its simulator container (Get-PeerDataDir).
-    $fixtureRoot = Join-Path (Join-Path $HOME 'hollow_fleet') 'fixtures'
-    $runRoot     = $null
-    $buildOutput = Join-Path (Join-Path (Join-Path $repoRoot 'build') 'ios') (Join-Path 'iphonesimulator' 'Runner.app')
-} elseif (Test-AndroidBackend) {
-    # Each peer's data lives inside its emulator (Reset-PeerData).
-    $fixtureRoot = Get-FixtureRoot
-    $runRoot     = $null
-    $buildOutput = Join-Path $repoRoot 'build/app/outputs/flutter-apk/app-debug.apk'
-} elseif (Test-LinuxBackend) {
-    $fixtureRoot = Join-Path (Get-LinuxFleetHome) 'fixtures'
-    $runRoot     = Join-Path (Get-LinuxFleetHome) 'run'
-    $buildOutput = Join-Path $repoRoot 'build/linux/x64/debug/bundle'
-} else {
-    $fixtureRoot = Join-Path $env:TEMP 'hollow_fleet\fixtures'
-    $runRoot     = Join-Path $env:TEMP 'hollow_fleet\run'
-    $buildOutput = Join-Path $repoRoot 'build\windows\x64\runner\Debug'
+# A phone peer has no run directory: its data lives inside its simulator
+# container or emulator (Get-PeerDataDir, Reset-PeerData).
+$runRoot = $null
+if (Test-LinuxBackend) { $runRoot = Join-Path (Get-LinuxFleetHome) 'run' }
+elseif (Test-WindowsBackend) { $runRoot = Join-Path $env:TEMP 'hollow_fleet\run' }
+
+# What -Build leaves for a peer to be staged from.
+function Get-BuildOutput($peer) {
+    if (Test-SimBackend $peer) { return Join-Path (Join-Path (Join-Path $repoRoot 'build') 'ios') (Join-Path 'iphonesimulator' 'Runner.app') }
+    if (Test-AndroidBackend $peer) { return Join-Path $repoRoot 'build/app/outputs/flutter-apk/app-debug.apk' }
+    if (Test-LinuxBackend) { return Join-Path $repoRoot 'build/linux/x64/debug/bundle' }
+    return Join-Path $repoRoot 'build\windows\x64\runner\Debug'
 }
 
 # Fixtures hold real Ed25519 keys, so they live outside the repo where no
@@ -194,29 +196,30 @@ function Write-Step($message, $colour = 'Cyan') {
 # a different data directory, so it does not conflict with anything here, and
 # killing it would be a rude surprise in the middle of a conversation.
 function Stop-Fleet {
-    if (Test-SimBackend) {
+    $sim = Test-SimBackend
+    $android = (Test-AndroidBackend) -or (Test-MixedFleet)
+    if ($sim -or $android) {
         $stopped = 0
-        foreach ($udid in Get-SimFleetUdids) {
-            if (Get-SimAppPid $udid) {
-                & xcrun simctl terminate $udid com.anonlisten.hollow 2>&1 | Out-Null
-                $stopped++
+        if ($sim) {
+            foreach ($udid in Get-SimFleetUdids) {
+                if (Get-SimAppPid $udid) {
+                    & xcrun simctl terminate $udid com.anonlisten.hollow 2>&1 | Out-Null
+                    $stopped++
+                }
+            }
+        }
+        if ($android) {
+            foreach ($peer in Get-AndroidFleetPeers) {
+                if (Get-AndroidAppPid $peer) {
+                    Invoke-Adb $peer 'shell' "am force-stop $($script:AndroidPackage)" 2>&1 | Out-Null
+                    $stopped++
+                }
             }
         }
         if ($stopped -gt 0) {
             Write-Step "stopping $stopped fleet instance(s)" 'Yellow'
-            Start-Sleep -Milliseconds 1200
+            if ($sim) { Start-Sleep -Milliseconds 1200 }
         }
-        return
-    }
-    if (Test-AndroidBackend) {
-        $stopped = 0
-        foreach ($peer in Get-AndroidFleetPeers) {
-            if (Get-AndroidAppPid $peer) {
-                Invoke-Adb $peer 'shell' "am force-stop $($script:AndroidPackage)" 2>&1 | Out-Null
-                $stopped++
-            }
-        }
-        if ($stopped -gt 0) { Write-Step "stopping $stopped fleet instance(s)" 'Yellow' }
         return
     }
     $running = Get-Process -Name 'hollow' -ErrorAction SilentlyContinue |
@@ -319,20 +322,22 @@ Write-Step "peers: $($peerList -join ', ')$attachNote"
 # --------------------------------------------------------------------------
 
 function Invoke-Build {
-    if (Test-SimBackend) {
+    # A mixed fleet builds only what its peers run on.
+    $sim = @($peerList | Where-Object { Test-SimBackend $_ }).Count -gt 0
+    $android = @($peerList | Where-Object { Test-AndroidBackend $_ }).Count -gt 0
+    if ($sim) {
         Write-Step 'building the probe target for the iOS Simulator'
         & flutter build ios --simulator --debug -t integration_test/ui_probe_test.dart
         if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
-        return
     }
-    if (Test-AndroidBackend) {
+    if ($android) {
         # Only the emulators' own ABI: every extra one is another Rust build.
         $platform = if ("$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" -eq 'Arm64') { 'android-arm64' } else { 'android-x64' }
         Write-Step "building the probe target as an APK ($platform)"
         & flutter build apk --debug --target-platform $platform -t integration_test/ui_probe_test.dart
         if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
-        return
     }
+    if ($sim -or $android) { return }
     if (Test-LinuxBackend) {
         Write-Step 'building the probe target as a Linux bundle'
         & flutter build linux --debug -t integration_test/ui_probe_test.dart
@@ -347,14 +352,14 @@ function Invoke-Build {
 # Whether a peer has a copy of the probe to launch: an exe folder here, an
 # installed app in its simulator there.
 function Test-PeerStaged($peer) {
-    if (Test-SimBackend) {
+    if (Test-SimBackend $peer) {
         $udid = Get-SimUdid $peer
         if (-not $udid) { return $false }
         Start-SimDevice $udid
         $null = & xcrun simctl get_app_container $udid com.anonlisten.hollow 2>$null
         return ($LASTEXITCODE -eq 0)
     }
-    if (Test-AndroidBackend) {
+    if (Test-AndroidBackend $peer) {
         Start-AndroidDevice $peer
         return ("$(Invoke-Adb $peer 'shell' "pm path $($script:AndroidPackage)" 2>$null)" -match 'package:')
     }
@@ -363,10 +368,11 @@ function Test-PeerStaged($peer) {
 }
 
 function Stage-Peer($peer) {
+    $buildOutput = Get-BuildOutput $peer
     if (-not (Test-Path $buildOutput)) {
         throw "no build output at $buildOutput. Run with -Build first."
     }
-    if (Test-SimBackend) {
+    if (Test-SimBackend $peer) {
         $udid = Get-SimUdid $peer -Create
         Start-SimDevice $udid
         Write-Step "installing into simulator hollow-$peer"
@@ -374,7 +380,7 @@ function Stage-Peer($peer) {
         if ($LASTEXITCODE -ne 0) { throw "simctl install for $peer failed with $LASTEXITCODE" }
         return
     }
-    if (Test-AndroidBackend) {
+    if (Test-AndroidBackend $peer) {
         Start-AndroidDevice $peer
         Write-Step "installing into emulator hollow-$peer"
         # -r keeps the app's data, -g grants every runtime permission up front
@@ -419,13 +425,13 @@ if (-not $Attach) {
 
 # Where a peer's app keeps its identity and database while it runs.
 function Get-PeerDataDir($peer) {
-    if (Test-SimBackend) { return Get-SimDataDir (Get-SimUdid $peer) }
+    if (Test-SimBackend $peer) { return Get-SimDataDir (Get-SimUdid $peer) }
     return Join-Path $runRoot $peer
 }
 
 function Reset-PeerData($peer) {
-    $fixture = Join-Path $fixtureRoot $peer
-    if (Test-AndroidBackend) {
+    $fixture = Join-Path (Get-FixtureRoot $peer) $peer
+    if (Test-AndroidBackend $peer) {
         $data = "$($script:AndroidDocs)/hollow"
         if ($Onboard -and $Fresh -and (Test-Path $fixture)) {
             Remove-Item $fixture -Recurse -Force
@@ -478,10 +484,10 @@ function Reset-PeerData($peer) {
 }
 
 function Save-Fixture($peer) {
-    $fixture = Join-Path $fixtureRoot $peer
+    $fixture = Join-Path (Get-FixtureRoot $peer) $peer
     # The WAL has to be folded in before a copy, and the app does that on exit,
     # so this only ever runs after the instances are stopped.
-    if (Test-AndroidBackend) {
+    if (Test-AndroidBackend $peer) {
         Pull-AppDir $peer "$($script:AndroidDocs)/hollow" $fixture
     } else {
         New-Item -ItemType Directory -Path $fixture -Force | Out-Null
@@ -505,7 +511,7 @@ $script:phrases = @{}
 
 function Start-Peer($peer) {
     $out = Join-Path $outRoot $peer
-    if (Test-SimBackend) {
+    if (Test-SimBackend $peer) {
         $udid = Get-SimUdid $peer
         Start-SimDevice $udid
         $documents = Join-Path (Get-SimContainer $udid) 'Documents'
@@ -538,7 +544,7 @@ function Start-Peer($peer) {
         Write-Step "launched $peer (pid $launchedPid, simulator hollow-$peer) data=$data"
         return
     }
-    if (Test-AndroidBackend) {
+    if (Test-AndroidBackend $peer) {
         Start-AndroidDevice $peer
         Invoke-Adb $peer 'shell' "am force-stop $($script:AndroidPackage)" 2>&1 | Out-Null
         $docs = $script:AndroidDocs

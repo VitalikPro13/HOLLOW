@@ -2,7 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 
 /// [serverListProvider]'s load, kept apart so its many readers keep the map.
@@ -182,6 +184,18 @@ final onlineMembersProvider =
     loading: () => {},
     error: (_, _) => {},
   );
+});
+
+/// How many members show online, us included the way the member list shows us:
+/// our own devices never appear in [onlineIdentitiesProvider].
+final onlineMemberCountProvider = Provider.family<int, String>((ref, serverId) {
+  final me = ref.watch(identityProvider).peerId;
+  final others = ref.watch(onlineMembersProvider(serverId)).where((p) => p != me);
+  final members =
+      ref.watch(serverMembersProvider(serverId)).valueOrNull ?? const [];
+  final meShown = !ref.watch(invisibleModeProvider) &&
+      members.any((m) => m.peerId == me);
+  return others.length + (meShown ? 1 : 0);
 });
 
 /// The local user's role in a server. Invalidated on RoleChanged events.

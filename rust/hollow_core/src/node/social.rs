@@ -807,6 +807,13 @@ pub(crate) async fn handle_accept_friend_request(
                     ).is_some();
                     if reachable || rec.live_at_receipt {
                         hollow_log!("[HOLLOW-FRIENDS] Requester {device} is present — leaving the session to the live key exchange");
+                        // Here when it asked but gone since (a phone put away): the live
+                        // sends below miss it, so the relay parks this copy for its return.
+                        if !reachable {
+                            send_message_to_peer_in_room(
+                                ws_cmd_tx, &dm_room, &device, friend_accept_msg(answered_at, own_list.clone()),
+                            );
+                        }
                     } else {
                         // Teach the requester OUR device -> master mapping FIRST,
                         // over the same buffered room. It learned nothing about us

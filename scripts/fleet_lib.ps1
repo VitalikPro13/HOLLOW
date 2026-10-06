@@ -33,13 +33,29 @@ if ($env:FLEET_BACKEND) {
     $script:FleetBackend = 'android'
 }
 
+# FLEET_ANDROID_PEERS=a,b (pwsh on macOS) mixes the two phone backends in one
+# fleet: the named peers run on Android emulators and every other peer in an
+# iOS Simulator, so one scenario drives an iPhone and an Android phone talking
+# to each other. Pass a peer to Test-SimBackend / Test-AndroidBackend wherever
+# the answer is about one peer; without one they answer for the machine.
+$script:AndroidPeers = @()
+if ($env:FLEET_ANDROID_PEERS) {
+    if (-not $IsMacOS) { throw 'FLEET_ANDROID_PEERS mixes Android emulators with iOS Simulators, so it runs under pwsh on macOS' }
+    if ($env:FLEET_BACKEND) { throw 'set FLEET_BACKEND=android or FLEET_ANDROID_PEERS, not both' }
+    $script:AndroidPeers = @($env:FLEET_ANDROID_PEERS -split '[,\s]+' | Where-Object { $_ })
+}
+function Test-MixedFleet { return $script:AndroidPeers.Count -gt 0 }
+
 # The iOS Simulator backend: one simulator per peer (named hollow-<peer>), the
 # probe target installed into each, the data directory and the probe output
 # inside the app's own container, which is the only place an iOS app can
 # write, reached from the scripts through a symlink per peer under
 # build/fleet_out. Configuration goes in as Documents/probe.env, because
 # Platform.environment is empty on iOS.
-function Test-SimBackend { return $script:FleetBackend -eq 'sim' }
+function Test-SimBackend($peer) {
+    if ($peer -and (Test-MixedFleet)) { return $script:AndroidPeers -notcontains $peer }
+    return $script:FleetBackend -eq 'sim'
+}
 
 # The Linux backend: a bundle copy per peer under build/fleet, each launched on
 # its OWN session bus (dbus-run-session). The runner registers one fixed
@@ -54,16 +70,17 @@ function Get-LinuxFleetHome { return (Join-Path $HOME 'hollow_fleet') }
 
 # Where `fleet.ps1 -Onboard` keeps each peer's fixture identity. Android peers
 # get their own root: peer a on an emulator and peer a in a simulator are two
-# different identities on the same Mac.
-function Get-FixtureRoot {
+# different identities on the same Mac. Under $HOME on macOS and Linux, never
+# the temp dir, which macOS purges after three idle days.
+function Get-FixtureRoot($peer) {
     if (Test-WindowsBackend) { return Join-Path $env:TEMP 'hollow_fleet\fixtures' }
-    if (Test-AndroidBackend) { return Join-Path (Get-LinuxFleetHome) 'fixtures-android' }
+    if (Test-AndroidBackend $peer) { return Join-Path (Get-LinuxFleetHome) 'fixtures-android' }
     return Join-Path (Get-LinuxFleetHome) 'fixtures'
 }
 
 # The recovery phrase `fleet.ps1 -Onboard` saw for a peer's fixture identity.
 function Get-FixturePhrase($peer) {
-    $file = Join-Path (Get-FixtureRoot) "$peer.phrase"
+    $file = Join-Path (Get-FixtureRoot $peer) "$peer.phrase"
     if (-not (Test-Path $file)) { throw "no phrase kept for '$peer': onboard it again with fleet.ps1 -Onboard -Fresh" }
     return [System.IO.File]::ReadAllText($file).Trim()
 }
@@ -81,7 +98,10 @@ function Get-PowerShellExe { if (Test-WindowsBackend) { return 'powershell' } el
 # host path: the inbox and outbox are written and read through `run-as`, and
 # build/fleet_out/<peer> is a copy that Sync-PeerOut refreshes. The data
 # directory is the app's own app_flutter/hollow.
-function Test-AndroidBackend { return $script:FleetBackend -eq 'android' }
+function Test-AndroidBackend($peer) {
+    if ($peer -and (Test-MixedFleet)) { return $script:AndroidPeers -contains $peer }
+    return $script:FleetBackend -eq 'android'
+}
 
 $script:AndroidPackage = 'com.anonlisten.hollow'
 # getApplicationDocumentsDirectory, relative to the app data directory `run-as`
@@ -252,7 +272,7 @@ function Get-AndroidAppPid($peer) {
 # so screenshots, results and logs are where every other backend leaves them.
 # A no-op on the other backends, whose out directories are the real thing.
 function Sync-PeerOut($peer) {
-    if (-not (Test-AndroidBackend)) { return }
+    if (-not (Test-AndroidBackend $peer)) { return }
     if (-not (Test-AndroidDeviceUp $peer)) { return }
     Pull-AppDir $peer "$($script:AndroidDocs)/probe_out" (Join-Path $script:FleetOutRoot $peer)
 }
@@ -412,14 +432,14 @@ function Get-RelayWelcomeSteps($relayDomain) {
 # A fleet instance is identified by where its exe lives, so nothing here can
 # ever match a real Hollow the user happens to have open.
 function Get-PeerProcess($peer) {
-    if (Test-SimBackend) {
+    if (Test-SimBackend $peer) {
         $udid = Get-SimUdid $peer
         if (-not $udid) { return $null }
         $running = Get-SimAppPid $udid
         if (-not $running) { return $null }
         return [pscustomobject]@{ Id = $running; Udid = $udid }
     }
-    if (Test-AndroidBackend) {
+    if (Test-AndroidBackend $peer) {
         if ($peer -notmatch '^[a-z]$' -or -not (Test-AndroidDeviceUp $peer)) { return $null }
         $running = Get-AndroidAppPid $peer
         if (-not $running) { return $null }
@@ -445,7 +465,7 @@ function Get-CrashTail($peer) {
         @{ name = 'errors.log'; path = (Join-Path $outDir 'errors.log') },
         @{ name = 'stdout'; path = (Join-Path $outDir 'stdout.log') }
     )
-    if (Test-SimBackend) {
+    if (Test-SimBackend $peer) {
         $udid = Get-SimUdid $peer
         if ($udid) {
             try {
@@ -460,7 +480,7 @@ function Get-CrashTail($peer) {
                 $lines += $simLog
             }
         }
-    } elseif (Test-AndroidBackend) {
+    } elseif (Test-AndroidBackend $peer) {
         # The probe's own logs only reach the host by a sync; the app log and
         # logcat are read where they are.
         try { Sync-PeerOut $peer } catch { }
@@ -497,7 +517,7 @@ function Get-CrashTail($peer) {
 }
 
 function Test-PeerLive($peer) {
-    if (Test-AndroidBackend) {
+    if (Test-AndroidBackend $peer) {
         if ($peer -notmatch '^[a-z]$' -or -not (Test-AndroidDeviceUp $peer)) { return $false }
         $marker = "$(Invoke-AppShell $peer "test -e $($script:AndroidDocs)/probe_out/live-ready && echo yes" 2>$null)"
         return ($marker.Trim() -eq 'yes')
@@ -538,7 +558,7 @@ function Send-FleetStep($peer, $step, $timeoutSeconds = 180) {
     $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
     $payload['id'] = $id
     $line = ($payload | ConvertTo-Json -Depth 12 -Compress)
-    $android = Test-AndroidBackend
+    $android = Test-AndroidBackend $peer
     if ($android) {
         Set-AppFile $peer "$($script:AndroidDocs)/probe_out/inbox.jsonl" ($line + "`n") -Append
     } else {

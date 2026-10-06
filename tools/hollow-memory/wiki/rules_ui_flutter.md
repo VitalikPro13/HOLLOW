@@ -130,7 +130,7 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   `feedback_lazy_avatar_pattern`, `feedback_reload_unchanged_bytes_identity`.
 - Event streaming: Rust->Dart `StreamSink`: `watch_network_events()` feeds
   `EventStreamNotifier`.
-- Temp nicknames live in relay RAM and reset on `RelayDisconnected`.
+- Temp nicknames live in relay RAM; the node re-claims a held one on every reconnect and before the relay's 10 minutes run out, so the UI keeps it across `RelayDisconnected`.
 
 ## Input and shortcuts
 

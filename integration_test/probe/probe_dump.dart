@@ -11,6 +11,7 @@ import 'package:hollow/src/core/models/strip_item.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
@@ -19,6 +20,7 @@ import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
+import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -443,6 +445,15 @@ class ProbeDump {
             if (f.direction.isNotEmpty) 'direction': f.direction,
           }
       ];
+    }
+
+    // Who this instance shows online, by identity: a friend row's dot and a
+    // server's "N online" both read this set.
+    final online = read(onlineIdentitiesProvider);
+    if (online != null) out['online'] = online.toList()..sort();
+    final nickname = read(temporaryNicknameProvider);
+    if (nickname != null) {
+      out['nickname'] = [nickname.status.name, ?nickname.nickname].join(' ');
     }
 
     // Counts, not bodies: a dump is read by eye, and forty message bodies bury

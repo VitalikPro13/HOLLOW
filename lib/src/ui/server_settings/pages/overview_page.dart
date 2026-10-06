@@ -537,7 +537,7 @@ class _InvitePreview extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final draft = ref.read(serverSettingsDraftProvider(serverId).notifier);
-    final online = ref.watch(onlineMembersProvider(serverId)).length;
+    final online = ref.watch(onlineMemberCountProvider(serverId));
     final members = ref.watch(serverMembersProvider(serverId)).valueOrNull?.length ??
         ref.watch(serverListProvider)[serverId]?.memberCount ??
         0;

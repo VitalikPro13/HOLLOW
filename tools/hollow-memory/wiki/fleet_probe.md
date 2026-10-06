@@ -743,6 +743,47 @@ FLEET_BACKEND=android pwsh scripts/fleet_send.ps1 -Command "$(cat /tmp/cmd.json)
   and its data vanish every boot), GPU off; `New-AndroidAvd` rewrites `config.ini`.
 - The machine setup the build needs (JDK 21, SDK CMake for webcrypto's ninja, the Android
   OpenSSL paths) is in memory `reference_mac_ssh_build`.
+- **Android cuts a backgrounded app's network within seconds.** `adb shell input keyevent
+  KEYCODE_HOME` and three seconds later the log shows `Software caused connection abort`, then
+  DNS failures: the relay sees the phone go, its nickname with it. That is the real behaviour
+  for anyone who did not grant the battery exemption, so lifecycle tests keep it.
+- **Hollow's own battery-exemption prompt** (`RequestIgnoreBatteryOptimizations`) sits on top
+  of the app after launch. The probe keeps answering under it, but once the app is sent home
+  and brought back (`am start -n com.anonlisten.hollow/.MainActivity`) the task returns with
+  the prompt in front and the probe stops answering until `adb shell input keyevent
+  KEYCODE_BACK` dismisses it. Check with `dumpsys activity activities | grep topResumedActivity`.
+
+## A mixed phone fleet: iPhone and Android in one run (2026-10-06)
+
+`FLEET_ANDROID_PEERS=a,b` (pwsh on macOS) puts the named peers on Android emulators and every
+other peer in an iOS Simulator, so one scenario or `fleet_send` batch drives an iPhone talking
+to an Android phone. `Test-SimBackend $peer` / `Test-AndroidBackend $peer` answer per peer
+(without a peer they answer for the machine); `-Build` builds the app and the APK only for the
+backends its peers use; fixtures stay apart (`fixtures` vs `fixtures-android`). Peer letters
+are unique across both, since `build/fleet_out/<peer>` is shared: the existing AVDs made a,b
+Android and c,d the simulators.
+
+```
+FLEET_ANDROID_PEERS=a,b pwsh scripts/fleet.ps1 -Build -Peers a,b,c,d          # ~6 min, both apps
+FLEET_ANDROID_PEERS=a,b pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b,c,d # ~3 min
+FLEET_ANDROID_PEERS=a,b pwsh scripts/fleet.ps1 -Live -Peers a,b,c,d
+FLEET_ANDROID_PEERS=a,b pwsh scripts/fleet_send.ps1 -Command "$(cat /tmp/x.json)"
+```
+
+**Lifecycle by hand, between batches:** an iPhone goes to the background with `xcrun simctl
+launch <udid> com.apple.Preferences` and comes back with `xcrun simctl launch <udid>
+com.anonlisten.hollow` (same pid: a resume, not a restart; the simulator keeps its socket, so
+frames wait in TCP rather than being lost); Android with `KEYCODE_HOME` and `am start` as above.
+Never send a probe step to a peer that is in the background: it waits for frames that never
+come. The provider snapshot carries `online` (identities this peer shows online; it never lists
+itself) and `nickname` (`claimed vitc1447`, `off`, ...) for exactly these journeys.
+
+**What the first runs found (2026-10-06):** a server rename read one change late on a phone
+(fixed: events wait for the CRDT actor's commit); a nickname died after ten minutes while the
+app still showed it, and with the socket when Android backgrounded the app (fixed: the node
+holds and re-claims it); a phone's accept lost to a dead socket never came again (fixed: a
+replayed request is answered again). Nickname add, accept and Online both ways passed with
+both phones in the foreground before any fix.
 
 ## The Linux backend: the same fleet on Vitalik's laptop (2026-09-09)
 

@@ -42,6 +42,8 @@ pub(crate) enum CrdtStoreCmd {
         server_id: String,
         reply: tokio::sync::oneshot::Sender<Option<crate::storage::messages::PendingJoinRow>>,
     },
+    /// Answered once every write queued before it is committed.
+    Barrier(tokio::sync::oneshot::Sender<()>),
 }
 
 /// A batched pending state save: either pre-serialized JSON (legacy path) or
@@ -56,6 +58,7 @@ enum PendingState {
 /// Owns a `rusqlite::Connection` (which is `!Send`) inside a `spawn_blocking`
 /// task. After each batch drain only the LATEST `SaveState` per `server_id` is
 /// flushed, which batches many CRDT ops into one DB write per server.
+#[derive(Clone)]
 pub(crate) struct CrdtStore {
     cmd_tx: mpsc::UnboundedSender<CrdtStoreCmd>,
 }
@@ -87,6 +90,7 @@ impl CrdtStore {
                 // suspended holding a lock is what RunningBoard kills the process
                 // for (EXC_CRASH 0xdead10cc). An all-read batch opens none.
                 let mut writes = Vec::new();
+                let mut barriers = Vec::new();
                 let mut queued = Some(cmd);
                 loop {
                     let Some(cmd) = queued.take().or_else(|| cmd_rx.try_recv().ok()) else {
@@ -117,10 +121,14 @@ impl CrdtStore {
                                 .find(|r| r.server_id == server_id);
                             let _ = reply.send(row);
                         }
+                        CrdtStoreCmd::Barrier(done) => barriers.push(done),
                         other => writes.push(other),
                     }
                 }
                 if writes.is_empty() {
+                    for done in barriers {
+                        let _ = done.send(());
+                    }
                     continue;
                 }
 
@@ -153,6 +161,9 @@ impl CrdtStore {
                 }
 
                 let _ = store.commit_transaction();
+                for done in barriers {
+                    let _ = done.send(());
+                }
             }
         });
 
@@ -200,7 +211,8 @@ impl CrdtStore {
             // opens, so it never reaches here.
             CrdtStoreCmd::ChannelWatermarks { .. }
             | CrdtStoreCmd::LoadPendingJoin { .. }
-            | CrdtStoreCmd::ChannelAuthors { .. } => {}
+            | CrdtStoreCmd::ChannelAuthors { .. }
+            | CrdtStoreCmd::Barrier(_) => {}
             CrdtStoreCmd::PruneLegacyOps { server_ids, keep } => {
                 for sid in server_ids {
                     match store.prune_crdt_ops(&sid, keep) {
@@ -259,6 +271,15 @@ impl CrdtStore {
     /// Fire-and-forget: prune each named legacy-anchored server to its newest ops.
     pub fn prune_legacy_ops(&self, server_ids: Vec<String>, keep: usize) {
         let _ = self.cmd_tx.send(CrdtStoreCmd::PruneLegacyOps { server_ids, keep });
+    }
+
+    /// Waits until every write queued before this call is committed, so another
+    /// connection reads it. Returns at once when the actor is gone.
+    pub async fn committed(&self) {
+        let (done, rx) = tokio::sync::oneshot::channel();
+        if self.cmd_tx.send(CrdtStoreCmd::Barrier(done)).is_ok() {
+            let _ = rx.await;
+        }
     }
 
     /// Every author of a channel post we hold in `server_id` (empty if the actor is gone).
@@ -368,5 +389,29 @@ mod tests {
             .channel_watermarks("srv".to_string(), vec!["random".into()])
             .await;
         assert_eq!(mixed.get("random"), Some(&2_000));
+    }
+
+    /// Dart answers a server event by reading the state on ITS connection, so the
+    /// barrier must hold until the write queued before it is committed, or a rename
+    /// shows one change late. A big state keeps the write slow enough to lose a race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn committed_waits_for_the_queued_state_write() {
+        let dir = crate::test_tmp::tempdir().expect("tmp");
+        let path = dir.path().join("barrier.db");
+        let path_str = path.to_string_lossy().to_string();
+        let passphrase = "cd".repeat(32);
+        let actor = CrdtStore::open(path_str.clone(), passphrase.clone()).expect("actor");
+        // Two opens at once race for the schema lock; the round trip waits out the actor's.
+        actor.committed().await;
+        let reader = MessageStore::open(&path_str, &passphrase).expect("reader");
+        let padding = "x".repeat(4 * 1024 * 1024);
+
+        for name in ["first", "second", "third"] {
+            actor.save_state("srv".into(), format!(r#"{{"name":"{name}","pad":"{padding}"}}"#));
+            actor.committed().await;
+            let stored = reader.load_all_servers().expect("read");
+            let json = &stored.iter().find(|(sid, _)| sid == "srv").expect("row").1;
+            assert!(json.starts_with(&format!(r#"{{"name":"{name}""#)), "the reader saw a stale state after {name}");
+        }
     }
 }

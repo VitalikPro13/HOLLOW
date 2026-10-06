@@ -267,10 +267,10 @@ class EventStreamNotifier extends Notifier<bool> {
     ref.invalidate(myPermissionsProvider(serverId));
     ref.invalidate(myRoleProvider(serverId));
     ref.invalidate(myMuteStatusProvider(serverId));
-    // CrdtStore persists via fire-and-forget mpsc, so a DB read races the actor's
-    // write and a single fixed delay was unreliable. Refresh on a ramp:
-    // channelListProvider drives the desktop shell and open mobile chat route,
-    // serverChannelsProvider drives the mobile Chats tab, which has no selection.
+    // Server events reach us once the CRDT actor has committed (the Rust event
+    // forwarder waits up to 2 s), so a read here is current; the ramp covers a
+    // commit slower than that wait. channelListProvider drives the desktop shell
+    // and open mobile chat route, serverChannelsProvider the mobile Chats tab.
     _reloadChannelsWithRetry(serverId);
     _evictVoiceIfInvisible(serverId);
   }
@@ -1103,7 +1103,7 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_RelayDisconnected():
         ref.read(siblingCallProvider.notifier).clear();
-        ref.read(temporaryNicknameProvider.notifier).onDisconnected();
+        // A claimed nickname stays: the node claims it again on reconnect.
         ref.read(deviceLinkSyncProvider.notifier).onDisconnected();
         ref
             .read(connectionStatusProvider.notifier)

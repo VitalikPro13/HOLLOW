@@ -21418,6 +21418,8 @@ async fn friend_accept_and_dms_with_zero_overlap() {
         b.olm_status(&a_device).await,
     );
     drain_events(&mut b);
+    // B's reconnect may already have parked an answer for A, so wait for one more.
+    let parked_for_a = relay.buffered_count(&a_device);
     b.cmd_tx
         .send(NodeCommand::SendMessage {
             peer_id: a_master.clone(),
@@ -21429,7 +21431,7 @@ async fn friend_accept_and_dms_with_zero_overlap() {
         .await
         .unwrap();
     assert!(
-        wait_until(10, async || relay.buffered_count(&a_device) > 0).await,
+        wait_until(10, async || relay.buffered_count(&a_device) > parked_for_a).await,
         "B's reply must be buffered for the offline A",
     );
 
@@ -21545,6 +21547,94 @@ async fn friend_accept_survives_mailbox_redelivery() {
         Some(("accepted".to_string(), String::new())),
         "the accepted friendship must survive the mailbox replay — no downgrade to \
          pending incoming",
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// Two phones: A asks while both are open, then A is put away and B's accept goes to a
+// socket the relay still listed but nobody read. The two are never open together
+// again, so the only way A learns is B answering the request its mailbox replays when
+// B next connects, into the DM room, where the relay parks it until A is back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn a_lost_accept_is_answered_again_when_the_mailbox_replays_the_request() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 111;
+    const A_DEV: u8 = 112;
+    const B_MASTER: u8 = 113;
+    const B_DEV: u8 = 114;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    let (a_device, b_device) = (a.device_id.clone(), b.device_id.clone());
+    sleep_ms(1500).await;
+    drain_events(&mut b);
+
+    a.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    let mut requester_id = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+                requester_id = Some(peer_id.clone());
+                true
+            } else {
+                false
+            }
+        })
+        .await,
+        "B must see A's request",
+    );
+
+    relay.hold_direct(&b_device, &a_device);
+    b.cmd_tx
+        .send(NodeCommand::AcceptFriendRequest { peer_id: requester_id.expect("requester") })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.held_kinds(&b_device, &a_device).iter().any(|k| k == "friend_accept")).await,
+        "B must answer: {:?}",
+        relay.held_kinds(&b_device, &a_device),
+    );
+    // Its redelivery on A's presence in the DM room is lost the same way.
+    sleep_ms(2000).await;
+    relay.discard_held_kind(&b_device, &a_device, "friend_accept");
+    relay.release_held(&b_device, &a_device);
+    assert_eq!(friend_row(&a, &b_master).map(|(s, _)| s).as_deref(), Some("pending"));
+
+    let parked_accept = || {
+        relay.buffered_frames(&a_device).iter().any(|body| {
+            serde_json::from_slice::<serde_json::Value>(body)
+                .ok()
+                .is_some_and(|v| v.get("type").and_then(|t| t.as_str()) == Some("friend_accept"))
+        })
+    };
+    relay.set_online(&a_device, false);
+    sleep_ms(500).await;
+    assert!(!parked_accept(), "nothing answered yet while B stays connected");
+    relay.set_online(&b_device, false);
+    relay.set_online(&b_device, true);
+    assert!(
+        wait_until(10, async || parked_accept()).await,
+        "B's reconnect must answer the replayed request for the absent A",
+    );
+    relay.set_online(&b_device, false);
+    relay.set_online(&a_device, true);
+    assert!(
+        wait_until(20, async || {
+            friend_row(&a, &b_master).map(|(s, _)| s) == Some("accepted".to_string())
+        })
+        .await,
+        "A must take the parked accept, got {:?}",
+        friend_row(&a, &b_master),
     );
 
     drop(a);

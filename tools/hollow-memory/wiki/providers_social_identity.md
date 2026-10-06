@@ -72,7 +72,6 @@ Initial state: `off`, no nickname, no error. **No persistence** — resets every
 - **`onClaimed(nickname)`** — event handler, sets `claimed` with nickname.
 - **`onReleased()`** — event handler, resets to `off`.
 - **`onClaimFailed(error)`** — event handler, sets `failed` with error string.
-- **`onDisconnected()`** — called on `NetworkEvent_RelayDisconnected`, resets to `off` (relay lost the nickname).
 
 ### Event Wiring (event_provider.dart)
 
@@ -81,7 +80,7 @@ Five new events handled:
 - `NetworkEvent_NicknameReleased` → `onReleased()`
 - `NetworkEvent_NicknameClaimFailed` → `onClaimFailed()`
 - `NetworkEvent_NicknameResolveFailed` → debug log only (toast handled by caller)
-- `NetworkEvent_RelayDisconnected` → `onDisconnected()` + `connectionStatusProvider.onRelayStatusChanged('disconnected')`
+- `NetworkEvent_RelayDisconnected` → `connectionStatusProvider.onRelayStatusChanged('disconnected')` only. A claimed nickname stays claimed (2026-10-06): the node holds it and claims it again on reconnect and every 8 minutes (`nick_claim::NickHold`, wiki `rust_social`); a re-claim someone else took arrives as `NicknameClaimFailed('taken')`.
 
 ---
 

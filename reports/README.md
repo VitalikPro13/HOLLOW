@@ -13,6 +13,7 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 | Document | Area | What it is |
 |---|---|---|
 | `planned/relay-and-sync/MULTI_RELAY_CLIENT_PLAN.md` | relay-and-sync | One client holding sockets to several relays, servers and friendships bound to the relay they live on, no relay-to-relay protocol. Designed 2026-09-12. |
+| `planned/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md` | relay-and-sync | Sessions that outlive the socket: counted and acked frames both ways, a relay grace window with a bounded ring, resume instead of rejoin, a heartbeat with a deadline, probes on foreground, network change and wake, and phones that close on background and let push wake them (no battery prompt). Root cause and research for the fragile connection. Designed 2026-10-06. |
 | `planned/relay-and-sync/STORAGE_NODES_PLAN.md` | relay-and-sync | Always-on storage nodes that members bring: a Worker in front of a volunteer's own R2 bucket with an enforced quota and zero-bill guards, or a self-hosted blob service beside a relay or on a NAS; server pools and personal nodes, one protocol. Designed 2026-09-17. |
 | `planned/security/SECURITY_AUDIT_PLAN.md` | security | How professional audits of encrypted messengers are run, the method Hollow adopts (claims, threat model, authorisation matrix, hostile harness, variant analysis), the program, and the identity authority design. Its working files live in `planned/security/audit/`. Started 2026-09-26. |
 

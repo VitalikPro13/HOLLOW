@@ -87,9 +87,4 @@ class TemporaryNicknameNotifier extends Notifier<TemporaryNicknameState> {
       error: error,
     );
   }
-
-  void onDisconnected() {
-    _claimTimer?.cancel();
-    state = const TemporaryNicknameState();
-  }
 }

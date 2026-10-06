@@ -1088,14 +1088,16 @@ async fn run_event_loop(
     // Pending friend requests: peer_id → requested_at timestamp.
     // Queued when peer isn't reachable (no shared rooms), sent when they appear.
     let mut pending_friend_requests: HashMap<String, i64> = HashMap::new();
-    // Masters whose DECLINE we have already re-sent on THIS connection. The relay's
-    // copy of a reject expires before the requester next boots; the requester then
-    // re-deposits the same request and we swallow it against the tombstone, so
-    // without re-arming the answer it would never learn. Cleared on Disconnected
-    // like every reconnect-scoped gate: the mailbox only replays on an inbox
-    // rejoin, so one re-send per connection is exactly one per replay burst.
-    let mut reject_resent: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Masters whose decline or accept we have already re-sent on THIS connection. The
+    // relay's copy of an answer can expire, or go to a socket that was already dead,
+    // before the requester next boots; the mailbox then replays the same request and
+    // we swallow it against the settled row, so without re-arming the answer the
+    // requester would never learn. Cleared on Disconnected like every reconnect-scoped
+    // gate: the mailbox only replays on an inbox rejoin, so one re-send per connection
+    // is exactly one per replay burst.
+    let mut answer_resent: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pending_nickname_resolve: Option<String> = None;
+    let mut nick_hold = super::nick_claim::NickHold::default();
     let mut link = link_handler::LinkState::default();
     // Destruction freshness: the first start of a device stamps when it joined the
     // identity, so an order issued before it existed can never wipe it.
@@ -1434,7 +1436,7 @@ async fn run_event_loop(
                     &local_peer_str, &ask.from, is_invisible,
                     &mut pending_friend_accepts, &mut pending_friend_requests,
                     &mut pending_friend_removals,
-                    &mut reject_resent,
+                    &mut answer_resent,
                     &mut pending_asset_asks,
                     &mut pending_file_asks,
                     &pending_ws_transfers,
@@ -2399,16 +2401,12 @@ async fn run_event_loop(
                         // it back on resolve, so a stranger's request goes to
                         // `inbox:{master}` and only to a master that claimed it.
                         let nickname = nickname.to_lowercase();
-                        let now_ms = super::types::now_ms();
-                        let claim = super::nick_claim::sign(&master_keypair, &nickname, &device_peer_id, now_ms);
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ClaimNickname {
-                            nickname,
-                            master: local_peer_str.to_string(),
-                            claim,
-                        });
+                        nick_hold.want(&nickname, std::time::Instant::now());
+                        super::nick_claim::send_claim(&ws_cmd_tx, &master_keypair, &device_peer_id, &nickname);
                     }
 
                     NodeCommand::ReleaseNickname => {
+                        nick_hold.release();
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ReleaseNickname);
                     }
 
@@ -3269,7 +3267,7 @@ async fn run_event_loop(
                                 &local_peer_str, &sender_peer_id, is_invisible,
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
                                 &mut pending_friend_removals,
-                                &mut reject_resent,
+                                &mut answer_resent,
                                 &mut pending_asset_asks,
                                 &mut pending_file_asks,
                                 &pending_ws_transfers,
@@ -3465,6 +3463,9 @@ async fn run_event_loop(
                         // reconnects are the only refresh needed — D5's
                         // fallback ladder corrects any staleness.
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetMediaForwarder);
+                        if let Some(nickname) = nick_hold.on_connected(std::time::Instant::now()) {
+                            super::nick_claim::send_claim(&ws_cmd_tx, &master_keypair, &device_peer_id, &nickname);
+                        }
                         door_rooms.on_connected();
                         // Phase 2: if we're serving as a peer forwarder, the
                         // relay forgot our fwd room on the reconnect — rejoin
@@ -3618,6 +3619,7 @@ async fn run_event_loop(
                     WsEvent::Disconnected => {
                         hollow_log!("[HOLLOW-WS] Relay disconnected — will auto-reconnect");
                         pending_nickname_resolve = None;
+                        nick_hold.on_disconnected();
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
                         ws_room_peers.clear();
                         super::door_room::forget_heard();
@@ -3643,8 +3645,8 @@ async fn run_event_loop(
                         relay_catchup_done.clear();
                         join_hold.went_away(&server_states);
                         // A new socket means a fresh mailbox replay burst, so the
-                        // decline re-send is re-armed with it (see `reject_resent`).
-                        reject_resent.clear();
+                        // answer re-send is re-armed with it (see `answer_resent`).
+                        answer_resent.clear();
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
                         mls_bootstrap_requested.clear();
@@ -4971,7 +4973,7 @@ async fn run_event_loop(
                                 &local_peer_str, &from, is_invisible,
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
                                 &mut pending_friend_removals,
-                                &mut reject_resent,
+                                &mut answer_resent,
                                 &mut pending_asset_asks,
                                 &mut pending_file_asks,
                                 &pending_ws_transfers,
@@ -5051,7 +5053,10 @@ async fn run_event_loop(
                         if pending_nickname_resolve.as_deref() == Some(&nickname) {
                             pending_nickname_resolve = None;
                             let _ = event_tx.send(NetworkEvent::NicknameResolveFailed { nickname, error }).await;
-                        } else {
+                        } else if error != "not_found" {
+                            // Only a lookup answers not_found; anything else refused a claim,
+                            // a re-claim included (taken while we were away).
+                            nick_hold.release();
                             let _ = event_tx.send(NetworkEvent::NicknameClaimFailed { error }).await;
                         }
                     }
@@ -5483,7 +5488,7 @@ async fn run_event_loop(
                                             &local_peer_str, &from, is_invisible,
                                             &mut pending_friend_accepts, &mut pending_friend_requests,
                                             &mut pending_friend_removals,
-                                            &mut reject_resent,
+                                            &mut answer_resent,
                                             &mut pending_asset_asks,
                                             &mut pending_file_asks,
                                             &pending_ws_transfers,
@@ -5889,6 +5894,9 @@ async fn run_event_loop(
             _ = rebootstrap_timer.tick() => {
                 arm_started = Some(("timer", "rebootstrap", std::time::Instant::now()));
                 frame_replays.prune(super::frame_auth::now_ms());
+                if let Some(nickname) = nick_hold.due(std::time::Instant::now()) {
+                    super::nick_claim::send_claim(&ws_cmd_tx, &master_keypair, &device_peer_id, &nickname);
+                }
                 // Primary peer discovery rides the LIVE WS connection, with no fresh TLS
                 // handshake. The HTTP bootstrap below is a non-fatal legacy fallback; its
                 // failures are logged quietly and never surfaced.
@@ -7471,7 +7479,7 @@ async fn handle_incoming_request(
     pending_friend_accepts: &mut HashMap<String, i64>,
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_removals: &mut std::collections::HashSet<String>,
-    reject_resent: &mut std::collections::HashSet<String>,
+    answer_resent: &mut std::collections::HashSet<String>,
     pending_asset_asks: &mut HashMap<String, emotes::PendingAsk>,
     pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
     pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
@@ -12050,11 +12058,20 @@ async fn handle_incoming_request(
                     .ok()
                     .and_then(|s| s.get_friend_row(&req_master_early).ok().flatten());
                 match existing.as_ref().map(|(s, d, r)| (s.as_str(), d.as_str(), *r)) {
-                    // Already friends — a re-delivered replay of a friendship we
-                    // already hold. Do NOT save (no downgrade), do NOT emit, do NOT
-                    // re-join/re-push. The friendship is settled.
-                    Some(("accepted", _, _)) => {
-                        hollow_log!("[HOLLOW-FRIENDS] Re-delivered request from {peer_str} — already accepted, ignoring");
+                    // Already friends: a re-delivered replay of a friendship we already
+                    // hold. Never saved (no downgrade) or emitted, but answered again, once
+                    // per connection: our accept may have gone to a socket that was already
+                    // dead, or answered an older request than this one, and the requester
+                    // shows "Sent" until one lands. Into the DM room, where the relay parks
+                    // it while the requester is away.
+                    Some(("accepted", _, stored_req)) => {
+                        hollow_log!("[HOLLOW-FRIENDS] Re-delivered request from {peer_str} — already accepted, answering again");
+                        if answer_resent.insert(req_master_early.clone()) {
+                            social::send_friend_accept(
+                                ws_cmd_tx, local_peer_str, master_keypair, &req_master_early,
+                                peer_str, stored_req.max(requested_at), db_path, db_passphrase,
+                            );
+                        }
                         return;
                     }
                     // The user already refused this person and the TTL-only mailbox is
@@ -12067,7 +12084,7 @@ async fn handle_incoming_request(
                         // mailbox, and when that copy expires before the requester next boots
                         // it re-deposits this very request and nobody answers again. So every
                         // swallow re-sends the decline, ONCE per requester per process.
-                        if reject_resent.insert(req_master_early.clone()) {
+                        if answer_resent.insert(req_master_early.clone()) {
                             social::send_friend_reject(
                                 ws_cmd_tx, ws_room_peers, peer_str,
                                 &req_master_early, stored_req,

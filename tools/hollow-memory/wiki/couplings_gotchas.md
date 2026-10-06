@@ -115,6 +115,12 @@ See memory `project_mls_epoch_catchup`.
 
 ## CRDT Gotchas
 
+### A server event Dart answers with a DB read waits for the CRDT commit (2026-10-06)
+
+**Rule:** the CrdtStore actor writes server state on its own SQLCipher connection after the node queued it, and Dart answers `ServerUpdated`, `SyncCompleted`, `MemberJoined`, ... by re-reading through FFI (`getJoinedServers`, `getServerMembers`). `event_forwarding_task` in `api/network.rs` therefore holds every event in `reads_persisted_server_state` until `CrdtStore::committed()` answers (max 2 s). A NEW event that Dart answers with a read of CRDT-written state joins that list.
+
+**Why:** without it the read lost the race on a phone, worst on an old server whose state (op log included) is slow to serialize: a rename showed only with the NEXT rename. Reproduced on the mixed fleet, fixed and re-run 32 of 32; `crdt_store::tests::committed_waits_for_the_queued_state_write` fails if the barrier stops waiting.
+
 ### New CrdtPayload variants must emit ServerUpdated in BOTH match blocks
 
 **Rule:** In `sync_handler.rs:handle_envelope_crdt_op()` and `swarm.rs:handle_incoming_request()`, new CrdtPayload variants that affect permissions, channels, labels, bans, or any server state visible in the UI MUST be explicitly listed in the match arms that emit `NetworkEvent::ServerUpdated`. They must NOT fall into the `_ =>` wildcard.

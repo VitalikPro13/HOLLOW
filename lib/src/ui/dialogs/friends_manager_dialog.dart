@@ -897,8 +897,8 @@ bool handleNicknameLookupFailed(String nickname, String error) {
   }
   if (waiter == null || waiter.isCompleted) return false;
   waiter.completeError(FriendlyException(switch (error) {
-    'not_found' => 'No one has the nickname $nickname right now. Nicknames '
-        'reset when their owner goes offline.',
+    'not_found' => 'No one has the nickname $nickname right now. A nickname '
+        'works only while its owner has Hollow open.',
     'unverified' =>
       "Hollow couldn't confirm who holds that nickname, so nothing was sent.",
     _ => "Hollow couldn't look up that nickname. Try again.",
@@ -1152,7 +1152,9 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
         const SizedBox(height: HollowSpacing.lg),
         Text('Temporary nickname', style: title),
         const SizedBox(height: HollowSpacing.xxs),
-        Text('A short name instead of your ID. Resets when you go offline.',
+        Text(
+            'A short name instead of your ID. Others can find you by it while '
+            'Hollow is open.',
             style: secondary),
         const SizedBox(height: HollowSpacing.sm),
         if (nicknameState.status == NicknameStatus.claimed)

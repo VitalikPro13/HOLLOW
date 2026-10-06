@@ -70,7 +70,7 @@ class MobileServerSettingsRoute extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final server = ref.watch(serverListProvider)[serverId];
     final access = ref.watch(serverSettingsAccessProvider(serverId));
-    final online = ref.watch(onlineMembersProvider(serverId)).length;
+    final online = ref.watch(onlineMemberCountProvider(serverId));
     final members =
         ref.watch(serverMembersProvider(serverId)).valueOrNull?.length ??
             server?.memberCount ??
