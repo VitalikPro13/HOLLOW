@@ -41,8 +41,8 @@ dependencies:
   flutter_rust_bridge: 2.11.1
   freezed_annotation: ^3.1.0
   flutter_riverpod: ^2.6.1
-  window_manager: ^0.5.1
-  tray_manager: ^0.5.2
+  window_manager: ^0.5.2
+  tray_manager: ^0.7.0
   local_notifier: ^0.1.6
   file_picker: ^10.3.10
   # Vendored fork of 0.3.8: adds findChildIndexCallback so chat-list rows
@@ -54,14 +54,14 @@ dependencies:
     path: packages/flutter_webrtc
   record: ^6.2.0
   win32audio: ^1.5.0
-  audioplayers: ^6.6.0
+  audioplayers: ^6.8.1
   # Voice messages on Linux capture via libpulse-simple over dart:ffi —
   # record_linux shells out to `parecord`, absent on PipeWire systems.
   ffi: ^2.1.0
   # Wayland global PTT/mute hotkeys via the org.freedesktop.portal
   # GlobalShortcuts D-Bus interface (was already transitive via
   # flutter_local_notifications_linux).
-  dbus: ^0.7.12
+  dbus: ^0.7.15
   # Screen-off when the phone is held to the ear during earpiece calls
   # (Android needs WAKE_LOCK — already in the manifest; iOS blanks natively
   # while the events stream is subscribed).
@@ -70,12 +70,12 @@ dependencies:
   # Pinned to 1.5.x: 1.6+ needs win32 ^6 which conflicts with file_picker.
   wakelock_plus: ^1.5.2
   # App lock: fingerprint / Face ID prompt (mobile).
-  local_auth: ^3.0.1
+  local_auth: ^3.0.2
   # App lock: holds the lock-type marker + the biometric-released secret
   # (Android Keystore / iOS Keychain).
   flutter_secure_storage: ^10.3.1
   super_clipboard: ^0.9.1
-  desktop_drop: ^0.7.0
+  desktop_drop: ^0.8.4
   path: ^1.9.0
   # Deep links: receives hollow:// (and later https universal-link) URLs on all
   # platforms — cold-start initial link + live stream. Windows single-instance
@@ -85,8 +85,8 @@ dependencies:
   fvp: ^0.35.2
   visibility_detector: ^0.4.0+2
   url_launcher: ^6.3.2
-  flutter_markdown_plus: ^1.0.7
-  path_provider: ^2.1.5
+  flutter_markdown_plus: ^1.0.12
+  path_provider: ^2.1.6
   # Pinned BELOW the iOS-SDK-v12 breaking change (firebase_core 4.0 /
   # firebase_messaging 16.0) to keep the iOS 13 deployment target — core 4.6+
   # forces an iOS 15 minimum. We use the CLASSIC (non-UIScene) iOS AppDelegate,
@@ -121,7 +121,7 @@ dev_dependencies:
   integration_test:
     sdk: flutter
   freezed: ^3.2.5
-  build_runner: ^2.11.1
+  build_runner: ^2.15.1
   flutter_launcher_icons: ^0.14.4
 
 # Android launcher icons. Run scripts/make_app_icons.py first (it renders these
