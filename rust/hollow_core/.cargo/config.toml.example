@@ -1,0 +1,25 @@
+# Copy to config.toml (gitignored) for plain `cargo` runs inside
+# rust/hollow_core, such as `cargo test` or an Android cross-compile check.
+# Flutter builds go through cargokit, which never reads this file; the system
+# variables in BUILDING.md cover those.
+
+[env]
+# Windows: the OpenSSL 3 install SQLCipher links against. Not needed once the
+# OPENSSL_* system variables from BUILDING.md are set.
+# OPENSSL_DIR = "C:\\Program Files\\OpenSSL-Win64"
+# OPENSSL_LIB_DIR = "C:\\Program Files\\OpenSSL-Win64\\lib\\VC\\x64\\MD"
+# OPENSSL_INCLUDE_DIR = "C:\\Program Files\\OpenSSL-Win64\\include"
+
+# A plain `cargo build --target <android target>` links with the NDK's clang.
+# <ndk> is your NDK folder, e.g. ...\Android\Sdk\ndk\28.2.13676358
+# [target.aarch64-linux-android]
+# linker = "<ndk>\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\aarch64-linux-android21-clang.cmd"
+#
+# [target.armv7-linux-androideabi]
+# linker = "<ndk>\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\armv7a-linux-androideabi21-clang.cmd"
+#
+# [target.x86_64-linux-android]
+# linker = "<ndk>\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\x86_64-linux-android21-clang.cmd"
+#
+# [target.i686-linux-android]
+# linker = "<ndk>\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\i686-linux-android21-clang.cmd"

@@ -50,6 +50,17 @@ release pipeline is the `release` skill.
   `build_release.ps1` scans the log for it. Rust TLS uses `webpki-roots`, NEVER
   `native-roots`. `feedback_android_platform`.
 
+## App icons
+
+- One source: `assets/branding/hollow_mark.svg`. `scripts/make_app_icons.py` renders every
+  platform's icon from it (Windows ICO and its runner copy, macOS on the 824/1024 tile, iOS
+  full bleed with no alpha, web, installer, `hollow_logo_rounded.png`, Android sources); then
+  `dart run flutter_launcher_icons`, then `scripts/make_tray_unread_icon.py`. 32 and 16 px are
+  hand-drawn pixel grids in the script, keyhole included at the vector's proportion.
+- `HollowMark` (`components/hollow_mark.dart`: the dock's Home tile, the About logo) draws the
+  same path in Dart. Change the mark and change it too, or the dock keeps the old logo.
+  `project_logo_refresh_2026_10`.
+
 ## Fonts
 
 - Emoji font: NotoColorEmoji = an emoji-only subset (`scripts/subset_emoji_font.py`).

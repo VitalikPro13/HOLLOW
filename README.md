@@ -5,34 +5,91 @@
 <h1 align="center">Hollow</h1>
 
 <p align="center">
-  Distributed, encrypted communication. No central servers or APIs. No accounts.
+  Distributed, encrypted communication. No accounts, and no server that stores your messages.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License">
-  <img src="https://img.shields.io/badge/platform-Windows%20·%20macOS%20·%20Linux%20·%20Android%20·%20iOS-0078D4" alt="Platform">
-  <img src="https://img.shields.io/badge/encryption-end--to--end-blueviolet" alt="Encryption">
-  <a href="https://codecov.io/gh/VitalikPro13/HOLLOW">
-  <img src="https://codecov.io/gh/VitalikPro13/HOLLOW/graph/badge.svg" alt="Rust Coverage"></a>
-  <img src="https://img.shields.io/badge/status-beta-00BFA6" alt="Status">
+  <a href="https://github.com/VitalikPro13/HOLLOW/releases/latest"><img src="https://img.shields.io/github/v/release/VitalikPro13/HOLLOW?label=release&color=00BFA6" alt="Latest release"></a>
 </p>
 
 <p align="center">
-  <a href="https://sonarcloud.io/summary/overall?id=VitalikPro13_HOLLOW">
-  <img src="https://sonarcloud.io/api/project_badges/measure?project=VitalikPro13_HOLLOW&metric=alert_status" alt="Quality Gate"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=VitalikPro13_HOLLOW">
-  <img src="https://sonarcloud.io/api/project_badges/measure?project=VitalikPro13_HOLLOW&metric=security_rating" alt="Security Rating"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=VitalikPro13_HOLLOW">
-  <img src="https://sonarcloud.io/api/project_badges/measure?project=VitalikPro13_HOLLOW&metric=reliability_rating" alt="Reliability Rating"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=VitalikPro13_HOLLOW">
-  <img src="https://sonarcloud.io/api/project_badges/measure?project=VitalikPro13_HOLLOW&metric=sqale_rating" alt="Maintainability Rating"></a>
+  <img src="assets/Home_Screenshot_v0120.png" width="800" alt="Hollow home screen">
 </p>
 
-<br>
+Hollow is fully distributed, end-to-end encrypted communication software. There are no central servers that store your messages or files. Members of a server collectively host it. The relay forwards encrypted blobs between peers. It cannot read or modify them, and it never writes them to disk.
 
-<p align="center">
-  <img src="assets/Home_Screenshot_v0101.png" width="800" alt="Hollow home screen">
-</p>
+Your identity is a cryptographic keypair. Zero registrations. One recovery phrase, or an export of your identity into a .hollow file, and you own your account forever.
+
+## Features
+
+### Privacy and identity
+
+- No accounts. Your identity is an Ed25519 keypair from a BIP-39 recovery phrase, with no email, phone number or password.
+- Direct messages use Olm (Double Ratchet) and servers use OpenMLS, both with forward secrecy by default.
+- One identity on your phone and your desktop, linked with a short code, with messages, servers and friends kept in sync. If you lose a device, you can remove it from any other one.
+- Every message is signed with Ed25519, so an exported conversation can't be forged.
+
+### Messages and files
+
+- Messages sent while you're offline are waiting when you come back. The relay holds them as ciphertext, in memory only, for a short time.
+- Files up to 34 MB go straight between devices. Larger ones use Hollow Share, which spreads the transfer across peers the way BitTorrent does.
+- Vault splits encrypted files into erasure-coded shards across server members, so a file survives when some of them go offline.
+- The Archive tab shows every message in your local encrypted database, and you can export all of it.
+
+### Calls
+
+- Peer-to-peer voice and video calls over WebRTC, encrypted frame by frame with SFrame (AES-128-GCM).
+- Noise suppression runs on your device (RNNoise, plus DeepFilterNet3 on desktop), along with loudness leveling and fullband Opus. No cloud service ever touches your audio.
+- Screen sharing keeps text readable, because our patched WebRTC encodes screens as screen content (AV1 or VP9) instead of webcam video. Game or music audio gets its own Opus stream, with per-app capture available.
+
+### Communities
+
+- Servers with text and voice channels, roles and permissions. Their state syncs between members through signed CRDTs, with no central copy.
+- Public channels that anyone with the server ID or a join link can read without joining, in the app or on the [website](https://hollow.anonlisten.com/).
+- Optional Twitch verification, to limit a server to your followers or subscribers.
+- Avatars, banners and frames from independent artists in the [Hollow Shop](https://shop.anonlisten.com/). You buy on the artist's Ko-fi page, and Hollow takes no cut.
+
+## Security
+
+The relay can't read messages, files, profiles or calls. It can't forge anything either, because every frame it forwards is signed by the device that sent it. It does see routing metadata: device IDs, IP addresses, which devices share a room, when they send and how much, and a phone's push token. All of that stays in memory and is never logged to disk. The whitepaper lists [exactly what the relay sees](WHITEPAPER.md#127-what-the-relay-sees) and covers the [threat model](WHITEPAPER.md#23-threat-model).
+
+If you find a vulnerability, please report it privately as described in [SECURITY.md](SECURITY.md).
+
+## Download
+
+| Platform | Links |
+|----------|------|
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.12.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.12.0-win64.zip) |
+| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.12.0.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.12.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.12.0-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.12.0-android.apk) |
+| iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
+
+What changed in each version is on the [releases page](https://github.com/VitalikPro13/HOLLOW/releases).
+
+## Self-hosting
+
+Hollow supports self-hosted relays for fully isolated networks. Only the people connected to your relay can reach each other, and the official network is not involved. You need a VPS with a public IP and about twenty minutes. The address can be a free DuckDNS name, so there is nothing to buy, and the certificate is obtained and renewed for you.
+
+```bash
+git clone --recurse-submodules https://github.com/VitalikPro13/HOLLOW.git
+cd HOLLOW/relay-uws
+cp .env.example .env              # set your address, TURN secret and email
+docker compose up -d
+```
+
+Then point the app at it in Settings, under Network. [relay-uws/SELF_HOSTING.md](relay-uws/SELF_HOSTING.md) is the full guide, including what a self-hosted relay does not have. If your relay is older than 0.12, follow [Moving to 0.12](relay-uws/SELF_HOSTING.md#moving-to-012) before your members update the app.
+
+The relay is written in C++ on uWebSockets. It handles TLS 1.3 itself, with no reverse proxy, and fits about 572,000 concurrent connections on an $8/month VPS ([BENCHMARK.md](relay-uws/BENCHMARK.md)).
+
+## Documentation
+
+- [Whitepaper](WHITEPAPER.md): the full protocol specification, covering cryptography, networking, and the threat model
+- [Privacy Policy](legal/PRIVACY_POLICY.md): what data exists, where, and what we can access (nothing)
+- [Terms of Use](legal/TERMS_OF_USE.md): plain-language terms
+- [Relay Documentation](relay-uws/README.md): relay architecture, benchmarks, deployment
+- [Legality Research](legal/legality.md): age verification, illegal-content/CSAM liability, encryption regulations, legal precedents (US/UK/EU)
+- [Transparency Report](legal/transparency_report.md): legal requests received and data disclosure
 
 <details>
 <summary><strong>A note from the creator</strong></summary>
@@ -53,199 +110,10 @@
 
 </details>
 
-## Overview
-
-Hollow is fully distributed, end-to-end encrypted communication software. There are no central servers that store your messages or files. Members of a server collectively host it. The relay is a zero-knowledge signaling pipe that forwards encrypted blobs between peers. It cannot read or modify them, and it keeps nothing on disk.
-
-Your identity is a cryptographic keypair. Zero registrations. One recovery phrase, or an export of your identity into a .hollow file, and you own your account forever.
-
-## Features
-
-- **End-to-end encrypted messaging**: Olm (Double Ratchet) for DMs, OpenMLS for servers. Forward secrecy by default
-- **Multi-device**: link your phone and desktop into one identity with a short code. Messages, servers, and friends stay in sync end-to-end encrypted across your devices, and a lost device can be revoked remotely at any time
-- **Offline delivery without servers**: messages sent while you're away are waiting when you come back. The relay holds only ciphertext, in memory and never on disk, with a short expiry
-- **Encrypted voice and video calls**: peer-to-peer WebRTC with SFrame (AES-128-GCM)
-- **Voice that sounds right**: on-device noise suppression (RNNoise, with DeepFilterNet3 on desktop), automatic loudness leveling, fullband Opus. No cloud processing ever touches your audio
-- **Screen sharing that stays sharp**: a custom-tuned WebRTC engine encodes screens as screen content rather than webcam video, so text stays readable. AV1/VP9, with resolution, framerate and content profiles. Works on all five platforms, both sending and receiving, encrypted with the same SFrame pipeline. Share audio travels on its own encrypted music-grade Opus stream (with per-app capture on Windows and Linux) instead of the voice-call path, so game or music audio arrives crisp instead of call-quality mushy
-- **File sharing**: encrypted peer-to-peer transfers. Files up to 34 MB transfer directly. Larger files use Hollow Share (BitTorrent-like swarmed distribution)
-- **Distributed storage (Vault)**: erasure-coded encrypted shards distributed across server members. Files survive even when individual peers go offline
-- **Servers and channels**: create communities with text channels, voice channels, roles, and permissions. All state synchronized via CRDTs with no authoritative server. Optional: secure Twitch verification to limit members only to your followers/subs
-- **Public channels**: you can make a server channel public, so anyone with the server ID or join link can read it without joining. You can use a viewer inside the app or on the [website](https://hollow.anonlisten.com/)
-- **Custom relay support**: self-host your own relay for a fully isolated network: a VPS, a free DuckDNS name, one `.env` file and `docker compose up`
-- **Cryptographic identity**: Ed25519 keypair from a BIP-39 mnemonic. No accounts, no passwords, no email or phone verification
-- **Full local data retention**: the Archive tab shows every message saved in your local database, and you can export them
-- **Verifiable messages**: every message is Ed25519-signed. Exported conversations are cryptographically unforgeable
-- **Native TLS**: the relay handles TLS 1.3 directly (no Cloudflare, no reverse proxy). ~572,000 concurrent connections on a single $8/month VPS (see [BENCHMARK.md](relay-uws/BENCHMARK.md))
-
-## Download
-
-| Platform | Links |
-|----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.12.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.12.0-win64.zip) |
-| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.12.0.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.12.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.12.0-linux.tar.gz) |
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.12.0-android.apk) |
-| iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
-| Web | Not planned |
-
-Current Progress: Hollow Shop is LIVE! The "big secret" is finally here, so you can buy cool avatars/banners/frames straight from artist's Ko-fi page! They receive all the revenue and you get a one-time activation code that will give you a nice badge on your profile, showing that you supported an artist! The standalone [shop](https://shop.anonlisten.com/) is also available. Besides it, tons of important security fixes and improvements to the app. Self-hosters, please refer to the [guide](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/SELF_HOSTING.md#moving-to-012) to update your relay for the new version and secure it!
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| UI | Flutter (Dart) on Windows, macOS, Linux, Android, iOS |
-| Backend | Rust via flutter_rust_bridge FFI |
-| DM Encryption | vodozemac (Olm / Double Ratchet) |
-| Server Encryption | OpenMLS 0.9 |
-| Media Encryption | SFrame (AES-128-GCM) |
-| Voice/Video | WebRTC (peer-to-peer) |
-| Local Storage | SQLCipher (encrypted SQLite) |
-| Identity | Ed25519 (BIP-39 mnemonic) |
-| Relay | uWebSockets C++ (13.4 KB/conn, native TLS) |
-
-## Self-Hosting
-
-Hollow supports self-hosted relays for fully isolated networks. Only the people connected to your relay can reach each other, and the official network is not involved. You need a VPS with a public IP and about twenty minutes. The address can be a free DuckDNS name, so there is nothing to buy, and the certificate is obtained and renewed for you.
-
-```bash
-git clone --recurse-submodules https://github.com/VitalikPro13/HOLLOW.git
-cd HOLLOW/relay-uws
-cp .env.example .env              # set your address, TURN secret and email
-docker compose up -d
-```
-
-Then point the app at it in Settings, under Network. [relay-uws/SELF_HOSTING.md](relay-uws/SELF_HOSTING.md) is the full guide, including what a self-hosted relay does not have.
-
-## Documentation
-
-- [Whitepaper](WHITEPAPER.md): the full protocol specification, covering cryptography, networking, and the threat model
-- [Privacy Policy](legal/PRIVACY_POLICY.md): what data exists, where, and what we can access (nothing)
-- [Terms of Use](legal/TERMS_OF_USE.md): plain-language terms
-- [Relay Documentation](relay-uws/README.md): relay architecture, benchmarks, deployment
-- [Mobile Port Plan](MobilePort_Plan.md): Android/iOS build setup, OpenSSL cross-compilation, contributor guide
-- [Legality Research](legal/legality.md): age verification, illegal-content/CSAM liability, encryption regulations, legal precedents (US/UK/EU)
-- [Transparency Report](legal/transparency_report.md): legal requests received and data disclosure
-
-## Building from Source
-
-### Prerequisites
-
-- Flutter SDK (stable channel)
-- Rust toolchain (stable)
-- flutter_rust_bridge_codegen v2.11.1
-
-### The custom WebRTC engine
-
-Hollow's desktop builds ship a **patched libwebrtc**: screen shares are encoded
-as screen content instead of webcam video (screencast mode + W3C content
-hints), which is why text stays sharp instead of turning blocky. The patched
-binaries and headers are vendored in git at
-`packages/flutter_webrtc/third_party/libwebrtc/`, so a normal clone + build
-just works, with no downloads and no extra steps. Rebuilding libwebrtc itself is only
-needed for maintainers bumping the upstream milestone; the full reproducible
-recipe (source pins, patch file, gn args) lives in
-[BUILDING.md](packages/flutter_webrtc/third_party/libwebrtc/BUILDING.md).
-
-### Build (Windows)
-
-Two native binaries are bundled with the Windows build. If they're missing,
-CMake prints a warning (`vendor/ffmpeg/ffmpeg-win-x64.exe not found...` /
-`screen_audio_test.exe not found...`) and the build still succeeds, but video
-thumbnails and screen-share audio are disabled at runtime. Fetch/build them
-once before your first release build:
-
-```powershell
-# 1. Fetch the vendored ffmpeg (video thumbnails)
-pwsh scripts\fetch_ffmpeg.ps1
-
-# 2. Build the screen audio capturer (screen-share system audio)
-pwsh scripts\build_screen_audio.ps1
-```
-
-Then build the app:
-
-```bash
-# Generate FFI bindings (only needed after changing Rust API signatures)
-flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
-
-# Run on Windows (debug)
-flutter run -d windows
-
-# Build release
-flutter build windows
-```
-
-<details>
-<summary><strong>macOS build instructions</strong></summary>
-
-Install Rust (if not already installed):
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source $HOME/.cargo/env
-```
-
-Install the build tools (Xcode from the App Store, plus CocoaPods):
-
-```bash
-xcode-select --install        # if not already present
-sudo gem install cocoapods     # or: brew install cocoapods
-```
-
-Build the screen audio capturer **before** building the app (it's bundled into
-the `.app` during the Xcode build phase). Screen-share audio is unavailable
-without it:
-
-```bash
-bash scripts/build_screen_audio.sh
-```
-
-Then build:
-
-```bash
-flutter pub get
-cd macos
-flutter build macos --release
-```
-
-The output is at `build/macos/Build/Products/Release/Hollow.app` (a universal
-x86_64 + arm64 bundle).
-
-> **Note:** Hollow runs on macOS 12 and later. Screen-share audio capture and
-> call recording require macOS 13.0+ (Apple exposes no system-audio API below
-> that); everything else, including screen-share video, works on macOS 12.
-
-</details>
-
-<details>
-<summary><strong>Linux build instructions</strong></summary>
-
-Install Rust (if not already installed):
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source $HOME/.cargo/env
-```
-
-Install system dependencies (Ubuntu/Debian):
-
-```bash
-sudo apt install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libssl-dev libnotify-dev libayatana-appindicator3-dev libpulse-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly lld curl build-essential
-```
-
-Then build:
-
-```bash
-flutter pub get
-flutter build linux
-```
-
-The output binary is at `build/linux/x64/release/bundle/hollow`.
-
-</details>
-
 ## Contributing
+
+<a href="https://sonarcloud.io/summary/overall?id=VitalikPro13_HOLLOW"><img src="https://sonarcloud.io/api/project_badges/measure?project=VitalikPro13_HOLLOW&metric=alert_status" alt="Quality gate"></a>
+<a href="https://codecov.io/gh/VitalikPro13/HOLLOW"><img src="https://img.shields.io/codecov/c/github/VitalikPro13/HOLLOW?label=Rust%20core%20coverage" alt="Rust core coverage"></a>
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, coding conventions, and how to submit a pull request.
 
@@ -253,24 +121,23 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup inst
 - Read the [Whitepaper](WHITEPAPER.md) for protocol-level context
 - Report security vulnerabilities privately: see [SECURITY.md](SECURITY.md)
 
+## Building from source
+
+Hollow is Flutter (Dart) for the interface and Rust for networking, cryptography and storage, joined by flutter_rust_bridge. Local data lives in SQLCipher, an encrypted SQLite. [BUILDING.md](BUILDING.md) has what each platform needs and how to build it, for Windows, macOS, Linux, Android and iOS.
+
 ## License
 
 Copyright (C) 2025-2026 Vitalii Rovinskyi <vitaliy2007rova@gmail.com>
 
 The Hollow client and core library are licensed under the [GNU Affero General Public License v3.0](LICENSE). The relay server ([relay-uws/](relay-uws/)) is licensed under the [MIT License](relay-uws/LICENSE).
 
-For commercial use without AGPL obligations, a commercial license is available:
+The AGPL lets anyone, companies included, use, modify and run Hollow for free. If you share a modified version, or let people use one over a network, you publish its source.
 
-| | AGPL-3.0 (free) | Commercial |
-|---|---|---|
-| Personal and community use | Yes | n/a |
-| Modify and distribute | Yes (source must stay open) | Yes (proprietary OK) |
-| Small business | n/a | $1,000/year |
-| Enterprise (SSO, SLA, custom) | n/a | [Contact us](mailto:collab@anonlisten.com) |
+Organizations that want support, custom development, a hosted relay, or terms other than the AGPL can write to [collab@anonlisten.com](mailto:collab@anonlisten.com).
 
 The Hollow name, logo, and branding are trademarks of AnonListen and are not covered by the open-source license.
 
-## Support the Project
+## Support the project
 
 Hollow is funded by the community, not by selling your data. Any support is appreciated.
 

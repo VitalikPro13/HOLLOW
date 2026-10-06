@@ -10,28 +10,7 @@ Thanks for your interest in contributing. Hollow is built to give people private
 
 ## Setting up the project
 
-### Prerequisites
-
-- Flutter SDK (stable channel)
-- Rust toolchain (stable)
-- `flutter_rust_bridge_codegen` v2.11.1
-
-### Building
-
-```bash
-# Clone the repository
-git clone https://github.com/VitalikPro13/HOLLOW.git
-cd HOLLOW
-
-# Generate FFI bindings (required before first build)
-flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
-
-# Run on Windows (debug)
-flutter run -d windows
-
-# Build release
-flutter build windows
-```
+[BUILDING.md](BUILDING.md) covers what each platform needs (Windows, macOS, Linux, Android and iOS) and how to build it.
 
 ### Running Rust tests
 
@@ -40,6 +19,8 @@ cd rust/hollow_core
 cargo test --lib
 cargo clippy
 ```
+
+On Windows the test binary loads OpenSSL's DLLs at startup, so put `C:\Program Files\OpenSSL-Win64\bin` on `PATH` first, or it exits with `STATUS_DLL_NOT_FOUND`.
 
 ### Regenerating FFI bindings
 

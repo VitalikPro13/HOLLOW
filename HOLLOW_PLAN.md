@@ -2152,9 +2152,7 @@ Release time: 100ms
 **Licensing:**
 - [X] Open-source client under AGPL-3.0 (forks must publish source — kills closed-fork theft)
 - [X] Relay stays MIT (thin uWebSockets glue, encourages self-hosting adoption)
-- [X] Dual license: AGPL default, commercial license for companies that don't want copyleft obligations
-  - Small business / startup: ~$1k/year (non-AGPL license, no source disclosure requirement)
-  - Enterprise: custom pricing (SSO/SAML, 2FA integration, priority support, custom stuff), contact collab@anonlisten.com
+- [X] **Public dual license DROPPED 2026-10-06** (no price list, no commercial-license table). Under the AGPL anyone, companies included, uses Hollow free; a paid licence only sells the right to keep a modified fork closed, and the client holds outside code with no CLA (DrFaust's PRs #5 and #7), so any exception needs that contributor's consent first. Organizations write to collab@anonlisten.com for support, custom development, a hosted relay, or non-AGPL terms, negotiated case by case. No CLA for now.
 - [X] Add LICENSE (AGPL-3.0) to repo root + MIT LICENSE in relay-uws/
 
 **Self-hosting:**
@@ -2168,6 +2166,7 @@ Release time: 100ms
 - [ ] Credits tab in Settings — Blender-style donor/sponsor wall (tiered: Supporters, Sponsors, Contributors)
 - [X] Patreon / Ko-fi / GitHub Sponsors for individual donations
 - [ ] Infrastructure sponsor program (companies providing dedicated servers get logo in Credits)
+- [ ] Services for organizations: support contracts, paid custom features (they land in the AGPL code), managed private relays. Nothing in the app is gated; anyone can still self-host.
 - [X] No paywalls, no cosmetic microtransactions, no user-facing limits — full app for everyone
 
 **Credibility & launch:**

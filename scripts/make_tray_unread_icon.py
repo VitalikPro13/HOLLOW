@@ -20,12 +20,18 @@ SRC = ROOT / "assets" / "app_icon.ico"
 DST = ROOT / "assets" / "app_icon_unread.ico"
 
 DOT_COLOR = (242, 63, 66, 255)  # notification red
-SIZES = [16, 24, 32, 48, 64, 128, 256]
+SIZES = [16, 20, 24, 32, 48, 64, 128, 256]
 SS = 4  # supersampling factor for smooth circle edges at tiny sizes
 
 
-def badge(base: Image.Image, size: int) -> Image.Image:
-    img = base.resize((size, size), Image.LANCZOS).convert("RGBA")
+def frame(ico: Image.Image, size: int) -> Image.Image:
+    """The icon's own frame at this size (16 and 32 are hand-drawn), else a shrink."""
+    if (size, size) in ico.ico.sizes():
+        return ico.ico.getimage((size, size)).convert("RGBA")
+    return ico.convert("RGBA").resize((size, size), Image.LANCZOS)
+
+
+def badge(img: Image.Image, size: int) -> Image.Image:
     w = size * SS
     d = round(size * 0.42) * SS  # dot diameter ~42% of icon
     ring = max(SS, round(d * 0.14))  # transparent gap around the dot
@@ -45,8 +51,8 @@ def badge(base: Image.Image, size: int) -> Image.Image:
 
 
 def main() -> None:
-    base = Image.open(SRC).convert("RGBA")  # opens the largest frame
-    frames = [badge(base, s) for s in SIZES]
+    ico = Image.open(SRC)
+    frames = [badge(frame(ico, s), s) for s in SIZES]
     frames[-1].save(
         DST,
         format="ICO",

@@ -124,26 +124,20 @@ dev_dependencies:
   build_runner: ^2.11.1
   flutter_launcher_icons: ^0.14.4
 
-# Android/iOS launcher icon generation. Run after editing:
+# Android launcher icons. Run scripts/make_app_icons.py first (it renders these
+# sources from assets/branding/hollow_mark.svg), then:
 #   dart run flutter_launcher_icons
-# Source is assets/hollow_icon_android.png — a SQUARE, full-bleed render of
-# hollow_main_logo.svg (NOT the pre-rounded hollow_logo_rounded.png, which would
-# double-round under Android's adaptive mask). Used for BOTH adaptive layers so
-# the whole logo fills the masked shape (circle/squircle) edge-to-edge — the H
-# sits well inside the 25% safe zone so it's never clipped. iOS gets the rounded,
-# alpha-stripped variant from the same source.
+# The adaptive foreground is the mark alone; the default 16% inset puts it
+# inside the 66 dp safe circle. The monochrome layer feeds Android 13+ themed
+# icons. The background colour is also the launch screen's.
 flutter_launcher_icons:
   android: "ic_launcher"
-  # iOS intentionally left untouched — its icons already look right and can't be
-  # tested right now. Flip to true (with a rounded-safe source) when on a Mac.
+  # iOS icons come from scripts/make_app_icons.py.
   ios: false
   image_path: "assets/hollow_icon_android.png"
-  # Solid dark background (matches the logo art's own edges) + the full logo as
-  # the foreground. Using the IMAGE for both layers double-exposes the bright H
-  # (a faint full-size H ghosts behind the inset one); a solid bg avoids that
-  # while the logo still fills the masked shape edge-to-edge.
-  adaptive_icon_background: "#0D0F14"
-  adaptive_icon_foreground: "assets/hollow_icon_android.png"
+  adaptive_icon_background: "#0B0C10"
+  adaptive_icon_foreground: "assets/hollow_icon_android_foreground.png"
+  adaptive_icon_monochrome: "assets/hollow_icon_android_monochrome.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

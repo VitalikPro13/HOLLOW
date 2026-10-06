@@ -128,6 +128,9 @@ android/app/google-services.json
 ios/Flutter/LocalSigning.xcconfig
 macos/Flutter/LocalSigning.xcconfig
 
+# Machine paths for plain cargo runs; the template is config.toml.example
+rust/hollow_core/.cargo/config.toml
+
 # Deprecated (replaced by relay/)
 signaling/
 
