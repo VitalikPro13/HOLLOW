@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/node_status.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
+import 'package:hollow/src/rust/api/network.dart';
 
 /// Granular connection stage for a peer.
 enum PeerConnectionStage {
@@ -125,15 +126,29 @@ class ConnectionStatusState {
 
 class ConnectionStatusNotifier extends Notifier<ConnectionStatusState> {
   Timer? _cleanupTimer;
+  Timer? _offlineTimer;
+  Timer? _outageTimer;
 
   /// Expiry durations.
   static const _failedExpiry = Duration(seconds: 10);
   static const _dialingExpiry = Duration(seconds: 30);
 
+  /// How long a lost relay session still reads as Reconnecting: a resume the relay
+  /// refuses is followed by a fresh session at once, which must not flash Offline.
+  static const offlineGrace = Duration(seconds: 3);
+
+  /// How long a held session reads as Reconnecting: past the relay's 120 s grace it
+  /// is most likely gone, and a long outage should not look like it is about to end.
+  static const outageOffline = Duration(seconds: 120);
+
   @override
   ConnectionStatusState build() {
     // Cancel cleanup timer when provider is disposed/rebuilt.
-    ref.onDispose(() => _cleanupTimer?.cancel());
+    ref.onDispose(() {
+      _cleanupTimer?.cancel();
+      _offlineTimer?.cancel();
+      _outageTimer?.cancel();
+    });
     return const ConnectionStatusState();
   }
 
@@ -245,14 +260,72 @@ class ConnectionStatusNotifier extends Notifier<ConnectionStatusState> {
     state = state.removePeer(peerId);
   }
 
-  void onRelayStatusChanged(String status) {
-    final relayStatus = switch (status) {
-      'connecting' => RelayConnectionStatus.connecting,
-      'connected' => RelayConnectionStatus.connected,
-      'reconnecting' => RelayConnectionStatus.reconnecting,
-      _ => RelayConnectionStatus.disconnected,
-    };
-    state = state.copyWithRelay(relayStatus);
+  /// The node's report of the relay session (RESUMABLE_SESSIONS_PLAN.md 9.8).
+  void onRelayEvent(NetworkEvent event) {
+    switch (event) {
+      case NetworkEvent_RelayConnected():
+        onRelayConnected();
+      case NetworkEvent_RelaySuspended():
+        onRelaySuspended();
+      case NetworkEvent_RelayConnecting(:final reconnecting):
+        onRelayConnecting(reconnecting: reconnecting);
+      case NetworkEvent_RelayDisconnected():
+        onRelayDisconnected();
+      default:
+        break;
+    }
+  }
+
+  /// The relay session is up: resumed, or fresh with its rooms confirmed.
+  void onRelayConnected() {
+    _cancelOffline();
+    _outageTimer?.cancel();
+    _outageTimer = null;
+    _setRelay(RelayConnectionStatus.connected);
+  }
+
+  /// The socket is gone but the relay holds the session: nothing is lost. The outage
+  /// clock runs from the first suspension, so repeated ones do not restart it.
+  void onRelaySuspended() {
+    _cancelOffline();
+    _setRelay(RelayConnectionStatus.reconnecting);
+    _outageTimer ??= Timer(outageOffline, () {
+      _outageTimer = null;
+      _setRelay(RelayConnectionStatus.disconnected);
+    });
+  }
+
+  /// A connect attempt starts. It never moves the indicator off Reconnecting or
+  /// Offline, which would flicker between attempts.
+  void onRelayConnecting({required bool reconnecting}) {
+    if (state.relayStatus == RelayConnectionStatus.connected) {
+      _setRelay(RelayConnectionStatus.reconnecting);
+    }
+  }
+
+  /// The relay session is gone. Offline only if nothing comes back within
+  /// [offlineGrace]; until then the indicator reads Reconnecting.
+  void onRelayDisconnected() {
+    if (state.relayStatus == RelayConnectionStatus.disconnected ||
+        _offlineTimer != null) {
+      return;
+    }
+    if (state.relayStatus == RelayConnectionStatus.connected) {
+      _setRelay(RelayConnectionStatus.reconnecting);
+    }
+    _offlineTimer = Timer(offlineGrace, () {
+      _offlineTimer = null;
+      _setRelay(RelayConnectionStatus.disconnected);
+    });
+  }
+
+  void _cancelOffline() {
+    _offlineTimer?.cancel();
+    _offlineTimer = null;
+  }
+
+  void _setRelay(RelayConnectionStatus status) {
+    if (state.relayStatus != status) state = state.copyWithRelay(status);
   }
 }
 

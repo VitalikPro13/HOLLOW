@@ -1,6 +1,8 @@
 #include "snapshot.h"
 #include "snapshot_codec.h"
 #include "sd_fdstore.h"
+#include "session_bounds.h"
+#include "session_snapshot.h"
 #include "ws_handler.h"
 #include "ring_auth.h"
 
@@ -137,11 +139,12 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
         }
         d.push_prefs.push_back(std::move(p));
     }
+    session_snapshot::capture(st, d);
     return d;
 }
 
 // Only meaningful on an empty state: a fresh process, before it listens.
-static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now) {
+static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now, int64_t grace_secs) {
     RestoredShares share;
     for (auto& o : d.optin) st.offline_optin[o.peer] = o.retention_secs;
     for (auto& p : d.push_tokens) st.push_tokens[p.peer] = {std::move(p.token), std::move(p.platform)};
@@ -199,7 +202,7 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now) {
     }
 
     // The eviction index must see every frame in the order the old process
-    // admitted it, DM and topic interleaved, so frames are placed first and
+    // admitted it, DM, topic and ring interleaved, so frames are placed first and
     // stamped afterwards in ascending old-seq order.
     struct Stamp {
         uint64_t old_seq;
@@ -207,8 +210,16 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now) {
         std::string key;
         size_t idx;
         uint64_t share;
+        session::Frame* ring_frame = nullptr;  // a session's, keyed by its peer id
     };
     std::vector<Stamp> stamps;
+    size_t dropped = 0;
+    std::vector<session_snapshot::Pending> sessions = session_snapshot::prepare(d, now, grace_secs, dropped);
+    for (auto& p : sessions) {
+        for (auto& f : p.entries) {
+            if (!f.tombstone()) stamps.push_back({f.budget_seq, false, p.s.peer_id, 0, f.share, &f});
+        }
+    }
 
     for (auto& sq : d.dm) {
         if (sq.frames.empty()) continue;
@@ -240,7 +251,9 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now) {
     std::sort(stamps.begin(), stamps.end(),
               [](const Stamp& a, const Stamp& b) { return a.old_seq < b.old_seq; });
     for (const auto& s : stamps) {
-        if (s.is_topic) {
+        if (s.ring_frame) {
+            session_bounds::detail::charge(st, s.key, *s.ring_frame);
+        } else if (s.is_topic) {
             auto& f = st.topic_buffers[s.key].frames[s.idx];
             f.seq = st.buffer_index.stamp(s.key, true, s.share, f.frame.size());
         } else {
@@ -248,6 +261,7 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now) {
             m.seq = st.buffer_index.stamp(s.key, false, s.share, m.frame.size());
         }
     }
+    session_snapshot::place(st, std::move(sessions), now_unix_secs());
 }
 
 void snapshot_to_fdstore(RelayState& st) {
@@ -288,7 +302,7 @@ void snapshot_to_fdstore(RelayState& st) {
             d.rosters.size(), bytes.size());
 }
 
-void restore_from_fdstore(RelayState& st) {
+void restore_from_fdstore(RelayState& st, int64_t session_grace_secs) {
     int fd = fdstore::take(FD_NAME);
     if (fd < 0) return;
     // Dropped from the store BEFORE it is parsed: a snapshot that crashes the
@@ -328,9 +342,10 @@ void restore_from_fdstore(RelayState& st) {
     size_t topic_frames = d.topic_frames(), rings = d.topics.size();
     size_t optins = d.optin.size(), tokens = d.push_tokens.size(), prefs = d.push_prefs.size();
     size_t kills = d.kills.size(), rosters = d.rosters.size();
-    apply(st, std::move(d), Clock::now());
+    apply(st, std::move(d), Clock::now(), session_grace_secs);
     // Whatever aged out while the service was down, and whatever a smaller
-    // budget in this build no longer admits.
+    // budget in this build no longer admits. Nothing about sessions is printed
+    // (section 9.7), not even a count.
     sweep_offline_buffer(st);
     enforce_buffer_budget(st);
     st.kill_list.sweep(Clock::now());

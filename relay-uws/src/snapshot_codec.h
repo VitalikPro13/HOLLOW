@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Wire form of the relay state that outlives a service restart: the offline
@@ -22,10 +23,11 @@ namespace snapshot {
 // (`shares`, fair_share.h) and dropped the owner binding, 7 every identity's
 // roster with when the relay first saw each pending join (`rosters`, design
 // ID-1R), 8 which parked destroy signals the target identity's phrase stands
-// behind (`proven`, D5). An older snapshot still decodes, without the newer
-// fields, so a relay coming up on this build keeps the buffers the previous one
-// handed over.
-static constexpr uint32_t VERSION = 8;
+// behind (`proven`, D5), 9 every resumable session with the fan-out buffers its
+// ring shares (`buffers`, `sessions`). An older snapshot still decodes, without the
+// newer fields, so a relay coming up on this build keeps the buffers the previous
+// one handed over.
+static constexpr uint32_t VERSION = 9;
 static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
@@ -124,6 +126,51 @@ struct Roster {
     std::vector<RosterSeen> seen;
 };
 
+// One entry of a session's ring (v9): a real frame names its bytes by their index in
+// Data::buffers, a tombstone (`gap` non-zero) carries no bytes.
+struct SessionFrame {
+    uint64_t seq = 0;
+    uint64_t gap = 0;
+    uint32_t buffer = 0;
+    bool binary = true;
+    uint64_t share = NO_SHARE;
+    uint8_t kind = 0;  // session::Kind
+    std::string room;
+    uint64_t budget_seq = 0;  // the OfflineIndex stamp it had, for the restore order
+};
+// The nickname binding a session's device held, with its master's signature if any.
+struct SessionNickname {
+    std::string nickname;
+    uint64_t expiry_unix = 0;
+    std::string master;  // "" when the claim named none
+    bool has_proof = false;
+    std::string master_key;
+    int64_t ts_ms = 0;
+    std::string sig;
+};
+struct SessionLinkCode {
+    std::string code;
+    uint64_t expiry_unix = 0;
+};
+// One resumable session (session.h). Door standing, its door nonce and its per-IP
+// slot are not here: the door key and the addresses belong to one process.
+struct SessionRec {
+    std::string sid;
+    std::string peer_id;
+    uint64_t share = NO_SHARE;
+    bool inactive = false;
+    uint64_t in_h = 0;
+    std::vector<std::pair<std::string, bool>> rooms;  // room, inbox owner
+    std::vector<std::pair<std::string, std::vector<std::string>>> subscriptions;
+    bool has_nickname = false;
+    SessionNickname nickname;
+    bool has_link_code = false;
+    SessionLinkCode link_code;
+    uint64_t sent = 0;
+    uint64_t acked = 0;
+    std::vector<SessionFrame> frames;
+};
+
 struct Data {
     std::vector<DmQueue> dm;
     std::vector<Optin> optin;
@@ -135,6 +182,13 @@ struct Data {
     std::vector<Lock> locks;  // least recently used first, the eviction order
     std::vector<Registration> registrations;  // v6; least recently used first
     std::vector<Roster> rosters;  // v7; least recently used first
+    // v9: every buffer a ring frame holds, written once however many rings share it,
+    // so the restored rings share it again and the budget charges it once.
+    std::vector<std::string> buffers;
+    std::vector<SessionRec> sessions;  // v9
+    // Records decode left out because they did not parse. Each record is its own
+    // length-prefixed string, so a bad one costs that session alone.
+    size_t sessions_dropped = 0;
 
     size_t dm_frames() const {
         size_t n = 0;
@@ -144,6 +198,13 @@ struct Data {
     size_t topic_frames() const {
         size_t n = 0;
         for (const auto& t : topics) n += t.frames.size();
+        return n;
+    }
+    size_t ring_frames() const {
+        size_t n = 0;
+        for (const auto& s : sessions) {
+            for (const auto& f : s.frames) n += f.gap == 0;
+        }
         return n;
     }
 };
@@ -229,6 +290,108 @@ struct Reader {
         return true;
     }
 };
+
+inline std::string encode_session(const SessionRec& s) {
+    Writer w;
+    w.str(s.sid);
+    w.str(s.peer_id);
+    w.u64(s.share);
+    w.flag(s.inactive);
+    w.u64(s.in_h);
+    w.count(s.rooms.size());
+    for (const auto& [room, owner] : s.rooms) {
+        w.str(room);
+        w.flag(owner);
+    }
+    w.count(s.subscriptions.size());
+    for (const auto& [room, topics] : s.subscriptions) {
+        w.str(room);
+        w.count(topics.size());
+        for (const auto& t : topics) w.str(t);
+    }
+    w.flag(s.has_nickname);
+    if (s.has_nickname) {
+        const auto& n = s.nickname;
+        w.str(n.nickname);
+        w.u64(n.expiry_unix);
+        w.str(n.master);
+        w.flag(n.has_proof);
+        if (n.has_proof) {
+            w.str(n.master_key);
+            w.i64(n.ts_ms);
+            w.str(n.sig);
+        }
+    }
+    w.flag(s.has_link_code);
+    if (s.has_link_code) {
+        w.str(s.link_code.code);
+        w.u64(s.link_code.expiry_unix);
+    }
+    w.u64(s.sent);
+    w.u64(s.acked);
+    w.count(s.frames.size());
+    for (const auto& f : s.frames) {
+        w.u64(f.seq);
+        w.u64(f.gap);
+        if (f.gap != 0) continue;
+        w.u32(f.buffer);
+        w.flag(f.binary);
+        w.u64(f.share);
+        w.u8(f.kind);
+        w.str(f.room);
+        w.u64(f.budget_seq);
+    }
+    return w.out;
+}
+
+// One record exactly, every buffer it names among the `buffers` decoded before it.
+inline bool parse_session(std::string_view rec, size_t buffers, SessionRec& out) {
+    Reader r{rec};
+    SessionRec s;
+    uint32_t n = 0;
+    if (!r.str(s.sid) || !r.str(s.peer_id) || !r.u64(s.share) || !r.flag(s.inactive) || !r.u64(s.in_h)) return false;
+    if (!r.count(n)) return false;
+    for (uint32_t i = 0; i < n; i++) {
+        std::pair<std::string, bool> room;
+        if (!r.str(room.first) || !r.flag(room.second)) return false;
+        s.rooms.push_back(std::move(room));
+    }
+    if (!r.count(n)) return false;
+    for (uint32_t i = 0; i < n; i++) {
+        std::pair<std::string, std::vector<std::string>> sub;
+        uint32_t m = 0;
+        if (!r.str(sub.first) || !r.count(m)) return false;
+        for (uint32_t j = 0; j < m; j++) {
+            std::string t;
+            if (!r.str(t)) return false;
+            sub.second.push_back(std::move(t));
+        }
+        s.subscriptions.push_back(std::move(sub));
+    }
+    if (!r.flag(s.has_nickname)) return false;
+    if (s.has_nickname) {
+        auto& nk = s.nickname;
+        if (!r.str(nk.nickname) || !r.u64(nk.expiry_unix) || !r.str(nk.master) || !r.flag(nk.has_proof)) return false;
+        if (nk.has_proof && (!r.str(nk.master_key) || !r.i64(nk.ts_ms) || !r.str(nk.sig))) return false;
+    }
+    if (!r.flag(s.has_link_code)) return false;
+    if (s.has_link_code && (!r.str(s.link_code.code) || !r.u64(s.link_code.expiry_unix))) return false;
+    if (!r.u64(s.sent) || !r.u64(s.acked) || !r.count(n)) return false;
+    for (uint32_t i = 0; i < n; i++) {
+        SessionFrame f;
+        if (!r.u64(f.seq) || !r.u64(f.gap)) return false;
+        if (f.gap == 0) {
+            if (!r.u32(f.buffer) || f.buffer >= buffers || !r.flag(f.binary) || !r.u64(f.share) ||
+                !r.u8(f.kind) || !r.str(f.room) || !r.u64(f.budget_seq)) {
+                return false;
+            }
+        }
+        s.frames.push_back(std::move(f));
+    }
+    if (r.left() != 0) return false;
+    out = std::move(s);
+    return true;
+}
 
 }  // namespace detail
 
@@ -354,6 +517,11 @@ inline std::string encode(const Data& d) {
 
     // proven: one flag per kill above, in the same order.
     for (const auto& k : d.kills) w.flag(k.proven);
+
+    w.count(d.buffers.size());
+    for (const auto& b : d.buffers) w.str(b);
+    w.count(d.sessions.size());
+    for (const auto& s : d.sessions) w.str(detail::encode_session(s));
 
     w.out.append("HRSE", 4);
     return w.out;
@@ -518,6 +686,26 @@ inline bool decode(std::string_view bytes, Data& out) {
     if (version >= 8) {
         for (auto& k : d.kills) {
             if (!r.flag(k.proven)) return false;
+        }
+    }
+
+    if (version >= 9) {
+        if (!r.count(n)) return false;
+        for (uint32_t i = 0; i < n; i++) {
+            std::string b;
+            if (!r.str(b)) return false;
+            d.buffers.push_back(std::move(b));
+        }
+        if (!r.count(n)) return false;
+        for (uint32_t i = 0; i < n; i++) {
+            std::string rec;
+            if (!r.str(rec)) return false;
+            SessionRec s;
+            if (detail::parse_session(rec, d.buffers.size(), s)) {
+                d.sessions.push_back(std::move(s));
+            } else {
+                d.sessions_dropped++;
+            }
         }
     }
 

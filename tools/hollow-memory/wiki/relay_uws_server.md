@@ -124,6 +124,168 @@ Binary name: `hollow-relay`
 - Live probe: `~/relay-next/door_probe.py [url] [domain]` (24 checks; mind the 10 new
   connections per minute per address when chaining probes).
 
+## Resumable sessions (2026-10-06, RESUMABLE_SESSIONS_PLAN.md section 9)
+
+A device's session outlives its socket: both sides count the stream frames they handled, the relay
+keeps every frame it sent until the device acks it, and a socket that dies mid-write costs a resume,
+not a loss. Spec: `reports/planned/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md` section 9 (the wire,
+binding) and section 11 (as built). Client half: `rust_networking.md`, ws_client.rs. Files:
+`session.h` (constants, the counted-frame classification, sid shape and constant-time `sid_equal`,
+`Ring`, `Session`), `session_bounds.h` (the hooks seam), `session_snapshot.h` (restart),
+`drain.h` (SIGTERM hint), `offline_index.h` (budget charging), `auth_frame.h` (v3), and the session
+code in `ws_handler.cpp` (`mint_session`, `resume_session`, `enter_grace`, `end_session`,
+`send_stream`, `send_held`, `send_presence`, `adopt_restored_sessions`, `sweep_sessions`, the
+`.open`/`.message`/`.close` handlers). Tests: `test_session.cpp`, `test_session_bounds.cpp`,
+`test_auth_frame.cpp`, `test_snapshot_codec.cpp`, the live cases in `test_relay_live.cpp`.
+`test/session_vectors.json` (v3 auth bytes, session shapes, counted frames) pins `test_session.cpp`
+and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
+
+- **Handshake.** `auth_challenge` always carries `"session":1`. Only a full v3 login has a session:
+  `"new"` mints one (`mint_session`: 128 random bits as 32 hex, the socket's challenge kept as the
+  session's door nonce, the minting address share), and a sid resumes (`resume_session`) when
+  `state.sessions[peer]` holds that sid (`sid_equal`, constant time; another device's sid is
+  answered exactly like an unknown one) and `ring.can_resume_from(in_h)` (`acked <= in_h <= sent`).
+  Otherwise the same socket gets a fresh session with `resume_failed: "unknown"` or `"bad_h"`.
+  Shape rules (`auth_frame.h:session_fields`): full takes `"new"` or a sid, fetch and guest take
+  `"none"`, and `"new"` or `"none"` with `in_h` other than 0 is `bad_auth`. A v2 login or `"none"`
+  gets a plain `auth_ok` and no session. `auth_ok` and `resumed` advertise `grace_secs` and
+  `hb_secs`; the client ignores both.
+- **Any non-fetch login ends a session the device still holds** (`handle_auth` calls `end_session`
+  before the supersede): v2 full, guest, v3 `"new"`, a `resume_failed`. Its ring hands off as on
+  expiry and its grace rooms are let go silently. Fetch sockets never touch sessions.
+- **States**: `Live` or `Grace`; gone = erased from `RelayState::sessions` (keyed by the device
+  peer id, one per device). `PerSocketData::sid` names the session a socket carries;
+  `live_session(state, data)` (same sid, Live, not superseded), `grace_session(peer)`,
+  `socket_of(session)`.
+- **Presence follows the socket, delivery follows the session.** `enter_grace` (the close handler,
+  for a socket whose session is live): the device leaves each room's `peers` now (`peer_left` to
+  whoever saw it) and goes into `WsRoom::held`; it leaves `peer_sockets` and `peer_rooms`
+  (`go_offline`: offline for push, push debounce reset, license seat released); the session keeps
+  its rooms with owner flags and door standing, its subscriptions, nickname, link code and inactive
+  flag, and the closing socket's per-IP slot (`hold_ip_slot`; the close handler skips its own
+  decrement). A room holding only `held` devices is not erased (`leave_room`). Every fan-out walks
+  `peers` (live sockets, `send_stream`) and then `held` (`send_held`, ring only) under the same
+  audience gates; topic frames to a grace session pass the session's stored filter. A device whose
+  fetch socket holds the room slot while its full session is in grace gets both copies (the
+  receiver dedups by message id).
+- **Send-site classification** (every relay-to-client write is one of these):
+  - `send_stream(ws, bytes, binary, Meta)`: a stream frame. On a live session's socket it enters
+    the ring (`ring_in` -> `session_bounds::ring_push`) BEFORE `write_raw`. Every forwarded frame
+    (0x02, 0x05, 0x06, 0x08, JSON `msg` and `direct`), buffered and mailbox replays, topic
+    catch-ups, counted answers.
+  - `send_held(state, peer, ...)`: the same frame for a session in grace: into its ring only.
+  - `send_presence(ws, text)`: unasked presence (`peer_joined`, `peer_left`, a door-grace
+    `members`): never counted or ringed, and withheld while the session is `inactive`.
+  - `send_json(ws, j)`: an answer, counted and ringed (`Meta::answer()`, charged to the receiver's
+    own share) unless its type is uncounted (`session::relay_type_counts`), as `kill_signal` is.
+  - `write_raw`: the auth answers, `resumed`, `hb_ack`, `ack`, the resume `members`, and the
+    `members` answer to a join, which an inactive session gets too (it asked for it).
+  - `Meta` carries the sender's address share (`fair_share.h`) and, for the 0x06 kinds
+    `offline_buffer` takes (`Kind::Direct`, `DirectImage`, `ChannelCopy`), the kind and room the
+    expiry hand-off files the frame under. Everything else is `Kind::Other`.
+- **CRITICAL: classify every new send site, and every new JSON type the same way on both sides**
+  (`session::relay_type_counts` / `client_type_counts`, `relay_session.rs`, `session_vectors.json`).
+  A stream frame written with `write_raw` is never ringed and is lost to a dead socket; a frame one
+  side counts and the other does not shifts every later ack and resume by one, silently.
+- **Counting on arrival** (`.message`): a stream frame from the device is counted (`count_in`)
+  before any handler or gate decides on it; a frame a gate refuses was still handled. Text over
+  1 MiB is never parsed but still counts, as does text that does not parse. The relay acks
+  `{"type":"ack","h":in_h}` after 16 frames, or 2 s after the first unacked one (the `acks_due`
+  queue, popped by `sweep_sessions` on a 250 ms session timer). `hb` is answered at once with
+  `hb_ack { h: in_h }` and acks the ring at the `hb`'s own `h`; `hb` on a socket without a session
+  gets `hb_ack { h: 0 }`. An `h` out of range acks nothing.
+- **The ring** (`session::Ring`): its entries cover `(acked, sent]` exactly once, in order, each a
+  real frame or a tombstone run. Per-session caps 8 MiB and 4096 real frames (`enforce`): past them
+  the oldest real frame of the sender share holding the most weight (bytes plus 1 KiB per frame)
+  becomes a tombstone (`evict_one`, `bury`) and adjacent tombstones merge. A frame over 8 MiB is
+  still written live but enters the ring as a tombstone (`push_gap`). A tombstone replays as one
+  counted `{"type":"gap","n":N}`, only the part after the client's `in_h`. The rings of one fan-out
+  share one buffer (`shared_ptr`). No refusal and no dropped socket: overflow only ever becomes a gap.
+- **Resume** (`resume_session`): a grace session gives back its held IP slot (the new socket took
+  its own); a session still live on another socket (a make-before-break transfer) marks that socket
+  superseded and closes it 1000 `moved`, silently. Re-checks: each inbox it owned stays owned only
+  while `still_owner` (the roster book's fold counts the device; no roster held for the identity =
+  kept). The socket takes the session's subscriptions and door nonce; a `restored` session takes the
+  new challenge instead and answers `reprove: true`. Answers `resumed { h: in_h, gap:
+  ring.gap_after(in_h), reprove, grace_secs, hb_secs }`, acks the ring at the client's `in_h`, then
+  in order: every waiting `kill_signal`, one `members` per session room (`proved` in locked rooms),
+  the ring replay after `in_h`, on `gap` the `inbox:` mailbox of every inbox room it still owns
+  (`replay_mailbox_no_delete`; a resume joins nothing, so a deposit that fell into the gap would
+  never come back otherwise), and `peer_joined` only in rooms where its presence had gone (a live
+  transfer sends none). It also resets the channel-push offline cap for its rooms.
+- **Push in grace**: a device in grace is not in `peer_sockets`, so it is offline for push. A 0x04,
+  0x08 or JSON `direct` into a grace ring also calls `try_push_notify` (debounced as before), unless
+  the device's fetch socket holds the room slot and took the frame live. 0x02 chunks never push. 0x09
+  is unchanged: a grace target is not in the room's `peers`, so it buffers and pushes as an offline
+  member.
+- **Ending** (`end_session`): grace expiry (the `grace_ends` queue, `sweep_sessions`), the client's
+  `end` (then close 1000 `end`), table eviction, a per-IP slot taken over, any non-fetch login of the
+  device, and a 1008 close (a revoked license) instead of grace. `ring_take_all` then `hand_off`:
+  only the binary 0x06 kinds move to `offline_buffer` under their room, each under its own cap there
+  (`buffer_offline_msg`, charged again), so the replay on join and push take over. Broadcasts, topic
+  frames, 0x02 chunks, JSON answers and JSON `direct` frames do not (topic rings, sync and file asks
+  cover them). A grace session then lets go of its rooms (`let_go`: held, owner flag, door standing;
+  the room goes with its last peer) and of its nickname and link code (`release_bindings`); a live
+  one leaves its socket without a session (`sid` cleared). The held IP slot is freed.
+- **`inactive` / `active`**: `inactive` sets the flag (presence withheld by `send_presence`);
+  `active` clears it and sends one `members` per room (`send_all_members`). The flag survives grace,
+  resume and the snapshot. `end` without a session is ignored.
+- **Nickname**: a binding whose holder has a session, live or in grace, is not stale
+  (`nickname_binding_is_stale`).
+- **The hooks seam, `session_bounds.h`**: every ring mutation, mint and end goes through
+  `ring_push`, `ring_ack`, `ring_take_all`, `make_room`, `hold_ip_slot`, `release_ip_slot`,
+  `grace_slot_victim`. **CRITICAL: never mutate a `Ring` directly**: the global budget and the
+  per-IP counts then drift silently. **Never `ring_push` while iterating a ring**: a push appends
+  and may bury entries, which invalidates the deque's iterators (`resume_session` replays the ring
+  with `write_raw`, and the gap mailbox replay, which does push, runs after the ring loop). A
+  `ring_push` never drops a buffered DM or topic frame itself, because it runs inside loops over
+  those buffers (a replay on join, a topic catch-up): such a budget victim waits for the settle
+  point, `enforce_buffer_budget` in main.cpp's loop post-handler, or the next deposit.
+- **Global budget** (`offline_index.h`): ring frames share the one 512 MB `OfflineIndex` budget
+  with DM and topic frames (`stamp_session`). A fan-out buffer held by many rings is RAM once, so its
+  bytes are charged once, keyed by the buffer pointer, to one holder; every holder pays its own 1 KiB
+  overhead, and when the charged holder lets go another holder is reweighed to carry the bytes.
+  **CRITICAL: exact only while every frame leaving a ring goes through `forget(budget_seq)`** (an
+  ack, the ring caps, the session's end: `session_bounds::detail::forget` is the ring's on-drop). A
+  budget victim inside a ring is buried there (`bury_session` -> `Ring::evict_budget_seq`) and the
+  device later sees it as a `gap`.
+- **Table cap** (`make_room`, from `mint_session`): at most 262,144 sessions. Past it, the address
+  share holding the most sessions (the newcomer counted; a tie goes against the newcomer's own
+  share) gives one up: a session in grace before a live one, then the one closest to its end. It
+  ends as on expiry; a live victim's socket closes 1000 `session_lost`.
+- **Per-IP slots**: a grace session keeps its socket's slot under `MAX_CONNS_PER_IP` (34) until
+  gone. In `.open` the rate check (10 new per minute) runs first; at the cap, `grace_slot_victim`
+  picks the session in grace at that address closest to its end and ends it, so a device coming back
+  is not refused by the slot its own session holds; with none, `ip_limit`. `data->ip_key` is set only
+  once the slot is taken, so a refused socket gives nothing back on close (the old code decremented a
+  slot it never took). Restored sessions hold no slot (addresses are never snapshotted).
+- **Grace length**: `--session-grace-secs` (Docker `SESSION_GRACE_SECS`, `SELF_HOSTING.md`
+  "Dropped connections"), default 120, held to 30..600 (`parse_grace_secs`, clamped again in
+  `setup_ws_handler`). The test-only define `-DHOLLOW_RELAY_TEST_GRACE_SECS=5` (`test/run_live.sh`)
+  overrides it so the live tests watch a grace run out. `idleTimeout` is 45: clients beat every
+  15 s.
+- **Snapshot v9** (`session_snapshot.h`, `SessionRec` in `snapshot_codec.h`): per session the sid,
+  peer id, minting share, `inactive` flag, `in_h`, rooms with owner flags, subscriptions, nickname
+  (with master and proof) and link code with their expiries, the ring's `sent` and `acked`, and its
+  entries (tombstones as runs; real frames as an index into `buffers`, where each fan-out buffer is
+  written once, plus binary flag, share, kind, room and the old budget stamp). Not carried: door
+  standing, the door nonce, the per-IP slot, ack timers. Restore: `prepare` judges each record
+  (shapes, `Ring::restore` coverage, the ring cap per frame) and drops a bad one alone
+  (`sessions_dropped`), and caps the table by the heaviest share; the ring frames rejoin the budget
+  in old-stamp order, interleaved with DM and topic frames (`snapshot.cpp:apply`); `place` restores a
+  nickname or link code only if unexpired and free. `adopt_restored_sessions` (in `setup_ws_handler`)
+  puts every one in grace with the timer starting at load, `restored = true` (its resume answers
+  `reprove: true`, its locked rooms come back unproved), its rooms `held` with their owner flags.
+- **Drain** (`drain.h`, main.cpp's shutdown tick): on SIGTERM, in one loop tick, every live
+  session's socket gets `{"type":"reconnect","after_ms":N}` (uncounted, N uniform in 2000..10000 via
+  `randombytes_uniform`), then the snapshot, then `app.close()`. Nothing counted is written after
+  the snapshot.
+- **Close reasons**: the relay closes 1000 `moved` (the session moved to a newer socket),
+  `superseded` (another login of the device), `end` (after the client's `end`), `session_lost` (a
+  live session evicted by the table cap); a 1008 close (`license_revoked` and the other policy
+  closes) ends the session. The client closes 1000 with `suspend`, `drain` or `end`.
+- **Nothing about sessions is logged**, not even a count in the snapshot lines.
+
 ## config.h — Configuration
 
 ### Config struct
@@ -344,7 +506,8 @@ Iterates all `signaling_rooms`, removes `PeerEntry` records where `now - last_se
 
 ### Graceful shutdown (rewritten 2026-09-07)
 
-When `should_shutdown` is true (from SIGINT/SIGTERM), the 1 s shutdown tick, on the loop thread with every buffer intact:
+When `should_shutdown` is true (from SIGINT/SIGTERM), the 1 s shutdown tick, on the loop thread with every buffer intact (`drain::shutdown`):
+0. The drain hint `{"type":"reconnect","after_ms":N}` to every live session's socket (see Resumable sessions).
 1. `snapshot_to_fdstore(state)` (see `snapshot.cpp` below).
 2. Closes the three periodic timers and itself.
 3. `app.close()`: the listen socket plus every connection (`us_socket_context_close` on the HTTP and WS contexts). Close handlers run `cleanup_peer` as usual; the snapshot was taken first because they mutate state.
@@ -360,9 +523,9 @@ Fatal: if the port bind fails, the process calls `exit(1)` immediately.
 
 Everything the relay holds is RAM. A service restart used to empty it: three days of offline DM frames, the topic rings, and every offline phone's push token (RAM-only, never erased on disconnect, re-sent only on app launch). Now the state that an OFFLINE peer cannot re-send rides systemd's file descriptor store across the restart. Memory `project_relay_restart_persistence` has the decisions; this is the shape.
 
-**What is in the snapshot:** `offline_buffer` (room, frame, sender, age, is_image, is_channel, seq), `offline_optin`, `topic_buffers` (key, accepting, retention_secs, registered age, frames), `push_tokens`, `push_prefs`. Not: rooms and sockets, nickname and link-code claims (relay-scoped by design), push debounce counters, `device_list_max_version`, the two files.
+**What is in the snapshot:** `offline_buffer` (room, frame, sender, age, is_image, is_channel, seq), `offline_optin`, `topic_buffers` (key, accepting, retention_secs, registered age, frames), `push_tokens`, `push_prefs`. Not: rooms and sockets, nickname and link-code claims (relay-scoped by design), push debounce counters, `device_list_max_version`, the two files. Since VERSION 9 also every resumable session, which carries its own rooms, subscriptions, nickname and link code (see Resumable sessions).
 
-**`snapshot_codec.h`** (header-only, no uWS, unit test `test/test_snapshot_codec.cpp`): `snapshot::Data` plus `encode`/`decode`. Magic `HRSN`, `VERSION` (2 since 2026-09-11), six counted sections (the sixth is the kill list, read only at version 2 or later; a version 1 snapshot decodes with an empty kill list, so a deploy keeps the live buffers), trailer `HRSE`; little-endian fixed-width ints, u32-length strings capped at 64 MB, flags must be 0/1, a count larger than the remaining bytes is refused. `decode` is all-or-nothing: any truncation, bad byte or a version outside the accepted range returns false and leaves the output untouched. Timestamps travel as AGES in seconds; the reader rebuilds `at = now - age`.
+**`snapshot_codec.h`** (header-only, no uWS, unit test `test/test_snapshot_codec.cpp`): `snapshot::Data` plus `encode`/`decode`. Magic `HRSN`, `VERSION` (9 since 2026-10-06; the header comment lists what each version added), six counted sections (the sixth is the kill list, read only at version 2 or later; a version 1 snapshot decodes with an empty kill list, so a deploy keeps the live buffers), trailer `HRSE`; little-endian fixed-width ints, u32-length strings capped at 64 MB, flags must be 0/1, a count larger than the remaining bytes is refused. `decode` is all-or-nothing: any truncation, bad byte or a version outside the accepted range returns false and leaves the output untouched. Timestamps travel as AGES in seconds; the reader rebuilds `at = now - age`.
 
 **`sd_fdstore.h`** (header-only): `store(fd, name)` sends `FDSTORE=1\nFDNAME=name` with the fd as SCM_RIGHTS over `NOTIFY_SOCKET` (abstract `@` paths handled); `remove(name)` sends `FDSTOREREMOVE=1`; `take(name)` parses `LISTEN_PID`/`LISTEN_FDS`/`LISTEN_FDNAMES`, marks every passed fd close-on-exec, closes the ones not taken, clears the variables. No libsystemd (its dev package is not on the box).
 
@@ -563,7 +726,7 @@ Registers the `/ws` endpoint with these settings:
 |---------|-------|-------------|
 | `.compression` | `uWS::DISABLED` | No per-message compression (content is already encrypted) |
 | `.maxPayloadLength` | `64 * 1024 * 1024` (64 MB) | Maximum single message size. NEVER lower — ChannelSyncBatch can exceed 2 MB after MLS+base64. Silently kills connections if exceeded. |
-| `.idleTimeout` | `120` seconds | Connection closed if no data (including pings) for 120s |
+| `.idleTimeout` | `45` seconds | Connection closed if no data (including pings) for 45 s; clients beat every 15 s (see Resumable sessions) |
 | `.maxBackpressure` | `64 * 1024 * 1024` (64 MB) | Hard backpressure limit — uWS force-closes truly dead connections at this threshold |
 | `.sendPingsAutomatically` | `true` | uWS sends WebSocket pings automatically |
 
@@ -597,8 +760,12 @@ Empty (no-op).
 
 #### .close handler
 
-1. If `auth_timer` is set, close it and null the pointer.
-2. If `authenticated`, call `cleanup_peer()` to remove from all rooms and notify peers.
+1. A socket carrying a live session: a 1008 close ends the session (`end_session`); any other close
+   starts its grace (`enter_grace`, see Resumable sessions), which keeps the per-IP slot.
+2. Otherwise the per-IP slot is given back (only if `ip_key` was set, i.e. the slot was taken).
+3. If `auth_timer` is set, close it and null the pointer.
+4. A fetch socket leaves only its own slots; a session-less authenticated socket that was not
+   superseded calls `cleanup_peer()` to remove it from all rooms and notify peers.
 
 ### ws_handler.cpp:handle_auth() — Authentication
 
@@ -1190,7 +1357,7 @@ The `deploy/` templates assume the repo cloned at `/opt/HOLLOW` and a `hollow` u
 | Message from non-member | Silently dropped |
 | Direct to offline target | Buffered (offline_buffer) + FCM push fired |
 | Backpressure > 64 MB (hard) | uWebSockets force-closes dead connection |
-| No data for 120s | uWebSockets idle timeout, connection closed |
+| No data for 45 s | uWebSockets idle timeout, connection closed; a session goes into grace |
 | keys.json removed keys | Affected peers kicked within 30s |
 | TLS cert/key missing on startup | Fatal exit |
 | Port already in use | Fatal exit |

@@ -14,6 +14,7 @@
 #include "kill_list.h"
 #include "license.h"
 #include "fair_share.h"
+#include "session.h"
 #include "offline_index.h"
 #include "reports.h"
 #include "roster_book.h"
@@ -157,8 +158,12 @@ struct PerSocketData {
     // socket, so a signature over it cannot open a second connection.
     std::string auth_nonce;
     // The challenge this socket logged in with (auth v2), which its door proofs
-    // (door_room.h) are bound to; `auth_nonce` is spent by the login.
+    // (door_room.h) are bound to; `auth_nonce` is spent by the login. A socket that
+    // resumes a session takes the session's.
     std::string door_nonce;
+    // The session this socket carries (RelayState::sessions), "" for none: v2 logins,
+    // fetch and guest sockets, and a socket whose session ended under it.
+    std::string sid;
     // A fetch socket's rooms, kept apart from `RelayState::peer_rooms`: that set
     // belongs to the device's full socket, whose auth resets it, and a fetch slot
     // it forgot would outlive the fetch socket.
@@ -192,6 +197,10 @@ struct WsRoom {
     std::unordered_set<std::string> owners;
     // In a server room with a join lock here, who proved its newest door.
     door_room::Doors doors;
+    // Devices whose session holds the room while their socket is gone: absent from
+    // presence, still reached by delivery (into their ring). Their `owners` and `doors`
+    // entries stay while they hold it.
+    std::unordered_set<std::string> held;
 };
 
 struct IpState {
@@ -241,6 +250,14 @@ struct RelayState {
 
     // peer_id -> WebSocket pointer (for license kicks + online count)
     std::unordered_map<std::string, SSLWebSocket*> peer_sockets;
+
+    // peer_id -> its resumable session, live or in grace (session_bounds.h).
+    std::unordered_map<std::string, session::Session> sessions;
+    // When each grace ends and when each owed ack falls due, in that order (the grace
+    // length is fixed per process, the ack delay fixed): the session timer pops the
+    // front, and an entry whose session moved on since is skipped.
+    std::deque<std::pair<std::chrono::steady_clock::time_point, std::string>> grace_ends;
+    std::deque<std::pair<std::chrono::steady_clock::time_point, std::string>> acks_due;
 
     // Per-IP connection tracking (in-memory only, never logged/persisted)
     std::unordered_map<std::string, IpState> ip_states;

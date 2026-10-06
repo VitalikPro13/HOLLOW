@@ -20,6 +20,7 @@
 #include "json.hpp"
 #include "ring_auth.h"
 #include "roster.h"
+#include "session.h"
 #include "validate.h"
 
 #include <arpa/inet.h>
@@ -32,6 +33,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -124,11 +126,28 @@ struct Frame {
     std::string data;
 };
 
+// What one frame from the relay adds to a session client's count (section 9.3).
+static uint64_t counts_as(const Frame& f) {
+    if (!f.text) return 1;
+    json j = json::parse(f.data, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return 1;
+    auto t = j.find("type");
+    if (t == j.end() || !t->is_string()) return 1;
+    const std::string type = t->get<std::string>();
+    if (type == "gap") return j.value("n", static_cast<uint64_t>(0));
+    return session::relay_type_counts(type) ? 1 : 0;
+}
+
 // One TLS WebSocket to the relay, each from its own loopback address: the relay admits
 // ten new connections a minute per address.
 class Socket {
   public:
     std::deque<Frame> inbox;
+    // Stream frames read off the wire so far, as a session client counts them.
+    uint64_t counted = 0;
+    // The relay's close frame, once one arrived.
+    int close_code = 0;
+    std::string close_reason;
 
     ~Socket() { drop(); }
 
@@ -202,6 +221,10 @@ class Socket {
 
     bool closed() const { return closed_; }
 
+    // The connection dies the way a phone's does: no close frame, whatever the relay
+    // wrote and the client never read lost with it.
+    void abort() { drop(); }
+
     // Close and wait for the relay's close frame: its close handler has run by then.
     bool close_clean() {
         send_frame(0x8, std::string("\x03\xe8", 2));
@@ -230,7 +253,9 @@ class Socket {
 
     void write_all(const std::string& data) {
         size_t off = 0;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WAIT_MS);
+        // A frame of megabytes gets a second more per megabyte on a loaded machine.
+        auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(WAIT_MS + static_cast<int64_t>(data.size() / 1024));
         while (off < data.size()) {
             int n = SSL_write(ssl_, data.data() + off, static_cast<int>(data.size() - off));
             if (n > 0) {
@@ -292,6 +317,10 @@ class Socket {
         rbuf_.erase(0, pos + static_cast<size_t>(len));
         if (op == 0x8) {
             closed_ = true;
+            if (payload.size() >= 2) {
+                close_code = (static_cast<unsigned char>(payload[0]) << 8) | static_cast<unsigned char>(payload[1]);
+                close_reason = payload.substr(2);
+            }
         } else if (op == 0x9) {
             send_frame(0xA, payload);
         } else if (op != 0xA) {
@@ -300,7 +329,10 @@ class Socket {
                 partial_text_ = op == 0x1;
             }
             partial_ += payload;
-            if (fin) inbox.push_back({partial_text_, std::move(partial_)});
+            if (fin) {
+                inbox.push_back({partial_text_, std::move(partial_)});
+                counted += counts_as(inbox.back());
+            }
             partial_.clear();
         }
         return true;
@@ -313,6 +345,10 @@ struct Peer {
     std::string relay_key;  // the relay's door key, from that challenge
     bool ok = false;
     Socket ws;
+    // Auth v3: the challenge, the relay's answer and the session this socket carries.
+    json challenge;
+    json answer;
+    std::string sid;
 
     void send(const json& j) { ws.send_frame(0x1, j.dump()); }
     void send_bin(const std::string& b) { ws.send_frame(0x2, b); }
@@ -450,9 +486,47 @@ static std::unique_ptr<Peer> login(const Ident& id, const std::string& mode = "f
         return j.value("type", "") == "auth_ok" || j.value("type", "") == "auth_failed";
     }));
     p->ok = r && r->value("type", "") == "auth_ok";
+    p->answer = r ? *r : json::object();
     if (!p->ok) check("a v2 " + mode + " login is accepted", false);
     return p;
 }
+
+// A socket logged in with auth v3 asking for `session` ("new", "none" or a sid) with
+// the client's count `in_h`, which its own count continues from. `signed_session`
+// replaces what the signature covers, to forge one.
+static std::unique_ptr<Peer> login3(const Ident& id, const std::string& session, uint64_t in_h,
+                                    const std::string& mode = "full", const std::string& signed_session = "") {
+    auto p = open_socket(id);
+    p->send({{"type", "auth_hello"}});
+    auto ch = next_json(*p, typed("auth_challenge"));
+    if (!ch) {
+        check("the relay answers auth_hello with a challenge", false);
+        return p;
+    }
+    p->challenge = *ch;
+    p->nonce = ch->value("nonce", "");
+    p->relay_key = ch->value("door_key", "");
+    const uint64_t ts = now_unix_secs();
+    const std::string covered = signed_session.empty() ? session : signed_session;
+    json a = {{"type", "auth"}, {"v", 3}, {"peer_id", id.peer}, {"public_key", id.pub_b64}, {"timestamp", ts},
+              {"nonce", p->nonce}, {"domain", g_domain}, {"session", session}, {"in_h", in_h},
+              {"signature", id.sign(auth_v3_message(g_domain, p->nonce, id.peer, ts, mode, "", covered, in_h))}};
+    if (mode == "guest") a["guest"] = true;
+    if (mode == "fetch") a["fetch"] = true;
+    p->ws.counted = in_h;
+    p->send(a);
+    auto r = next_json(*p, json_where([](const json& j) {
+        const std::string t = j.value("type", "");
+        return t == "auth_ok" || t == "auth_failed" || t == "resumed";
+    }));
+    p->answer = r ? *r : json::object();
+    const std::string t = p->answer.value("type", "");
+    p->ok = t == "auth_ok" || t == "resumed";
+    p->sid = t == "resumed" ? session : p->answer.value("sid", "");
+    return p;
+}
+
+static bool is_sid(const std::string& s) { return session::is_sid_shape(s); }
 
 static std::string frame(uint8_t op, std::initializer_list<std::string> fields, const std::string& payload) {
     std::string f(1, static_cast<char>(op));
@@ -498,7 +572,8 @@ static std::set<std::string> online(Peer& p, const std::vector<std::string>& ids
     return out;
 }
 
-static std::string door_proof(const Peer& p, const std::string& room, const Door& door) {
+// A door proof bound to the challenge `nonce`.
+static std::string door_proof_for(const Peer& p, const std::string& nonce, const std::string& room, const Door& door) {
     unsigned char relay_pk[32];
     size_t len = 0;
     if (sodium_base642bin(relay_pk, sizeof(relay_pk), p.relay_key.c_str(), p.relay_key.size(), nullptr, &len, nullptr,
@@ -506,7 +581,11 @@ static std::string door_proof(const Peer& p, const std::string& room, const Door
         return "";
     }
     return door_proof_make(door.sk, relay_pk,
-                           door_room::proof_message(auth_domain(g_domain), p.nonce, p.id.peer, room, door.text, p.relay_key));
+                           door_room::proof_message(auth_domain(g_domain), nonce, p.id.peer, room, door.text, p.relay_key));
+}
+
+static std::string door_proof(const Peer& p, const std::string& room, const Door& door) {
+    return door_proof_for(p, p.nonce, room, door);
 }
 
 // A one-link chain signed by its owner: a legacy (32-hex) server's carries no nonce.
@@ -1401,6 +1480,600 @@ static void test_deep_json() {
           next(*o, bin(frame(0x06, {inbox, b->id.peer}, "mail-pad"))).has_value());
 }
 
+// ---------------------------------------------------------------------------
+// Resumable sessions (RESUMABLE_SESSIONS_PLAN.md section 9). A device drops the way a
+// phone does (Socket::abort: no close frame), and comes back with auth v3 naming its
+// sid and how many stream frames it read.
+
+// The relay's grace, as its auth_ok says (run_live.sh builds it short).
+static int64_t g_grace_secs = 0;
+
+static json hb(Peer& p, uint64_t h) {
+    p.send({{"type", "hb"}, {"h", h}});
+    auto r = next_json(p, typed("hb_ack"));
+    return r ? *r : json::object();
+}
+
+static std::string answer_type(const Peer& p) { return p.answer.value("type", ""); }
+
+static bool resumed(const Peer& p) { return answer_type(p) == "resumed"; }
+
+static std::string resume_failed(const Peer& p) { return p.answer.value("resume_failed", ""); }
+
+// Waits for the relay to close the socket.
+static bool closed_by_relay(Peer& p) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WAIT_MS);
+    while (!p.ws.closed() && left_ms(deadline) > 0) p.ws.pump(left_ms(deadline));
+    return p.ws.closed();
+}
+
+static std::set<std::string> keys_of(const json& j) {
+    std::set<std::string> out;
+    for (auto it = j.begin(); it != j.end(); ++it) out.insert(it.key());
+    return out;
+}
+
+static bool is_json(const Frame& f, const std::function<bool(const json&)>& pred) {
+    auto j = as_json(f);
+    return j && pred(*j);
+}
+
+static void sleep_ms(int ms) {
+    pollfd none{-1, 0, 0};
+    poll(&none, 0, ms);
+}
+
+static void test_session_logins() {
+    printf("sessions: auth v3 logins\n");
+    auto a = login3(Ident(), "new", 0);
+    check("the challenge offers sessions", a->challenge.value("session", 0) == 1);
+    check("a fresh session is minted", a->ok && answer_type(*a) == "auth_ok" && is_sid(a->sid));
+    check("with its grace and heartbeat", a->answer.value("grace_secs", 0) > 0 && a->answer.value("hb_secs", 0) == 15);
+    check("and no resume to report", !a->answer.contains("resume_failed"));
+    g_grace_secs = a->answer.value("grace_secs", 0);
+
+    auto v2 = login(Ident());
+    check("a v2 login is answered exactly as before", v2->answer == json{{"type", "auth_ok"}});
+    auto f = login3(Ident(), "none", 0, "fetch");
+    check("a fetch socket gets no session", f->ok && f->answer == json{{"type", "auth_ok"}});
+    auto g = login3(Ident(), "none", 0, "guest");
+    check("nor does a guest", g->ok && g->answer == json{{"type", "auth_ok"}});
+    check("a full socket asking for none is refused", !login3(Ident(), "none", 0)->ok);
+    check("a fetch socket asking for one is refused", !login3(Ident(), "new", 0, "fetch")->ok);
+    check("a signature over another session is refused",
+          !login3(Ident(), "new", 0, "full", "00112233445566778899aabbccddeeff")->ok);
+
+    Ident x, y, z;
+    auto unknown = login3(x, random_hex(16), 0);
+    auto owner = login3(y, "new", 0);
+    auto stranger = login3(z, owner->sid, 0);
+    check("an unknown sid gets a fresh session on the same socket",
+          answer_type(*unknown) == "auth_ok" && resume_failed(*unknown) == "unknown" && is_sid(unknown->sid));
+    check("another device's sid is answered exactly the same",
+          answer_type(*stranger) == "auth_ok" && resume_failed(*stranger) == "unknown" &&
+              keys_of(stranger->answer) == keys_of(unknown->answer) && stranger->sid != owner->sid);
+    auto back = login3(y, owner->sid, owner->ws.counted);
+    check("and leaves the owner's session as it was", resumed(*back));
+    auto wrong = login3(y, random_hex(16), 0);
+    check("a device naming a sid that is not its own gets a fresh session",
+          answer_type(*wrong) == "auth_ok" && resume_failed(*wrong) == "unknown" && wrong->sid != owner->sid);
+}
+
+static void test_session_resume() {
+    printf("sessions: a resume replays what the device never read, in order\n");
+    const std::string room = room_name("sess-resume");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    a->send_bin(frame(0x03, {room}, "from-a"));
+    b->send_bin(frame(0x04, {room, ida.peer}, "r-1"));
+    check("a direct arrives live", next(*a, bin(frame(0x06, {room, b->id.peer}, "r-1"))).has_value());
+    const uint64_t read = a->ws.counted;
+    // The relay writes these into a socket whose reader has stopped and is about to die.
+    b->send_bin(frame(0x04, {room, ida.peer}, "r-2"));
+    b->send({{"type", "direct"}, {"room", room}, {"target", ida.peer}, {"data", "r-3"}});
+    b->send_bin(frame(0x03, {room}, "r-4"));
+    settle({b.get()});
+    a->ws.abort();
+    check("presence follows the socket: the room sees it leave at once",
+          next(*b, about("peer_left", room, ida.peer)).has_value());
+
+    auto a2 = login3(ida, a->sid, read);
+    check("the session resumes", resumed(*a2) && !a2->answer.value("gap", true) && !a2->answer.value("reprove", true));
+    check("with the relay's count of what the device sent", a2->answer.value("h", 0) == 2);
+    check("and its grace and heartbeat", a2->answer.value("grace_secs", 0) == g_grace_secs &&
+                                             a2->answer.value("hb_secs", 0) == 15);
+    const auto upto = through(*a2, bin(frame(0x05, {room, b->id.peer}, "r-4")));
+    check("members first, then every frame after its count, in order",
+          upto.size() == 4 && is_json(upto[0], [&](const json& j) { return j.value("type", "") == "members" && j.value("room", "") == room; }) &&
+              bin(frame(0x06, {room, b->id.peer}, "r-2"))(upto[1]) &&
+              is_json(upto[2], [](const json& j) { return j.value("type", "") == "direct" && j.value("data", "") == "r-3"; }));
+    check("the room sees it come back", next(*b, about("peer_joined", room, ida.peer)).has_value());
+    b->send_bin(frame(0x04, {room, ida.peer}, "r-5"));
+    check("and its directs reach the new socket", next(*a2, bin(frame(0x06, {room, b->id.peer}, "r-5"))).has_value());
+    check("nothing was rejoined: the device is listed once",
+          discover(*b, room) == std::set<std::string>{ida.peer});
+    a2->ws.abort();
+    check("the device left again", next(*b, about("peer_left", room, ida.peer)).has_value());
+    check("the count a resume named acked the ring", resume_failed(*login3(ida, a->sid, read - 1)) == "bad_h");
+}
+
+static void test_session_counting() {
+    printf("sessions: both sides count the same frames\n");
+    const std::string room = room_name("sess-count");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    join(*a, room);
+    sync(*a);
+    a->send_bin(frame(0x03, {room_name("sess-elsewhere")}, "gated"));
+    a->ws.send_frame(0x1, "not json");
+    a->send({{"type", "ack"}, {"h", 0}});
+    a->send({{"type", "inactive"}});
+    a->send({{"type", "active"}});
+    check("every stream frame counts on arrival, one a gate refused too, and no control frame",
+          hb(*a, a->ws.counted).value("h", 0) == 4);
+    check("the relay's answers count, presence does not", a->ws.counted == 1);
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    auto a2 = login3(ida, a->sid, read);
+    check("a resume at the device's count replays nothing", resumed(*a2) && hb(*a2, read).value("h", 0) == 4);
+    settle({a2.get()});
+    check("(nothing but the members)", count(*a2, typed("discovered_peers")) == 0);
+
+    // `in_h` above what the relay sent, and below what the device acked.
+    Ident idd, ide, idf;
+    auto d = login3(idd, "new", 0);
+    sync(*d);
+    const uint64_t d_read = d->ws.counted;
+    d->ws.abort();
+    auto d2 = login3(idd, d->sid, d_read + 1);
+    check("a count above what the relay sent is bad_h", resume_failed(*d2) == "bad_h" && is_sid(d2->sid) && d2->sid != d->sid);
+    auto e = login3(ide, "new", 0);
+    sync(*e);
+    sync(*e);
+    e->send({{"type", "ack"}, {"h", e->ws.counted}});
+    sync(*e);
+    e->ws.abort();
+    auto e2 = login3(ide, e->sid, 1);
+    check("a count below what the device acked is bad_h", resume_failed(*e2) == "bad_h");
+    Ident idh;
+    auto h = login3(idh, "new", 0);
+    sync(*h);
+    sync(*h);
+    hb(*h, h->ws.counted);
+    h->ws.abort();
+    check("a heartbeat's count acks too", resume_failed(*login3(idh, h->sid, 1)) == "bad_h");
+    auto f = login3(idf, "new", 0);
+    sync(*f);
+    sync(*f);
+    sync(*f);
+    f->ws.abort();
+    auto f2 = login3(idf, f->sid, 1);
+    check("unacked, the same count resumes and replays the rest", resumed(*f2));
+    settle({f2.get()});
+    check("(the two answers after its count)", count(*f2, typed("discovered_peers")) == 2);
+}
+
+static void test_session_acks() {
+    printf("sessions: acks both ways\n");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    // Seventeen at once: the first ack names 16, the seventeenth waits for the timer.
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 17; i++) a->send({{"type", "discover_peers"}, {"room", room_name("ack") + std::to_string(i)}});
+    auto ack = next_json(*a, typed("ack"));
+    check("the relay acks after 16 stream frames", ack && ack->value("h", 0) == 16);
+    auto late = next_json(*a, typed("ack"), 4500);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    check("and 2 s after one it has not acked", late && late->value("h", 0) == 17 && ms >= 1500);
+    auto quiet = next_json(*a, typed("ack"), 2600);
+    check("and not again with nothing new", !quiet.has_value());
+    check("the heartbeat answer carries the count", hb(*a, 0).value("h", 0) == 17);
+    // An `h` the relay never sent is ignored, so a later resume from 0 still works.
+    a->send({{"type", "ack"}, {"h", 1000000}});
+    a->send({{"type", "hb"}, {"h", 1000000}});
+    sync(*a);
+    a->ws.abort();
+    auto a2 = login3(ida, a->sid, 0);
+    check("an ack past what the relay sent acks nothing", resumed(*a2));
+}
+
+static void test_session_gap() {
+    printf("sessions: what the ring cannot keep replays as a counted gap\n");
+    const std::string room = room_name("sess-gap");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("the device left", next(*b, about("peer_left", room, ida.peer)).has_value());
+    b->send_bin(frame(0x04, {room, ida.peer}, std::string(9 * 1024 * 1024, 'g')));
+    b->send_bin(frame(0x04, {room, ida.peer}, "after-gap"));
+    settle({b.get()});
+    auto a2 = login3(ida, a->sid, read);
+    check("the resume says its replay holds a gap", resumed(*a2) && a2->answer.value("gap", false));
+    const auto upto = through(*a2, bin(frame(0x06, {room, b->id.peer}, "after-gap")));
+    check("the frame too big for the ring comes back as one counted gap, then the rest",
+          upto.size() == 3 && is_json(upto[1], [](const json& j) { return j.value("type", "") == "gap" && j.value("n", 0) == 1; }));
+    check("and the device's count takes the gap in", a2->ws.counted == read + 2);
+}
+
+static void test_session_expiry() {
+    printf("sessions: when grace runs out, its directs move to offline_buffer\n");
+    const std::string room = room_name("sess-exp");
+    Ident ida, master;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    const std::string nick = "s" + g_tag + "x";
+    a->send(signed_nickname(nick, ida, master));
+    check("the device claims a nickname", next(*a, typed("nickname_claimed")).has_value());
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("the device left", next(*b, about("peer_left", room, ida.peer)).has_value());
+    b->send_bin(frame(0x04, {room, ida.peer}, "exp-direct"));
+    b->send_bin(frame(0x08, {room, ida.peer}, "exp-image"));
+    b->send_bin(frame(0x03, {room}, "exp-bcast"));
+    b->send_bin(frame(0x02, {room, ida.peer}, "exp-raw"));
+    const json resolve = {{"type", "resolve_nickname"}, {"nickname", nick}};
+    const auto answer = json_where([](const json& j) {
+        return j.value("type", "") == "nickname_resolved" || j.value("type", "") == "nickname_error";
+    });
+    b->send(resolve);
+    auto held = next_json(*b, answer);
+    check("a nickname its session holds still resolves",
+          held && held->value("type", "") == "nickname_resolved" && held->value("peer_id", "") == ida.peer);
+
+    sleep_ms(static_cast<int>(g_grace_secs * 1000 + 1500));
+    b->send(resolve);
+    auto gone = next_json(*b, answer);
+    check("once the grace is over it does not", gone && gone->value("type", "") == "nickname_error");
+    settle({b.get()});
+    check("and the room hears no second departure", !got(*b, about("peer_left", room, ida.peer)));
+    auto a2 = login3(ida, a->sid, read);
+    check("the session is gone", answer_type(*a2) == "auth_ok" && resume_failed(*a2) == "unknown");
+    join(*a2, room);
+    settle({a2.get()});
+    check("its directs wait for the next join", got(*a2, bin(frame(0x06, {room, b->id.peer}, "exp-direct"))) &&
+                                                     got(*a2, bin(frame(0x06, {room, b->id.peer}, "exp-image"))));
+    check("its broadcasts and chunks do not", !got(*a2, bin(frame(0x05, {room, b->id.peer}, "exp-bcast"))) &&
+                                                  !got(*a2, bin(frame(0x02, {room, b->id.peer}, "exp-raw"))));
+}
+
+static void test_session_transfer() {
+    printf("sessions: a live session moves to the socket that resumes it\n");
+    const std::string room = room_name("sess-move");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    b->send_bin(frame(0x04, {room, ida.peer}, "mv-1"));
+    next(*a, bin(frame(0x06, {room, b->id.peer}, "mv-1")));
+    auto a2 = login3(ida, a->sid, a->ws.counted);
+    check("it resumes", resumed(*a2));
+    check("the old socket closes as moved",
+          closed_by_relay(*a) && a->ws.close_code == 1000 && a->ws.close_reason == "moved");
+    check("the new one is told the room", next(*a2, typed("members", room)).has_value());
+    settle({a2.get(), b.get()});
+    check("and the room is told nothing", !got(*b, about("peer_left", room, ida.peer)) &&
+                                              !got(*b, about("peer_joined", room, ida.peer)));
+    b->send_bin(frame(0x04, {room, ida.peer}, "mv-2"));
+    check("its directs reach the new socket", next(*a2, bin(frame(0x06, {room, b->id.peer}, "mv-2"))).has_value());
+}
+
+static void test_session_fresh_over_held() {
+    printf("sessions: a fresh login ends the session the device held\n");
+    const std::string room = room_name("sess-fresh");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    a->ws.abort();
+    check("the device left", next(*b, about("peer_left", room, ida.peer)).has_value());
+    b->send_bin(frame(0x04, {room, ida.peer}, "fr-1"));
+    settle({b.get()});
+    auto a2 = login3(ida, "new", 0);
+    check("a fresh session", answer_type(*a2) == "auth_ok" && is_sid(a2->sid) && a2->sid != a->sid);
+    join(*a2, room);
+    check("the old ring's direct waits in offline_buffer for the fresh one",
+          next(*a2, bin(frame(0x06, {room, b->id.peer}, "fr-1"))).has_value());
+    settle({b.get()});
+    check("its rooms were left silently", !got(*b, about("peer_left", room, ida.peer)));
+    check("the new socket joined the room", next(*b, about("peer_joined", room, ida.peer)).has_value());
+
+    auto a3 = login3(ida, "new", 0);
+    check("over a live session too", answer_type(*a3) == "auth_ok" && a3->sid != a2->sid);
+    check("whose socket is closed", closed_by_relay(*a2));
+    settle({b.get()});
+    check("silently", !got(*b, about("peer_left", room, ida.peer)));
+}
+
+static void test_session_inactive() {
+    printf("sessions: an inactive session is spared presence\n");
+    const std::string room = room_name("sess-idle");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    a->send({{"type", "inactive"}});
+    sync(*a);
+    auto c = login(Ident());
+    join(*c, room);
+    b->send_bin(frame(0x03, {room}, "idle-bcast"));
+    check("stream frames still flow", next(*a, bin(frame(0x05, {room, b->id.peer}, "idle-bcast"))).has_value());
+    settle({c.get(), a.get()});
+    check("presence is withheld", !got(*a, about("peer_joined", room, c->id.peer)));
+    a->send({{"type", "active"}});
+    auto m = next_json(*a, typed("members", room));
+    check("active sends a fresh members per room",
+          m && peers_of(*m) == std::set<std::string>{ida.peer, b->id.peer, c->id.peer});
+    c->send({{"type", "leave"}, {"room", room}});
+    check("and presence flows again", next(*a, about("peer_left", room, c->id.peer)).has_value());
+}
+
+static void test_session_end() {
+    printf("sessions: end hands off and closes\n");
+    const std::string room = room_name("sess-end");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    b->send_bin(frame(0x04, {room, ida.peer}, "end-1"));
+    next(*a, bin(frame(0x06, {room, b->id.peer}, "end-1")));
+    a->send({{"type", "end"}});
+    check("the relay closes the socket", closed_by_relay(*a) && a->ws.close_code == 1000);
+    check("the room sees it leave", next(*b, about("peer_left", room, ida.peer)).has_value());
+    auto a2 = login3(ida, a->sid, a->ws.counted);
+    check("the session is gone", resume_failed(*a2) == "unknown");
+    join(*a2, room);
+    check("its unacked direct moved to offline_buffer", next(*a2, bin(frame(0x06, {room, b->id.peer}, "end-1"))).has_value());
+}
+
+static void test_session_fetch_in_grace() {
+    printf("sessions: a fetch socket during grace gets its copy too\n");
+    const std::string room = room_name("sess-fetch");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("the device left", next(*b, about("peer_left", room, ida.peer)).has_value());
+    auto f = login3(ida, "none", 0, "fetch");
+    f->send({{"type", "join"}, {"room", room}});
+    settle({f.get()});
+    b->send_bin(frame(0x04, {room, ida.peer}, "fg-1"));
+    check("the fetch socket gets it live", next(*f, bin(frame(0x06, {room, b->id.peer}, "fg-1"))).has_value());
+    auto a2 = login3(ida, a->sid, read);
+    check("the session resumes", resumed(*a2));
+    check("and its ring replays it too", next(*a2, bin(frame(0x06, {room, b->id.peer}, "fg-1"))).has_value());
+    check("the room sees it come back", next(*b, about("peer_joined", room, ida.peer)).has_value());
+    f->send({{"type", "leave"}, {"room", room}});
+    settle({f.get()});
+    b->send_bin(frame(0x04, {room, ida.peer}, "fg-2"));
+    check("the fetch socket's leave keeps the resumed slot", next(*a2, bin(frame(0x06, {room, b->id.peer}, "fg-2"))).has_value());
+}
+
+static void test_session_doors_and_kills() {
+    printf("sessions: kill signals first, door standing kept within the process\n");
+    Ident owner, change, owner2, change2;
+    Door door, door2;
+    const std::string nonce = random_hex(16), nonce2 = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    const std::string room2 = genesis_server_id(owner2.peer, nonce2);
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    b->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", base_link(room, door, change, owner, nonce, true)}});
+    b->send({{"type", "lock_put"}, {"server", room2}, {"owner", ""},
+             {"links", base_link(room2, door2, change2, owner2, nonce2, true)}});
+    check("the relay takes both locks", next(*b, typed("lock_chain")).has_value() && next(*b, typed("lock_chain")).has_value());
+    auto ma = join(*a, room, {{"door_proof", door_proof(*a, room, door)}});
+    auto mb = join(*b, room, {{"door_proof", door_proof(*b, room, door)}});
+    check("both prove the door", ma && ma->value("proved", false) && mb && mb->value("proved", false));
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("the device left", next(*b, about("peer_left", room, ida.peer)).has_value());
+    b->send({{"type", "kill_deposit"}, {"blob", "AAAA"}, {"issued_at_ms", 7}, {"targets", json::array({ida.peer})}});
+    check("a destroy signal waits for it", next(*b, typed("kill_deposited")).has_value());
+    // Its fetch socket comes and goes meanwhile, taking none of the session's standing.
+    auto f = login3(ida, "none", 0, "fetch");
+    f->send({{"type", "join"}, {"room", room}});
+    f->send({{"type", "leave"}, {"room", room}});
+    settle({f.get()});
+    check("its fetch socket closes", f->ws.close_clean());
+
+    auto a2 = login3(ida, a->sid, read);
+    check("the session resumes", resumed(*a2));
+    const auto upto = through(*a2, typed("members", room));
+    check("the waiting kill signal comes first", upto.size() == 2 && is_json(upto[0], [](const json& j) {
+                                                     return j.value("type", "") == "kill_signal" && j.value("issued_at_ms", 0) == 7;
+                                                 }));
+    check("and the locked room is still proved", !upto.empty() && is_json(upto.back(), [&](const json& j) {
+                                                     return j.value("proved", false) && peers_of(j).count(b->id.peer) != 0;
+                                                 }));
+    check("the provers see it come back", next(*b, about("peer_joined", room, ida.peer)).has_value());
+    // The socket took the session's door nonce: a proof for its own challenge opens nothing.
+    auto fresh = join(*a2, room2, {{"door_proof", door_proof_for(*a2, a2->nonce, room2, door2)}});
+    check("a proof bound to the new socket's challenge proves nothing", fresh && !fresh->value("proved", true));
+    auto kept = join(*a2, room2, {{"door_proof", door_proof_for(*a2, a->nonce, room2, door2)}});
+    check("one bound to the session's nonce does", kept && kept->value("proved", false));
+    a2->send({{"type", "kill_ack"}});
+}
+
+// A legacy-base roster in which `by` removed `gone`.
+static json roster_removing(const Ident& master, const std::vector<const Ident*>& devices, const Ident& gone,
+                            const Ident& by) {
+    roster::Roster r = roster::Roster::named(master.peer);
+    for (const auto* d : devices) {
+        r.legacy.push_back({d->peer, master.sign(roster::legacy_payload(master.peer, d->peer))});
+        r.consents.push_back({d->peer, d->sign(roster::consent_payload(master.peer, d->peer))});
+    }
+    roster::Removal x;
+    x.base = roster::LEGACY_BASE;
+    x.device = gone.peer;
+    x.by = by.peer;
+    x.sig = by.sign(roster::removal_payload(master.peer, roster::LEGACY_BASE, gone.peer, {}));
+    r.removals.push_back(x);
+    return json::parse(roster::to_json(r).dump());
+}
+
+static void test_session_inbox_recheck() {
+    printf("sessions: an owner the roster drops during grace loses the inbox\n");
+    Ident master, d1, d2;
+    const std::string inbox = "inbox:" + master.peer;
+    auto a = login3(d1, "new", 0);
+    auto m1 = join(*a, inbox, {{"inbox_roster", legacy_roster(master, {&d1, &d2})}});
+    check("the device owns the inbox", m1 && peers_of(*m1) == std::set<std::string>{d1.peer});
+    auto b = login(d2);
+    join(*b, inbox, {{"inbox_roster", legacy_roster(master, {&d1, &d2})}});
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("its sibling sees it leave", next(*b, about("peer_left", inbox, d1.peer)).has_value());
+    join(*b, inbox, {{"inbox_roster", roster_removing(master, {&d1, &d2}, d1, d2)}});
+    auto s = login(Ident());
+    join(*s, inbox);
+    s->send_bin(frame(0x04, {inbox, master.peer}, "after-removal"));
+    check("a deposit reaches the owner left", next(*b, bin(frame(0x06, {inbox, s->id.peer}, "after-removal"))).has_value());
+    auto a2 = login3(d1, a->sid, read);
+    check("the session resumes", resumed(*a2));
+    auto m2 = next_json(*a2, typed("members", inbox));
+    check("without the inbox: it sees only itself", m2 && peers_of(*m2) == std::set<std::string>{d1.peer});
+    settle({a2.get(), b.get()});
+    check("its ring kept nothing deposited after the removal",
+          !got(*a2, bin(frame(0x06, {inbox, s->id.peer}, "after-removal"))));
+    check("and the owner is not told it came back", !got(*b, about("peer_joined", inbox, d1.peer)));
+}
+
+// A gapped resume joins nothing, so a mailbox deposit that fell out of the ring would
+// never reach the device: an inbox it owns replays its mailbox after the ring.
+static void test_session_gap_mailbox() {
+    printf("sessions: a gapped resume replays the mailbox of an inbox it owns\n");
+    Ident master, d1;
+    const std::string inbox = "inbox:" + master.peer;
+    const std::string room = room_name("sess-gapmail");
+    auto a = login3(d1, "new", 0);
+    auto m = join(*a, inbox, {{"inbox_roster", legacy_roster(master, {&d1})}});
+    check("the device owns the inbox", m && peers_of(*m) == std::set<std::string>{d1.peer});
+    join(*a, room);
+    auto s = login(Ident());
+    join(*s, inbox);
+    join(*s, room);
+    // Another identity's inbox the device sits in without owning it, mail waiting there.
+    Ident other;
+    const std::string not_mine = "inbox:" + other.peer;
+    s->send_bin(frame(0x04, {not_mine, other.peer}, "not-mine"));
+    settle({s.get()});
+    join(*a, not_mine);
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("the device left", next(*s, about("peer_left", room, d1.peer)).has_value());
+    // The depositor fills the ring after its deposit, so its own oldest frame, the
+    // deposit, is the first to become a gap.
+    s->send_bin(frame(0x04, {inbox, master.peer}, "mail-in-gap"));
+    for (int i = 0; i < 8; i++) s->send_bin(frame(0x03, {room}, std::string(1024 * 1024, 'f') + std::to_string(i)));
+    settle({s.get()});
+    const std::string mail = frame(0x06, {inbox, s->id.peer}, "mail-in-gap");
+    auto a2 = login3(d1, a->sid, read);
+    check("the resume reports a gap", resumed(*a2) && a2->answer.value("gap", false));
+    const auto upto = through(*a2, bin(mail));
+    bool gap_first = false;
+    for (const auto& f : upto) {
+        if (is_json(f, [](const json& j) { return j.value("type", "") == "gap"; })) {
+            gap_first = true;
+            break;
+        }
+        if (bin(mail)(f)) break;
+    }
+    check("the deposit that fell into the gap arrives from the mailbox, after the ring", !upto.empty() && gap_first);
+    settle({a2.get()});
+    const auto foreign = bin(frame(0x06, {not_mine, s->id.peer}, "not-mine"));
+    check("an inbox it does not own replays nothing",
+          std::none_of(upto.begin(), upto.end(), foreign) && !got(*a2, foreign));
+    const uint64_t read2 = a2->ws.counted;
+    a2->ws.abort();
+    check("the device left again", next(*s, about("peer_left", room, d1.peer)).has_value());
+    auto a3 = login3(d1, a->sid, read2);
+    check("the mailbox replay was counted like any stream frame", resumed(*a3) && !a3->answer.value("gap", true));
+    settle({a3.get()});
+    check("a resume without a gap replays no mailbox", !got(*a3, bin(mail)));
+}
+
+// The relay posts a push to 127.0.0.1:3001. Only when this test holds that port does it
+// register a token, so a real sidecar there never sees one.
+static void test_session_push_in_grace() {
+    printf("sessions: a direct into a ring in grace wakes the phone\n");
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in at{};
+    at.sin_family = AF_INET;
+    at.sin_port = htons(3001);
+    at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int one = 1;
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    if (lfd < 0 || bind(lfd, reinterpret_cast<sockaddr*>(&at), sizeof(at)) != 0 || listen(lfd, 8) != 0) {
+        if (lfd >= 0) close(lfd);
+        printf("  skip push in grace (127.0.0.1:3001 is taken)\n");
+        return;
+    }
+    auto wake = [lfd](int timeout_ms) {
+        pollfd p{lfd, POLLIN, 0};
+        if (poll(&p, 1, timeout_ms) <= 0) return std::string();
+        int c = accept(lfd, nullptr, nullptr);
+        if (c < 0) return std::string();
+        std::string req;
+        char buf[4096];
+        for (int i = 0; i < 20 && req.find("\r\n\r\n") == std::string::npos; i++) {
+            pollfd q{c, POLLIN, 0};
+            if (poll(&q, 1, 500) <= 0) break;
+            ssize_t n = read(c, buf, sizeof(buf));
+            if (n <= 0) break;
+            req.append(buf, static_cast<size_t>(n));
+        }
+        pollfd q{c, POLLIN, 0};
+        if (poll(&q, 1, 500) > 0) {
+            ssize_t n = read(c, buf, sizeof(buf));
+            if (n > 0) req.append(buf, static_cast<size_t>(n));
+        }
+        const std::string ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        (void)!write(c, ok.data(), ok.size());
+        close(c);
+        return req;
+    };
+    const std::string room = room_name("sess-push");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    a->send({{"type", "register_push_token"}, {"token", "token-" + g_tag}, {"platform", "android"}});
+    check("the device registers a token", next(*a, typed("push_token_registered")).has_value());
+    b->send_bin(frame(0x04, {room, ida.peer}, "push-live"));
+    next(*a, bin(frame(0x06, {room, b->id.peer}, "push-live")));
+    check("a live device is not woken", wake(1000).empty());
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("the device left", next(*b, about("peer_left", room, ida.peer)).has_value());
+    b->send_bin(frame(0x04, {room, ida.peer}, "push-grace"));
+    const std::string req = wake(WAIT_MS);
+    check("a device in grace is", req.find("\"sender\":\"" + b->id.peer + "\"") != std::string::npos &&
+                                      req.find("token-" + g_tag) != std::string::npos);
+    auto a2 = login3(ida, a->sid, read);
+    check("and still gets the frame on resume", next(*a2, bin(frame(0x06, {room, b->id.peer}, "push-grace"))).has_value());
+    a2->send({{"type", "unregister_push_token"}});
+    sync(*a2);
+    close(lfd);
+}
+
 int main(int argc, char** argv) {
     if (argc != 4 || (std::string(argv[3]) != "on" && std::string(argv[3]) != "off")) {
         fprintf(stderr, "usage: test_relay_live <port> <auth domain> <on|off>\n");
@@ -1414,18 +2087,38 @@ int main(int argc, char** argv) {
     g_ctx = SSL_CTX_new(TLS_client_method());
     SSL_CTX_set_verify(g_ctx, SSL_VERIFY_NONE, nullptr);
 
-    test_auth();
-    test_nicknames();
-    test_rings();
-    test_catchup_end_mark();
-    test_inbox_proof();
-    test_inbox_audience();
-    test_forwarder_rooms();
-    test_hidden_channel_copies();
-    test_guests();
-    test_fetch();
-    test_door_rooms();
-    test_deep_json();
+    // RELAY_LIVE_ONLY=sessions runs the session cases alone (the mutation pass).
+    const char* only = getenv("RELAY_LIVE_ONLY");
+    const bool all = !only || std::string(only) != "sessions";
+    if (all) {
+        test_auth();
+        test_nicknames();
+        test_rings();
+        test_catchup_end_mark();
+        test_inbox_proof();
+        test_inbox_audience();
+        test_forwarder_rooms();
+        test_hidden_channel_copies();
+        test_guests();
+        test_fetch();
+        test_door_rooms();
+    }
+    test_session_logins();
+    test_session_resume();
+    test_session_counting();
+    test_session_acks();
+    test_session_gap();
+    test_session_transfer();
+    test_session_fresh_over_held();
+    test_session_inactive();
+    test_session_end();
+    test_session_fetch_in_grace();
+    test_session_doors_and_kills();
+    test_session_inbox_recheck();
+    test_session_gap_mailbox();
+    test_session_push_in_grace();
+    test_session_expiry();
+    if (all) test_deep_json();
 
     SSL_CTX_free(g_ctx);
     if (failures) {

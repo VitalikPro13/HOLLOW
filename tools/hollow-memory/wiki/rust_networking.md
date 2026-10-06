@@ -6,99 +6,291 @@ Covers seven Rust modules in `rust/hollow_core/src/node/` that handle relay comm
 
 ## ws_client.rs — WebSocket Relay Client
 
-File: `rust/hollow_core/src/node/ws_client.rs`
+Files: `rust/hollow_core/src/node/ws_client.rs` (the socket loop, `Client`),
+`node/relay_session.rs` (the session rules as plain state with no socket and no clock: counting,
+acks, the outbound queue, liveness, backoff, the v3 auth bytes; every rule unit-tested by handing
+it instants), `node/ws_client_wire_tests.rs` (the client against an in-process relay speaking the
+section 9 wire: zombie windows, failed resumes, make before break, suspend, drain, door proofs) and
+`node/resume_e2e.rs` (ignored test: the real client against the real relay through the zombie
+proxy, run by `scripts/resume_e2e.sh`). Spec: `reports/planned/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md`
+section 9 (the wire) and section 11 (as built). Relay half: `relay_uws_server.md`, "Resumable
+sessions".
 
 ### Purpose
 
-Persistent WSS connection to the relay (configurable domain, default `relay.anonlisten.com:443`). All text messages (CRDT ops, key exchange, sync) and binary data (file/shard streaming, room broadcasts) flow through this single multiplexed connection. Auto-reconnects with exponential backoff. Relay URL is constructed from the `relay_domain` parameter passed through `spawn_node()` from the Dart-side `relayDomainProvider`.
+One WSS connection per relay carries every room: text (CRDT ops, key exchange, sync) and binary
+(file and shard streaming, room broadcasts). Against a relay that offers it, a **session outlives
+the socket**: both sides count the stream frames they handled and ack them, a dropped socket resumes
+on a new one without a single rejoin, and a heartbeat with a deadline finds a dead path in seconds.
+The relay URL is built from the `relay_domain` passed through `spawn_node()` (Dart
+`relayDomainProvider`).
 
-### Public Entry Point
+### Entry points
 
-`ws_client.rs:spawn_ws_client()` — spawns a `tokio::spawn` background task that runs `ws_client_loop()` forever. Parameters:
-- `relay_url` — WSS endpoint
-- `peer_id` — local Ed25519 peer ID string
-- `keypair_proto` — protobuf-encoded Ed25519 keypair bytes
-- `pub_key_b64` — base64 public key
-- `license_key` — optional license key for gated relays
-- `cmd_rx` — `mpsc::UnboundedReceiver<WsCommand>` from swarm
-- `event_tx` — `mpsc::UnboundedSender<WsEvent>` to swarm
+- `ws_client.rs:spawn_ws_client(relay_url, peer_id, keypair_proto, pub_key_b64, license_key, fetch, cmd_rx, event_tx)`:
+  spawns `Client::run` and registers its control channel in `CONTROLS` (one per running full
+  client, so one per relay). The task ends when the node drops its command sender (`shutdown()`).
+- `ws_client.rs:connect_and_auth()`: a signed-in socket for the push fetch node (`fetch.rs`) and
+  the media forwarder (`forwarder/signaling.rs`). Always today's v2 frame, never a session,
+  whatever the relay offers; any answer other than a plain `auth_ok` is refused.
+- FFI (`api/network.rs`): `relay_nudge(reason)` -> `ws_client::nudge`,
+  `relay_set_background(bool)` -> `set_background`, `relay_suspend()` -> `suspend()` (returns once
+  every client closed, at most `SUSPEND_MAX` 5 s). `set_realtime_active(bool)` marks a live call.
+- `spawn_with()` (cfg(test)): its own `Timing` and control channel, outside the FFI's reach.
 
 ### WsCommand Enum (swarm -> WS client)
 
-- `JoinRoom { room_code }` — sends JSON `{"type":"join","room":"..."}` to relay
-- `LeaveRoom { room_code }` — sends JSON `{"type":"leave","room":"..."}`
-- `SendToRoom { room_code, data }` — binary frame: `[0x03][room_bytes][0x00][data]`. Relay broadcasts to all room members.
-- `SendDirect { room_code, target_peer, data }` — binary frame: `[0x04][room_bytes][0x00][target_bytes][0x00][data]`. Relay routes to one peer. Used for shard transfers.
-- `SendBinaryDirect { room_code, target_peer, data }` — binary frame: `[0x02][room_bytes][0x00][target_bytes][0x00][data]`. Used for file/shard streaming chunks.
-- `CheckPeers { peers, rooms }` — sends JSON `{"type":"check_peers","peers":[...],"rooms":[...]}` to relay. Relay does O(1) hashmap lookups, returns which peers are connected and which rooms are populated. Used by the 60s peer liveness timer (3 s under `cfg(test)`; friends only; since 2026-09-17 reachability is `peer_is_reachable` (device-aware) and the query names `resolver::devices_for(master)`, falling back to the master only for an identity with no known devices, because the relay only ever sees DEVICE ids and a master-keyed check read every fresh install as offline forever, not servers).
+Room state: `JoinRoom`, `JoinInbox { room_code, roster }` (our own `inbox:{master}` room, showing
+our roster; design ID-1R), `SetDoor { room_code, door }` (the newest door of a server room; never
+written itself, joins of that room prove it), `LeaveRoom`, `Subscribe { room_code, topics }`,
+`SetOfflineBuffer`. Data: `SendToRoom` (0x03), `SendPublic` (0x0A), `SendDirect` (0x04),
+`SendDirectImage` (0x08), `SendBinaryDirect` (0x02), `SendToRoomTopic` (0x07), `SendChannelDirect`
+(0x09), `Carry` (writes nothing here: the sealing stage hands it to the node's Olm lane). Control:
+`CheckPeers`, `DiscoverPeers`, `GetTurnCredentials`, `GetMediaForwarder`, `Claim/Release/ResolveNickname`,
+`Claim/Release/ResolveLinkCode`, `RegisterPushToken`, `UnregisterPushToken`, `SetPushPrefs`,
+`SetTopicBuffer`, `TopicCatchup`, `KillDeposit`, `KillAck`, `LockGet`, `LockPut`, `ReportUser`.
+
+`CheckPeers { peers, rooms }` feeds the 60 s peer liveness timer (3 s under `cfg(test)`; friends
+only). Reachability is `peer_is_reachable` (device-aware) and the query names
+`resolver::devices_for(master)`, the master only for an identity with no known devices, because the
+relay only ever sees DEVICE ids.
 
 ### WsEvent Enum (WS client -> swarm)
 
-- `Connected` — emitted after successful auth handshake
-- `Disconnected` — emitted when connection drops (before backoff sleep)
-- `PeerJoined { room, peer_id }` — relay notifies a new peer joined a room
-- `PeerLeft { room, peer_id }` — relay notifies a peer left
-- `RoomMembers { room, peers }` — full member list after joining a room
-- `Message { room, from, data }` — decrypted text message payload from relay binary frame type `0x05`
-- `DirectMessage { room, from, data }` — direct message from relay binary frame type `0x06`
-- `BinaryDirect { room, from, data }` — binary streaming chunk from relay binary frame type `0x02`
-- `LicenseError { reason }` — auth failed on the license key. `invalid_license_key` / `license_key_required` stop the reconnect loop; `license_key_in_use` is emitted ONCE per outage (`license_busy_notified`, reset on a successful auth) and the loop keeps its backoff, because the holder is usually our own ghost socket or a sibling device
-- `RoomBudgetUpdate { joined, limit }` — tracks how many rooms are joined vs the 2000 cap (`ROOM_BUDGET_LIMIT`)
-- `RoomCapHit { room }` — server rejected a room join because cap was hit
-- `PeerStatus { online, active_rooms }` — response to `CheckPeers`. Lists which queried peers are actually connected and which rooms are populated. Swarm re-joins DM/inbox rooms for online friends to trigger RoomMembers → full state healing.
+- `Connected`: a fresh session: the first connect, after `SessionLost`, or every connect to a relay
+  without sessions. Rooms are joined from here.
+- `Suspended`: the socket is gone but the relay holds the session. Nothing is lost and sends keep
+  queueing; `Resumed` or `SessionLost` follows.
+- `Resumed { gap }`: the session is back on a new socket with no rejoin. `gap`: frames fell out of
+  the relay's ring while away, so the node runs its catch-ups.
+- `SessionLost` (was `Disconnected`): the relay refused or forgot the session, or there never was
+  one. The node purges and rebuilds from the next `Connected`.
+- `Connecting { reconnecting }`: a connect attempt starts (not for a make-before-break race).
+- `PeerJoined`, `PeerLeft`, `RoomMembers { room, peers }`, `DoorStatus { room, proved }` (sent right
+  before the `RoomMembers` it came with; false only in a door-locked room that hides us),
+  `LeftRoom { room }` (local, see Room budget), `TopicCatchupDone`.
+- `Message` (0x05, and 0x08 topic frames), `DirectMessage` (0x06), `BinaryDirect` (0x02).
+- `LicenseError { reason }`, `RoomBudgetUpdate { joined, limit }`, `RoomCapHit { room }`,
+  `PeerStatus`, `DiscoveredPeers`, `TurnCredentials`, `MediaForwarderInfo`, the nickname and link
+  code events, `KillSignal { blob, signal }`, `LockChain`.
+
+**Orders** (`relay_session::on_drop`, `on_established`, `on_resume_refused`; pinned by
+`events_follow_the_order_of_section_9_8` and the wire tests):
+- A drop with a session: `Suspended`, then `Resumed { gap }`, or `SessionLost` + `Connected`.
+- A drop without one (a relay without sessions): `SessionLost`, then `Connected`. Each failed
+  connect attempt while no session is held emits `SessionLost` again.
+- A make-before-break win: `Suspended`, then `Resumed`.
+- `Resumed` reaches the node before any frame the relay replays.
+- While a sid is held, a failed connect emits nothing: the client never declares the session lost
+  on its own, because the relay's grace started at the relay's own detection. Dart shows Offline
+  after 120 s of Reconnecting (`connection_status_provider.dart`, `outageOffline`).
+- A `resumed` whose `h` is above what we wrote or below our last ack is not about our session:
+  `SessionLost`, that socket is dropped, and a fresh connect follows at once (`Connected`).
+
+### Handshake: `ws_client.rs:open_socket()`
+
+1. `dial_websocket()` opens the TCP stream itself, so socket options go on before TLS:
+   `TCP_USER_TIMEOUT` 20 s on Linux and Android (`limit_unacked_send_time`, socket2), so the kernel
+   stops hiding a dead path behind 15 to 30 minutes of retransmits. Then TLS and the upgrade
+   (`client_async_tls_with_config`). TCP + TLS + upgrade together are bounded by
+   `Timing::handshake` (10 s).
+2. `{"type":"auth_hello"}` -> `auth_challenge { nonce, door_key, session }`. A relay older than
+   0.12 answers `auth_failed` ("needs updating"). Each auth reply within `Timing::auth_reply` (5 s).
+3. `relay_session::Ask::choose(offered && want_session, fetch, held)`: **v3 only when the challenge
+   carries exactly `"session":1`** (`AuthReply::offers_sessions`) and the socket is a full one; v2
+   otherwise, and always for fetch and forwarder sockets. v3 = the v2 frame plus `"v":3`, `session`
+   (`"new"` or the held sid) and `in_h` (our receive count; 0 for `"new"`), signed as
+   `relay_session::auth_v3_message`
+   (`hollow-ws-auth3\n{domain}\n{nonce}\n{peer}\n{ts}\n{mode}\n{license_digest}\n{session}\n{in_h}`,
+   pinned with the relay's `auth_frame.h` through `relay-uws/test/session_vectors.json`). v2 signs
+   `auth_v2_message` (pinned against `test_auth_frame.cpp`). The domain is
+   `relay_auth_domain(url)`: the dialled host, lowercase, no port.
+4. `relay_session::judge(ask, held, reply)`: `auth_failed` is an error (only the relay's exact codes
+   `invalid_license_key`, `license_key_in_use`, `license_key_required` are `LicenseRefusal`s);
+   `resumed { h, gap, reprove }` only if we asked to resume; `auth_ok { sid?, resume_failed? }` =
+   `Established::Fresh { sid (if sid-shaped), lost: held || resume_failed }`; a second challenge is
+   an error. The `hb_secs` and `grace_secs` the relay advertises are ignored: the client keeps its
+   own `Timing` (section 9.9 numbers).
+5. License: `license_key_in_use` emits `LicenseError` once per outage (`license_busy_notified`,
+   reset on success) and the client keeps retrying, because the holder is usually our own ghost
+   socket or a sibling; the other two codes stop the client (`stopped`).
+
+### The outbound queue: `relay_session::Outbound<WsCommand>` (replaced `pending_commands`)
+
+- **Unwritten** entries: `Entry::Command` (from the node), `Entry::Replay` (the client's own
+  fresh-session replay), `Entry::Frame` (a lost session's written frame, sent again as it was). A
+  command becomes a frame only when written (`Client::render`), so a join's door proof is made for
+  the session current at write time.
+- **Written, unacked**: every counted frame on a session socket gets its number and is recorded
+  BEFORE the write (`Outbound::record`), then kept byte for byte until the relay's `ack` or
+  `hb_ack` covers it (`Outbound::ack`; an `h` above what we wrote or below our last ack changes
+  nothing). A frame that may have reached the relay is resent on resume, never written again as new.
+- **Flow control**: at 4096 written-unacked frames or 8 MiB the pump waits for an ack
+  (`can_write`); a frame bigger than that still goes once nothing is waiting.
+- **Unwritten bounds**: 20,000 entries or 32 MiB. Past them `prune` drops first a sealed live-only
+  frame its receiver would refuse anyway (`HavenMessage::live_only` and `frame_auth::is_stale`, read
+  from our own seal by `sealed_class`), then the oldest ordinary entry, and **room state (join,
+  leave, subscribe, opt-in) last**. The class is computed only on overflow.
+- **CRITICAL: the node's channel is the backpressure.** While a socket is live, `takes_commands()`
+  reads `cmd_rx` only while the unwritten queue is under HALF of either bound
+  (`Outbound::has_room`), so a burst such as a file stream over 32 MiB waits in the node's channel
+  instead of being pruned. With no socket the client takes everything and the bounds apply.
+- **Pump**: at most `PUMP_BATCH` (64) entries per loop turn, so reads and acks interleave with a long
+  flush; paused while a make-before-break race is open. A failed write on a session socket loses
+  nothing (the frame was recorded; the resume resends it). On a session-less socket the failed
+  entry goes back in front (`unpop`) and nothing behind it moves (the flush-tail bug of plan 1.6).
+- **Session lost** (`Outbound::lose_session`): the written-unacked frames move ahead of the unwritten
+  queue as `Entry::Frame`, byte-identical, except room-state frames (the replay rebuilds those);
+  numbering restarts at 0.
+
+### Inbound count and acks: `relay_session::Inbound`
+
+The counting rules are shared with the relay (`relay_frame_counts`, `client_frame_counts`; vectors
+in `session_vectors.json`): every binary frame counts one, every JSON type outside the uncounted set
+counts one, text that does not parse counts one, `{"type":"gap","n":N}` counts N. Uncounted relay to
+client: `auth_challenge`, `auth_ok`, `auth_failed`, `resumed`, `hb_ack`, `ack`, `reconnect`,
+`members`, `peer_joined`, `peer_left`, `kill_signal`. Uncounted client to relay: `auth_hello`,
+`auth`, `hb`, `ack`, `inactive`, `active`, `end`. Counting happens only on a session socket. The
+client acks `{"type":"ack","h":N}` at once after 16 counted frames, or 2 s after the first unacked
+one (`ack_due_at`); every `hb` carries `h` too.
+
+### Resume
+
+`Established::Resumed { h, gap, reprove }` -> `Outbound::resume(h)` drops what `h` covers and
+returns the rest. `Resumed { gap }` goes to the node, then those frames are written again in order,
+byte-identical (`write_control`), then the unwritten queue. Nothing is rejoined and nothing
+resubscribed. On `reprove: true` (the relay came back from a snapshot without door standing) the
+session's door context becomes this socket's challenge and `reprove_doors()` queues, at the front,
+a join of every joined room we hold a door for, proving it anew.
+
+**Door proofs** (`proof_door()`): with a session, every proof is made for `session_door`, the
+challenge of the socket that minted the session (the relay keeps that nonce as the session's door
+nonce across resumes), until a reprove. Without a session, the socket's own challenge.
+
+### Fresh session
+
+`Established::Fresh { sid, lost }`: if `lost`, `lose_session()` (unacked frames carried over); then
+`SessionLost` (if lost) and `Connected`; the inbound count resets; `replay_rooms()` puts at the
+FRONT of the queue a join of every room in `Rooms::joined` (own `inbox:` rooms first, as
+`JoinInbox` with their stored roster, the rest sorted), then every stored subscription, then the
+offline-delivery opt-in, and emits `RoomBudgetUpdate`. So after a `resume_failed` the wire order is
+the replay, the dead session's unacked frames, then the unwritten queue. A fresh session opened while
+backgrounded writes `inactive` at once.
+
+**Join echo rule** (`render_join`, `replayed_joins`): the swarm's `Connected` work joins the same
+rooms again. The first join of a room that renders byte-identical to the replay's join within
+`Timing::replay_echo` (5 s) is dropped, once per room. Every other join is written, identical or
+not: a re-join is how the node asks the relay for a fresh `members` (the PeerLeft self-heal). The
+record clears on a leave, a lost session, a session-less socket's drop and a room-cap rollback.
+Pinned by `only_the_nodes_echo_of_the_replay_is_dropped`.
+
+**`Rooms`** (client memory that outlives sockets and sessions): `joined`, `inbox_rosters`, `doors`
+(from `SetDoor`; a changed door of a joined room queues a re-join that proves it), `subscriptions`
+(the latest topic set per room), `offline_optin`, `last_join_attempt`. `enqueue()` updates it at
+once, before the command reaches the wire, so a fresh session joins what the node asked for even if
+the command is still queued.
+
+### Liveness
+
+- Heartbeat every 15 s in the foreground, 60 s in the background (`Timing::heartbeat_every`):
+  `{"type":"hb","h":N}` on a session socket, a WebSocket ping on a relay without sessions (which
+  answers pings with pongs, so it gets the fast liveness too). The client answers the relay's pings.
+- **Dead rule** (`Liveness::dead_at`): nothing at all heard for 10 s after a heartbeat went out ->
+  drop (`Why::Dead`) and reconnect at once. Any inbound frame answers a heartbeat, so a busy
+  download is never judged dead.
+- Sleep: every heartbeat tick compares the wall-clock delta with the monotonic one
+  (`Clocks::slept`); more than 5 s apart means the machine slept, which is an internal `wake` nudge.
+- The relay's side: `idleTimeout` 45.
+
+### Nudge, background, suspend
+
+- `nudge(reason)` (reasons `foreground`, `focus`, `network`, `wake`, anything else `other`) sends
+  `Control::Nudge { external: true }` to every client. `Client::nudge` resets the backoff. With a
+  socket: nothing if a frame arrived in the last 2 s (`wants_probe`), a probe is out or an attempt
+  is open; otherwise a heartbeat with a 1 s deadline (`probe_sent`), and on a miss a NEW socket opens
+  and resumes while the old one is still judged (**make before break**, `start_attempt(true)`). The
+  first to answer wins: any frame on the old socket drops the race; the new socket winning drops the
+  old one quietly (no close frame) and emits `Suspended` then `Resumed`; a failed race is ignored
+  (the dead rule decides the old socket). With no socket: connect now (a drain wait is cancelled);
+  an attempt older than 2 s is started over, a younger one is left alone.
+- `set_background(bg)`: kept process-wide (`BACKGROUND`, so a new client starts in it); switches the
+  heartbeat interval; writes `inactive` or `active` (uncounted) on a session socket; `false` also
+  nudges `foreground`.
+- `suspend()`: the client first takes what the node already queued, then (`begin_suspend`,
+  `check_suspend`) waits until the queue is written and the relay acked it all (asking with one
+  `hb`), at most `Timing::suspend_wait` (2 s); acks what it received; closes 1000 `suspend` and
+  waits up to 2 s for the relay's close reply (`goodbye`). The session goes into grace and the
+  client stays closed (`suspended`) until an EXTERNAL nudge: its own `wake` nudge never ends a
+  suspend. With no socket open it is suspended at once.
+
+### Reconnect timing: `schedule()`, `relay_session::Backoff`
+
+- After a dead socket, a failed write or a drain close: at once, backoff reset.
+- After a close or a failed connect: the drain time when one is set, else full jitter, uniform in
+  `[0, min(30 s, 0.5 s * 2^attempt)]` (`Backoff::next`, a `getrandom` roll). While
+  `realtime_active()` (a call, voice channel or conference is live) a steady 1 s
+  (`Timing::realtime_retry`) and no climb, so an ICE restart offer can reach the relay inside the
+  call's hold-open window. The attempt count resets on every success and every nudge.
+- Never while suspended.
+
+### Drain hint
+
+`{"type":"reconnect","after_ms":N}` -> `drain_at = now + min(N, 30 s)` (`drain_wait`). The relay
+closes the socket in the same tick, and the reconnect waits for `drain_at`. If the socket is still
+open at `drain_at`, the client closes it 1000 `drain` (waiting up to 2 s for the reply) and resumes
+at once.
+
+### Shutdown
+
+The node drops its command sender -> `shutdown()`: on a session socket `{"type":"end"}`, then close
+1000 `end` (the 2 s goodbye bound), so the relay hands the ring to `offline_buffer` now instead of
+after the grace; then the task returns. Without the exit the socket would ping and reconnect forever,
+one leaked task per node restart.
+
+### Fleet dial override (debug builds only)
+
+`dial_override()`: a `relay_connect` file in the data dir holding one `ip:port` (it must parse as a
+`SocketAddr`) is dialled instead of the relay's address; TLS and the auth domain stay the relay's.
+The fleet uses it to route one app through a proxy it can cut. `cfg(debug_assertions)` only: a
+release build always dials the relay. Test `the_fleet_dial_override_takes_only_one_address`.
+
+**CRITICAL: every sink write goes through `bounded_send(write, msg)`** (30 s `WRITE_TIMEOUT` around
+`SinkExt::send`; the goodbye frames use `bounded_send_within` with 2 s). An unbounded send on a
+wedged TCP connection (a zero-window zombie peer) pends forever with no error, and while that await
+is pending `select!` polls no other arm, so the liveness rule itself can never run. A timeout is an
+error and takes the normal drop path. Never add a raw `write.send(...)` here. Memory
+`feedback_ws_zombie_liveness_timeout`.
 
 ### Wire Protocol (JSON for control, binary for data)
 
-**ClientMsg** (serde-tagged JSON sent to relay):
-- `Auth { peer_id, public_key, timestamp, signature, license_key? }` — first message after WS connect
-- `Join { room }` — join a relay room
-- `Leave { room }` — leave a relay room
+**ClientMsg** (serde-tagged JSON): `AuthHello`; `Auth { v, peer_id, public_key, timestamp, nonce,
+domain, signature, license_key?, fetch?, session?, in_h? }`; `Join { room, inbox_roster?,
+door_proof? }`; `Leave { room }`. Every other command is built by `command_frame()` as a JSON value
+or a binary frame; the session frames come from `relay_session` (`hb_frame`, `ack_frame`,
+`INACTIVE`, `ACTIVE`, `END`).
 
-**ServerMsg** (serde-tagged JSON received from relay):
-- `AuthOk` — authentication succeeded
-- `AuthFailed { error }` — authentication failed
-- `PeerJoined { room, peer_id }` — another peer joined
-- `PeerLeft { room, peer_id }` — another peer left
-- `Members { room, peers }` — initial room member list
-- `Error { error }` — server-side error. If message contains "Too many rooms", the client rolls back the `last_join_attempt` room from `joined_rooms` and emits `RoomCapHit`.
-
-### Authentication Flow
-
-`ws_client.rs:connect_and_auth()`:
-1. Establish the WSS connection: `tokio_tungstenite::connect_async(url)`, direct (the SOCKS/REALITY branch was removed 2026-09-30). Covers BOTH the live swarm and the push-fetch path (both funnel through `connect_and_auth`).
-2. Build sign payload: `"hollow-ws-auth:{peer_id}:{timestamp}"` where timestamp is Unix epoch seconds
-3. Sign with Ed25519 via `NativeKeypair::from_protobuf_encoding().sign()`
-4. Send `Auth` JSON message with peer_id, public_key (base64), timestamp, signature (base64), optional license_key
-5. Wait up to 5 seconds for response
-6. `AuthOk` → reunite read/write halves, return stream. `AuthFailed` → return error string
-
-### Connection Lifecycle
-
-`ws_client.rs:ws_client_loop()`:
-1. Connect + authenticate via `connect_and_auth()`
-2. On success: reset `backoff_secs` to 1, emit `WsEvent::Connected`
-3. Re-join all previously tracked rooms from `WsClientState.joined_rooms` (persisted in `Arc<RwLock<HashSet<String>>>`)
-4. Flush `pending_commands` buffer (commands received while disconnected)
-5. Enter main `tokio::select!` loop:
-   - **30s keepalive ping** — checks the 70s receive-side liveness deadline FIRST (`last_recv`, refreshed by ANY inbound frame; lapse → break to reconnect), then sends WS Ping frame `[0x01]`. If send fails, break to reconnect.
-   - **Incoming relay messages** — dispatches JSON text to `handle_server_message()`, dispatches binary frames by type byte. A failed pong reply breaks to reconnect.
-   - **Commands from swarm** — calls `send_command()` + `track_room_change()`
-
-**CRITICAL — every sink write goes through `bounded_send(write, msg)`** (30s `tokio::time::timeout` around `SinkExt::send`; all ~30 sites incl. auth, rejoin, ping, pong, every `send_command` arm). An unbounded send on a wedged TCP connection (zero-window zombie peer) pends FOREVER with no error, and while that await is pending `select!` polls no other arm — the liveness watchdog itself can never run. Timeout ⇒ error ⇒ existing break-to-reconnect paths. Never add a raw `write.send(...)` here. See memory `feedback_ws_zombie_liveness_timeout`.
-6. On disconnect: emit `WsEvent::SessionLost`, drain `cmd_rx` into `pending_commands` buffer
-7. Exponential backoff: sleep `backoff_secs` (starts 1, doubles to max 30), then loop back to step 1
-8. **License error special case**: a `license_key_in_use` error emits `LicenseError` once per outage and keeps reconnecting; any other error containing "license_key" or "license key" emits `LicenseError` and `return`s (no reconnect)
+**ServerMsg** (serde-tagged JSON): `PeerJoined`, `PeerLeft`, `Members { room, peers, proved? }`
+(emits `DoorStatus` first; `proved` absent = an open room = true), `TopicCatchupDone`, `PeerStatus`,
+`DiscoveredPeers`, `TurnCredentials` (URIs naming any host but the relay's are dropped,
+`turn_uris_on_relay`), `MediaForwarder`, `Error` ("Too many rooms" rolls back the last join),
+the nickname and link code answers, `KillSignal`, `KillDeposited`, `LockChain`, `HbAck { h }` and
+`Ack { h }` (both ack the outbound queue), `Reconnect { after_ms }` (the drain hint).
 
 ### Binary Frame Protocol
 
-All data frames are type-prefixed. NUL byte (`0x00`) separates room/peer/payload fields.
+All data frames are type-prefixed; a NUL byte (`0x00`) ends each room, peer and topic field.
+Layouts pinned by `commands_keep_their_wire_layout`.
 
 **Outbound (client to relay):**
 | Type byte | Format | Purpose |
 |-----------|--------|---------|
-| `0x02` | `[0x02][room][0x00][target][0x00][data]` | Binary direct (file streaming) |
+| `0x02` | `[0x02][room][0x00][target][0x00][data]` | Binary direct (file and shard streaming) |
 | `0x03` | `[0x03][room][0x00][data]` | Room broadcast |
 | `0x04` | `[0x04][room][0x00][target][0x00][data]` | Direct message |
+| `0x07` | `[0x07][room][0x00][topic][0x00][data]` | Topic broadcast (channel rings) |
+| `0x08` | `[0x08][room][0x00][target][0x00][data]` | Direct carrying an inlined image (image cap offline) |
+| `0x09` | `[0x09][room][0x00][target][0x00][channel][0x00][flags][data]` | Channel copy for an offline member; flags bit0 = mention |
+| `0x0A` | `[0x0A][room][0x00][data]` | Public broadcast (reaches sockets a locked room hides) |
 
 **Inbound (relay to client):**
 | Type byte | Format | Emits |
@@ -106,20 +298,23 @@ All data frames are type-prefixed. NUL byte (`0x00`) separates room/peer/payload
 | `0x02` | `[0x02][room][0x00][from][0x00][payload]` | `WsEvent::BinaryDirect` |
 | `0x05` | `[0x05][room][0x00][from][0x00][payload]` | `WsEvent::Message` |
 | `0x06` | `[0x06][room][0x00][from][0x00][payload]` | `WsEvent::DirectMessage` |
+| `0x08` | `[0x08][room][0x00][topic][0x00][from][0x00][payload]` | `WsEvent::Message` |
 
-Parsing: `ws_client.rs:parse_binary_relay_frame()` — finds first two NUL bytes to split into (room, from, payload).
+Parsing: `parse_binary_relay_frame()` (room, from, payload) and `dispatch_binary()`.
 
 ### Room Budget Tracking
 
-`ws_client.rs:track_room_change()` — called on every `JoinRoom`/`LeaveRoom` command. Updates `joined_rooms` HashSet and emits `RoomBudgetUpdate { joined, limit: 2000 }`. On `JoinRoom`, also sets `last_join_attempt` (used for rollback on "Too many rooms" error). On `LeaveRoom` (2026-08-07) it ALSO emits `WsEvent::LeftRoom { room }` — the relay never echoes your own leave, and the swarm must purge `ws_room_peers[room]` on it: a self-left room's frozen member snapshot otherwise lives forever and `ws_room_for_peer` can route targeted sends into it, which the relay drops (sender not in room) — a silent per-node signal blackhole until restart (field-hit twice during media-forwarding phase 2's `fwd:` room churn; see memory `feedback_ws_presence_stale_rooms`).
+`enqueue()` emits `RoomBudgetUpdate { joined, limit: 2000 }` (`ROOM_BUDGET_LIMIT`) on every
+`JoinRoom`, `JoinInbox` and `LeaveRoom`, and the fresh-session replay emits one too. A join records
+`last_join_attempt` when it is rendered; an `Error` containing "Too many rooms" removes that room
+from `joined` and emits `RoomBudgetUpdate` and `RoomCapHit`.
 
-`ws_client.rs:handle_server_message()` — on `Error` containing "Too many rooms": removes the last attempted room from `joined_rooms`, emits corrected `RoomBudgetUpdate`, emits `RoomCapHit`.
+`WsEvent::LeftRoom { room }` is emitted when the Leave frame is rendered: the relay never echoes our
+own leave, and the swarm must purge `ws_room_peers[room]` on it. A self-left room's frozen member
+snapshot otherwise lives forever and `ws_room_for_peer` can route targeted sends into it, which the
+relay drops (sender not in room): a silent per-node signal blackhole until restart (field-hit twice
+during media-forwarding phase 2's `fwd:` room churn; memory `feedback_ws_presence_stale_rooms`).
 
-### State
-
-`WsClientState`:
-- `joined_rooms: Arc<RwLock<HashSet<String>>>` — rooms to re-join on reconnect
-- `last_join_attempt: Arc<RwLock<Option<String>>>` — for error rollback
 
 ---
 
@@ -720,7 +915,7 @@ Error messages include the channel name for user-friendly display.
 ### Message Flow: Text Message Through Relay
 
 1. Swarm sends `WsCommand::SendToRoom` or `WsCommand::SendDirect` to `ws_client.rs`
-2. `ws_client.rs:send_command()` builds binary frame (`0x03` for room, `0x04` for direct)
+2. `ws_client.rs:Client::enqueue()` queues it; `command_frame()` renders the binary frame (`0x03` for room, `0x04` for direct) when the pump writes it
 3. Relay broadcasts/routes the frame
 4. Recipient's `ws_client.rs` receives binary frame type `0x05` (room) or `0x06` (direct)
 5. Emits `WsEvent::Message` or `WsEvent::DirectMessage` to swarm
@@ -760,4 +955,4 @@ Error messages include the channel name for user-friendly display.
 
 ## Topic re-subscribe on reconnect (2026-07-03)
 
-Relay channel-topic subscriptions are PER-SOCKET state — they die with the connection. `WsClientState.subscriptions` (ws_client.rs) mirrors `joined_rooms`: `track_room_change` records the latest `WsCommand::Subscribe` topic set per room (cleared on LeaveRoom), and after every reconnect the client re-joins rooms THEN replays all subscriptions (log: `[HOLLOW-WS] Re-subscribed topics for N room(s) after reconnect`). Without this, a silent reconnect kept room traffic (typing/presence) flowing while topic-routed channel messages went nowhere until a channel re-open.
+Relay channel-topic subscriptions belong to the socket, and to its session where the relay keeps one: a resume keeps them on the relay, so nothing is resubscribed. `Rooms::subscriptions` (ws_client.rs) keeps the latest `WsCommand::Subscribe` topic set per room (cleared on LeaveRoom), and every FRESH session's replay (`replay_rooms`) re-joins the rooms THEN re-sends every subscription, ahead of anything queued. Without this, a silent reconnect kept room traffic (typing/presence) flowing while topic-routed channel messages went nowhere until a channel re-open.

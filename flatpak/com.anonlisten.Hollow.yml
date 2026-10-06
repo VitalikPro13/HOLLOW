@@ -42,6 +42,8 @@ finish-args:
   - --talk-name=org.freedesktop.portal.Desktop
   # OS keychain (identity-at-rest protection via libsecret)
   - --talk-name=org.freedesktop.secrets
+  # Wake from sleep (logind PrepareForSleep) probes the relay at once.
+  - --system-talk-name=org.freedesktop.login1
   # GPU acceleration
   - --device=dri
 

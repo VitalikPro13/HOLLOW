@@ -11,7 +11,7 @@ has the whole pipeline.
 - Mobile UI lives in `lib/src/ui/mobile/`; `MobileShell` (4 tabs) below 600px; floating
   pills in the MobileShell + MobileChatRoute stacks, NEVER the `app.dart` builder;
   selection providers are cleared in `.then()`, NOT `dispose()`. `feedback_mobile_ui_patterns`.
-- Mobile lifecycle: resume = WiFi lock + rejoin; pause releases.
+- Mobile lifecycle: resume = WiFi lock + `RelayTriggers` foreground nudge (`relay_nudge`, no room rejoin: the relay session resumes); pause releases.
 - App Lock (mobile): the PIN via the Rust Argon2id flow; the biometric secret in
   flutter_secure_storage after `local_auth` (3.x named params); the lock-type marker is
   readable BEFORE identity unlock; MainActivity MUST extend `FlutterFragmentActivity`.

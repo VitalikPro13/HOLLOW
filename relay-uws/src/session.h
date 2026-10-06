@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -8,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -34,6 +36,20 @@ static constexpr int64_t DRAIN_MAX_MS = 10000;
 // What keeping one frame costs beyond its bytes, as OfflineIndex weighs it: without it a
 // flood of tiny frames would weigh next to nothing against real ones.
 static constexpr size_t FRAME_WEIGHT_OVERHEAD = 1024;
+
+// The relay acks what it received after this many stream frames, or this long after
+// the first one it has not acked yet (section 9.4).
+static constexpr uint32_t ACK_EVERY_FRAMES = 16;
+static constexpr int64_t ACK_AFTER_MS = 2000;
+
+// Whether two sids match, in a time that does not depend on where they first differ:
+// a resume must not tell a guesser how much of a sid it got right.
+inline bool sid_equal(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    volatile unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); i++) diff = diff | static_cast<unsigned char>(a[i] ^ b[i]);
+    return diff == 0;
+}
 
 inline bool is_sid_shape(std::string_view s) {
     if (s.size() != SID_HEX_LEN) return false;
@@ -295,6 +311,36 @@ private:
     uint64_t acked_ = 0;
     size_t bytes_ = 0;
     size_t real_ = 0;
+};
+
+// Gone is not a state: a gone session is erased from RelayState::sessions.
+enum class State : uint8_t { Live = 0, Grace = 1 };
+
+// One device's session (section 9.7), kept in RelayState::sessions under its peer id.
+// Ring mutations, minting and ending go through session_bounds.h, never Ring directly.
+struct Session {
+    std::string sid;  // never logged, never on disk outside the memfd snapshot
+    std::string peer_id;
+    State state = State::Live;
+    // Every room it holds; true = an owner of that `inbox:` room as last proven.
+    std::unordered_map<std::string, bool> rooms;
+    // As PerSocketData::subscriptions: room -> topics; a room with no entry gets every topic.
+    std::unordered_map<std::string, std::unordered_set<std::string>> subscriptions;
+    bool inactive = false;
+    uint64_t in_h = 0;  // stream frames received from the device
+    Ring ring;          // stream frames sent to it and not acked
+    // The nonce it was minted with, its door-proof nonce within this process.
+    std::string door_nonce;
+    // The per-IP slot it holds while in grace, "" when its socket holds the slot.
+    std::string ip_key;
+    uint64_t share = 0;  // the address share that minted it
+    std::chrono::steady_clock::time_point grace_until{};
+    // Back from a snapshot: door standing is gone, so its resume answers reprove:true.
+    bool restored = false;
+    // Stream frames received since the relay last told the device its count, and when
+    // that count is due at the latest. Live only, never snapshotted.
+    uint32_t unacked_in = 0;
+    std::chrono::steady_clock::time_point ack_due{};
 };
 
 }  // namespace session

@@ -17,6 +17,7 @@ import 'package:hollow/src/core/services/deep_link_service.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
 import 'package:hollow/src/core/services/privacy_screen.dart';
 import 'package:hollow/src/core/services/push_hints_cache.dart';
+import 'package:hollow/src/core/services/relay_triggers.dart';
 import 'package:hollow/src/ui/settings/longer_pin_prompt.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -287,10 +288,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     HardwareKeyboard.instance.addHandler(_handleGlobalKey);
 
-    // Mobile lifecycle observer for WS reconnection on app resume.
     if (Platform.isAndroid || Platform.isIOS) {
       WidgetsBinding.instance.addObserver(this);
     }
+    // Foreground, focus, network and wake probe the relay from here on.
+    ref.read(relayTriggersProvider);
 
     // After the first frame, so the window is visible before anything moves.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1180,18 +1182,17 @@ class _HollowShellState extends ConsumerState<HollowShell>
   }
 
   @override
-  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!(Platform.isAndroid || Platform.isIOS)) return;
     // Event routing picks an OS notification or an in-app banner from this, so
     // it is set BEFORE the _initialized guard and is always current.
     ref.read(appLifecycleProvider.notifier).state = state;
     if (!_initialized) return;
+    // The relay probe on resume is RelayTriggers' foreground nudge.
     if (state == AppLifecycleState.resumed) {
-      debugPrint('[HOLLOW] App resumed — rejoining rooms + WiFi lock');
+      debugPrint('[HOLLOW] App resumed — WiFi lock');
       _lockAfterBackground();
       acquireWifiLock();
-      _rejoinRoomsOnResume();
       _updateIosPushHeartbeat(active: true);
     } else if (state == AppLifecycleState.paused) {
       debugPrint('[HOLLOW] App paused — releasing WiFi lock');
@@ -1214,19 +1215,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
       IosDataDirMigration.touchHeartbeat(container);
     } else {
       IosDataDirMigration.clearHeartbeat(container);
-    }
-  }
-
-  void _rejoinRoomsOnResume() {
-    final servers = ref.read(serverListProvider);
-    final peerId = ref.read(identityProvider).peerId;
-    if (peerId == null) return;
-    // .catchError, not try/catch: an async rejection ("Node is not running" when
-    // a resume fires during startup) escapes a sync try/catch. The node's own
-    // start path joins rooms, so a swallowed early failure self-heals.
-    network_api.joinRoom(roomCode: peerId).catchError((_) {});
-    for (final serverId in servers.keys) {
-      network_api.joinRoom(roomCode: serverId).catchError((_) {});
     }
   }
 

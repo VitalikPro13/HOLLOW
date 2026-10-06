@@ -715,9 +715,13 @@ async fn run_event_loop(
         std::collections::HashMap::new();
 
     // (server room, channel) pairs whose relay offline catch-up already ran THIS
-    // connection. Cleared on Disconnected like every sync gate: a new socket needs
-    // a fresh registration and replay.
+    // session. Cleared on `SessionLost` like every sync gate, and by a gapped resume:
+    // a resumed session keeps its rooms, rings and registrations.
     let mut relay_catchup_done: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+    // The inbox room of a fresh session whose join the relay has not answered yet. The
+    // UI says Connected only once it has: before, nothing joined is confirmed.
+    let mut awaiting_inbox_answer: Option<String> = None;
 
     let mut is_invisible = initial_invisible;
     if initial_invisible {
@@ -3438,6 +3442,8 @@ async fn run_event_loop(
                             .iter()
                             .map(|(sid, p)| (sid.clone(), (p.opened_at, p.parked)))
                             .collect();
+                        snap.synced_peers = synced_peers.iter().cloned().collect();
+                        snap.ws_transfers = pending_ws_transfers.keys().cloned().collect();
                         let _ = reply.send(snap);
                     }
                 }
@@ -3451,10 +3457,9 @@ async fn run_event_loop(
                         let _ = event_tx.send(NetworkEvent::RelayConnecting { reconnecting }).await;
                     }
                     WsEvent::Connected => {
-                        hollow_log!("[HOLLOW-WS] Relay connected — joining inbox + server + DM rooms");
-                        // Pure UI signal — the room-join side effects below are
-                        // unchanged. Tells Dart to show real "Connected".
-                        let _ = event_tx.send(NetworkEvent::RelayConnected).await;
+                        hollow_log!("[HOLLOW-WS] Fresh relay session: joining inbox, server and DM rooms");
+                        // `RelayConnected` waits for the relay's answer to the inbox join.
+                        awaiting_inbox_answer = Some(format!("inbox:{local_peer_str}"));
                         // TURN credentials over the authed socket (fresh set on
                         // every (re)connect; the 50-min timer below refreshes
                         // long-lived sessions before the 1h expiry).
@@ -3616,10 +3621,30 @@ async fn run_event_loop(
                         }
                     }
 
-                    // Never emitted until the session work lands (RESUMABLE_SESSIONS_PLAN.md 9.8).
-                    WsEvent::Suspended | WsEvent::Resumed { .. } => {}
+                    // The socket is gone, the relay holds our session: every room, peer, call,
+                    // throttle, ask and transfer stays, and sends wait in ws_client's queue.
+                    WsEvent::Suspended => {
+                        hollow_log!("[HOLLOW-WS] Relay socket lost, session held: keeping every room and peer");
+                        let _ = event_tx.send(NetworkEvent::RelaySuspended).await;
+                    }
+                    // Nothing was rejoined and nothing needs to be: the relay replayed what we
+                    // missed. Only a gap (frames that fell out of its ring) runs the catch-ups.
+                    WsEvent::Resumed { gap } => {
+                        hollow_log!("[HOLLOW-WS] Relay session resumed (gap: {gap})");
+                        awaiting_inbox_answer = None;
+                        if gap {
+                            Box::pin(sync_handler::repair_after_gap(
+                                &ws_cmd_tx, &crdt_store, &server_states, &ws_room_peers,
+                                &pending_server_joins, &mut relay_catchup_done, &mut join_hold,
+                                &|room: &str| door_rooms.is_hidden(room), &mut sync_coordinator,
+                                mls.as_ref(), &master_keypair, &local_peer_str, &db_path, &db_passphrase,
+                            ))
+                            .await;
+                        }
+                        let _ = event_tx.send(NetworkEvent::RelayConnected).await;
+                    }
                     WsEvent::SessionLost => {
-                        hollow_log!("[HOLLOW-WS] Relay disconnected — will auto-reconnect");
+                        hollow_log!("[HOLLOW-WS] Relay session lost: purging, a fresh one follows");
                         pending_nickname_resolve = None;
                         nick_hold.on_disconnected();
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
@@ -4278,6 +4303,10 @@ async fn run_event_loop(
                     }
                     WsEvent::RoomMembers { room, peers } => {
                         hollow_log!("[HOLLOW-WS] Room {room}: {} members", peers.len());
+                        if awaiting_inbox_answer.as_deref() == Some(room.as_str()) {
+                            awaiting_inbox_answer = None;
+                            let _ = event_tx.send(NetworkEvent::RelayConnected).await;
+                        }
                         let peers: Vec<String> = peers.into_iter().filter(|p| bare_presence.admits(p)).collect();
                         let local_peer = local_peer_str.to_string();
                         // Exclude BOTH our master (local_peer) and our DEVICE id: the relay lists us
@@ -4396,43 +4425,12 @@ async fn run_event_loop(
                         }
 
                         // -- The JOIN ring (pending joins, rung 1) --
-                        // Read once per connection by BOTH roles: a member collects parked
-                        // requests and other members' resolutions, a joiner collects the
-                        // resolution addressed to it. A joiner is not in `server_states` at all,
-                        // which is why this cannot ride the block above. No `max_age`: a join has
-                        // no watermark and an old request is exactly the one we want.
-                        {
-                            let member = server_states.contains_key(&room);
-                            if member {
-                                join_hold.joined(&room, hidden);
-                            }
-                            let ring_wanted = server_states
-                                .get(&room)
-                                .is_some_and(|s| s.relay_catchup_secs() > 0)
-                                || pending_server_joins.contains_key(&room);
-                            if ring_wanted
-                                && !hidden
-                                && relay_catchup_done
-                                    .insert((room.clone(), super::types::JOIN_TOPIC.to_string()))
-                            {
-                                hollow_log!("[HOLLOW-TOPIC] Join-ring catch-up request (connect) for {room}");
-                                let owner = server_states
-                                    .get(&room)
-                                    .and_then(|s| s.anchor_owner())
-                                    .or_else(|| pending_server_joins.get(&room).and_then(|p| p.owner_pin.clone()));
-                                let topic = super::ring_auth::ring_topic(&room, owner.as_deref(), super::types::JOIN_TOPIC);
-                                // A member judges the parked asks of the replay only after its end.
-                                if member {
-                                    join_hold.ring_asked(&room, &topic);
-                                }
-                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
-                                    room_code: room.clone(),
-                                    channel_id: topic,
-                                    max_age_secs: 0,
-                                    end: member,
-                                });
-                            }
-                        }
+                        // Both roles read it: a joiner is not in `server_states` at all, which is
+                        // why this cannot ride the block above.
+                        sync_handler::request_join_ring_catchup(
+                            &ws_cmd_tx, &server_states, &pending_server_joins, &mut join_hold,
+                            &mut relay_catchup_done, &room, hidden, "connect",
+                        );
 
                         // A still-parked join of OUR OWN re-deposits its copy, but only on a
                         // 12h interval: the ring is 200 frames shared by everyone joining this
@@ -5000,6 +4998,11 @@ async fn run_event_loop(
                     }
                     WsEvent::RoomCapHit { room } => {
                         hollow_log!("[HOLLOW] Room cap hit for room: {room}");
+                        // A refused inbox join is an answer too: the session is up.
+                        if awaiting_inbox_answer.as_deref() == Some(room.as_str()) {
+                            awaiting_inbox_answer = None;
+                            let _ = event_tx.send(NetworkEvent::RelayConnected).await;
+                        }
                         let _ = event_tx.send(NetworkEvent::RoomCapHit { room }).await;
                     }
                     WsEvent::PeerStatus { online, active_rooms: _ } => {

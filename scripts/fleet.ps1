@@ -146,6 +146,9 @@ param(
     [switch]$ReuseData,
     # Arrange the windows side by side so a human can watch.
     [bool]$Tile = $true,
+    # Run every non-Android peer's relay connection through the zombie proxy
+    # (tools/zombie_proxy), so net_off and net_on can cut it (fleet_lifecycle.ps1).
+    [switch]$NetProxy,
     [int]$IdleMinutes = 40,
     [int]$BootTimeoutSeconds = 240,
     [int]$StepTimeoutSeconds = 180
@@ -248,6 +251,7 @@ function Stop-Fleet {
 
 if ($Stop) {
     Stop-Fleet
+    Stop-FleetProxy
     Write-Step 'fleet stopped'
     exit 0
 }
@@ -817,6 +821,13 @@ if ($Relay) {
 if (-not $Attach) {
     Stop-Fleet
     foreach ($peer in $peerList) { Reset-PeerData $peer }
+    if ($NetProxy) {
+        $proxied = @($peerList | Where-Object { -not (Test-AndroidBackend $_) })
+        if ($proxied.Count -gt 0) {
+            Start-FleetProxy $proxied
+            foreach ($peer in $proxied) { Set-PeerRelayConnect $peer (Get-PeerDataDir $peer) }
+        }
+    }
     foreach ($peer in $peerList) { Start-Peer $peer }
 }
 

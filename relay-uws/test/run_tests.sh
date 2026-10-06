@@ -50,6 +50,12 @@ run test_ring_auth
 run test_ring_evict
 run test_roster ../src/crypto.cpp $LIBS
 run test_session
+# state.h includes App.h, so the session bounds need the uWebSockets headers.
+if [ -f ../uWebSockets/src/App.h ] && [ -f ../uSockets/src/libusockets.h ]; then
+    run test_session_bounds -std=c++20 -I../uWebSockets/src -I../uSockets/src
+else
+    echo "skip test_session_bounds (no uWebSockets/uSockets sources; git submodule update --init)"
+fi
 run test_snapshot_codec
 run test_turn_uris
 run test_verify_device_list ../src/device_list.cpp ../src/crypto.cpp $LIBS

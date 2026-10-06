@@ -63,6 +63,8 @@ services:
       - /certs/fullchain.pem
       - --key-file
       - /certs/privkey.pem
+      - --session-grace-secs
+      - ${SESSION_GRACE_SECS:-120}
     volumes:
       - certs:/certs:ro
       - ./keys:/keys:ro

@@ -1566,6 +1566,10 @@ pub(crate) struct DebugSnapshotReply {
     pub olm_one_time_keys: usize,
     /// server_id -> the pending join's (`opened_at`, parked).
     pub pending_asks: std::collections::HashMap<String, (i64, bool)>,
+    /// Peers this session already synced with (`synced_peers`).
+    pub synced_peers: Vec<String>,
+    /// Stream ids of the WS transfers we are receiving.
+    pub ws_transfers: Vec<String>,
 }
 
 // -- Wire protocol types (v2: encrypted) --

@@ -22,10 +22,18 @@ class MainActivity : FlutterFragmentActivity() {
     private val CHANNEL = "com.anonlisten.hollow/platform"
     private val SECRET_CLIP_LABEL = "hollow-secret"
     private var wifiLock: WifiManager.WifiLock? = null
+    private var relayNetworkWatch: RelayNetworkWatch? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         registerPrivacyChannel(flutterEngine)
+
+        val relayTriggers =
+            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hollow/relay_triggers")
+        relayNetworkWatch?.stop()
+        relayNetworkWatch = RelayNetworkWatch(this) {
+            relayTriggers.invokeMethod("network", null)
+        }.also { it.start() }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
@@ -168,6 +176,8 @@ class MainActivity : FlutterFragmentActivity() {
         getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
 
     override fun onDestroy() {
+        relayNetworkWatch?.stop()
+        relayNetworkWatch = null
         if (wifiLock?.isHeld == true) {
             wifiLock?.release()
         }

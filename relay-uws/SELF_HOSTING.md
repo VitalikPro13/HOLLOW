@@ -127,6 +127,7 @@ The fields:
 | `COMPOSE_PROFILES` | Leave it as `turn`. Set it empty to run without a TURN server. |
 | `PUBLIC_IP`, `PUBLIC_IPV6` | Leave empty. The IPv4 is detected at start. Fill the v6 in only if the machine has one. |
 | `OWN_CERT_DIR` | Advanced. A directory holding a `fullchain.pem` and `privkey.pem` you manage yourself. Set it and certbot is not used at all. |
+| `SESSION_GRACE_SECS` | Optional. How many seconds the relay waits for someone whose connection dropped, from 30 to 600. Leave it empty for 120. See [Dropped connections](#dropped-connections). |
 | `CERTBOT_STAGING` | Troubleshooting. Set to `1` to use the Let's Encrypt staging service while you get the setup right. |
 
 ## Start
@@ -233,8 +234,10 @@ which works and costs the sender more upload.
 **Restart persistence** needs the relay to run without Docker. On the official
 relay, offline message buffers survive a restart through a systemd handoff.
 Under Docker there is no such handoff, so buffers, channel history rings, push
-registrations and destroy orders end when the container stops, and upgrading the
-relay empties them. A destroy order is how Destroy my identity everywhere
+registrations, destroy orders and the places it keeps for
+[dropped connections](#dropped-connections) end when the container stops, and
+upgrading the relay empties them. Apps then reconnect from scratch and fetch what
+they missed from each other. A destroy order is how Destroy my identity everywhere
 reaches a device that is offline when you press it. If the container restarts
 before that device comes back, the order is gone and the device keeps its data.
 Certificate renewals no longer restart anything, so those cost nothing. A
@@ -242,6 +245,25 @@ relay set up as in [Without Docker](#without-docker) gets the handoff too.
 
 Everything else is the same relay. The GIF, emote and game cover services are
 features of the app rather than the relay, so they keep working.
+
+## Dropped connections
+
+Phones lose signal, laptops go to sleep and Wi-Fi hands over to mobile data. When
+someone's connection drops, the relay keeps their place for a while: which rooms
+they were in, and everything sent to them since. When their app comes back within
+that time, it picks up where it left off and nothing is lost. Their friends see
+them go offline as soon as the connection is gone, as before.
+
+The wait is two minutes unless you change it. Set `SESSION_GRACE_SECS` in `.env`
+to any number of seconds from 30 to 600, then `docker compose up -d`. A longer wait
+covers longer gaps but holds more memory while people are away. Each dropped
+connection keeps at most 8 MB, and everything the relay holds for absent people
+shares one 512 MB limit. Without Docker, add `--session-grace-secs` and the number
+to the relay's `ExecStart` line.
+
+When you restart or update the relay, it first tells every connected app to come
+back 2 to 10 seconds later, each at a different moment, so they do not all
+reconnect at once.
 
 ## Running without TURN
 
@@ -398,6 +420,8 @@ While it runs, it holds:
 - for each phone, where to send its wake-ups and its notification settings,
   muted servers and conversations included
 - temporary nicknames and one-time device link codes
+- for each connection that dropped in the last few minutes, the rooms it was in
+  and the ciphertext sent to it since, until it comes back or the wait runs out
 
 It cannot decrypt the ciphertext, and nothing on the list is message content.
 
@@ -783,7 +807,8 @@ cmake --build relay-uws/build -j"$(nproc)"
 sudo systemctl restart hollow-relay
 ```
 
-Offline messages survive this restart. If `push-sidecar` changed, run
+Offline messages survive this restart, and apps that were connected resume their
+place within about 10 seconds, missing nothing. If `push-sidecar` changed, run
 `npm install --omit=optional --omit=dev` in it and
 `sudo systemctl restart hollow-push` as well.
 

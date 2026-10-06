@@ -41,6 +41,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'probe_dump.dart';
 import 'probe_env.dart';
+import 'probe_session_ops.dart';
 import 'probe_targets.dart';
 
 /// Executes probe steps. A step is a JSON object, so the same runner serves a
@@ -83,6 +84,9 @@ import 'probe_targets.dart';
 /// | `zoom` | `value` (1.5 = 150%) | sets the interface zoom, not saved |
 /// | `log` | `message` | a note in the results |
 /// | `quit` | | ends a live session |
+///
+/// The relay-session ops (`lifecycle`, `health`, `stream_*`, ...) are in
+/// [SessionOps].
 ///
 /// Targets use the [ProbeTargets] grammar. Any step may carry `"soft": true`
 /// to record a failure and keep going, and a pointer step may carry
@@ -130,6 +134,8 @@ class ProbeRunner {
   final String? peer = probeEnv['UI_PROBE_PEER'];
 
   bool get failed => results.any((r) => r['ok'] == false);
+
+  late final SessionOps _session = SessionOps(tester, container);
 
   // ---------------------------------------------------------------------------
   // Frames and pictures
@@ -324,7 +330,7 @@ class ProbeRunner {
   /// Ops worth an automatic screenshot. `dump`, `log` and `expect_*` change
   /// nothing, so a shot of them only duplicates the previous frame, and `shot`
   /// has already written one under the name that was asked for.
-  bool _visualOp(String op) => !const {
+  bool _visualOp(String op) => !SessionOps.ops.contains(op) && !const {
         'arm_image_pick',
         'dump',
         'log',
@@ -600,9 +606,11 @@ class ProbeRunner {
         return '${step['message'] ?? ''}';
 
       case 'quit':
+        _session.dispose();
         return 'bye';
 
       default:
+        if (SessionOps.ops.contains(op)) return _session.run(op, step, extra);
         throw _ProbeFailure('unknown op "$op"');
     }
   }

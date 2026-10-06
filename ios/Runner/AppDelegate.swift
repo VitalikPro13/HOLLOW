@@ -140,6 +140,8 @@ final class ForegroundBannerPresenter: NSObject, UNUserNotificationCenterDelegat
   // Set before launch finishes, which is when firebase adopts it.
   private let foregroundBanners = ForegroundBannerPresenter()
 
+  private var relayTriggers: RelayTriggers?
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -231,6 +233,16 @@ final class ForegroundBannerPresenter: NSObject, UNUserNotificationCenterDelegat
           result(FlutterMethodNotImplemented)
         }
       }
+
+      // hollow/relay_triggers -> network changes for relay_triggers.dart.
+      let relayChannel = FlutterMethodChannel(
+        name: "hollow/relay_triggers",
+        binaryMessenger: controller.binaryMessenger)
+      let triggers = RelayTriggers { event in
+        relayChannel.invokeMethod(event, arguments: nil)
+      }
+      triggers.start()
+      relayTriggers = triggers
     }
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)

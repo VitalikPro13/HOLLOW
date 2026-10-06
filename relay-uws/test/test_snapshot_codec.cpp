@@ -25,6 +25,12 @@ static void check(const std::string& label, bool ok) {
     }
 }
 
+// A literal with its embedded NULs.
+template <size_t N>
+static std::string bytes_of(const char (&s)[N]) {
+    return std::string(s, N - 1);
+}
+
 static snapshot::Data sample() {
     snapshot::Data d;
     snapshot::DmQueue q;
@@ -80,6 +86,43 @@ static snapshot::Data sample() {
     d.rosters.push_back({"12D3KooWMasterOne", R"({"master":"12D3KooWMasterOne","r_pub":""})", 114, {}});
     d.rosters.push_back({"12D3KooWMasterTwo", std::string(3000, 'r'), 1ull << 62,
                          {{"12D3KooWWaiting", 604800}, {"12D3KooWJustAsked", 0}}});
+
+    // Two sessions sharing one fan-out buffer, one ring holding a run of tombstones.
+    d.buffers.push_back(bytes_of("\x05srv\0" "12D3KooWSenderA\0" "fanout"));
+    d.buffers.push_back(bytes_of("\x06" "dmroom\0" "12D3KooWSenderB\0" "dm"));
+    d.buffers.push_back(R"({"type":"lock_chain","server":"x"})");
+    snapshot::SessionRec a;
+    a.sid = "00112233445566778899aabbccddeeff";
+    a.peer_id = "12D3KooWTargetOne";
+    a.share = 115;
+    a.inactive = true;
+    a.in_h = 41;
+    a.rooms = {{"inbox:12D3KooWMasterOne", true}, {"srv", false}};
+    a.subscriptions = {{"srv", {"general", "random"}}, {"other", {}}};
+    a.has_nickname = true;
+    a.nickname = {"vitalik_7", 1790000600, "12D3KooWMasterOne", true, "CAESIA==", 1790000000000, "c2ln"};
+    a.has_link_code = true;
+    a.link_code = {"AB12CD", 1790000300};
+    a.sent = 9;
+    a.acked = 3;
+    a.frames.push_back({4, 0, 0, true, 116, 0, "", 50});
+    a.frames.push_back({7, 3, 0, true, 0, 0, "", 0});
+    a.frames.push_back({8, 0, 1, true, 117, 1, "dmroom", 61});
+    a.frames.push_back({9, 0, 2, false, 118, 0, "", 62});
+    d.sessions.push_back(a);
+    snapshot::SessionRec b;
+    b.sid = "ffeeddccbbaa99887766554433221100";
+    b.peer_id = "12D3KooWTargetTwo";
+    b.sent = 2;
+    b.acked = 1;
+    b.frames.push_back({2, 0, 0, true, 116, 0, "", 51});
+    d.sessions.push_back(b);
+    snapshot::SessionRec c;
+    c.sid = "0123456789abcdef0123456789abcdef";
+    c.peer_id = "12D3KooWEmptyRing";
+    c.sent = 5;
+    c.acked = 5;
+    d.sessions.push_back(c);
     return d;
 }
 
@@ -267,7 +310,53 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
             if (x.seen[j].device != y.seen[j].device || x.seen[j].age_secs != y.seen[j].age_secs) return false;
         }
     }
+    if (a.buffers != b.buffers || a.sessions.size() != b.sessions.size()) return false;
+    for (size_t i = 0; i < a.sessions.size(); i++) {
+        const auto& x = a.sessions[i];
+        const auto& y = b.sessions[i];
+        if (x.sid != y.sid || x.peer_id != y.peer_id || x.share != y.share || x.inactive != y.inactive ||
+            x.in_h != y.in_h || x.rooms != y.rooms || x.subscriptions != y.subscriptions ||
+            x.has_nickname != y.has_nickname || x.has_link_code != y.has_link_code || x.sent != y.sent ||
+            x.acked != y.acked || x.frames.size() != y.frames.size()) {
+            return false;
+        }
+        const auto& n = x.nickname;
+        const auto& m = y.nickname;
+        if (x.has_nickname && (n.nickname != m.nickname || n.expiry_unix != m.expiry_unix || n.master != m.master ||
+                               n.has_proof != m.has_proof || n.master_key != m.master_key || n.ts_ms != m.ts_ms ||
+                               n.sig != m.sig)) {
+            return false;
+        }
+        if (x.has_link_code &&
+            (x.link_code.code != y.link_code.code || x.link_code.expiry_unix != y.link_code.expiry_unix)) {
+            return false;
+        }
+        for (size_t j = 0; j < x.frames.size(); j++) {
+            const auto& f = x.frames[j];
+            const auto& g = y.frames[j];
+            if (f.seq != g.seq || f.gap != g.gap || f.buffer != g.buffer || f.binary != g.binary ||
+                f.share != g.share || f.kind != g.kind || f.room != g.room || f.budget_seq != g.budget_seq) {
+                return false;
+            }
+        }
+    }
     return true;
+}
+
+// The bytes of the v9 `buffers` and `sessions` sections.
+static size_t sessions_bytes(const snapshot::Data& d) {
+    size_t n = 4;
+    for (const auto& b : d.buffers) n += 4 + b.size();
+    n += 4;
+    for (const auto& s : d.sessions) n += 4 + snapshot::detail::encode_session(s).size();
+    return n;
+}
+
+// `d` without what v9 added, as a v8 build held it.
+static snapshot::Data without_sessions(snapshot::Data d) {
+    d.buffers.clear();
+    d.sessions.clear();
+    return d;
 }
 
 // The bytes of the `ring_meta` section this build writes for `d`.
@@ -299,8 +388,9 @@ static size_t rosters_bytes(const snapshot::Data& d) {
 // The bytes of the v8 `proven` section.
 static size_t proven_bytes(const snapshot::Data& d) { return d.kills.size(); }
 
-// `d` without what v8 added, as a v7 build held it.
+// `d` without what v8 and v9 added, as a v7 build held it.
 static snapshot::Data without_proven(snapshot::Data d) {
+    d = without_sessions(std::move(d));
     for (auto& k : d.kills) k.proven = false;
     return d;
 }
@@ -343,8 +433,8 @@ static snapshot::Data without_ring_meta(snapshot::Data d) {
 static std::string as_v5(const snapshot::Data& d, const std::string& owner) {
     std::string bytes = snapshot::encode(d);
     snapshot::detail::Writer w;
-    w.out = bytes.substr(0, bytes.size() - 4 - proven_bytes(d) - rosters_bytes(d) - shares_bytes(d) -
-                                ring_meta_bytes(d));
+    w.out = bytes.substr(0, bytes.size() - 4 - sessions_bytes(d) - proven_bytes(d) - rosters_bytes(d) -
+                                shares_bytes(d) - ring_meta_bytes(d));
     w.out[4] = 5;
     w.count(d.topics.size());
     for (const auto& t : d.topics) {
@@ -392,6 +482,69 @@ int main() {
               out.rosters[1].json.size() == 3000 && out.rosters[1].seen.size() == 2 &&
               out.rosters[1].seen[0].age_secs == 604800);
         check("re-encode is byte-identical", snapshot::encode(out) == bytes);
+        check("every session survives, none dropped", out.sessions.size() == 3 && out.sessions_dropped == 0);
+        check("a shared fan-out buffer is written once", out.buffers.size() == 3 &&
+                                                             out.sessions[0].frames[0].buffer == 0 &&
+                                                             out.sessions[1].frames[0].buffer == 0);
+        check("a ring keeps its tombstone run and its counters",
+              out.sessions[0].sent == 9 && out.sessions[0].acked == 3 && out.sessions[0].frames[1].gap == 3 &&
+                  out.sessions[0].frames[1].seq == 7 && out.ring_frames() == 4);
+        check("owner flags, subscriptions and the wildcard survive",
+              out.sessions[0].rooms[0].second && !out.sessions[0].rooms[1].second &&
+                  out.sessions[0].subscriptions[0].second.size() == 2 && out.sessions[0].subscriptions[1].second.empty());
+        check("the nickname with its proof and the link code survive",
+              out.sessions[0].has_nickname && out.sessions[0].nickname.has_proof &&
+                  out.sessions[0].nickname.sig == "c2ln" && out.sessions[0].link_code.code == "AB12CD" &&
+                  !out.sessions[1].has_nickname && !out.sessions[1].has_link_code);
+        check("a frame keeps its kind, room, binary flag and share",
+              out.sessions[0].frames[2].kind == 1 && out.sessions[0].frames[2].room == "dmroom" &&
+                  !out.sessions[0].frames[3].binary && out.sessions[0].frames[3].share == 118);
+    }
+
+    // The relay that holds sessions takes back what the v8 build running before it
+    // handed over: the same bytes, less the sessions, under version 8.
+    {
+        snapshot::Data in = sample();
+        std::string bytes = snapshot::encode(in);
+        std::string v8 = bytes.substr(0, bytes.size() - 4 - sessions_bytes(in)) + bytes.substr(bytes.size() - 4);
+        v8[4] = 8;
+        snapshot::Data out;
+        check("a v8 snapshot decodes under this reader", snapshot::decode(v8, out));
+        check("and carries no sessions", out.sessions.empty() && out.buffers.empty() &&
+                                             same(without_sessions(in), out));
+    }
+
+    // A session record that does not parse is dropped alone; the snapshot and every
+    // other session stay.
+    {
+        snapshot::Data in = sample();
+        const std::string good = snapshot::encode(in);
+        const std::string rec = snapshot::detail::encode_session(in.sessions[0]);
+        const size_t at = good.find(rec);
+        auto with_record = [&](const std::string& replacement) {
+            std::string out = good.substr(0, at - 4);
+            snapshot::detail::Writer w;
+            w.str(replacement);
+            return out + w.out + good.substr(at + rec.size());
+        };
+        auto drops_first_alone = [&](const std::string& bytes) {
+            snapshot::Data out;
+            return snapshot::decode(bytes, out) && out.sessions_dropped == 1 && out.sessions.size() == 2 &&
+                   out.sessions[0].peer_id == "12D3KooWTargetTwo" && out.dm_frames() == 4 && out.kills.size() == 2;
+        };
+        check("the record sits in the snapshot once", at != std::string::npos && at >= 4 &&
+                                                          good.find(rec, at + 1) == std::string::npos);
+        check("putting the record back gives the same snapshot", with_record(rec) == good);
+        check("a truncated record is dropped alone", drops_first_alone(with_record(rec.substr(0, rec.size() - 3))));
+        check("a record with bytes after it is dropped alone", drops_first_alone(with_record(rec + "x")));
+        snapshot::SessionRec bad_buffer = in.sessions[0];
+        bad_buffer.frames[0].buffer = 3;
+        check("a record naming a buffer that is not there is dropped alone",
+              drops_first_alone(with_record(snapshot::detail::encode_session(bad_buffer))));
+        std::string bad_flag = rec;
+        bad_flag[4 + in.sessions[0].sid.size() + 4 + in.sessions[0].peer_id.size() + 8] = 2;
+        check("a record with a flag byte other than 0/1 is dropped alone", drops_first_alone(with_record(bad_flag)));
+        check("an empty record is dropped alone", drops_first_alone(with_record("")));
     }
 
     // The relay that holds proven kill slots takes back what the v7 build running
@@ -399,7 +552,8 @@ int main() {
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        std::string v7 = bytes.substr(0, bytes.size() - 4 - proven_bytes(in)) + bytes.substr(bytes.size() - 4);
+        std::string v7 = bytes.substr(0, bytes.size() - 4 - sessions_bytes(in) - proven_bytes(in)) +
+                         bytes.substr(bytes.size() - 4);
         v7[4] = 7;
         snapshot::Data out;
         check("a v7 snapshot decodes under this reader", snapshot::decode(v7, out));
@@ -411,8 +565,9 @@ int main() {
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        std::string v6 = bytes.substr(0, bytes.size() - 4 - proven_bytes(in) - rosters_bytes(in)) +
-                         bytes.substr(bytes.size() - 4);
+        std::string v6 =
+            bytes.substr(0, bytes.size() - 4 - sessions_bytes(in) - proven_bytes(in) - rosters_bytes(in)) +
+            bytes.substr(bytes.size() - 4);
         v6[4] = 6;
         snapshot::Data out;
         check("a v6 snapshot decodes under this reader", snapshot::decode(v6, out));
@@ -434,7 +589,8 @@ int main() {
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in) + proven_bytes(in);
+        size_t meta =
+            ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in) + proven_bytes(in) + sessions_bytes(in);
         std::string v4 = bytes.substr(0, bytes.size() - 4 - meta) + bytes.substr(bytes.size() - 4);
         v4[4] = 4;
         snapshot::Data out;
@@ -448,7 +604,8 @@ int main() {
         snapshot::Data in = sample();
         in.locks.clear();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in) + proven_bytes(in);
+        size_t meta =
+            ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in) + proven_bytes(in) + sessions_bytes(in);
         std::string v3 = bytes.substr(0, bytes.size() - 8 - meta) + bytes.substr(bytes.size() - 4);
         v3[4] = 3;
         snapshot::Data out;
@@ -460,7 +617,8 @@ int main() {
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in) + proven_bytes(in);
+        size_t meta =
+            ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in) + proven_bytes(in) + sessions_bytes(in);
         std::string bad = bytes;
         bad[bytes.size() - 4 - meta] = 3;  // claims three rings where there are two
         snapshot::Data out;

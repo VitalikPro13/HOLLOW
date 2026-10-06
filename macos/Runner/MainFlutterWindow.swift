@@ -7,6 +7,7 @@ class MainFlutterWindow: NSWindow {
   private var trafficLightHeader: CGFloat = 0
   private var systemTitlebarHeight: CGFloat?
   private var trafficLightObservers: [NSObjectProtocol] = []
+  private var relayTriggers: RelayTriggers?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -41,6 +42,15 @@ class MainFlutterWindow: NSWindow {
         result(FlutterMethodNotImplemented)
       }
     }
+
+    let relayChannel = FlutterMethodChannel(
+      name: "hollow/relay_triggers",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    let triggers = RelayTriggers { event in
+      relayChannel.invokeMethod(event, arguments: nil)
+    }
+    triggers.start()
+    relayTriggers = triggers
 
     // AppKit puts the buttons back on these, so they are moved again after.
     let center = NotificationCenter.default

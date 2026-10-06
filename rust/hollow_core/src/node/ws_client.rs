@@ -1,30 +1,32 @@
 //! WebSocket client for the Hollow relay room router.
 //!
-//! Maintains a persistent WSS connection to the relay server.
-//! Handles authentication, room join/leave, message routing, and auto-reconnect.
+//! One persistent WSS connection carries every room. Against a relay that offers it, a
+//! session outlives the socket (RESUMABLE_SESSIONS_PLAN.md section 9, the rules in
+//! `relay_session`): both sides count and ack stream frames, a dropped socket resumes
+//! without a single rejoin, and a heartbeat with a deadline finds a dead path in seconds.
 
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 
 use base64::Engine;
 
-use crate::hollow_log;
-
-/// Max time with NO inbound traffic from the relay (any frame: text, binary,
-/// ping or pong) before the socket is declared a zombie and force-reconnected.
-///
-/// A silently-dropped network path lets local writes succeed into the OS buffer
-/// with no error, so a write-failure check alone never fires. The relay pings
-/// automatically, so a HEALTHY connection always refreshes `last_recv` well
-/// inside this window; 70s tolerates one lost 30s keepalive cycle.
-const LIVENESS_TIMEOUT: Duration = Duration::from_secs(70);
+use super::relay_session::{
+    self, Ask, AuthReply, Backoff, Class, Clocks, Entry, Established, Frame, Inbound, Liveness, Note, Outbound,
+    Queued, Timing,
+};
 
 /// Max time for ONE socket write before the connection is declared wedged.
 ///
@@ -35,6 +37,23 @@ const LIVENESS_TIMEOUT: Duration = Duration::from_secs(70);
 /// 30s because the largest frame, a 256 KB stream chunk, reaches the OS buffer
 /// well inside it even on a dreadful uplink.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A goodbye (`end`, a close frame and its reply) is a courtesy: never worth a long wait.
+const GOODBYE_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The kernel gives up on unacknowledged data after this long (Linux, Android) instead
+/// of hiding a dead path behind 15 to 30 minutes of retransmits.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const TCP_USER_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Queue entries written per loop turn, so reads and acks interleave with a long flush.
+const PUMP_BATCH: usize = 64;
+
+/// How long `suspend()` waits for every client to close.
+const SUSPEND_MAX: Duration = Duration::from_secs(5);
+
+/// The signature that ends a `frame_auth` seal ahead of its body.
+const SEAL_SIG_LEN: usize = 64;
 
 // -- Public types --
 
@@ -192,9 +211,8 @@ pub enum WsCommand {
     /// Offer the relay a join lock chain (or its next links) for a server. Answered
     /// by a `LockChain` naming whether the relay took it.
     LockPut { server: String, owner: String, links: Vec<super::join_lock::LockLink> },
-    /// File a user report with the relay. One-shot — deliberately NOT cached
-    /// in `track_room_change`, so it is never re-sent on reconnect (the relay
-    /// also dedups per (reporter, target, category) via hashed keys).
+    /// File a user report with the relay. One-shot: never replayed by a fresh
+    /// session (the relay also dedups per (reporter, target, category) via hashed keys).
     ReportUser { target: String, category: String },
 }
 
@@ -213,8 +231,8 @@ pub enum WsEvent {
     /// The relay refused or forgot our session, or there never was one: purge and
     /// rebuild from the next `Connected`.
     SessionLost,
-    /// A connect attempt is starting. `reconnecting` is true for backoff retries
-    /// after a drop, false for the very first attempt.
+    /// A connect attempt is starting. `reconnecting` is true for every attempt after
+    /// the very first.
     Connecting { reconnecting: bool },
     PeerJoined { room: String, peer_id: String },
     PeerLeft { room: String, peer_id: String },
@@ -318,7 +336,7 @@ impl WsEvent {
     }
 }
 
-// -- Wire protocol (matches relay/src/ws_router.rs) --
+// -- Wire protocol --
 
 fn is_false(v: &bool) -> bool { !*v }
 
@@ -329,8 +347,9 @@ enum ClientMsg {
     /// Asks the relay for the challenge the auth signature covers.
     AuthHello,
     Auth {
-        /// Always 2: the signature covers the relay's challenge, its domain and
-        /// every flag ([`auth_v2_message`]).
+        /// 2, or 3 with `session` and `in_h` for a relay that offered sessions; the
+        /// signature covers the relay's challenge, its domain and every flag
+        /// ([`auth_v2_message`], [`relay_session::auth_v3_message`]).
         v: u8,
         peer_id: String,
         public_key: String,
@@ -342,6 +361,10 @@ enum ClientMsg {
         license_key: Option<String>,
         #[serde(default, skip_serializing_if = "is_false")]
         fetch: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        in_h: Option<u64>,
     },
     Join {
         room: String,
@@ -360,9 +383,6 @@ enum ClientMsg {
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 enum ServerMsg {
-    AuthChallenge { nonce: String, #[serde(default)] door_key: String },
-    AuthOk,
-    AuthFailed { error: String },
     PeerJoined { room: String, peer_id: String },
     PeerLeft { room: String, peer_id: String },
     /// `proved` only in a door-locked server room.
@@ -408,6 +428,11 @@ enum ServerMsg {
         #[serde(default)] links: Vec<super::join_lock::LockLink>,
         #[serde(default)] put: Option<bool>,
     },
+    /// The relay's count of our stream frames, answering a heartbeat.
+    HbAck { h: u64 },
+    Ack { h: u64 },
+    /// The relay is about to restart: resume after this long.
+    Reconnect { #[serde(default)] after_ms: u64 },
 }
 
 /// A server's door secret on its way to the socket that proves it; never printed.
@@ -455,52 +480,9 @@ pub(crate) fn door_proof(session: &RelaySession, room: &str, door: &[u8; 32]) ->
     Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
 }
 
-// -- State --
+// -- Real-time sessions and the FFI controls --
 
 const ROOM_BUDGET_LIMIT: u32 = 2000;
-
-struct WsClientState {
-    /// Rooms we've joined (for re-join on reconnect).
-    joined_rooms: Arc<RwLock<HashSet<String>>>,
-    /// Last room we attempted to join (for error rollback).
-    last_join_attempt: Arc<RwLock<Option<String>>>,
-    /// Channel-topic subscriptions per room, for re-subscribe on reconnect. The
-    /// relay keeps them as PER-SOCKET state, so a silent reconnect leaves the
-    /// client receiving room traffic but ZERO topic-routed channel messages. The
-    /// latest Subscribe per room wins, replayed right after the room re-joins.
-    subscriptions: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
-    /// Latest opt-in offline-delivery setting (enabled, retention_secs) — the
-    /// relay registry is RAM-per-relay-lifetime, so replay it on every
-    /// reconnect like subscriptions. None = never set this session.
-    offline_optin: Arc<RwLock<Option<(bool, i64)>>>,
-    /// The roster each `inbox:` room was joined with via [`WsCommand::JoinInbox`]. The
-    /// reconnect replay re-sends it: a plain `Join` on a NEW socket owns nothing.
-    inbox_rosters: Arc<RwLock<std::collections::HashMap<String, crate::identity::roster::Roster>>>,
-    /// The newest door the node holds per server room ([`WsCommand::SetDoor`]), proved
-    /// on every join of it, the reconnect replay's included.
-    doors: Arc<RwLock<std::collections::HashMap<String, DoorSecret>>>,
-    /// The host we dialled; TURN URIs naming any other host are dropped.
-    relay_host: String,
-}
-
-// -- Public API --
-
-/// Spawn the WebSocket client as a background task.
-/// Returns a JoinHandle that runs forever (auto-reconnects).
-pub fn spawn_ws_client(
-    relay_url: String,
-    peer_id: String,
-    keypair_proto: Vec<u8>,
-    pub_key_b64: String,
-    license_key: Option<String>,
-    fetch: bool,
-    cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
-    event_tx: mpsc::UnboundedSender<WsEvent>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        ws_client_loop(relay_url, peer_id, keypair_proto, pub_key_b64, license_key, fetch, cmd_rx, event_tx).await;
-    })
-}
 
 /// Whether a real-time session (a DM call, a voice channel, a conference) is
 /// live right now. Set from Dart when one starts, cleared when the last ends.
@@ -512,339 +494,1259 @@ pub fn spawn_ws_client(
 /// socket, and the hold-open window is tens of seconds, so a ladder already at
 /// 30 seconds leaves the socket asleep long after the network is back. The
 /// policy is conditional rather than capped: normal backoff when idle, a steady
-/// [REALTIME_RETRY_SECS] while a call is live.
-static REALTIME_ACTIVE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Retry interval while a real-time session is live. Fast enough that the socket
-/// is back within a second of the network returning, so a user whose internet is
-/// working again does not sit watching "Reconnecting".
-const REALTIME_RETRY_SECS: u64 = 1;
+/// `Timing::realtime_retry` while a call is live.
+static REALTIME_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Set from the FFI when a call / voice channel / conference starts or ends.
 pub fn set_realtime_active(active: bool) {
-    REALTIME_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
+    REALTIME_ACTIVE.store(active, Ordering::Relaxed);
 }
 
 pub(crate) fn realtime_active() -> bool {
-    REALTIME_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+    REALTIME_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// What the FFI asks of a running client.
+#[derive(Debug)]
+pub(crate) enum Control {
+    /// Look at the connection now. `external`: from the app, which also ends a suspend;
+    /// the client's own (a clock jump) never does.
+    Nudge { reason: String, external: bool },
+    Background(bool),
+    Suspend(oneshot::Sender<()>),
+}
+
+/// Every running full client, one per relay; a closed one drops out on the next send.
+static CONTROLS: Mutex<Vec<mpsc::UnboundedSender<Control>>> = Mutex::new(Vec::new());
+static BACKGROUND: AtomicBool = AtomicBool::new(false);
+
+fn controls() -> std::sync::MutexGuard<'static, Vec<mpsc::UnboundedSender<Control>>> {
+    CONTROLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn tell_all(make: impl Fn() -> Control) {
+    controls().retain(|tx| tx.send(make()).is_ok());
 }
 
 /// Look at the relay connection now: the app came to the foreground, the network
-/// changed, the machine woke (RESUMABLE_SESSIONS_PLAN.md 9.6). Not wired up yet.
+/// changed, the machine woke (RESUMABLE_SESSIONS_PLAN.md 9.6).
 pub fn nudge(reason: &str) {
-    let _ = reason;
+    let reason = match reason {
+        "foreground" | "focus" | "network" | "wake" => reason,
+        _ => "other",
+    };
+    tell_all(|| Control::Nudge { reason: reason.to_string(), external: true });
 }
 
-/// The app went to the background (`inactive`, slower heartbeat) or came back. Not
-/// wired up yet.
+/// The app went to the background (`inactive`, slower heartbeat) or came back
+/// (`active`, a `foreground` nudge).
 pub fn set_background(background: bool) {
-    let _ = background;
+    BACKGROUND.store(background, Ordering::Relaxed);
+    tell_all(|| Control::Background(background));
 }
 
-/// Flush, close cleanly into the session's grace and stay closed until the next
-/// nudge. Not wired up yet.
-pub async fn suspend() {}
+/// Flush, wait briefly for the relay's ack, close cleanly into the session's grace and
+/// stay closed until the next nudge. Returns once every client closed.
+pub async fn suspend() {
+    let mut waits = Vec::new();
+    controls().retain(|tx| {
+        let (done, wait) = oneshot::channel();
+        let open = tx.send(Control::Suspend(done)).is_ok();
+        if open {
+            waits.push(wait);
+        }
+        open
+    });
+    let _ = tokio::time::timeout(SUSPEND_MAX, futures_util::future::join_all(waits)).await;
+}
 
-async fn ws_client_loop(
+// -- Public API --
+
+/// Spawn the WebSocket client as a background task.
+/// Returns a JoinHandle that runs until the command channel closes.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_ws_client(
     relay_url: String,
     peer_id: String,
     keypair_proto: Vec<u8>,
     pub_key_b64: String,
     license_key: Option<String>,
     fetch: bool,
-    mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
+    cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
     event_tx: mpsc::UnboundedSender<WsEvent>,
-) {
-    let state = WsClientState {
-        joined_rooms: Arc::new(RwLock::new(HashSet::new())),
-        last_join_attempt: Arc::new(RwLock::new(None)),
-        subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        offline_optin: Arc::new(RwLock::new(None)),
-        inbox_rosters: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        doors: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        relay_host: relay_auth_domain(&relay_url).unwrap_or_default(),
-    };
+) -> JoinHandle<()> {
+    let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+    controls().push(ctl_tx);
+    let dial = Dial { url: relay_url, peer_id, keypair_proto, pub_key_b64, license_key, fetch };
+    let client = Client::new(dial, Timing::default(), event_tx, BACKGROUND.load(Ordering::Relaxed));
+    tokio::spawn(client.run(cmd_rx, ctl_rx))
+}
 
-    let mut backoff_secs = 1u64;
-    let mut pending_commands: Vec<WsCommand> = Vec::new();
-    let mut license_busy_notified = false;
+/// [`spawn_ws_client`] with its own timing and control channel, outside the FFI's reach.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_with(
+    relay_url: String,
+    peer_id: String,
+    keypair_proto: Vec<u8>,
+    pub_key_b64: String,
+    timing: Timing,
+    cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
+    event_tx: mpsc::UnboundedSender<WsEvent>,
+    ctl_rx: mpsc::UnboundedReceiver<Control>,
+) -> JoinHandle<()> {
+    let dial = Dial { url: relay_url, peer_id, keypair_proto, pub_key_b64, license_key: None, fetch: false };
+    tokio::spawn(Client::new(dial, timing, event_tx, false).run(cmd_rx, ctl_rx))
+}
 
-    'reconnect: loop {
-        hollow_log!("[HOLLOW-WS] Connecting to {relay_url}...");
-        // backoff_secs > 1 means a prior connection dropped (it resets to 1 on
-        // success), so this attempt is a reconnect rather than the first connect.
-        let _ = event_tx.send(WsEvent::Connecting { reconnecting: backoff_secs > 1 });
+// -- The client --
 
-        match connect_and_auth_session(&relay_url, &peer_id, &keypair_proto, &pub_key_b64, license_key.as_deref(), fetch).await {
-            Ok((ws_stream, session)) => {
-                backoff_secs = 1; // Reset backoff on successful connect.
-                let _ = event_tx.send(WsEvent::Connected);
-                hollow_log!("[HOLLOW-WS] Connected and authenticated");
-                license_busy_notified = false;
+/// What every connect attempt needs.
+#[derive(Clone)]
+struct Dial {
+    url: String,
+    peer_id: String,
+    keypair_proto: Vec<u8>,
+    pub_key_b64: String,
+    license_key: Option<String>,
+    fetch: bool,
+}
 
-                let (mut ws_write, mut ws_read) = ws_stream.split();
-                {
-                    let rooms = state.joined_rooms.read().await;
-                    let rosters = state.inbox_rosters.read().await;
-                    let doors = state.doors.read().await;
-                    for room in rooms.iter() {
-                        let join_msg = serde_json::to_string(&ClientMsg::Join {
-                            room: room.clone(),
-                            inbox_roster: rosters.get(room).cloned(),
-                            door_proof: doors.get(room).and_then(|d| door_proof(&session, room, &d.0)),
-                        })
-                            .unwrap_or_default();
-                        let _ = bounded_send(&mut ws_write, Message::Text(join_msg.into())).await;
+/// What the client keeps about rooms across sockets and sessions.
+#[derive(Default)]
+struct Rooms {
+    /// Rooms we are in: a fresh session joins each again.
+    joined: HashSet<String>,
+    /// The roster each own `inbox:` room was joined with ([`WsCommand::JoinInbox`]): a
+    /// plain join on a new session owns nothing.
+    inbox_rosters: HashMap<String, crate::identity::roster::Roster>,
+    /// The newest door the node holds per server room, proved on every join of it.
+    doors: HashMap<String, DoorSecret>,
+    /// The latest topic set per room: the relay keeps subscriptions per session.
+    subscriptions: HashMap<String, Vec<String>>,
+    /// The latest offline-delivery opt-in, registered again by every fresh session.
+    offline_optin: Option<(bool, i64)>,
+    /// The room of the last join written, rolled back if the relay says the cap is hit.
+    last_join_attempt: Option<String>,
+}
+
+type WsSink = SplitSink<WsStream, Message>;
+
+struct Socket {
+    write: WsSink,
+    read: SplitStream<WsStream>,
+    /// This socket's challenge: door proofs on a session-less socket, and after a reprove.
+    door: RelaySession,
+    /// The relay keeps a session for this socket: frames are counted and acked.
+    session: bool,
+    live: Liveness,
+}
+
+struct Attempt {
+    fut: Pin<Box<dyn Future<Output = Result<Opened, ConnectError>> + Send>>,
+    /// Racing a socket that is still being judged (make before break).
+    racing: bool,
+    started: Instant,
+}
+
+struct Suspending {
+    until: Instant,
+    done: oneshot::Sender<()>,
+    asked: bool,
+}
+
+/// Why a socket went, which decides when the next one is tried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Why {
+    /// Closed or broken by the other end.
+    Lost,
+    /// Nothing heard after a heartbeat (the dead rule).
+    Dead,
+    SendFailed,
+    /// The relay's drain hint ran out with the socket still open.
+    Drain,
+    Suspend,
+}
+
+struct Client {
+    dial: Dial,
+    timing: Timing,
+    event_tx: mpsc::UnboundedSender<WsEvent>,
+    /// The host we dialled; TURN URIs naming any other host are dropped.
+    relay_host: String,
+    rooms: Rooms,
+    out: Outbound<WsCommand>,
+    inbound: Inbound,
+    /// The session the relay holds for us.
+    sid: Option<String>,
+    /// What this session's door proofs are made for: the challenge of the socket that
+    /// minted it, until a `reprove` resume (section 9.8).
+    session_door: Option<RelaySession>,
+    /// The join each room's fresh-session replay wrote, and when: the node's identical
+    /// join of that room right after (its Connected work echoing the replay) is dropped,
+    /// once. Every other join is written, identical or not: a re-join is how the node
+    /// asks for a fresh `members`.
+    replayed_joins: HashMap<String, (String, Instant)>,
+    socket: Option<Socket>,
+    attempt: Option<Attempt>,
+    reconnect_at: Option<Instant>,
+    /// Set by the relay's drain hint: resume no earlier than this.
+    drain_at: Option<Instant>,
+    backoff: Backoff,
+    background: bool,
+    /// Closed on purpose until an external nudge.
+    suspended: bool,
+    suspending: Option<Suspending>,
+    next_beat: Instant,
+    clocks: Clocks,
+    attempts: u64,
+    license_busy_notified: bool,
+    stopped: bool,
+}
+
+async fn read_next(
+    socket: &mut Option<Socket>,
+) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
+    match socket {
+        Some(s) => s.read.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn poll_attempt(attempt: &mut Option<Attempt>) -> Result<Opened, ConnectError> {
+    match attempt {
+        Some(a) => (&mut a.fut).await,
+        None => std::future::pending().await,
+    }
+}
+
+impl Client {
+    fn new(dial: Dial, timing: Timing, event_tx: mpsc::UnboundedSender<WsEvent>, background: bool) -> Self {
+        let now = Instant::now();
+        Self {
+            relay_host: relay_auth_domain(&dial.url).unwrap_or_default(),
+            next_beat: now + timing.heartbeat_every(background),
+            clocks: Clocks { wall_ms: super::frame_auth::now_ms(), mono: now },
+            dial,
+            timing,
+            event_tx,
+            rooms: Rooms::default(),
+            out: Outbound::default(),
+            inbound: Inbound::default(),
+            sid: None,
+            session_door: None,
+            replayed_joins: HashMap::new(),
+            socket: None,
+            attempt: None,
+            reconnect_at: Some(now),
+            drain_at: None,
+            backoff: Backoff::default(),
+            background,
+            suspended: false,
+            suspending: None,
+            attempts: 0,
+            license_busy_notified: false,
+            stopped: false,
+        }
+    }
+
+    async fn run(mut self, mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>, mut ctl_rx: mpsc::UnboundedReceiver<Control>) {
+        loop {
+            let deadline = tokio::time::Instant::from_std(self.next_deadline());
+            let pump = self.can_pump();
+            tokio::select! {
+                frame = read_next(&mut self.socket) => self.on_frame(frame).await,
+                opened = poll_attempt(&mut self.attempt) => self.on_attempt(opened).await,
+                cmd = cmd_rx.recv(), if self.takes_commands() => match cmd {
+                    Some(cmd) => self.enqueue(cmd),
+                    // The node dropped its sender: it is shutting down. Exit, or the
+                    // socket would ping and reconnect forever (a per-restart leak).
+                    None => {
+                        self.shutdown().await;
+                        return;
                     }
-                    let _ = event_tx.send(WsEvent::RoomBudgetUpdate { joined: rooms.len() as u32, limit: ROOM_BUDGET_LIMIT });
+                },
+                Some(ctl) = ctl_rx.recv() => {
+                    if matches!(ctl, Control::Suspend(_)) {
+                        // Suspend flushes what the node already handed over.
+                        while self.takes_commands()
+                            && let Ok(cmd) = cmd_rx.try_recv()
+                        {
+                            self.enqueue(cmd);
+                        }
+                    }
+                    self.on_control(ctl).await;
                 }
+                _ = tokio::time::sleep_until(deadline) => self.on_timers().await,
+                _ = std::future::ready(()), if pump => self.pump().await,
+            }
+            self.check_suspend().await;
+            if self.stopped {
+                return;
+            }
+        }
+    }
 
-                // Re-subscribe channel topics: the relay's subscription state is
-                // per-socket and died with the old connection.
-                {
-                    let subs = state.subscriptions.read().await;
-                    for (room, topics) in subs.iter() {
-                        let msg = serde_json::json!({
-                            "type": "subscribe",
-                            "room": room,
-                            "topics": topics,
-                        });
-                        if bounded_send(&mut ws_write, Message::Text(msg.to_string().into())).await.is_err() {
-                            hollow_log!("[HOLLOW-WS] Re-subscribe send failed for room {room}");
-                            break;
-                        }
-                    }
-                    if !subs.is_empty() {
-                        hollow_log!("[HOLLOW-WS] Re-subscribed topics for {} room(s) after reconnect", subs.len());
-                    }
+    /// While a socket drains the queue, a burst waits in the node's channel rather than
+    /// be pruned here; with no socket the bounds of section 9.4 apply.
+    fn takes_commands(&self) -> bool {
+        self.socket.is_none() || self.out.has_room()
+    }
+
+    fn next_deadline(&self) -> Instant {
+        let mut at = self.next_beat;
+        let mut consider = |t: Option<Instant>| {
+            if let Some(t) = t {
+                at = at.min(t);
+            }
+        };
+        if let Some(s) = &self.socket {
+            consider(s.live.dead_at(&self.timing));
+            consider(s.live.probe_missed_at());
+            if s.session {
+                consider(self.inbound.ack_due_at(&self.timing));
+            }
+            consider(self.drain_at);
+        } else if self.attempt.is_none() {
+            consider(self.reconnect_at);
+        }
+        consider(self.suspending.as_ref().map(|s| s.until));
+        at
+    }
+
+    fn notify(&self, notes: Vec<Note>) {
+        for note in notes {
+            let event = match note {
+                Note::Suspended => WsEvent::Suspended,
+                Note::Resumed { gap } => WsEvent::Resumed { gap },
+                Note::SessionLost => WsEvent::SessionLost,
+                Note::Connected => WsEvent::Connected,
+            };
+            let _ = self.event_tx.send(event);
+        }
+    }
+
+    // -- Commands --
+
+    /// Take a command from the node. Room state is remembered here, at once, so a fresh
+    /// session joins what the node asked for even before the command reaches the wire.
+    fn enqueue(&mut self, cmd: WsCommand) {
+        let budget = match &cmd {
+            WsCommand::SetDoor { room_code, door } => {
+                let changed = remember_door(&mut self.rooms.doors, room_code, door.clone());
+                if changed && door.is_some() && self.rooms.joined.contains(room_code) {
+                    self.push(WsCommand::JoinRoom { room_code: room_code.clone() });
                 }
+                return;
+            }
+            WsCommand::JoinRoom { room_code } => {
+                self.rooms.joined.insert(room_code.clone());
+                true
+            }
+            WsCommand::JoinInbox { room_code, roster } => {
+                self.rooms.inbox_rosters.insert(room_code.clone(), roster.clone());
+                self.rooms.joined.insert(room_code.clone());
+                true
+            }
+            WsCommand::LeaveRoom { room_code } => {
+                self.rooms.joined.remove(room_code);
+                self.rooms.subscriptions.remove(room_code);
+                self.rooms.inbox_rosters.remove(room_code);
+                true
+            }
+            WsCommand::Subscribe { room_code, topics } => {
+                self.rooms.subscriptions.insert(room_code.clone(), topics.clone());
+                false
+            }
+            WsCommand::SetOfflineBuffer { enabled, retention_secs } => {
+                self.rooms.offline_optin = Some((*enabled, *retention_secs));
+                false
+            }
+            _ => false,
+        };
+        if budget {
+            let _ = self.event_tx.send(WsEvent::RoomBudgetUpdate {
+                joined: self.rooms.joined.len() as u32,
+                limit: ROOM_BUDGET_LIMIT,
+            });
+        }
+        self.push(cmd);
+    }
 
-                // Re-register the opt-in offline-delivery setting — the relay
-                // registry is RAM-only and a relay restart would silently
-                // drop this peer back to the 24h push baseline.
-                {
-                    let optin = *state.offline_optin.read().await;
-                    if let Some((enabled, retention_secs)) = optin {
-                        let msg = serde_json::json!({
-                            "type": "set_offline_buffer",
-                            "enabled": enabled,
-                            "retention_secs": retention_secs,
-                        });
-                        if bounded_send(&mut ws_write, Message::Text(msg.to_string().into())).await.is_err() {
-                            hollow_log!("[HOLLOW-WS] Offline-buffer re-register send failed");
-                        }
-                    }
+    fn push(&mut self, cmd: WsCommand) {
+        let pruned = self.out.push(cmd, super::frame_auth::now_ms());
+        if pruned > 0 {
+            hollow_log!("[HOLLOW-WS] Outbound queue full: {pruned} unwritten frame(s) dropped");
+        }
+    }
+
+    fn can_pump(&self) -> bool {
+        let Some(s) = &self.socket else { return false };
+        !self.attempt.as_ref().is_some_and(|a| a.racing)
+            && self.out.has_unwritten()
+            && (!s.session || self.out.can_write())
+    }
+
+    /// Write queued entries, a batch per loop turn. A frame gets its number before the
+    /// write, so one that may have reached the relay is resent on resume rather than
+    /// written again as new; on a session-less socket a failed entry goes back in
+    /// front, and nothing behind it moves.
+    async fn pump(&mut self) {
+        for _ in 0..PUMP_BATCH {
+            if !self.can_pump() {
+                return;
+            }
+            let Some(entry) = self.out.pop() else { return };
+            let Some((frame, room_state)) = self.render(&entry) else { continue };
+            let session = self.socket.as_ref().is_some_and(|s| s.session);
+            if session && relay_session::client_frame_counts(&frame) > 0 {
+                self.out.record(frame.clone(), room_state);
+            }
+            let sent = match self.socket.as_mut() {
+                Some(s) => bounded_send(&mut s.write, frame.to_message()).await,
+                None => Err("no socket".to_string()),
+            };
+            if let Err(e) = sent {
+                hollow_log!("[HOLLOW-WS] Send failed: {e}");
+                if !session {
+                    self.out.unpop(entry);
                 }
+                self.drop_socket(Why::SendFailed).await;
+                return;
+            }
+        }
+    }
 
-                {
-                    let cmds: Vec<WsCommand> = pending_commands.drain(..).collect();
-                    for cmd in cmds {
-                        if !send_with_doors(&mut ws_write, &cmd, &state, &session).await {
-                            hollow_log!("[HOLLOW-WS] Replay failed — connection dead again");
-                            pending_commands.push(cmd);
-                            break;
-                        }
-                        track_room_change(&state, &cmd, &event_tx).await;
-                    }
-                }
+    /// The frame an entry becomes on this socket, and whether it is room state a
+    /// fresh session rebuilds. None: nothing to write.
+    fn render(&mut self, entry: &Entry<WsCommand>) -> Option<(Frame, bool)> {
+        let (cmd, replay) = match entry {
+            Entry::Frame(f) => return Some((f.clone(), false)),
+            Entry::Command(c) => (c, false),
+            Entry::Replay(c) => (c, true),
+        };
+        match cmd {
+            WsCommand::JoinRoom { room_code } => {
+                self.render_join(room_code, None, replay).map(|t| (Frame::text(t), true))
+            }
+            WsCommand::JoinInbox { room_code, roster } => {
+                self.render_join(room_code, Some(roster.clone()), replay).map(|t| (Frame::text(t), true))
+            }
+            WsCommand::LeaveRoom { room_code } => {
+                self.replayed_joins.remove(room_code);
+                let _ = self.event_tx.send(WsEvent::LeftRoom { room: room_code.clone() });
+                let text = serde_json::to_string(&ClientMsg::Leave { room: room_code.clone() }).ok()?;
+                Some((Frame::text(text), true))
+            }
+            WsCommand::Subscribe { .. } | WsCommand::SetOfflineBuffer { .. } => command_frame(cmd).map(|f| (f, true)),
+            _ => command_frame(cmd).map(|f| (f, false)),
+        }
+    }
 
-                let mut ping_timer = tokio::time::interval(Duration::from_secs(30));
-                ping_timer.tick().await; // consume immediate first tick
-                // Liveness: last time ANY inbound relay frame arrived. A healthy
-                // socket is refreshed by the relay's automatic pings + our own
-                // pong replies + real traffic; a zombie path stops refreshing it.
-                let mut last_recv = tokio::time::Instant::now();
-                loop {
-                    tokio::select! {
-                        // Keepalive ping — prevents Nginx/proxy/relay from closing idle connections.
-                        _ = ping_timer.tick() => {
-                            // Zombie-socket detection: past the deadline the
-                            // write below would still "succeed" into a dead OS
-                            // buffer, so check liveness FIRST and reconnect.
-                            if last_recv.elapsed() > LIVENESS_TIMEOUT {
-                                hollow_log!(
-                                    "[HOLLOW-WS] Liveness timeout — no relay traffic in {}s, reconnecting",
-                                    last_recv.elapsed().as_secs()
-                                );
-                                break;
-                            }
-                            if let Err(e) = bounded_send(&mut ws_write, Message::Ping(vec![0x01].into())).await {
-                                hollow_log!("[HOLLOW-WS] Ping failed: {e}");
-                                break; // Connection dead, trigger reconnect.
-                            }
-                        }
-                        msg = ws_read.next() => {
-                            // Any successfully-read frame proves the socket is
-                            // alive in BOTH directions, and the relay's own
-                            // automatic pings keep this fresh even when idle.
-                            if matches!(msg, Some(Ok(_))) {
-                                last_recv = tokio::time::Instant::now();
-                            }
-                            match msg {
-                                Some(Ok(Message::Text(text))) => {
-                                    if let Ok(server_msg) = serde_json::from_str::<ServerMsg>(&text) {
-                                        handle_server_message(&event_tx, server_msg, &state).await;
-                                    }
-                                }
-                                Some(Ok(Message::Binary(data))) => {
-                                    if data.len() > 3 {
-                                        match data[0] {
-                                            0x02 => {
-                                                if let Some((room, from, payload)) = parse_binary_relay_frame(&data[1..]) {
-                                                    let _ = event_tx.send(WsEvent::BinaryDirect {
-                                                        room, from, data: payload,
-                                                    });
-                                                }
-                                            }
-                                            0x05 => {
-                                                if let Some((room, from, payload)) = parse_binary_relay_frame(&data[1..]) {
-                                                    let _ = event_tx.send(WsEvent::Message {
-                                                        room, from, data: payload,
-                                                    });
-                                                }
-                                            }
-                                            0x06 => {
-                                                if let Some((room, from, payload)) = parse_binary_relay_frame(&data[1..]) {
-                                                    let _ = event_tx.send(WsEvent::DirectMessage {
-                                                        room, from, data: payload,
-                                                    });
-                                                }
-                                            }
-                                            0x08 => {
-                                                // Topic broadcast: [0x08][room\0][topic\0][sender\0][payload]
-                                                let rest = &data[1..];
-                                                if let Some(room_end) = rest.iter().position(|&b| b == 0) {
-                                                    let room = String::from_utf8_lossy(&rest[..room_end]).to_string();
-                                                    let after_room = &rest[room_end + 1..];
-                                                    if let Some(topic_end) = after_room.iter().position(|&b| b == 0) {
-                                                        let after_topic = &after_room[topic_end + 1..];
-                                                        if let Some(sender_end) = after_topic.iter().position(|&b| b == 0) {
-                                                            let from = String::from_utf8_lossy(&after_topic[..sender_end]).to_string();
-                                                            let payload = after_topic[sender_end + 1..].to_vec();
-                                                            let _ = event_tx.send(WsEvent::Message {
-                                                                room, from, data: payload,
-                                                            });
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                Some(Ok(Message::Ping(data))) => {
-                                    // A failed/wedged pong reply is a dead
-                                    // connection — reconnect, don't limp on.
-                                    if let Err(e) =
-                                        bounded_send(&mut ws_write, Message::Pong(data)).await
-                                    {
-                                        hollow_log!("[HOLLOW-WS] Pong reply failed: {e}");
-                                        break;
-                                    }
-                                }
-                                Some(Ok(Message::Pong(_))) => {
-                                    // Reply to our keepalive ping; liveness is
-                                    // already refreshed above.
-                                }
-                                Some(Ok(Message::Close(frame))) => {
-                                    // Log the relay's close reason: it never
-                                    // closes silently (bad_license, auth timeout).
-                                    let reason = frame
-                                        .as_ref()
-                                        .map(|f| f.reason.to_string())
-                                        .unwrap_or_default();
-                                    hollow_log!("[HOLLOW-WS] Connection closed by server: {reason}");
-                                    break;
-                                }
-                                None => {
-                                    hollow_log!("[HOLLOW-WS] Connection closed by server");
-                                    break;
-                                }
-                                Some(Err(e)) => {
-                                    hollow_log!("[HOLLOW-WS] Read error: {e}");
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                        maybe_cmd = cmd_rx.recv() => {
-                            // None = the swarm dropped the command sender, so the
-                            // node is shutting down. Exit BOTH loops, or `select!`
-                            // just disables this arm and keeps the socket alive,
-                            // pinging and reconnecting forever (a per-restart leak).
-                            let Some(cmd) = maybe_cmd else {
-                                hollow_log!("[HOLLOW-WS] Command channel closed — shutting down WS client task");
-                                break 'reconnect;
-                            };
-                            if !send_with_doors(&mut ws_write, &cmd, &state, &session).await {
-                                hollow_log!("[HOLLOW-WS] Send failed — connection dead, reconnecting");
-                                pending_commands.push(cmd);
-                                break;
-                            }
-                            track_room_change(&state, &cmd, &event_tx).await;
-                        }
-                    }
+    /// The join frame for `room` on this socket, proving its door when we hold one. None
+    /// for the node's first join of a room right after our replay wrote the identical one.
+    fn render_join(
+        &mut self,
+        room: &str,
+        inbox_roster: Option<crate::identity::roster::Roster>,
+        replay: bool,
+    ) -> Option<String> {
+        let door_proof = self
+            .rooms
+            .doors
+            .get(room)
+            .and_then(|d| self.proof_door().and_then(|session| door_proof(session, room, &d.0)));
+        let text = serde_json::to_string(&ClientMsg::Join { room: room.to_string(), inbox_roster, door_proof }).ok()?;
+        let now = Instant::now();
+        if replay {
+            self.replayed_joins.insert(room.to_string(), (text.clone(), now));
+        } else if let Some((replayed, at)) = self.replayed_joins.remove(room)
+            && replayed == text
+            && now.saturating_duration_since(at) <= self.timing.replay_echo
+        {
+            return None;
+        }
+        self.rooms.last_join_attempt = Some(room.to_string());
+        Some(text)
+    }
+
+    fn proof_door(&self) -> Option<&RelaySession> {
+        if self.sid.is_some() {
+            self.session_door.as_ref()
+        } else {
+            self.socket.as_ref().map(|s| &s.door)
+        }
+    }
+
+    /// A fresh session joins every room again, newest roster and door included, then
+    /// subscribes and registers the opt-in, all ahead of whatever is queued.
+    fn replay_rooms(&mut self) {
+        let mut rooms: Vec<&String> = self.rooms.joined.iter().collect();
+        rooms.sort_by_key(|room| (!self.rooms.inbox_rosters.contains_key(*room), (*room).clone()));
+        let mut entries: Vec<Entry<WsCommand>> = rooms
+            .into_iter()
+            .map(|room| {
+                Entry::Replay(match self.rooms.inbox_rosters.get(room) {
+                    Some(roster) => WsCommand::JoinInbox { room_code: room.clone(), roster: roster.clone() },
+                    None => WsCommand::JoinRoom { room_code: room.clone() },
+                })
+            })
+            .collect();
+        let mut subscriptions: Vec<(&String, &Vec<String>)> = self.rooms.subscriptions.iter().collect();
+        subscriptions.sort();
+        entries.extend(subscriptions.into_iter().map(|(room, topics)| {
+            Entry::Replay(WsCommand::Subscribe { room_code: room.clone(), topics: topics.clone() })
+        }));
+        if let Some((enabled, retention_secs)) = self.rooms.offline_optin {
+            entries.push(Entry::Replay(WsCommand::SetOfflineBuffer { enabled, retention_secs }));
+        }
+        let pruned = self.out.push_front(entries, super::frame_auth::now_ms());
+        if pruned > 0 {
+            hollow_log!("[HOLLOW-WS] Outbound queue full: {pruned} unwritten frame(s) dropped");
+        }
+        let _ = self.event_tx.send(WsEvent::RoomBudgetUpdate {
+            joined: self.rooms.joined.len() as u32,
+            limit: ROOM_BUDGET_LIMIT,
+        });
+    }
+
+    /// After a `reprove` resume: join every room we hold a door for again, proving it
+    /// for the new socket.
+    fn reprove_doors(&mut self) {
+        let mut rooms: Vec<String> =
+            self.rooms.doors.keys().filter(|room| self.rooms.joined.contains(*room)).cloned().collect();
+        rooms.sort();
+        let entries = rooms
+            .into_iter()
+            .map(|room| {
+                Entry::Command(match self.rooms.inbox_rosters.get(&room) {
+                    Some(roster) => WsCommand::JoinInbox { room_code: room, roster: roster.clone() },
+                    None => WsCommand::JoinRoom { room_code: room },
+                })
+            })
+            .collect();
+        self.out.push_front(entries, super::frame_auth::now_ms());
+    }
+
+    // -- Inbound --
+
+    async fn on_frame(&mut self, frame: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>) {
+        let now = Instant::now();
+        let msg = match frame {
+            Some(Ok(msg)) => msg,
+            Some(Err(e)) => {
+                hollow_log!("[HOLLOW-WS] Read error: {e}");
+                self.drop_socket(Why::Lost).await;
+                return;
+            }
+            None => {
+                hollow_log!("[HOLLOW-WS] Connection closed by server");
+                self.drop_socket(Why::Lost).await;
+                return;
+            }
+        };
+        let Some(socket) = self.socket.as_mut() else { return };
+        socket.live.heard(now);
+        let session = socket.session;
+        if self.attempt.as_ref().is_some_and(|a| a.racing) {
+            hollow_log!("[HOLLOW-WS] The old socket answered first; the new one is dropped");
+            self.attempt = None;
+        }
+        let ack_now = match msg {
+            Message::Text(text) => {
+                let due = session && self.inbound.received(relay_session::relay_frame_counts(&Frame::Text(text.clone())), now);
+                self.on_text(&text);
+                due
+            }
+            Message::Binary(data) => {
+                let due = session && self.inbound.received(relay_session::relay_frame_counts(&Frame::Binary(data.clone())), now);
+                dispatch_binary(&self.event_tx, &data);
+                due
+            }
+            Message::Ping(data) => {
+                self.write_control(Message::Pong(data)).await;
+                false
+            }
+            Message::Close(frame) => {
+                // The relay never closes silently (bad_license, auth timeout, moved).
+                let reason = frame.as_ref().map(|f| f.reason.to_string()).unwrap_or_default();
+                hollow_log!("[HOLLOW-WS] Connection closed by server: {reason}");
+                self.drop_socket(Why::Lost).await;
+                false
+            }
+            Message::Pong(_) | Message::Frame(_) => false,
+        };
+        if ack_now {
+            self.send_ack().await;
+        }
+    }
+
+    fn on_text(&mut self, text: &str) {
+        let Ok(msg) = serde_json::from_str::<ServerMsg>(text) else { return };
+        match msg {
+            ServerMsg::HbAck { h } | ServerMsg::Ack { h } => {
+                if self.socket.as_ref().is_some_and(|s| s.session) {
+                    self.out.ack(h);
                 }
             }
+            ServerMsg::Reconnect { after_ms } => {
+                let wait = relay_session::drain_wait(after_ms);
+                hollow_log!("[HOLLOW-WS] The relay is restarting: resuming in {}ms", wait.as_millis());
+                self.drain_at = Some(Instant::now() + wait);
+            }
+            other => handle_server_message(&self.event_tx, other, &mut self.rooms, &mut self.replayed_joins, &self.relay_host),
+        }
+    }
+
+    // -- Writes outside the queue (uncounted) --
+
+    /// A protocol frame on the current socket; false (and the socket dropped) on failure.
+    async fn write_control(&mut self, msg: Message) -> bool {
+        let Some(socket) = self.socket.as_mut() else { return false };
+        match bounded_send(&mut socket.write, msg).await {
+            Ok(()) => true,
+            Err(e) => {
+                hollow_log!("[HOLLOW-WS] Send failed: {e}");
+                self.drop_socket(Why::SendFailed).await;
+                false
+            }
+        }
+    }
+
+    async fn send_ack(&mut self) -> bool {
+        let h = self.inbound.acked();
+        self.write_control(relay_session::ack_frame(h).to_message()).await
+    }
+
+    /// A heartbeat: `hb` with our count on a session socket, a WebSocket ping on an
+    /// older relay, which answers pings with pongs.
+    async fn beat(&mut self) -> bool {
+        let Some(socket) = self.socket.as_mut() else { return false };
+        let msg = if socket.session {
+            relay_session::hb_frame(self.inbound.acked()).to_message()
+        } else {
+            Message::Ping(vec![0x01].into())
+        };
+        socket.live.beat_sent(Instant::now());
+        self.write_control(msg).await
+    }
+
+    // -- Timers --
+
+    async fn on_timers(&mut self) {
+        let now = Instant::now();
+        if self.suspending.as_ref().is_some_and(|s| now >= s.until) {
+            self.finish_suspend().await;
+        }
+        if self.socket.is_some() && self.drain_at.is_some_and(|at| now >= at) {
+            self.drain_at = None;
+            self.drop_socket(Why::Drain).await;
+        }
+        let dead = self.socket.as_ref().and_then(|s| s.live.dead_at(&self.timing)).is_some_and(|at| now >= at);
+        if dead {
+            hollow_log!("[HOLLOW-WS] Nothing heard for {}s after a heartbeat: the socket is dead", self.timing.dead_after.as_secs());
+            self.drop_socket(Why::Dead).await;
+        }
+        let missed = self.socket.as_ref().and_then(|s| s.live.probe_missed_at()).is_some_and(|at| now >= at);
+        if missed {
+            if let Some(s) = self.socket.as_mut() {
+                s.live.probe_given_up();
+            }
+            if self.attempt.is_none() {
+                hollow_log!("[HOLLOW-WS] No answer to the probe: racing a new socket");
+                self.start_attempt(true);
+            }
+        }
+        let ack_due = self.socket.as_ref().is_some_and(|s| s.session)
+            && self.inbound.ack_due_at(&self.timing).is_some_and(|at| now >= at);
+        if ack_due {
+            self.send_ack().await;
+        }
+        if now >= self.next_beat {
+            self.on_beat(now).await;
+        }
+        let reconnect =
+            self.socket.is_none() && self.attempt.is_none() && self.reconnect_at.is_some_and(|at| now >= at);
+        if reconnect {
+            self.reconnect_at = None;
+            self.start_attempt(false);
+        }
+    }
+
+    /// The heartbeat tick: also where a machine that slept is noticed, because the
+    /// monotonic clock stood still while the wall clock ran (section 9.5).
+    async fn on_beat(&mut self, now: Instant) {
+        let reading = Clocks { wall_ms: super::frame_auth::now_ms(), mono: now };
+        let slept = self.clocks.slept(&reading, &self.timing);
+        self.clocks = reading;
+        self.next_beat = now + self.timing.heartbeat_every(self.background);
+        if slept {
+            hollow_log!("[HOLLOW-WS] The clocks drifted apart: the machine slept");
+            self.nudge("wake", false).await;
+        } else if self.socket.is_some() {
+            self.beat().await;
+        }
+    }
+
+    // -- Controls --
+
+    async fn on_control(&mut self, ctl: Control) {
+        match ctl {
+            Control::Nudge { reason, external } => self.nudge(&reason, external).await,
+            Control::Background(background) => {
+                self.background = background;
+                self.next_beat = Instant::now() + self.timing.heartbeat_every(background);
+                if self.socket.as_ref().is_some_and(|s| s.session) {
+                    let frame = if background { relay_session::INACTIVE } else { relay_session::ACTIVE };
+                    if !self.write_control(Message::Text(frame.into())).await {
+                        return;
+                    }
+                }
+                if !background {
+                    self.nudge("foreground", true).await;
+                }
+            }
+            Control::Suspend(done) => self.begin_suspend(done),
+        }
+    }
+
+    /// Section 9.6: a socket that spoke in the quiet window is fine; otherwise probe it
+    /// and race a new socket on a miss. With no socket, connect now. Every nudge resets
+    /// the backoff.
+    async fn nudge(&mut self, reason: &str, external: bool) {
+        if self.suspended && !external {
+            return;
+        }
+        if external {
+            self.suspended = false;
+            if let Some(s) = self.suspending.take() {
+                let _ = s.done.send(());
+            }
+        }
+        self.backoff.reset();
+        let now = Instant::now();
+        match &self.socket {
+            Some(socket) => {
+                if self.attempt.is_some() || !socket.live.wants_probe(now, &self.timing) {
+                    return;
+                }
+                hollow_log!("[HOLLOW-WS] Nudge ({reason}): probing the socket");
+                if self.beat().await
+                    && let Some(socket) = self.socket.as_mut()
+                {
+                    socket.live.probe_sent(now, &self.timing);
+                }
+            }
+            None => match &self.attempt {
+                Some(a) if now.saturating_duration_since(a.started) >= self.timing.nudge_quiet => {
+                    hollow_log!("[HOLLOW-WS] Nudge ({reason}): starting the connect over");
+                    self.attempt = None;
+                    self.start_attempt(false);
+                }
+                Some(_) => {}
+                None => {
+                    hollow_log!("[HOLLOW-WS] Nudge ({reason}): connecting now");
+                    self.drain_at = None;
+                    self.reconnect_at = Some(now);
+                }
+            },
+        }
+    }
+
+    fn begin_suspend(&mut self, done: oneshot::Sender<()>) {
+        if self.socket.is_none() {
+            self.suspended = true;
+            self.attempt = None;
+            self.reconnect_at = None;
+            self.drain_at = None;
+            hollow_log!("[HOLLOW-WS] Suspended with no socket open");
+            let _ = done.send(());
+            return;
+        }
+        if self.attempt.as_ref().is_some_and(|a| a.racing) {
+            self.attempt = None;
+        }
+        if let Some(previous) = self.suspending.take() {
+            let _ = previous.done.send(());
+        }
+        self.suspending = Some(Suspending { until: Instant::now() + self.timing.suspend_wait, done, asked: false });
+    }
+
+    /// Once the queue is written and the relay acked it all (or right away without a
+    /// session), close; a heartbeat asks the relay for its count instead of waiting for
+    /// its ack timer.
+    async fn check_suspend(&mut self) {
+        let Some(session) = self.socket.as_ref().map(|s| s.session) else { return };
+        let Some(asked) = self.suspending.as_ref().map(|s| s.asked) else { return };
+        if self.out.has_unwritten() {
+            return;
+        }
+        if !session || self.out.all_acked() {
+            self.finish_suspend().await;
+        } else if !asked {
+            if let Some(s) = self.suspending.as_mut() {
+                s.asked = true;
+            }
+            self.beat().await;
+        }
+    }
+
+    async fn finish_suspend(&mut self) {
+        let unacked_in = self.socket.as_ref().is_some_and(|s| s.session) && self.inbound.ack_due_at(&self.timing).is_some();
+        if unacked_in && !self.send_ack().await {
+            return;
+        }
+        if self.socket.is_some() {
+            self.drop_socket(Why::Suspend).await;
+        } else if let Some(s) = self.suspending.take() {
+            self.suspended = true;
+            let _ = s.done.send(());
+        }
+        hollow_log!("[HOLLOW-WS] Suspended: closed until the next nudge");
+    }
+
+    // -- Sockets --
+
+    fn start_attempt(&mut self, racing: bool) {
+        if !racing {
+            let _ = self.event_tx.send(WsEvent::Connecting { reconnecting: self.attempts > 0 });
+            hollow_log!("[HOLLOW-WS] Connecting to {}...", self.dial.url);
+        }
+        self.attempts += 1;
+        let held = self.sid.clone().map(|sid| (sid, self.inbound.h()));
+        let fut = open_socket(self.dial.clone(), true, held, self.timing.clone());
+        self.attempt = Some(Attempt { fut: Box::pin(fut), racing, started: Instant::now() });
+    }
+
+    async fn on_attempt(&mut self, result: Result<Opened, ConnectError>) {
+        let Some(attempt) = self.attempt.take() else { return };
+        let held = self.sid.is_some();
+        let judged = result.and_then(|opened| {
+            relay_session::judge(&opened.ask, held, opened.reply)
+                .map(|established| (opened.stream, opened.door, established))
+                .map_err(ConnectError::Other)
+        });
+        let (stream, door, established) = match judged {
+            Ok(up) => up,
             Err(e) => {
                 hollow_log!("[HOLLOW-WS] Connection failed: {e}");
+                if attempt.racing {
+                    // The old socket is still being judged; the dead rule decides it.
+                    return;
+                }
                 // A busy key is still OUR key: the holder is usually our own ghost
-                // socket or a sibling device, so keep the backoff going and tell
-                // the UI once per outage; only a refused key stops the loop. Only
-                // the relay's exact refusal codes count, never text that merely
-                // mentions a license.
+                // socket or a sibling device, so keep retrying and tell the UI once
+                // per outage; only a refused key stops the client. Only the relay's
+                // exact refusal codes count, never text that merely mentions a license.
                 match e {
                     ConnectError::License(LicenseRefusal::InUse) => {
-                        if !license_busy_notified {
-                            license_busy_notified = true;
-                            let _ = event_tx.send(WsEvent::LicenseError { reason: LicenseRefusal::InUse.code().into() });
+                        if !self.license_busy_notified {
+                            self.license_busy_notified = true;
+                            let _ = self.event_tx.send(WsEvent::LicenseError { reason: LicenseRefusal::InUse.code().into() });
                         }
                     }
                     ConnectError::License(refusal) => {
                         hollow_log!("[HOLLOW-WS] License refused, not retrying");
-                        let _ = event_tx.send(WsEvent::LicenseError { reason: refusal.code().into() });
+                        let _ = self.event_tx.send(WsEvent::LicenseError { reason: refusal.code().into() });
+                        self.stopped = true;
                         return;
                     }
                     ConnectError::Other(_) => {}
                 }
+                if !held {
+                    let _ = self.event_tx.send(WsEvent::SessionLost);
+                }
+                self.schedule(Why::Lost);
+                return;
+            }
+        };
+        if attempt.racing {
+            // The new socket answered first; the old one goes quietly and the relay
+            // moves the session over.
+            if let Some(old) = self.socket.take() {
+                self.forget_socket(&old);
+            }
+            self.notify(relay_session::on_drop(held));
+        }
+        self.establish(stream, door, established).await;
+    }
+
+    async fn establish(&mut self, stream: WsStream, door: RelaySession, established: Established) {
+        let now = Instant::now();
+        let (write, read) = stream.split();
+        match established {
+            Established::Fresh { sid, lost } => {
+                if lost {
+                    self.lose_session();
+                }
+                self.notify(relay_session::on_established(&Established::Fresh { sid: sid.clone(), lost }));
+                let session = sid.is_some();
+                self.session_door = sid.as_ref().map(|_| door.clone());
+                self.sid = sid;
+                self.inbound = Inbound::default();
+                self.replayed_joins.clear();
+                self.socket = Some(Socket { write, read, door, session, live: Liveness::new(now) });
+                self.up(now);
+                hollow_log!("[HOLLOW-WS] Connected and authenticated ({})", if session { "new session" } else { "no session" });
+                self.replay_rooms();
+                if self.background && session {
+                    self.write_control(Message::Text(relay_session::INACTIVE.into())).await;
+                }
+            }
+            Established::Resumed { h, gap, reprove } => {
+                let Some(resend) = self.out.resume(h) else {
+                    hollow_log!("[HOLLOW-WS] The relay resumed numbers that are not ours: starting a fresh session");
+                    self.notify(relay_session::on_resume_refused());
+                    self.lose_session();
+                    self.backoff.reset();
+                    self.reconnect_at = Some(now);
+                    return;
+                };
+                self.notify(relay_session::on_established(&Established::Resumed { h, gap, reprove }));
+                if reprove {
+                    self.session_door = Some(door.clone());
+                }
+                self.socket = Some(Socket { write, read, door, session: true, live: Liveness::new(now) });
+                self.up(now);
+                hollow_log!(
+                    "[HOLLOW-WS] Session resumed: {} frame(s) to send again{}",
+                    resend.len(),
+                    if gap { ", the relay's ring had a gap" } else { "" }
+                );
+                for frame in resend {
+                    if !self.write_control(frame.to_message()).await {
+                        return;
+                    }
+                }
+                if reprove {
+                    self.reprove_doors();
+                }
             }
         }
+    }
 
-        let _ = event_tx.send(WsEvent::SessionLost);
+    fn up(&mut self, now: Instant) {
+        self.backoff.reset();
+        self.license_busy_notified = false;
+        self.reconnect_at = None;
+        self.next_beat = now + self.timing.heartbeat_every(self.background);
+    }
 
-        // Drain any commands that arrived during the failed connection attempt.
-        // If the channel is CLOSED (sender dropped → node shutting down), stop
-        // reconnecting and end the task instead of looping forever.
-        loop {
-            match cmd_rx.try_recv() {
-                Ok(cmd) => {
-                    track_room_change(&state, &cmd, &event_tx).await;
-                    pending_commands.push(cmd);
-                }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    hollow_log!("[HOLLOW-WS] Command channel closed during reconnect — shutting down WS client task");
-                    break 'reconnect;
-                }
-            }
+    /// The session is gone: its unacked data waits for the next one, its numbers and
+    /// joins start over.
+    fn lose_session(&mut self) {
+        self.out.lose_session();
+        self.inbound = Inbound::default();
+        self.sid = None;
+        self.session_door = None;
+        self.replayed_joins.clear();
+    }
+
+    fn forget_socket(&mut self, socket: &Socket) {
+        if !socket.session {
+            self.replayed_joins.clear();
         }
+    }
 
-        // Backoff, unless a call is riding on this socket: a live session retries
-        // at a steady short interval and does NOT let the ladder climb, so an ICE
-        // restart can be delivered inside the call's hold-open window. See
-        // REALTIME_ACTIVE for why this is conditional rather than a lower cap.
+    async fn drop_socket(&mut self, why: Why) {
+        let Some(socket) = self.socket.take() else { return };
+        self.forget_socket(&socket);
+        match why {
+            Why::Suspend => goodbye(socket, None, "suspend").await,
+            Why::Drain => goodbye(socket, None, "drain").await,
+            _ => drop(socket),
+        }
+        self.notify(relay_session::on_drop(self.sid.is_some()));
+        if let Some(a) = self.attempt.as_mut() {
+            a.racing = false;
+        }
+        if let Some(s) = self.suspending.take() {
+            self.suspended = true;
+            let _ = s.done.send(());
+        }
+        self.schedule(why);
+    }
+
+    /// When to try again: at once after a dead path or a failed write, when the
+    /// relay's drain hint says, else after the backoff; never while suspended.
+    fn schedule(&mut self, why: Why) {
+        if self.suspended {
+            self.reconnect_at = None;
+            return;
+        }
+        let now = Instant::now();
+        let at = match why {
+            Why::Dead | Why::SendFailed | Why::Drain => {
+                self.backoff.reset();
+                self.drain_at = None;
+                now
+            }
+            Why::Lost | Why::Suspend => match self.drain_at.take() {
+                Some(at) => at,
+                None => now + self.retry_wait(),
+            },
+        };
+        self.reconnect_at = Some(at);
+    }
+
+    fn retry_wait(&mut self) -> Duration {
+        // A call riding on this socket retries at a steady short interval and does
+        // NOT let the ladder climb, so an ICE restart can be delivered inside the
+        // call's hold-open window. See REALTIME_ACTIVE.
         if realtime_active() {
-            hollow_log!(
-                "[HOLLOW-WS] Reconnecting in {REALTIME_RETRY_SECS}s (call in progress)..."
-            );
-            tokio::time::sleep(Duration::from_secs(REALTIME_RETRY_SECS)).await;
-            backoff_secs = 1;
-        } else {
-            hollow_log!("[HOLLOW-WS] Reconnecting in {backoff_secs}s...");
-            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-            backoff_secs = (backoff_secs * 2).min(30);
+            self.backoff.reset();
+            return self.timing.realtime_retry;
         }
+        let mut roll = [0u8; 8];
+        let _ = getrandom::fill(&mut roll);
+        self.backoff.next(u64::from_le_bytes(roll), &self.timing)
+    }
+
+    /// The node is shutting down: end the session so the relay hands its ring to the
+    /// offline buffer now instead of after the grace window.
+    async fn shutdown(&mut self) {
+        hollow_log!("[HOLLOW-WS] Command channel closed: shutting down the WS client task");
+        if let Some(socket) = self.socket.take() {
+            let end = socket.session.then_some(relay_session::END);
+            goodbye(socket, end, "end").await;
+        }
+    }
+}
+
+/// Close a socket on purpose: an optional last frame, the close frame, then the relay's
+/// close reply, so the goodbye is read rather than lost to a reset of a socket closed
+/// with unread data in it. Frames still arriving are not counted: the relay resends
+/// them on resume.
+async fn goodbye(mut socket: Socket, last: Option<&'static str>, reason: &'static str) {
+    if let Some(text) = last
+        && bounded_send_within(&mut socket.write, Message::Text(text.into()), GOODBYE_WRITE_TIMEOUT).await.is_err()
+    {
+        return;
+    }
+    let close = CloseFrame { code: CloseCode::Normal, reason: reason.into() };
+    if bounded_send_within(&mut socket.write, Message::Close(Some(close)), GOODBYE_WRITE_TIMEOUT).await.is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(GOODBYE_WRITE_TIMEOUT, async {
+        while let Some(Ok(msg)) = socket.read.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
+/// Room state ranks last in the prune; a sealed live-only frame first once its
+/// receiver would refuse it.
+impl Queued for WsCommand {
+    fn bytes(&self) -> usize {
+        const OVERHEAD: usize = 128;
+        let payload = match self {
+            WsCommand::SendToRoom { data, .. }
+            | WsCommand::SendPublic { data, .. }
+            | WsCommand::SendDirect { data, .. }
+            | WsCommand::SendDirectImage { data, .. }
+            | WsCommand::SendBinaryDirect { data, .. }
+            | WsCommand::SendToRoomTopic { data, .. }
+            | WsCommand::SendChannelDirect { data, .. } => data.len(),
+            WsCommand::Carry { json, .. } => json.len(),
+            WsCommand::SetPushPrefs { prefs_json } => prefs_json.len(),
+            WsCommand::KillDeposit { blob, .. } => blob.len(),
+            WsCommand::JoinInbox { .. } | WsCommand::LockPut { .. } => 4096,
+            _ => 0,
+        };
+        OVERHEAD + payload
+    }
+
+    fn class(&self) -> Class {
+        match self {
+            WsCommand::JoinRoom { .. }
+            | WsCommand::JoinInbox { .. }
+            | WsCommand::LeaveRoom { .. }
+            | WsCommand::Subscribe { .. }
+            | WsCommand::SetDoor { .. }
+            | WsCommand::SetOfflineBuffer { .. } => Class::RoomState,
+            WsCommand::SendToRoom { data, .. }
+            | WsCommand::SendPublic { data, .. }
+            | WsCommand::SendDirect { data, .. }
+            | WsCommand::SendDirectImage { data, .. }
+            | WsCommand::SendBinaryDirect { data, .. }
+            | WsCommand::SendToRoomTopic { data, .. }
+            | WsCommand::SendChannelDirect { data, .. } => sealed_class(data),
+            _ => Class::Ordinary,
+        }
+    }
+
+    fn frame_class(frame: &Frame) -> Class {
+        match frame {
+            Frame::Binary(bytes) => binary_payload(bytes).map(sealed_class).unwrap_or(Class::Ordinary),
+            Frame::Text(_) => Class::Ordinary,
+        }
+    }
+}
+
+/// How the prune ranks a sealed payload: a live-only message (`HavenMessage::live_only`)
+/// with its seal time, else ordinary.
+fn sealed_class(payload: &[u8]) -> Class {
+    let Some((sealed_ms, body)) = sealed_parts(payload) else { return Class::Ordinary };
+    match serde_json::from_slice::<super::types::HavenMessage>(body) {
+        Ok(msg) if msg.live_only() => Class::LiveOnly { sealed_ms },
+        _ => Class::Ordinary,
+    }
+}
+
+/// The seal time and body of a frame `frame_auth::seal` made, unchecked: only for
+/// ranking our own queued frames.
+fn sealed_parts(frame: &[u8]) -> Option<(i64, &[u8])> {
+    let rest = frame.strip_prefix(&super::frame_auth::MAGIC[..])?;
+    let ts_ms = i64::from_be_bytes(rest.get(..8)?.try_into().ok()?);
+    let rest = rest.get(8 + super::frame_auth::NONCE_LEN..)?;
+    let (&route_len, rest) = rest.split_first()?;
+    Some((ts_ms, rest.get(route_len as usize + SEAL_SIG_LEN..)?))
+}
+
+/// The peer payload of a client binary frame: what follows its NUL-ended fields.
+fn binary_payload(frame: &[u8]) -> Option<&[u8]> {
+    let (&op, mut rest) = frame.split_first()?;
+    let fields = match op {
+        0x03 | 0x0A => 1,
+        0x02 | 0x04 | 0x07 | 0x08 => 2,
+        0x09 => 3,
+        _ => return None,
+    };
+    for _ in 0..fields {
+        let at = rest.iter().position(|&b| b == 0)?;
+        rest = &rest[at + 1..];
+    }
+    if op == 0x09 {
+        rest = rest.get(1..)?;
+    }
+    Some(rest)
+}
+
+fn binary_frame(op: u8, fields: &[&str], data: &[u8]) -> Frame {
+    let mut frame = Vec::with_capacity(1 + fields.iter().map(|f| f.len() + 1).sum::<usize>() + data.len());
+    frame.push(op);
+    for field in fields {
+        frame.extend_from_slice(field.as_bytes());
+        frame.push(0x00);
+    }
+    frame.extend_from_slice(data);
+    Frame::Binary(frame.into())
+}
+
+/// The frame a command becomes on the wire; None for one that writes nothing. Joins
+/// and leaves are rendered by the client, which proves doors and drops repeats.
+fn command_frame(cmd: &WsCommand) -> Option<Frame> {
+    let json = |v: serde_json::Value| Some(Frame::text(v.to_string()));
+    match cmd {
+        WsCommand::SendBinaryDirect { room_code, target_peer, data } => Some(binary_frame(0x02, &[room_code, target_peer], data)),
+        WsCommand::SendToRoom { room_code, data } => Some(binary_frame(0x03, &[room_code], data)),
+        WsCommand::SendPublic { room_code, data } => Some(binary_frame(0x0A, &[room_code], data)),
+        WsCommand::SendDirect { room_code, target_peer, data } => Some(binary_frame(0x04, &[room_code, target_peer], data)),
+        // Same layout as 0x04, but 0x08 tells the relay this direct carries an inlined
+        // image, so the image cap applies to its offline buffer.
+        WsCommand::SendDirectImage { room_code, target_peer, data } => Some(binary_frame(0x08, &[room_code, target_peer], data)),
+        WsCommand::SendToRoomTopic { room_code, topic, data } => Some(binary_frame(0x07, &[room_code, topic], data)),
+        // [0x09][room\0][target\0][channel\0][flags:1][payload]; flags bit0 = mention.
+        // The payload may be empty (a push trigger only).
+        WsCommand::SendChannelDirect { room_code, target_peer, channel_id, mention, data } => {
+            let mut flagged = Vec::with_capacity(1 + data.len());
+            flagged.push(if *mention { 0x01 } else { 0x00 });
+            flagged.extend_from_slice(data);
+            Some(binary_frame(0x09, &[room_code, target_peer, channel_id], &flagged))
+        }
+        WsCommand::CheckPeers { peers, rooms } => json(serde_json::json!({ "type": "check_peers", "peers": peers, "rooms": rooms })),
+        WsCommand::DiscoverPeers { room_code } => json(serde_json::json!({ "type": "discover_peers", "room": room_code })),
+        WsCommand::GetTurnCredentials => json(serde_json::json!({ "type": "get_turn_credentials" })),
+        WsCommand::GetMediaForwarder => json(serde_json::json!({ "type": "get_media_forwarder" })),
+        WsCommand::Subscribe { room_code, topics } => {
+            json(serde_json::json!({ "type": "subscribe", "room": room_code, "topics": topics }))
+        }
+        WsCommand::ClaimNickname { nickname, master, claim } => json(serde_json::json!({
+            "type": "claim_nickname",
+            "nickname": nickname,
+            "master": master,
+            "master_key": claim.master_key,
+            "ts": claim.ts_ms,
+            "sig": claim.sig,
+        })),
+        WsCommand::ReleaseNickname => json(serde_json::json!({ "type": "release_nickname" })),
+        WsCommand::ResolveNickname { nickname } => json(serde_json::json!({ "type": "resolve_nickname", "nickname": nickname })),
+        WsCommand::ClaimLinkCode { code } => json(serde_json::json!({ "type": "claim_link_code", "code": code })),
+        WsCommand::ReleaseLinkCode => json(serde_json::json!({ "type": "release_link_code" })),
+        WsCommand::ResolveLinkCode { code } => json(serde_json::json!({ "type": "resolve_link_code", "code": code })),
+        WsCommand::RegisterPushToken { token, platform } => {
+            json(serde_json::json!({ "type": "register_push_token", "token": token, "platform": platform }))
+        }
+        WsCommand::SetPushPrefs { prefs_json } => {
+            // Embedded as a real JSON object so the relay parses it directly; a
+            // malformed prefs string is dropped here.
+            let Ok(prefs) = serde_json::from_str::<serde_json::Value>(prefs_json) else {
+                hollow_log!("[HOLLOW-WS] SetPushPrefs: invalid prefs JSON, skipped");
+                return None;
+            };
+            json(serde_json::json!({ "type": "set_push_prefs", "prefs": prefs }))
+        }
+        WsCommand::SetOfflineBuffer { enabled, retention_secs } => json(serde_json::json!({
+            "type": "set_offline_buffer",
+            "enabled": enabled,
+            "retention_secs": retention_secs,
+        })),
+        WsCommand::ReportUser { target, category } => {
+            json(serde_json::json!({ "type": "report", "target": target, "category": category }))
+        }
+        WsCommand::SetTopicBuffer { room_code, channels, retention_secs, clear, auth } => {
+            // Every field the signature covers goes on the wire as signed.
+            let mut msg = serde_json::json!({
+                "type": "set_topic_buffer",
+                "room": room_code,
+                "channels": channels,
+                "retention_secs": retention_secs,
+                "clear": clear,
+            });
+            if let Some(auth) = auth {
+                msg["owner"] = auth.owner.clone().into();
+                msg["ts"] = auth.ts_ms.into();
+                msg["sig"] = auth.sig.clone().into();
+            }
+            json(msg)
+        }
+        WsCommand::TopicCatchup { room_code, channel_id, max_age_secs, end } => {
+            json(topic_catchup_frame(room_code, channel_id, *max_age_secs, *end))
+        }
+        WsCommand::KillDeposit { targets, issued_at_ms, blob } => json(serde_json::json!({
+            "type": "kill_deposit",
+            "targets": targets,
+            "issued_at_ms": issued_at_ms,
+            "blob": blob,
+        })),
+        WsCommand::KillAck { signal } => json(kill_ack_frame(signal.as_ref())),
+        WsCommand::LockGet { locks } => {
+            let locks: Vec<serde_json::Value> = locks
+                .iter()
+                .map(|(server, owner)| serde_json::json!({ "server": server, "owner": owner }))
+                .collect();
+            json(serde_json::json!({ "type": "lock_get", "locks": locks }))
+        }
+        WsCommand::LockPut { server, owner, links } => {
+            json(serde_json::json!({ "type": "lock_put", "server": server, "owner": owner, "links": links }))
+        }
+        WsCommand::UnregisterPushToken => json(serde_json::json!({ "type": "unregister_push_token" })),
+        WsCommand::JoinRoom { .. }
+        | WsCommand::JoinInbox { .. }
+        | WsCommand::LeaveRoom { .. }
+        | WsCommand::SetDoor { .. }
+        | WsCommand::Carry { .. } => None,
+    }
+}
+
+/// Keep (or forget) the door of `room`; whether it changed.
+fn remember_door(doors: &mut HashMap<String, DoorSecret>, room: &str, door: Option<DoorSecret>) -> bool {
+    match door {
+        Some(door) => doors.insert(room.to_string(), door.clone()).is_none_or(|old| *old.0 != *door.0),
+        None => doors.remove(room).is_some(),
     }
 }
 
@@ -950,7 +1852,7 @@ pub(crate) fn auth_v2_message(
     format!("hollow-ws-auth2\n{domain}\n{nonce}\n{peer_id}\n{timestamp}\n{mode}\n{license_digest}")
 }
 
-fn license_digest(key: Option<&str>) -> String {
+pub(crate) fn license_digest(key: Option<&str>) -> String {
     use sha2::{Digest, Sha256};
     key.filter(|k| !k.is_empty())
         .map(|k| hex::encode(Sha256::digest(k.as_bytes())))
@@ -961,25 +1863,171 @@ fn is_auth_nonce(nonce: &str) -> bool {
     nonce.len() == 64 && nonce.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Reads the relay's next text frame as a [`ServerMsg`], within the auth window.
-async fn read_auth_reply<S>(read: &mut S) -> Result<(ServerMsg, String), ConnectError>
+/// Reads the relay's next text frame as an [`AuthReply`], within `limit`.
+async fn read_auth_reply<S>(read: &mut S, limit: Duration) -> Result<(AuthReply, String), ConnectError>
 where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
-    let response = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .map_err(|_| "Auth timeout".to_string())?
-        .ok_or_else(|| "Connection closed before auth response".to_string())?
-        .map_err(|e| format!("Read error: {e}"))?;
-    let Message::Text(text) = response else {
-        return Err("Unexpected auth response".to_string().into());
-    };
-    match serde_json::from_str::<ServerMsg>(&text) {
-        Ok(msg) => Ok((msg, text.to_string())),
-        Err(_) => Err(format!("Auth rejected: {text}").into()),
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        let response = tokio::time::timeout_at(deadline, read.next())
+            .await
+            .map_err(|_| "Auth timeout".to_string())?
+            .ok_or_else(|| "Connection closed before auth response".to_string())?
+            .map_err(|e| format!("Read error: {e}"))?;
+        let text = match response {
+            Message::Text(text) => text,
+            Message::Ping(_) | Message::Pong(_) => continue,
+            _ => return Err("Unexpected auth response".to_string().into()),
+        };
+        return match serde_json::from_str::<AuthReply>(&text) {
+            Ok(reply) => Ok((reply, text.to_string())),
+            Err(_) => Err(format!("Auth rejected: {text}").into()),
+        };
     }
 }
 
+/// A WebSocket over a TCP stream we opened ourselves, so the stream's options are set
+/// before TLS.
+async fn dial_websocket(url: &str) -> Result<WsStream, ConnectError> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let request = url.into_client_request().map_err(|e| format!("Bad relay URL: {e}"))?;
+    let host = request.uri().host().ok_or_else(|| format!("Bad relay URL: {url}"))?;
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_string();
+    let port = request
+        .uri()
+        .port_u16()
+        .or_else(|| match request.uri().scheme_str() {
+            Some("wss") => Some(443),
+            Some("ws") => Some(80),
+            _ => None,
+        })
+        .ok_or_else(|| format!("Bad relay URL: {url}"))?;
+    let addr = dial_override().unwrap_or_else(|| format!("{host}:{port}"));
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+    limit_unacked_send_time(&tcp);
+    let (stream, _response) = tokio_tungstenite::client_async_tls_with_config(request, tcp, None, None)
+        .await
+        .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+    Ok(stream)
+}
+
+/// Debug builds only: a `relay_connect` file in the data dir (one `ip:port` line) is
+/// dialled instead of the relay, so the fleet can cut one app's path at its proxy.
+/// TLS and the auth domain stay the relay's.
+#[cfg(debug_assertions)]
+fn dial_override() -> Option<String> {
+    dial_override_in(&crate::identity::data_dir().ok()?)
+}
+
+#[cfg(not(debug_assertions))]
+fn dial_override() -> Option<String> {
+    None
+}
+
+#[cfg(debug_assertions)]
+fn dial_override_in(dir: &std::path::Path) -> Option<String> {
+    let line = std::fs::read_to_string(dir.join("relay_connect")).ok()?;
+    let addr = line.trim();
+    addr.parse::<std::net::SocketAddr>().is_ok().then(|| addr.to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn limit_unacked_send_time(tcp: &tokio::net::TcpStream) {
+    if let Err(e) = socket2::SockRef::from(tcp).set_tcp_user_timeout(Some(TCP_USER_TIMEOUT)) {
+        hollow_log!("[HOLLOW-WS] TCP_USER_TIMEOUT not set: {e}");
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn limit_unacked_send_time(_tcp: &tokio::net::TcpStream) {}
+
+/// A socket that passed auth, with what it asked and what the relay answered.
+struct Opened {
+    stream: WsStream,
+    door: RelaySession,
+    ask: Ask,
+    reply: AuthReply,
+}
+
+/// Connect, take the relay's challenge and sign in: v3 with a session (resuming
+/// `held`) only to a relay that offered sessions and only when `want_session`, else v2.
+async fn open_socket(dial: Dial, want_session: bool, held: Option<(String, u64)>, timing: Timing) -> Result<Opened, ConnectError> {
+    let domain = relay_auth_domain(&dial.url).ok_or_else(|| format!("Bad relay URL: {}", dial.url))?;
+    let stream = tokio::time::timeout(timing.handshake, dial_websocket(&dial.url))
+        .await
+        .map_err(|_| "WebSocket connect timed out".to_string())??;
+    let (mut write, mut read) = stream.split();
+
+    let hello = serde_json::to_string(&ClientMsg::AuthHello).map_err(|e| format!("JSON error: {e}"))?;
+    bounded_send(&mut write, Message::Text(hello.into()))
+        .await
+        .map_err(|e| format!("Failed to ask for a challenge: {e}"))?;
+    let (challenge, text) = read_auth_reply(&mut read, timing.auth_reply).await?;
+    let offered = challenge.offers_sessions();
+    let (nonce, door_key) = match challenge {
+        AuthReply::AuthChallenge { nonce, door_key, .. } if is_auth_nonce(&nonce) => (nonce, door_key),
+        // A relay older than 0.12 answers the hello as a bad auth frame.
+        AuthReply::AuthFailed { .. } => {
+            return Err("The relay offers no auth challenge (it needs updating)".to_string().into());
+        }
+        _ => return Err(format!("Auth rejected: {text}").into()),
+    };
+
+    let ask = Ask::choose(offered && want_session, dial.fetch, held.as_ref().map(|(sid, in_h)| (sid.as_str(), *in_h)));
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mode = if dial.fetch { "fetch" } else { "full" };
+    let digest = license_digest(dial.license_key.as_deref());
+    let session = ask.session_field();
+    let sign_payload = match &session {
+        Some((field, in_h)) => {
+            relay_session::auth_v3_message(&domain, &nonce, &dial.peer_id, timestamp, mode, &digest, field, *in_h)
+        }
+        None => auth_v2_message(&domain, &nonce, &dial.peer_id, timestamp, mode, &digest),
+    };
+    let keypair = crate::identity::native_identity::NativeKeypair::from_protobuf_encoding(&dial.keypair_proto)
+        .map_err(|e| format!("Failed to decode keypair: {e}"))?;
+    let signature = base64::engine::general_purpose::STANDARD.encode(keypair.sign(sign_payload.as_bytes()));
+
+    let door = RelaySession { domain: domain.clone(), nonce: nonce.clone(), peer_id: dial.peer_id.clone(), door_key };
+    let auth = ClientMsg::Auth {
+        v: if session.is_some() { 3 } else { 2 },
+        peer_id: dial.peer_id.clone(),
+        public_key: dial.pub_key_b64.clone(),
+        timestamp,
+        nonce,
+        domain,
+        signature,
+        license_key: dial.license_key.as_deref().filter(|k| !k.is_empty()).map(str::to_string),
+        fetch: dial.fetch,
+        in_h: session.as_ref().map(|(_, in_h)| *in_h),
+        session: session.map(|(field, _)| field),
+    };
+    let auth_json = serde_json::to_string(&auth).map_err(|e| format!("JSON error: {e}"))?;
+    bounded_send(&mut write, Message::Text(auth_json.into()))
+        .await
+        .map_err(|e| format!("Failed to send auth: {e}"))?;
+
+    match read_auth_reply(&mut read, timing.auth_reply).await? {
+        (AuthReply::AuthFailed { error }, _) => Err(match LicenseRefusal::from_code(&error) {
+            Some(refusal) => ConnectError::License(refusal),
+            None => ConnectError::Other(error),
+        }),
+        (AuthReply::AuthChallenge { .. }, text) => Err(format!("Auth rejected: {text}").into()),
+        (reply, _) => {
+            let stream = read.reunite(write).map_err(|e| format!("Reunite error: {e}"))?;
+            Ok(Opened { stream, door, ask, reply })
+        }
+    }
+}
+
+/// A signed-in socket for the push fetch and the forwarder: today's v2 frame, never a
+/// session, whatever the relay offers.
 pub(crate) async fn connect_and_auth(
     url: &str,
     peer_id: &str,
@@ -988,559 +2036,37 @@ pub(crate) async fn connect_and_auth(
     license_key: Option<&str>,
     fetch: bool,
 ) -> Result<WsStream, ConnectError> {
-    connect_and_auth_session(url, peer_id, keypair_proto, pub_key_b64, license_key, fetch)
-        .await
-        .map(|(stream, _)| stream)
-}
-
-/// [`connect_and_auth`], with what the socket's door proofs are made for.
-async fn connect_and_auth_session(
-    url: &str,
-    peer_id: &str,
-    keypair_proto: &[u8],
-    pub_key_b64: &str,
-    license_key: Option<&str>,
-    fetch: bool,
-) -> Result<(WsStream, RelaySession), ConnectError> {
-    let domain = relay_auth_domain(url).ok_or_else(|| format!("Bad relay URL: {url}"))?;
-
-    let (ws_stream, _response) = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(|e| format!("WebSocket connect failed: {e}"))?;
-
-    let (mut write, mut read) = ws_stream.split();
-
-    let hello = serde_json::to_string(&ClientMsg::AuthHello).map_err(|e| format!("JSON error: {e}"))?;
-    bounded_send(&mut write, Message::Text(hello.into()))
-        .await
-        .map_err(|e| format!("Failed to ask for a challenge: {e}"))?;
-    let (nonce, door_key) = match read_auth_reply(&mut read).await? {
-        (ServerMsg::AuthChallenge { nonce, door_key }, _) if is_auth_nonce(&nonce) => (nonce, door_key),
-        // A relay older than 0.12 answers the hello as a bad auth frame.
-        (ServerMsg::AuthFailed { .. }, _) => {
-            return Err("The relay offers no auth challenge (it needs updating)".to_string().into());
-        }
-        (_, text) => return Err(format!("Auth rejected: {text}").into()),
-    };
-
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mode = if fetch { "fetch" } else { "full" };
-    let sign_payload = auth_v2_message(&domain, &nonce, peer_id, timestamp, mode, &license_digest(license_key));
-
-    let keypair = crate::identity::native_identity::NativeKeypair::from_protobuf_encoding(keypair_proto)
-        .map_err(|e| format!("Failed to decode keypair: {e}"))?;
-    let sig_bytes = keypair.sign(sign_payload.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig_bytes);
-
-    let session = RelaySession {
-        domain: domain.clone(),
-        nonce: nonce.clone(),
+    let dial = Dial {
+        url: url.to_string(),
         peer_id: peer_id.to_string(),
-        door_key,
-    };
-    let auth = ClientMsg::Auth {
-        v: 2,
-        peer_id: peer_id.to_string(),
-        public_key: pub_key_b64.to_string(),
-        timestamp,
-        nonce,
-        domain,
-        signature: sig_b64,
-        license_key: license_key.filter(|k| !k.is_empty()).map(|s| s.to_string()),
+        keypair_proto: keypair_proto.to_vec(),
+        pub_key_b64: pub_key_b64.to_string(),
+        license_key: license_key.map(str::to_string),
         fetch,
     };
-    let auth_json = serde_json::to_string(&auth).map_err(|e| format!("JSON error: {e}"))?;
-    bounded_send(&mut write, Message::Text(auth_json.into()))
-        .await
-        .map_err(|e| format!("Failed to send auth: {e}"))?;
-
-    match read_auth_reply(&mut read).await? {
-        (ServerMsg::AuthOk, _) => Ok((read.reunite(write).map_err(|e| format!("Reunite error: {e}"))?, session)),
-        (ServerMsg::AuthFailed { error }, _) => Err(match LicenseRefusal::from_code(&error) {
-            Some(refusal) => ConnectError::License(refusal),
-            None => ConnectError::Other(error),
-        }),
-        (_, text) => Err(format!("Auth rejected: {text}").into()),
+    let opened = open_socket(dial, false, None, Timing::default()).await?;
+    match opened.reply {
+        AuthReply::AuthOk { .. } => Ok(opened.stream),
+        _ => Err("Auth rejected: an answer for a session nobody asked for".to_string().into()),
     }
 }
 
-// -- Command sending --
-
-type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
+// -- Writes --
 
 /// Bounded socket write, the ONLY way this module writes to the sink. See
 /// WRITE_TIMEOUT for why an unbounded `send` can freeze the entire client loop
 /// with the liveness watchdog unable to run. A timeout is reported as an error
 /// string, so every `Err -> reconnect` path handles it exactly like a dead socket.
 async fn bounded_send(write: &mut WsSink, msg: Message) -> Result<(), String> {
-    match tokio::time::timeout(WRITE_TIMEOUT, write.send(msg)).await {
+    bounded_send_within(write, msg, WRITE_TIMEOUT).await
+}
+
+async fn bounded_send_within(write: &mut WsSink, msg: Message, limit: Duration) -> Result<(), String> {
+    match tokio::time::timeout(limit, write.send(msg)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err(format!(
-            "write timed out after {}s — connection wedged",
-            WRITE_TIMEOUT.as_secs()
-        )),
+        Err(_) => Err(format!("write timed out after {}s: connection wedged", limit.as_secs())),
     }
-}
-
-/// The relay's join frame for `room`, proving its door when we hold one.
-async fn join_text(state: &WsClientState, session: &RelaySession, room: &str) -> Option<String> {
-    let door_proof = state.doors.read().await.get(room).and_then(|d| door_proof(session, room, &d.0));
-    serde_json::to_string(&ClientMsg::Join { room: room.to_string(), inbox_roster: None, door_proof }).ok()
-}
-
-/// [`send_command`], with a door proof on every join of a room we hold the door of. A
-/// new door for a room we are in is proved at once by joining it again.
-async fn send_with_doors(write: &mut WsSink, cmd: &WsCommand, state: &WsClientState, session: &RelaySession) -> bool {
-    let room = match cmd {
-        WsCommand::JoinRoom { room_code } => room_code,
-        WsCommand::SetDoor { room_code, door } => {
-            if !remember_door(state, room_code, door.clone()).await || door.is_none()
-                || !state.joined_rooms.read().await.contains(room_code)
-            {
-                return true;
-            }
-            room_code
-        }
-        _ => return send_command(write, cmd).await,
-    };
-    let Some(text) = join_text(state, session, room).await else { return true };
-    if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
-        hollow_log!("[HOLLOW-WS] Join send failed: {e}");
-        return false;
-    }
-    true
-}
-
-/// Keep (or forget) the door of `room`; whether it changed.
-async fn remember_door(state: &WsClientState, room: &str, door: Option<DoorSecret>) -> bool {
-    let mut doors = state.doors.write().await;
-    match door {
-        Some(door) => doors.insert(room.to_string(), door.clone()).is_none_or(|old| *old.0 != *door.0),
-        None => doors.remove(room).is_some(),
-    }
-}
-
-/// Returns false if the send failed (connection dead — caller should break).
-async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
-    match cmd {
-        WsCommand::SendBinaryDirect { room_code, target_peer, data } => {
-            let room = room_code.as_bytes();
-            let target = target_peer.as_bytes();
-            let mut frame = Vec::with_capacity(1 + room.len() + 1 + target.len() + 1 + data.len());
-            frame.push(0x02);
-            frame.extend_from_slice(room);
-            frame.push(0x00);
-            frame.extend_from_slice(target);
-            frame.push(0x00);
-            frame.extend_from_slice(data);
-            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
-                hollow_log!("[HOLLOW-WS] Binary send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::CheckPeers { peers, rooms } => {
-            let msg = serde_json::json!({
-                "type": "check_peers",
-                "peers": peers,
-                "rooms": rooms,
-            });
-            let text = msg.to_string();
-            if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
-                hollow_log!("[HOLLOW-WS] CheckPeers send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::DiscoverPeers { room_code } => {
-            let msg = serde_json::json!({
-                "type": "discover_peers",
-                "room": room_code,
-            });
-            let text = msg.to_string();
-            if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
-                hollow_log!("[HOLLOW-WS] DiscoverPeers send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::GetTurnCredentials => {
-            let msg = serde_json::json!({ "type": "get_turn_credentials" });
-            let text = msg.to_string();
-            if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
-                hollow_log!("[HOLLOW-WS] GetTurnCredentials send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::GetMediaForwarder => {
-            let msg = serde_json::json!({ "type": "get_media_forwarder" });
-            let text = msg.to_string();
-            if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
-                hollow_log!("[HOLLOW-WS] GetMediaForwarder send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::Subscribe { room_code, topics } => {
-            let msg = serde_json::json!({
-                "type": "subscribe",
-                "room": room_code,
-                "topics": topics,
-            });
-            let text = msg.to_string();
-            if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
-                hollow_log!("[HOLLOW-WS] Subscribe send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::ClaimNickname { nickname, master, claim } => {
-            let msg = serde_json::json!({
-                "type": "claim_nickname",
-                "nickname": nickname,
-                "master": master,
-                "master_key": claim.master_key,
-                "ts": claim.ts_ms,
-                "sig": claim.sig,
-            });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] ClaimNickname send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::ReleaseNickname => {
-            let msg = serde_json::json!({ "type": "release_nickname" });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] ReleaseNickname send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::ResolveNickname { nickname } => {
-            let msg = serde_json::json!({ "type": "resolve_nickname", "nickname": nickname });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] ResolveNickname send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::ClaimLinkCode { code } => {
-            let msg = serde_json::json!({ "type": "claim_link_code", "code": code });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] ClaimLinkCode send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::ReleaseLinkCode => {
-            let msg = serde_json::json!({ "type": "release_link_code" });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] ReleaseLinkCode send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::ResolveLinkCode { code } => {
-            let msg = serde_json::json!({ "type": "resolve_link_code", "code": code });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] ResolveLinkCode send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::RegisterPushToken { token, platform } => {
-            let msg = serde_json::json!({ "type": "register_push_token", "token": token, "platform": platform });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] RegisterPushToken send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::SetPushPrefs { prefs_json } => {
-            // Embed the prefs as a real JSON object (not a string) so the relay
-            // parses it directly. A malformed prefs string is dropped here.
-            let Ok(prefs) = serde_json::from_str::<serde_json::Value>(prefs_json) else {
-                hollow_log!("[HOLLOW-WS] SetPushPrefs: invalid prefs JSON — skipped");
-                return true;
-            };
-            let msg = serde_json::json!({ "type": "set_push_prefs", "prefs": prefs });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] SetPushPrefs send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::SetOfflineBuffer { enabled, retention_secs } => {
-            let msg = serde_json::json!({
-                "type": "set_offline_buffer",
-                "enabled": enabled,
-                "retention_secs": retention_secs,
-            });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] SetOfflineBuffer send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::ReportUser { target, category } => {
-            let msg = serde_json::json!({
-                "type": "report",
-                "target": target,
-                "category": category,
-            });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] ReportUser send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::SetTopicBuffer { room_code, channels, retention_secs, clear, auth } => {
-            // Every field the signature covers goes on the wire as signed.
-            let mut msg = serde_json::json!({
-                "type": "set_topic_buffer",
-                "room": room_code,
-                "channels": channels,
-                "retention_secs": retention_secs,
-                "clear": clear,
-            });
-            if let Some(auth) = auth {
-                msg["owner"] = auth.owner.clone().into();
-                msg["ts"] = auth.ts_ms.into();
-                msg["sig"] = auth.sig.clone().into();
-            }
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] SetTopicBuffer send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::TopicCatchup { room_code, channel_id, max_age_secs, end } => {
-            let msg = topic_catchup_frame(room_code, channel_id, *max_age_secs, *end);
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] TopicCatchup send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::SendChannelDirect { room_code, target_peer, channel_id, mention, data } => {
-            // [0x09][room\0][target\0][channel\0][flags:1][payload]
-            // flags bit0 = mention. Payload may be empty (push trigger only).
-            let room = room_code.as_bytes();
-            let target = target_peer.as_bytes();
-            let channel = channel_id.as_bytes();
-            let mut frame = Vec::with_capacity(
-                1 + room.len() + 1 + target.len() + 1 + channel.len() + 1 + 1 + data.len(),
-            );
-            frame.push(0x09);
-            frame.extend_from_slice(room);
-            frame.push(0x00);
-            frame.extend_from_slice(target);
-            frame.push(0x00);
-            frame.extend_from_slice(channel);
-            frame.push(0x00);
-            frame.push(if *mention { 0x01 } else { 0x00 });
-            frame.extend_from_slice(data);
-            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
-                hollow_log!("[HOLLOW-WS] Channel direct send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::SendToRoomTopic { room_code, topic, data } => {
-            let mut frame = Vec::with_capacity(1 + room_code.len() + 1 + topic.len() + 1 + data.len());
-            frame.push(0x07);
-            frame.extend_from_slice(room_code.as_bytes());
-            frame.push(0x00);
-            frame.extend_from_slice(topic.as_bytes());
-            frame.push(0x00);
-            frame.extend_from_slice(data);
-            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
-                hollow_log!("[HOLLOW-WS] Topic send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::SendToRoom { room_code, data } | WsCommand::SendPublic { room_code, data } => {
-            let room = room_code.as_bytes();
-            let mut frame = Vec::with_capacity(1 + room.len() + 1 + data.len());
-            frame.push(if matches!(cmd, WsCommand::SendPublic { .. }) { 0x0A } else { 0x03 });
-            frame.extend_from_slice(room);
-            frame.push(0x00);
-            frame.extend_from_slice(data);
-            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
-                hollow_log!("[HOLLOW-WS] Room send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::SendDirect { room_code, target_peer, data } => {
-            let room = room_code.as_bytes();
-            let target = target_peer.as_bytes();
-            let mut frame = Vec::with_capacity(1 + room.len() + 1 + target.len() + 1 + data.len());
-            frame.push(0x04);
-            frame.extend_from_slice(room);
-            frame.push(0x00);
-            frame.extend_from_slice(target);
-            frame.push(0x00);
-            frame.extend_from_slice(data);
-            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
-                hollow_log!("[HOLLOW-WS] Direct send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::SendDirectImage { room_code, target_peer, data } => {
-            // Same layout as 0x04 SendDirect, but a 0x08 type byte tells the relay
-            // this direct carries an inlined image, so the image cap applies.
-            let room = room_code.as_bytes();
-            let target = target_peer.as_bytes();
-            let mut frame = Vec::with_capacity(1 + room.len() + 1 + target.len() + 1 + data.len());
-            frame.push(0x08);
-            frame.extend_from_slice(room);
-            frame.push(0x00);
-            frame.extend_from_slice(target);
-            frame.push(0x00);
-            frame.extend_from_slice(data);
-            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
-                hollow_log!("[HOLLOW-WS] Direct image send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::KillDeposit { targets, issued_at_ms, blob } => {
-            let msg = serde_json::json!({
-                "type": "kill_deposit",
-                "targets": targets,
-                "issued_at_ms": issued_at_ms,
-                "blob": blob,
-            });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] KillDeposit send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::KillAck { signal } => {
-            let msg = kill_ack_frame(signal.as_ref());
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] KillAck send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::LockGet { locks } => {
-            let locks: Vec<serde_json::Value> = locks
-                .iter()
-                .map(|(server, owner)| serde_json::json!({ "server": server, "owner": owner }))
-                .collect();
-            let msg = serde_json::json!({ "type": "lock_get", "locks": locks });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] LockGet send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::LockPut { server, owner, links } => {
-            let msg = serde_json::json!({ "type": "lock_put", "server": server, "owner": owner, "links": links });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] LockPut send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::UnregisterPushToken => {
-            let msg = serde_json::json!({ "type": "unregister_push_token" });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] UnregisterPushToken send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        _ => {}
-    }
-
-    let json = match cmd {
-        WsCommand::JoinInbox { room_code, roster } => {
-            serde_json::to_string(&ClientMsg::Join {
-                room: room_code.clone(),
-                inbox_roster: Some(roster.clone()),
-                door_proof: None,
-            })
-        }
-        WsCommand::LeaveRoom { room_code } => {
-            serde_json::to_string(&ClientMsg::Leave { room: room_code.clone() })
-        }
-        _ => return true,
-    };
-
-    if let Ok(json) = json {
-        if let Err(e) = bounded_send(write, Message::Text(json.into())).await {
-            hollow_log!("[HOLLOW-WS] Send failed: {e}");
-            return false;
-        }
-    }
-    true
-}
-
-async fn track_room_change(state: &WsClientState, cmd: &WsCommand, event_tx: &mpsc::UnboundedSender<WsEvent>) {
-    let count = match cmd {
-        WsCommand::JoinRoom { room_code } => {
-            *state.last_join_attempt.write().await = Some(room_code.clone());
-            let mut rooms = state.joined_rooms.write().await;
-            rooms.insert(room_code.clone());
-            rooms.len() as u32
-        }
-        WsCommand::JoinInbox { room_code, roster } => {
-            *state.last_join_attempt.write().await = Some(room_code.clone());
-            state
-                .inbox_rosters
-                .write()
-                .await
-                .insert(room_code.clone(), roster.clone());
-            let mut rooms = state.joined_rooms.write().await;
-            rooms.insert(room_code.clone());
-            rooms.len() as u32
-        }
-        WsCommand::LeaveRoom { room_code } => {
-            let mut rooms = state.joined_rooms.write().await;
-            rooms.remove(room_code);
-            state.subscriptions.write().await.remove(room_code);
-            state.inbox_rosters.write().await.remove(room_code);
-            // Confirm our own leave to the swarm so it purges the room from
-            // `ws_room_peers` — see WsEvent::LeftRoom.
-            let _ = event_tx.send(WsEvent::LeftRoom { room: room_code.clone() });
-            rooms.len() as u32
-        }
-        WsCommand::Subscribe { room_code, topics } => {
-            // Remember the latest topic set per room so a reconnect can
-            // replay it — the relay's subscription state is per-socket.
-            state
-                .subscriptions
-                .write()
-                .await
-                .insert(room_code.clone(), topics.clone());
-            return;
-        }
-        WsCommand::SetOfflineBuffer { enabled, retention_secs } => {
-            // Remember the latest opt-in so a reconnect can re-register it —
-            // the relay registry dies with a relay restart.
-            *state.offline_optin.write().await = Some((*enabled, *retention_secs));
-            return;
-        }
-        WsCommand::SetDoor { room_code, door } => {
-            // Sent while disconnected: the reconnect replay proves it.
-            remember_door(state, room_code, door.clone()).await;
-            return;
-        }
-        _ => return,
-    };
-    let _ = event_tx.send(WsEvent::RoomBudgetUpdate { joined: count, limit: ROOM_BUDGET_LIMIT });
 }
 
 // -- Binary frame parsing --
@@ -1556,9 +2082,43 @@ fn parse_binary_relay_frame(data: &[u8]) -> Option<(String, String, Vec<u8>)> {
     Some((room, from, payload))
 }
 
+fn dispatch_binary(event_tx: &mpsc::UnboundedSender<WsEvent>, data: &[u8]) {
+    if data.len() <= 3 {
+        return;
+    }
+    let event = match data[0] {
+        0x02 => parse_binary_relay_frame(&data[1..]).map(|(room, from, data)| WsEvent::BinaryDirect { room, from, data }),
+        0x05 => parse_binary_relay_frame(&data[1..]).map(|(room, from, data)| WsEvent::Message { room, from, data }),
+        0x06 => parse_binary_relay_frame(&data[1..]).map(|(room, from, data)| WsEvent::DirectMessage { room, from, data }),
+        // Topic broadcast: [0x08][room\0][topic\0][sender\0][payload]
+        0x08 => {
+            let rest = &data[1..];
+            rest.iter().position(|&b| b == 0).and_then(|room_end| {
+                let room = String::from_utf8_lossy(&rest[..room_end]).to_string();
+                let after_room = &rest[room_end + 1..];
+                let topic_end = after_room.iter().position(|&b| b == 0)?;
+                let after_topic = &after_room[topic_end + 1..];
+                let sender_end = after_topic.iter().position(|&b| b == 0)?;
+                let from = String::from_utf8_lossy(&after_topic[..sender_end]).to_string();
+                Some(WsEvent::Message { room, from, data: after_topic[sender_end + 1..].to_vec() })
+            })
+        }
+        _ => None,
+    };
+    if let Some(event) = event {
+        let _ = event_tx.send(event);
+    }
+}
+
 // -- Server message handling --
 
-async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: ServerMsg, state: &WsClientState) {
+fn handle_server_message(
+    event_tx: &mpsc::UnboundedSender<WsEvent>,
+    msg: ServerMsg,
+    rooms: &mut Rooms,
+    replayed_joins: &mut HashMap<String, (String, Instant)>,
+    relay_host: &str,
+) {
     let event = match msg {
         ServerMsg::PeerJoined { room, peer_id } => {
             hollow_log!("[HOLLOW-WS] Peer joined {room}: {peer_id}");
@@ -1591,7 +2151,7 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
                 return;
             }
             let offered = uris.len();
-            let uris = turn_uris_on_relay(uris, &state.relay_host);
+            let uris = turn_uris_on_relay(uris, relay_host);
             if uris.len() < offered {
                 hollow_log!("[HOLLOW-WS] Dropped {} TURN URI(s) naming a host other than the relay", offered - uris.len());
             }
@@ -1614,14 +2174,11 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
         ServerMsg::Error { error } => {
             hollow_log!("[HOLLOW-WS] Server error: {error}");
             if error.contains("Too many rooms") {
-                let room = state.last_join_attempt.write().await.take().unwrap_or_default();
+                let room = rooms.last_join_attempt.take().unwrap_or_default();
                 if !room.is_empty() {
-                    let count = {
-                        let mut rooms = state.joined_rooms.write().await;
-                        rooms.remove(&room);
-                        rooms.len() as u32
-                    };
-                    let _ = event_tx.send(WsEvent::RoomBudgetUpdate { joined: count, limit: ROOM_BUDGET_LIMIT });
+                    rooms.joined.remove(&room);
+                    replayed_joins.remove(&room);
+                    let _ = event_tx.send(WsEvent::RoomBudgetUpdate { joined: rooms.joined.len() as u32, limit: ROOM_BUDGET_LIMIT });
                     let _ = event_tx.send(WsEvent::RoomCapHit { room });
                 }
             }
@@ -1671,11 +2228,15 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             return;
         }
         ServerMsg::LockChain { server, links, put } => WsEvent::LockChain { server, links, put },
-        ServerMsg::AuthChallenge { .. } | ServerMsg::AuthOk | ServerMsg::AuthFailed { .. } => return,
+        ServerMsg::HbAck { .. } | ServerMsg::Ack { .. } | ServerMsg::Reconnect { .. } => return,
     };
 
     let _ = event_tx.send(event);
 }
+
+#[cfg(test)]
+#[path = "ws_client_wire_tests.rs"]
+mod wire_tests;
 
 // -- Tests --
 
@@ -1686,18 +2247,11 @@ mod tests {
     /// D5: the relay names who parked each kill signal, and turning one away echoes it.
     #[tokio::test]
     async fn a_kill_signal_keeps_its_issuer_for_the_ack() {
-        let state = WsClientState {
-            joined_rooms: Arc::new(RwLock::new(HashSet::new())),
-            last_join_attempt: Arc::new(RwLock::new(None)),
-            subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            offline_optin: Arc::new(RwLock::new(None)),
-            inbox_rosters: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            doors: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            relay_host: String::new(),
-        };
+        let mut rooms = Rooms::default();
+        let mut joins = HashMap::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let frame = r#"{"type":"kill_signal","blob":"b","issued_at_ms":5,"issuer":"12D3KooWJunk"}"#;
-        handle_server_message(&tx, serde_json::from_str(frame).unwrap(), &state).await;
+        handle_server_message(&tx, serde_json::from_str(frame).unwrap(), &mut rooms, &mut joins, "");
         let Ok(WsEvent::KillSignal { signal, .. }) = rx.try_recv() else { panic!("no kill signal") };
         assert_eq!(signal, KillSignalId { issuer: "12D3KooWJunk".into(), issued_at_ms: 5 });
         assert_eq!(
@@ -1706,6 +2260,18 @@ mod tests {
             "a stamp alone cannot tell junk from an order sharing it",
         );
         assert_eq!(kill_ack_frame(None), serde_json::json!({ "type": "kill_ack" }), "only a wipe acks everything");
+    }
+
+    #[test]
+    fn the_fleet_dial_override_takes_only_one_address() {
+        let dir = crate::test_tmp::tempdir().unwrap();
+        assert_eq!(dial_override_in(dir.path()), None, "no file, the relay's own address");
+        std::fs::write(dir.path().join("relay_connect"), "127.0.0.1:18501\r\n").unwrap();
+        assert_eq!(dial_override_in(dir.path()).as_deref(), Some("127.0.0.1:18501"));
+        for junk in ["relay.example.com:443", "127.0.0.1", "127.0.0.1:18501 10.0.0.1:1", ""] {
+            std::fs::write(dir.path().join("relay_connect"), junk).unwrap();
+            assert_eq!(dial_override_in(dir.path()), None, "{junk:?} is not one address");
+        }
     }
 
     #[test]
@@ -1723,6 +2289,8 @@ mod tests {
             signature: "c2lnbmF0dXJl".into(),
             license_key: None,
             fetch: false,
+            session: None,
+            in_h: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"auth\""));
@@ -1743,6 +2311,8 @@ mod tests {
             signature: "c2lnbmF0dXJl".into(),
             license_key: Some("L".into()),
             fetch: true,
+            session: None,
+            in_h: None,
         };
         let json_fetch = serde_json::to_string(&msg_fetch).unwrap();
         assert!(json_fetch.contains("\"fetch\":true"));
@@ -1916,18 +2486,11 @@ mod tests {
         assert_eq!(plain, serde_json::json!({ "type": "topic_catchup", "room": "srv", "channel": "~join", "max_age_secs": 0 }));
         assert_eq!(topic_catchup_frame("srv", "~join", 0, true)["end"], serde_json::json!(true));
 
-        let state = WsClientState {
-            joined_rooms: Arc::new(RwLock::new(HashSet::new())),
-            last_join_attempt: Arc::new(RwLock::new(None)),
-            subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            offline_optin: Arc::new(RwLock::new(None)),
-            inbox_rosters: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            doors: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            relay_host: String::new(),
-        };
+        let mut rooms = Rooms::default();
+        let mut joins = HashMap::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mark = r#"{"type":"topic_catchup_done","room":"srv","channel":"~join"}"#;
-        handle_server_message(&tx, serde_json::from_str(mark).unwrap(), &state).await;
+        handle_server_message(&tx, serde_json::from_str(mark).unwrap(), &mut rooms, &mut joins, "");
         let Ok(WsEvent::TopicCatchupDone { room, channel }) = rx.try_recv() else { panic!("no end mark") };
         assert_eq!((room.as_str(), channel.as_str()), ("srv", "~join"));
     }
@@ -1945,4 +2508,100 @@ mod tests {
         }
     }
 
+    /// Section 9.1: the v3 frame is the v2 frame with `"v":3`, `session` and `in_h`; a
+    /// v2 frame carries neither.
+    #[test]
+    fn the_v3_auth_frame_carries_the_session_and_the_count() {
+        let frame = |v: u8, session: Option<&str>, in_h: Option<u64>| {
+            serde_json::to_value(ClientMsg::Auth {
+                v,
+                peer_id: "12D3KooWTest".into(),
+                public_key: "AQID".into(),
+                timestamp: 1,
+                nonce: "ab".repeat(32),
+                domain: "relay.example.com".into(),
+                signature: "c2ln".into(),
+                license_key: None,
+                fetch: false,
+                session: session.map(str::to_string),
+                in_h,
+            })
+            .unwrap()
+        };
+        let v3 = frame(3, Some("00112233445566778899aabbccddeeff"), Some(42));
+        assert_eq!((v3["v"].as_u64(), v3["session"].as_str(), v3["in_h"].as_u64()), (Some(3), Some("00112233445566778899aabbccddeeff"), Some(42)));
+        let fresh = frame(3, Some("new"), Some(0));
+        assert_eq!((fresh["session"].as_str(), fresh["in_h"].as_u64()), (Some("new"), Some(0)));
+        let v2 = frame(2, None, None);
+        assert!(v2.get("session").is_none() && v2.get("in_h").is_none(), "{v2}");
+    }
+
+    /// Every command keeps the bytes it had before the outbound queue existed.
+    #[test]
+    fn commands_keep_their_wire_layout() {
+        let bin = |cmd: WsCommand| match command_frame(&cmd) {
+            Some(Frame::Binary(b)) => b.to_vec(),
+            other => panic!("not binary: {other:?}"),
+        };
+        let text = |cmd: WsCommand| match command_frame(&cmd) {
+            Some(Frame::Text(t)) => serde_json::from_str::<serde_json::Value>(&t).unwrap(),
+            other => panic!("not text: {other:?}"),
+        };
+        assert_eq!(bin(WsCommand::SendToRoom { room_code: "r".into(), data: vec![1, 2] }), b"\x03r\x00\x01\x02");
+        assert_eq!(bin(WsCommand::SendPublic { room_code: "r".into(), data: vec![1] }), b"\x0ar\x00\x01");
+        assert_eq!(bin(WsCommand::SendDirect { room_code: "r".into(), target_peer: "p".into(), data: vec![1] }), b"\x04r\x00p\x00\x01");
+        assert_eq!(bin(WsCommand::SendDirectImage { room_code: "r".into(), target_peer: "p".into(), data: vec![1] }), b"\x08r\x00p\x00\x01");
+        assert_eq!(bin(WsCommand::SendBinaryDirect { room_code: "r".into(), target_peer: "p".into(), data: vec![1] }), b"\x02r\x00p\x00\x01");
+        assert_eq!(bin(WsCommand::SendToRoomTopic { room_code: "r".into(), topic: "t".into(), data: vec![1] }), b"\x07r\x00t\x00\x01");
+        assert_eq!(
+            bin(WsCommand::SendChannelDirect { room_code: "r".into(), target_peer: "p".into(), channel_id: "c".into(), mention: true, data: vec![9] }),
+            b"\x09r\x00p\x00c\x00\x01\x09"
+        );
+        assert_eq!(
+            bin(WsCommand::SendChannelDirect { room_code: "r".into(), target_peer: "p".into(), channel_id: "c".into(), mention: false, data: vec![] }),
+            b"\x09r\x00p\x00c\x00\x00"
+        );
+        assert_eq!(text(WsCommand::Subscribe { room_code: "r".into(), topics: vec!["a".into()] }), serde_json::json!({ "type": "subscribe", "room": "r", "topics": ["a"] }));
+        assert_eq!(text(WsCommand::SetOfflineBuffer { enabled: true, retention_secs: 5 }), serde_json::json!({ "type": "set_offline_buffer", "enabled": true, "retention_secs": 5 }));
+        assert_eq!(text(WsCommand::SetPushPrefs { prefs_json: r#"{"s":{"level":"all"}}"#.into() })["prefs"]["s"]["level"], "all");
+        assert!(command_frame(&WsCommand::SetPushPrefs { prefs_json: "not json".into() }).is_none(), "malformed prefs write nothing");
+        assert_eq!(text(WsCommand::KillAck { signal: None }), kill_ack_frame(None));
+        assert!(command_frame(&WsCommand::SetDoor { room_code: "r".into(), door: None }).is_none());
+        for frame in [
+            command_frame(&WsCommand::SendToRoom { room_code: "r".into(), data: vec![1] }).unwrap(),
+            command_frame(&WsCommand::GetTurnCredentials).unwrap(),
+            command_frame(&WsCommand::Subscribe { room_code: "r".into(), topics: vec![] }).unwrap(),
+        ] {
+            assert_eq!(relay_session::client_frame_counts(&frame), 1, "every command is a stream frame: {frame:?}");
+        }
+    }
+
+    /// The prune reads the seal of a queued frame: a live-only message ranks by its seal
+    /// time, everything else (another message, an unsealed or truncated body) is ordinary.
+    #[test]
+    fn queued_frames_rank_by_what_their_seal_carries() {
+        let kp = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[3; 32]);
+        let at = 1_790_000_000_000i64;
+        let seal = |msg: &super::super::types::HavenMessage, route: &str| {
+            super::super::frame_auth::seal_at(&kp, "r", route, at, [7; 16], &serde_json::to_vec(msg).unwrap())
+        };
+        let live = seal(&super::super::types::HavenMessage::FriendListRequest, "12D3KooWTarget");
+        let kept = seal(&super::super::types::HavenMessage::FriendRemove, "12D3KooWTarget");
+        assert_eq!(sealed_class(&live), Class::LiveOnly { sealed_ms: at });
+        assert_eq!(sealed_class(&kept), Class::Ordinary);
+        assert_eq!(sealed_class(b"{\"plain\":true}"), Class::Ordinary);
+        assert_eq!(sealed_class(&live[..20]), Class::Ordinary);
+
+        let direct = WsCommand::SendDirect { room_code: "r".into(), target_peer: "12D3KooWTarget".into(), data: live.clone() };
+        assert_eq!(direct.class(), Class::LiveOnly { sealed_ms: at });
+        let wire = command_frame(&direct).unwrap();
+        assert_eq!(WsCommand::frame_class(&wire), Class::LiveOnly { sealed_ms: at }, "a written frame keeps its rank");
+        let channel = WsCommand::SendChannelDirect {
+            room_code: "r".into(), target_peer: "12D3KooWTarget".into(), channel_id: "c".into(), mention: false, data: live,
+        };
+        assert_eq!(WsCommand::frame_class(&command_frame(&channel).unwrap()), Class::LiveOnly { sealed_ms: at });
+        assert_eq!(WsCommand::JoinRoom { room_code: "r".into() }.class(), Class::RoomState);
+        assert_eq!(WsCommand::GetTurnCredentials.class(), Class::Ordinary);
+        assert_eq!(binary_payload(b"\x05r\x00x"), None, "a relay opcode is no client frame");
+    }
 }

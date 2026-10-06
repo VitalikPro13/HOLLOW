@@ -546,6 +546,8 @@ function Get-LivePeers {
 # mixes peers only means anything if each step lands before the next one is
 # sent, and "A sends, THEN B looks" is most of what a fleet scenario is.
 function Send-FleetStep($peer, $step, $timeoutSeconds = 180) {
+    # Lifecycle ops act on the peer from out here (fleet_lifecycle.ps1).
+    if (Test-FleetHostOp $step.op) { return (Invoke-FleetHostOp $peer $step) }
     $out = Join-Path $script:FleetOutRoot $peer
     $inbox = Join-Path $out 'inbox.jsonl'
     $outbox = Join-Path $out 'outbox.jsonl'
@@ -687,3 +689,6 @@ function Write-FleetAnswer($peer, $answer, $indent = '       ') {
         }
     }
 }
+
+# background, foreground, pause, resume, net_off, net_on: run on the host.
+. (Join-Path $PSScriptRoot 'fleet_lifecycle.ps1')

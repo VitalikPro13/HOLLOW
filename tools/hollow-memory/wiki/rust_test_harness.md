@@ -56,6 +56,27 @@ ordering lives in the nodes):
   peer-fallback path), `SendBinaryDirect`, `DiscoverPeers`, `CheckPeers`.
 - Presence accessors: `online_devices()`, `room_devices(room)` — the authoritative presence source
   (like the real relay's `RoomMembers`).
+- **Resumable sessions (2026-10-06, RESUMABLE_SESSIONS_PLAN.md 9).** Every registered device holds a
+  `MockSession` (relay half: counters, ring with gap tombstones, rooms held in grace) and its `Conn`
+  a `ClientWire` (ws_client half: inflight queue of frames written into a dead socket, unwritten
+  queue while suspended, last join per room). Delivery splits: `write()` for stream frames (live
+  socket now, else the ring), `tell()` for presence and kill signals (live sockets only, never
+  ringed), `local()` for ws_client's own events. `set_online(false/true)` stays the drop WITHOUT a
+  session (`SessionLost`, then `Connected`), so every older test keeps its meaning. Session levers:
+  `suspend(dev)` (presence leaves, node hears `Suspended`), `resume(dev)` (`Resumed{gap}`, kill
+  signals, `members` per room, ring replay, `peer_joined` to others, then the client resends what
+  the relay did not count and its unwritten queue; no session = `resume_failed`: `SessionLost` +
+  `Connected` + ws_client's join replay first), `zombie(dev)` / `relay_times_out` /
+  `zombie_noticed` / `zombie_for(dev, window)` (frames swallowed both ways; presence leaves at
+  `set_relay_idle`, the client notices at the window's end and resumes), `expire_session` (ring's
+  DM-class directs into the offline buffer), `restart_relay(snapshot)` (sessions survive in grace
+  with `reprove`, or everything RAM is gone), `set_ring_cap` (force a gap). Inspectors:
+  `swallowed`, `socket_of`, `ring_len`, `client_state`, `inflight_joins`, and the command log
+  (`log_mark`, `commands_since`, `joins_since`, which skips resent frames and `barrier:` rooms).
+  `hold_joins`/`release_joins` model a relay slow to answer a join. Tests:
+  `zombie_window_loses_no_*`, `suspend_keeps_every_peer_and_resume_joins_nothing`,
+  `a_gapped_resume_*`, `a_failed_resume_*`, `relay_restart_*`, `presence_leaves_at_the_relay_deadline_*`,
+  `the_once_per_session_gates_*`, `relay_connected_waits_for_the_inbox_join_answer`.
 - **Topic rings (pending joins rung 1, 2026-08-29), mirroring the real relay's `topic_buffers`:**
   `SendToRoomTopic` tees a copy into a `(room, topic)` ring ONLY when it was REGISTERED first
   (`SetTopicBuffer`); an unregistered ring silently drops every publish, exactly like production, so

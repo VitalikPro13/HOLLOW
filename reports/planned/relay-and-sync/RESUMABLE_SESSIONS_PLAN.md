@@ -688,3 +688,124 @@ Fleet peer letters are owned, because fixtures and devices are shared per letter
 and on the mini alike, and `fleet.ps1 -Stop` stops only the `-Peers` it is given: the lead
 `a`, `b`; triggers `c`, `d`; test-infra `e`, `f`; node-split `g`, `h`; mobile-model (wave 2)
 `i`, `j`; the end-to-end runs `k`, `l`. Every fleet command passes `-Peers` with its own letters.
+
+## 11. As built (wave 1, 2026-10-06)
+
+Where the merged wave 1 refines or departs from section 9, each with its reason. Section 9 stays
+the wire; these are the rules the code follows on top of it. The wikis describe the result:
+`rust_networking.md` (ws_client.rs) and `relay_uws_server.md` (Resumable sessions).
+
+### 11.1 Client (`ws_client.rs`, `relay_session.rs`)
+
+- A `resumed` whose `h` is below the client's last ack is `SessionLost`, like one above what it
+  wrote (`Outbound::resume`). Either way the relay is not describing our session.
+- The unwritten-queue prune drops room state (join, leave, subscribe, opt-in) last, after stale
+  live-only frames and the oldest ordinary entry. A pruned join leaves the device out of a room
+  until the next fresh session.
+- While a socket is live, the client takes node commands only while the unwritten queue is below
+  half of either bound (`Outbound::has_room`). A file stream over 32 MiB was being pruned
+  otherwise; the rest of a burst now waits in the node's channel.
+- The client's own `wake` nudge (the sleep detector) never ends a suspend; only a nudge from the
+  app does. A clock jump must not reopen a socket the app closed on purpose.
+- On a relay without sessions the heartbeat is a WebSocket ping. That relay answers pings, so it
+  still gets the 15 s beat and the 10 s dead rule.
+- The client keeps the section 9.9 constants and ignores the `hb_secs` and `grace_secs` the relay
+  advertises. One set of numbers is pinned by the tests, and a relay cannot slow a client's
+  liveness.
+- A 10 s timeout covers TCP, TLS and the WebSocket upgrade together, and a nudge restarts a
+  connect attempt older than 2 s. A connect stuck on a dead path would otherwise outlast the
+  network coming back.
+- `end` is sent on node shutdown. The relay then hands the ring to `offline_buffer` at once
+  instead of after the grace window.
+- Suspend, drain and shutdown wait up to 2 s for the relay's close reply. A socket closed with
+  unread data in it is reset, which can lose the goodbye.
+- The drain wait is capped at 30 s. A relay cannot park a client for longer than the backoff cap.
+- A make-before-break win emits `Suspended` then `Resumed`. The node sees the same order as for
+  any other drop and resume.
+- `Resumed` is emitted before any replayed frame. The node knows the session is back before the
+  frames of the gap arrive.
+- After `resume_failed` the order is `SessionLost`, `Connected`, the fresh join replay, then the
+  dead session's unacked frames byte-identical (room-state frames left out, since the replay
+  rebuilds them), then the unwritten queue. The rooms have to exist on the relay before the frames
+  that travel through them.
+- No local `SessionLost` on a long outage: while it holds a sid the client stays `Suspended` and
+  keeps trying to resume. The relay's grace starts at its own detection, so only the relay knows
+  when the session is gone; Dart shows Offline after 120 s of Reconnecting instead
+  (`connection_status_provider.dart`, `outageOffline`).
+- The node's identical join is dropped once per room, within 5 s of the fresh-session replay;
+  every other join is written. A re-join is how the node asks for a fresh `members` (the PeerLeft
+  self-heal), so only the echo of the replay may be swallowed.
+
+### 11.2 Relay (`ws_handler.cpp`, `session_bounds.h`, `session_snapshot.h`)
+
+- Any non-fetch login ends a session the device still holds, with the expiry hand-off: v2 full,
+  guest, v3 `"new"` and a `resume_failed`. Section 9.2 named only `"new"`, but each of them
+  replaces the device's socket, and a session left behind would split its delivery.
+- After a resume, `peer_joined` goes out only in rooms where the device's presence had gone; a
+  live transfer (make before break) sends none. Peers never saw it leave, so a join would be a
+  false flap.
+- Push in grace fires only for 0x04, 0x08 and JSON `direct`, not for 0x02 chunks, and not when the
+  device's fetch socket holds the room slot and took the frame live. A file chunk is nothing to
+  wake a phone for, and a fetch socket that got the frame is already awake.
+- While inactive, a session still gets the `members` answer to its own join. The device asked
+  for it; withholding it would leave the join unanswered.
+- A 1008 close (a revoked license) ends the session instead of starting grace. A device the
+  operator cut off keeps nothing.
+- A live session evicted by the table cap has its socket closed 1000 `session_lost`. The client
+  then starts a fresh session instead of writing into one that no longer exists.
+- `"new"` or `"none"` with an `in_h` other than 0 is `bad_auth`, and `hb` on a socket without a
+  session gets `hb_ack{h:0}`. Nothing can have been counted in a session that is not resumed, and
+  a socket whose session ended under it keeps a working heartbeat.
+- With no roster record held for an identity, inbox ownership is kept on resume (`still_owner`).
+  There is nothing to judge against; the next roster shown decides.
+- JSON `direct` frames are not handed to `offline_buffer` on expiry; only the binary 0x06 kinds
+  are. The buffer and its replay deal in 0x06 frames, and DM sync covers the rest.
+- A resume answering `gap:true` also replays the `inbox:` mailbox of every inbox room the session
+  still owns, counted like any stream frame (node-split's request). A resume joins nothing, and
+  only an inbox join replays the mailbox, so a deposit that fell into the gap would never come
+  back.
+- The snapshot also carries each session's `inactive` flag and the address share that minted it.
+  A restored phone must not get presence it asked to be spared, and the table cap must still find
+  the heaviest share after a restart.
+- At the per-IP cap, the session in grace at that address closest to its end gives its slot to
+  the new socket and ends as on expiry (`grace_slot_victim`). A device coming back to a full
+  address would otherwise be refused by the slot its own session holds.
+- Per-IP accounting in `.open`: the rate check runs first, and `ip_key` is set only once the slot
+  is taken. A refused socket used to give back on close a slot it never took, letting an address
+  drift past the cap.
+- A session restored from a snapshot holds no per-IP slot: addresses are never written to the
+  snapshot, so the slot of a restored grace session is not counted until it resumes.
+- The snapshot carries the session's link code as well as its nickname, so a link handshake in
+  progress survives a restart.
+- A fan-out buffer shared by many rings is charged to the global budget once, keyed by the
+  buffer; a budget victim inside a ring becomes a tombstone there, never a desynced counter.
+- The table cap breaks ties: grace before live, then the session closest to its end, and a tie
+  between shares goes against the newcomer's own share. A snapshot restore caps the table the
+  same way. The sid is compared in constant time (`sid_equal`).
+- Relay acks ride a 250 ms timer, so the 2 s ack can come up to 2.25 s after the first frame.
+
+### 11.3 Client details beyond section 9
+
+- When the drain wait ends and the socket is still open, the client closes it with 1000 `drain`
+  itself and resumes at once.
+- On a relay without sessions every failed connect emits `SessionLost` again, not once.
+- The queue stops writing while a make-before-break race is open, and the FFI `suspend()` gives
+  up after 5 s overall.
+
+### 11.4 Open for wave 2
+
+- `inactive` / `active` reach the relay only while a socket is open: an app that comes back while
+  suspended resumes with the relay still holding it inactive (presence withheld), and going to
+  the background with no socket never reaches the relay. After `Resumed`, the client must send
+  the flag again when it differs from what the relay holds.
+- A `network` nudge whose heartbeat is answered does nothing, so the 3.7 move to a better new
+  default network (make before break while the old socket works) is not built.
+- `relay_set_background(false)` also nudges `foreground`, so with the lifecycle nudge the probe
+  fires twice; one of the two goes.
+- An app `network` or `wake` nudge after `relay_suspend()` must not reopen a phone socket that was
+  closed on purpose.
+- A new client on a relay without sessions finds a frozen path in about 22 s, so a 25 to 70 s
+  freeze that today's client sits out without loss now costs the frames written into it. The
+  plan accepts this (the relay deploys first); confirm it.
+- The 10-minute zero-loss target holds at the transport only while frames fit `offline_buffer`
+  after grace; past that, the node's gap repair carries it, which only the fleet can show.

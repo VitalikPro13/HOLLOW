@@ -11,10 +11,12 @@
 #include "validate.h"
 #include "turn_uris.h"
 #include "push_queue.h"
+#include "session_bounds.h"
 #include "json.hpp"
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <memory>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -204,18 +206,16 @@ static bool is_valid_room_code(std::string_view room) {
     return true;
 }
 
-static void send_json(SSLWebSocket* ws, const json& j) {
-    std::string s = j.dump();
-    ws->send(s, uWS::OpCode::TEXT);
-}
-
 // Delivery diagnostics + forwarder identity, wired up in setup_ws_handler.
-// File-scope because send_to_peer is called from a dozen sites that don't
+// File-scope because the send helpers are called from a dozen sites that don't
 // carry state/config. Counters only — the relay logs nothing.
 static DeliveryDiag* g_diag = nullptr;
 static std::string g_forwarder_peer_id;
+// The state every send consults for the receiving socket's session.
+static RelayState* g_state = nullptr;
+static int64_t g_grace_secs = session::DEFAULT_GRACE_SECS;
 
-static void send_to_peer(SSLWebSocket* ws, std::string_view data, uWS::OpCode op) {
+static void write_raw(SSLWebSocket* ws, std::string_view data, uWS::OpCode op) {
     // uWS silently returns DROPPED past maxBackpressure — count it or a
     // delivery failure leaves zero trace anywhere (field 2026-08-06: large
     // frames to the forwarder vanished with every hop looking healthy).
@@ -223,6 +223,123 @@ static void send_to_peer(SSLWebSocket* ws, std::string_view data, uWS::OpCode op
     if (g_diag) {
         if (status == SSLWebSocket::SendStatus::DROPPED) g_diag->send_dropped++;
         else if (status == SSLWebSocket::SendStatus::BACKPRESSURE) g_diag->send_backpressure++;
+    }
+}
+
+// --- Sessions (RESUMABLE_SESSIONS_PLAN.md section 9) -------------------------
+//
+// Every relay-to-client write is one of two things. A stream frame (section 9.3) on a
+// session socket enters the session's ring before the write and leaves it only by
+// the device's ack, so a frame written into a dead socket is resent on resume; to a
+// device whose session is in grace it goes into the ring alone. State (presence, kill
+// signals, acks and the auth answers) is never counted or kept: it is re-read on
+// resume. Nothing about sessions is ever logged.
+
+using Bytes = std::shared_ptr<const std::string>;
+
+static Bytes shared_bytes(std::string s) { return std::make_shared<const std::string>(std::move(s)); }
+
+// What a stream frame is to its ring: the sender's address share, and for the 0x06
+// kinds offline_buffer takes, the kind and room the expiry hand-off files it under.
+// `own` charges an answer to the receiving socket's own share.
+struct Meta {
+    uint64_t share = 0;
+    session::Kind kind = session::Kind::Other;
+    std::string room;
+    bool own = false;
+
+    explicit Meta(uint64_t sender_share, session::Kind k = session::Kind::Other, std::string r = std::string())
+        : share(sender_share), kind(k), room(std::move(r)) {}
+    static Meta answer() {
+        Meta m(0);
+        m.own = true;
+        return m;
+    }
+};
+
+static uint64_t socket_share(RelayState& state, const PerSocketData* data);
+
+// The session `data`'s socket carries while it is that session's live socket.
+static session::Session* live_session(RelayState& state, const PerSocketData* data) {
+    if (data->sid.empty() || data->superseded) return nullptr;
+    auto it = state.sessions.find(data->peer_id);
+    if (it == state.sessions.end() || it->second.state != session::State::Live || it->second.sid != data->sid) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+// The session of `peer` while its socket is gone.
+static session::Session* grace_session(RelayState& state, const std::string& peer) {
+    auto it = state.sessions.find(peer);
+    return it != state.sessions.end() && it->second.state == session::State::Grace ? &it->second : nullptr;
+}
+
+// The live socket of a live session.
+static SSLWebSocket* socket_of(RelayState& state, const session::Session& s) {
+    auto it = state.peer_sockets.find(s.peer_id);
+    if (it == state.peer_sockets.end()) return nullptr;
+    const PerSocketData* d = it->second->getUserData();
+    return d->sid == s.sid && !d->superseded ? it->second : nullptr;
+}
+
+static void ring_in(RelayState& state, session::Session& s, const Bytes& bytes, bool binary, const Meta& meta,
+                    const PerSocketData* receiver) {
+    session::Frame f;
+    f.bytes = bytes;
+    f.binary = binary;
+    f.share = meta.own && receiver ? socket_share(state, receiver) : meta.share;
+    f.kind = meta.kind;
+    if (meta.kind != session::Kind::Other) f.room = meta.room;
+    session_bounds::ring_push(state, s, std::move(f));
+}
+
+// A stream frame for a socket: counted into its session's ring before the write.
+static void send_stream(SSLWebSocket* ws, const Bytes& bytes, bool binary, const Meta& meta) {
+    const PerSocketData* data = ws->getUserData();
+    if (session::Session* s = g_state ? live_session(*g_state, data) : nullptr) {
+        ring_in(*g_state, *s, bytes, binary, meta, data);
+    }
+    write_raw(ws, *bytes, binary ? uWS::OpCode::BINARY : uWS::OpCode::TEXT);
+}
+
+// The same for one receiver: a ring keeps its own copy, and only a session's socket
+// pays for one.
+static void send_stream(SSLWebSocket* ws, std::string_view data, bool binary, const Meta& meta) {
+    const PerSocketData* d = ws->getUserData();
+    if (session::Session* s = g_state ? live_session(*g_state, d) : nullptr) {
+        ring_in(*g_state, *s, std::make_shared<const std::string>(data), binary, meta, d);
+    }
+    write_raw(ws, data, binary ? uWS::OpCode::BINARY : uWS::OpCode::TEXT);
+}
+
+// A stream frame for `peer`'s session in grace, which holds a room the frame is for:
+// into its ring only. False when `peer` has no session in grace.
+static bool send_held(RelayState& state, const std::string& peer, const Bytes& bytes, bool binary, const Meta& meta) {
+    session::Session* s = grace_session(state, peer);
+    if (!s) return false;
+    ring_in(state, *s, bytes, binary, meta, nullptr);
+    return true;
+}
+
+// Presence, unasked: withheld from a session that said it is inactive.
+static void send_presence(SSLWebSocket* ws, std::string_view text) {
+    if (g_state) {
+        const session::Session* s = live_session(*g_state, ws->getUserData());
+        if (s && s->inactive) return;
+    }
+    write_raw(ws, text, uWS::OpCode::TEXT);
+}
+
+// A relay answer: a stream frame unless its type is state (section 9.3).
+static void send_json(SSLWebSocket* ws, const json& j) {
+    auto t = j.find("type");
+    const bool counted = t == j.end() || !t->is_string() || session::relay_type_counts(t->get_ref<const std::string&>());
+    if (counted) {
+        const std::string text = j.dump();
+        send_stream(ws, std::string_view(text), false, Meta::answer());
+    } else {
+        write_raw(ws, j.dump(), uWS::OpCode::TEXT);
     }
 }
 
@@ -238,6 +355,13 @@ static void replay_buffered_msgs(SSLWebSocket* ws, const std::string& peer_id,
 static void cleanup_peer(RelayState& state, const std::string& peer_id,
                          SSLWebSocket* expected_ws,
                          bool suppress_peer_left = false);
+// Defined with the rest of the session code, near the close handler.
+static void end_session(RelayState& state, const std::string& peer);
+static void mint_session(RelayState& state, SSLWebSocket* ws, PerSocketData* data, const std::string& challenge,
+                         const char* resume_failed);
+static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* data, session::Session& s,
+                           uint64_t in_h, const std::string& challenge);
+static void send_kill_signals(RelayState& state, SSLWebSocket* ws, const std::string& peer);
 
 // Pre-0.12 clients sign only `hollow-ws-auth:{peer}:{ts}` and cannot ask for a
 // challenge, so a v1 frame captured by another relay would replay here: refused.
@@ -250,12 +374,15 @@ static constexpr bool ACCEPT_AUTH_V1 = HOLLOW_ACCEPT_AUTH_V1;
 
 // The one frame an unauthenticated socket may send besides `auth`. The nonce is
 // minted once per socket; asking again gets the same one. `door_key` is what this
-// socket's door proofs are made for.
+// socket's door proofs are made for; `session` says a v3 login may ask for one.
 static void handle_auth_hello(SSLWebSocket* ws, PerSocketData* data, const RelayState& state) {
     if (data->auth_nonce.empty()) {
         data->auth_nonce = random_hex(AUTH_NONCE_HEX_LEN / 2);
     }
-    send_json(ws, {{"type", "auth_challenge"}, {"nonce", data->auth_nonce}, {"door_key", state.door_key.text}});
+    send_json(ws, {{"type", "auth_challenge"},
+                   {"nonce", data->auth_nonce},
+                   {"door_key", state.door_key.text},
+                   {"session", 1}});
 }
 
 static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
@@ -322,7 +449,7 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
     // relay, not a second socket here, not an invisible `fetch` socket beside the
     // live device.
     std::string signed_msg;
-    if (frame->version == 2) {
+    if (frame->version >= 2) {
         std::optional<std::string> mode = auth_mode(guest, fetch);
         bool challenged = !data->auth_nonce.empty() && frame->nonce == data->auth_nonce;
         if (!mode || !challenged || frame->domain != auth_domain(config.domain)) {
@@ -331,7 +458,10 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
             return;
         }
         std::string license_digest = license_key_val.empty() ? std::string() : sha256_hex(license_key_val);
-        signed_msg = auth_v2_message(frame->domain, frame->nonce, peer_id, timestamp, *mode, license_digest);
+        signed_msg = frame->version == 3
+                         ? auth_v3_message(frame->domain, frame->nonce, peer_id, timestamp, *mode, license_digest,
+                                           frame->session, frame->in_h)
+                         : auth_v2_message(frame->domain, frame->nonce, peer_id, timestamp, *mode, license_digest);
     } else if (ACCEPT_AUTH_V1) {
         signed_msg = "hollow-ws-auth:" + peer_id + ":" + std::to_string(timestamp);
     } else {
@@ -340,7 +470,7 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         return;
     }
     // One challenge, one attempt; door proofs stay bound to the one that logged in.
-    const std::string challenge = frame->version == 2 ? data->auth_nonce : std::string();
+    const std::string challenge = frame->version >= 2 ? data->auth_nonce : std::string();
     data->auth_nonce.clear();
     if (!verify_ed25519(public_key, signature, signed_msg)) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
@@ -399,10 +529,27 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         data->auth_timer = nullptr;
     }
 
+    // A full v3 login may ask for a session: one to resume, or a fresh one.
+    const bool wants_session = frame->version == 3 && !guest && !fetch;
+    const char* resume_failed = nullptr;
+    if (wants_session && frame->session != "new") {
+        // Only this device's own session can be named, so a sid of anyone else's is
+        // answered exactly like one that never existed.
+        auto it = state.sessions.find(peer_id);
+        if (it == state.sessions.end() || !session::sid_equal(it->second.sid, frame->session)) {
+            resume_failed = "unknown";
+        } else if (!it->second.ring.can_resume_from(frame->in_h)) {
+            resume_failed = "bad_h";
+        } else {
+            resume_session(state, ws, data, it->second, frame->in_h, challenge);
+            return;
+        }
+    }
+
     // Supersede a stale duplicate connection. A client that reconnects (mobile
     // resume, network blip, TLS re-handshake) opens a NEW socket while its old
     // TCP socket may still be half-open — the relay won't notice the dead socket
-    // until the 120s idleTimeout fires. Without this, the old socket lingers in
+    // until the idleTimeout fires. Without this, the old socket lingers in
     // peer_sockets + every room map; when it finally closes, cleanup_peer would
     // leave_room ALL of this peer's rooms and broadcast peer_left — evicting the
     // LIVE new socket from every room and telling friends the peer went offline
@@ -413,6 +560,9 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
     // the peer's presence. Fetch-mode peers never register in peer_sockets, so
     // they never supersede a full node (and vice-versa — full node wins).
     if (!data->is_fetch) {
+        // Any other login of the device starts afresh: a session it still holds ends
+        // first, its rooms left silently and its ring handed off as on expiry.
+        end_session(state, peer_id);
         auto existing = state.peer_sockets.find(peer_id);
         if (existing != state.peer_sockets.end() && existing->second != ws) {
             SSLWebSocket* ghost = existing->second;
@@ -440,13 +590,21 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         state.peer_rooms[peer_id] = {};
     }
 
-    send_json(ws, {{"type", "auth_ok"}});
+    if (wants_session) {
+        mint_session(state, ws, data, challenge, resume_failed);
+    } else {
+        send_json(ws, {{"type", "auth_ok"}});
+    }
+    send_kill_signals(state, ws, peer_id);
+    // privacy: no connection logging
+}
 
-    // Out with the auth, before any join: a device whose identity is gone may
-    // never join a room again, and a phone that only wakes for push (a fetch
-    // socket) has to act on it too. Every signal waiting: the device judges each,
-    // and its ack names the one it turned away by issuer and stamp.
-    const auto kills = state.kill_list.waiting(peer_id);
+// Out with the auth, before any join: a device whose identity is gone may never join a
+// room again, and a phone that only wakes for push (a fetch socket) has to act on it
+// too. Every signal waiting: the device judges each, and its ack names the one it
+// turned away by issuer and stamp.
+static void send_kill_signals(RelayState& state, SSLWebSocket* ws, const std::string& peer) {
+    const auto kills = state.kill_list.waiting(peer);
     for (const auto* kill : kills) {
         send_json(ws, {{"type", "kill_signal"},
                        {"blob", kill->blob},
@@ -455,7 +613,6 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
     }
     // Operational only: no peer id, no issuer, no blob.
     if (!kills.empty()) fprintf(stderr, "[kill] kill_signal delivered\n");
-    // privacy: no connection logging
 }
 
 // --- Inbox mailbox (async friending) ---------------------------------------
@@ -550,7 +707,8 @@ static void replay_mailbox_no_delete(SSLWebSocket* ws,
     if (it == state.offline_buffer.end()) return;
     for (const auto& m : it->second) {
         if (m.room == room) {
-            send_to_peer(ws, m.frame, uWS::OpCode::BINARY);
+            // The mailbox keeps its copy, so the ring's never moves on expiry.
+            send_stream(ws, m.frame, true, Meta{m.share});
         }
     }
     // The byte budget is untouched on purpose: nothing left the buffer.
@@ -646,23 +804,31 @@ static void drop_inbox_owners(RelayState& state, const std::string& room, const 
     }
     for (const auto& peer : gone) {
         r.owners.erase(peer);
+        // A session holding the inbox keeps no owner flag the fold took back.
+        auto sit = state.sessions.find(peer);
+        if (sit != state.sessions.end()) {
+            auto flag = sit->second.rooms.find(room);
+            if (flag != sit->second.rooms.end()) flag->second = false;
+        }
+        // A device in grace already left presence.
+        if (r.peers.find(peer) == r.peers.end()) continue;
         std::string left = json{{"type", "peer_left"}, {"room", room}, {"peer_id", peer}}.dump();
         const Audience aud = audience(state, r, room);
         for (auto& [pid, sock] : r.peers) {
             if (pid != peer && !sock->getUserData()->is_guest && aud.sees(pid)) {
-                send_to_peer(sock, left, uWS::OpCode::TEXT);
+                send_presence(sock, left);
             }
         }
     }
 }
 
-// Whether `proof` opens `door` for this socket in `room`. A socket that never asked
+// Whether `proof` opens `door` for `peer` in `room`, bound to the challenge `nonce` its
+// socket logged in with (or its session was minted with). A socket that never asked
 // for a challenge (a 0.11 login) has no nonce to bind a proof to.
-static bool door_opens(const RelayState& state, const PerSocketData* data, const std::string& room,
-                       const std::string& door, const std::string& proof) {
-    if (data->door_nonce.empty() || proof.size() != door_room::PROOF_TEXT_LEN) return false;
-    const std::string msg =
-        door_room::proof_message(state.door_domain, data->door_nonce, data->peer_id, room, door, state.door_key.text);
+static bool door_opens(const RelayState& state, const std::string& nonce, const std::string& peer,
+                       const std::string& room, const std::string& door, const std::string& proof) {
+    if (nonce.empty() || proof.size() != door_room::PROOF_TEXT_LEN) return false;
+    const std::string msg = door_room::proof_message(state.door_domain, nonce, peer, room, door, state.door_key.text);
     return door_proof_opens(state.door_key, door, msg, proof);
 }
 
@@ -683,9 +849,29 @@ static void announce_door_change(const WsRoom& room, const Audience& aud, const 
     std::string frame = json{{"type", type}, {"room", room_name}, {"peer_id", peer}}.dump();
     for (const auto& [pid, sock] : room.peers) {
         if (pid != peer && !sock->getUserData()->is_guest && aud.shares(pid, peer)) {
-            send_to_peer(sock, frame, uWS::OpCode::TEXT);
+            send_presence(sock, frame);
         }
     }
+}
+
+// The `members` snapshot `peer` is told for `room`: everyone it may know of there and
+// itself last, or itself alone where it sees nobody (a non-owner of an inbox, a
+// socket a locked room hides); `proved` for a locked room.
+static json members_of(const RelayState& state, const std::string& room_name, const WsRoom& room,
+                       const std::string& peer, bool owner) {
+    const Audience aud = audience(state, room, room_name);
+    const bool proved = !aud.locked || room.doors.sees(peer, aud.now_ms);
+    std::vector<std::string> peers;
+    if ((!aud.inbox || owner) && proved) {
+        for (const auto& [pid, sock] : room.peers) {
+            const auto* pd = sock->getUserData();
+            if (pid != peer && !pd->is_guest && !pd->is_fetch && aud.shares(pid, peer)) peers.push_back(pid);
+        }
+    }
+    peers.push_back(peer);
+    json j = {{"type", "members"}, {"room", room_name}, {"peers", peers}};
+    if (aud.locked) j["proved"] = proved;
+    return j;
 }
 
 // Ownership of an `inbox:{M}` join that shows a roster (design ID-1R): the roster is
@@ -770,7 +956,8 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     if (lock) {
         saw_before = same_socket && ws_room.doors.sees(data->peer_id, now_ms);
         const std::string proof = data->is_guest ? std::string() : door_proof;
-        const bool opens = !proof.empty() && door_opens(state, data, room, lock->door, proof);
+        const bool opens =
+            !proof.empty() && door_opens(state, data->door_nonce, data->peer_id, room, lock->door, proof);
         door_ok = ws_room.doors.join(data->peer_id, proof, opens, same_socket, now_ms);
     }
     const bool visible = (!inbox || owner) && door_ok;
@@ -813,8 +1000,10 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
 
     // Track room on peer
     state.peer_rooms[data->peer_id].insert(room);
+    if (session::Session* s = live_session(state, data)) s->rooms[room] = owner;
 
-    // Send member list to joiner (excluding guests and fetch-mode peers)
+    // Send member list to joiner (excluding guests and fetch-mode peers). The answer
+    // to its own join, so an inactive session is told it too.
     std::vector<std::string> all_peers = existing_peers;
     if (!data->is_guest && !data->is_fetch) {
         all_peers.push_back(data->peer_id);
@@ -825,7 +1014,7 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
         {"peers", all_peers}
     };
     if (lock) members_msg["proved"] = door_ok;
-    send_json(ws, members_msg);
+    write_raw(ws, members_msg.dump(), uWS::OpCode::TEXT);
 
     // Notify existing non-guest peers (skip if joiner is a guest or fetch-mode,
     // or if this is a redundant re-join — the peer was already in the room).
@@ -885,12 +1074,16 @@ static void leave_room(RelayState& state, const std::string& peer_id,
                                   !audience(state, rit->second, room).sees(peer_id);
 
     rit->second.peers.erase(peer_id);
-    rit->second.owners.erase(peer_id);
-    rit->second.doors.leave(peer_id);
+    // The device's fetch socket leaving keeps what its session in grace holds here.
+    if (!rit->second.held.count(peer_id)) {
+        rit->second.owners.erase(peer_id);
+        rit->second.doors.leave(peer_id);
+    }
 
     bool should_notify = !rit->second.peers.empty();
 
-    if (!should_notify) {
+    // A room some session in grace holds stays, so delivery still finds it.
+    if (!should_notify && rit->second.held.empty()) {
         state.ws_rooms.erase(rit);
     }
 
@@ -1043,6 +1236,7 @@ static void drop_frame(RelayState& state, uint64_t seq, const OfflineIndex::Loc&
             if (q.empty()) state.offline_buffer.erase(it);
         }
     }
+    // A frame a session's ring holds is buried there by released() itself.
     state.buffer_index.released(seq);
 }
 
@@ -1156,7 +1350,11 @@ static void replay_buffered_msgs(SSLWebSocket* ws, const std::string& peer_id,
     size_t delivered = 0;
     for (auto& m : q) {
         if (m.room == room) {
-            send_to_peer(ws, m.frame, uWS::OpCode::BINARY);
+            // Unacked when the session ends, it goes back where it came from.
+            const session::Kind kind = m.is_image     ? session::Kind::DirectImage
+                                       : m.is_channel ? session::Kind::ChannelCopy
+                                                      : session::Kind::Direct;
+            send_stream(ws, m.frame, true, Meta{m.share, kind, m.room});
             state.buffer_index.released(m.seq);
             delivered++;
         } else {
@@ -1255,9 +1453,11 @@ void sweep_door_grace(RelayState& state) {
         // A lock gone from the relay leaves the room open: nobody to hide anyone from.
         for (const auto& peer : r.doors.expire(now_ms)) {
             auto pit = r.peers.find(peer);
-            if (!aud.locked || pit == r.peers.end()) continue;
+            // A session in grace left presence already; its fetch socket learns nothing.
+            if (!aud.locked || pit == r.peers.end() || pit->second->getUserData()->is_fetch) continue;
             announce_door_change(r, aud, room, peer, "peer_left");
-            send_json(pit->second, {{"type", "members"}, {"room", room}, {"peers", json::array({peer})}, {"proved", false}});
+            send_presence(pit->second,
+                          json{{"type", "members"}, {"room", room}, {"peers", json::array({peer})}, {"proved", false}}.dump());
         }
         it = r.doors.in_grace() ? std::next(it) : state.door_grace_rooms.erase(it);
     }
@@ -1504,16 +1704,28 @@ static void relock_room(RelayState& state, const std::string& room, bool was_loc
         const auto* pd = sock->getUserData();
         if (!pd->is_guest && !pd->is_fetch) peers.push_back(pid);
     }
+    // Sessions in grace are judged too, by the nonce their proofs were made for, or an
+    // old door's standing would outlive the move.
+    for (const auto& pid : r.held) {
+        if (r.peers.find(pid) == r.peers.end() || r.peers[pid]->getUserData()->is_fetch) peers.push_back(pid);
+    }
     const std::string door = lock->door;
     auto opens = [&](const std::string& peer, const std::string& proof) {
         auto pit = r.peers.find(peer);
-        return pit != r.peers.end() && door_opens(state, pit->second->getUserData(), room, door, proof);
+        if (pit != r.peers.end() && !pit->second->getUserData()->is_fetch) {
+            return door_opens(state, pit->second->getUserData()->door_nonce, peer, room, door, proof);
+        }
+        const session::Session* s = grace_session(state, peer);
+        return s && door_opens(state, s->door_nonce, peer, room, door, proof);
     };
     auto newly = r.doors.relock(peers, was_locked, opens, steady_ms());
     if (r.doors.in_grace()) state.door_grace_rooms.insert(room);
     const Audience aud = audience(state, r, room);
     for (const auto& peer : newly) {
-        send_json(r.peers[peer], {{"type", "members"}, {"room", room}, {"peers", roster_for(r, aud, peer)}, {"proved", true}});
+        auto pit = r.peers.find(peer);
+        if (pit == r.peers.end() || pit->second->getUserData()->is_fetch) continue;
+        send_presence(pit->second,
+                      json{{"type", "members"}, {"room", room}, {"peers", roster_for(r, aud, peer)}, {"proved", true}}.dump());
         announce_door_change(r, aud, room, peer, "peer_joined");
     }
 }
@@ -1776,7 +1988,7 @@ static void handle_topic_catchup(SSLWebSocket* ws, PerSocketData* data,
                 auto age = std::chrono::duration_cast<std::chrono::seconds>(now - f.at).count();
                 if (age > max_age) continue;
             }
-            send_to_peer(ws, f.frame, uWS::OpCode::BINARY);
+            send_stream(ws, f.frame, true, Meta{f.share});
         }
     }
     // Asked for, the end of the replay is marked behind its last frame, an empty or
@@ -1936,12 +2148,16 @@ static void handle_msg(PerSocketData* data, const std::string& room,
         {"from", data->peer_id},
         {"data", msg_data}
     };
-    std::string broadcast_str = broadcast.dump();
+    const Bytes out = shared_bytes(broadcast.dump());
+    const Meta meta{socket_share(state, data)};
     const Audience aud = audience(state, rit->second, room);
     for (auto& [pid, peer_ws] : rit->second.peers) {
         if (pid != data->peer_id && aud.shares(pid, data->peer_id)) {
-            send_to_peer(peer_ws, broadcast_str, uWS::OpCode::TEXT);
+            send_stream(peer_ws, out, false, meta);
         }
+    }
+    for (const auto& pid : rit->second.held) {
+        if (pid != data->peer_id && aud.shares(pid, data->peer_id)) send_held(state, pid, out, false, meta);
     }
 }
 
@@ -1964,8 +2180,9 @@ static void handle_direct(PerSocketData* data, const std::string& room,
     }
 
     auto tit = rit->second.peers.find(target);
-    if (tit != rit->second.peers.end() && !audience(state, rit->second, room).reachable(target)) return;
-    if (tit == rit->second.peers.end()) {
+    const bool held = rit->second.held.count(target) != 0;
+    if ((tit != rit->second.peers.end() || held) && !audience(state, rit->second, room).reachable(target)) return;
+    if (tit == rit->second.peers.end() && !held) {
         // Target not in THIS room. Buffer either way (replays on join); only
         // push when fully offline. A connected-but-not-yet-joined target hits a
         // race (first plaintext DM — friend request / key exchange / sync —
@@ -1990,8 +2207,15 @@ static void handle_direct(PerSocketData* data, const std::string& room,
         {"from", data->peer_id},
         {"data", msg_data}
     };
-    std::string direct_str = direct.dump();
-    send_to_peer(tit->second, direct_str, uWS::OpCode::TEXT);
+    const Bytes out = shared_bytes(direct.dump());
+    const Meta meta{socket_share(state, data)};
+    if (tit != rit->second.peers.end()) send_stream(tit->second, out, false, meta);
+    // Delivery follows the session: a device in grace gets it in its ring, and its
+    // phone the wake-up an offline device gets.
+    if (held) {
+        send_held(state, target, out, false, meta);
+        if (tit == rit->second.peers.end()) try_push_notify(target, data->peer_id, state);
+    }
 }
 
 // NOTE: opcode 0x01 (legacy raw 32-byte-room binary broadcast) was REMOVED.
@@ -2041,7 +2265,8 @@ static void handle_binary_direct(PerSocketData* data,
     if (!is_peer_id_shape(target_str)) return;
     if (!fwd_room::paired(room_str, data->peer_id, target_str)) return;
     auto tit = rit->second.peers.find(target_str);
-    if (tit == rit->second.peers.end()) return;
+    const bool held = rit->second.held.count(target_str) != 0;
+    if (tit == rit->second.peers.end() && !held) return;
     if (!audience(state, rit->second, room_str).reachable(target_str)) return;
 
     // Build forwarded frame: replace target with sender
@@ -2054,7 +2279,12 @@ static void handle_binary_direct(PerSocketData* data,
     forwarded.push_back(0x00);
     forwarded.append(payload);
 
-    send_to_peer(tit->second, forwarded, uWS::OpCode::BINARY);
+    // A chunk rides the ring of a session in grace too, so a transfer survives a short
+    // drop; it never moves to offline_buffer (the pull resumes through file asks).
+    const Bytes out = shared_bytes(std::move(forwarded));
+    const Meta meta{socket_share(state, data)};
+    if (tit != rit->second.peers.end()) send_stream(tit->second, out, true, meta);
+    if (held) send_held(state, target_str, out, true, meta);
 }
 
 // 0x03 reaches whoever sees the room; 0x0A (`to_all`) is a public frame, which a
@@ -2092,9 +2322,16 @@ static void handle_binary_msg(PerSocketData* data,
 
     const Audience aud = audience(state, rit->second, room_str);
     const bool public_frame = to_all && aud.locked && aud.sees(data->peer_id);
+    const Bytes out = shared_bytes(std::move(forwarded));
+    const Meta meta{socket_share(state, data)};
     for (auto& [pid, peer_ws] : rit->second.peers) {
         if (pid != data->peer_id && (public_frame || aud.shares(pid, data->peer_id))) {
-            send_to_peer(peer_ws, forwarded, uWS::OpCode::BINARY);
+            send_stream(peer_ws, out, true, meta);
+        }
+    }
+    for (const auto& pid : rit->second.held) {
+        if (pid != data->peer_id && (public_frame || aud.shares(pid, data->peer_id))) {
+            send_held(state, pid, out, true, meta);
         }
     }
 }
@@ -2163,7 +2400,8 @@ static void handle_binary_direct_msg(PerSocketData* data,
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
 
     auto tit = rit->second.peers.find(target_str);
-    if (tit == rit->second.peers.end()) {
+    const bool held = rit->second.held.count(target_str) != 0;
+    if (tit == rit->second.peers.end() && !held) {
         // Target not in THIS room. Two cases:
         //  - fully offline (not in peer_sockets): buffer + push.
         //  - connected but not yet in the room (race: a DM sent in the gap
@@ -2190,13 +2428,15 @@ static void handle_binary_direct_msg(PerSocketData* data,
         // A deposit for the inbox's own master also reaches its owners online
         // now: nobody else learns which devices those are, so the depositor
         // cannot address them itself.
+        // The mailbox keeps its copy, so an owner's ring never moves this one on expiry.
         if (room_str == std::string(INBOX_ROOM_PREFIX) + target_str) {
-            std::string live = build_direct_frame(room_code, data->peer_id, payload);
+            const Bytes live = shared_bytes(build_direct_frame(room_code, data->peer_id, payload));
+            const Meta meta{socket_share(state, data)};
             for (const auto& owner_id : rit->second.owners) {
+                if (owner_id == data->peer_id) continue;
                 auto oit = rit->second.peers.find(owner_id);
-                if (owner_id != data->peer_id && oit != rit->second.peers.end()) {
-                    send_to_peer(oit->second, live, uWS::OpCode::BINARY);
-                }
+                if (oit != rit->second.peers.end()) send_stream(oit->second, live, true, meta);
+                if (rit->second.held.count(owner_id)) send_held(state, owner_id, live, true, meta);
             }
         }
         return;
@@ -2206,14 +2446,28 @@ static void handle_binary_direct_msg(PerSocketData* data,
     if (!g_forwarder_peer_id.empty() && target_str == g_forwarder_peer_id) {
         state.diag.fwd_delivered++;
     }
-    send_to_peer(tit->second, build_direct_frame(room_code, data->peer_id, payload),
-                 uWS::OpCode::BINARY);
+    // Unacked when the target's session ends, it moves to offline_buffer like a deposit.
+    const Bytes out = shared_bytes(build_direct_frame(room_code, data->peer_id, payload));
+    const Meta meta{socket_share(state, data), is_image ? session::Kind::DirectImage : session::Kind::Direct, room_str};
+    if (tit != rit->second.peers.end()) send_stream(tit->second, out, true, meta);
+    // Delivery follows the session: a device in grace gets it in its ring, and its
+    // phone the wake-up an offline device gets.
+    if (held) {
+        send_held(state, target_str, out, true, meta);
+        if (tit == rit->second.peers.end()) try_push_notify(target_str, data->peer_id, state);
+    }
+}
+
+// Whether a topic frame passes a room's filter: no filter = every topic.
+static bool subscribed(const std::unordered_map<std::string, std::unordered_set<std::string>>& subs,
+                       const std::string& room, const std::string& topic) {
+    auto it = subs.find(room);
+    return it == subs.end() || it->second.count(topic) != 0;
 }
 
 // Replace a room's topic filter. A set that would pass either per-socket cap is
 // dropped instead, leaving the room unfiltered: more frames, never fewer.
-static void handle_subscribe(PerSocketData* data, const std::string& room,
-                              const json& topics_arr) {
+static void apply_subscribe(PerSocketData* data, const std::string& room, const json& topics_arr) {
     if (!data->authenticated || !is_valid_room_code(room)) return;
     if (auto old = data->subscriptions.find(room); old != data->subscriptions.end()) {
         data->subscription_topics -= std::min(data->subscription_topics, old->second.size());
@@ -2232,6 +2486,20 @@ static void handle_subscribe(PerSocketData* data, const std::string& room,
     }
     data->subscription_topics += subs.size();
     data->subscriptions.emplace(room, std::move(subs));
+}
+
+// The socket's filter, and its session's: the filter outlives the socket with it.
+static void handle_subscribe(PerSocketData* data, const std::string& room, const json& topics_arr,
+                             RelayState& state) {
+    apply_subscribe(data, room, topics_arr);
+    session::Session* s = live_session(state, data);
+    if (!s) return;
+    auto it = data->subscriptions.find(room);
+    if (it != data->subscriptions.end()) {
+        s->subscriptions[room] = it->second;
+    } else {
+        s->subscriptions.erase(room);
+    }
 }
 
 static void handle_binary_topic_msg(PerSocketData* data,
@@ -2308,19 +2576,20 @@ static void handle_binary_topic_msg(PerSocketData* data,
     }
 
     const Audience aud = audience(state, rit->second, room_str);
+    const Bytes out = shared_bytes(std::move(forwarded));
+    const Meta meta{socket_share(state, data)};
     for (auto& [pid, peer_ws] : rit->second.peers) {
         if (pid == data->peer_id) continue;
         if (!aud.shares(pid, data->peer_id)) continue;
-
-        auto* peer_data = peer_ws->getUserData();
-        auto sit = peer_data->subscriptions.find(room_str);
-        if (sit == peer_data->subscriptions.end()) {
-            // No subscriptions for this room — wildcard, send everything
-            send_to_peer(peer_ws, forwarded, uWS::OpCode::BINARY);
-        } else if (sit->second.count(topic_str)) {
-            // Peer is subscribed to this topic
-            send_to_peer(peer_ws, forwarded, uWS::OpCode::BINARY);
+        if (subscribed(peer_ws->getUserData()->subscriptions, room_str, topic_str)) {
+            send_stream(peer_ws, out, true, meta);
         }
+    }
+    // A session in grace keeps its filter.
+    for (const auto& pid : rit->second.held) {
+        if (pid == data->peer_id || !aud.shares(pid, data->peer_id)) continue;
+        const session::Session* s = grace_session(state, pid);
+        if (s && subscribed(s->subscriptions, room_str, topic_str)) send_held(state, pid, out, true, meta);
     }
 }
 
@@ -2348,8 +2617,10 @@ static bool nickname_binding_is_stale(RelayState& state, const std::string& nick
     bool expired = false;
     auto exp = state.nickname_expiry.find(nickname);
     if (exp != state.nickname_expiry.end() && now_unix_secs() > exp->second) expired = true;
-    // Dead holder: no live socket authenticated as this peer_id.
-    bool dead_holder = state.peer_sockets.find(holder) == state.peer_sockets.end();
+    // Dead holder: no live socket authenticated as this peer_id, and no session of it
+    // waiting for its socket to come back.
+    bool dead_holder = state.peer_sockets.find(holder) == state.peer_sockets.end() &&
+                       state.sessions.find(holder) == state.sessions.end();
     if (expired || dead_holder) {
         erase_nickname_binding(state, nickname, holder);
         return true;
@@ -2674,13 +2945,15 @@ void sweep_link_guesses(RelayState& state) {
     }
 }
 
-static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
-                                 std::string_view message, RelayState& state,
-                                 const Config& config) {
-    json j = client_json::parse(message);
-    if (j.is_discarded()) return;
+// Session control (section 9.4 to 9.7). Returns true when `type` was one; the socket
+// may be closed afterwards.
+static bool handle_session_control(SSLWebSocket* ws, PerSocketData* data, const json& j, const std::string& type,
+                                   RelayState& state);
 
-    std::string type = j.value("type", "");
+static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
+                                 const json& j, const std::string& type, RelayState& state,
+                                 const Config& config) {
+    if (handle_session_control(ws, data, j, type, state)) return;
 
     if (type == "join") {
         // An `inbox:{master}` join may show the device's roster (0.12) or a
@@ -2698,6 +2971,7 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         std::string room = j.value("room", "");
         leave_room(state, data->peer_id, room, ws);
         data->fetch_rooms.erase(room);
+        if (session::Session* s = live_session(state, data)) s->rooms.erase(room);
     } else if (type == "msg") {
         handle_msg(data, j.value("room", ""), j.value("data", ""), state);
     } else if (type == "direct") {
@@ -2781,8 +3055,9 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         }
         send_json(ws, {{"type", "discovered_peers"}, {"room", room}, {"peers", peers}});
     } else if (type == "subscribe") {
-        handle_subscribe(data, j.value("room", ""),
-                         j.contains("topics") ? j["topics"] : json::array());
+        static const json no_topics = json::array();
+        auto topics = j.find("topics");
+        handle_subscribe(data, j.value("room", ""), topics != j.end() ? *topics : no_topics, state);
     } else if (type == "claim_nickname") {
         handle_claim_nickname(ws, data, j, state);
     } else if (type == "release_nickname") {
@@ -2865,6 +3140,38 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
 // Ed25519 auth + license key revocation. IPs tracked in-memory only, never logged.
 
 
+// Release the device's temporary nickname (with its expiry, master and proof) and its
+// link code: they belong to a socket, or to a session while it waits for one.
+static void release_bindings(RelayState& state, const std::string& peer_id) {
+    auto nit = state.peer_to_nickname.find(peer_id);
+    if (nit != state.peer_to_nickname.end()) {
+        state.nickname_expiry.erase(nit->second);
+        state.nickname_to_peer.erase(nit->second);
+        state.nickname_to_master.erase(nit->second);
+        state.nickname_proof.erase(nit->second);
+        state.peer_to_nickname.erase(nit);
+    }
+    auto lit = state.peer_to_linkcode.find(peer_id);
+    if (lit != state.peer_to_linkcode.end()) {
+        state.linkcode_expiry.erase(lit->second);
+        state.linkcode_to_peer.erase(lit->second);
+        state.peer_to_linkcode.erase(lit);
+    }
+}
+
+// The device's socket is gone: it is offline for presence and push.
+static void go_offline(RelayState& state, const std::string& peer_id) {
+    // Clear push debounce on disconnect (token stays — needed for offline
+    // pushes). The hourly wake-up budget goes with it: the budget exists to
+    // bound how often an OFFLINE device is woken, so each offline stretch
+    // starts fresh, and the map never outlives the peer's push token.
+    state.last_push_sent.erase(peer_id);
+    state.push_budget.erase(peer_id);
+
+    state.license.release_key(peer_id);
+    state.peer_sockets.erase(peer_id);
+}
+
 // Tear down all shared state for `peer_id`, owned by `expected_ws`. Only the
 // socket that currently owns the peer's entries does the teardown: if a newer
 // socket has already taken over (peer_sockets points elsewhere / room slots
@@ -2886,33 +3193,8 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
     bool owns_peer = (sock_it == state.peer_sockets.end() || sock_it->second == expected_ws);
 
     if (owns_peer) {
-        // Release temporary nickname (+ its expiry/master entries)
-        auto nit = state.peer_to_nickname.find(peer_id);
-        if (nit != state.peer_to_nickname.end()) {
-            state.nickname_expiry.erase(nit->second);
-            state.nickname_to_peer.erase(nit->second);
-            state.nickname_to_master.erase(nit->second);
-            state.nickname_proof.erase(nit->second);
-            state.peer_to_nickname.erase(nit);
-        }
-
-        // Release multi-device link code
-        auto lit = state.peer_to_linkcode.find(peer_id);
-        if (lit != state.peer_to_linkcode.end()) {
-            state.linkcode_expiry.erase(lit->second);
-            state.linkcode_to_peer.erase(lit->second);
-            state.peer_to_linkcode.erase(lit);
-        }
-
-        // Clear push debounce on disconnect (token stays — needed for offline
-        // pushes). The hourly wake-up budget goes with it: the budget exists to
-        // bound how often an OFFLINE device is woken, so each offline stretch
-        // starts fresh, and the map never outlives the peer's push token.
-        state.last_push_sent.erase(peer_id);
-        state.push_budget.erase(peer_id);
-
-        state.license.release_key(peer_id);
-        state.peer_sockets.erase(peer_id);
+        release_bindings(state, peer_id);
+        go_offline(state, peer_id);
     }
 
     auto pit = state.peer_rooms.find(peer_id);
@@ -2930,15 +3212,364 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
     }
 }
 
+// --- Session lifecycle (section 9.2 and 9.7) ---------------------------------
+
+// The sender a 0x06 frame names: [0x06][room\0][sender\0][payload].
+static std::string direct_frame_sender(const std::string& frame) {
+    const size_t room_end = frame.find('\0', 1);
+    if (room_end == std::string::npos) return std::string();
+    const size_t sender_end = frame.find('\0', room_end + 1);
+    if (sender_end == std::string::npos) return std::string();
+    return frame.substr(room_end + 1, sender_end - room_end - 1);
+}
+
+// A session ends: the 0x06 frames its ring holds move into offline_buffer under their
+// room, each under its own cap there, so the replay on join and push take over.
+// Broadcasts, topic frames, 0x02 chunks and JSON answers do not: the topic rings, sync
+// and file asks cover them.
+static void hand_off(RelayState& state, const std::string& peer, const std::vector<session::Frame>& frames) {
+    for (const auto& f : frames) {
+        if (f.kind == session::Kind::Other || !f.bytes || !f.binary) continue;
+        buffer_offline_msg(peer, f.room, *f.bytes, state, direct_frame_sender(*f.bytes), f.share,
+                           f.kind == session::Kind::DirectImage, f.kind == session::Kind::ChannelCopy);
+    }
+}
+
+// A session in grace lets go of a room: its owner flag and door standing go with it,
+// and the room goes with the last of its peers. Only the device's fetch socket can hold
+// its slot by now, and that never owns or proves anything.
+static void let_go(RelayState& state, const std::string& peer, const std::string& room) {
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end()) return;
+    WsRoom& r = rit->second;
+    r.held.erase(peer);
+    r.owners.erase(peer);
+    r.doors.leave(peer);
+    if (r.peers.empty() && r.held.empty()) state.ws_rooms.erase(rit);
+}
+
+// The device's session is gone now (grace over, `end`, evicted, or a fresh login of
+// the device): its ring hands off, a session in grace lets go of its rooms and
+// bindings, and a live socket goes on without a session, its rooms its own again.
+static void end_session(RelayState& state, const std::string& peer) {
+    auto it = state.sessions.find(peer);
+    if (it == state.sessions.end()) return;
+    session::Session& s = it->second;
+    hand_off(state, peer, session_bounds::ring_take_all(state, s));
+    if (s.state == session::State::Grace) {
+        for (const auto& [room, owner] : s.rooms) let_go(state, peer, room);
+        release_bindings(state, peer);
+    } else if (SSLWebSocket* ws = socket_of(state, s)) {
+        ws->getUserData()->sid.clear();
+    }
+    session_bounds::release_ip_slot(state, s);
+    state.sessions.erase(it);
+}
+
+// The session's socket is gone. Presence follows the socket: the device leaves every
+// room's presence now. Delivery follows the session: it keeps its rooms with their
+// owner flags and door standing, its filter, nickname and link code for the grace, and
+// its socket's per-IP slot until it is gone.
+static void enter_grace(RelayState& state, SSLWebSocket* ws, PerSocketData* data, session::Session& s) {
+    const std::string& peer = data->peer_id;
+    for (const auto& [room, owner] : s.rooms) {
+        WsRoom& r = state.ws_rooms[room];
+        auto pit = r.peers.find(peer);
+        if (pit != r.peers.end() && pit->second == ws) {
+            const bool seen = audience(state, r, room).sees(peer);
+            r.peers.erase(pit);
+            if (seen && !r.peers.empty()) announce_door_change(r, audience(state, r, room), room, peer, "peer_left");
+        }
+        r.held.insert(peer);
+    }
+    auto sock = state.peer_sockets.find(peer);
+    if (sock != state.peer_sockets.end() && sock->second == ws) {
+        state.peer_rooms.erase(peer);
+        go_offline(state, peer);
+    }
+    session_bounds::hold_ip_slot(state, s, data->ip_key);
+    s.state = session::State::Grace;
+    s.unacked_in = 0;
+    s.grace_until = std::chrono::steady_clock::now() + std::chrono::seconds(g_grace_secs);
+    state.grace_ends.emplace_back(s.grace_until, peer);
+}
+
+// Whether the relay's fold of the identity's rosters still counts `peer` an owner of
+// the inbox `room`. With no roster held for that identity there is nothing to judge.
+static bool still_owner(RelayState& state, const std::string& room, const std::string& peer) {
+    const auto* held = state.roster_book.get(room.substr(sizeof(INBOX_ROOM_PREFIX) - 1));
+    if (!held) return true;
+    return state.roster_book.fold(*held, wall_now_ms(), relay_roster_crypto()).is_member(peer);
+}
+
+// A full socket's fresh session. The table makes room first: each session it names
+// ends as on expiry, and a live one's socket closes.
+static void mint_session(RelayState& state, SSLWebSocket* ws, PerSocketData* data, const std::string& challenge,
+                         const char* resume_failed) {
+    const uint64_t share = socket_share(state, data);
+    for (const auto& victim : session_bounds::make_room(state, share)) {
+        auto vit = state.sessions.find(victim);
+        if (vit == state.sessions.end()) continue;
+        SSLWebSocket* live = vit->second.state == session::State::Live ? socket_of(state, vit->second) : nullptr;
+        end_session(state, victim);
+        if (live && live != ws) live->end(1000, "session_lost");
+    }
+    session::Session s;
+    s.sid = random_hex(session::SID_HEX_LEN / 2);
+    s.peer_id = data->peer_id;
+    s.door_nonce = challenge;
+    s.share = share;
+    data->sid = s.sid;
+    json ok = {{"type", "auth_ok"}, {"sid", s.sid}, {"grace_secs", g_grace_secs}, {"hb_secs", session::HB_SECS}};
+    if (resume_failed) ok["resume_failed"] = resume_failed;
+    state.sessions[data->peer_id] = std::move(s);
+    write_raw(ws, ok.dump(), uWS::OpCode::TEXT);
+}
+
+// The session comes back on `ws`: from grace, or moved from a socket it is still live
+// on, which closes silently. Nothing is rejoined and nothing resubscribed; what changed
+// meanwhile is judged again, then in order: kill signals, one `members` per room, the
+// ring after the device's count, and `peer_joined` where its presence had gone.
+static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* data, session::Session& s,
+                           uint64_t in_h, const std::string& challenge) {
+    const std::string peer = data->peer_id;
+    SSLWebSocket* old = s.state == session::State::Live ? socket_of(state, s) : nullptr;
+    if (s.state == session::State::Grace) session_bounds::release_ip_slot(state, s);
+    s.state = session::State::Live;
+    s.unacked_in = 0;
+    data->sid = s.sid;
+    // Proofs stay bound to the nonce the session was minted with; one back from a
+    // snapshot has no door standing left and proves again on this socket's challenge.
+    const bool reprove = s.restored;
+    if (s.restored) s.door_nonce = challenge;
+    s.restored = false;
+    data->door_nonce = s.door_nonce;
+    data->subscriptions = s.subscriptions;
+    data->subscription_topics = 0;
+    for (const auto& [room, topics] : s.subscriptions) data->subscription_topics += topics.size();
+    state.peer_sockets[peer] = ws;
+    auto& rooms_of = state.peer_rooms[peer];
+    rooms_of.clear();
+
+    std::vector<std::string> came_back;
+    for (auto& [room, owner] : s.rooms) {
+        rooms_of.insert(room);
+        WsRoom& r = state.ws_rooms[room];
+        // An owner the roster fold no longer counts loses the inbox.
+        if (owner && is_inbox_room(room) && !still_owner(state, room, peer)) owner = false;
+        if (owner) {
+            r.owners.insert(peer);
+        } else {
+            r.owners.erase(peer);
+        }
+        auto pit = r.peers.find(peer);
+        const bool present = old && pit != r.peers.end() && pit->second == old;
+        r.peers[peer] = ws;
+        r.held.erase(peer);
+        if (!present) came_back.push_back(room);
+    }
+    if (old) {
+        old->getUserData()->superseded = true;
+        old->end(1000, "moved");
+    }
+
+    const bool gap = s.ring.gap_after(in_h);
+    write_raw(ws,
+              json{{"type", "resumed"},
+                   {"h", s.in_h},
+                   {"gap", gap},
+                   {"reprove", reprove},
+                   {"grace_secs", g_grace_secs},
+                   {"hb_secs", session::HB_SECS}}
+                  .dump(),
+              uWS::OpCode::TEXT);
+    session_bounds::ring_ack(state, s, in_h);
+    send_kill_signals(state, ws, peer);
+    for (const auto& [room, owner] : s.rooms) {
+        write_raw(ws, members_of(state, room, state.ws_rooms[room], peer, owner).dump(), uWS::OpCode::TEXT);
+    }
+    s.ring.replay_after(in_h, [ws](const session::Frame& f, uint64_t n) {
+        if (n) {
+            write_raw(ws, session::gap_frame(n), uWS::OpCode::TEXT);
+        } else {
+            write_raw(ws, *f.bytes, f.binary ? uWS::OpCode::BINARY : uWS::OpCode::TEXT);
+        }
+    });
+    // A mailbox deposit that fell into the gap would never come back: a resume joins
+    // nothing, and only an inbox join replays the mailbox. So an inbox the session
+    // still owns replays it here, counted like any stream frame.
+    if (gap) {
+        for (const auto& [room, owner] : s.rooms) {
+            if (owner && is_inbox_room(room)) {
+                replay_mailbox_no_delete(ws, room.substr(sizeof(INBOX_ROOM_PREFIX) - 1), room, state);
+            }
+        }
+    }
+    for (const auto& room : came_back) {
+        const WsRoom& r = state.ws_rooms[room];
+        const Audience aud = audience(state, r, room);
+        if (aud.sees(peer)) announce_door_change(r, aud, room, peer, "peer_joined");
+    }
+    // The app is back and in sync, so channel pushes may wake it again later.
+    auto cit = state.channel_push_state.find(peer);
+    if (cit != state.channel_push_state.end()) {
+        for (const auto& [room, owner] : s.rooms) cit->second.erase(room);
+        if (cit->second.empty()) state.channel_push_state.erase(cit);
+    }
+}
+
+// The relay's count of what the device sent, which lets the device drop what it kept.
+static void send_ack(SSLWebSocket* ws, session::Session& s) {
+    write_raw(ws, json{{"type", "ack"}, {"h", s.in_h}}.dump(), uWS::OpCode::TEXT);
+    s.unacked_in = 0;
+}
+
+// A stream frame arrived from the device. Counted on arrival, before any handler or
+// gate decides on it: a frame a gate refuses was still handled.
+static void count_in(RelayState& state, SSLWebSocket* ws, session::Session& s) {
+    s.in_h++;
+    if (++s.unacked_in == 1) {
+        s.ack_due = std::chrono::steady_clock::now() + std::chrono::milliseconds(session::ACK_AFTER_MS);
+        state.acks_due.emplace_back(s.ack_due, s.peer_id);
+    }
+    if (s.unacked_in >= session::ACK_EVERY_FRAMES) send_ack(ws, s);
+}
+
+static bool json_h(const json& j, uint64_t& h) {
+    auto it = j.find("h");
+    if (it == j.end() || !it->is_number_unsigned()) return false;
+    h = it->get<uint64_t>();
+    return true;
+}
+
+// One fresh `members` for each room the session holds.
+static void send_all_members(RelayState& state, SSLWebSocket* ws, const session::Session& s) {
+    for (const auto& [room, owner] : s.rooms) {
+        auto rit = state.ws_rooms.find(room);
+        if (rit == state.ws_rooms.end()) continue;
+        write_raw(ws, members_of(state, room, rit->second, s.peer_id, owner).dump(), uWS::OpCode::TEXT);
+    }
+}
+
+static bool handle_session_control(SSLWebSocket* ws, PerSocketData* data, const json& j, const std::string& type,
+                                   RelayState& state) {
+    if (type != "hb" && type != "ack" && type != "inactive" && type != "active" && type != "end") return false;
+    session::Session* s = live_session(state, data);
+    uint64_t h = 0;
+    if (type == "hb") {
+        // An `h` out of range acks nothing.
+        if (s && json_h(j, h)) session_bounds::ring_ack(state, *s, h);
+        write_raw(ws, json{{"type", "hb_ack"}, {"h", s ? s->in_h : 0}}.dump(), uWS::OpCode::TEXT);
+        if (s) s->unacked_in = 0;
+        return true;
+    }
+    if (type == "ack") {
+        if (s && json_h(j, h)) session_bounds::ring_ack(state, *s, h);
+        return true;
+    }
+    if (type == "inactive") {
+        if (s) s->inactive = true;
+        return true;
+    }
+    if (type == "active") {
+        if (s) {
+            s->inactive = false;
+            send_all_members(state, ws, *s);
+        }
+        return true;
+    }
+    if (type == "end") {
+        if (s) {
+            end_session(state, data->peer_id);
+            ws->end(1000, "end");
+        }
+        return true;
+    }
+    return false;
+}
+
+// Acks that fell due, and graces that ran out. Each queue is in deadline order, so a
+// tick with nothing due reads two fronts.
+static void sweep_sessions(RelayState& state) {
+    const auto now = std::chrono::steady_clock::now();
+    while (!state.acks_due.empty() && state.acks_due.front().first <= now) {
+        const auto due = state.acks_due.front().first;
+        const std::string peer = std::move(state.acks_due.front().second);
+        state.acks_due.pop_front();
+        auto it = state.sessions.find(peer);
+        if (it == state.sessions.end()) continue;
+        session::Session& s = it->second;
+        if (s.state != session::State::Live || s.unacked_in == 0 || s.ack_due != due) continue;
+        if (SSLWebSocket* ws = socket_of(state, s)) send_ack(ws, s);
+    }
+    while (!state.grace_ends.empty() && state.grace_ends.front().first <= now) {
+        const auto due = state.grace_ends.front().first;
+        const std::string peer = std::move(state.grace_ends.front().second);
+        state.grace_ends.pop_front();
+        auto it = state.sessions.find(peer);
+        if (it != state.sessions.end() && it->second.state == session::State::Grace && it->second.grace_until == due) {
+            end_session(state, peer);
+        }
+    }
+}
+
+// Sessions a snapshot brought back (relay-bounds' restore runs before this): every one
+// in grace, its timer restarting now, its rooms held again, no door standing.
+static void adopt_restored_sessions(RelayState& state) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(g_grace_secs);
+    for (auto& [peer, s] : state.sessions) {
+        s.peer_id = peer;
+        s.state = session::State::Grace;
+        s.restored = true;
+        s.unacked_in = 0;
+        s.grace_until = until;
+        state.grace_ends.emplace_back(until, peer);
+        for (const auto& [room, owner] : s.rooms) {
+            WsRoom& r = state.ws_rooms[room];
+            r.held.insert(peer);
+            if (owner) r.owners.insert(peer);
+        }
+    }
+}
+
+static std::string json_type(const json& j) {
+    if (!j.is_object()) return std::string();
+    auto t = j.find("type");
+    return t != j.end() && t->is_string() ? t->get<std::string>() : std::string();
+}
+
+// Every session tick: acks that fell due, graces that ran out. Created once; a
+// fallthrough timer, so it never keeps the loop alive past a SIGTERM's app.close(),
+// and never closed (closing one would take a poll count it never added).
+static struct us_timer_t* g_session_timer = nullptr;
+static constexpr int SESSION_TICK_MS = 250;
+
 void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config) {
     g_diag = &state.diag;
+    g_state = &state;
     g_forwarder_peer_id = config.forwarder_peer_id;
+#ifdef HOLLOW_RELAY_TEST_GRACE_SECS
+    // The live tests (test/run_live.sh) watch graces run out in seconds.
+    g_grace_secs = HOLLOW_RELAY_TEST_GRACE_SECS;
+#else
+    g_grace_secs = std::clamp(config.session_grace_secs, session::MIN_GRACE_SECS, session::MAX_GRACE_SECS);
+#endif
     door_key_mint(state.door_key);
     state.door_domain = auth_domain(config.domain);
+    adopt_restored_sessions(state);
+    if (!g_session_timer) {
+        auto* loop = reinterpret_cast<struct us_loop_t*>(uWS::Loop::get());
+        g_session_timer = us_create_timer(loop, 1, sizeof(RelayState*));
+        *reinterpret_cast<RelayState**>(us_timer_ext(g_session_timer)) = &state;
+        us_timer_set(g_session_timer, [](struct us_timer_t* t) {
+            sweep_sessions(**reinterpret_cast<RelayState**>(us_timer_ext(t)));
+        }, SESSION_TICK_MS, SESSION_TICK_MS);
+    }
     app.ws<PerSocketData>("/ws", {
         .compression = uWS::DISABLED,
         .maxPayloadLength = 64 * 1024 * 1024,
-        .idleTimeout = 120,
+        // Clients beat every 15 s, so a silent socket is a dead one well before this.
+        .idleTimeout = 45,
         .maxBackpressure = 64 * 1024 * 1024,
         .sendPingsAutomatically = true,
 
@@ -2948,27 +3579,38 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             // Per-IP connection limiting (in-memory only, never logged)
             const std::string remote(ws->getRemoteAddressAsText());
             std::string ip = ip_limit_key(remote);
-            data->ip_key = ip;
             data->share_block = share_block(remote);
             auto& ip_state = state.ip_states[ip];
 
-            if (ip_state.active_count >= MAX_CONNS_PER_IP) {
-                ws->end(1008, "ip_limit");
-                return;
-            }
-
+            // A refused socket never took a slot, so its close must give none back:
+            // `ip_key` is set only once the slot is taken, and an address holding no
+            // slot keeps no entry. The rate check goes first, so a probe at the cap
+            // costs no look at the session table.
             auto now = std::chrono::steady_clock::now();
             while (!ip_state.recent_connects.empty() &&
                    (now - ip_state.recent_connects.front()) > std::chrono::seconds(60)) {
                 ip_state.recent_connects.pop_front();
             }
             if (ip_state.recent_connects.size() >= MAX_NEW_CONNS_PER_MIN_PER_IP) {
+                if (ip_state.active_count == 0) state.ip_states.erase(ip);
                 ws->end(1008, "rate_limit");
                 return;
             }
 
+            // At the cap, a session in grace gives its slot up (ended as on expiry), so
+            // a device coming back is not refused by the slot its own session holds.
+            if (ip_state.active_count >= MAX_CONNS_PER_IP) {
+                auto victim = session_bounds::grace_slot_victim(state, ip);
+                if (!victim) {
+                    ws->end(1008, "ip_limit");
+                    return;
+                }
+                end_session(state, *victim);
+            }
+
             ip_state.active_count++;
             ip_state.recent_connects.push_back(now);
+            data->ip_key = ip;
 
             // 10-second auth timeout
             auto* loop = reinterpret_cast<struct us_loop_t*>(uWS::Loop::get());
@@ -3004,17 +3646,25 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                 return;
             }
 
+            session::Session* s = live_session(state, data);
             if (opCode == uWS::OpCode::TEXT) {
-                if (message.size() > 1024 * 1024) return;
+                // Text past the cap is never parsed; it still counts, like text that
+                // does not parse.
+                const json j = message.size() <= 1024 * 1024 ? client_json::parse(message)
+                                                              : json(json::value_t::discarded);
+                const std::string type = json_type(j);
+                if (s && session::client_type_counts(type)) count_in(state, ws, *s);
+                if (j.is_discarded()) return;
                 // A field of the wrong JSON type makes value() throw, and an
                 // exception unwinding into uSockets' C frames would end the
                 // process on one malformed frame from any client.
                 try {
-                    handle_text_message(ws, data, message, state, config);
+                    handle_text_message(ws, data, j, type, state, config);
                 } catch (const std::exception&) {
                     return;
                 }
             } else if (opCode == uWS::OpCode::BINARY) {
+                if (s) count_in(state, ws, *s);
                 // 1-byte 0x00 = guest keepalive, don't process or count
                 if (message.size() == 1 && static_cast<uint8_t>(message[0]) == 0x00) {
                     return;
@@ -3081,11 +3731,19 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
 
         .drain = [](SSLWebSocket* /*ws*/) {},
 
-        .close = [&state](SSLWebSocket* ws, int /*code*/, std::string_view /*reason*/) {
+        .close = [&state](SSLWebSocket* ws, int code, std::string_view /*reason*/) {
             auto* data = ws->getUserData();
 
+            // A session socket that is gone starts its grace, holding its per-IP slot;
+            // a policy close (a revoked license) ends the session instead.
+            session::Session* s = data->authenticated ? live_session(state, data) : nullptr;
+            if (s && code == 1008) {
+                end_session(state, data->peer_id);
+                s = nullptr;
+            }
+
             // IP tracking cleanup (in-memory only).
-            if (!data->ip_key.empty()) {
+            if (!s && !data->ip_key.empty()) {
                 auto it = state.ip_states.find(data->ip_key);
                 if (it != state.ip_states.end()) {
                     if (it->second.active_count > 0) it->second.active_count--;
@@ -3113,6 +3771,8 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                 if (!state.peer_sockets.count(data->peer_id)) {
                     state.license.release_key(data->peer_id);
                 }
+            } else if (s) {
+                enter_grace(state, ws, data, *s);
             } else if (data->authenticated && !data->superseded) {
                 // privacy: no connection logging
                 // Pass the closing socket so cleanup only fires if THIS socket

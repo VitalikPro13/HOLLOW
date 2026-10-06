@@ -8,6 +8,8 @@
 #include "auth_frame.h"
 
 #include <cstdio>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 static int failures = 0;
@@ -30,6 +32,90 @@ static bool accepted(const std::string& frame) {
         failures++;
         return false;
     }
+}
+
+// A v3 frame for `mode` asking for `session` with `in_h`; `extra` replaces or drops fields.
+static std::string v3_frame(const std::string& mode, const nlohmann::json& session, const nlohmann::json& in_h,
+                            const nlohmann::json& extra = nlohmann::json::object()) {
+    nlohmann::json j = {{"type", "auth"}, {"v", 3}, {"peer_id", "12D3KooWA"}, {"public_key", "k"},
+                        {"timestamp", 1790000000}, {"nonce", std::string(64, 'a')},
+                        {"domain", "relay.example.com"}, {"signature", "s"}};
+    if (!session.is_null()) j["session"] = session;
+    if (!in_h.is_null()) j["in_h"] = in_h;
+    if (mode == "guest") j["guest"] = true;
+    if (mode == "fetch") j["fetch"] = true;
+    for (auto it = extra.begin(); it != extra.end(); ++it) {
+        if (it.value().is_null()) {
+            j.erase(it.key());
+        } else {
+            j[it.key()] = it.value();
+        }
+    }
+    return j.dump();
+}
+
+static void test_v3() {
+    std::ifstream file("session_vectors.json");
+    std::stringstream ss;
+    ss << file.rdbuf();
+    const nlohmann::json v = nlohmann::json::parse(ss.str(), nullptr, false);
+    const bool loaded = v.is_object() && v.contains("auth_v3") && v["auth_v3"].is_array() &&
+                        v["auth_v3"].size() >= 3 && v.contains("auth_v3_shape");
+    check("the session vectors load", loaded);
+    if (!loaded) return;
+
+    // SHA-256("L"), as the v2 vector above pins it.
+    const std::string digest_l = "72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa";
+    size_t kat_ok = 0;
+    for (const auto& k : v["auth_v3"]) {
+        const std::string digest = k["license_key"].is_null() ? std::string() : digest_l;
+        const std::string got =
+            auth_v3_message(k["domain"].get<std::string>(), k["nonce"].get<std::string>(),
+                            k["peer_id"].get<std::string>(), k["timestamp"].get<uint64_t>(),
+                            k["mode"].get<std::string>(), digest, k["session"].get<std::string>(),
+                            k["in_h"].get<uint64_t>());
+        if (got == k["message"].get<std::string>()) kat_ok++;
+    }
+    check("the signed v3 message matches every pinned vector (" + std::to_string(kat_ok) + "/" +
+              std::to_string(v["auth_v3"].size()) + ")",
+          kat_ok == v["auth_v3"].size());
+
+    size_t shapes_ok = 0;
+    for (const auto& s : v["auth_v3_shape"]) {
+        const std::string session = s["session"].get<std::string>();
+        if (accepted(v3_frame(s["mode"].get<std::string>(), session, 0)) == s["ok"].get<bool>()) {
+            shapes_ok++;
+        } else {
+            printf("    shape mismatch: %s %s\n", s["mode"].get<std::string>().c_str(), session.c_str());
+        }
+    }
+    check("every mode and session field is judged the way the vectors say", shapes_ok == v["auth_v3_shape"].size());
+
+    const std::string sid = "00112233445566778899aabbccddeeff";
+    auto resume = parse_auth_frame(v3_frame("full", sid, 42));
+    check("a resume frame parses with its sid and count",
+          resume && resume->version == 3 && resume->session == sid && resume->in_h == 42);
+    auto fresh = parse_auth_frame(v3_frame("full", "new", 0));
+    check("a fresh session frame parses", fresh && fresh->version == 3 && fresh->session == "new" && fresh->in_h == 0);
+    check("a new session counts nothing yet", !accepted(v3_frame("full", "new", 3)));
+    check("a socket without a session counts nothing", !accepted(v3_frame("fetch", "none", 1)));
+    check("a v3 frame without a session field is refused", !accepted(v3_frame("full", nullptr, 0)));
+    check("a v3 frame without a count is refused", !accepted(v3_frame("full", sid, nullptr)));
+    check("a numeric session is refused", !accepted(v3_frame("full", 5, 0)));
+    check("a negative count is refused", !accepted(v3_frame("full", sid, -1)));
+    check("a fractional count is refused", !accepted(v3_frame("full", sid, 1.5)));
+    check("a string count is refused", !accepted(v3_frame("full", sid, "1")));
+    check("a guest and fetch socket at once is no mode", !accepted(v3_frame("fetch", "none", 0, {{"guest", true}})));
+    auto v2 = parse_auth_frame(v3_frame("full", "zzz", "x", {{"v", 2}}));
+    check("a v2 frame keeps ignoring fields it never had", v2 && v2->version == 2 && v2->session.empty());
+
+    // A resume names its sid; the relay compares it with the device's own.
+    check("a sid matches itself", session::sid_equal(sid, sid));
+    check("one differing character anywhere is no match",
+          !session::sid_equal(sid, "10112233445566778899aabbccddeeff") &&
+              !session::sid_equal(sid, "00112233445566778899aabbccddeefe") &&
+              !session::sid_equal(sid, "00112233445566778899abbbccddeeff"));
+    check("a prefix is no match", !session::sid_equal(sid, sid.substr(0, 31)) && !session::sid_equal(sid, ""));
 }
 
 int main() {
@@ -85,7 +171,7 @@ int main() {
     check("a v2 frame parses", v2 && v2->version == 2 && v2->nonce == nonce &&
                                    v2->domain == "relay.example.com" && v2->fetch);
     check("a frame without v is v1", f && f->version == 1);
-    check("an unknown version is refused", !accepted(R"({"type":"auth","v":3})"));
+    check("an unknown version is refused", !accepted(R"({"type":"auth","v":4})"));
     check("a string version is refused", !accepted(R"({"type":"auth","v":"2"})"));
     check("a numeric nonce is refused", !accepted(R"({"type":"auth","v":2,"nonce":5})"));
     check("a numeric domain is refused", !accepted(R"({"type":"auth","v":2,"domain":5})"));
@@ -112,6 +198,9 @@ int main() {
               "hollow-ws-auth2\nrelay.example.com\n" + nonce +
                   "\n12D3KooWPeer\n1790000000\nfetch\n"
                   "72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa");
+
+    printf("auth v3 (resumable sessions)\n");
+    test_v3();
 
     if (failures) {
         printf("%d FAILED\n", failures);

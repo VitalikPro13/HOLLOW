@@ -35,13 +35,205 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
 /// What a node hands the broker so the broker can deliver events back to it.
 struct Conn {
     event_tx: mpsc::UnboundedSender<WsEvent>,
+    /// Presence: a socket the relay counts as up.
     online: bool,
+    /// The node's ws_client, which the broker stands in for.
+    client: ClientWire,
+}
+
+/// ws_client's half of a resumable session (RESUMABLE_SESSIONS_PLAN.md section 9).
+#[derive(Default)]
+struct ClientWire {
+    /// It saw its socket die and said `Suspended`: sends wait unwritten until a resume.
+    suspended: bool,
+    /// Its socket swallows everything both ways and it has not noticed yet.
+    zombie: bool,
+    /// Stream frames received in this session.
+    in_h: u64,
+    /// Stream frames written in this session.
+    written: u64,
+    /// Written and not acked, kept byte for byte with their number.
+    inflight: std::collections::VecDeque<(u64, WsCommand)>,
+    unwritten: std::collections::VecDeque<WsCommand>,
+    /// The last join per room: what a fresh session joins again.
+    joins: std::collections::BTreeMap<String, WsCommand>,
+    /// Joins the fresh-session replay wrote; the node's identical join is then not written.
+    replayed: HashSet<String>,
+    /// Frames a zombie socket swallowed: toward the device, and from it.
+    swallowed_in: u64,
+    swallowed_out: u64,
+}
+
+impl ClientWire {
+    /// What ws_client remembers of a command whatever its socket is doing.
+    fn track(&mut self, cmd: &WsCommand) {
+        match cmd {
+            WsCommand::JoinRoom { room_code } | WsCommand::JoinInbox { room_code, .. } => {
+                self.joins.insert(room_code.clone(), cmd.clone());
+            }
+            WsCommand::LeaveRoom { room_code } => {
+                self.joins.remove(room_code);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The relay's half of one device's session.
+struct MockSession {
+    /// Client frames the relay handled.
+    in_h: u64,
+    /// Stream frames the relay wrote to the device.
+    out_h: u64,
+    /// The device's last ack; the ring holds every frame after it, in order.
+    acked: u64,
+    ring: std::collections::VecDeque<RingSlot>,
+    ring_cap: usize,
+    socket: Socket,
+    /// The rooms the session holds while it has no socket in them.
+    held_rooms: Vec<String>,
+    /// Presence was withdrawn when its socket died, so a resume announces it again.
+    presence_out: bool,
+    /// Restored from a restart snapshot: door standing did not survive it.
+    reprove: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Socket {
+    Live,
+    /// Up as far as the relay knows, while every write into it is lost.
+    Zombie,
+    /// Grace: no socket, the session held.
+    Gone,
+}
+
+enum RingSlot {
+    Frame(WsEvent),
+    /// Frames that fell out of a full ring; a replay sends them as one `gap`.
+    Gap(u64),
+}
+
+impl MockSession {
+    fn fresh(ring_cap: usize) -> Self {
+        Self {
+            in_h: 0,
+            out_h: 0,
+            acked: 0,
+            ring: std::collections::VecDeque::new(),
+            ring_cap,
+            socket: Socket::Live,
+            held_rooms: Vec::new(),
+            presence_out: false,
+            reprove: false,
+        }
+    }
+
+    /// Keep a frame until acked. Over the cap the oldest real frame becomes a tombstone,
+    /// merged with its neighbours (the relay picks the heaviest sender share; the mock,
+    /// with one share per test, the oldest frame).
+    fn push_ring(&mut self, ev: WsEvent) {
+        self.ring.push_back(RingSlot::Frame(ev));
+        while self.ring.iter().filter(|s| matches!(s, RingSlot::Frame(_))).count() > self.ring_cap {
+            let Some(at) = self.ring.iter().position(|s| matches!(s, RingSlot::Frame(_))) else { break };
+            self.ring[at] = RingSlot::Gap(1);
+            let merged: std::collections::VecDeque<RingSlot> =
+                std::mem::take(&mut self.ring).into_iter().fold(std::collections::VecDeque::new(), |mut out, slot| {
+                    match (out.back_mut(), slot) {
+                        (Some(RingSlot::Gap(n)), RingSlot::Gap(m)) => *n += m,
+                        (_, slot) => out.push_back(slot),
+                    }
+                    out
+                });
+            self.ring = merged;
+        }
+    }
+
+    fn gapped(&self) -> bool {
+        self.ring.iter().any(|s| matches!(s, RingSlot::Gap(_)))
+    }
+}
+
+/// Where a command the relay handled came from: the node now, the node earlier (written
+/// into a dead socket, resent on resume), or ws_client on its own (fresh-session joins,
+/// door re-proofs).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CmdSource {
+    Node,
+    Resent,
+    Client,
+}
+
+/// The room a command names, if any.
+fn cmd_room(cmd: &WsCommand) -> Option<&str> {
+    match cmd {
+        WsCommand::JoinRoom { room_code }
+        | WsCommand::JoinInbox { room_code, .. }
+        | WsCommand::LeaveRoom { room_code }
+        | WsCommand::SendToRoom { room_code, .. }
+        | WsCommand::SendPublic { room_code, .. }
+        | WsCommand::SendDirect { room_code, .. }
+        | WsCommand::SendDirectImage { room_code, .. }
+        | WsCommand::SendBinaryDirect { room_code, .. }
+        | WsCommand::SendToRoomTopic { room_code, .. }
+        | WsCommand::TopicCatchup { room_code, .. } => Some(room_code),
+        _ => None,
+    }
+}
+
+/// The wire kind of a command, for the relay's command log.
+fn cmd_kind(cmd: &WsCommand) -> &'static str {
+    match cmd {
+        WsCommand::JoinRoom { .. } => "join",
+        WsCommand::JoinInbox { .. } => "join_inbox",
+        WsCommand::SetDoor { .. } => "set_door",
+        WsCommand::LeaveRoom { .. } => "leave",
+        WsCommand::SendToRoom { .. } => "send_room",
+        WsCommand::SendPublic { .. } => "send_public",
+        WsCommand::SendDirect { .. } => "send_direct",
+        WsCommand::SendDirectImage { .. } => "send_direct_image",
+        WsCommand::SendBinaryDirect { .. } => "send_binary",
+        WsCommand::Carry { .. } => "carry",
+        WsCommand::Subscribe { .. } => "subscribe",
+        WsCommand::SendToRoomTopic { .. } => "send_topic",
+        WsCommand::CheckPeers { .. } => "check_peers",
+        WsCommand::DiscoverPeers { .. } => "discover_peers",
+        WsCommand::GetTurnCredentials => "get_turn",
+        WsCommand::GetMediaForwarder => "get_forwarder",
+        WsCommand::ClaimNickname { .. } => "claim_nickname",
+        WsCommand::ReleaseNickname => "release_nickname",
+        WsCommand::ResolveNickname { .. } => "resolve_nickname",
+        WsCommand::ClaimLinkCode { .. } => "claim_link_code",
+        WsCommand::ReleaseLinkCode => "release_link_code",
+        WsCommand::ResolveLinkCode { .. } => "resolve_link_code",
+        WsCommand::RegisterPushToken { .. } => "register_push_token",
+        WsCommand::SetPushPrefs { .. } => "set_push_prefs",
+        WsCommand::SendChannelDirect { .. } => "send_channel_direct",
+        WsCommand::SetOfflineBuffer { .. } => "set_offline_buffer",
+        WsCommand::SetTopicBuffer { .. } => "set_topic_buffer",
+        WsCommand::TopicCatchup { .. } => "topic_catchup",
+        WsCommand::KillDeposit { .. } => "kill_deposit",
+        WsCommand::KillAck { .. } => "kill_ack",
+        WsCommand::UnregisterPushToken => "unregister_push_token",
+        WsCommand::LockGet { .. } => "lock_get",
+        WsCommand::LockPut { .. } => "lock_put",
+        WsCommand::ReportUser { .. } => "report_user",
+    }
 }
 
 #[derive(Default)]
 struct RelayInner {
     /// device_peer_id -> connection (event sink + online flag).
     conns: HashMap<String, Conn>,
+    /// device_peer_id -> its session; none for a device that dropped without one.
+    sessions: HashMap<String, MockSession>,
+    /// The ring cap a new session gets (the relay's 4096 frames).
+    ring_cap: usize,
+    /// How long the relay waits on a silent socket before it calls it dead (`idleTimeout`).
+    relay_idle: std::time::Duration,
+    /// Every command the relay handled: (device, kind, room, source).
+    cmd_log: Vec<(String, &'static str, Option<String>, CmdSource)>,
+    /// device -> joins a slow relay has not answered yet ([`MockRelay::hold_joins`]).
+    held_joins: HashMap<String, Vec<WsCommand>>,
     /// room_code -> set of device_peer_ids currently in the room.
     rooms: HashMap<String, HashSet<String>>,
     /// `inbox:{master}` room -> the devices the relay's fold counts as that master's.
@@ -316,7 +508,14 @@ impl MockRelay {
                 (kp.peer_id(), kp)
             })
             .collect();
-        Self { inner: Arc::new(Mutex::new(RelayInner { keys, ..RelayInner::default() })) }
+        Self {
+            inner: Arc::new(Mutex::new(RelayInner {
+                keys,
+                ring_cap: 4096,
+                relay_idle: std::time::Duration::from_secs(45),
+                ..RelayInner::default()
+            })),
+        }
     }
 
     /// Register a freshly-spawned node: take ownership of its outbound command
@@ -331,7 +530,9 @@ impl MockRelay {
     ) {
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.conns.insert(peer_id.clone(), Conn { event_tx: event_tx.clone(), online: true });
+            inner.conns.insert(peer_id.clone(), Conn { event_tx: event_tx.clone(), online: true, client: ClientWire::default() });
+            let session = MockSession::fresh(inner.ring_cap);
+            inner.sessions.insert(peer_id.clone(), session);
             // The relay's door grace sweep, as its 5 s timer.
             if !inner.door_sweeper {
                 inner.door_sweeper = true;
@@ -350,7 +551,7 @@ impl MockRelay {
         let pid = peer_id.clone();
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
-                relay.handle_command(&pid, cmd);
+                relay.inner.lock().unwrap().client_send(&pid, cmd);
             }
         });
         // Tell the node it's connected (mirrors WsEvent::Connected on real auth).
@@ -375,12 +576,7 @@ impl MockRelay {
     /// The relay hands a parked order over immediately after `auth_ok`, before any
     /// join: a device whose identity is gone may never join a room again.
     fn deliver_kill_signal(&self, peer_id: &str) {
-        let inner = self.inner.lock().unwrap();
-        if let Some(conn) = inner.conns.get(peer_id).filter(|c| c.online) {
-            for entry in inner.kill_list.get(peer_id).into_iter().flatten() {
-                let _ = conn.event_tx.send(entry.signal());
-            }
-        }
+        self.inner.lock().unwrap().deliver_kill_signals(peer_id);
     }
 
     /// The first order parked for `target`, as `(blob, issued_at_ms, issuer)`. `None`
@@ -565,29 +761,24 @@ impl MockRelay {
     /// forwards any authed frame; sender honesty is not a transport guarantee).
     #[allow(dead_code)]
     pub(crate) fn inject_direct(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         let data = inner.sealed_as(from, room, target, data);
-        if let Some(conn) = inner.conns.get(target) {
-            let _ = conn.event_tx.send(WsEvent::DirectMessage {
-                room: room.to_string(),
-                from: from.to_string(),
-                data,
-            });
-        }
+        inner.deliver_any(target, WsEvent::DirectMessage {
+            room: room.to_string(),
+            from: from.to_string(),
+            data,
+        });
     }
 
     /// Deliver `data` to `target` as a direct frame stamped `from`, byte for byte: what a
     /// relay can do with no key at all (an unsealed frame, or one sealed by someone else).
     #[allow(dead_code)]
     pub(crate) fn inject_raw_direct(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
-        let inner = self.inner.lock().unwrap();
-        if let Some(conn) = inner.conns.get(target) {
-            let _ = conn.event_tx.send(WsEvent::DirectMessage {
-                room: room.to_string(),
-                from: from.to_string(),
-                data,
-            });
-        }
+        self.inner.lock().unwrap().deliver_any(target, WsEvent::DirectMessage {
+            room: room.to_string(),
+            from: from.to_string(),
+            data,
+        });
     }
 
     /// Tell `target` that `peer` joined `room`, with no join behind it: an event that
@@ -602,28 +793,23 @@ impl MockRelay {
     /// [`Self::inject_raw_direct`] delivered as a room broadcast.
     #[allow(dead_code)]
     pub(crate) fn inject_raw(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
-        let inner = self.inner.lock().unwrap();
-        if let Some(conn) = inner.conns.get(target) {
-            let _ = conn.event_tx.send(WsEvent::Message {
-                room: room.to_string(),
-                from: from.to_string(),
-                data,
-            });
-        }
+        self.inner.lock().unwrap().deliver_any(target, WsEvent::Message {
+            room: room.to_string(),
+            from: from.to_string(),
+            data,
+        });
     }
 
     /// [`Self::inject_direct`] for a binary stream frame (`WsEvent::BinaryDirect`).
     #[allow(dead_code)]
     pub(crate) fn inject_binary(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         let data = inner.sealed_as(from, room, target, data);
-        if let Some(conn) = inner.conns.get(target) {
-            let _ = conn.event_tx.send(WsEvent::BinaryDirect {
-                room: room.to_string(),
-                from: from.to_string(),
-                data,
-            });
-        }
+        inner.deliver_any(target, WsEvent::BinaryDirect {
+            room: room.to_string(),
+            from: from.to_string(),
+            data,
+        });
     }
 
     /// Mark a node offline (simulate a disconnect): stop delivering to it, drop
@@ -643,10 +829,20 @@ impl MockRelay {
         self.set_online_inner(peer_id, false, false)
     }
 
+    /// A drop with no session behind it (a relay without sessions, or one that forgot
+    /// ours): `SessionLost`, and a later `Connected` on a fresh one. Sends made in
+    /// between are lost, as on a socket ws_client had not noticed was dead.
     fn set_online_inner(&self, peer_id: &str, online: bool, announce_leave: bool) {
         let mut inner = self.inner.lock().unwrap();
         if let Some(conn) = inner.conns.get_mut(peer_id) {
             conn.online = online;
+            conn.client = ClientWire { joins: std::mem::take(&mut conn.client.joins), ..ClientWire::default() };
+        }
+        if online {
+            let session = MockSession::fresh(inner.ring_cap);
+            inner.sessions.insert(peer_id.to_string(), session);
+        } else {
+            inner.sessions.remove(peer_id);
         }
         if !online {
             let rooms: Vec<String> = inner.rooms.keys().cloned().collect();
@@ -683,20 +879,13 @@ impl MockRelay {
             if let Some(conn) = inner.conns.get(peer_id) {
                 let _ = conn.event_tx.send(WsEvent::Connected);
             }
-            if let Some(conn) = inner.conns.get(peer_id) {
-                for entry in inner.kill_list.get(peer_id).into_iter().flatten() {
-                    let _ = conn.event_tx.send(entry.signal());
-                }
-            }
+            inner.deliver_kill_signals(peer_id);
         }
     }
 
     /// The relay names `forwarder` as the media forwarder it runs, to `target`.
     pub(crate) fn advertise_forwarder(&self, target: &str, forwarder: &str) {
-        let inner = self.inner.lock().unwrap();
-        if let Some(conn) = inner.conns.get(target) {
-            let _ = conn.event_tx.send(WsEvent::MediaForwarderInfo { peer_id: forwarder.to_string(), online: true });
-        }
+        self.inner.lock().unwrap().deliver_any(target, WsEvent::MediaForwarderInfo { peer_id: forwarder.to_string(), online: true });
     }
 
     /// A hostile relay: `nickname` now resolves to `device`, naming `master` with `claim`.
@@ -833,15 +1022,13 @@ impl MockRelay {
     /// Deliver `data` to `target` as if `from` had just sent it into `room`.
     /// A replay: the bytes are whatever the test captured, unchanged.
     pub(crate) fn inject(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         let data = inner.sealed_as(from, room, super::frame_auth::ROUTE_ROOM, data);
-        if let Some(conn) = inner.conns.get(target).filter(|c| c.online) {
-            let _ = conn.event_tx.send(WsEvent::Message {
-                room: room.to_string(),
-                from: from.to_string(),
-                data,
-            });
-        }
+        inner.write(target, WsEvent::Message {
+            room: room.to_string(),
+            from: from.to_string(),
+            data,
+        });
     }
 
     /// Make the relay swallow every direct frame from one device to another.
@@ -869,10 +1056,8 @@ impl MockRelay {
     pub(crate) fn release_lock_reads(&self, device: &str) {
         let mut inner = self.inner.lock().unwrap();
         let held = inner.held_lock_reads.remove(device).unwrap_or_default();
-        if let Some(conn) = inner.conns.get(device) {
-            for read in held {
-                let _ = conn.event_tx.send(read);
-            }
+        for read in held {
+            inner.deliver_any(device, read);
         }
     }
 
@@ -952,9 +1137,9 @@ impl MockRelay {
     pub(crate) fn release_streams(&self, from: &str, target: &str, deliver: bool) {
         let mut inner = self.inner.lock().unwrap();
         let held = inner.held_streams.remove(&(from.to_string(), target.to_string())).unwrap_or_default();
-        if let Some(conn) = inner.conns.get(target).filter(|c| c.online && deliver) {
+        if deliver {
             for m in held {
-                let _ = conn.event_tx.send(WsEvent::BinaryDirect { room: m.room, from: m.from, data: m.data });
+                inner.write(target, WsEvent::BinaryDirect { room: m.room, from: m.from, data: m.data });
             }
         }
     }
@@ -967,10 +1152,9 @@ impl MockRelay {
             .iter()
             .map(|from| inner.held_streams.remove(&(from.to_string(), target.to_string())).unwrap_or_default().into())
             .collect();
-        let Some(conn) = inner.conns.get(target).filter(|c| c.online) else { return };
         while queues.iter().any(|q| !q.is_empty()) {
             for m in queues.iter_mut().filter_map(|q| q.pop_front()) {
-                let _ = conn.event_tx.send(WsEvent::BinaryDirect { room: m.room, from: m.from, data: m.data });
+                inner.write(target, WsEvent::BinaryDirect { room: m.room, from: m.from, data: m.data });
             }
         }
     }
@@ -985,10 +1169,8 @@ impl MockRelay {
     pub(crate) fn release_broadcasts(&self, from: &str, target: &str) {
         let mut inner = self.inner.lock().unwrap();
         let held = inner.held_broadcasts.remove(&(from.to_string(), target.to_string())).unwrap_or_default();
-        if let Some(conn) = inner.conns.get(target).filter(|c| c.online) {
-            for event in held {
-                let _ = conn.event_tx.send(event);
-            }
+        for event in held {
+            inner.write(target, event);
         }
     }
 
@@ -1001,8 +1183,12 @@ impl MockRelay {
         }
     }
 
-    fn handle_command(&self, from: &str, cmd: WsCommand) {
-        let mut inner = self.inner.lock().unwrap();
+}
+
+impl RelayInner {
+    /// One client frame as the relay handles it.
+    fn handle(&mut self, from: &str, cmd: WsCommand) {
+        let inner = self;
         // A door stays with ws_client across a dead socket; the next join proves it.
         if let WsCommand::SetDoor { room_code, door: d } = &cmd
             && !inner.conns.get(from).map(|c| c.online).unwrap_or(false)
@@ -1074,11 +1260,7 @@ impl MockRelay {
                 // nodes bypass ws_client entirely) — the swarm purges the
                 // room's peer snapshot on this, closing the stale-room
                 // targeted-send blackhole.
-                if let Some(conn) = inner.conns.get(from) {
-                    let _ = conn.event_tx.send(WsEvent::LeftRoom {
-                        room: room_code.clone(),
-                    });
-                }
+                inner.local(from, WsEvent::LeftRoom { room: room_code.clone() });
             }
             WsCommand::SendToRoom { room_code, data } => {
                 if let Some(m) = inner.meter.as_mut() { m.send_to_room_cmds += 1; }
@@ -1099,18 +1281,16 @@ impl MockRelay {
                 // 0x0A: a prover's public frame reaches everyone a locked room hides too.
                 let data = inner.on_the_wire(from, &room_code, super::frame_auth::ROUTE_ROOM, data);
                 let to_all = inner.room_door(&room_code).is_some() && inner.receives(&room_code, from);
-                let members: Vec<String> = inner.rooms.get(&room_code).map(|s| s.iter().cloned().collect()).unwrap_or_default();
+                let members = inner.room_slots(&room_code);
                 for m in members {
                     if m == from || inner.broadcast_deaf.contains(&m) || !(to_all || inner.shares(&room_code, &m, from)) {
                         continue;
                     }
-                    if let Some(conn) = inner.conns.get(&m).filter(|c| c.online) {
-                        let _ = conn.event_tx.send(WsEvent::Message {
-                            room: room_code.clone(),
-                            from: from.to_string(),
-                            data: data.clone(),
-                        });
-                    }
+                    inner.write(&m, WsEvent::Message {
+                        room: room_code.clone(),
+                        from: from.to_string(),
+                        data: data.clone(),
+                    });
                 }
             }
             WsCommand::SendDirect { room_code, target_peer, data }
@@ -1130,14 +1310,14 @@ impl MockRelay {
                 // room: the relay drops a 0x02 whose SENDER never joined, so a sender that skips
                 // the join must fail here too rather than passing only under the mock.
                 let sender_in_room = inner.peer_in_room(&room_code, from);
-                let in_room = inner.peer_in_room(&room_code, &target_peer);
+                let in_room = inner.holds_slot(&room_code, &target_peer);
                 if !sender_in_room || !RelayInner::paired(&room_code, from, &target_peer) { return; }
                 if let Some(held) = inner.held_streams.get_mut(&(from.to_string(), target_peer.clone())) {
                     held.push(BufferedMsg { room: room_code, from: from.to_string(), data, direct: true });
                     return;
                 }
-                if let Some(conn) = inner.conns.get(&target_peer).filter(|c| c.online && in_room) {
-                    let _ = conn.event_tx.send(WsEvent::BinaryDirect {
+                if in_room {
+                    inner.write(&target_peer, WsEvent::BinaryDirect {
                         room: room_code,
                         from: from.to_string(),
                         data,
@@ -1159,7 +1339,7 @@ impl MockRelay {
                 let n = data.len() as u64;
                 // Simplify topic routing to a plain room broadcast (no test
                 // exercises topic filtering yet).
-                let delivered = inner.broadcast_except(&room_code, from, WsEvent::Message {
+                let delivered = inner.fan_out(&room_code, from, WsEvent::Message {
                     room: room_code.clone(),
                     from: from.to_string(),
                     data,
@@ -1208,17 +1388,15 @@ impl MockRelay {
                     .get(&(room_code.clone(), channel_id.clone()))
                     .map(|v| v.iter().filter(|(s, _)| s != from).cloned().collect())
                     .unwrap_or_default();
-                if let Some(conn) = inner.conns.get(from).filter(|c| c.online) {
-                    for (sender, data) in frames {
-                        let _ = conn.event_tx.send(WsEvent::Message {
-                            room: room_code.clone(),
-                            from: sender,
-                            data,
-                        });
-                    }
-                    if end && !inner.withhold_catchup_end {
-                        let _ = conn.event_tx.send(WsEvent::TopicCatchupDone { room: room_code, channel: channel_id });
-                    }
+                for (sender, data) in frames {
+                    inner.write(from, WsEvent::Message {
+                        room: room_code.clone(),
+                        from: sender,
+                        data,
+                    });
+                }
+                if end && !inner.withhold_catchup_end {
+                    inner.write(from, WsEvent::TopicCatchupDone { room: room_code, channel: channel_id });
                 }
             }
             WsCommand::DiscoverPeers { room_code } => {
@@ -1235,9 +1413,7 @@ impl MockRelay {
                             .collect()
                     })
                     .unwrap_or_default();
-                if let Some(conn) = inner.conns.get(from) {
-                    let _ = conn.event_tx.send(WsEvent::DiscoveredPeers { room: room_code, peers });
-                }
+                inner.write(from, WsEvent::DiscoveredPeers { room: room_code, peers });
             }
             WsCommand::CheckPeers { peers, rooms } => {
                 inner.check_peers_log.push((from.to_string(), peers.clone()));
@@ -1250,37 +1426,30 @@ impl MockRelay {
                 // DM room was live), so nothing may depend on a reply here.
                 let _ = rooms;
                 let active_rooms: Vec<String> = Vec::new();
-                if let Some(conn) = inner.conns.get(from) {
-                    let _ = conn.event_tx.send(WsEvent::PeerStatus { online, active_rooms });
-                }
+                inner.write(from, WsEvent::PeerStatus { online, active_rooms });
             }
             WsCommand::ClaimNickname { nickname, master, claim } => {
                 // The relay takes only a claim the named master signed for this socket.
                 if super::nick_claim::verified_master(&nickname, from, &master, &claim, super::types::now_ms()).is_none() {
-                    if let Some(conn) = inner.conns.get(from) {
-                        let _ = conn.event_tx.send(WsEvent::NicknameError { error: "invalid_claim".to_string(), nickname });
-                    }
+                    inner.write(from, WsEvent::NicknameError { error: "invalid_claim".to_string(), nickname });
                     return;
                 }
                 // Auto-release any old binding of this claimer (like the relay).
                 inner.nicknames.retain(|_, v| v.0 != from);
                 inner.nicknames.insert(nickname.clone(), (from.to_string(), master, claim));
-                if let Some(conn) = inner.conns.get(from) {
-                    let _ = conn.event_tx.send(WsEvent::NicknameClaimed { nickname });
-                }
+                inner.write(from, WsEvent::NicknameClaimed { nickname });
             }
             WsCommand::ReleaseNickname => {
                 inner.nicknames.retain(|_, v| v.0 != from);
-                if let Some(conn) = inner.conns.get(from) {
-                    let _ = conn.event_tx.send(WsEvent::NicknameReleased);
-                }
+                inner.write(from, WsEvent::NicknameReleased);
             }
             WsCommand::ResolveNickname { nickname } => {
                 // An offline holder resolves as not_found (the real relay's
                 // dead-holder staleness check).
                 let hit = inner.nicknames.get(&nickname).and_then(|(dev, master, claim)| {
+                    // A binding a session holds, live or in grace, is not stale.
                     let online =
-                        inner.conns.get(dev).map(|c| c.online).unwrap_or(false);
+                        inner.conns.get(dev).map(|c| c.online).unwrap_or(false) || inner.sessions.contains_key(dev);
                     online.then(|| (dev.clone(), master.clone(), claim.clone()))
                 });
                 let ev = match hit {
@@ -1295,9 +1464,7 @@ impl MockRelay {
                         nickname,
                     },
                 };
-                if let Some(conn) = inner.conns.get(from) {
-                    let _ = conn.event_tx.send(ev);
-                }
+                inner.write(from, ev);
             }
             WsCommand::KillDeposit { targets, issued_at_ms, blob } => {
                 // Relay semantics: at most 16 targets, one slot per issuer that only
@@ -1313,9 +1480,7 @@ impl MockRelay {
                     let entry = KillEntry { blob: blob.clone(), issued_at_ms, issuer: from.to_string() };
                     let signal = entry.signal();
                     slots.push(entry);
-                    if let Some(conn) = inner.conns.get(&target).filter(|c| c.online) {
-                        let _ = conn.event_tx.send(signal);
-                    }
+                    inner.tell(&target, signal);
                 }
             }
             WsCommand::LockGet { locks } => {
@@ -1324,8 +1489,8 @@ impl MockRelay {
                     let read = WsEvent::LockChain { server, links, put: None };
                     if let Some(held) = inner.held_lock_reads.get_mut(from) {
                         held.push(read);
-                    } else if let Some(conn) = inner.conns.get(from) {
-                        let _ = conn.event_tx.send(read);
+                    } else {
+                        inner.write(from, read);
                     }
                 }
             }
@@ -1336,9 +1501,7 @@ impl MockRelay {
                 if after.is_some() && after != before {
                     inner.relock(&server, before.is_some());
                 }
-                if let Some(conn) = inner.conns.get(from) {
-                    let _ = conn.event_tx.send(WsEvent::LockChain { server, links: current, put: Some(accepted) });
-                }
+                inner.write(from, WsEvent::LockChain { server, links: current, put: Some(accepted) });
             }
             WsCommand::KillAck { signal } => {
                 // The only removal a client can ask for, and always its own: the
@@ -1367,15 +1530,11 @@ impl MockRelay {
                     inner.link_codes.insert(code.clone(), from.to_string());
                     WsEvent::LinkCodeClaimed { code }
                 };
-                if let Some(conn) = inner.conns.get(from) {
-                    let _ = conn.event_tx.send(reply);
-                }
+                inner.write(from, reply);
             }
             WsCommand::ReleaseLinkCode => {
                 inner.link_codes.retain(|_, owner| owner != from);
-                if let Some(conn) = inner.conns.get(from) {
-                    let _ = conn.event_tx.send(WsEvent::LinkCodeReleased);
-                }
+                inner.write(from, WsEvent::LinkCodeReleased);
             }
             WsCommand::ResolveLinkCode { code } => {
                 let code = code.to_uppercase();
@@ -1383,9 +1542,7 @@ impl MockRelay {
                     Some(peer_id) => WsEvent::LinkCodeResolved { code, peer_id },
                     None => WsEvent::LinkCodeError { error: "not_found".into(), code },
                 };
-                if let Some(conn) = inner.conns.get(from) {
-                    let _ = conn.event_tx.send(reply);
-                }
+                inner.write(from, reply);
             }
             WsCommand::SendChannelDirect { room_code, target_peer, .. } => {
                 // Only from a socket that sees the room; a member who got the room's
@@ -1554,10 +1711,8 @@ impl RelayInner {
             .map(|s| s.iter().filter(|p| *p != peer && self.receives(room, p)).cloned().collect())
             .unwrap_or_default();
         members.push(peer.to_string());
-        if let Some(conn) = self.conns.get(peer).filter(|c| c.online) {
-            let _ = conn.event_tx.send(WsEvent::DoorStatus { room: room.to_string(), proved: true });
-            let _ = conn.event_tx.send(WsEvent::RoomMembers { room: room.to_string(), peers: members });
-        }
+        self.tell(peer, WsEvent::DoorStatus { room: room.to_string(), proved: true });
+        self.tell(peer, WsEvent::RoomMembers { room: room.to_string(), peers: members });
         self.broadcast_except(room, peer, WsEvent::PeerJoined { room: room.to_string(), peer_id: peer.to_string() });
     }
 
@@ -1580,10 +1735,8 @@ impl RelayInner {
                 continue;
             }
             self.broadcast_except(&room, &peer, WsEvent::PeerLeft { room: room.clone(), peer_id: peer.clone() });
-            if let Some(conn) = self.conns.get(&peer).filter(|c| c.online) {
-                let _ = conn.event_tx.send(WsEvent::DoorStatus { room: room.clone(), proved: false });
-                let _ = conn.event_tx.send(WsEvent::RoomMembers { room: room.clone(), peers: vec![peer.clone()] });
-            }
+            self.tell(&peer, WsEvent::DoorStatus { room: room.clone(), proved: false });
+            self.tell(&peer, WsEvent::RoomMembers { room: room.clone(), peers: vec![peer.clone()] });
         }
     }
 
@@ -1633,20 +1786,16 @@ impl RelayInner {
         // members snapshot to the joiner (includes self, like the relay).
         let mut members = existing.clone();
         members.push(from.to_string());
-        if let Some(conn) = self.conns.get(from) {
-            let _ = conn.event_tx.send(WsEvent::DoorStatus { room: room.to_string(), proved: door_ok });
-            let _ = conn.event_tx.send(WsEvent::RoomMembers {
-                room: room.to_string(),
-                peers: members,
-            });
-        }
+        self.tell(from, WsEvent::DoorStatus { room: room.to_string(), proved: door_ok });
+        self.tell(from, WsEvent::RoomMembers {
+            room: room.to_string(),
+            peers: members,
+        });
         for m in &existing {
-            if let Some(conn) = self.conns.get(m) {
-                let _ = conn.event_tx.send(WsEvent::PeerJoined {
-                    room: room.to_string(),
-                    peer_id: from.to_string(),
-                });
-            }
+            self.tell(m, WsEvent::PeerJoined {
+                room: room.to_string(),
+                peer_id: from.to_string(),
+            });
         }
         self.replay_offline(from, room);
     }
@@ -1680,11 +1829,7 @@ impl RelayInner {
     /// keep using `broadcast_except` directly — the real relay's drop hits
     /// data frames on a wedged socket, not the membership protocol.
     fn broadcast_data_except(&mut self, room: &str, from: &str, event: WsEvent) -> u64 {
-        let members: Vec<String> = self
-            .rooms
-            .get(room)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default();
+        let members = self.room_slots(room);
         let mut delivered = 0u64;
         for m in members {
             if m == from || self.broadcast_deaf.contains(&m) || !self.shares(room, &m, from) {
@@ -1694,8 +1839,19 @@ impl RelayInner {
                 held.push(event.clone());
                 continue;
             }
-            if let Some(conn) = self.conns.get(&m).filter(|c| c.online) {
-                let _ = conn.event_tx.send(event.clone());
+            if self.write(&m, event.clone()) {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
+    /// A data frame for every slot of `room` but the sender's (topic frames: no
+    /// backpressure lever, no hold).
+    fn fan_out(&mut self, room: &str, from: &str, event: WsEvent) -> u64 {
+        let mut delivered = 0u64;
+        for m in self.room_slots(room) {
+            if m != from && self.shares(room, &m, from) && self.write(&m, event.clone()) {
                 delivered += 1;
             }
         }
@@ -1719,8 +1875,7 @@ impl RelayInner {
             if !self.shares(room, &m, from) {
                 continue;
             }
-            if let Some(conn) = self.conns.get(&m).filter(|c| c.online) {
-                let _ = conn.event_tx.send(event.clone());
+            if self.tell(&m, event.clone()) {
                 delivered += 1;
             }
         }
@@ -1740,10 +1895,9 @@ impl RelayInner {
             held.push(BufferedMsg { room: room.to_string(), from: from.to_string(), data, direct });
             return 0;
         }
-        if self.peer_in_room(room, target) && !self.reachable(room, target) {
+        if self.holds_slot(room, target) && !self.reachable(room, target) {
             return 0;
         }
-        let online = self.conns.get(target).map(|c| c.online).unwrap_or(false);
         if room.strip_prefix("inbox:") == Some(target) {
             // A deposit for the inbox's own master: kept in the mailbox AND handed to
             // the owners online now, who alone know which devices they are.
@@ -1754,12 +1908,13 @@ impl RelayInner {
                 .unwrap_or_default();
             let mut delivered = 0;
             for owner in owners {
-                if let Some(conn) = self.conns.get(&owner).filter(|c| c.online) {
-                    let _ = conn.event_tx.send(WsEvent::DirectMessage {
+                if self.holds_slot(room, &owner)
+                    && self.write(&owner, WsEvent::DirectMessage {
                         room: room.to_string(),
                         from: from.to_string(),
                         data: data.clone(),
-                    });
+                    })
+                {
                     delivered += 1;
                 }
             }
@@ -1771,15 +1926,12 @@ impl RelayInner {
             });
             return delivered;
         }
-        if online && self.peer_in_room(room, target) {
-            if let Some(conn) = self.conns.get(target) {
-                let _ = conn.event_tx.send(WsEvent::DirectMessage {
-                    room: room.to_string(),
-                    from: from.to_string(),
-                    data,
-                });
-            }
-            return 1;
+        if self.holds_slot(room, target) {
+            u64::from(self.write(target, WsEvent::DirectMessage {
+                room: room.to_string(),
+                from: from.to_string(),
+                data,
+            }))
         } else {
             // Target offline (or connected but not in the room): buffer for
             // replay on the target's next join of this room. This is the
@@ -1807,8 +1959,7 @@ impl RelayInner {
             .iter()
             .map(|m| (m.room.clone(), m.from.clone(), m.data.clone(), m.direct))
             .collect();
-        let Some(conn) = self.conns.get(peer) else { return };
-        if !conn.online {
+        if !self.conns.get(peer).is_some_and(|c| c.online) {
             return;
         }
         for (room, from, data, direct) in frames {
@@ -1817,7 +1968,7 @@ impl RelayInner {
             } else {
                 WsEvent::Message { room, from, data }
             };
-            let _ = conn.event_tx.send(ev);
+            self.write(peer, ev);
         }
     }
 
@@ -1825,8 +1976,7 @@ impl RelayInner {
         let Some(buf) = self.offline.get_mut(peer) else { return };
         let (replay, keep): (Vec<_>, Vec<_>) = std::mem::take(buf).into_iter().partition(|m| m.room == room);
         *buf = keep;
-        let Some(conn) = self.conns.get(peer) else { return };
-        if !conn.online {
+        if !self.conns.get(peer).is_some_and(|c| c.online) {
             return;
         }
         for m in replay {
@@ -1835,7 +1985,570 @@ impl RelayInner {
             } else {
                 WsEvent::Message { room: m.room, from: m.from, data: m.data }
             };
+            self.write(peer, ev);
+        }
+    }
+}
+
+/// Resumable sessions as a test drives them (RESUMABLE_SESSIONS_PLAN.md 9.8 event orders).
+impl MockRelay {
+    /// The socket dies where both ends see it at once (a closed app, a network change):
+    /// presence leaves, the node hears `Suspended`, the session waits in grace.
+    pub(crate) fn suspend(&self, dev: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.sessions.get(dev).is_some_and(|s| s.socket != Socket::Gone) {
+            inner.socket_gone(dev);
+        }
+        inner.client_suspends(dev);
+    }
+
+    /// ws_client's new socket resumes the session, or gets a fresh one when the relay
+    /// has none for it.
+    pub(crate) fn resume(&self, dev: &str) {
+        self.inner.lock().unwrap().resume(dev);
+    }
+
+    /// From now on `dev`'s socket swallows every frame both ways while both ends think it
+    /// is up: what a path that died under a still-open TCP connection does.
+    pub(crate) fn zombie(&self, dev: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(s) = inner.sessions.get_mut(dev) {
+            s.socket = Socket::Zombie;
+        }
+        if let Some(conn) = inner.conns.get_mut(dev) {
+            conn.client.zombie = true;
+        }
+    }
+
+    /// The relay's idle timeout fires on a zombie socket: presence leaves, delivery
+    /// stays with the session.
+    pub(crate) fn relay_times_out(&self, dev: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.sessions.get(dev).is_some_and(|s| s.socket == Socket::Zombie) {
+            inner.socket_gone(dev);
+        }
+    }
+
+    /// ws_client's heartbeat goes unanswered: it calls the socket dead and resumes on a
+    /// new one at once.
+    pub(crate) fn zombie_noticed(&self, dev: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.client_suspends(dev);
+        inner.resume(dev);
+    }
+
+    /// [`Self::zombie`] for `window`: the relay times the socket out at its idle limit if
+    /// that comes first, and ws_client notices when the window ends.
+    pub(crate) fn zombie_for(&self, dev: &str, window: std::time::Duration) {
+        self.zombie(dev);
+        let idle = self.inner.lock().unwrap().relay_idle;
+        let relay = self.clone();
+        let dev = dev.to_string();
+        let start = tokio::time::Instant::now();
+        tokio::spawn(async move {
+            if idle < window {
+                tokio::time::sleep_until(start + idle).await;
+                relay.relay_times_out(&dev);
+            }
+            tokio::time::sleep_until(start + window).await;
+            relay.zombie_noticed(&dev);
+        });
+    }
+
+    /// The grace window ran out: the session is gone, its directs in the offline buffer.
+    pub(crate) fn expire_session(&self, dev: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.sessions.get(dev).is_some_and(|s| s.socket == Socket::Gone) {
+            inner.end_session(dev);
+        }
+    }
+
+    /// The relay process restarts, with or without its memfd snapshot. Every node hears
+    /// `Suspended`; each comes back through [`Self::resume`].
+    pub(crate) fn restart_relay(&self, snapshot: bool) {
+        self.inner.lock().unwrap().restart(snapshot);
+    }
+
+    /// The relay's idle timeout for the sockets [`Self::zombie_for`] silences.
+    pub(crate) fn set_relay_idle(&self, idle: std::time::Duration) {
+        self.inner.lock().unwrap().relay_idle = idle;
+    }
+
+    /// Cap `dev`'s session ring at `frames` real frames; past it the oldest become a gap.
+    pub(crate) fn set_ring_cap(&self, dev: &str, frames: usize) {
+        if let Some(s) = self.inner.lock().unwrap().sessions.get_mut(dev) {
+            s.ring_cap = frames;
+        }
+    }
+
+    /// Frames a zombie socket swallowed so far: (toward `dev`, from `dev`).
+    pub(crate) fn swallowed(&self, dev: &str) -> (u64, u64) {
+        let inner = self.inner.lock().unwrap();
+        inner.conns.get(dev).map_or((0, 0), |c| (c.client.swallowed_in, c.client.swallowed_out))
+    }
+
+    /// The relay's view of `dev`'s socket; `None` with no session.
+    pub(crate) fn socket_of(&self, dev: &str) -> Option<Socket> {
+        self.inner.lock().unwrap().sessions.get(dev).map(|s| s.socket)
+    }
+
+    /// Frames waiting in `dev`'s session ring (a gap counts once).
+    pub(crate) fn ring_len(&self, dev: &str) -> usize {
+        self.inner.lock().unwrap().sessions.get(dev).map_or(0, |s| s.ring.len())
+    }
+
+    /// A point in the relay's command log.
+    pub(crate) fn log_mark(&self) -> usize {
+        self.inner.lock().unwrap().cmd_log.len()
+    }
+
+    /// The kind, room and source of every command the relay handled from `dev` after
+    /// `mark`.
+    pub(crate) fn commands_since(&self, dev: &str, mark: usize) -> Vec<(&'static str, Option<String>, CmdSource)> {
+        let inner = self.inner.lock().unwrap();
+        inner.cmd_log[mark.min(inner.cmd_log.len())..]
+            .iter()
+            .filter(|(from, _, _, _)| from == dev)
+            .map(|(_, kind, room, source)| (*kind, room.clone(), *source))
+            .collect()
+    }
+
+    /// Joins from `dev` after `mark` that the node sent then (not resent, not the test's
+    /// own barrier rooms), and ws_client's own.
+    pub(crate) fn joins_since(&self, dev: &str, mark: usize) -> Vec<String> {
+        self.commands_since(dev, mark)
+            .into_iter()
+            .filter(|(kind, room, source)| {
+                matches!(*kind, "join" | "join_inbox")
+                    && *source != CmdSource::Resent
+                    && !room.as_deref().is_some_and(|r| r.starts_with("barrier:"))
+            })
+            .map(|(kind, room, source)| format!("{kind} {} ({source:?})", room.unwrap_or_default()))
+            .collect()
+    }
+
+    /// A relay slow to answer `dev`'s joins: they wait until [`Self::release_joins`].
+    pub(crate) fn hold_joins(&self, dev: &str) {
+        self.inner.lock().unwrap().held_joins.entry(dev.to_string()).or_default();
+    }
+
+    pub(crate) fn held_joins(&self, dev: &str) -> usize {
+        self.inner.lock().unwrap().held_joins.get(dev).map_or(0, Vec::len)
+    }
+
+    /// Answer `dev`'s held joins in order, and stop holding them.
+    pub(crate) fn release_joins(&self, dev: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        for join in inner.held_joins.remove(dev).unwrap_or_default() {
+            inner.handle(dev, join);
+        }
+    }
+
+    /// ws_client's view of its socket: (zombie and unnoticed, suspended).
+    pub(crate) fn client_state(&self, dev: &str) -> (bool, bool) {
+        let inner = self.inner.lock().unwrap();
+        inner.conns.get(dev).map_or((false, false), |c| (c.client.zombie, c.client.suspended))
+    }
+
+    /// The rooms of the joins `dev` wrote into a socket that swallowed them.
+    pub(crate) fn inflight_joins(&self, dev: &str) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .conns
+            .get(dev)
+            .map(|c| {
+                c.client
+                    .inflight
+                    .iter()
+                    .filter_map(|(_, cmd)| match cmd {
+                        WsCommand::JoinRoom { room_code } => Some(room_code.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Deliver the first `n` stream frames held from `from` to `target`; keep holding.
+    pub(crate) fn release_streams_first(&self, from: &str, target: &str, n: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        let key = (from.to_string(), target.to_string());
+        let mut held = inner.held_streams.remove(&key).unwrap_or_default();
+        let rest = held.split_off(n.min(held.len()));
+        for m in held {
+            inner.write(target, WsEvent::BinaryDirect { room: m.room, from: m.from, data: m.data });
+        }
+        inner.held_streams.insert(key, rest);
+    }
+}
+
+/// The two halves of section 9: what the relay keeps for a device's session, and what
+/// its ws_client does with the socket under it.
+impl RelayInner {
+    /// A stream frame for `dev` as the relay writes it: delivered on a live socket, kept
+    /// in the session ring otherwise (a zombie socket swallows the write). Whether it
+    /// reached the node now.
+    fn write(&mut self, dev: &str, ev: WsEvent) -> bool {
+        let Some(conn) = self.conns.get_mut(dev) else { return false };
+        let Some(session) = self.sessions.get_mut(dev) else {
+            // Online with no session: a device back without rejoining anything.
+            if conn.online {
+                let _ = conn.event_tx.send(ev);
+                return true;
+            }
+            return false;
+        };
+        session.out_h += 1;
+        match session.socket {
+            Socket::Live => {
+                // A healthy device acks at once, so its ring stays empty.
+                session.acked = session.out_h;
+                conn.client.in_h += 1;
+                let _ = conn.event_tx.send(ev);
+                true
+            }
+            Socket::Zombie | Socket::Gone => {
+                if session.socket == Socket::Zombie {
+                    conn.client.swallowed_in += 1;
+                }
+                session.push_ring(ev);
+                false
+            }
+        }
+    }
+
+    /// Presence and kill signals: state the relay re-reads on resume, so only a live
+    /// socket gets them and no ring keeps them.
+    fn tell(&self, dev: &str, ev: WsEvent) -> bool {
+        let live = self.sessions.get(dev).is_none_or(|s| s.socket == Socket::Live);
+        match self.conns.get(dev).filter(|c| c.online && live) {
+            Some(conn) => {
+                let _ = conn.event_tx.send(ev);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// An event ws_client raises itself, whatever its socket is doing.
+    fn local(&self, dev: &str, ev: WsEvent) {
+        if let Some(conn) = self.conns.get(dev) {
             let _ = conn.event_tx.send(ev);
+        }
+    }
+
+    /// A frame a test hands `dev`: through its session when it has one, else straight in.
+    fn deliver_any(&mut self, dev: &str, ev: WsEvent) {
+        if self.sessions.contains_key(dev) {
+            self.write(dev, ev);
+        } else {
+            self.local(dev, ev);
+        }
+    }
+
+    /// Everyone who takes delivery in `room`: its live slots and the sessions in grace
+    /// that hold it.
+    fn room_slots(&self, room: &str) -> Vec<String> {
+        let mut slots: Vec<String> = self.rooms.get(room).map(|s| s.iter().cloned().collect()).unwrap_or_default();
+        for (dev, s) in &self.sessions {
+            if s.socket == Socket::Gone && s.held_rooms.iter().any(|r| r == room) && !slots.contains(dev) {
+                slots.push(dev.clone());
+            }
+        }
+        slots
+    }
+
+    /// Whether `dev` takes delivery in `room`: a socket in it, or a session holding it.
+    fn holds_slot(&self, room: &str, dev: &str) -> bool {
+        if self.peer_in_room(room, dev) {
+            return self.conns.get(dev).is_some_and(|c| c.online);
+        }
+        self.sessions.get(dev).is_some_and(|s| s.socket == Socket::Gone && s.held_rooms.iter().any(|r| r == room))
+    }
+
+    fn deliver_kill_signals(&self, dev: &str) {
+        for entry in self.kill_list.get(dev).into_iter().flatten() {
+            self.tell(dev, entry.signal());
+        }
+    }
+
+    /// A command from the node, as ws_client puts it on the wire: written on a live
+    /// socket, kept in flight on a zombie one, held unwritten while suspended.
+    fn client_send(&mut self, from: &str, cmd: WsCommand) {
+        let Some(conn) = self.conns.get_mut(from) else { return };
+        conn.client.track(&cmd);
+        if matches!(cmd, WsCommand::SetDoor { .. }) {
+            self.handle(from, cmd);
+            return;
+        }
+        let client = &mut conn.client;
+        if client.suspended {
+            client.unwritten.push_back(cmd);
+            return;
+        }
+        if client.zombie {
+            client.written += 1;
+            client.inflight.push_back((client.written, cmd));
+            client.swallowed_out += 1;
+            return;
+        }
+        if !conn.online {
+            return;
+        }
+        if matches!(cmd, WsCommand::JoinRoom { .. } | WsCommand::JoinInbox { .. }) && client.replayed.remove(&format!("{cmd:?}")) {
+            return;
+        }
+        client.written += 1;
+        self.receive(from, cmd, CmdSource::Node);
+    }
+
+    /// A frame the relay reads off a live socket: counted on arrival, then handled.
+    fn receive(&mut self, from: &str, cmd: WsCommand, source: CmdSource) {
+        if let Some(s) = self.sessions.get_mut(from) {
+            s.in_h += 1;
+        }
+        self.cmd_log.push((from.to_string(), cmd_kind(&cmd), cmd_room(&cmd).map(str::to_string), source));
+        if matches!(cmd, WsCommand::JoinRoom { .. } | WsCommand::JoinInbox { .. })
+            && let Some(held) = self.held_joins.get_mut(from)
+        {
+            held.push(cmd);
+            return;
+        }
+        self.handle(from, cmd);
+    }
+
+    /// The relay calls `dev`'s socket dead: presence leaves now, the session holds its
+    /// rooms in grace.
+    fn socket_gone(&mut self, dev: &str) {
+        let held: Vec<String> = self.rooms.iter().filter(|(_, s)| s.contains(dev)).map(|(r, _)| r.clone()).collect();
+        for room in &held {
+            let visible = self.receives(room, dev);
+            if let Some(s) = self.rooms.get_mut(room) {
+                s.remove(dev);
+            }
+            if visible {
+                self.broadcast_except(room, dev, WsEvent::PeerLeft { room: room.clone(), peer_id: dev.to_string() });
+            }
+        }
+        if let Some(conn) = self.conns.get_mut(dev) {
+            conn.online = false;
+        }
+        if let Some(s) = self.sessions.get_mut(dev) {
+            s.socket = Socket::Gone;
+            s.held_rooms = held;
+            s.presence_out = true;
+        }
+    }
+
+    /// ws_client sees its socket gone: `Suspended`, and sends wait.
+    fn client_suspends(&mut self, dev: &str) {
+        if let Some(conn) = self.conns.get_mut(dev).filter(|c| !c.client.suspended) {
+            conn.client.zombie = false;
+            conn.client.suspended = true;
+            let _ = conn.event_tx.send(WsEvent::Suspended);
+        }
+    }
+
+    /// One `members` for `room`, as a join answers it, with nothing else a join does.
+    fn members_to(&self, dev: &str, room: &str) {
+        let inbox = room.starts_with("inbox:");
+        let owner = self.inbox_owners.get(room).is_some_and(|o| o.contains(dev));
+        let door_ok = self.room_door(room).is_none() || self.sees_door(room, dev);
+        let visible = (!inbox || owner) && door_ok;
+        let mut members: Vec<String> = if visible {
+            self.rooms
+                .get(room)
+                .map(|s| s.iter().filter(|p| *p != dev && self.shares(room, p, dev)).cloned().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        members.push(dev.to_string());
+        self.tell(dev, WsEvent::DoorStatus { room: room.to_string(), proved: door_ok });
+        self.tell(dev, WsEvent::RoomMembers { room: room.to_string(), peers: members });
+    }
+
+    /// ws_client's new socket asks for its session (section 9.2): `resumed`, kill
+    /// signals, one `members` per room, the ring after the device's count, presence for
+    /// the others; then the device resends what the relay did not count, and whatever
+    /// waited unwritten. Nothing is joined again, unless the relay restarted and lost
+    /// door standing.
+    fn resume(&mut self, dev: &str) {
+        self.local(dev, WsEvent::Connecting { reconnecting: true });
+        let client_in = self.conns.get(dev).map_or(0, |c| c.client.in_h);
+        let usable = self.sessions.get(dev).is_some_and(|s| client_in >= s.acked && client_in <= s.out_h);
+        if !usable {
+            self.resume_failed(dev);
+            return;
+        }
+        let Some(session) = self.sessions.get_mut(dev) else { return };
+        let gap = session.gapped();
+        let superseded = session.socket != Socket::Gone;
+        session.socket = Socket::Live;
+        let held = std::mem::take(&mut session.held_rooms);
+        let presence_out = std::mem::take(&mut session.presence_out);
+        let reprove = std::mem::take(&mut session.reprove);
+        let ring = std::mem::take(&mut session.ring);
+        let relay_h = session.in_h;
+        session.acked = session.out_h;
+        let rooms: Vec<String> = if superseded {
+            self.rooms.iter().filter(|(_, s)| s.contains(dev)).map(|(r, _)| r.clone()).collect()
+        } else {
+            held
+        };
+        for room in &rooms {
+            self.rooms.entry(room.clone()).or_default().insert(dev.to_string());
+        }
+        let (inflight, unwritten) = match self.conns.get_mut(dev) {
+            Some(conn) => {
+                conn.online = true;
+                conn.client.zombie = false;
+                conn.client.suspended = false;
+                (std::mem::take(&mut conn.client.inflight), std::mem::take(&mut conn.client.unwritten))
+            }
+            None => return,
+        };
+        self.local(dev, WsEvent::Resumed { gap });
+        self.deliver_kill_signals(dev);
+        for room in &rooms {
+            self.members_to(dev, room);
+        }
+        for slot in ring {
+            match slot {
+                RingSlot::Frame(ev) => {
+                    if let Some(conn) = self.conns.get_mut(dev) {
+                        conn.client.in_h += 1;
+                    }
+                    self.local(dev, ev);
+                }
+                RingSlot::Gap(n) => {
+                    if let Some(conn) = self.conns.get_mut(dev) {
+                        conn.client.in_h += n;
+                    }
+                }
+            }
+        }
+        if presence_out {
+            for room in &rooms {
+                if self.receives(room, dev) {
+                    self.broadcast_except(room, dev, WsEvent::PeerJoined { room: room.clone(), peer_id: dev.to_string() });
+                }
+            }
+        }
+        if reprove {
+            let doors: Vec<String> = self.doors_held.get(dev).map(|d| d.keys().cloned().collect()).unwrap_or_default();
+            for room in rooms.iter().filter(|r| doors.contains(r)) {
+                self.receive(dev, WsCommand::JoinRoom { room_code: room.clone() }, CmdSource::Client);
+            }
+        }
+        for (seq, cmd) in inflight {
+            if seq > relay_h {
+                self.receive(dev, cmd, CmdSource::Resent);
+            }
+        }
+        for cmd in unwritten {
+            self.client_send(dev, cmd);
+        }
+    }
+
+    /// The relay has no session to resume (forgot it, or the count was off): a fresh
+    /// one on the same socket, `SessionLost` then `Connected`, and ws_client joins every
+    /// room it holds before its queue goes out.
+    fn resume_failed(&mut self, dev: &str) {
+        self.end_session(dev);
+        self.local(dev, WsEvent::SessionLost);
+        let session = MockSession::fresh(self.ring_cap);
+        self.sessions.insert(dev.to_string(), session);
+        let (joins, inflight, unwritten) = match self.conns.get_mut(dev) {
+            Some(conn) => {
+                conn.online = true;
+                let client = &mut conn.client;
+                client.zombie = false;
+                client.suspended = false;
+                client.in_h = 0;
+                client.written = 0;
+                let joins: Vec<WsCommand> = client.joins.values().cloned().collect();
+                client.replayed = joins.iter().map(|j| format!("{j:?}")).collect();
+                (joins, std::mem::take(&mut client.inflight), std::mem::take(&mut client.unwritten))
+            }
+            None => return,
+        };
+        self.local(dev, WsEvent::Connected);
+        self.deliver_kill_signals(dev);
+        for join in joins {
+            if let Some(conn) = self.conns.get_mut(dev) {
+                conn.client.written += 1;
+            }
+            self.receive(dev, join, CmdSource::Client);
+        }
+        for (_, cmd) in inflight {
+            if let Some(conn) = self.conns.get_mut(dev) {
+                conn.client.written += 1;
+            }
+            self.receive(dev, cmd, CmdSource::Resent);
+        }
+        for cmd in unwritten {
+            if let Some(conn) = self.conns.get_mut(dev) {
+                conn.client.written += 1;
+            }
+            self.receive(dev, cmd, CmdSource::Node);
+        }
+    }
+
+    /// A session ends without a socket (grace expiry, `end`, eviction): the directs the
+    /// offline buffer takes move there under their room, the rest is left to the
+    /// catch-ups, and its rooms are left.
+    fn end_session(&mut self, dev: &str) {
+        let Some(session) = self.sessions.remove(dev) else { return };
+        for slot in session.ring {
+            if let RingSlot::Frame(WsEvent::DirectMessage { room, from, data }) = slot {
+                self.offline.entry(dev.to_string()).or_default().push(BufferedMsg { room, from, data, direct: true });
+            }
+        }
+        for room in &session.held_rooms {
+            if let Some(owners) = self.inbox_owners.get_mut(room) {
+                owners.remove(dev);
+            }
+            if let Some(provers) = self.provers.get_mut(room) {
+                provers.remove(dev);
+            }
+        }
+        self.nicknames.retain(|_, v| v.0 != dev);
+    }
+
+    /// The relay process restarts: every socket closes at once, and only what the
+    /// snapshot carries comes back. Sessions return in grace without door standing.
+    fn restart(&mut self, snapshot: bool) {
+        let devices: Vec<String> = self.sessions.keys().cloned().collect();
+        for dev in &devices {
+            let rooms: Vec<String> = self.rooms.iter().filter(|(_, s)| s.contains(dev)).map(|(r, _)| r.clone()).collect();
+            if let Some(s) = self.sessions.get_mut(dev).filter(|s| s.socket != Socket::Gone) {
+                s.socket = Socket::Gone;
+                s.held_rooms = rooms;
+                s.presence_out = true;
+            }
+            if snapshot && let Some(s) = self.sessions.get_mut(dev) {
+                s.reprove = true;
+            }
+        }
+        for dev in &devices {
+            self.client_suspends(dev);
+        }
+        for conn in self.conns.values_mut() {
+            conn.online = false;
+        }
+        self.rooms.clear();
+        self.provers.clear();
+        if !snapshot {
+            self.sessions.clear();
+            self.offline.clear();
+            self.topic_buffers.clear();
+            self.locks.clear();
+            self.kill_list.clear();
+            self.nicknames.clear();
+            self.link_codes.clear();
+            self.inbox_rosters.clear();
+            self.inbox_owners.clear();
         }
     }
 }
@@ -26464,7 +27177,12 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // absence proofs, a commit the second owner device never makes and an alert a
     // friend never records, plus the poll of `quiet_agreed_group`, which must see a
     // group stay unchanged (12.5 s).
-    const BUDGET_MS: u64 = 713_450;
+    // 2026-10-06: the lost-accept test added one spawn stagger, a window for the accept's
+    // redelivery on presence that it holds and discards, and one absence proof, an accept
+    // nobody parks while B stays connected (4.0 s).
+    // 2026-10-06: the resumable-session tests added two spawn staggers (in their pair
+    // helpers) and one auto-download advert window (3.4 s).
+    const BUDGET_MS: u64 = 720_850;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -40485,5 +41203,585 @@ async fn a_friend_request_reaches_the_target_devices_the_requester_cannot_see() 
     assert!(
         wait_event(&mut a1, std::time::Duration::from_secs(15), asked).await,
         "A1 never heard a request sent while the requester saw only A2",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Resumable relay sessions (RESUMABLE_SESSIONS_PLAN.md section 9.8): a socket that
+// dies is not a session that dies. The MockRelay plays the relay ring and ws_client's
+// outbound queue, so these prove the node end to end: nothing lost across a zombie
+// window, nothing joined on a resume, the gates once per session.
+// ---------------------------------------------------------------------------
+
+/// Two friends sharing a server whose MLS group formed, each with a device id apart
+/// from its master id. Returns (owner, member, server id).
+async fn session_server_pair(relay: &MockRelay, o_tag: u8, j_tag: u8) -> (TestNode, TestNode, String) {
+    let o_master = tag_kp(o_tag).peer_id();
+    let j_master = tag_kp(j_tag).peer_id();
+    let mut o = spawn_node_with_friends(relay, o_tag, o_tag + 1, &[&j_master]).await;
+    // Spawn stagger, as every pair here: two nodes keying each other at once glare.
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(relay, j_tag, j_tag + 1, &[&o_master]).await;
+    expect_dm_pair_ready(relay, &o, &j, 20).await;
+    let server_id = create_server_and_wait(&mut o, "Sessions").await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut j, &server_id, 20).await, "the member joins");
+    expect_mls_group(&[&o, &j], &server_id, 30).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+    (o, j, server_id)
+}
+
+/// Two friends, each with a device id apart from its master id.
+async fn session_friend_pair(relay: &MockRelay, a_tag: u8, b_tag: u8) -> (TestNode, TestNode) {
+    let a_master = tag_kp(a_tag).peer_id();
+    let b_master = tag_kp(b_tag).peer_id();
+    let a = spawn_node_with_friends(relay, a_tag, a_tag + 1, &[&b_master]).await;
+    // Spawn stagger (see `session_server_pair`).
+    sleep_ms(1200).await;
+    let b = spawn_node_with_friends(relay, b_tag, b_tag + 1, &[&a_master]).await;
+    expect_dm_pair_ready(relay, &a, &b, 20).await;
+    (a, b)
+}
+
+/// Wait until `node` emitted an event `name` maps to each of `want`; returns what never came.
+async fn expect_each(node: &mut TestNode, secs: u64, want: &[&str], name: impl Fn(&NetworkEvent) -> Option<String>) -> Vec<String> {
+    let mut missing: HashSet<String> = want.iter().map(|s| s.to_string()).collect();
+    wait_event(node, std::time::Duration::from_secs(secs), |ev| {
+        if let Some(n) = name(ev) {
+            missing.remove(&n);
+        }
+        missing.is_empty()
+    })
+    .await;
+    let mut left: Vec<String> = missing.into_iter().collect();
+    left.sort();
+    left
+}
+
+/// How many sync asks `node` aimed at `device`: (DM syncs, server syncs).
+async fn sync_asks_to(node: &TestNode, device: &str) -> (usize, usize) {
+    let carried = node.carried_to(device).await;
+    let dm = carried.iter().filter(|m| matches!(m, super::types::HavenMessage::DmSyncRequest { .. })).count();
+    let server = carried.iter().filter(|m| matches!(m, super::types::HavenMessage::SyncRequest { .. })).count();
+    (dm, server)
+}
+
+/// The ids a DM, a channel post, a new channel or a friend accept event names.
+fn delivered_id(ev: &NetworkEvent) -> Option<String> {
+    match ev {
+        NetworkEvent::MessageReceived { message_id, .. } | NetworkEvent::ChannelMessageReceived { message_id, .. } => {
+            Some(message_id.clone())
+        }
+        NetworkEvent::ChannelAdded { name, .. } => Some(name.clone()),
+        NetworkEvent::FriendRequestAccepted { peer_id } => Some(peer_id.clone()),
+        NetworkEvent::FileCompleted { file_id, .. } => Some(file_id.clone()),
+        _ => None,
+    }
+}
+
+/// Every command `node` sent so far is in its zombie socket: a join nobody answers
+/// sits in flight behind them.
+async fn zombie_barrier(relay: &MockRelay, node: &TestNode, tag: &str) {
+    let room = format!("barrier:{}:{}", node.device_id, tag);
+    node.cmd_tx.send(NodeCommand::JoinRoom { room_code: room.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || relay.inflight_joins(&node.device_id).contains(&room)).await,
+        "{}'s commands never reached its zombie socket",
+        node.device_id,
+    );
+}
+
+/// The node handled every frame the relay gave it, and the relay every command the node
+/// sent in answer.
+async fn settle_both_ways(relay: &MockRelay, node: &mut TestNode, tag: &str) {
+    flush_frames(relay, node).await;
+    expect_relay_drained(relay, node, tag).await;
+}
+
+/// The relay-status events a node emitted while `pred` waited, in order.
+async fn relay_status_until(node: &mut TestNode, secs: u64, mut done: impl FnMut(&NetworkEvent) -> bool) -> (bool, Vec<&'static str>) {
+    let mut seen = Vec::new();
+    let ok = wait_event(node, std::time::Duration::from_secs(secs), |ev| {
+        match ev {
+            NetworkEvent::RelaySuspended => seen.push("suspended"),
+            NetworkEvent::RelayConnected => seen.push("connected"),
+            NetworkEvent::RelayDisconnected => seen.push("disconnected"),
+            _ => {}
+        }
+        done(ev)
+    })
+    .await;
+    (ok, seen)
+}
+
+/// A fresh session says Connected only once the relay answered its inbox join: until
+/// then nothing it joined is confirmed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn relay_connected_waits_for_the_inbox_join_answer() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let device = tag_kp(201).peer_id();
+    relay.hold_joins(&device);
+    let mut n = spawn_node_with_friends(&relay, 200, 201, &[]).await;
+    assert!(wait_until(10, async || relay.held_joins(&device) >= 1).await, "the node joins its inbox on Connected");
+    let mut early = false;
+    while let Ok(ev) = n.event_rx.try_recv() {
+        early |= matches!(ev, NetworkEvent::RelayConnected);
+    }
+    assert!(!early, "Connected shown before the relay answered a single join");
+    relay.release_joins(&device);
+    assert!(
+        wait_event(&mut n, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::RelayConnected)).await,
+        "the inbox answer makes the session Connected",
+    );
+}
+
+/// `Suspended` keeps every room and peer and says Reconnecting; the resume says
+/// Connected, joins nothing and re-syncs nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn suspend_keeps_every_peer_and_resume_joins_nothing() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, mut j, _server_id) = session_server_pair(&relay, 202, 212).await;
+
+    let mark = relay.log_mark();
+    relay.suspend(&j.device_id);
+    let (ok, seen) = relay_status_until(&mut j, 10, |ev| matches!(ev, NetworkEvent::RelaySuspended)).await;
+    assert!(ok, "Suspended reaches the UI as RelaySuspended, saw {seen:?}");
+    let snap = j.debug_snapshot().await.expect("the loop answers");
+    assert!(snap.room_peers.contains(&o.device_id), "Suspended dropped the rooms' peers: {:?}", snap.room_peers);
+    assert!(snap.synced_peers.contains(&o.device_id), "Suspended forgot who it synced with: {:?}", snap.synced_peers);
+
+    relay.resume(&j.device_id);
+    let (ok, seen) = relay_status_until(&mut j, 10, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+    assert!(ok, "a resume says Connected, saw {seen:?}");
+    assert!(!seen.contains(&"disconnected"), "a resume is no disconnect: {seen:?}");
+    settle_both_ways(&relay, &mut j, "resume").await;
+    assert_eq!(relay.joins_since(&j.device_id, mark), Vec::<String>::new(), "a resume joins nothing");
+    let resynced: Vec<_> = relay
+        .commands_since(&j.device_id, mark)
+        .into_iter()
+        .filter(|(kind, _, _)| matches!(*kind, "topic_catchup" | "lock_get" | "get_turn" | "get_forwarder"))
+        .collect();
+    assert!(resynced.is_empty(), "a resume ran fresh-session work: {resynced:?}");
+    let snap = j.debug_snapshot().await.expect("the loop answers");
+    assert!(snap.room_peers.contains(&o.device_id), "the resume lost the owner: {:?}", snap.room_peers);
+}
+
+/// A path that dies under an open socket swallows frames both ways; the session's ring
+/// and the client's queue hand every one over on the resume, with no gap repair.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn zombie_window_loses_no_dm_post_or_crdt_op_either_way() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut j, server_id) = session_server_pair(&relay, 204, 214).await;
+    let general = general_channel_of(&server_id);
+
+    let asks_before = sync_asks_to(&j, &o.device_id).await;
+    let mark = relay.log_mark();
+    relay.zombie(&j.device_id);
+    o.cmd_tx
+        .send(NodeCommand::SendMessage { peer_id: j.master_id.clone(), text: "dm to a zombie".into(), message_id: "z-o-dm".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), text: "post to a zombie".into(), message_id: "z-o-post".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel { server_id: server_id.clone(), channel_id: crate::node::new_channel_id(&server_id), name: "made-in-the-window".into(), category: None, channel_type: "text".into() })
+        .await
+        .unwrap();
+    j.cmd_tx
+        .send(NodeCommand::SendMessage { peer_id: o.master_id.clone(), text: "dm from a zombie".into(), message_id: "z-j-dm".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    j.cmd_tx
+        .send(NodeCommand::SendChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), text: "post from a zombie".into(), message_id: "z-j-post".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    j.cmd_tx
+        .send(NodeCommand::SetNickname { server_id: server_id.clone(), peer_id: j.master_id.clone(), nickname: "Zombie".into() })
+        .await
+        .unwrap();
+    expect_relay_drained(&relay, &o, "zombie-sends").await;
+    zombie_barrier(&relay, &j, "zombie-sends").await;
+    let (swallowed_in, swallowed_out) = relay.swallowed(&j.device_id);
+    assert!(swallowed_in >= 3 && swallowed_out >= 3, "the window swallowed both ways: {swallowed_in} in, {swallowed_out} out");
+
+    relay.zombie_noticed(&j.device_id);
+    let missing = expect_each(&mut j, 20, &["z-o-dm", "z-o-post", "made-in-the-window"], delivered_id).await;
+    assert!(missing.is_empty(), "lost toward the zombie: {missing:?}");
+    let missing = expect_each(&mut o, 20, &["z-j-dm", "z-j-post"], delivered_id).await;
+    assert!(missing.is_empty(), "lost from the zombie: {missing:?}");
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.is_some_and(|s| s.get_nickname(&j.master_id) == "Zombie")).await,
+        "the member's CRDT op written into the dead socket never landed",
+    );
+    settle_both_ways(&relay, &mut j, "after").await;
+    assert_eq!(relay.joins_since(&j.device_id, mark), Vec::<String>::new(), "the resume joined rooms");
+    // Content may still prompt a server sync (a new channel does); the catch-ups are the
+    // DM gap digest and the topic rings.
+    assert_eq!(sync_asks_to(&j, &o.device_id).await.0, asks_before.0, "a resume without a gap ran the DM catch-up");
+    let caught_up = relay.commands_since(&j.device_id, mark).into_iter().any(|(kind, _, _)| kind == "topic_catchup");
+    assert!(!caught_up, "a resume without a gap ran the topic catch-up");
+}
+
+/// A friend accept toward a zombie socket, and one written into it: neither is lost.
+/// The three meet in a room first, so every request goes out live and nobody keeps
+/// one queued: a queued request asks again on the resume's roster and its answer
+/// would come back on its own, hiding a lost accept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn zombie_window_loses_no_friend_accept_either_way() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut a = spawn_node_with_friends(&relay, 216, 217, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, 218, 219, &[]).await;
+    let mut c = spawn_node_with_friends(&relay, 220, 221, &[]).await;
+    for node in [&a, &b, &c] {
+        node.cmd_tx.send(NodeCommand::JoinRoom { room_code: "lobby-sessions".into() }).await.unwrap();
+    }
+    assert!(
+        wait_until(15, async || {
+            a.sees_peer(&b.device_id).await && a.sees_peer(&c.device_id).await && c.sees_peer(&a.device_id).await
+        })
+        .await,
+        "the three meet in the lobby",
+    );
+    let asked = |ev: &NetworkEvent| matches!(ev, NetworkEvent::FriendRequestReceived { .. });
+    a.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b.master_id.clone() }).await.unwrap();
+    assert!(wait_event(&mut b, std::time::Duration::from_secs(15), asked).await, "B hears A's request");
+    c.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: a.master_id.clone() }).await.unwrap();
+    assert!(wait_event(&mut a, std::time::Duration::from_secs(15), asked).await, "A hears C's request");
+    let ac_room = super::types::dm_room_code(&a.master_id, &c.master_id);
+    assert!(wait_until(15, async || relay.room_devices(&ac_room).contains(&c.device_id)).await, "C waits in the DM room");
+    drain_events(&mut a);
+    drain_events(&mut c);
+
+    let mark = relay.log_mark();
+    relay.zombie(&a.device_id);
+    b.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: a.master_id.clone() }).await.unwrap();
+    a.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: c.master_id.clone() }).await.unwrap();
+    expect_relay_drained(&relay, &b, "accept").await;
+    zombie_barrier(&relay, &a, "accept").await;
+    assert!(relay.swallowed(&a.device_id).0 >= 1, "B's accept went into the dead socket");
+
+    relay.zombie_noticed(&a.device_id);
+    // The accept event names the device that answered.
+    let b_dev = b.device_id.clone();
+    assert!(
+        expect_each(&mut a, 20, &[&b_dev], delivered_id).await.is_empty(),
+        "the accept toward the zombie was lost",
+    );
+    let a_dev = a.device_id.clone();
+    assert!(
+        expect_each(&mut c, 20, &[&a_dev], delivered_id).await.is_empty(),
+        "the accept written into the zombie was lost",
+    );
+    assert!(is_friend(&a, &b.master_id) && is_friend(&c, &a.master_id), "both friendships stand");
+    settle_both_ways(&relay, &mut a, "accept-after").await;
+    let joins = relay.joins_since(&a.device_id, mark);
+    assert!(joins.iter().all(|j| !j.contains("(Client)")), "ws_client rejoined on a resume: {joins:?}");
+}
+
+/// A file stream half delivered when the socket dies: `Suspended` keeps the transfer,
+/// the ring hands over the rest, and a stream written into the dead socket arrives too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn suspended_keeps_a_file_stream_and_the_resume_finishes_it() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut a, mut b) = session_friend_pair(&relay, 222, 224).await;
+    // Residual: a file send pre-negotiates the receiver's auto-download preference,
+    // and that advert has no live probe (see `dm_file_transfer_completes_and_decrypts`).
+    sleep_ms(1000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+    let file = |name: &str, len: usize| {
+        let path = global_tmp.path().join(name);
+        std::fs::write(&path, (0..len).map(|i| (i % 251) as u8).collect::<Vec<u8>>()).expect("write the source");
+        path.to_str().unwrap().to_string()
+    };
+    let send = |to: &TestNode, path: String, mid: &str| {
+        NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(to.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: path,
+            message_id: mid.to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        }))
+    };
+    let header_id = async |node: &mut TestNode| {
+        let mut fid = None;
+        wait_event(node, std::time::Duration::from_secs(15), |ev| {
+            if let NetworkEvent::FileHeaderReceived { file_id, .. } = ev {
+                fid = Some(file_id.clone());
+            }
+            fid.is_some()
+        })
+        .await;
+        fid.expect("a file header")
+    };
+
+    relay.hold_streams(&b.device_id, &a.device_id);
+    b.cmd_tx.send(send(&a, file("to-a.bin", 600_000), "file-to-a")).await.unwrap();
+    let to_a = header_id(&mut a).await;
+    assert!(wait_until(20, async || relay.held_stream_count(&b.device_id, &a.device_id) >= 3).await, "B streams three chunks");
+    relay.release_streams_first(&b.device_id, &a.device_id, 1);
+    assert!(
+        wait_until(15, async || a.debug_snapshot().await.is_some_and(|s| !s.ws_transfers.is_empty())).await,
+        "A opens the stream on its first chunk",
+    );
+
+    relay.zombie(&a.device_id);
+    relay.release_streams(&b.device_id, &a.device_id, true);
+    a.cmd_tx.send(send(&b, file("to-b.bin", 400_000), "file-to-b")).await.unwrap();
+    zombie_barrier(&relay, &a, "streams").await;
+    assert!(relay.swallowed(&a.device_id).0 >= 2, "the rest of B's stream went into the dead socket");
+    relay.relay_times_out(&a.device_id);
+    relay.suspend(&a.device_id);
+    let (ok, seen) = relay_status_until(&mut a, 10, |ev| matches!(ev, NetworkEvent::RelaySuspended)).await;
+    assert!(ok, "A noticed its socket is gone, saw {seen:?}");
+    let snap = a.debug_snapshot().await.expect("the loop answers");
+    assert!(!snap.ws_transfers.is_empty(), "Suspended dropped the half-received stream");
+
+    relay.resume(&a.device_id);
+    assert!(expect_each(&mut a, 30, &[&to_a], delivered_id).await.is_empty(), "the stream toward A never finished");
+    let to_b = header_id(&mut b).await;
+    assert!(expect_each(&mut b, 30, &[&to_b], delivered_id).await.is_empty(), "the stream written into A's dead socket never finished");
+}
+
+/// Presence follows the socket: offline at the relay's deadline while the session holds,
+/// back on the resume. A trip shorter than the deadline does not flap at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn presence_leaves_at_the_relay_deadline_and_returns_on_resume() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut a, mut b) = session_friend_pair(&relay, 226, 228).await;
+    drain_events(&mut a);
+
+    relay.set_relay_idle(std::time::Duration::from_millis(400));
+    relay.zombie_for(&a.device_id, std::time::Duration::from_secs(6));
+    assert!(
+        wait_until(5, async || !b.sees_peer(&a.device_id).await).await,
+        "B still shows A online past the relay's deadline",
+    );
+    assert_eq!(relay.client_state(&a.device_id), (true, false), "presence went before A's own client noticed");
+    assert!(relay.socket_of(&a.device_id) == Some(Socket::Gone), "the session waits in grace");
+    let (ok, seen) = relay_status_until(&mut a, 15, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+    assert!(ok && seen.first() == Some(&"suspended"), "A resumes after noticing, saw {seen:?}");
+    assert!(
+        wait_until(10, async || b.sees_peer(&a.device_id).await && relay.online_devices().contains(&a.device_id)).await,
+        "A never came back online for B",
+    );
+
+    relay.set_relay_idle(std::time::Duration::from_secs(30));
+    drain_events(&mut b);
+    relay.zombie_for(&a.device_id, std::time::Duration::from_millis(300));
+    let (ok, _) = relay_status_until(&mut a, 15, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+    assert!(ok, "A resumes the short trip");
+    let a_dev = a.device_id.clone();
+    let flapped = seen_before_flush(&relay, &mut b, |ev| {
+        matches!(ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == a_dev)
+    })
+    .await;
+    assert!(!flapped, "a trip shorter than the deadline flapped A's presence");
+}
+
+/// A relay restart with its snapshot: every node resumes, none joins, and a DM sent
+/// while the relay was down arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn relay_restart_with_its_snapshot_resumes_every_session() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut a, mut b) = session_friend_pair(&relay, 230, 232).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let mark = relay.log_mark();
+    relay.restart_relay(true);
+    for node in [&mut a, &mut b] {
+        let (ok, seen) = relay_status_until(node, 10, |ev| matches!(ev, NetworkEvent::RelaySuspended)).await;
+        assert!(ok, "{} hears its socket close, saw {seen:?}", node.device_id);
+    }
+    b.cmd_tx
+        .send(NodeCommand::SendMessage { peer_id: a.master_id.clone(), text: "while the relay restarted".into(), message_id: "restart-dm".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    assert!(b.debug_snapshot().await.is_some(), "B took the send");
+    relay.resume(&a.device_id);
+    relay.resume(&b.device_id);
+    for node in [&mut a, &mut b] {
+        let (ok, seen) = relay_status_until(node, 10, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+        assert!(ok && !seen.contains(&"disconnected"), "{} resumed, saw {seen:?}", node.device_id);
+    }
+    assert!(expect_each(&mut a, 20, &["restart-dm"], delivered_id).await.is_empty(), "the DM sent across the restart was lost");
+    for node in [&mut a, &mut b] {
+        settle_both_ways(&relay, node, "restart").await;
+        assert_eq!(relay.joins_since(&node.device_id, mark), Vec::<String>::new(), "a restart cost a rejoin");
+    }
+    assert!(wait_until(10, async || b.sees_peer(&a.device_id).await).await, "presence came back with the resume");
+}
+
+/// A resume whose ring overflowed (`gap:true`) runs the catch-ups, topic, DM and server
+/// sync, without a single join, and recovers what fell out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_gapped_resume_repairs_through_the_catch_ups_without_a_join() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut j, server_id) = session_server_pair(&relay, 234, 236).await;
+    let general = general_channel_of(&server_id);
+
+    relay.set_ring_cap(&j.device_id, 1);
+    relay.suspend(&j.device_id);
+    assert!(wait_until(10, async || !o.sees_peer(&j.device_id).await).await, "O sees J leave");
+    for i in 0..3 {
+        o.cmd_tx
+            .send(NodeCommand::SendChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), text: format!("gap post {i}"), message_id: format!("gap-post-{i}"), reply_to_mid: None, link_preview: None })
+            .await
+            .unwrap();
+        o.cmd_tx
+            .send(NodeCommand::SendMessage { peer_id: j.master_id.clone(), text: format!("gap dm {i}"), message_id: format!("gap-dm-{i}"), reply_to_mid: None, link_preview: None })
+            .await
+            .unwrap();
+    }
+    expect_relay_drained(&relay, &o, "gap-sends").await;
+    drain_events(&mut o);
+    assert!(relay.ring_len(&j.device_id) >= 2, "the ring overflowed into a gap");
+
+    let before = sync_asks_to(&j, &o.device_id).await;
+    let mark = relay.log_mark();
+    relay.resume(&j.device_id);
+    let want = ["gap-post-0", "gap-post-1", "gap-post-2", "gap-dm-0", "gap-dm-1", "gap-dm-2"];
+    let missing = expect_each(&mut j, 30, &want, delivered_id).await;
+    assert!(missing.is_empty(), "the gap repair never recovered {missing:?}");
+    settle_both_ways(&relay, &mut j, "gap").await;
+    let ran: Vec<&'static str> = relay.commands_since(&j.device_id, mark).into_iter().map(|(kind, _, _)| kind).collect();
+    assert!(ran.contains(&"topic_catchup"), "no topic catch-up after the gap: {ran:?}");
+    let after = sync_asks_to(&j, &o.device_id).await;
+    assert!(after.0 > before.0, "no DM sync after the gap ({before:?} -> {after:?})");
+    assert!(after.1 > before.1, "no server sync after the gap ({before:?} -> {after:?})");
+    assert_eq!(relay.joins_since(&j.device_id, mark), Vec::<String>::new(), "the gap repair joined rooms");
+}
+
+/// The session expired while away: the resume fails, the node gets `SessionLost` then
+/// `Connected`, and the fresh path (offline buffer, catch-ups, sync) brings back what the
+/// dead session held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_failed_resume_takes_the_fresh_path_and_loses_nothing() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut j, server_id) = session_server_pair(&relay, 238, 240).await;
+    let general = general_channel_of(&server_id);
+
+    relay.suspend(&j.device_id);
+    assert!(wait_until(10, async || !o.sees_peer(&j.device_id).await).await, "O sees J leave");
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), text: "post into grace".into(), message_id: "grace-post".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    o.cmd_tx
+        .send(NodeCommand::SendMessage { peer_id: j.master_id.clone(), text: "dm into grace".into(), message_id: "grace-dm".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    expect_relay_drained(&relay, &o, "grace-sends").await;
+    drain_events(&mut o);
+    relay.expire_session(&j.device_id);
+    assert!(relay.socket_of(&j.device_id).is_none(), "the session is gone");
+
+    relay.resume(&j.device_id);
+    let (ok, seen) = relay_status_until(&mut j, 20, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+    assert!(ok && seen.contains(&"disconnected"), "a failed resume is SessionLost, then a fresh Connected: {seen:?}");
+    let missing = expect_each(&mut j, 30, &["grace-post", "grace-dm"], delivered_id).await;
+    assert!(missing.is_empty(), "the fresh path never recovered {missing:?}");
+}
+
+/// The once-per-connection gates are once per session: a resume runs none of the
+/// fresh-session work again, a `SessionLost` re-arms all of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn the_once_per_session_gates_hold_across_a_resume_and_reset_after_session_lost() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (_o, mut j, _server_id) = session_server_pair(&relay, 242, 244).await;
+    j.cmd_tx.send(NodeCommand::ClaimNickname { nickname: "sessionnick".into() }).await.unwrap();
+    assert!(
+        wait_until(10, async || relay.nickname_master("sessionnick").is_some()).await,
+        "the nickname is claimed",
+    );
+    settle_both_ways(&relay, &mut j, "claimed").await;
+    let once = ["topic_catchup", "lock_get", "claim_nickname", "get_turn", "get_forwarder"];
+    let j_dev = j.device_id.clone();
+    let fresh_work = |relay: &MockRelay, mark: usize| -> Vec<&'static str> {
+        let mut kinds: Vec<&'static str> = relay
+            .commands_since(&j_dev, mark)
+            .into_iter()
+            .map(|(kind, _, _)| kind)
+            .filter(|kind| once.contains(kind))
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        kinds
+    };
+
+    let mark = relay.log_mark();
+    relay.suspend(&j.device_id);
+    relay.resume(&j.device_id);
+    let (ok, seen) = relay_status_until(&mut j, 10, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+    assert!(ok, "resumed, saw {seen:?}");
+    settle_both_ways(&relay, &mut j, "resumed").await;
+    assert_eq!(fresh_work(&relay, mark), Vec::<&str>::new(), "a resume ran once-per-session work");
+    assert!(relay.nickname_master("sessionnick").is_some(), "the session kept the nickname");
+
+    let mark = relay.log_mark();
+    relay.suspend(&j.device_id);
+    relay.expire_session(&j.device_id);
+    relay.resume(&j.device_id);
+    let (ok, seen) = relay_status_until(&mut j, 20, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+    assert!(ok && seen.contains(&"disconnected"), "a fresh session after SessionLost, saw {seen:?}");
+    settle_both_ways(&relay, &mut j, "fresh").await;
+    let mut want = once.to_vec();
+    want.sort();
+    assert_eq!(fresh_work(&relay, mark), want, "SessionLost did not re-arm every gate");
+    assert!(
+        wait_until(10, async || relay.nickname_master("sessionnick").is_some()).await,
+        "the fresh session claims the nickname again",
     );
 }

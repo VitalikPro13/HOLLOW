@@ -201,13 +201,41 @@ All timers consume their immediate first tick during initialization so they do n
 
 `ws_event_rx.recv()` receives events from the WS relay client. The match arms:
 
+### Relay sessions (RESUMABLE_SESSIONS_PLAN.md 9.8, wave 1)
+A socket is not a session. ws_client reports `Connected` (a FRESH session), `Suspended` (socket
+gone, session held), `Resumed { gap }` (back on a new socket) and `SessionLost` (refused or
+forgotten). Orders: a drop with a session gives `Suspended`, then `Resumed` or `SessionLost` +
+`Connected`; a drop without one gives `SessionLost`, then `Connected`.
+- **`Suspended`**: keeps EVERYTHING (`ws_room_peers`, `synced_peers`, calls, voice participants,
+  throttles, asset/file asks, `pending_ws_transfers`); sends keep going into ws_client's queue.
+  Emits `NetworkEvent::RelaySuspended` (Dart: Reconnecting, nothing lost).
+- **`Resumed { gap: false }`**: no joins, no reconnect work, `RelayConnected`. The relay's fresh
+  `members` per room run through the normal `RoomMembers` arm (vanished peers purge, `is_new`
+  stays false for peers already synced).
+- **`Resumed { gap: true }`**: `sync_handler::repair_after_gap` first (re-arms `relay_catchup_done`,
+  `join_hold.went_away`, topic + join-ring catch-ups per server room, `SyncRequest` + channel sync
+  to each member device the rooms show, `DmSyncRequest` with a gap digest to each DM-room
+  friend device), never a join; then `RelayConnected`.
+- **Once-per-session gates** (`relay_catchup_done`, `answer_resent`, `synced_peers`,
+  `key_request_in_flight`, `key_bundle_sent_to`, `mls_bootstrap_requested`, `mls_welcome_grace`,
+  `mls_epoch_hint_cooldown`, `join_hold`, the asset/file `asked` sets, `peer_auto_dl`, nick hold)
+  reset ONLY in `SessionLost`; the fresh-session work (`door_rooms.on_connected`,
+  `lock_keeper.on_connected`, pending-join lock reads, nickname claim, TURN, forwarder) runs ONLY
+  in `Connected`. Neither runs on `Suspended`/`Resumed`.
+- **`RelayConnected` timing**: a fresh session says Connected only when the relay answered its
+  inbox join (`RoomMembers` or `RoomCapHit` for `inbox:{master}`, `awaiting_inbox_answer`), a
+  resume says it on `Resumed`.
+
 ### WsEvent::Connected
+- A fresh session: everything below, then `RelayConnected` on the inbox join's answer.
 - Joins personal inbox room (`inbox:{peer_id}`).
-- Auto-joins rooms for all known servers from `server_states`.
+- Auto-joins rooms for all known servers from `server_states`. The joins stay (ws_client also
+  replays its own and drops an identical repeat): keeping one is always safe.
 - Auto-joins DM rooms for all accepted friends from DB.
 - Runs shard integrity verification (removes DB records for corrupt/missing shards).
 
 ### WsEvent::SessionLost
+- Emits `RelayDisconnected`.
 - Clears `ws_room_peers` entirely.
 - Clears `synced_peers` — ensures full re-sync on reconnect (without this, peers skip sync because they're already in the set).
 - Clears `key_request_in_flight` — allows fresh key exchange after reconnect.
@@ -507,7 +535,7 @@ Drop stale local group, send KeyPackage to coordinator for re-bootstrap.
 Primary peer discovery rides the LIVE WS connection, not the HTTP `/bootstrap` poll (which paid a fresh TLS handshake per request and could stall under a WS frame burst on the relay's single event loop). The `rebootstrap_timer` sends `WsCommand::DiscoverPeers { room }` for the active room + each server; the relay responds with `discovered_peers` (the room's `ws_rooms` peer set). `WsEvent::DiscoveredPeers` populates `ws_room_peers` and key-exchanges with any peer lacking a confirmed session (reusing the sweep's freshness guard). HTTP bootstrap is kept as a non-fatal fallback — its failures are logged quietly, never surfaced as `NetworkEvent::Error`. The relay's `members`-on-join response already covers most discovery, so this is belt-and-suspenders.
 
 ### WS disconnect
-Clears `ws_room_peers`, `synced_peers`, `key_request_in_flight`, `mls_bootstrap_requested`, drains `pending_messages`, and cleans up in-progress WS transfers. The WS client auto-reconnects; on reconnect (`WsEvent::Connected`), rooms are re-joined and full sync is retriggered for all peers.
+A session lost (`WsEvent::SessionLost`) clears `ws_room_peers`, `synced_peers`, `key_request_in_flight`, `mls_bootstrap_requested`, drains `pending_messages`, and cleans up in-progress WS transfers. The WS client auto-reconnects; on a fresh session (`WsEvent::Connected`), rooms are re-joined and full sync is retriggered for all peers. A socket lost with the session held (`WsEvent::Suspended`) clears nothing; see "Relay sessions" above.
 
 ### MLS Welcome after join
 After joining from Welcome, sends plaintext `ChannelSyncRequest` for channels with no messages (MLS epoch may be stale on responder, so MLS sync would silently fail).

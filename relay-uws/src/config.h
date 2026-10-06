@@ -1,7 +1,11 @@
 #pragma once
+#include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
+
+#include "session.h"
 
 struct Config {
     uint16_t port = 443;
@@ -18,7 +22,28 @@ struct Config {
     // update the flag + restart (no hot-reload machinery by design). Empty =
     // not configured. Zero-knowledge: one static id, no per-stream metadata.
     std::string forwarder_peer_id;
+    // How long a session outlives its socket (--session-grace-secs, 30 to 600).
+    int64_t session_grace_secs = session::DEFAULT_GRACE_SECS;
 };
+
+// --session-grace-secs: a number outside 30..600 is held to the nearer end, and
+// anything that is not a number stops the relay before it listens.
+inline int64_t parse_grace_secs(const char* text) {
+    char* end = nullptr;
+    errno = 0;
+    const long long v = strtoll(text, &end, 10);
+    if (end == text || *end != '\0' || errno == ERANGE) {
+        fprintf(stderr, "[config] --session-grace-secs takes whole seconds, 30 to 600\n");
+        exit(2);
+    }
+    if (v < session::MIN_GRACE_SECS || v > session::MAX_GRACE_SECS) {
+        const int64_t held = v < session::MIN_GRACE_SECS ? session::MIN_GRACE_SECS : session::MAX_GRACE_SECS;
+        fprintf(stderr, "[config] --session-grace-secs %lld is outside 30 to 600, using %lld\n", v,
+                static_cast<long long>(held));
+        return held;
+    }
+    return v;
+}
 
 inline void print_help() {
     fprintf(stderr,
@@ -30,6 +55,7 @@ inline void print_help() {
         "  --cert-file <path>    TLS certificate file\n"
         "  --key-file <path>     TLS private key file\n"
         "  --forwarder-peer-id <id>  Media forwarder peer_id to advertise (get_media_forwarder)\n"
+        "  --session-grace-secs <n>  How long a dropped device's session waits for it, 30 to 600 (default: 120)\n"
         "  --help                Show this help\n"
     );
 }
@@ -50,6 +76,7 @@ inline Config parse_args(int argc, char** argv) {
         else if (arg == "--cert-file" && i + 1 < argc) config.cert_file = argv[++i];
         else if (arg == "--key-file" && i + 1 < argc) config.key_file = argv[++i];
         else if (arg == "--forwarder-peer-id" && i + 1 < argc) config.forwarder_peer_id = argv[++i];
+        else if (arg == "--session-grace-secs" && i + 1 < argc) config.session_grace_secs = parse_grace_secs(argv[++i]);
         else if (arg == "--help") { print_help(); exit(0); }
     }
     return config;

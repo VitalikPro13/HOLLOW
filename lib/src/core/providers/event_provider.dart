@@ -1101,30 +1101,21 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_LinkPushComplete():
         ref.read(deviceLinkSyncProvider.notifier).onPushComplete();
 
+      // The relay session is gone (refused, forgotten, or there never was one).
       case NetworkEvent_RelayDisconnected():
         ref.read(siblingCallProvider.notifier).clear();
         // A claimed nickname stays: the node claims it again on reconnect.
         ref.read(deviceLinkSyncProvider.notifier).onDisconnected();
-        ref
-            .read(connectionStatusProvider.notifier)
-            .onRelayStatusChanged('disconnected');
+        ref.read(connectionStatusProvider.notifier).onRelayEvent(event);
 
       case NetworkEvent_RelayConnected():
-        ref
-            .read(connectionStatusProvider.notifier)
-            .onRelayStatusChanged('connected');
+        ref.read(connectionStatusProvider.notifier).onRelayEvent(event);
         // A hangup we could not deliver while the relay was down: say it now.
         ref.read(callProvider.notifier).handleRelayReconnected();
 
-      case NetworkEvent_RelayConnecting(:final reconnecting):
-        ref
-            .read(connectionStatusProvider.notifier)
-            .onRelayStatusChanged(reconnecting ? 'reconnecting' : 'connecting');
-
-      case NetworkEvent_RelaySuspended():
-        ref
-            .read(connectionStatusProvider.notifier)
-            .onRelayStatusChanged('reconnecting');
+      // The socket is gone, the session held: everything stays, sends wait.
+      case NetworkEvent_RelayConnecting() || NetworkEvent_RelaySuspended():
+        ref.read(connectionStatusProvider.notifier).onRelayEvent(event);
 
       case NetworkEvent_ChannelNotificationHint(
             :final serverId, :final channelId, :final fromPeer,

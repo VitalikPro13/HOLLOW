@@ -8,6 +8,8 @@
 #   bash run_live.sh [dir]
 #   RELAY_LIVE_BUILD=<dir>    keep the relay's objects there between runs
 #   RELAY_LIVE_VARIANTS=on    run one of the two builds
+#   RELAY_LIVE_PORTS=lo-hi    pick the relay's port in this range (a machine others share)
+#   RELAY_LIVE_JOBS=n         compile at most n objects at once
 cd "$(dirname "$0")" || exit 1
 
 skip() {
@@ -48,6 +50,7 @@ compile() {
     local newest
     newest=$(ls -t "$src" ../src/*.h | head -1)
     if [ -f "$out" ] && [ "$out" -nt "$newest" ]; then return; fi
+    while [ "${RELAY_LIVE_JOBS:-0}" -gt 0 ] && [ "$(jobs -rp | wc -l)" -ge "$RELAY_LIVE_JOBS" ]; do sleep 0.2; done
     "$@" -c "$src" -o "$out" > "$dir/$name.build" 2>&1 &
     pids+=($!)
     names+=("$name")
@@ -65,7 +68,8 @@ wait_all() {
 }
 
 us_c="gcc -std=c11 $flags -DLIBUS_USE_OPENSSL -I../uSockets/src"
-relay_cxx="g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -DHOLLOW_RELAY_TEST_LOOPBACK=1 -I../uWebSockets/src -I../uSockets/src -I../src"
+# A session grace of seconds, so the tests watch one run out.
+relay_cxx="g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_GRACE_SECS=5 -I../uWebSockets/src -I../uSockets/src -I../src"
 # Both builds set every switch, so flipping a default on release day changes neither.
 switches() {
     local s
@@ -109,7 +113,11 @@ fail=0
 run_variant() {
     local v=$1 port tries=0 log=$dir/relay_$v.log
     while :; do
-        port=$((20000 + RANDOM % 12000))
+        if [ -n "$RELAY_LIVE_PORTS" ]; then
+            port=$((${RELAY_LIVE_PORTS%-*} + RANDOM % (${RELAY_LIVE_PORTS#*-} - ${RELAY_LIVE_PORTS%-*} + 1)))
+        else
+            port=$((20000 + RANDOM % 12000))
+        fi
         # Never under a systemd fd store, never near the real push sidecar's token.
         env -u NOTIFY_SOCKET -u LISTEN_PID -u LISTEN_FDS -u LISTEN_FDNAMES -u HOLLOW_PUSH_TOKEN \
             TURN_SECRET=live-test "$dir/relay_$v" --port "$port" --domain "$domain" \

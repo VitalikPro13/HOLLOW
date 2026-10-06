@@ -103,6 +103,10 @@ jni = "0.21"
 str0m = { version = "0.21", optional = true }
 toml = { version = "0.8", optional = true }
 
+# TCP_USER_TIMEOUT on the relay socket (node/ws_client.rs); already in the tree through tokio.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+socket2 = { version = "0.6", features = ["all"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Foundation"] }
 

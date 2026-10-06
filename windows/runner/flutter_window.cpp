@@ -7,6 +7,7 @@
 namespace {
 
 constexpr char kWindowChannel[] = "hollow/window";
+constexpr char kRelayTriggersChannel[] = "hollow/relay_triggers";
 
 int64_t AsInt64(LONG value) { return static_cast<int64_t>(value); }
 
@@ -43,6 +44,13 @@ bool FlutterWindow::OnCreate() {
         HandleWindowMethod(call, std::move(result));
       });
 
+  relay_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), kRelayTriggersChannel,
+          &flutter::StandardMethodCodec::GetInstance());
+  relay_triggers_ = std::make_unique<RelayTriggerSource>(GetHandle());
+  relay_triggers_->Start();
+
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   // Let window_manager control when the window is shown to avoid
@@ -53,6 +61,8 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  relay_triggers_ = nullptr;
+  relay_channel_ = nullptr;
   window_channel_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
@@ -182,6 +192,16 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // Observed before the plugins, which could consume WM_POWERBROADCAST.
+  if (relay_triggers_ && relay_channel_) {
+    if (const char* event = relay_triggers_->EventFor(message, wparam)) {
+      relay_channel_->InvokeMethod(event, nullptr);
+      if (message == RelayTriggerSource::NetworkMessage()) {
+        return 0;
+      }
+    }
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

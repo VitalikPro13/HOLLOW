@@ -39,6 +39,7 @@ pub(crate) mod olm_lane;
 pub(crate) mod mls_authority;
 pub(crate) mod profile_card;
 pub(crate) mod recovery_pool;
+pub(crate) mod relay_session;
 pub(crate) mod resolver;
 pub(crate) mod ring_auth;
 pub(crate) mod roster_book;
@@ -60,6 +61,8 @@ pub(crate) mod webp_anim;
 
 #[cfg(test)]
 mod kill_vectors;
+#[cfg(test)]
+mod resume_e2e;
 #[cfg(test)]
 mod test_harness;
 

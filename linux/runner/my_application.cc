@@ -6,13 +6,22 @@
 #endif
 
 #include "flutter/generated_plugin_registrant.h"
+#include "relay_triggers.h"
 
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
+  FlMethodChannel* relay_channel;
+  RelayTriggers* relay_triggers;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
+
+static void relay_trigger_cb(const char* event, gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  fl_method_channel_invoke_method(self->relay_channel, event, nullptr, nullptr,
+                                  nullptr, nullptr);
+}
 
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
@@ -113,6 +122,12 @@ static void my_application_activate(GApplication* application) {
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
 
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  self->relay_channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "hollow/relay_triggers", FL_METHOD_CODEC(codec));
+  self->relay_triggers = relay_triggers_start(relay_trigger_cb, self);
+
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
 
@@ -179,6 +194,8 @@ static void my_application_shutdown(GApplication* application) {
 // Implements GObject::dispose.
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
+  g_clear_pointer(&self->relay_triggers, relay_triggers_stop);
+  g_clear_object(&self->relay_channel);
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }

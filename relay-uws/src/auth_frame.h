@@ -1,6 +1,7 @@
 #pragma once
 #include "client_json.h"
 #include "json.hpp"
+#include "session.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,8 +21,12 @@
 // domain and every flag the relay acts on. A v1 frame signs only the peer id and a
 // timestamp, so one captured frame replays to any relay within a minute, and its
 // `fetch`, `guest` and license key ride unsigned.
+//
+// Auth v3 is v2 plus the session it asks for (`"new"`, `"none"` or a sid to resume)
+// and how many stream frames the client received in it, both signed
+// (RESUMABLE_SESSIONS_PLAN.md section 9.1).
 struct AuthFrame {
-    // 1 = the pre-0.12 frame (no `v`), 2 = the challenge frame.
+    // 1 = the pre-0.12 frame (no `v`), 2 = the challenge frame, 3 = with a session.
     int version = 1;
     std::string peer_id;
     std::string public_key;
@@ -30,9 +35,12 @@ struct AuthFrame {
     std::string license_key;
     bool guest = false;
     bool fetch = false;
-    // v2 only.
+    // v2 and v3.
     std::string nonce;
     std::string domain;
+    // v3 only.
+    std::string session;
+    uint64_t in_h = 0;
 };
 
 // Two orders of magnitude above any real auth frame (a peer id, a key, a
@@ -43,7 +51,29 @@ static constexpr size_t MAX_AUTH_FRAME_BYTES = 16 * 1024;
 // 32 random bytes as lowercase hex.
 static constexpr size_t AUTH_NONCE_HEX_LEN = 64;
 
+// What the socket will be, as the v2 signature names it. A frame claiming both a
+// guest and a fetch socket is no mode at all.
+inline std::optional<std::string> auth_mode(bool guest, bool fetch) {
+    if (guest && fetch) return std::nullopt;
+    if (guest) return std::string("guest");
+    if (fetch) return std::string("fetch");
+    return std::string("full");
+}
+
 namespace auth_detail {
+
+// A v3 frame's session and count, by the shape rules of section 9.1: only a full
+// socket has a session, and nothing was counted yet in one that is not resumed.
+inline bool session_fields(const nlohmann::json& j, AuthFrame& f) {
+    auto s = j.find("session");
+    auto h = j.find("in_h");
+    if (s == j.end() || !s->is_string() || h == j.end() || !h->is_number_unsigned()) return false;
+    f.session = s->get_ref<const std::string&>();
+    f.in_h = h->get<uint64_t>();
+    std::optional<std::string> mode = auth_mode(f.guest, f.fetch);
+    if (!mode || !session::auth_session_ok(*mode, f.session)) return false;
+    return session::is_sid_shape(f.session) || f.in_h == 0;
+}
 
 inline bool frame_of_type(const nlohmann::json& j, const char* want) {
     if (!j.is_object()) return false;
@@ -100,19 +130,13 @@ inline std::optional<AuthFrame> parse_auth_frame(std::string_view message) {
 
     auto v = j.find("v");
     if (v != j.end()) {
-        if (!v->is_number_unsigned() || v->get<uint64_t>() != 2) return std::nullopt;
-        f.version = 2;
+        if (!v->is_number_unsigned()) return std::nullopt;
+        const uint64_t version = v->get<uint64_t>();
+        if (version != 2 && version != 3) return std::nullopt;
+        f.version = static_cast<int>(version);
     }
+    if (f.version == 3 && !auth_detail::session_fields(j, f)) return std::nullopt;
     return f;
-}
-
-// What the socket will be, as the v2 signature names it. A frame claiming both a
-// guest and a fetch socket is no mode at all.
-inline std::optional<std::string> auth_mode(bool guest, bool fetch) {
-    if (guest && fetch) return std::nullopt;
-    if (guest) return std::string("guest");
-    if (fetch) return std::string("fetch");
-    return std::string("full");
 }
 
 // The relay's host as a v2 signature names it: lowercase, no port. `--domain` may
@@ -142,6 +166,18 @@ inline std::string auth_v2_message(const std::string& domain, const std::string&
                                    const std::string& mode, const std::string& license_digest) {
     return "hollow-ws-auth2\n" + domain + "\n" + nonce + "\n" + peer_id + "\n" +
            std::to_string(timestamp) + "\n" + mode + "\n" + license_digest;
+}
+
+// The exact bytes a v3 auth signature covers: the v2 fields, the session asked for
+// and the client's count, so a resume cannot be grafted onto another handshake.
+// Pinned in session_vectors.json for both languages.
+inline std::string auth_v3_message(const std::string& domain, const std::string& nonce,
+                                   const std::string& peer_id, uint64_t timestamp,
+                                   const std::string& mode, const std::string& license_digest,
+                                   const std::string& session, uint64_t in_h) {
+    return "hollow-ws-auth3\n" + domain + "\n" + nonce + "\n" + peer_id + "\n" +
+           std::to_string(timestamp) + "\n" + mode + "\n" + license_digest + "\n" + session + "\n" +
+           std::to_string(in_h);
 }
 
 inline bool is_auth_nonce_shape(const std::string& nonce) {

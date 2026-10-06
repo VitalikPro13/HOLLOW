@@ -1041,3 +1041,56 @@ peer letters; nobody touches `~/src/HOLLOW` (Windows is the source of truth).
   section 10). `-Stop` and every run's opening stop touch only the `-Peers` given; without
   `-Peers` they stop every `hollow-*` device, so always pass it.
 - The relay's submodules arrive as empty folders: relay C++ builds on the Linux VM, never here.
+
+## Lifecycle ops, time to healthy, the soak (resumable sessions, 2026-10-06)
+
+`scripts/fleet_lifecycle.ps1` (dot-sourced by `fleet_lib.ps1`) adds six ops any scenario or
+`fleet_send` batch can use: `background`, `foreground`, `pause`, `resume`, `net_off`, `net_on`
+(`"mode":"thaw"` or `"drop"`). They run on the HOST, never in the probe: an app that is away
+cannot answer a step. Never send a probe step to a peer that is away; `health` is the one meant
+to follow a `foreground` / `resume` / `net_on`. Nothing ever cuts a host's network or sleeps a
+host (other agents and SSH ride them).
+
+| op | Windows exe | iOS Simulator | Android emulator |
+|---|---|---|---|
+| background | minimize without activating + probe `lifecycle inactive` | `simctl launch <udid> com.apple.Preferences` | `KEYCODE_HOME` |
+| foreground | restore without activating, bottom of the z-order + probe `lifecycle resumed` | `simctl launch <udid> com.anonlisten.hollow` (same pid, else it fails) | `am start -n .../.MainActivity`, BACK once if the battery prompt is on top |
+| pause / resume | `NtSuspendProcess` / `NtResumeProcess` on the peer's pid | `kill -STOP` / `-CONT` (sim pids are host pids) | `run-as ... kill -STOP` / `-CONT` |
+| net_off / net_on | zombie proxy route (needs the client's connect override) | zombie proxy route (same) | `svc wifi` + `svc data` disable / enable |
+
+Linux: pause/resume (`kill`) and the proxy route only; background/foreground refuse.
+
+- **Windows fleet windows are never shown.** The probe never runs `main()`, so the runner's
+  window stays hidden (`IsWindowVisible` false) and `Process.MainWindowHandle` is 0; this is
+  also why tiling's `MoveWindow` met an empty handle. The ops find the window by class
+  (`FLUTTER_RUNNER_WIN32_WINDOW`, `EnumWindows`). A minimized probe keeps drawing and stays
+  `resumed` (no focus change, no engine lifecycle edge), so the probe delivers the edge a
+  person's focus would make.
+- **A step's `peer` field is the routing key and never reaches the app** (`Send-FleetStep`
+  strips it): the session ops name the other identity `contact`.
+- **The iOS Simulator and the desktops share their host's network stack**, so `net_off` there
+  freezes that peer's route on the zombie proxy (`tools/zombie_proxy`, `fleet.ps1 -NetProxy`,
+  port 18500 + letter index, control 18549). The app reaches the proxy only once ws_client
+  honours `relay_connect` (one `host:port` line in the data dir, debug builds; the fleet writes
+  it): until then `net_off` refuses with that reason instead of silently cutting nothing.
+
+Probe ops for this (`integration_test/probe/probe_session_ops.dart`): `lifecycle` (`resumed`
+or `inactive` only, the others stop the frames the probe answers with), `clock`, `friend`
+(`request`/`accept` through the provider), `autoreply` (answers `ping:` DMs with `pong:`),
+`health` (time to `connected`, then a DM round trip through an autoreplying friend, with
+device epochs), `stream_start` / `stream_stop` / `stream_stats` (a counted `soak:<tag>:<n>`
+DM stream; received = the DATABASE, where every delivery path ends).
+
+- `scripts/fleet_time_to_healthy.ps1 -Peers e,f -Trip background|net|pause -Repeats N
+  [-Befriend]`: the first peer is sent away and back N times, p50/p95 of back-to-connected and
+  back-to-round-trip against 1.5 s / 3 s, report in `build/fleet_out/metrics/`. A sample whose
+  first look already read `connected` may be stale; the round trip cannot lie. Emulator clocks
+  get an offset from the `clock` op; simulators and desktops share the host clock.
+- `scripts/fleet_soak.ps1 -Peers e,f -Minutes 60 [-CanaryRelay host -RelayRestart '<cmd>']`:
+  counted DM streams both ways, random trips one peer at a time, a canary relay restart every
+  `-RestartEveryMinutes` (refused for relay.anonlisten.com and for peers not on the canary),
+  then a settle; exit 1 on any loss. `scripts/fleet_metrics_selftest.ps1` checks its loss
+  counter.
+- `scripts/resume_e2e.sh` (Linux VM): the real relay, the zombie proxy and the real ws_client
+  (`node/resume_e2e.rs`, ignored test) with B's path frozen for each `--windows` entry, then
+  thawed or dropped; per-window report and `summary.md`.

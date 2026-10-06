@@ -904,6 +904,172 @@ pub(crate) async fn request_channel_catchups(
     }
 }
 
+/// Ask the relay to replay a server room's join ring once per session: a member
+/// collects parked asks and the answers to them, a joiner the answer addressed to it.
+/// No `max_age`: a join has no watermark, and an old ask is exactly the one wanted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn request_join_ring_catchup(
+    ws_cmd_tx: &WsCmdTx,
+    server_states: &ServerStates,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    join_hold: &mut super::join_hold::JoinHold,
+    relay_catchup_done: &mut std::collections::HashSet<(String, String)>,
+    room: &str,
+    hidden: bool,
+    tag: &str,
+) {
+    let member = server_states.contains_key(room);
+    if member {
+        join_hold.joined(room, hidden);
+    }
+    let ring_wanted = server_states.get(room).is_some_and(|s| s.relay_catchup_secs() > 0)
+        || pending_server_joins.contains_key(room);
+    if !ring_wanted || hidden || !relay_catchup_done.insert((room.to_string(), JOIN_TOPIC.to_string())) {
+        return;
+    }
+    hollow_log!("[HOLLOW-TOPIC] Join-ring catch-up request ({tag}) for {room}");
+    let owner = server_states
+        .get(room)
+        .and_then(|s| s.anchor_owner())
+        .or_else(|| pending_server_joins.get(room).and_then(|p| p.owner_pin.clone()));
+    let topic = super::ring_auth::ring_topic(room, owner.as_deref(), JOIN_TOPIC);
+    // A member judges the parked asks of the replay only after its end.
+    if member {
+        join_hold.ring_asked(room, &topic);
+    }
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
+        room_code: room.to_string(),
+        channel_id: topic,
+        max_age_secs: 0,
+        end: member,
+    });
+}
+
+/// A resumed relay session whose ring overflowed while we were away
+/// (`Resumed { gap: true }`, RESUMABLE_SESSIONS_PLAN.md 9.8). What fell out comes back
+/// through the catch-ups a fresh session runs (topic rings, server sync, DM gap
+/// digests), without a single join. A dropped frame may have been a removal, so every
+/// server judges join asks again as a member back from away (HOL-SEC-121).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn repair_after_gap(
+    ws_cmd_tx: &WsCmdTx,
+    crdt_store: &CrdtStore,
+    server_states: &ServerStates,
+    ws_room_peers: &WsRoomPeers,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    relay_catchup_done: &mut std::collections::HashSet<(String, String)>,
+    join_hold: &mut super::join_hold::JoinHold,
+    hidden: &(dyn Fn(&str) -> bool + Sync),
+    sync_coordinator: &mut SyncCoordinator,
+    mls: Option<&MlsManager>,
+    master: &crate::identity::native_identity::NativeKeypair,
+    local_peer: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    relay_catchup_done.clear();
+    join_hold.went_away(server_states);
+    let rooms: std::collections::BTreeSet<String> =
+        server_states.keys().chain(pending_server_joins.keys()).cloned().collect();
+    for room in &rooms {
+        let hidden = hidden(room);
+        if !hidden {
+            request_channel_catchups(
+                ws_cmd_tx, crdt_store, server_states.get(room), room, local_peer, master, relay_catchup_done, "gap",
+            )
+            .await;
+        }
+        request_join_ring_catchup(
+            ws_cmd_tx, server_states, pending_server_joins, join_hold, relay_catchup_done, room, hidden, "gap",
+        );
+    }
+
+    // Whom to ask: the member devices each server room shows us, and the friends' devices
+    // in our DM rooms.
+    let mut server_peers: Vec<(String, String)> = Vec::new();
+    for (sid, state) in server_states {
+        if state.is_deleted() || !state.is_member(local_peer) {
+            continue;
+        }
+        for device in ws_room_peers.get(sid).into_iter().flatten() {
+            if state.is_member(device) {
+                server_peers.push((sid.clone(), device.clone()));
+            }
+        }
+    }
+    let mut dm_peers: Vec<String> = ws_room_peers
+        .iter()
+        .flat_map(|(room, peers)| {
+            peers.iter().filter(move |d| *room == dm_room_code(local_peer, &super::resolver::resolve(d)))
+        })
+        .cloned()
+        .collect();
+    dm_peers.sort();
+    dm_peers.dedup();
+
+    let channels: Vec<(String, Vec<String>)> = server_peers
+        .iter()
+        .map(|(sid, _)| sid.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|sid| server_states.get(&sid).map(|s| (sid, s.channels.keys().cloned().collect())))
+        .collect();
+    let multi_device = !super::resolver::devices_for(local_peer).is_empty();
+    let convos: Vec<String> = dm_peers.iter().map(|d| super::resolver::resolve(d)).collect();
+    let (path, pass) = (db_path.to_string(), db_passphrase.to_string());
+    let (channel_ts, anchors) = tokio::task::spawn_blocking(move || {
+        let Ok(store) = crate::storage::MessageStore::open(&path, &pass) else {
+            return (HashMap::new(), Vec::new());
+        };
+        let channel_ts: HashMap<String, Vec<(String, i64)>> = channels
+            .into_iter()
+            .map(|(sid, cids)| {
+                let ts = cids
+                    .into_iter()
+                    .map(|cid| {
+                        let at = store.get_latest_channel_timestamp(&sid, &cid).unwrap_or(None).unwrap_or(0);
+                        (cid, at)
+                    })
+                    .collect();
+                (sid, ts)
+            })
+            .collect();
+        let anchors: Vec<(i64, Option<GapDigest>)> =
+            convos.iter().map(|c| store.dm_sync_anchor(c, multi_device)).collect();
+        (channel_ts, anchors)
+    })
+    .await
+    .unwrap_or_default();
+
+    for (sid, device) in &server_peers {
+        let Some(state) = server_states.get(sid) else { continue };
+        if let Ok(state_vector_json) = serde_json::to_string(&crate::crdt::sync::StateVector::from_server_state(state)) {
+            super::olm_lane::carry(
+                ws_cmd_tx, device, None,
+                &HavenMessage::SyncRequest {
+                    server_id: sid.clone(),
+                    state_vector_json,
+                    mls_epoch: mls.and_then(|m| m.epoch(sid).ok()),
+                    nonce: Some(join_hold.ask()),
+                },
+                super::olm_lane::NoSession::Queue,
+            );
+        }
+        sync_coordinator.register_peer(sid, device, channel_ts.get(sid).cloned().unwrap_or_default());
+    }
+    for (device, (since_timestamp, gap)) in dm_peers.iter().zip(anchors) {
+        super::olm_lane::carry(
+            ws_cmd_tx, device, None,
+            &HavenMessage::DmSyncRequest { since_timestamp, both_directions: multi_device, gap },
+            super::olm_lane::NoSession::Drop,
+        );
+    }
+    hollow_log!(
+        "[HOLLOW-SYNC] Gap repair after a resume: {} room(s), {} server peer(s), {} DM peer(s)",
+        rooms.len(), server_peers.len(), dm_peers.len(),
+    );
+}
+
 // ── 2. CreateChannel ──────────────────────────────────────────────────
 
 pub(crate) async fn handle_create_channel(

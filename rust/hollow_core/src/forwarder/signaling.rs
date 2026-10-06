@@ -8,10 +8,10 @@
 //! time the forwarder initiates.
 //!
 //! Deliberately NOT `spawn_node` / `spawn_ws_client`: no CRDT, MLS, sync, gossip or
-//! room-state machinery. The manual loop keeps the keepalive and liveness
-//! discipline of `ws_client.rs` (30 s ping, 70 s liveness, bounded writes, backoff
-//! reconnect and room rejoin), and media legs ride their own UDP sockets, so they
-//! survive signaling blips untouched.
+//! room-state machinery, and no resumable relay session (it signs in with v2). The
+//! manual loop keeps its own keepalive and liveness (30 s ping, 70 s liveness, bounded
+//! writes, backoff reconnect and room rejoin), and media legs ride their own UDP
+//! sockets, so they survive signaling blips untouched.
 //!
 //! Zero metadata logging: no per-peer request logs, and a security refusal logs the
 //! reason, never a stream identity.
@@ -38,8 +38,7 @@ use crate::node::ws_client;
 use super::engine::{EngineCmd, OutSignal};
 use super::ForwarderConfig;
 
-/// Mirrors ws_client.rs WRITE_TIMEOUT / LIVENESS_TIMEOUT: a wedged sink must never
-/// freeze the loop.
+/// A wedged sink must never freeze the loop (WRITE_TIMEOUT as in ws_client.rs).
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const LIVENESS_TIMEOUT: Duration = Duration::from_secs(70);
 /// A peer's session is torn down or re-asked for at most this often (re-key storms).

@@ -13,6 +13,12 @@ release pipeline is the `release` skill.
 - The single-instance guard = `SingleInstanceLock` (a KERNEL file lock, never a bare pid
   file): in a flatpak EVERY launch is pid 2, so a stale pid file = a silent exit (#69).
   `feedback_flatpak_pid_namespace_instance_lock`.
+- Relay triggers (resumable sessions): native code ONLY forwards `network` / `wake` on the
+  `hollow/relay_triggers` channel; `lib/src/core/services/relay_triggers.dart` decides
+  (coalescing, focus gap, phones in the background drop `network`) and calls `relay_nudge`.
+  A new listener keeps that split; `test/relay_triggers_native_test.dart` pins the channel
+  name in every runner, the two Swift copies identical and the build entries.
+  `RESUMABLE_SESSIONS_PLAN.md` 3.7, 9.6.
 
 ## Rendering
 
@@ -24,6 +30,10 @@ release pipeline is the `release` skill.
 
 - Annotation mode: `window_manager` maximize/unmaximize only, never raw Win32 or
   `setFullScreen`. `feedback_annotation_window_management`.
+- Wake = `WM_POWERBROADCAST` with `PBT_APMRESUMEAUTOMATIC` only (the user-input resume that
+  follows would nudge twice). `NotifyIpInterfaceChange` fires without a real change (at start,
+  under heavy build load; VirtualBox and Tailscale adapters), so the runner keeps at most ONE
+  queued network message; each extra costs one heartbeat at most.
 
 ## Linux
 
@@ -40,6 +50,10 @@ release pipeline is the `release` skill.
 - Flatpak: `flatpak/` + `build-flatpak.sh`; requires `--socket=x11` (NOT
   `fallback-x11`), `--socket=session-bus` + `--own-name` (else it never launches, #59),
   and a bundled libsecret. `feedback_flatpak_libsecret_and_vm_no_gui`.
+- Wake inside the flatpak needs `--system-talk-name=org.freedesktop.login1` (logind's
+  `PrepareForSleep(false)`), accepted only from the bus owner of `org.freedesktop.login1`.
+  Network change = `GNetworkMonitor` (sees a new default route while NetworkManager still
+  says connected, works without NM, goes through the portal), not NM `StateChanged`.
 
 ## Android build
 

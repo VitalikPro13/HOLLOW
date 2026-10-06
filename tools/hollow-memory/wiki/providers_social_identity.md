@@ -80,7 +80,7 @@ Five new events handled:
 - `NetworkEvent_NicknameReleased` → `onReleased()`
 - `NetworkEvent_NicknameClaimFailed` → `onClaimFailed()`
 - `NetworkEvent_NicknameResolveFailed` → debug log only (toast handled by caller)
-- `NetworkEvent_RelayDisconnected` → `connectionStatusProvider.onRelayStatusChanged('disconnected')` only. A claimed nickname stays claimed (2026-10-06): the node holds it and claims it again on reconnect and every 8 minutes (`nick_claim::NickHold`, wiki `rust_social`); a re-claim someone else took arrives as `NicknameClaimFailed('taken')`.
+- `NetworkEvent_RelayDisconnected` (the relay session is gone, not merely suspended) → sibling calls cleared, `deviceLinkSyncProvider.onDisconnected()`, `connectionStatusProvider.onRelayEvent(event)`. A claimed nickname stays claimed (2026-10-06): the node holds it and claims it again on reconnect and every 8 minutes (`nick_claim::NickHold`, wiki `rust_social`); a re-claim someone else took arrives as `NicknameClaimFailed('taken')`.
 
 ---
 
@@ -376,14 +376,15 @@ The `label` getter returns a human-readable string per stage:
 
 ### RelayConnectionStatus
 
-Enum: `disconnected`, `connecting`, `connected`, `reconnecting`. Default is `connecting` (so the UI reads "Connecting…" before the first WS connect resolves — never a false "Disconnected" or "Connected"). Updated via `onRelayStatusChanged(status)` which maps string values from Rust events to enum variants. The `relayLabel` getter produces human-readable text for the dashboard.
+Enum: `disconnected`, `connecting`, `connected`, `reconnecting`. Default is `connecting` (so the UI reads "Connecting…" before the first WS connect resolves — never a false "Disconnected" or "Connected"). Updated via `onRelayEvent(NetworkEvent)` (resumable sessions, 2026-10-06): `RelaySuspended` reads `reconnecting` (the relay holds the session, nothing is lost), `RelayConnected` reads `connected`, `RelayDisconnected` reads `disconnected` only after `offlineGrace` (3 s, so a refused resume followed at once by a fresh session never flashes Offline), and a held session that outlasts `outageOffline` (120 s from the FIRST suspension, the relay's grace) reads `disconnected` too. A connect attempt never moves the indicator off Reconnecting or Offline (no flicker). Tests: `test/connection_status_session_test.dart`. The `relayLabel` getter produces human-readable text for the dashboard.
 
 Fed by REAL relay-WebSocket events from Rust (the relay WS connection is the ground truth for "am I actually online" — a live WSS link proves working internet, so no `connectivity_plus` package is used):
-- `NetworkEvent_RelayConnected` → `'connected'`
-- `NetworkEvent_RelayConnecting { reconnecting }` → `'reconnecting'` if reconnecting else `'connecting'`
-- `NetworkEvent_RelayDisconnected` → `'disconnected'`
+- `NetworkEvent_RelayConnected` → `connected` (after `Resumed`, or a fresh session once its inbox join is answered)
+- `NetworkEvent_RelaySuspended` → `reconnecting` (socket gone, session held)
+- `NetworkEvent_RelayConnecting` → only `connected` drops to `reconnecting`; otherwise unchanged
+- `NetworkEvent_RelayDisconnected` → `disconnected` after the 3 s grace
 
-These are emitted from `swarm.rs` (`WsEvent::Connected`/`Connecting`) and `ws_client.rs`. Before this, the visible "Connected" came from `nodeProvider` (set the instant the LOCAL node starts, unrelated to the relay) so it showed "Connected" even with no internet.
+These are emitted from `swarm.rs` on `WsEvent::{Connected, Resumed, Suspended, SessionLost, Connecting}` (wiki `rust_swarm_event_loop`). Before this, the visible "Connected" came from `nodeProvider` (set the instant the LOCAL node starts, unrelated to the relay) so it showed "Connected" even with no internet.
 
 ### overallConnectionProvider
 

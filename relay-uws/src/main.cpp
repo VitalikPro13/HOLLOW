@@ -11,6 +11,7 @@
 #include "config.h"
 #include "state.h"
 #include "crypto.h"
+#include "drain.h"
 #include "http_handlers.h"
 #include "snapshot.h"
 #include "ws_handler.h"
@@ -88,7 +89,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[main] No keys file, license system disabled\n");
     }
     state.reports.load_from_file(config.reports_file);
-    restore_from_fdstore(state);
+    restore_from_fdstore(state, config.session_grace_secs);
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -124,6 +125,13 @@ int main(int argc, char** argv) {
             fprintf(stderr, "[main] Listening on port %d (TLS)\n", config.port);
 
             auto* loop = reinterpret_cast<struct us_loop_t*>(uWS::Loop::get());
+
+            // The buffer budget's settle point, after every loop iteration: a session
+            // ring push never drops a buffered frame itself (session_bounds.h), because
+            // it can run inside a loop over those buffers.
+            uWS::Loop::get()->addPostHandler(&state, [&state](uWS::Loop*) {
+                if (state.buffer_index.bytes() > MAX_BUFFER_TOTAL_BYTES) enforce_buffer_budget(state);
+            });
 
             // License reload timer (30s)
             auto* license_timer = us_create_timer(loop, 0, sizeof(RelayState*));
@@ -204,21 +212,34 @@ int main(int argc, char** argv) {
             }, 5000, 5000);
             g_shutdown.timers.push_back(door_timer);
 
-            // Shutdown check timer (1s). The snapshot goes out while every
+            // Shutdown check timer (1s). Every session's device is told to come
+            // back after a spread wait, then the snapshot goes out while every
             // buffer is still intact; then the timers and app.close() (listen
-            // socket plus every connection) release the loop. Closing only
-            // the listen socket, as this once did, left the loop alive on the
-            // timers and the open sockets until systemd's stop timeout killed
-            // the process.
+            // socket plus every connection) release the loop, all in this tick.
+            // Closing only the listen socket, as this once did, left the loop
+            // alive on the timers and the open sockets until systemd's stop
+            // timeout killed the process.
             auto* shutdown_timer = us_create_timer(loop, 0, sizeof(void*));
             us_timer_set(shutdown_timer, [](struct us_timer_t* t) {
                 if (!should_shutdown.load()) return;
                 fprintf(stderr, "[main] Shutting down...\n");
-                snapshot_to_fdstore(*g_shutdown.state);
-                for (auto* pt : g_shutdown.timers) us_timer_close(pt);
-                g_shutdown.timers.clear();
-                us_timer_close(t);
-                g_shutdown.app->close();
+                drain::shutdown(
+                    *g_shutdown.state,
+                    [](const std::string& peer, const session::Session& s) -> SSLWebSocket* {
+                        auto it = g_shutdown.state->peer_sockets.find(peer);
+                        if (it == g_shutdown.state->peer_sockets.end()) return nullptr;
+                        const PerSocketData* d = it->second->getUserData();
+                        return d->superseded || d->sid != s.sid ? nullptr : it->second;
+                    },
+                    [](SSLWebSocket* ws, const std::string& hint) { ws->send(hint, uWS::OpCode::TEXT); },
+                    [](uint32_t n) { return randombytes_uniform(n); },
+                    [] { snapshot_to_fdstore(*g_shutdown.state); },
+                    [t] {
+                        for (auto* pt : g_shutdown.timers) us_timer_close(pt);
+                        g_shutdown.timers.clear();
+                        us_timer_close(t);
+                        g_shutdown.app->close();
+                    });
             }, 1000, 1000);
         } else {
             fprintf(stderr, "[main] FATAL: Failed to listen on port %d\n", config.port);
