@@ -981,7 +981,7 @@ pub async fn handle_command_share_remove(
             if let Some(copy) = disk.filter(|p| is_send_copy(p)) {
                 let _ = crate::node::at_rest::remove(copy);
                 if let Some(dir) = copy.parent() {
-                    let _ = std::fs::remove_dir(dir);
+                    let _ = tokio::fs::remove_dir(dir).await;
                 }
             } else if delete_file {
                 if let Some(p) = disk {

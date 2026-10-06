@@ -8526,7 +8526,7 @@ async fn data_channel_file_sends(node: &mut TestNode, n: usize) -> Vec<(String, 
 /// the sender's temp, reported as a completed transfer.
 async fn cross_data_channel(to: &TestNode, from: &TestNode, transfer_id: &str, temp: &str) {
     let received = crate::node::file_transfer::files_dir().join(format!(".webrtc_recv_{transfer_id}.tmp"));
-    std::fs::copy(temp, &received).expect("the receiver's copy off the data channel");
+    tokio::fs::copy(temp, &received).await.expect("the receiver's copy off the data channel");
     to.cmd_tx
         .send(NodeCommand::WebRtcTransferComplete {
             transfer_id: transfer_id.to_string(),
@@ -39042,8 +39042,8 @@ async fn a_restored_device_tells_its_ui_once_it_waits() {
 async fn spawn_presenter_in_data_root(relay: &MockRelay, root: &crate::test_tmp::TestDir, master_tag: u8, device_tag: u8) -> TestNode {
     let master = tag_kp(master_tag);
     let device = tag_kp(device_tag);
-    std::fs::write(root.path().join("identity.key"), master.to_protobuf_encoding().unwrap()).unwrap();
-    std::fs::write(root.path().join("identity.device"), device.to_protobuf_encoding().unwrap()).unwrap();
+    tokio::fs::write(root.path().join("identity.key"), master.to_protobuf_encoding().unwrap()).await.unwrap();
+    tokio::fs::write(root.path().join("identity.device"), device.to_protobuf_encoding().unwrap()).await.unwrap();
     let db_path = root.path().join("messages.db").to_str().unwrap().to_string();
     let passphrase = passphrase_for(&master);
     crate::storage::MessageStore::migrate_auto_vacuum_once(&db_path, &passphrase).unwrap();

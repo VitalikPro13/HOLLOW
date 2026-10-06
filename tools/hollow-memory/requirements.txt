@@ -1,6 +1,8 @@
 # torch with CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu128
 torch>=2.8
-sentence-transformers>=5.1
+# Floors close the model-loading code execution CVEs (sentence-transformers 6.0, transformers 5.14).
+sentence-transformers>=6.1
+transformers>=5.18
 mcp>=1.27,<2
 sqlite-vec>=0.1.9
 numpy

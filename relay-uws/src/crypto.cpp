@@ -231,7 +231,7 @@ bool base64_decode(const std::string& text, std::string& out) {
 static std::string b64url(const unsigned char* data, size_t len) {
     std::string out(sodium_base64_encoded_len(len, sodium_base64_VARIANT_URLSAFE_NO_PADDING), '\0');
     sodium_bin2base64(out.data(), out.size(), data, len, sodium_base64_VARIANT_URLSAFE_NO_PADDING);
-    out.resize(strlen(out.c_str()));
+    out.pop_back();  // the encoded length counts libsodium's trailing NUL
     return out;
 }
 
