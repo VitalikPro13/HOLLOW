@@ -77,7 +77,7 @@ Columns:
 
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
-| C-29 | Nothing a peer sends can write a file outside Hollow's own folders or choose where it lands. | all peers | filename sanitisation | Fixed a third time on local main (HOL-SEC-129: link snapshots, backups and archives from someone else could write anywhere), retest at release |
+| C-29 | Nothing a peer sends can write a file outside Hollow's own folders or choose where it lands. | all peers | filename sanitisation | Fixed a third time on local main (HOL-SEC-129: link snapshots, backups and archives from someone else could write anywhere), retest at release; a fourth time 2026-10-06 (HOL-SEC-163: an iOS Save let a received file's name replace anything in the app's sandbox), local, ships with the next release |
 | C-30 | File contents are end-to-end encrypted in transit, and content files at rest are unreadable without the identity. | P-01, P-02, P-09 | WP 7, 23.1 | Believed |
 | C-31 | An emote, sticker, avatar or banner shown for a hash is exactly the bytes of that hash, and assets nobody asked for are dropped. | P-01, all peers | asset rail | Believed |
 | C-32 | A support or Twitch credential on a profile was issued by the shop's pinned root for that identity and cannot be moved to anyone else. | all peers | WP 19, 20 | Believed |

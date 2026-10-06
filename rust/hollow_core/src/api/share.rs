@@ -22,6 +22,13 @@ pub struct ShareLinkInfo {
     pub room_id: String,
 }
 
+/// A file name someone else chose, as the one inert path component a Save dialog
+/// may suggest: the rule downloads already follow.
+#[frb(sync)]
+pub fn safe_save_name(raw: String) -> String {
+    node::share_handler::safe_file_name(&raw)
+}
+
 /// Build a manifest from a local file, encrypt every chunk with a fresh
 /// random key, persist the share row, write the encrypted stream to
 /// `~/.hollow/shares/{root_hash}.{ext}`, join the swarm room, start seeding.

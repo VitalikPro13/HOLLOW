@@ -1,10 +1,10 @@
 import 'dart:typed_data';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -32,11 +32,7 @@ Future<void> saveArchivedAttachmentMobile(
     final base =
         name.contains('.') ? name.substring(0, name.lastIndexOf('.')) : name;
 
-    final saved = await FilePicker.platform.saveFile(
-      dialogTitle: 'Save file',
-      fileName: asPng ? '$base.png' : name,
-      bytes: bytes,
-    );
+    final saved = await saveBytesFromPhone(asPng ? '$base.png' : name, bytes);
     if (saved != null && context.mounted) {
       HollowToast.show(context, 'File saved', type: HollowToastType.success);
     }

@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -30,12 +29,8 @@ Future<void> saveArchivedAttachment(
         ? attachment.fileName
             .substring(0, attachment.fileName.lastIndexOf('.'))
         : attachment.fileName;
-    final savePath = await FilePicker.platform.saveFile(
-      dialogTitle: 'Save file',
-      fileName: isImage
-          ? (isGif ? '$baseName.gif' : '$baseName.png')
-          : attachment.fileName,
-      type: FileType.custom,
+    final savePath = await pickSavePathFor(
+      isImage ? (isGif ? '$baseName.gif' : '$baseName.png') : attachment.fileName,
       allowedExtensions:
           isImage ? ['png', 'jpg', 'jpeg', 'webp', 'gif'] : [attachment.fileExt],
     );

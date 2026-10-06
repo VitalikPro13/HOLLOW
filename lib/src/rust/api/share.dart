@@ -11,6 +11,11 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 Future<ShareLinkInfo> shareDecodeLink({required String link}) =>
     RustLib.instance.api.crateApiShareShareDecodeLink(link: link);
 
+/// A file name someone else chose, as the one inert path component a Save dialog
+/// may suggest: the rule downloads already follow.
+String safeSaveName({required String raw}) =>
+    RustLib.instance.api.crateApiShareSafeSaveName(raw: raw);
+
 /// Build a manifest from a local file, encrypt every chunk with a fresh
 /// random key, persist the share row, write the encrypted stream to
 /// `~/.hollow/shares/{root_hash}.{ext}`, join the swarm room, start seeding.

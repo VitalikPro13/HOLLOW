@@ -1,7 +1,6 @@
 ﻿import 'dart:async';
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
@@ -212,12 +211,8 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
     if (_isPicking) return;
     _isPicking = true;
     try {
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save file',
-        fileName: att.fileName,
-        type: FileType.custom,
-        allowedExtensions: [att.fileExt],
-      );
+      final savePath =
+          await pickSavePathFor(att.fileName, allowedExtensions: [att.fileExt]);
       if (savePath == null) return;
       await exportAttachmentTo(sourcePath, savePath);
       if (mounted) {

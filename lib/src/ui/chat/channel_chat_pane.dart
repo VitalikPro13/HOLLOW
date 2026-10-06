@@ -1191,12 +1191,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
     if (_isPicking) return;
     _isPicking = true;
     try {
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save video',
-        fileName: saveFileName,
-        type: FileType.custom,
-        allowedExtensions: [fileExt],
-      );
+      final savePath = await pickSavePathFor(saveFileName,
+          dialogTitle: 'Save video', allowedExtensions: [fileExt]);
       if (savePath == null) return;
       await exportAttachmentTo(cachePath, savePath);
 
@@ -1265,10 +1261,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
           ? attachment.fileName.substring(0, attachment.fileName.lastIndexOf('.'))
           : attachment.fileName;
 
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save file',
-        fileName: isImage ? (isGif ? '$baseName.gif' : '$baseName.png') : attachment.fileName,
-        type: FileType.custom,
+      final savePath = await pickSavePathFor(
+        isImage ? (isGif ? '$baseName.gif' : '$baseName.png') : attachment.fileName,
         allowedExtensions: allowedExtensions,
       );
       if (savePath == null) return;

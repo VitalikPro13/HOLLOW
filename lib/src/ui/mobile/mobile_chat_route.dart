@@ -99,6 +99,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -1294,11 +1295,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         bytes = await AtRest.read(attachment.diskPath!);
       }
 
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save file',
-        fileName: fileName,
-        bytes: bytes,
-      );
+      final savePath = await saveBytesFromPhone(fileName, bytes);
       if (savePath == null) return;
 
       if (mounted) {

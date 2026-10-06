@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,6 +10,7 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/ui/chat/message_row.dart';
@@ -224,13 +224,11 @@ class _MessageProofDialogContentState
     final jsonBytes = Uint8List.fromList(utf8.encode(json));
     final defaultName = 'hollow-proof-${proof.messageId ?? proof.timestampMs}.json';
     try {
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Export message proof',
-        fileName: defaultName,
-        type: FileType.custom,
-        allowedExtensions: ['json'],
-        bytes: jsonBytes,
-      );
+      const title = 'Export message proof';
+      final savePath = Platform.isAndroid || Platform.isIOS
+          ? await saveBytesFromPhone(defaultName, jsonBytes, dialogTitle: title)
+          : await pickSavePathFor(defaultName,
+              dialogTitle: title, allowedExtensions: ['json']);
       if (savePath == null) return;
       if (!Platform.isAndroid && !Platform.isIOS) {
         final path = savePath.endsWith('.json') ? savePath : '$savePath.json';

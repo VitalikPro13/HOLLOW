@@ -651,10 +651,8 @@ class _ChatPaneState extends ConsumerState<ChatPane>
     _isPicking = true;
     try {
       final isImage = attachment.isImage;
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save file',
-        fileName: _saveDialogFileName(attachment),
-        type: FileType.custom,
+      final savePath = await pickSavePathFor(
+        _saveDialogFileName(attachment),
         allowedExtensions:
             isImage ? ['png', 'jpg', 'jpeg', 'webp', 'gif'] : [attachment.fileExt],
       );
