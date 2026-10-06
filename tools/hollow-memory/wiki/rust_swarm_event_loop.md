@@ -56,7 +56,7 @@ The loop owns ~40 mutable state variables. They are NOT consolidated into a stru
 - `join_resolutions: HashMap<String, i64>` (pending joins rung 1): `"{server_id}|{master}"` maps to the newest `requested_at` this node has resolved or seen resolved. Written by the `ServerJoinRequest` arm on every verdict and by the `ServerJoinResolved` arm (max-wins), so a stale copy replayed out of the `~join` ring can never re-serve or undo a newer answer.
 - `join_request_seen: HashMap<String, Instant>` (pending joins rung 1): `"{server_id}|{peer_str}"` maps to the last time we served a LIVE (non-parked) request from that device, gating the coordinator election to one responder unless the joiner's 4s retry fires (`JOIN_SERVE_RETRY_WINDOW` = 12s). A parked copy never touches this map.
 - `awaiting_mls_after_parked_join: HashSet<String>` (pending joins rung 1): server_ids where the CRDT admission landed (a parked join completed) but the MLS leaf has not formed yet. Drives the "waiting for a member to finish setup" badge: inserted at CRDT completion (`PendingJoinUpdated{admitted}`), removed and `PendingJoinUpdated{ready}` emitted when `MlsWelcome` lands for that server. RAM only, so a restart between admitted and ready just drops the badge.
-- `relay_catchup_done: HashSet<(String, String)>`: `(room, channel_or_topic)` pairs this CONNECTION has already requested `TopicCatchup` for; cleared on `WsEvent::Disconnected`. The join ring (`JOIN_TOPIC`) rides the same set, keyed `(server_id, "~join")`.
+- `relay_catchup_done: HashSet<(String, String)>`: `(room, channel_or_topic)` pairs this CONNECTION has already requested `TopicCatchup` for; cleared on `WsEvent::SessionLost`. The join ring (`JOIN_TOPIC`) rides the same set, keyed `(server_id, "~join")`.
 - `pending_sync_requests: HashMap<String, Vec<(String, String, i64)>>` — failed sync requests per peer, retried after session re-establishment.
 
 ### Sync Coordination
@@ -207,7 +207,7 @@ All timers consume their immediate first tick during initialization so they do n
 - Auto-joins DM rooms for all accepted friends from DB.
 - Runs shard integrity verification (removes DB records for corrupt/missing shards).
 
-### WsEvent::Disconnected
+### WsEvent::SessionLost
 - Clears `ws_room_peers` entirely.
 - Clears `synced_peers` — ensures full re-sync on reconnect (without this, peers skip sync because they're already in the set).
 - Clears `key_request_in_flight` — allows fresh key exchange after reconnect.

@@ -219,7 +219,7 @@ async fn dispatch_one(
         .unwrap_or(0);
 
     // CRITICAL, and the load-bearing line of this module: the explicit-pull receipt
-    // is CLEARED on `WsEvent::Disconnected` and CONSUMED at header time, so a retry
+    // is CLEARED on `WsEvent::SessionLost` and CONSUMED at header time, so a retry
     // that does not re-stamp it has its own answer refused by the auto-download
     // gate. Same for the decline pin: a declined push is what a manual pull is for.
     requested_file_receipts.insert(file_id.to_string(), Instant::now());

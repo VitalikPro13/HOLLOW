@@ -1024,3 +1024,20 @@ Traps, each of which cost a rerun:
 - The harness shares one resolver across nodes, so a sibling that never heard its
   sibling's consent still looks fine there; the two-device 0.11 upgrade split showed up
   only in the fleet.
+
+## Several agents on the Mac mini at once (2026-10-06)
+
+The mini runs phone checks for parallel agents. Each agent gets its own folder and its own
+peer letters; nobody touches `~/src/HOLLOW` (Windows is the source of truth).
+
+- `bash scripts/mini_sync.sh <name> [worktree]` ships a worktree to `~/wt/<name>` as git
+  would store it (LF, uncommitted changes included), copies the gitignored Firebase and iOS
+  signing files from `~/src/HOLLOW` once, and checks every shipped file against its git hash.
+  The first run ships the whole tree (about a minute), later runs only the changes. It finds
+  the mini by trying the addresses its lease has had, with the mini's own host key.
+- Run the fleet from that folder: `ssh <mini> 'cd ~/wt/<name> && FLEET_BACKEND=android pwsh
+  scripts/fleet.ps1 -Build -Peers c,d'`. Simulators, emulators and fixtures are per LETTER and
+  shared by every folder, so letters are owned (the list in `RESUMABLE_SESSIONS_PLAN.md`
+  section 10). `-Stop` and every run's opening stop touch only the `-Peers` given; without
+  `-Peers` they stop every `hollow-*` device, so always pass it.
+- The relay's submodules arrive as empty folders: relay C++ builds on the Linux VM, never here.

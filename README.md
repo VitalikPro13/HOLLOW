@@ -51,7 +51,7 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 ## Security
 
-The relay can't read messages, files, profiles or calls. It can't forge anything either, because every frame it forwards is signed by the device that sent it. It does see routing metadata: device IDs, IP addresses, which devices share a room, when they send and how much, and a phone's push token. All of that stays in memory and is never logged to disk. The whitepaper lists [exactly what the relay sees](WHITEPAPER.md#127-what-the-relay-sees) and covers the [threat model](WHITEPAPER.md#23-threat-model).
+The relay can't read messages, files, profiles or calls. It can't forge anything either, because every frame it forwards is signed by the device that sent it. To deliver messages it handles some routing details: a random ID for each device, the IP address every server you connect to sees, which device IDs share a room under random room codes, when data is sent and how much, and a phone's push token. None of it includes your name, phone number or what you wrote, and all of it stays in memory and is never logged to disk. The whitepaper lists [exactly what the relay sees](WHITEPAPER.md#127-what-the-relay-sees) and covers the [threat model](WHITEPAPER.md#23-threat-model).
 
 If you find a vulnerability, please report it privately as described in [SECURITY.md](SECURITY.md).
 

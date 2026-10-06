@@ -199,9 +199,11 @@ function Stop-Fleet {
     $sim = Test-SimBackend
     $android = (Test-AndroidBackend) -or (Test-MixedFleet)
     if ($sim -or $android) {
+        # Several agents share the mini's devices: with -Peers, only those peers stop.
+        $only = @($Peers -split '[,\s]+' | Where-Object { $_ })
         $stopped = 0
         if ($sim) {
-            foreach ($udid in Get-SimFleetUdids) {
+            foreach ($udid in Get-SimFleetUdids $only) {
                 if (Get-SimAppPid $udid) {
                     & xcrun simctl terminate $udid com.anonlisten.hollow 2>&1 | Out-Null
                     $stopped++
@@ -210,6 +212,7 @@ function Stop-Fleet {
         }
         if ($android) {
             foreach ($peer in Get-AndroidFleetPeers) {
+                if ($only.Count -gt 0 -and $peer -notin $only) { continue }
                 if (Get-AndroidAppPid $peer) {
                     Invoke-Adb $peer 'shell' "am force-stop $($script:AndroidPackage)" 2>&1 | Out-Null
                     $stopped++

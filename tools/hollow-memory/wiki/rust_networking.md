@@ -85,7 +85,7 @@ Persistent WSS connection to the relay (configurable domain, default `relay.anon
    - **Commands from swarm** — calls `send_command()` + `track_room_change()`
 
 **CRITICAL — every sink write goes through `bounded_send(write, msg)`** (30s `tokio::time::timeout` around `SinkExt::send`; all ~30 sites incl. auth, rejoin, ping, pong, every `send_command` arm). An unbounded send on a wedged TCP connection (zero-window zombie peer) pends FOREVER with no error, and while that await is pending `select!` polls no other arm — the liveness watchdog itself can never run. Timeout ⇒ error ⇒ existing break-to-reconnect paths. Never add a raw `write.send(...)` here. See memory `feedback_ws_zombie_liveness_timeout`.
-6. On disconnect: emit `WsEvent::Disconnected`, drain `cmd_rx` into `pending_commands` buffer
+6. On disconnect: emit `WsEvent::SessionLost`, drain `cmd_rx` into `pending_commands` buffer
 7. Exponential backoff: sleep `backoff_secs` (starts 1, doubles to max 30), then loop back to step 1
 8. **License error special case**: a `license_key_in_use` error emits `LicenseError` once per outage and keeps reconnecting; any other error containing "license_key" or "license key" emits `LicenseError` and `return`s (no reconnect)
 

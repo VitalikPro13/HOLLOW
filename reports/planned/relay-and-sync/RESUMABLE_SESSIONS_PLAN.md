@@ -1,9 +1,11 @@
 # Resumable relay sessions: a connection that survives phones, sleep and bad networks
 
-Status: planned 2026-10-06, nothing built. Written after the mixed iPhone/Android fleet run that
-found a nickname dying with the socket and an accept lost to a dead connection. Research digest
-and code map from that session are folded in below; every claim about other apps carries its
-source.
+Status: planned 2026-10-06; wave 0 (the wire spec in section 9, shared stubs, the relay's ring
+core) done the same day, waves 1 and 2 by parallel worktree agents (section 10). Written after the
+mixed iPhone/Android fleet run that found a nickname dying with the socket and an accept lost to a
+dead connection. Research digest and code map from that session are folded in below; every claim
+about other apps carries its source. Section 9 binds every implementer; where it is more precise
+than sections 3 to 5, section 9 wins.
 
 ## 0. TL;DR
 
@@ -425,7 +427,8 @@ Linux get small platform listeners, or a Rust crate if one fits.
 | 7 | Security review of the handshake, canary relay, deploy, release | all | 1 session |
 
 Steps 1 and 6 start together (the MockRelay model is the spec the relay is tested against). Step
-2 needs 1. Step 5 ships only together with 2 and 3.
+2 needs 1. Step 5 ships only together with 2 and 3. Superseded by the waves in section 10: the
+wire spec of section 9 lets steps 1 to 4 and 6 run at once.
 
 ## 8. Decisions (Vitalik, 2026-10-06)
 
@@ -440,3 +443,248 @@ Steps 1 and 6 start together (the MockRelay model is the spec the relay is teste
    once again, it needs to be blazingly fast without any stupid stallings with waiting on dead
    connection... literally like all big apps do." Hence 3.7: never wait on an old socket, race a
    new one after 1 s, resume in one round trip, target Connected within 1.5 s p50 and 3 s p95.
+
+## 9. Wire specification (wave 0, 2026-10-06)
+
+Binding for the relay and the client alike. Both ends test against one file,
+`relay-uws/test/session_vectors.json` (the auth KATs and the counted-frame classification), the
+way `roster_vectors.json` and `kill_vectors.json` already pin both languages. Change the vectors
+and both sides change with them.
+
+### 9.1 Capability and the v3 auth frame
+
+- The relay advertises sessions in its challenge: `auth_challenge` gains `"session":1`.
+- A client sends the v3 frame only to a relay that advertised it, and today's v2 frame otherwise
+  (no session; it keeps the faster liveness and the triggers). The relay keeps accepting v2
+  exactly as today, so a 0.12 client never notices.
+- The v3 frame is the v2 frame with `"v":3` and two more fields: `"session"` is `"new"`, `"none"`
+  or a sid to resume, and `"in_h"` is the client's count of stream frames received in that
+  session (0 for `"new"` and `"none"`).
+- Shape rules, any other combination is `bad_auth`: mode `full` takes `"new"` or a sid; modes
+  `fetch` and `guest` take `"none"` (fetch sockets never get sessions). A sid is 32 lowercase hex
+  characters (128 random bits).
+- The signed bytes, pinned in both languages:
+
+  ```
+  hollow-ws-auth3\n{domain}\n{nonce}\n{peer_id}\n{timestamp}\n{mode}\n{license_digest}\n{session}\n{in_h}
+  ```
+
+  `in_h` is decimal. Known answer (also in the vectors file): domain `relay.example.com`, nonce
+  `0123456789abcdef` four times, peer `12D3KooWPeer`, timestamp `1790000000`, mode `full`, no
+  license, session `00112233445566778899aabbccddeeff`, in_h `42` sign exactly
+  `hollow-ws-auth3\nrelay.example.com\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n12D3KooWPeer\n1790000000\nfull\n\n00112233445566778899aabbccddeeff\n42`.
+
+### 9.2 The relay's answers
+
+| Case | Answer (all uncounted) |
+|---|---|
+| fresh session (`"new"`) | `{"type":"auth_ok","sid":S,"grace_secs":120,"hb_secs":15}` |
+| resume works | `{"type":"resumed","h":R,"gap":G,"reprove":P,"grace_secs":120,"hb_secs":15}` |
+| resume impossible | `{"type":"auth_ok","sid":S2,"grace_secs":120,"hb_secs":15,"resume_failed":"unknown"}` or `"bad_h"` |
+| v2 frame, or `"none"` | `{"type":"auth_ok"}` as today |
+
+- `R` is the relay's count of stream frames it has received from the client in this session.
+  `G` is true when the replay below holds a `gap` frame. `P` is true when the session came back
+  from a relay restart (section 9.7): door standing is gone and the client proves its doors again.
+- A resume is impossible when no session has that sid **for this peer id** (`unknown`; a sid that
+  belongs to another peer id is answered the same way, never revealed), or when the client's
+  `in_h` is below what it already acked or above what the relay sent (`bad_h`). The same socket
+  then carries a fresh session `S2`: no second round trip.
+- A sid whose session is still live on another socket moves to the new socket: the old socket is
+  marked superseded and closed with 1000 `moved`, silently (no `peer_left`), like today's
+  supersede.
+- A `"new"` request from a peer that still holds a session ends that session first: its ring
+  hands off as on grace expiry (9.7), its rooms are left silently.
+- After `resumed`, in this order: every waiting `kill_signal`, then one `members` per session room
+  (with `proved` for locked rooms), then the ring replay of every stream frame after the client's
+  `in_h`, then `peer_joined` to whoever sees the device in each room. Nothing is rejoined and
+  nothing is resubscribed. After a fresh `auth_ok`, the kill signals as today.
+
+### 9.3 Counting
+
+A **stream frame** is a WebSocket data message (TEXT or BINARY) on a session socket, after
+`auth_ok` or `resumed`, that is not in the uncounted set:
+
+- Relay to client, uncounted JSON types: `auth_challenge`, `auth_ok`, `auth_failed`, `resumed`,
+  `hb_ack`, `ack`, `reconnect`, `members`, `peer_joined`, `peer_left`, `kill_signal`.
+- Client to relay, uncounted JSON types: `auth_hello`, `auth`, `hb`, `ack`, `inactive`, `active`,
+  `end`.
+- Everything else counts: every binary frame, every other JSON type, and text that does not parse.
+  A `{"type":"gap","n":N}` frame counts as N.
+
+Presence (`members`, `peer_joined`, `peer_left`) and kill signals are state: never ringed, re-read
+on resume. Both counters start at 0 in a fresh session and the first stream frame is number 1.
+The relay counts a client frame when it **arrives**, before any handler decides to drop it; a
+frame refused by a membership gate was still handled.
+
+### 9.4 Acks and what each side keeps
+
+- `{"type":"ack","h":N}` both ways, N being the sender's own receive count. Sent once 16 stream
+  frames arrived since the last ack, or 2 s after the first unacked one, and `h` also rides every
+  `hb` and `hb_ack`. Cumulative and monotonic; an `h` above what the other side sent, or below its
+  previous ack, is ignored.
+- **Relay ring.** Every stream frame to a session, live or in grace, enters its ring before the
+  socket write, and leaves only by ack. Caps per session: 8 MiB and 4096 real frames; all rings
+  also count toward the global 512 MB buffer budget (OfflineIndex). Over a cap, the oldest real
+  frame of the sender share holding the most bytes in that ring becomes a **tombstone**, adjacent
+  tombstones merge, and a tombstone replays as one counted `{"type":"gap","n":N}`. A frame larger
+  than the ring cap is still written live but enters the ring as a tombstone. Fan-out frames share
+  one buffer across rings. A replay that starts inside a tombstone run sends `gap` for the part
+  after the client's `in_h` only. The ring core is `relay-uws/src/session.h`.
+- **Client outbound queue** (replaces `pending_commands`). An entry gets its sequence number when
+  it is first written; from then it is kept byte for byte (already sealed by `frame_auth`) until
+  acked, and is never dropped while the session lives. Flow control, never loss: at 8 MiB or 4096
+  written-but-unacked frames the client stops writing until an ack. Unwritten entries stay
+  `WsCommand`s, so a join's door proof is made for the session current at write time; they are
+  bounded (32 MiB, 20,000 entries), and past that the oldest unwritten entry goes, a live-only
+  frame older than the receiver's 300 s window first (`frame_auth` classes it; parse only when
+  pruning).
+- **On resume** the client drops what `h` covers, resends every written frame after `h` in order
+  and byte-identical, then the unwritten queue. An `h` above what the client wrote means the
+  relay is not talking about our session: `SessionLost`.
+
+### 9.5 Liveness
+
+- `{"type":"hb","h":N}` every 15 s in the foreground and every 60 s when backgrounded but still
+  connected; the relay answers at once with `{"type":"hb_ack","h":M}`.
+- Dead = no inbound data at all for 10 s after a heartbeat went out. Any frame counts, so a busy
+  download never trips it.
+- Relay `idleTimeout` 45; `sendPingsAutomatically` stays, and the client keeps answering pings.
+- `TCP_USER_TIMEOUT` 20 s on the client socket (Linux, Android).
+- Sleep: every heartbeat tick compares the wall-clock delta with the monotonic delta; more than
+  5 s apart means the machine slept, which is a `wake` nudge.
+
+### 9.6 Triggers and the FFI
+
+Three FFI entry points (`api/network.rs`, stubbed in wave 0, codegen done):
+
+- `relay_nudge(reason)`: reasons `foreground`, `focus`, `network`, `wake`. If a frame arrived in
+  the last 2 s, nothing. Otherwise a heartbeat with a 1 s deadline; on a miss, open a new socket
+  and resume on it while the old one is still judged (make before break), the first to answer
+  wins. With no socket, cancel the backoff sleep and connect now. Every nudge resets the backoff.
+- `relay_set_background(background)`: true sends `inactive` and slows the heartbeat to 60 s; false
+  sends `active`, restores 15 s and nudges `foreground`.
+- `relay_suspend()`: flush the queue and the ack, wait up to 2 s for the relay to ack everything
+  written, close with 1000 `suspend`, and stay closed until the next nudge. The session goes to
+  grace. Async, so iOS ends its background task only after it returns.
+- Backoff: full jitter, `random(0, min(30 s, 0.5 s * 2^attempt))`; the attempt resets on success
+  and on every nudge. The 1 s retry while `realtime_active` stays.
+- `bounded_send` failure is an internal `send_failed` nudge.
+
+### 9.7 Relay session rules
+
+- **States** live, grace, gone. Grace lasts 120 s (`--session-grace-secs`, 30 to 600).
+- **Presence follows the socket.** On close or idle timeout the device leaves room presence
+  (`peer_left` to whoever saw it, as today) and `peer_sockets`. The session keeps its rooms with
+  inbox owner flags and, within this process, door standing; its subscriptions; its nickname and
+  link code; its inactive flag.
+- **Delivery follows the session.** Fan-out and directs reach live room slots and grace sessions
+  alike; a grace session's frames go into its ring only. A device whose fetch socket holds a room
+  slot while its full session is in grace gets both copies (the receiver dedups by message id).
+- **Push during grace.** A device in grace is offline for push (it is not in `peer_sockets`): a
+  direct into its ring also calls `try_push_notify`, debounced as today; `0x09` is unchanged.
+- **Nickname.** A binding held by a session, live or in grace, is not stale.
+- **Grace expiry** (and `end`, and eviction): the ring's direct frames that `offline_buffer`
+  would take today (0x06 frames: DM text, inlined image, channel copy, each under its own cap)
+  move there under their room, so the replay on join and the push path take over. Broadcasts,
+  topic frames, `0x02` chunks and JSON answers do not (topic rings, sync and `file_asks` cover
+  them). Then the session's rooms are left (presence already went at socket death) and it is gone.
+- **Re-checks on resume.** Inbox ownership against the roster book's fold (an owner it no longer
+  counts loses the inbox, as `drop_inbox_owners`); kill signals first; door standing as below.
+- **`inactive` / `active`.** While inactive the relay withholds presence frames from the session;
+  `active` (and every resume) sends one fresh `members` per room.
+- **`end`.** The session is gone now: the expiry hand-off runs at once, then the normal close.
+- **Bounds.** A grace session holds its slot in the per-IP connection cap (`ip_limit_key`) until
+  gone. The session table holds at most 262,144 sessions; past it, the session of the address
+  share holding the most goes (handing off as on expiry). No rate limit, no refusal: ring
+  overflow becomes a gap, never a dropped socket.
+- **Restart.** Snapshot VERSION 9 carries every session (as grace, the timer restarting at load):
+  sid, peer id, rooms with owner flags, subscriptions, the nickname binding, both counters, the
+  ring with its tombstones and each direct frame's room and kind. Door standing and the session's
+  door nonce are **not** carried: the door key is per process by design (`crypto.h`), so a
+  restored session answers `reprove:true`, its locked rooms come back unproved, and the client
+  re-sends a join with a fresh proof for every room it holds a door for.
+- **Door nonce.** Within one relay process a session keeps the nonce it was minted with as its
+  door nonce, so proofs it showed stay valid across resumes; a socket that resumes a session
+  takes the session's door nonce.
+- **Drain.** On SIGTERM, before the snapshot, every session socket gets
+  `{"type":"reconnect","after_ms":N}`, N uniform in [2000, 10000]. The snapshot and the close run
+  in the same loop tick; nothing counted is written after the snapshot. The client waits N, then
+  reconnects with resume.
+- **Logging.** Nothing about sessions, ever.
+
+### 9.8 Client events and the node
+
+- `WsEvent::Connected` = a fresh session: the first connect, after `SessionLost`, or every connect
+  to a relay without sessions. `WsEvent::Suspended` = the socket is gone, the session is held.
+  `WsEvent::Resumed { gap }` = the session is back on a new socket. `WsEvent::SessionLost` (was
+  `Disconnected`) = the relay refused or forgot the session, or there never was one. Orders: a
+  drop with a session gives `Suspended`, then `Resumed` or `SessionLost` + `Connected`; a drop
+  without one gives `SessionLost`, then `Connected`.
+- `NetworkEvent::RelaySuspended` is new (Dart shows Reconnecting, nothing is lost).
+  `RelayConnected` follows `Resumed`, or a fresh session once its rooms are confirmed (the inbox
+  join answered), never before. `RelayDisconnected` follows `SessionLost`.
+- The node on `Suspended` keeps everything (`ws_room_peers`, `synced_peers`, calls, throttles,
+  file asks); sends keep going into the queue. `Resumed { gap: true }` runs the catch-ups
+  (DM `GapDigest` syncs, topic catch-up, server syncs) without a single join. `SessionLost` is
+  today's purge. `Connected` is today's fresh-session work, and each room has ONE owner of its
+  join (no double joins). Once-per-connection gates become once per session.
+- On `reprove:true` the client proves its doors again (9.7) with the new socket's
+  `RelaySession`; otherwise door proofs keep using the session's original one.
+
+### 9.9 Numbers
+
+| Constant | Value | Side |
+|---|---|---|
+| Grace | 120 s (30 to 600) | relay |
+| Ring caps per session | 8 MiB, 4096 real frames | relay |
+| Session table | 262,144 | relay |
+| `idleTimeout` | 45 s | relay |
+| Drain spread | 2 to 10 s | relay |
+| Heartbeat | 15 s foreground, 60 s background | client |
+| Heartbeat deadline | 10 s with no inbound data | client |
+| Nudge probe | skip if a frame in the last 2 s, else 1 s deadline | client |
+| Ack | every 16 frames or 2 s | both |
+| In-flight cap | 8 MiB or 4096 written-unacked frames | client |
+| Unwritten queue | 32 MiB or 20,000 entries | client |
+| Backoff | full jitter, 0.5 s base, 30 s cap | client |
+| `TCP_USER_TIMEOUT` | 20 s | client |
+| Sleep jump | more than 5 s | client |
+| Android close after background | 10 s | client |
+| Suspend flush wait | 2 s | client |
+
+## 10. Waves and who owns what
+
+Wave 0 (lead, done): sections 9 and 10, `session_vectors.json`, the relay ring core
+(`relay-uws/src/session.h` + `test/test_session.cpp`), the shared stubs (`WsEvent::Suspended`,
+`WsEvent::Resumed`, `WsEvent::SessionLost`, `NetworkEvent::RelaySuspended`, the three FFI entry
+points with codegen run), and `scripts/mini_sync.sh` for agent folders on the Mac mini. Every
+worktree starts from that base.
+
+Wave 1, six agents in parallel, each in its own worktree on D:, test first, mutation-checked, one
+final report:
+
+| Agent | Owns | Must not touch |
+|---|---|---|
+| relay-session | `ws_handler.cpp` session paths (mint, resume, transfer, counting, every send site classified, grace delivery, presence split, push in grace, expiry hand-off, re-checks, inactive/active/end, hb answers, `idleTimeout`), auth v3 in `auth_frame.h` + its C++ KAT, `test_relay_live.cpp` cases | snapshot codec, drain, budget eviction |
+| relay-bounds | snapshot VERSION 9 (`snapshot_codec.h`, `snapshot.cpp`), drain hint (`main.cpp`), OfflineIndex charging of rings and global eviction into tombstones, session table cap and per-IP accounting, `--session-grace-secs`, `SELF_HOSTING.md` | handshake and send-site code |
+| client-wire | `ws_client.rs` + a new `node/relay_session.rs` (pure protocol state machine): outbound queue, acks, v3 auth + Rust KAT, resume, heartbeat, nudge/background/suspend bodies, make before break, full jitter, `TCP_USER_TIMEOUT`, sleep jump, the flush-tail and join-replay bugs, the vectors test | `swarm.rs`, Dart |
+| node-split | `swarm.rs` Suspended/Resumed/SessionLost/Connected handling, one owner per join, once-per-session gates, `RelayConnected` timing, MockRelay sessions and zombie mode, the harness loss tests, Dart connection status | `ws_client.rs` internals |
+| triggers | foreground, focus, network change and wake on Windows, macOS, Linux, Android and iOS, all into `relay_nudge` (Dart lifecycle, Kotlin, Swift, Windows runner, Linux) | background close and the battery prompt (wave 2) |
+| test-infra | fleet `background`, `foreground`, `net_off`, `net_on`, `pause` ops on every backend, the time-to-healthy metric, the zombie TCP proxy, the end-to-end resume test of the real client against the real relay on the VM, the soak script | product code |
+
+Wave 2 after the merge: mobile-model (step 5), two hostile reviewers of the merged handshake,
+the end-to-end runs at 5 s, 30 s, 2 min and 10 min away, the mixed-fleet check. Then the soak,
+the canaries, the relay deploy and the release.
+
+Rules every agent follows: read `CLAUDE.md`, the area rule books its work touches and this plan
+whole; the wire is section 9 and nothing else (a needed change goes in the final report, never
+silently into code); Rust tests in its worktree with its own `CARGO_TARGET_DIR`; relay C++ in its
+own folder on the Linux VM; every phone check on the Mac mini (iOS Simulators and Android
+emulators, as many as the test needs) through `scripts/mini_sync.sh`, in its own folder there;
+never `git checkout`, `reset` or `stash` in a shared tree; no commits.
+
+Fleet peer letters are owned, because fixtures and devices are shared per letter on Windows
+and on the mini alike, and `fleet.ps1 -Stop` stops only the `-Peers` it is given: the lead
+`a`, `b`; triggers `c`, `d`; test-infra `e`, `f`; node-split `g`, `h`; mobile-model (wave 2)
+`i`, `j`; the end-to-end runs `k`, `l`. Every fleet command passes `-Peers` with its own letters.

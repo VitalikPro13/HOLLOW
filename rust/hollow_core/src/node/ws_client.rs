@@ -201,8 +201,18 @@ pub enum WsCommand {
 /// Events received from the WebSocket relay, forwarded to the swarm.
 #[derive(Debug, Clone)]
 pub enum WsEvent {
+    /// A fresh session: the first connect, after `SessionLost`, or every connect to a
+    /// relay without sessions. Rooms are joined from here.
     Connected,
-    Disconnected,
+    /// The socket is gone but the relay holds our session: nothing is lost and sends
+    /// keep queueing. `Resumed` or `SessionLost` follows.
+    Suspended,
+    /// The relay resumed our session on a new socket without a single rejoin. `gap`:
+    /// frames fell out of its ring while we were away, so the catch-ups run.
+    Resumed { gap: bool },
+    /// The relay refused or forgot our session, or there never was one: purge and
+    /// rebuild from the next `Connected`.
+    SessionLost,
     /// A connect attempt is starting. `reconnecting` is true for backoff retries
     /// after a drop, false for the very first attempt.
     Connecting { reconnecting: bool },
@@ -274,7 +284,9 @@ impl WsEvent {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Connected => "Connected",
-            Self::Disconnected => "Disconnected",
+            Self::Suspended => "Suspended",
+            Self::Resumed { .. } => "Resumed",
+            Self::SessionLost => "SessionLost",
             Self::Connecting { .. } => "Connecting",
             Self::PeerJoined { .. } => "PeerJoined",
             Self::PeerLeft { .. } => "PeerLeft",
@@ -517,6 +529,22 @@ pub fn set_realtime_active(active: bool) {
 pub(crate) fn realtime_active() -> bool {
     REALTIME_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+/// Look at the relay connection now: the app came to the foreground, the network
+/// changed, the machine woke (RESUMABLE_SESSIONS_PLAN.md 9.6). Not wired up yet.
+pub fn nudge(reason: &str) {
+    let _ = reason;
+}
+
+/// The app went to the background (`inactive`, slower heartbeat) or came back. Not
+/// wired up yet.
+pub fn set_background(background: bool) {
+    let _ = background;
+}
+
+/// Flush, close cleanly into the session's grace and stay closed until the next
+/// nudge. Not wired up yet.
+pub async fn suspend() {}
 
 async fn ws_client_loop(
     relay_url: String,
@@ -783,7 +811,7 @@ async fn ws_client_loop(
             }
         }
 
-        let _ = event_tx.send(WsEvent::Disconnected);
+        let _ = event_tx.send(WsEvent::SessionLost);
 
         // Drain any commands that arrived during the failed connection attempt.
         // If the channel is CLOSED (sender dropped → node shutting down), stop

@@ -280,12 +280,15 @@ function Sync-PeerOut($peer) {
 $script:SimUdids = @{}
 
 # Every simulator this tooling created, whatever peers this run happens to use.
-function Get-SimFleetUdids {
+# Every fleet simulator, or only those of `$only` (peer letters) when given.
+function Get-SimFleetUdids($only = @()) {
     $found = @()
     $json = & xcrun simctl list devices -j | ConvertFrom-Json
     foreach ($runtime in $json.devices.PSObject.Properties) {
         foreach ($device in @($runtime.Value)) {
-            if ($device.name -like 'hollow-*' -and $device.isAvailable) { $found += $device.udid }
+            if ($device.name -notlike 'hollow-*' -or -not $device.isAvailable) { continue }
+            if (@($only).Count -gt 0 -and $device.name.Substring(7) -notin @($only)) { continue }
+            $found += $device.udid
         }
     }
     return $found

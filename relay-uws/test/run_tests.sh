@@ -49,6 +49,7 @@ run test_reports ../src/reports.cpp ../src/crypto.cpp $LIBS
 run test_ring_auth
 run test_ring_evict
 run test_roster ../src/crypto.cpp $LIBS
+run test_session
 run test_snapshot_codec
 run test_turn_uris
 run test_verify_device_list ../src/device_list.cpp ../src/crypto.cpp $LIBS

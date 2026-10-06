@@ -282,6 +282,9 @@ pub enum NetworkEvent {
     /// A WS connect attempt is in progress. `reconnecting` distinguishes a
     /// backoff retry (after a drop) from the initial connect.
     RelayConnecting { reconnecting: bool },
+    /// The socket dropped but the relay holds our session: Reconnecting, nothing is
+    /// lost.
+    RelaySuspended,
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
@@ -834,6 +837,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::RelayConnecting { reconnecting } => {
             hollow_log!("[HOLLOW] Relay connecting event emitted (reconnecting={reconnecting})");
         }
+        node::NetworkEvent::RelaySuspended => {
+            hollow_log!("[HOLLOW] Relay suspended event emitted");
+        }
         node::NetworkEvent::ChannelNotificationHint { server_id, channel_id, from_peer, .. } => {
             hollow_log!("[HOLLOW] Notification hint for {channel_id} in {server_id} from {from_peer}");
         }
@@ -1071,6 +1077,7 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::RelayConnecting { reconnecting } => {
             NetworkEvent::RelayConnecting { reconnecting }
         }
+        node::NetworkEvent::RelaySuspended => NetworkEvent::RelaySuspended,
         node::NetworkEvent::ChannelNotificationHint {
             server_id, channel_id, from_peer, message_id, has_everyone, mentioned_names, is_reply_to_own,
         } => {
@@ -1433,6 +1440,26 @@ pub fn set_license_key(key: Option<String>) -> Result<(), String> {
 #[frb]
 pub fn set_realtime_session_active(active: bool) {
     crate::node::ws_client::set_realtime_active(active);
+}
+
+/// Look at the relay connection now instead of waiting for a timer. `reason` is one
+/// of `foreground`, `focus`, `network`, `wake`, for the log only.
+#[frb]
+pub fn relay_nudge(reason: String) {
+    crate::node::ws_client::nudge(&reason);
+}
+
+/// The app went to the background (true) or came back (false).
+#[frb]
+pub fn relay_set_background(background: bool) {
+    crate::node::ws_client::set_background(background);
+}
+
+/// Flush what is queued and close the relay socket cleanly; the relay holds the
+/// session until the next nudge resumes it. Returns once the socket is closed.
+#[frb]
+pub fn relay_suspend() {
+    get_runtime().block_on(crate::node::ws_client::suspend());
 }
 
 #[frb]

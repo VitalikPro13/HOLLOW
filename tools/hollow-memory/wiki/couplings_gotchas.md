@@ -286,13 +286,13 @@ per-peer only on `WsEvent::PeerLeft` or a `RoomMembers` vanish diff.
 a DNS failure closes the socket with nobody told (verified in a field log: zero
 `PeerLeft` lines for a peer gone 26 seconds). So a peer that dropped and came
 back reads `is_new == false` and skips the entire cascade — and that peer is
-the one that needs it most, because its own `WsEvent::Disconnected` purged its
+the one that needs it most, because its own `WsEvent::SessionLost` purged its
 state.
 
 **Anything that must run when a peer COMES BACK belongs OUTSIDE that guard.**
 
 What it cost: the voice mesh's presence re-announce sat inside it.
-`WsEvent::Disconnected` purges every remote peer from
+`WsEvent::SessionLost` purges every remote peer from
 `voice_channel_participants`, that set gates EVERY inbound VC signal
 (`is_vc_participant`), and nothing else refills it — so a reconnected node
 could SEND voice signals and never receive one. `BLOCKED VC SDP offer from

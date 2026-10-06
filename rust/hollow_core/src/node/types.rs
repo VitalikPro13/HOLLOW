@@ -398,6 +398,9 @@ pub(crate) enum NetworkEvent {
     /// A WS connect attempt is in progress. `reconnecting` is true when this
     /// follows a prior drop (backoff retry), false for the initial connect.
     RelayConnecting { reconnecting: bool },
+    /// The socket dropped but the relay holds our session: Reconnecting, nothing is
+    /// lost.
+    RelaySuspended,
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,

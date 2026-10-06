@@ -45,7 +45,7 @@ Mirrors the production relay's load-bearing behavior (the relay is a dumb pipe; 
 ordering lives in the nodes):
 - `register(peer, cmd_rx, event_tx)` → drives the node's outbound commands, emits `WsEvent::Connected`.
 - `set_online(peer, false)` → drops from rooms + broadcasts `PeerLeft` to others **AND sends
-  `WsEvent::Disconnected` to the offline node itself** (mirrors the real WS client on socket drop — the
+  `WsEvent::SessionLost` to the offline node itself** (mirrors the real WS client on socket drop — the
   event loop relies on `Disconnected` to clear `synced_peers`/`key_request_in_flight`/
   `key_bundle_sent_to`; omitting it leaves peers marked already-synced so the `is_new` reconnect guard
   silently suppresses the proactive DmSyncRequest/key-exchange). `set_online(peer, true)` re-emits

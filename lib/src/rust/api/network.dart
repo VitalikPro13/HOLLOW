@@ -9,8 +9,8 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 import 'showcase.dart';
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `flat`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `openable_card_url`, `refuse_oversized_message`, `send_node_command`, `store_profile_media`, `to_ffi_event`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`
+// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `flat`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `openable_card_url`, `reads_persisted_server_state`, `refuse_oversized_message`, `send_node_command`, `store_profile_media`, `to_ffi_event`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `EventFeed`, `NodeState`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`
 
 Future<void> setLicenseKey({String? key}) =>
@@ -30,6 +30,22 @@ Future<void> setRealtimeSessionActive({required bool active}) => RustLib
     .instance
     .api
     .crateApiNetworkSetRealtimeSessionActive(active: active);
+
+/// Look at the relay connection now instead of waiting for a timer. `reason` is one
+/// of `foreground`, `focus`, `network`, `wake`, for the log only.
+Future<void> relayNudge({required String reason}) =>
+    RustLib.instance.api.crateApiNetworkRelayNudge(reason: reason);
+
+/// The app went to the background (true) or came back (false).
+Future<void> relaySetBackground({required bool background}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkRelaySetBackground(background: background);
+
+/// Flush what is queued and close the relay socket cleanly; the relay holds the
+/// session until the next nudge resumes it. Returns once the socket is closed.
+Future<void> relaySuspend() =>
+    RustLib.instance.api.crateApiNetworkRelaySuspend();
 
 Future<void> setRelayUrl({String? domain}) =>
     RustLib.instance.api.crateApiNetworkSetRelayUrl(domain: domain);
@@ -1971,6 +1987,10 @@ sealed class NetworkEvent with _$NetworkEvent {
   /// backoff retry (after a drop) from the initial connect.
   const factory NetworkEvent.relayConnecting({required bool reconnecting}) =
       NetworkEvent_RelayConnecting;
+
+  /// The socket dropped but the relay holds our session: Reconnecting, nothing is
+  /// lost.
+  const factory NetworkEvent.relaySuspended() = NetworkEvent_RelaySuspended;
   const factory NetworkEvent.channelNotificationHint({
     required String serverId,
     required String channelId,

@@ -428,7 +428,7 @@ A mesh leg whose window is spent is NOT abandoned the way a DM call is hung up:
 `isChannelParticipant` says the member is still in the channel.
 
 **A reconnecting peer must be re-told we are in the channel.**
-`WsEvent::Disconnected` purges every remote peer from
+`WsEvent::SessionLost` purges every remote peer from
 `voice_channel_participants`, and that set gates EVERY inbound VC signal — so
 without a re-announce the reconnecting side can send and never receive. The
 re-announce lives in the `PeerJoined` handler and MUST stay OUTSIDE the

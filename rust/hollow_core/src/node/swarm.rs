@@ -1076,7 +1076,7 @@ async fn run_event_loop(
     // "{server_id}|{joiner_master}" -> the newest `requested_at` we know has been
     // ANSWERED, read from the `~join` ring or written by our own answer. It stops a
     // member returning days later from re-serving a join somebody else handled. NOT
-    // sync-gating state, so it deliberately survives `WsEvent::Disconnected`.
+    // sync-gating state, so it deliberately survives `WsEvent::SessionLost`.
     let mut join_resolutions: HashMap<String, i64> = HashMap::new();
     let mut join_hold = super::join_hold::JoinHold::default();
     join_hold.went_away(&server_states);
@@ -3616,7 +3616,9 @@ async fn run_event_loop(
                         }
                     }
 
-                    WsEvent::Disconnected => {
+                    // Never emitted until the session work lands (RESUMABLE_SESSIONS_PLAN.md 9.8).
+                    WsEvent::Suspended | WsEvent::Resumed { .. } => {}
+                    WsEvent::SessionLost => {
                         hollow_log!("[HOLLOW-WS] Relay disconnected — will auto-reconnect");
                         pending_nickname_resolve = None;
                         nick_hold.on_disconnected();
@@ -3779,7 +3781,7 @@ async fn run_event_loop(
                         // synced with this peer at all this session" and is NOT cleared when a peer's
                         // socket dies, because the relay only broadcasts PeerLeft for a CLEAN leave, so
                         // a peer that dropped and came back is `is_new == false` and skips the cascade.
-                        // That is exactly the peer that needs this: `WsEvent::Disconnected` purges every
+                        // That is exactly the peer that needs this: `WsEvent::SessionLost` purges every
                         // REMOTE participant from `voice_channel_participants`, that set gates EVERY
                         // inbound VC signal, and nothing else refills it, so the reconnecting side
                         // blackholes the offers its own peer sends while its own requests still arrive.

@@ -670,12 +670,12 @@ impl MockRelay {
                     });
                 }
             }
-            // Tell the offline node its OWN socket died. Without `WsEvent::Disconnected` the
+            // Tell the offline node its OWN socket died. Without `WsEvent::SessionLost` the
             // node never clears sync-gating state (`synced_peers`, `key_request_in_flight`,
             // ...), so on reconnect the `is_new` guard suppresses the proactive sync and key
             // exchange and the reconnect flow silently does nothing.
             if let Some(conn) = inner.conns.get(peer_id) {
-                let _ = conn.event_tx.send(WsEvent::Disconnected);
+                let _ = conn.event_tx.send(WsEvent::SessionLost);
             }
         } else {
             // Coming back online: re-emit Connected so the node re-runs its
@@ -7208,7 +7208,7 @@ async fn vc_screen_origin_attribution_round_trip() {
 }
 
 // A voice peer that reconnects must be able to RECEIVE again, not just send.
-// `WsEvent::Disconnected` purges every remote peer from
+// `WsEvent::SessionLost` purges every remote peer from
 // `voice_channel_participants`, which gates every inbound VC signal, and nothing
 // refilled it: the peer never left its own channel, and the one re-announce sat
 // behind the `is_new` guard, which is false for exactly the peer that came back.

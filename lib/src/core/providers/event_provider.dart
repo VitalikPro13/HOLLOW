@@ -1121,6 +1121,11 @@ class EventStreamNotifier extends Notifier<bool> {
             .read(connectionStatusProvider.notifier)
             .onRelayStatusChanged(reconnecting ? 'reconnecting' : 'connecting');
 
+      case NetworkEvent_RelaySuspended():
+        ref
+            .read(connectionStatusProvider.notifier)
+            .onRelayStatusChanged('reconnecting');
+
       case NetworkEvent_ChannelNotificationHint(
             :final serverId, :final channelId, :final fromPeer,
             :final messageId,
