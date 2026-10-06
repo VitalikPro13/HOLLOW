@@ -75,5 +75,8 @@ foreach ($step in $commands) {
     }
 }
 
+# Shots and dumps taken inside an emulator only reach build/fleet_out this way.
+foreach ($peerName in $live) { Sync-PeerOut $peerName }
+
 if ($failed) { exit 1 }
 exit 0

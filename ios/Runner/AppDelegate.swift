@@ -2,6 +2,7 @@ import AVFoundation
 import Flutter
 import UIKit
 import UniformTypeIdentifiers
+import UserNotifications
 
 /// The bundled UI sound pack (issue #55) on iOS.
 ///
@@ -86,6 +87,35 @@ final class HollowSfxPlayer {
   }
 }
 
+/// Decides how a banner shows while Hollow is open (#96).
+///
+/// firebase_messaging takes the notification center at launch and hands every
+/// foreground banner to the delegate it found there, after its own `onMessage`;
+/// with none, it shows nothing. A push stays silent, since the in-app banner
+/// owns the foreground; a banner Hollow posts itself (the settings test) shows
+/// as its flags ask.
+final class ForegroundBannerPresenter: NSObject, UNUserNotificationCenterDelegate {
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler:
+      @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    let info = notification.request.content.userInfo
+    // Only flutter_local_notifications writes these keys.
+    guard info["NotificationId"] != nil else {
+      completionHandler([])
+      return
+    }
+    var options: UNNotificationPresentationOptions = []
+    if info["presentBanner"] as? Bool == true { options.insert(.banner) }
+    if info["presentList"] as? Bool == true { options.insert(.list) }
+    if info["presentSound"] as? Bool == true { options.insert(.sound) }
+    if info["presentBadge"] as? Bool == true { options.insert(.badge) }
+    completionHandler(options)
+  }
+}
+
 // CLASSIC FlutterAppDelegate lifecycle (NOT the UIScene / FlutterImplicitEngineDelegate
 // template). Plugins register against the AppDelegate via register(with: self), which is
 // what firebase_messaging's APNs swizzling expects on iOS — Messaging.messaging().delegate
@@ -106,10 +136,15 @@ final class HollowSfxPlayer {
   // PushHintsCache (Dart).
   private let appGroupId = "group.com.anonlisten.hollow"
 
+  // Held here: the notification center and firebase_messaging keep it weakly.
+  // Set before launch finishes, which is when firebase adopts it.
+  private let foregroundBanners = ForegroundBannerPresenter()
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    UNUserNotificationCenter.current().delegate = foregroundBanners
     GeneratedPluginRegistrant.register(with: self)
     excludeDataFromBackup()
     observeSwitcher()

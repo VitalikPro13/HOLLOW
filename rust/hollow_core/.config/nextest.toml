@@ -54,3 +54,17 @@ retries = 2
 test-threads = 16
 slow-timeout = { period = "180s", terminate-after = 5 }
 failure-output = "immediate-final"
+
+# ...except for the harness itself. Since 0.12 (every frame sealed, every op
+# signed and judged) a harness test is CPU-bound on a 4-core runner, and
+# sixteen of them at once ran each to ~20s against waits sized for ~8s: four
+# failed outright and a dozen only passed on retry (2026-10-06). nextest runs
+# tests in name order, so the harness mostly competes with itself; capping it
+# keeps the unit tests at full width. A local 4-core replay at 6 went green with
+# four harness retries, so 4 buys margin for a slower runner.
+[test-groups.harness]
+max-threads = 4
+
+[[profile.ci.overrides]]
+filter = 'test(/^node::test_harness::/)'
+test-group = 'harness'

@@ -83,6 +83,20 @@
 #   DISPLAY=:1 XAUTHORITY=/run/user/1000/gdm/Xauthority pwsh scripts/fleet.ps1 -Build -Peers a,b
 #   pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b
 #   pwsh scripts/fleet.ps1 -Live -Peers a,b
+#
+# ## The Android emulator backend (FLEET_BACKEND=android, pwsh on macOS/Linux)
+#
+# One emulator per peer (AVD hollow-<peer>, created on first use, serial
+# emulator-5554 for a, 5556 for b, ...), the probe APK installed into each, the
+# same scenario files and send script. The app's files live inside the
+# emulator, so everything crosses through `adb run-as` (fleet_lib.ps1), and
+# build/fleet_out/<peer> is a copy refreshed after each run and send. Fixtures
+# live in ~/hollow_fleet/fixtures-android, apart from the simulator ones. The
+# emulators stay up after -Stop; booting is the slow part.
+#
+#   FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Build -Peers a,b
+#   FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b
+#   FLEET_BACKEND=android pwsh scripts/fleet_send.ps1 -Command '[{"peer":"a","op":"look"}]'
 
 param(
     # A file in scripts\probe_scenarios\fleet (without .json).
@@ -153,6 +167,11 @@ if (Test-SimBackend) {
     $fixtureRoot = Join-Path (Join-Path $HOME 'hollow_fleet') 'fixtures'
     $runRoot     = $null
     $buildOutput = Join-Path (Join-Path (Join-Path $repoRoot 'build') 'ios') (Join-Path 'iphonesimulator' 'Runner.app')
+} elseif (Test-AndroidBackend) {
+    # Each peer's data lives inside its emulator (Reset-PeerData).
+    $fixtureRoot = Get-FixtureRoot
+    $runRoot     = $null
+    $buildOutput = Join-Path $repoRoot 'build/app/outputs/flutter-apk/app-debug.apk'
 } elseif (Test-LinuxBackend) {
     $fixtureRoot = Join-Path (Get-LinuxFleetHome) 'fixtures'
     $runRoot     = Join-Path (Get-LinuxFleetHome) 'run'
@@ -187,6 +206,17 @@ function Stop-Fleet {
             Write-Step "stopping $stopped fleet instance(s)" 'Yellow'
             Start-Sleep -Milliseconds 1200
         }
+        return
+    }
+    if (Test-AndroidBackend) {
+        $stopped = 0
+        foreach ($peer in Get-AndroidFleetPeers) {
+            if (Get-AndroidAppPid $peer) {
+                Invoke-Adb $peer 'shell' "am force-stop $($script:AndroidPackage)" 2>&1 | Out-Null
+                $stopped++
+            }
+        }
+        if ($stopped -gt 0) { Write-Step "stopping $stopped fleet instance(s)" 'Yellow' }
         return
     }
     $running = Get-Process -Name 'hollow' -ErrorAction SilentlyContinue |
@@ -295,6 +325,14 @@ function Invoke-Build {
         if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
         return
     }
+    if (Test-AndroidBackend) {
+        # Only the emulators' own ABI: every extra one is another Rust build.
+        $platform = if ("$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" -eq 'Arm64') { 'android-arm64' } else { 'android-x64' }
+        Write-Step "building the probe target as an APK ($platform)"
+        & flutter build apk --debug --target-platform $platform -t integration_test/ui_probe_test.dart
+        if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
+        return
+    }
     if (Test-LinuxBackend) {
         Write-Step 'building the probe target as a Linux bundle'
         & flutter build linux --debug -t integration_test/ui_probe_test.dart
@@ -316,6 +354,10 @@ function Test-PeerStaged($peer) {
         $null = & xcrun simctl get_app_container $udid com.anonlisten.hollow 2>$null
         return ($LASTEXITCODE -eq 0)
     }
+    if (Test-AndroidBackend) {
+        Start-AndroidDevice $peer
+        return ("$(Invoke-Adb $peer 'shell' "pm path $($script:AndroidPackage)" 2>$null)" -match 'package:')
+    }
     $exe = if (Test-LinuxBackend) { 'hollow' } else { 'hollow.exe' }
     return (Test-Path (Join-Path (Join-Path $stageRoot $peer) $exe))
 }
@@ -330,6 +372,15 @@ function Stage-Peer($peer) {
         Write-Step "installing into simulator hollow-$peer"
         & xcrun simctl install $udid $buildOutput 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "simctl install for $peer failed with $LASTEXITCODE" }
+        return
+    }
+    if (Test-AndroidBackend) {
+        Start-AndroidDevice $peer
+        Write-Step "installing into emulator hollow-$peer"
+        # -r keeps the app's data, -g grants every runtime permission up front
+        # so no system prompt (notifications, microphone) ever covers the app.
+        $installed = "$(Invoke-Adb $peer 'install' '-r' '-t' '-g' $buildOutput 2>&1)"
+        if ($LASTEXITCODE -ne 0 -or $installed -notmatch 'Success') { throw "adb install for $peer failed: $installed" }
         return
     }
     $dest = Join-Path $stageRoot $peer
@@ -374,6 +425,24 @@ function Get-PeerDataDir($peer) {
 
 function Reset-PeerData($peer) {
     $fixture = Join-Path $fixtureRoot $peer
+    if (Test-AndroidBackend) {
+        $data = "$($script:AndroidDocs)/hollow"
+        if ($Onboard -and $Fresh -and (Test-Path $fixture)) {
+            Remove-Item $fixture -Recurse -Force
+            Remove-Item "$fixture.phrase" -Force -ErrorAction SilentlyContinue
+            Write-Step "$peer discarded its old fixture identity" 'Yellow'
+        }
+        if ($ReuseData -and -not $Onboard) {
+            Write-Step "$peer reusing its last data directory"
+        } elseif ($Onboard -or -not (Test-Path $fixture)) {
+            Invoke-AppShell $peer "rm -rf $data && mkdir -p $data" | Out-Null
+            if ($Onboard) { Write-Step "$peer starting from an empty data directory" }
+            else { Write-Step "$peer has no fixture identity yet - it will onboard from scratch. Run -Onboard to stamp one." 'Yellow' }
+        } else {
+            Push-AppDir $peer $fixture $data
+        }
+        return
+    }
     $run = Get-PeerDataDir $peer
     if ($Onboard) {
         # Onboarding walks the WELCOME flow, which only exists when there is no
@@ -410,11 +479,14 @@ function Reset-PeerData($peer) {
 
 function Save-Fixture($peer) {
     $fixture = Join-Path $fixtureRoot $peer
-    $run = Get-PeerDataDir $peer
-    New-Item -ItemType Directory -Path $fixture -Force | Out-Null
     # The WAL has to be folded in before a copy, and the app does that on exit,
     # so this only ever runs after the instances are stopped.
-    Copy-Mirror $run $fixture
+    if (Test-AndroidBackend) {
+        Pull-AppDir $peer "$($script:AndroidDocs)/hollow" $fixture
+    } else {
+        New-Item -ItemType Directory -Path $fixture -Force | Out-Null
+        Copy-Mirror (Get-PeerDataDir $peer) $fixture
+    }
     # A throwaway identity's phrase, next to the fixture and never inside a data
     # directory, read back with Get-FixturePhrase.
     if ($script:phrases[$peer]) {
@@ -464,6 +536,45 @@ function Start-Peer($peer) {
         if ($launched -match ':\s*(\d+)\s*$') { $launchedPid = [int]$Matches[1] }
         $script:processes[$peer] = [pscustomobject]@{ Id = $launchedPid; Udid = $udid }
         Write-Step "launched $peer (pid $launchedPid, simulator hollow-$peer) data=$data"
+        return
+    }
+    if (Test-AndroidBackend) {
+        Start-AndroidDevice $peer
+        Invoke-Adb $peer 'shell' "am force-stop $($script:AndroidPackage)" 2>&1 | Out-Null
+        $docs = $script:AndroidDocs
+        Invoke-AppShell $peer "rm -rf $docs/probe_out && mkdir -p $docs/probe_out $docs/hollow" | Out-Null
+        # A real directory here, where the simulator backend leaves a symlink:
+        # rm, so a link goes as a link and never takes its target with it.
+        New-Item -ItemType Directory -Path $outRoot -Force | Out-Null
+        & rm -rf $out
+        New-Item -ItemType Directory -Path $out -Force | Out-Null
+        $config = @(
+            "UI_PROBE_OUT=$($script:AndroidDocsAbs)/probe_out",
+            'UI_PROBE_MODE=live',
+            "UI_PROBE_PEER=$peer",
+            "UI_PROBE_IDLE_MINUTES=$IdleMinutes",
+            "HOLLOW_DATA_DIR=$($script:AndroidDocsAbs)/hollow"
+        )
+        Set-AppFile $peer "$docs/probe.env" (($config -join "`n") + "`n")
+        # A start right after a force-stop can be "delivered to top" of the
+        # activity still being torn down, and then no process starts at all
+        # (2026-10-06). -S stops the app as part of the start, the task is
+        # cleared, and the start is repeated once if no process appears.
+        $launchedPid = $null
+        $launched = ''
+        foreach ($attempt in 1..2) {
+            $launched = "$(Invoke-Adb $peer 'shell' "am start -S -W --activity-clear-task -n $($script:AndroidPackage)/.MainActivity" 2>&1)"
+            if ($launched -match 'Error') { throw "launching $peer failed: $launched" }
+            $deadline = (Get-Date).AddSeconds(10)
+            while (-not $launchedPid -and (Get-Date) -lt $deadline) {
+                $launchedPid = Get-AndroidAppPid $peer
+                if (-not $launchedPid) { Start-Sleep -Milliseconds 300 }
+            }
+            if ($launchedPid) { break }
+        }
+        if (-not $launchedPid) { throw "launching $peer started no process: $launched" }
+        $script:processes[$peer] = [pscustomobject]@{ Id = $launchedPid; Serial = (Get-AndroidSerial $peer) }
+        Write-Step "launched $peer (pid $launchedPid, emulator hollow-$peer $(Get-AndroidSerial $peer))"
         return
     }
     $dest = Join-Path $stageRoot $peer
@@ -680,7 +791,7 @@ $onboardSteps = @(
     @{ op = 'wait_for'; target = 'text:probe-${PEER}'; timeout_ms = 20000 },
     @{ op = 'dump'; name = 'onboarded' }
 )
-if (Test-SimBackend) { $onboardSteps = $onboardStepsMobile }
+if ((Test-SimBackend) -or (Test-AndroidBackend)) { $onboardSteps = $onboardStepsMobile }
 
 # The relay is chosen BEFORE the identity is created, in the welcome dialog's
 # own Advanced field, and the choice is stamped into the fixture with the keys.
@@ -776,6 +887,9 @@ try {
         }
     } else {
         Stop-Fleet
+    }
+    foreach ($peer in $peerList) {
+        try { Sync-PeerOut $peer } catch { Write-Step "could not copy $peer's output off its emulator: $_" 'Yellow' }
     }
 }
 

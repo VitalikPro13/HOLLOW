@@ -1665,7 +1665,12 @@ mod tests {
     #[test]
     fn fetch_refuses_a_dm_header_over_the_send_limit() {
         let _g = crate::node::resolver::test_lock();
-        let (_tmp, path, pass) = temp_store();
+        let (tmp, path, pass) = temp_store();
+        // The image is sealed through the process-global key ring, which would
+        // otherwise load the REAL identity from the real data directory.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::node::at_rest::reset_for_test();
+        crate::node::at_rest::init(&path, &pass).expect("key ring");
         let me = kp(197).peer_id();
         let bob = kp(198).peer_id();
         let enc = crate::vault::pipeline::aes_encrypt(b"a small image").unwrap();

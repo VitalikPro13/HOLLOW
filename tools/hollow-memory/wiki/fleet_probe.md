@@ -702,6 +702,48 @@ their control, `tap type:_FriendsManager > semantics:Close` + `wait_for gone typ
 it), and the scope is not optional: a bare `semantics:Close` matches the window title bar's close
 button first in tree order, and that tap ends the process (it did). Predates the simulator work.
 
+## The Android emulator backend: the same fleet on the Mac mini (2026-10-06)
+
+`FLEET_BACKEND=android` (pwsh on macOS or Linux) swaps the simulators for Android emulators;
+every script that loads `fleet_lib.ps1` follows it, `fleet_send.ps1` included. Same scenario
+files, same op vocabulary. `mobile_friend_dm` passed first try once launching was fixed: 34
+steps in 38 s, 56 s with boot.
+
+```
+FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Build -Peers a,b          # APK for the host ABI only, adb install -r -t -g into each
+FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b # ~2 min incl. a cold emulator boot
+FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Scenario mobile_friend_dm
+FLEET_BACKEND=android pwsh scripts/fleet_send.ps1 -Command "$(cat /tmp/cmd.json)"
+```
+
+**What differs, and only this:**
+
+- **One emulator per peer**, AVD `hollow-<peer>`, created on first use from the newest installed
+  Google system image for the host CPU (`FLEET_ANDROID_IMAGE`, `FLEET_ANDROID_DEVICE` override;
+  default `pixel_9`). Peers are single letters; the console port is fixed by the letter (a =
+  `emulator-5554`, b = 5556), so the adb serial is the peer. Emulators stay up after `-Stop`
+  (cold boot is the slow part); `adb -s emulator-5554 emu kill` ends one.
+- **The app's files live inside the emulator.** Nothing is a host path: `probe.env`, the data
+  directory (`app_flutter/hollow`) and the probe output (`app_flutter/probe_out`) are written and
+  read through `adb exec-out|exec-in 'run-as com.anonlisten.hollow ...'` (debug APKs only).
+  `build/fleet_out/<peer>` is a COPY, refreshed by `Sync-PeerOut` at the end of every run and
+  every `fleet_send` batch. Fixtures move as tar streams and live in
+  `~/hollow_fleet/fixtures-android`, apart from the simulator peers of the same letters.
+- **Mobile onboarding steps**, as on the simulator.
+
+**Traps, each found on screen:**
+
+- `am start` 120 ms after `am force-stop` came back "delivered to top" (result code 3) of the
+  activity still being torn down, and no process started: Start-Peer uses `am start -S -W
+  --activity-clear-task`, waits for a pid and retries once.
+- adb joins its arguments WITHOUT quoting: a `run-as` command goes over as one pre-quoted string,
+  or a `>>` redirect runs as the shell user outside the sandbox (`Invoke-AppShell`).
+- Started from SSH the emulator picks software rendering (lavapipe); `-gpu host` gives the M4
+  through Metal. avdmanager's defaults differ from Studio's: a `<temp>` data partition (the app
+  and its data vanish every boot), GPU off; `New-AndroidAvd` rewrites `config.ini`.
+- The machine setup the build needs (JDK 21, SDK CMake for webcrypto's ninja, the Android
+  OpenSSL paths) is in memory `reference_mac_ssh_build`.
+
 ## The Linux backend: the same fleet on Vitalik's laptop (2026-09-09)
 
 `fleet_lib.ps1` picks `linux` from `$IsLinux`; the machine is the real Ubuntu laptop

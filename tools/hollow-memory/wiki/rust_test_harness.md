@@ -319,12 +319,25 @@ The original 7:
 
 ## CI integration
 
-The harness is CI-gated. `.github/workflows/rust-coverage.yml` (job "Test & Coverage") runs
-`cargo llvm-cov --lib` on every push/PR touching `rust/hollow_core/**` — `--lib` EXECUTES the
+The harness is CI-gated. `.github/workflows/ci.yml` (job "Test & Coverage") runs
+`cargo llvm-cov nextest --lib --profile ci` on every push and PR — `--lib` EXECUTES the
 `#[cfg(test)]` harness tests, so a failing harness test fails the job. The
 `--ignore-filename-regex "(...|/node/|...)"` only excludes `node/` from the coverage PERCENTAGE, not
 from running. Branch protection requires "Test & Coverage" → the harness gates merges to `main`. No
-separate job needed. **Caveat:** the harness tests are timing-sensitive (sleeps for the MLS batch timer,
+separate job needed.
+
+**Load on the runner (2026-10-06).** The `ci` profile in `rust/hollow_core/.config/nextest.toml`
+runs 16 test processes on a 4-core runner with coverage on. That was fine at 888 tests (206 s,
+harness avg 7.4 s); after 0.12 it was 1,497 tests, 849 s, harness avg 19.7 s, and four to nine
+harness tests failed all three tries with a dozen more flaky. nextest runs tests in name order, so
+the harness (from about test 877 on) competes with ITSELF: the fix is the `harness` test group
+(`max-threads = 4`, ci profile only), unit tests keep all 16 slots. Replayed locally: 16-wide =
+854 s, 4 failed + 11 flaky; capped at 6 = 926 s, all green, harness avg 10 s, 4 harness retries;
+4 was chosen for margin. **Reproduce CI locally** before touching that number: a coverage build,
+the `ci` profile, 4 cores, an empty data dir. On the 16-core box `start /affinity F` around
+`cargo llvm-cov nextest --lib --profile ci --no-report`, with `HOLLOW_DATA_DIR` set to a fresh
+empty folder and OpenSSL's `bin` on PATH, matched CI to 5 s (854 vs 849 s) and failed the same
+tests. **Caveat:** the harness tests are timing-sensitive (sleeps for the MLS batch timer,
 Olm confirmation, etc.); a slower instrumented CI runner is a latent flakiness risk. **Deflake rule
 (2026-07-15, from the `device_revocation_cuts_off_and_ghost_fanout_holds` two-strike flake): don't just
 bump flat sleeps — convert them to poll-until-deadline loops (N × 500ms with a 20-30s ceiling, early-exit

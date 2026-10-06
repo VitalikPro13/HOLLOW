@@ -42,3 +42,10 @@ has the whole pipeline.
 - iOS: the App Group data, push hints and caches are excluded from device backups at every
   start; keychain items use this-device-only classes. HOL-SEC-158.
 - Push prefs to the relay carry only non-default entries (`pushPrefsForRelay`). HOL-SEC-160.
+- An Android resource named only from Dart (`@drawable/ic_stat_hollow`) is STRIPPED from
+  release APKs unless `res/raw/keep.xml` lists it; a missing notification icon fails EVERY
+  local banner with `invalid_icon` (#96). Guard: `test/android_resource_keep_test.dart`;
+  proof: `aapt2 dump resources <apk>`.
+- iOS foreground presentation = `ForegroundBannerPresenter` (AppDelegate), set before launch
+  finishes so firebase_messaging adopts it as its forward target: pushes stay silent, banners
+  Hollow posts itself show by their flags. With no delegate, firebase shows nothing (#96).

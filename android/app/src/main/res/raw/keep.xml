@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Resources named only from Dart, which the release resource shrinker cannot
+  see. Without the status-bar icon every local notification fails with
+  invalid_icon (#96). test/android_resource_keep_test.dart guards the list.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_stat_hollow" />
