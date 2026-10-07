@@ -40,3 +40,11 @@ reason = "proc-macro-error2 unmaintained: build-time only, under libcrux. See ru
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0319"
 reason = "anymap2 unmaintained: a build-dependency of tract-linalg's build script. See rust/deny.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0330"
+reason = "libcrux-kem 0.0.9 hybrid KEM panics on short input, via hpke-rs-libcrux: locked only as hpke-rs's optional libcrux backend, which openmls_rust_crypto never enables, so it is never compiled (cargo deny's feature-resolved graph has no such crate, hence no rust/deny.toml mirror). The fix needs hpke-rs 0.8, which openmls_rust_crypto 0.6 cannot take."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0331"
+reason = "libcrux-kem 0.0.9 hybrid KEM panics on short input, via hpke-rs-libcrux: locked only as hpke-rs's optional libcrux backend, which openmls_rust_crypto never enables, so it is never compiled (cargo deny's feature-resolved graph has no such crate, hence no rust/deny.toml mirror). The fix needs hpke-rs 0.8, which openmls_rust_crypto 0.6 cannot take."
