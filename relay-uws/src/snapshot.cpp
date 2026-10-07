@@ -210,14 +210,15 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now, int
         std::string key;
         size_t idx;
         uint64_t share;
-        session::Frame* ring_frame = nullptr;  // a session's, keyed by its peer id
+        session::Frame* ring_frame = nullptr;  // a session's
+        const session::Session* holder = nullptr;  // the session holding `ring_frame`
     };
     std::vector<Stamp> stamps;
     size_t dropped = 0;
     std::vector<session_snapshot::Pending> sessions = session_snapshot::prepare(d, now, grace_secs, dropped);
     for (auto& p : sessions) {
         for (auto& f : p.entries) {
-            if (!f.tombstone()) stamps.push_back({f.budget_seq, false, p.s.peer_id, 0, f.share, &f});
+            if (!f.tombstone()) stamps.push_back({f.budget_seq, false, p.s.peer_id, 0, f.share, &f, &p.s});
         }
     }
 
@@ -252,7 +253,7 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now, int
               [](const Stamp& a, const Stamp& b) { return a.old_seq < b.old_seq; });
     for (const auto& s : stamps) {
         if (s.ring_frame) {
-            session_bounds::detail::charge(st, s.key, *s.ring_frame);
+            session_bounds::detail::charge(st, *s.holder, *s.ring_frame);
         } else if (s.is_topic) {
             auto& f = st.topic_buffers[s.key].frames[s.idx];
             f.seq = st.buffer_index.stamp(s.key, true, s.share, f.frame.size());

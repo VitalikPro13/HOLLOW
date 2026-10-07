@@ -1781,12 +1781,16 @@ pub(crate) fn is_mls_coordinator(
 
 /// Vault coordinator: 2nd-lowest online MASTER identity (distributes work away
 /// from the MLS coordinator). Falls back to lowest if only one identity is online.
+/// While the app is away our identity counts only through a sibling the others see.
 pub(crate) fn elect_vault_coordinator(
     mls_members: &[String],
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) -> Option<String> {
-    let masters = online_master_identities(mls_members, local_peer, ws_room_peers);
+    let mut masters = online_master_identities(mls_members, local_peer, ws_room_peers);
+    if super::ws_client::backgrounded() && !peer_is_reachable(ws_room_peers, local_peer) {
+        masters.retain(|m| m != local_peer);
+    }
     if masters.is_empty() {
         return None;
     }
@@ -1797,17 +1801,58 @@ pub(crate) fn elect_vault_coordinator(
     }
 }
 
+/// Whether this device runs the vault's repair: never while the app is away, when a
+/// sibling the others see acts for our identity, or someone else for the server.
 pub(crate) fn is_vault_coordinator(
     mls: &MlsManager,
     server_id: &str,
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) -> bool {
-    if !mls.has_group(server_id) {
+    if !mls.has_group(server_id) || super::ws_client::backgrounded() {
         return false;
     }
     let members = mls.group_members(server_id);
     elect_vault_coordinator(&members, local_peer, ws_room_peers).as_deref() == Some(local_peer)
+}
+
+/// How long a session that came back is read before this device commits again: the
+/// commits made while it was gone arrive in the resume's replay.
+pub(crate) const MLS_TURN_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// When this device may commit in MLS. While the app is away (plan decision 6) or its
+/// socket is down, nobody counts it online, yet its own frozen view of presence can
+/// still name it the committer: it commits nothing then and keeps what it queued.
+#[derive(Default)]
+pub(crate) struct MlsTurn {
+    /// When the session last came back; `None` while the socket is down.
+    live_since: Option<tokio::time::Instant>,
+    /// Away or down since the last settle.
+    returning: bool,
+}
+
+impl MlsTurn {
+    /// `Resumed` or `Connected` (true); `Suspended` or `SessionLost` (false).
+    pub(crate) fn on_session(&mut self, live: bool) {
+        self.live_since = live.then(tokio::time::Instant::now);
+        self.returning |= !live;
+    }
+
+    /// Asked once per batch tick: whether this tick may commit.
+    pub(crate) fn take(&mut self) -> bool {
+        if super::ws_client::backgrounded() {
+            self.returning = true;
+            return false;
+        }
+        let Some(live_since) = self.live_since else { return false };
+        if self.returning {
+            if live_since.elapsed() < MLS_TURN_SETTLE {
+                return false;
+            }
+            self.returning = false;
+        }
+        true
+    }
 }
 
 /// Elect the coordinator for a per-channel MLS subgroup. A subgroup may not
@@ -2006,6 +2051,8 @@ pub(crate) fn reconcile_subgroups_for_server(
         // its founding member). If we ourselves don't qualify we can't be coord.
         if !server.can_see_channel(local_peer, &cid) { continue; }
         if !mls.has_group(&group_key) {
+            // One made while the app is away would be a group the others never see.
+            if super::ws_client::backgrounded() { continue; }
             if let Err(e) = mls.create_group(&group_key) {
                 hollow_log!("[HOLLOW-MLS] reconcile: failed to create subgroup {group_key}: {e}");
                 continue;
@@ -3402,6 +3449,111 @@ mod tests {
         assert_eq!(elect_vault_coordinator(&members, "master1", &rooms).as_deref(), Some("master2"));
 
         super::super::resolver::clear_all();
+    }
+
+    /// `f` run by a node whose app has (or has not) left the screen.
+    async fn as_node<T>(away: bool, f: impl FnOnce() -> T) -> T {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(away));
+        super::super::ws_client::with_test_away(flag, async move { f() }).await
+    }
+
+    /// Plan decision 6: while the app is away the others see neither this device nor,
+    /// unless a sibling of ours is online, our identity.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver is process-global
+    async fn an_away_device_is_never_the_vault_coordinator() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        super::super::resolver::update("vc_dev_m1", "vc_master1");
+        super::super::resolver::update("vc_sibling", "vc_master2");
+        let members: Vec<String> = vec!["vc_dev_m1".into(), "vc_dev_m2".into()];
+        let alone = make_room_peers(&[("srv1", &["vc_dev_m1"])]);
+        let with_sibling = make_room_peers(&[("srv1", &["vc_dev_m1", "vc_sibling"])]);
+        let elect = |rooms: &HashMap<String, HashSet<String>>| elect_vault_coordinator(&members, "vc_master2", rooms);
+
+        assert_eq!(as_node(false, || elect(&alone)).await.as_deref(), Some("vc_master2"));
+        assert_eq!(as_node(true, || elect(&alone)).await.as_deref(), Some("vc_master1"), "away, we are online to nobody");
+        assert_eq!(
+            as_node(true, || elect(&with_sibling)).await.as_deref(),
+            Some("vc_master2"),
+            "away, our identity still counts through the sibling the others see",
+        );
+
+        let kp = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[41; 32]);
+        let me = kp.peer_id();
+        super::super::resolver::update("vc_my_sibling", &me);
+        let mut mls = MlsManager::new(&kp, &kp).unwrap();
+        mls.create_group("vc_srv").unwrap();
+        let sibling = make_room_peers(&[("vc_srv", &["vc_my_sibling"])]);
+        assert!(as_node(false, || is_vault_coordinator(&mls, "vc_srv", &me, &sibling)).await);
+        assert!(
+            !as_node(true, || is_vault_coordinator(&mls, "vc_srv", &me, &sibling)).await,
+            "our identity is the coordinator, and the sibling the others see acts for it",
+        );
+        super::super::resolver::clear_all();
+    }
+
+    /// A subgroup made while the app is away would be a group the others never see.
+    #[tokio::test]
+    async fn an_away_owner_makes_no_subgroup() {
+        let kp = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[42; 32]);
+        let me = kp.peer_id();
+        let mut state = crate::crdt::server_state::ServerState::new("sg_srv".into(), "s".into(), me.clone());
+        for channel in state.channels.values_mut() {
+            channel.visibility = crate::crdt::server_state::ChannelVisibility::AdminPlus;
+        }
+        let group = crate::crypto::subgroup_id("sg_srv", &state.subgroup_channel_ids()[0]);
+        let mut mls = MlsManager::new(&kp, &kp).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let rooms = HashMap::new();
+        let (mut key_packages, mut removals) = (HashMap::new(), HashMap::new());
+        let mut reconcile = |mls: &mut MlsManager| {
+            reconcile_subgroups_for_server(mls, &tx, &rooms, &mut key_packages, &mut removals, &state, "sg_srv", &me, None)
+        };
+        as_node(true, || reconcile(&mut mls)).await;
+        assert!(!mls.has_group(&group), "away, the owner made the subgroup");
+        as_node(false, || reconcile(&mut mls)).await;
+        assert!(mls.has_group(&group), "on screen the owner makes it");
+    }
+
+    /// A device commits nothing while its app is away or its socket is down, and once
+    /// its session is back it first reads the replay for a while.
+    #[tokio::test]
+    async fn an_away_device_takes_no_mls_turn_until_its_session_is_back_and_read() {
+        let away = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = away.clone();
+        super::super::ws_client::with_test_away(away, async move {
+            let set = |v: bool| flag.store(v, std::sync::atomic::Ordering::Relaxed);
+            let settle = |turn: &mut MlsTurn| turn.live_since = turn.live_since.map(|t| t - MLS_TURN_SETTLE);
+            let mut turn = MlsTurn::default();
+            assert!(!turn.take(), "no session yet");
+            turn.on_session(true);
+            assert!(turn.take(), "a fresh node commits at once");
+
+            set(true);
+            assert!(!turn.take(), "away");
+            settle(&mut turn);
+            set(false);
+            assert!(turn.take(), "back on screen, its socket up all along: every frame came live");
+
+            set(true);
+            assert!(!turn.take(), "away");
+            turn.on_session(false);
+            set(false);
+            assert!(!turn.take(), "back on screen before the session resumed");
+            turn.on_session(true);
+            assert!(!turn.take(), "resumed: the replay is still being read");
+            settle(&mut turn);
+            assert!(turn.take(), "then the turn is back");
+
+            turn.on_session(false);
+            assert!(!turn.take(), "on screen with the socket down, nobody counts us either");
+            turn.on_session(true);
+            assert!(!turn.take(), "the resume's replay first");
+            settle(&mut turn);
+            assert!(turn.take());
+        })
+        .await;
     }
 
     #[test]

@@ -77,6 +77,26 @@ ordering lives in the nodes):
   `zombie_window_loses_no_*`, `suspend_keeps_every_peer_and_resume_joins_nothing`,
   `a_gapped_resume_*`, `a_failed_resume_*`, `relay_restart_*`, `presence_leaves_at_the_relay_deadline_*`,
   `the_once_per_session_gates_*`, `relay_connected_waits_for_the_inbox_join_answer`.
+- **The inbound rate limit (2026-10-07).** `set_offline_cap(n)` holds at most `n` directs per
+  away device, oldest out (the relay's `MAX_BUFFERED_MSGS_PER_PEER`, 100; unset keeps
+  everything, as before). `frame_budget::pause_refill(sender, bool)` stops a sender's buckets
+  refilling in every node, so a node takes exactly one bucket however slowly the machine runs
+  it (a debug node consuming slower than 20 frames a second otherwise never drops at all);
+  release it before anything that must find a full bucket. `TestNode::rate_dropped_from(dev)`
+  counts what the limiter dropped (`None` when the loop did not answer). Helpers:
+  `send_dms`/`expect_dms`/`drain_and_settle` empty the 256-slot event channels while a
+  burst runs (a full one stalls the node), `settle_round_trip` settles one ask and its answer
+  both ways. Tests `a_friend_back_past_grace_*`, `kept_dm_copies_*`, `a_burst_past_the_bucket_*`,
+  `a_resumed_ring_past_the_bucket_*`, `a_flood_past_the_bucket_*`.
+- **A phone the app left (plan decision 6, 2026-10-07).** `MockRelay::set_background(&node, away)`
+  plays `relay_set_background`: it sets that node's own flag (`ws_client::backgrounded()` reads a
+  per-node task-local in tests, `with_test_away`, wrapped around each loop by `spawn_node_mock`,
+  since the nodes share one process) and the relay's `inactive` / `active`: hidden, the device is
+  in no member list, discovery or `check_peers` answer and announced to nobody, its own view gets
+  no unasked presence, frames still reach it; shown, the others see it join and it gets a fresh
+  `members` per room. Helper `join_holding_key_package_from_all` holds a joiner's one KeyPackage
+  back from the owner's devices (a sender whose view is a moment old). Tests `a_backgrounded_phone_*`,
+  `a_phone_back_before_its_session_waits_for_the_replay`.
 - **Topic rings (pending joins rung 1, 2026-08-29), mirroring the real relay's `topic_buffers`:**
   `SendToRoomTopic` tees a copy into a `(room, topic)` ring ONLY when it was REGISTERED first
   (`SetTopicBuffer`); an unregistered ring silently drops every publish, exactly like production, so

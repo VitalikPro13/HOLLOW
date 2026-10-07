@@ -237,13 +237,13 @@ inline std::vector<Pending> prepare(snapshot::Data& d, std::chrono::steady_clock
     return out;
 }
 
-// Charge every real frame of `pending` to the budget, in the order the old process
-// charged them, so the budget's eviction order survives the restart.
+// Charge every real frame of `pending` to the rings' pool, in the order the old process
+// charged them, so the pool's eviction order survives the restart.
 inline void stamp(RelayState& st, std::vector<Pending>& pending) {
-    std::vector<std::pair<uint64_t, std::pair<const std::string*, session::Frame*>>> order;
+    std::vector<std::pair<uint64_t, std::pair<const session::Session*, session::Frame*>>> order;
     for (auto& p : pending) {
         for (auto& f : p.entries) {
-            if (!f.tombstone()) order.push_back({f.budget_seq, {&p.s.peer_id, &f}});
+            if (!f.tombstone()) order.push_back({f.budget_seq, {&p.s, &f}});
         }
     }
     std::sort(order.begin(), order.end(),
@@ -251,8 +251,9 @@ inline void stamp(RelayState& st, std::vector<Pending>& pending) {
     for (auto& [old, at] : order) session_bounds::detail::charge(st, *at.first, *at.second);
 }
 
-// Put the stamped sessions in place. A nickname or link code comes back while it has
-// not expired at `now_unix` and nobody else holds it.
+// Put the stamped sessions in place, then hold the rings' pool to this build's budget. A
+// nickname or link code comes back while it has not expired at `now_unix` and nobody else
+// holds it.
 inline void place(RelayState& st, std::vector<Pending>&& pending, uint64_t now_unix) {
     session_bounds::detail::attach(st);
     for (auto& p : pending) {
@@ -266,6 +267,8 @@ inline void place(RelayState& st, std::vector<Pending>&& pending, uint64_t now_u
         }
         p.s.ring = std::move(*ring);
         p.s.ring.enforce(session::RING_MAX_BYTES, session::RING_MAX_FRAMES, session_bounds::detail::forget(st));
+        st.session_book.add(peer, p.s.share);
+        st.session_book.to_grace(peer, std::string());
         st.sessions.emplace(peer, std::move(p.s));
         if (p.nickname && now_unix <= p.nickname->expiry_unix && !st.nickname_to_peer.count(p.nickname->nickname) &&
             !st.peer_to_nickname.count(peer)) {
@@ -283,6 +286,7 @@ inline void place(RelayState& st, std::vector<Pending>&& pending, uint64_t now_u
             st.linkcode_expiry[p.link_code->code] = p.link_code->expiry_unix;
         }
     }
+    session_bounds::detail::bury_over_pool(st);
 }
 
 // The whole restore on its own. snapshot.cpp interleaves the stamps with the buffers'.

@@ -31,8 +31,8 @@ Future<void> setRealtimeSessionActive({required bool active}) => RustLib
     .api
     .crateApiNetworkSetRealtimeSessionActive(active: active);
 
-/// Look at the relay connection now instead of waiting for a timer. `reason` is one
-/// of `foreground`, `focus`, `network`, `wake`, for the log only.
+/// Look at the relay connection now instead of waiting for a timer. `foreground`,
+/// `focus`, `call` and `push` also end a suspend; `network` and `wake` only probe.
 Future<void> relayNudge({required String reason}) =>
     RustLib.instance.api.crateApiNetworkRelayNudge(reason: reason);
 

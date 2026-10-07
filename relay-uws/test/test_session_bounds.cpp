@@ -127,10 +127,12 @@ static uint64_t deposit_dm(RelayState& st, const std::string& target, uint64_t s
     return seq;
 }
 
-// Every frame the relay holds, and what the budget should weigh them at.
+// Every frame the relay holds, and what the budget and the rings' pool should weigh them at.
 struct Held {
     size_t frames = 0;
     size_t bytes = 0;
+    size_t ring_frames = 0;
+    size_t ring_bytes = 0;
 };
 
 static Held held(const RelayState& st) {
@@ -151,9 +153,9 @@ static Held held(const RelayState& st) {
     for (const auto& [p, s] : st.sessions) {
         for (const auto& f : s.ring.entries()) {
             if (f.tombstone()) continue;
-            h.frames++;
-            h.bytes += W;
-            if (buffers.insert(f.bytes.get()).second) h.bytes += f.size();
+            h.ring_frames++;
+            h.ring_bytes += W;
+            if (buffers.insert(f.bytes.get()).second) h.ring_bytes += f.size();
         }
     }
     return h;
@@ -163,9 +165,11 @@ static Held held(const RelayState& st) {
 // counters still cover (acked, sent].
 static bool exact(const RelayState& st) {
     const Held h = held(st);
-    if (st.buffer_index.live() != h.frames || st.buffer_index.bytes() != h.bytes) {
-        printf("    index %zu frames / %zu bytes, held %zu / %zu\n", st.buffer_index.live(), st.buffer_index.bytes(),
-               h.frames, h.bytes);
+    if (st.buffer_index.live() != h.frames || st.buffer_index.bytes() != h.bytes ||
+        st.buffer_index.ring_live() != h.ring_frames || st.buffer_index.ring_bytes() != h.ring_bytes) {
+        printf("    index %zu frames / %zu bytes, held %zu / %zu; rings %zu / %zu, held %zu / %zu\n",
+               st.buffer_index.live(), st.buffer_index.bytes(), h.frames, h.bytes, st.buffer_index.ring_live(),
+               st.buffer_index.ring_bytes(), h.ring_frames, h.ring_bytes);
         return false;
     }
     for (const auto& [p, s] : st.sessions) {
@@ -189,18 +193,18 @@ static bool exact(const RelayState& st) {
 }
 
 static void budget_tests() {
-    printf("ring frames and the global buffer budget\n");
+    printf("ring frames and the rings' pool\n");
 
     {
         RelayState st;
         Session& a = mint(st, peer(1), 7);
         session_bounds::ring_push(st, a, frame(buf(100), 9));
         check("a ring frame is charged with its overhead",
-              st.buffer_index.live() == 1 && st.buffer_index.bytes() == 100 + W && exact(st));
-        auto victim = st.buffer_index.victim();
-        check("its stamp is a session stamp under the sender's share",
-              a.ring.entries()[0].budget_seq != 0 && victim && victim->second.is_session &&
-                  st.buffer_index.frames.held(9) == 100 + W);
+              st.buffer_index.ring_live() == 1 && st.buffer_index.ring_bytes() == 100 + W && exact(st));
+        check("its bytes go to the sender's share, its holding to the session's",
+              a.ring.entries()[0].budget_seq != 0 && st.buffer_index.rings.held(9) == 100 &&
+                  st.buffer_index.rings.held(7) == W);
+        check("and none of it to the buffers' budget", st.buffer_index.live() == 0 && st.buffer_index.bytes() == 0);
     }
 
     {
@@ -211,31 +215,34 @@ static void budget_tests() {
         auto shared = buf(5000);
         for (Session* s : {&a, &b, &c}) session_bounds::ring_push(st, *s, frame(shared, 4));
         check("a fan-out's buffer is charged once, every holder its overhead",
-              st.buffer_index.live() == 3 && st.buffer_index.bytes() == 5000 + 3 * W &&
+              st.buffer_index.ring_live() == 3 && st.buffer_index.ring_bytes() == 5000 + 3 * W &&
                   st.buffer_index.shared_buffers() == 1 && exact(st));
         session_bounds::ring_ack(st, a, 1);
-        check("the charge moves on when its holder acks first",
-              st.buffer_index.live() == 2 && st.buffer_index.bytes() == 5000 + 2 * W && exact(st));
+        check("the bytes stay charged while another ring holds them",
+              st.buffer_index.ring_live() == 2 && st.buffer_index.ring_bytes() == 5000 + 2 * W && exact(st));
         session_bounds::ring_ack(st, b, 1);
         session_bounds::ring_ack(st, c, 1);
-        check("the last holder's ack frees the buffer",
-              st.buffer_index.live() == 0 && st.buffer_index.bytes() == 0 && st.buffer_index.shared_buffers() == 0);
+        check("the last holder's ack frees the buffer", st.buffer_index.ring_live() == 0 &&
+                                                          st.buffer_index.ring_bytes() == 0 &&
+                                                          st.buffer_index.shared_buffers() == 0);
     }
 
     {
         RelayState st;
         Session& a = mint(st, peer(1), 1);
         for (int i = 0; i < 5; i++) session_bounds::ring_push(st, a, frame(buf(10 + i), 3));
-        check("an ack out of range changes nothing", !session_bounds::ring_ack(st, a, 9) && st.buffer_index.live() == 5);
+        check("an ack out of range changes nothing",
+              !session_bounds::ring_ack(st, a, 9) && st.buffer_index.ring_live() == 5);
         check("an ack releases exactly what it covers",
-              session_bounds::ring_ack(st, a, 3) && st.buffer_index.live() == 2 && exact(st));
+              session_bounds::ring_ack(st, a, 3) && st.buffer_index.ring_live() == 2 && exact(st));
         Frame keep = frame(buf(40), 3, Kind::Direct, "dmroom");
         session_bounds::ring_push(st, a, std::move(keep));
         auto all = session_bounds::ring_take_all(st, a);
         bool unstamped = all.size() == 3;
         for (const auto& f : all) unstamped = unstamped && f.budget_seq == 0;
         check("an end releases every frame and hands them over unstamped",
-              unstamped && st.buffer_index.live() == 0 && st.buffer_index.bytes() == 0 && all[2].room == "dmroom");
+              unstamped && st.buffer_index.ring_live() == 0 && st.buffer_index.ring_bytes() == 0 &&
+                  all[2].room == "dmroom");
     }
 
     {
@@ -243,12 +250,12 @@ static void budget_tests() {
         Session& a = mint(st, peer(1), 1);
         for (size_t i = 0; i < session::RING_MAX_FRAMES + 10; i++) session_bounds::ring_push(st, a, frame(buf(1), 5));
         check("the per-session frame cap releases what it buries",
-              a.ring.real_frames() == session::RING_MAX_FRAMES && st.buffer_index.live() == session::RING_MAX_FRAMES &&
-                  exact(st));
+              a.ring.real_frames() == session::RING_MAX_FRAMES &&
+                  st.buffer_index.ring_live() == session::RING_MAX_FRAMES && exact(st));
         session_bounds::ring_push(st, a, frame(buf(session::RING_MAX_BYTES + 1), 5));
         check("a frame bigger than a ring is counted, never charged",
-              a.ring.sent() == session::RING_MAX_FRAMES + 11 && st.buffer_index.live() == session::RING_MAX_FRAMES &&
-                  exact(st));
+              a.ring.sent() == session::RING_MAX_FRAMES + 11 &&
+                  st.buffer_index.ring_live() == session::RING_MAX_FRAMES && exact(st));
     }
 
     {
@@ -260,74 +267,81 @@ static void budget_tests() {
               a.ring.bytes() <= session::RING_MAX_BYTES && a.ring.real_frames() == 3 && exact(st));
     }
 
-    // At the real budget: buffered frames from a thousand light shares fill it, and the
-    // heaviest share's ring frames give way as tombstones, counters whole.
+    // Past the pool, the share holding the most gives way: here two sessions of one address
+    // hold one sender's big frames, against a thousand light holders.
     {
         RelayState st;
-        const size_t light = (MAX_BUFFER_TOTAL_BYTES - 6 * 1024 * 1024) / 1000;
-        for (int i = 0; i < 1000; i++) {
-            st.buffer_index.stamp("filler-" + std::to_string(i), false, 1000 + i, light - W);
+        st.buffer_index.ring_budget = 44 * 1024 * 1024;
+        std::vector<Session*> light;
+        for (int i = 0; i < 100; i++) {
+            light.push_back(&mint(st, peer(100 + i), 1000 + i));
+            session_bounds::ring_push(st, *light.back(), frame(buf(400 * 1024), 3000 + i));
         }
-        const size_t fillers = st.buffer_index.live();
         Session& a = mint(st, peer(1), 1);
         Session& b = mint(st, peer(2), 1);
-        for (int i = 0; i < 4; i++) {
-            auto shared = buf(2 * 1024 * 1024, static_cast<char>('a' + i));
+        for (int i = 0; i < 12; i++) {
+            auto shared = buf(1024 * 1024, static_cast<char>('a' + i));
             session_bounds::ring_push(st, a, frame(shared, 77));
             session_bounds::ring_push(st, b, frame(shared, 77));
         }
-        check("the budget holds after ring pushes", st.buffer_index.bytes() <= MAX_BUFFER_TOTAL_BYTES);
-        check("no buffered frame of a light share went", st.buffer_index.live() - a.ring.real_frames() -
-                                                              b.ring.real_frames() == fillers);
-        check("the flooding share's oldest frames became tombstones",
-              a.ring.real_frames() < 4 && a.ring.gap_after(0) && a.ring.entries().front().tombstone());
-        check("the rings still count every frame", a.ring.sent() == 4 && b.ring.sent() == 4 &&
-                                                       replay_count(a.ring, 0) == 4 && replay_count(b.ring, 0) == 4);
-        bool stamps_ok = true;
-        for (const Session* s : {&a, &b}) {
-            for (const auto& f : s->ring.entries()) {
-                if (!f.tombstone()) stamps_ok = stamps_ok && st.buffer_index.where.count(f.budget_seq) == 1;
-            }
-        }
-        check("every frame left holds a live stamp", stamps_ok);
+        check("the pool holds after ring pushes", st.buffer_index.ring_bytes() <= st.buffer_index.ring_budget);
+        bool light_kept = true;
+        for (const Session* s : light) light_kept = light_kept && s->ring.real_frames() == 1;
+        check("no light holder's frame went", light_kept);
+        check("the heavy share's oldest frames became tombstones",
+              a.ring.real_frames() < 12 && a.ring.gap_after(0) && a.ring.entries().front().tombstone());
+        check("the rings still count every frame", a.ring.sent() == 12 && b.ring.sent() == 12 &&
+                                                       replay_count(a.ring, 0) == 12 && replay_count(b.ring, 0) == 12);
+        check("and the index is exact", exact(st));
     }
 
-    // A buffered frame the budget picks is never dropped inside a ring push: the push
-    // may run inside a loop over those buffers. The loop's settle point drops it.
+    // The buffers' budget and the rings' pool never reach into each other: a ring push
+    // past the pool drops no buffered frame, and the buffers' settle point no ring frame.
     {
         RelayState st;
-        // Weighed at the whole budget, held as a few bytes: the test needs the charge only.
         const uint64_t big = st.buffer_index.stamp("target", false, 5, MAX_BUFFER_TOTAL_BYTES - W);
         st.offline_buffer["target"].push_back(
             {"dmroom", "dm", "sender", std::chrono::steady_clock::now(), false, false, big, 5});
         Session& a = mint(st, peer(1), 1);
         session_bounds::ring_push(st, a, frame(buf(100), 9));
-        check("a ring push leaves the buffered victim alone",
+        check("a ring frame does not weigh on the buffers' budget",
               st.buffer_index.where.count(big) == 1 && st.offline_buffer["target"].size() == 1 &&
-                  st.buffer_index.bytes() > MAX_BUFFER_TOTAL_BYTES && a.ring.real_frames() == 1);
+                  st.buffer_index.bytes() == MAX_BUFFER_TOTAL_BYTES && a.ring.real_frames() == 1);
+        st.buffer_index.ring_budget = 0;
+        session_bounds::ring_push(st, a, frame(buf(100), 9));
+        check("and a full pool buries its own frames, never a buffered one",
+              st.buffer_index.where.count(big) == 1 && st.offline_buffer["target"].size() == 1 &&
+                  a.ring.real_frames() == 0 && replay_count(a.ring, 0) == 2 && st.buffer_index.ring_live() == 0);
+        deposit_dm(st, "other", 6, 500);
         spend_over(st, MAX_BUFFER_TOTAL_BYTES);
-        check("the settle point drops it", st.buffer_index.where.count(big) == 0 && st.offline_buffer.empty() &&
-                                              a.ring.real_frames() == 1 && exact(st));
+        check("the settle point drops a buffered frame, no ring frame", st.buffer_index.where.count(big) == 0 &&
+                                                                           st.offline_buffer.count("other") &&
+                                                                           exact(st));
     }
 
-    // ws_handler's own eviction (drop_frame) finds a ring frame in neither buffer and
-    // releases it: the ring buries it.
+    // A ring frame the buffers' eviction might still name (drop_frame) is buried in its ring.
     {
         RelayState st;
         Session& a = mint(st, peer(1), 1);
         for (int i = 0; i < 6; i++) session_bounds::ring_push(st, a, frame(buf(1000), 8));
-        deposit_dm(st, "target", 2, 500);
-        spend_over(st, 3 * (1000 + W) + 500 + W);
-        check("drop_frame's release buries the ring's oldest frames",
+        for (int i = 0; i < 3; i++) {
+            for (const auto& f : a.ring.entries()) {
+                if (f.tombstone()) continue;
+                st.buffer_index.released(f.budget_seq);
+                break;
+            }
+        }
+        check("a released ring frame is buried there, a run of them merged",
               a.ring.real_frames() == 3 && a.ring.entries().front().tombstone() &&
-                  a.ring.entries().front().gap == 3 && st.offline_buffer["target"].size() == 1 && exact(st));
+                  a.ring.entries().front().gap == 3 && exact(st));
         check("and the device is replayed one gap for them", replay_count(a.ring, 0) == 6 && a.ring.gap_after(0));
     }
 
-    // Random pushes, fan-outs, acks, ends, deposits and evictions: the stamp count
-    // always equals the frames held.
+    // Random pushes, fan-outs, acks, ends, deposits and evictions of both kinds: the stamp
+    // count always equals the frames held.
     {
         RelayState st;
+        st.buffer_index.ring_budget = 60000;
         std::mt19937_64 rng(12345);
         auto pick = [&rng](uint64_t n) { return n ? rng() % n : 0; };
         std::vector<std::string> peers;
@@ -360,13 +374,26 @@ static void budget_tests() {
                 deposit_dm(st, "t" + std::to_string(pick(5)), pick(4), pick(3000));
             } else {
                 spend_over(st, 40000 + pick(80000));
+                st.buffer_index.ring_budget = 20000 + pick(80000);
+                session_bounds::detail::bury_over_pool(st);
             }
-            ok = exact(st);
+            ok = exact(st) && st.buffer_index.ring_bytes() <= st.buffer_index.ring_budget;
         }
         check("4000 random operations keep the index exact (" + std::to_string(ops) + " run)", ok);
     }
 
     printf("\n");
+}
+
+// What mint_session does around make_room: ends each session it names, then mints.
+static std::vector<std::string> mint_after_room(RelayState& st, uint64_t share, const std::string& p) {
+    auto out = session_bounds::make_room(st, share, p);
+    for (const auto& v : out) {
+        session_bounds::ring_take_all(st, st.sessions[v]);
+        st.sessions.erase(v);
+    }
+    mint(st, p, share);
+    return out;
 }
 
 static void table_tests() {
@@ -375,7 +402,7 @@ static void table_tests() {
     {
         RelayState st;
         for (int i = 0; i < 10; i++) mint(st, peer(i), static_cast<uint64_t>(i));
-        check("below the cap nothing goes", session_bounds::make_room(st, 3).empty());
+        check("below the cap nothing goes", mint_after_room(st, 3, peer(50)).empty() && st.sessions.size() == 11);
     }
 
     {
@@ -392,24 +419,24 @@ static void table_tests() {
             }
         }
         for (; n < session::MAX_SESSIONS; n++) mint(st, "user-" + std::to_string(n), 100000 + n);
-        auto out = session_bounds::make_room(st, 5);
-        check("at the cap one session goes", out.size() == 1);
+        auto out = mint_after_room(st, 5, "user-new");
+        check("at the cap one session goes", out.size() == 1 && st.sessions.size() == session::MAX_SESSIONS);
         check("it is the heaviest share's", !out.empty() && out[0].rfind("flood-", 0) == 0);
         check("in grace, the one closest to its end", !out.empty() && out[0] == "flood-999");
-        if (!out.empty()) st.sessions.erase(out[0]);
-        mint(st, "user-new", 5);
-        out = session_bounds::make_room(st, 5);
+        out = mint_after_room(st, 5, "user-new2");
         check("the next mint takes the heaviest share's next", out.size() == 1 && out[0] == "flood-997");
 
-        // Every share holds one: the requester's own share pays first.
+        // Every share holds one: the requester's own share pays first. The table is edited
+        // by hand below, so the book is dropped each time and rebuilt from it.
         RelayState even;
         even.sessions.reserve(session::MAX_SESSIONS);
         for (size_t i = 0; i < session::MAX_SESSIONS; i++) mint(even, "one-" + std::to_string(i), i);
-        out = session_bounds::make_room(even, 77);
+        out = session_bounds::make_room(even, 77, "newcomer-1");
         check("a newcomer whose share already holds one evicts its own", out.size() == 1 && out[0] == "one-77");
         even.sessions["one-12"].state = session::State::Grace;
         even.sessions["one-12"].grace_until = now;
-        out = session_bounds::make_room(even, session::MAX_SESSIONS + 5);
+        even.session_book = session::Book();
+        out = session_bounds::make_room(even, session::MAX_SESSIONS + 5, "newcomer-2");
         check("a newcomer with nothing yet evicts a session in grace first", out.size() == 1 && out[0] == "one-12");
 
         // Counted with its newcomer, the requester's share ties the heaviest: it pays,
@@ -419,7 +446,8 @@ static void table_tests() {
         for (const char* p : {"one-3", "one-4", "one-5"}) even.sessions[p].share = theirs;
         even.sessions["one-4"].state = session::State::Grace;
         even.sessions["one-4"].grace_until = now - std::chrono::seconds(5);
-        out = session_bounds::make_room(even, mine);
+        even.session_book = session::Book();
+        out = session_bounds::make_room(even, mine, "newcomer-3");
         check("a tie with the newcomer counted falls on the newcomer's share",
               out.size() == 1 && (out[0] == "one-1" || out[0] == "one-2"));
     }
@@ -611,7 +639,7 @@ static void snapshot_tests() {
     check("the fan-out buffer is shared again", !ra.ring.entries().empty() && !rb.ring.entries().empty() &&
                                                     ra.ring.entries()[0].bytes == rb.ring.entries()[0].bytes &&
                                                     r.buffer_index.shared_buffers() == 4);
-    check("the restored rings are charged exactly", exact(r) && r.buffer_index.live() == 5);
+    check("the restored rings are charged exactly", exact(r) && r.buffer_index.ring_live() == 5);
     check("a session's nickname comes back with its master and proof",
           r.nickname_to_peer["vitalik_7"] == peer(1) && r.peer_to_nickname[peer(1)] == "vitalik_7" &&
               r.nickname_to_master["vitalik_7"] == peer(100) &&
@@ -620,7 +648,7 @@ static void snapshot_tests() {
     check("an expired nickname does not", !r.nickname_to_peer.count("gone_nick") && !r.peer_to_nickname.count(peer(3)));
     check("a binding no session holds is not carried", !r.nickname_to_peer.count("no_session"));
     session_bounds::ring_ack(r, r.sessions[peer(1)], r.sessions[peer(1)].ring.sent());
-    check("a restored ring acks like any other", exact(r) && r.buffer_index.live() == 1);
+    check("a restored ring acks like any other", exact(r) && r.buffer_index.ring_live() == 1);
 
     // A record the codec read but that is not a session this relay could have held
     // is dropped alone. Each case spoils the record of the session with a full ring.

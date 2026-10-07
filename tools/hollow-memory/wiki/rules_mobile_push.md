@@ -11,7 +11,30 @@ has the whole pipeline.
 - Mobile UI lives in `lib/src/ui/mobile/`; `MobileShell` (4 tabs) below 600px; floating
   pills in the MobileShell + MobileChatRoute stacks, NEVER the `app.dart` builder;
   selection providers are cleared in `.then()`, NOT `dispose()`. `feedback_mobile_ui_patterns`.
-- Mobile lifecycle: resume = WiFi lock + `RelayTriggers` foreground nudge (`relay_nudge`, no room rejoin: the relay session resumes); pause releases.
+- The ONE thing meant to sit over every phone route is the connection indicator
+  (`mobile_connection_indicator.dart`): a ROOT-overlay entry that `MobileShell` owns (so the
+  narrow desktop layout gets it too), registered with `OverlayHosts` so the lock removes it
+  before the cover rises and it returns after. Speaks after 1.5 s down ON SCREEN (the count
+  restarts on every return from the background), leaves at once, never takes a tap; silent
+  before an identity, while a call rings in, and over a `ConnectionIndicatorCover` (DM call
+  screen, fullscreen share: their own link state, the call rides peer to peer). A new
+  full-screen call surface wraps itself in the cover; any other route needs nothing.
+- Mobile lifecycle (`RelayTriggers`, plan 3.8): away (hidden, paused, detached; `inactive` is
+  still on screen) = `relay_set_background(true)` at once, `relay_suspend()` 10 s later unless
+  `relayRealtimeProvider` (a call, voice channel, meeting, or a call ringing in) holds the
+  socket; iOS holds a background task until the suspend returned. `relay_set_background(true)`
+  HIDES the phone from everyone's presence (plan decision 6: online only while on screen), so
+  while such a session is live it is NOT sent; it goes out once that session ends while still
+  away, once per trip (others drop a hidden device from their voice channel on
+  `PeerDisconnected`). Back = ONE `relay_set_background(false)`, never also a `foreground` nudge,
+  call or not. A session that goes live while the phone is already hidden only nudges `call`
+  and stays hidden until the return. A relay back while away (a
+  push wake) closes again 10 s later; a session going live while away nudges `call`. No
+  battery-exemption prompt, no `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, no Wi-Fi lock (guard:
+  `test/relay_triggers_native_test.dart`).
+- A push wake on Android with the node alive goes through `rejoinThroughLiveNode`: a `push`
+  nudge brings the suspended session back BEFORE the live node rejoins, or the rejoin waits in
+  the queue until the app returns.
 - App Lock (mobile): the PIN via the Rust Argon2id flow; the biometric secret in
   flutter_secure_storage after `local_auth` (3.x named params); the lock-type marker is
   readable BEFORE identity unlock; MainActivity MUST extend `FlutterFragmentActivity`.

@@ -24,36 +24,6 @@ Future<int?> androidSdkInt() async {
 /// Synchronous — for UI that already primed the cache.
 int? get androidSdkIntCached => _cachedSdkInt;
 
-Future<bool> isBatteryOptimized() async {
-  if (!_isAndroid) return false;
-  try {
-    return await _channel.invokeMethod<bool>('isBatteryOptimized') ?? false;
-  } catch (_) {
-    return false;
-  }
-}
-
-Future<void> requestBatteryExemption() async {
-  if (!_isAndroid) return;
-  try {
-    await _channel.invokeMethod<void>('requestBatteryExemption');
-  } catch (_) {}
-}
-
-Future<void> acquireWifiLock() async {
-  if (!_isAndroid) return;
-  try {
-    await _channel.invokeMethod<void>('acquireWifiLock');
-  } catch (_) {}
-}
-
-Future<void> releaseWifiLock() async {
-  if (!_isAndroid) return;
-  try {
-    await _channel.invokeMethod<void>('releaseWifiLock');
-  } catch (_) {}
-}
-
 /// Opens the system notification settings page for Hollow. False off Android
 /// or when the OS refused to show it.
 Future<bool> openAndroidNotificationSettings() async {

@@ -53,13 +53,17 @@ run test_session
 # state.h includes App.h, so the session bounds need the uWebSockets headers.
 if [ -f ../uWebSockets/src/App.h ] && [ -f ../uSockets/src/libusockets.h ]; then
     run test_session_bounds -std=c++20 -I../uWebSockets/src -I../uSockets/src
+    run test_session_hostile -std=c++20 -I../uWebSockets/src -I../uSockets/src
 else
     echo "skip test_session_bounds (no uWebSockets/uSockets sources; git submodule update --init)"
+    echo "skip test_session_hostile (no uWebSockets/uSockets sources)"
 fi
 run test_snapshot_codec
 run test_turn_uris
 run test_verify_device_list ../src/device_list.cpp ../src/crypto.cpp $LIBS
 # The handlers themselves: the real relay on loopback, driven over TLS.
 bash ./run_live.sh "$out" || fail=1
+# The same relay across a restart, the snapshot handed over through a stand-in fd store.
+bash ./run_restart.sh "$out" || fail=1
 rm -rf "$out"
 exit $fail

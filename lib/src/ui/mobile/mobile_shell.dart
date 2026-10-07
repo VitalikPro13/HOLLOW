@@ -16,6 +16,7 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_minimised_call.dart';
@@ -256,6 +257,8 @@ class _MobileShellState extends ConsumerState<MobileShell> {
         // MobileInChatBanner, shown while inside a chat. Outside one, mobile
         // relies on OS notifications.
         const MobileMinimisedCall(),
+        // Lives in the root overlay, over every route pushed on the phone.
+        const MobileConnectionIndicatorHost(),
       ],
     );
   }

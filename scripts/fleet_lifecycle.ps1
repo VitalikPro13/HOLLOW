@@ -327,8 +327,12 @@ function Start-FleetProxy($peers, $relayHost = 'relay.anonlisten.com') {
     Remove-Item $ready -ErrorAction SilentlyContinue
     $arguments = @($proxy, 'serve', '--control', "127.0.0.1:$(Get-FleetProxyControlPort)", '--ready-file', $ready,
         '--log', (Join-Path $script:FleetOutRoot '_proxy.log'))
+    # FLEET_RELAY_CONNECT (host:port) sends the routes to another listener of the same
+    # relay, such as a canary, while the app keeps the relay's TLS name and auth domain.
+    $upstream = "${relayHost}:443"
+    if ($env:FLEET_RELAY_CONNECT) { $upstream = $env:FLEET_RELAY_CONNECT }
     foreach ($peer in @($peers)) {
-        $arguments += @('--route', "$peer=127.0.0.1:$(Get-FleetProxyPort $peer)=${relayHost}:443")
+        $arguments += @('--route', "$peer=127.0.0.1:$(Get-FleetProxyPort $peer)=$upstream")
     }
     $start = @{ FilePath = (Get-PythonExe); ArgumentList = $arguments; PassThru = $true }
     if (Test-WindowsBackend) { $start['WindowStyle'] = 'Hidden' }
@@ -336,7 +340,7 @@ function Start-FleetProxy($peers, $relayHost = 'relay.anonlisten.com') {
     if (-not (Wait-Condition { Test-Path $ready } 15 200)) { throw 'the zombie proxy never became ready' }
     [System.IO.File]::WriteAllText((Get-FleetProxyFile),
         (@{ pid = $process.Id; relay = $relayHost; peers = @($peers) } | ConvertTo-Json -Compress))
-    Write-Host "[fleet] zombie proxy up (pid $($process.Id)), routes $(@($peers) -join ',') -> ${relayHost}:443" -ForegroundColor Cyan
+    Write-Host "[fleet] zombie proxy up (pid $($process.Id)), routes $(@($peers) -join ',') -> $upstream" -ForegroundColor Cyan
 }
 
 function Stop-FleetProxy {

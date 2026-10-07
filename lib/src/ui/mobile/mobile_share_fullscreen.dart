@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/call/call_theme.dart';
 import 'package:hollow/src/ui/media/fullscreen_media_chrome.dart';
 import 'package:hollow/src/ui/media/media_zoom_view.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
+import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -94,8 +95,12 @@ class _MobileShareFullscreenState extends ConsumerState<MobileShareFullscreen>
     Navigator.of(context).maybePop();
   }
 
+  /// Immersive video with its own stream state: the relay line steps aside.
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ConnectionIndicatorCover(child: _screen(context));
+
+  Widget _screen(BuildContext context) {
     final data = widget.source.watchData(context, ref);
     CallShare? share;
     for (final s in data?.shares ?? const <CallShare>[]) {

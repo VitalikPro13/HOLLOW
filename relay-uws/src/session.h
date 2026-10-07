@@ -6,8 +6,10 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -111,6 +113,8 @@ struct Frame {
     Kind kind = Kind::Other;
     std::string room;  // the room of a direct kind, for the expiry hand-off
     uint64_t budget_seq = 0;  // its OfflineIndex stamp, 0 = not charged
+    // The ring's next real frame from the same share, 0 for none. The ring's own.
+    uint64_t next_of_share = 0;
 
     bool tombstone() const { return gap != 0; }
     size_t size() const { return bytes ? bytes->size() : 0; }
@@ -118,6 +122,11 @@ struct Frame {
 
 // The frames one session's device has not acked. Entries cover every number in
 // (acked, sent] exactly once, in order: a real frame its own seq, a tombstone a run.
+// Tombstones next to each other merge where that is cheap and at the next compaction
+// otherwise; a replay sends every run of them as one gap either way.
+//
+// Every operation is logarithmic or amortized constant in the ring's size: a full ring
+// takes each frame of a fan-out, so a linear step here is paid once per ring per frame.
 class Ring {
 public:
     uint64_t sent() const { return sent_; }
@@ -130,9 +139,11 @@ public:
     uint64_t push(Frame f) {
         f.seq = ++sent_;
         f.gap = 0;
+        f.next_of_share = 0;
         bytes_ += f.size();
         real_++;
         entries_.push_back(std::move(f));
+        hold(entries_.back());
         return sent_;
     }
 
@@ -147,6 +158,7 @@ public:
             t.seq = sent_;
             t.gap = 1;
             entries_.push_back(std::move(t));
+            tombs_++;
         }
         return sent_;
     }
@@ -171,22 +183,28 @@ public:
     }
 
     // Every entry after `h`, in order: `visit(const Frame&, uint64_t n)` with `n` the part
-    // of a tombstone after `h`, 0 for a real frame. Call can_resume_from first.
+    // of a run of tombstones after `h`, 0 for a real frame. Call can_resume_from first.
     template <typename Visit>
     void replay_after(uint64_t h, Visit&& visit) const {
-        for (const auto& f : entries_) {
-            if (f.seq <= h) continue;
-            if (!f.tombstone()) {
-                visit(f, 0);
-            } else {
-                visit(f, first_of(f) > h ? f.gap : f.seq - h);
+        const Frame* run_end = nullptr;
+        uint64_t run = 0;
+        for (size_t i = first_after(h); i < entries_.size(); i++) {
+            const Frame& f = entries_[i];
+            if (f.tombstone()) {
+                run += first_of(f) > h ? f.gap : f.seq - h;
+                run_end = &f;
+                continue;
             }
+            if (run) visit(*run_end, run);
+            run = 0;
+            visit(f, 0);
         }
+        if (run) visit(*run_end, run);
     }
 
     bool gap_after(uint64_t h) const {
-        for (const auto& f : entries_) {
-            if (f.seq > h && f.tombstone()) return true;
+        for (size_t i = first_after(h); i < entries_.size(); i++) {
+            if (entries_[i].tombstone()) return true;
         }
         return false;
     }
@@ -196,20 +214,10 @@ public:
     // real is left.
     template <typename OnDrop>
     bool evict_one(OnDrop&& on_drop) {
-        std::unordered_map<uint64_t, size_t> held;
-        size_t most = 0;
-        for (const auto& f : entries_) {
-            if (!f.tombstone()) most = std::max(most, held[f.share] += f.size() + FRAME_WEIGHT_OVERHEAD);
-        }
-        if (most == 0) return false;
-        for (size_t i = 0; i < entries_.size(); i++) {
-            const Frame& f = entries_[i];
-            if (!f.tombstone() && held[f.share] == most) {
-                bury(i, on_drop);
-                return true;
-            }
-        }
-        return false;
+        if (by_weight_.empty()) return false;
+        const Held& h = held_.at(std::get<2>(*by_weight_.rbegin()));
+        bury(index_of(h.head), on_drop);
+        return true;
     }
 
     // Evict until the ring is within `max_bytes` and `max_frames` real frames.
@@ -240,8 +248,11 @@ public:
             if (!f.tombstone()) out.push_back(std::move(f));
         }
         entries_.clear();
+        held_.clear();
+        by_weight_.clear();
         bytes_ = 0;
         real_ = 0;
+        tombs_ = 0;
         acked_ = sent_;
         return out;
     }
@@ -257,6 +268,7 @@ public:
         for (const auto& f : entries) {
             if (f.tombstone()) {
                 if (f.bytes || f.gap > f.seq || f.seq - f.gap + 1 != next) return std::nullopt;
+                r.tombs_++;
             } else {
                 if (!f.bytes || f.seq != next) return std::nullopt;
                 r.bytes_ += f.size();
@@ -266,51 +278,157 @@ public:
         }
         if (next != sent + 1) return std::nullopt;
         r.entries_ = std::move(entries);
+        for (auto& f : r.entries_) {
+            f.next_of_share = 0;
+            if (!f.tombstone()) r.hold(f);
+        }
         return r;
     }
 
 private:
+    // One sender share's real frames here: their weight and the oldest and newest of them,
+    // linked oldest first through Frame::next_of_share.
+    struct Held {
+        size_t weight = 0;
+        uint64_t head = 0;
+        uint64_t tail = 0;
+    };
+    // Heaviest last; among equals the share whose oldest frame is oldest.
+    using WeightKey = std::tuple<size_t, uint64_t, uint64_t>;
+
+    // Merge a new tombstone into a neighbour only when the erase moves this few entries.
+    static constexpr size_t MERGE_NEAR = 32;
+    // Tombstone entries allowed beyond one per real frame before a compaction.
+    static constexpr size_t COMPACT_SLACK = 64;
+
     static uint64_t first_of(const Frame& f) { return f.tombstone() ? f.seq - f.gap + 1 : f.seq; }
+    static WeightKey key(const Held& h, uint64_t share) { return {h.weight, UINT64_MAX - h.head, share}; }
+    static size_t weight_of(const Frame& f) { return f.size() + FRAME_WEIGHT_OVERHEAD; }
+
+    // The first entry whose numbers reach past `h`.
+    size_t first_after(uint64_t h) const {
+        auto it = std::upper_bound(entries_.begin(), entries_.end(), h,
+                                   [](uint64_t v, const Frame& f) { return v < f.seq; });
+        return static_cast<size_t>(it - entries_.begin());
+    }
+
+    // The entry holding the real frame `seq`.
+    size_t index_of(uint64_t seq) const {
+        auto it = std::lower_bound(entries_.begin(), entries_.end(), seq,
+                                   [](const Frame& f, uint64_t v) { return f.seq < v; });
+        return static_cast<size_t>(it - entries_.begin());
+    }
+
+    // `f`, already in the ring and its newest real frame from its share, joins the index.
+    void hold(Frame& f) {
+        auto [it, fresh] = held_.try_emplace(f.share);
+        Held& h = it->second;
+        if (fresh) {
+            h.head = f.seq;
+        } else {
+            by_weight_.erase(key(h, f.share));
+            entries_[index_of(h.tail)].next_of_share = f.seq;
+        }
+        h.tail = f.seq;
+        h.weight += weight_of(f);
+        by_weight_.insert(key(h, f.share));
+    }
+
+    // The real frame `f` leaves the index, before it leaves the ring.
+    void unhold(const Frame& f) {
+        auto it = held_.find(f.share);
+        Held& h = it->second;
+        by_weight_.erase(key(h, f.share));
+        h.weight -= weight_of(f);
+        if (h.head == f.seq) {
+            h.head = f.next_of_share;
+        } else {
+            // Only the budget picks a frame other than its share's oldest: walk to it.
+            uint64_t prev = 0;
+            for (uint64_t at = h.head; at != 0 && at != f.seq; at = entries_[index_of(at)].next_of_share) prev = at;
+            if (prev != 0) entries_[index_of(prev)].next_of_share = f.next_of_share;
+            if (h.tail == f.seq) h.tail = prev;
+        }
+        if (h.head == 0) h.tail = 0;
+        if (h.head == 0) {
+            held_.erase(it);
+        } else {
+            by_weight_.insert(key(h, f.share));
+        }
+    }
 
     template <typename OnDrop>
     void drop_front(OnDrop& on_drop) {
         const Frame& f = entries_.front();
         if (!f.tombstone()) {
             on_drop(f);
+            unhold(f);
             bytes_ -= f.size();
             real_--;
+        } else {
+            tombs_--;
         }
         entries_.pop_front();
     }
 
-    // Entry `i` becomes a one-frame tombstone, merged into the runs on either side.
+    bool near_end(size_t i) const { return i < MERGE_NEAR || entries_.size() - i <= MERGE_NEAR; }
+
+    // Entry `i` becomes a one-frame tombstone, merged into a run beside it where cheap.
     template <typename OnDrop>
     void bury(size_t i, OnDrop&& on_drop) {
-        Frame& v = entries_[i];
-        on_drop(v);
-        bytes_ -= v.size();
-        real_--;
-        v.bytes.reset();
-        v.room.clear();
-        v.kind = Kind::Other;
-        v.share = 0;
-        v.budget_seq = 0;
-        v.gap = 1;
-        if (i + 1 < entries_.size() && entries_[i + 1].tombstone()) {
-            entries_[i + 1].gap += v.gap;
-            entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(i));
+        {
+            Frame& v = entries_[i];
+            on_drop(v);
+            unhold(v);
+            bytes_ -= v.size();
+            real_--;
+            v.bytes.reset();
+            v.room.clear();
+            v.kind = Kind::Other;
+            v.share = 0;
+            v.budget_seq = 0;
+            v.next_of_share = 0;
+            v.gap = 1;
+            tombs_++;
         }
-        if (i > 0 && i < entries_.size() && entries_[i - 1].tombstone() && entries_[i].tombstone()) {
+        if (i + 1 < entries_.size() && entries_[i + 1].tombstone() && near_end(i)) {
+            entries_[i + 1].gap += entries_[i].gap;
+            entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(i));
+            tombs_--;
+        }
+        if (i > 0 && i < entries_.size() && entries_[i - 1].tombstone() && entries_[i].tombstone() &&
+            near_end(i - 1)) {
             entries_[i].gap += entries_[i - 1].gap;
             entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(i - 1));
+            tombs_--;
         }
+        if (tombs_ > real_ + COMPACT_SLACK) compact();
+    }
+
+    // Every run of adjacent tombstones becomes one entry.
+    void compact() {
+        std::deque<Frame> out;
+        for (auto& f : entries_) {
+            if (f.tombstone() && !out.empty() && out.back().tombstone()) {
+                out.back().seq = f.seq;
+                out.back().gap += f.gap;
+            } else {
+                out.push_back(std::move(f));
+            }
+        }
+        entries_ = std::move(out);
+        tombs_ = 0;
+        for (const auto& f : entries_) tombs_ += f.tombstone();
     }
 
     std::deque<Frame> entries_;
+    std::unordered_map<uint64_t, Held> held_;
+    std::set<WeightKey> by_weight_;
     uint64_t sent_ = 0;
     uint64_t acked_ = 0;
     size_t bytes_ = 0;
     size_t real_ = 0;
+    size_t tombs_ = 0;  // tombstone entries
 };
 
 // Gone is not a state: a gone session is erased from RelayState::sessions.
@@ -341,6 +459,146 @@ struct Session {
     // that count is due at the latest. Live only, never snapshotted.
     uint32_t unacked_in = 0;
     std::chrono::steady_clock::time_point ack_due{};
+
+    // A stream frame from the device arrived at `now`. True when an ack must be queued for
+    // it (RelayState::acks_due), due at `ack_due`. One is queued per session at a time: a
+    // frame after an ack or a heartbeat while one waits rides that one, so the ack comes
+    // early, never late, and frames between heartbeats cannot grow the queue.
+    bool count_in(std::chrono::steady_clock::time_point now) {
+        in_h++;
+        if (++unacked_in != 1 || ack_due > now) return false;
+        ack_due = now + std::chrono::milliseconds(ACK_AFTER_MS);
+        return true;
+    }
+};
+
+// Which session gives way when the session table is full, and which grace slot when an
+// address is (session_bounds.h): kept beside RelayState::sessions as they change, so
+// neither choice walks the table. At 262,144 sessions a walk costs tens of milliseconds
+// of the relay's one thread, once per login.
+class Book {
+public:
+    // A session whose turn to give way comes first sorts first: in grace before live,
+    // then the earlier into grace (the grace is one length per process).
+    struct Rank {
+        bool live = true;
+        uint64_t order = 0;
+        bool operator<(const Rank& o) const { return live != o.live ? !live : order < o.order; }
+    };
+
+    size_t size() const { return where_.size(); }
+    bool has(const std::string& peer) const { return where_.count(peer) != 0; }
+
+    // A fresh session of `share`.
+    void add(const std::string& peer, uint64_t share) {
+        if (has(peer)) drop(peer);
+        where_[peer] = Place{share, Rank{true, 0}, std::string()};
+        link(peer);
+    }
+
+    // `peer`'s session went into grace, holding a slot of the address `ip_key` ("" for none).
+    void to_grace(const std::string& peer, const std::string& ip_key) {
+        auto it = where_.find(peer);
+        if (it == where_.end()) return;
+        unlink(peer);
+        it->second.rank = Rank{false, ++next_order_};
+        it->second.ip = ip_key;
+        link(peer);
+    }
+
+    // `peer`'s session is live again.
+    void to_live(const std::string& peer) {
+        auto it = where_.find(peer);
+        if (it == where_.end() || it->second.rank.live) return;
+        unlink(peer);
+        it->second.rank = Rank{true, 0};
+        it->second.ip.clear();
+        link(peer);
+    }
+
+    void drop(const std::string& peer) {
+        if (!has(peer)) return;
+        unlink(peer);
+        where_.erase(peer);
+    }
+
+    // The session the table cap ends for a newcomer of `share`: the share holding the
+    // most gives one up, the newcomer counted and a tie going against the newcomer's own.
+    std::optional<std::string> table_victim(uint64_t share) const {
+        if (by_count_.empty()) return std::nullopt;
+        const auto& top = *by_count_.rbegin();
+        uint64_t pick = std::get<3>(top);
+        auto own = shares_.find(share);
+        if (own != shares_.end() && pick != share && own->second.size() + 1 >= std::get<0>(top)) pick = share;
+        return shares_.at(pick).begin()->second;
+    }
+
+    // How many grace slots the address `ip_key` holds, and the one closest to its end.
+    size_t grace_slots(const std::string& ip_key) const {
+        auto it = by_ip_.find(ip_key);
+        return it == by_ip_.end() ? 0 : it->second.size();
+    }
+    std::optional<std::string> grace_slot_victim(const std::string& ip_key) const {
+        auto it = by_ip_.find(ip_key);
+        if (it == by_ip_.end()) return std::nullopt;
+        return it->second.begin()->second;
+    }
+
+private:
+    struct Place {
+        uint64_t share = 0;
+        Rank rank;
+        std::string ip;
+    };
+    struct ByRank {
+        bool operator()(const std::pair<Rank, std::string>& a, const std::pair<Rank, std::string>& b) const {
+            if (a.first < b.first) return true;
+            if (b.first < a.first) return false;
+            return a.second < b.second;
+        }
+    };
+    using Members = std::set<std::pair<Rank, std::string>, ByRank>;
+    // A share's place among shares: by how many sessions it holds, then by how soon its
+    // first session would give way.
+    using CountKey = std::tuple<size_t, bool, uint64_t, uint64_t>;
+
+    static CountKey count_key(uint64_t share, const Members& m) {
+        const Rank& r = m.begin()->first;
+        return {m.size(), !r.live, r.live ? 0 : UINT64_MAX - r.order, share};
+    }
+
+    void link(const std::string& peer) {
+        const Place& p = where_.at(peer);
+        Members& m = shares_[p.share];
+        if (!m.empty()) by_count_.erase(count_key(p.share, m));
+        m.insert({p.rank, peer});
+        by_count_.insert(count_key(p.share, m));
+        if (!p.rank.live && !p.ip.empty()) by_ip_[p.ip].insert({p.rank.order, peer});
+    }
+
+    void unlink(const std::string& peer) {
+        const Place& p = where_.at(peer);
+        auto sit = shares_.find(p.share);
+        Members& m = sit->second;
+        by_count_.erase(count_key(p.share, m));
+        m.erase({p.rank, peer});
+        if (m.empty()) {
+            shares_.erase(sit);
+        } else {
+            by_count_.insert(count_key(p.share, m));
+        }
+        if (!p.rank.live && !p.ip.empty()) {
+            auto iit = by_ip_.find(p.ip);
+            iit->second.erase({p.rank.order, peer});
+            if (iit->second.empty()) by_ip_.erase(iit);
+        }
+    }
+
+    std::unordered_map<std::string, Place> where_;
+    std::unordered_map<uint64_t, Members> shares_;
+    std::set<CountKey> by_count_;
+    std::unordered_map<std::string, std::set<std::pair<uint64_t, std::string>>> by_ip_;
+    uint64_t next_order_ = 0;
 };
 
 }  // namespace session

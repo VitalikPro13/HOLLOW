@@ -194,6 +194,22 @@ repairing it; a digest-less hint (`SyncRequest.mls_epoch`) has its own cooldown 
 silences the digest probe. Tests `two_devices_of_the_owner_add_a_joiner_once`,
 `a_fork_between_the_owners_devices_heals_without_a_restart`.
 
+**No MLS turn while away or down (2026-10-07, plan decision 6).** The relay hides a phone the app
+left (`ws_client::backgrounded()`, the `relay_set_background` flag) from everyone, its own siblings
+included, while the phone's own view of presence stays frozen, so the phone could still count itself
+the committer beside the device the others now count. The elections are left as they are (the work
+they queue is kept); the gate sits where an election turns into a commit: `crypto_handler::MlsTurn`,
+asked once per batch tick, says no while the app is away or the socket is down (`Suspended`,
+`SessionLost`), and after either says no until the session has been live for `MLS_TURN_SETTLE`
+(2 s) so the commits replayed on resume are merged first. Off the turn, Phase 1 (rebind) and
+Phase 2 (both queues) wait untouched. Group creation (KeyPackage handler, parked admission,
+subgroup reconcile) is skipped while away: nobody else would see the group. The vault coordinator
+is never an away device (`is_vault_coordinator`; `elect_vault_coordinator` counts our identity only
+through a sibling the others see; the event-driven rebalance waits). Tests
+`a_backgrounded_phone_leaves_the_commit_to_its_desktop`,
+`a_backgrounded_phone_commits_its_deferred_work_once_back`,
+`a_phone_back_before_its_session_waits_for_the_replay`.
+
 **Committer vs catch-up authority — these are DIFFERENT elections and must stay that way (2026-08-27).**
 `elect_server_coordinator` prefers the OWNER for the server group, because a single authoritative
 committer keeps epochs linear. `group_authority` mirrors that for "who speaks for this group".

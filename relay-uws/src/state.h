@@ -2,6 +2,8 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <functional>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 #include <chrono>
@@ -142,6 +144,15 @@ static constexpr size_t MAX_DEVICE_LIST_VERSIONS = 262144;
 // How long one key hashes address blocks into share ids (fair_share.h).
 static constexpr int SHARE_KEY_LIFETIME_SECS = 3600;
 
+// One socket's presence passes (`inactive` tells every room it is in that the device left,
+// `active` that it is back) come at least this far apart, and a change inside the gap waits
+// for its end: a client toggling cannot make the relay walk its rooms at will (HOL-SEC-164).
+static constexpr int PRESENCE_PASS_MS = 2000;
+// After a big pass the gap grows by this much per room walked and per peer in it, so one
+// session's passes hold the relay's loop well under 1% of the time whatever its rooms hold
+// (a peer costs about 1.3 us of a pass, measured with RELAY_LIVE_PROBE=hide).
+static constexpr int PRESENCE_PASS_US_PER_PEER = 250;
+
 using SSLWebSocket = uWS::WebSocket<true, true, struct PerSocketData>;
 
 struct PerSocketData {
@@ -164,6 +175,15 @@ struct PerSocketData {
     // The session this socket carries (RelayState::sessions), "" for none: v2 logins,
     // fetch and guest sockets, and a socket whose session ended under it.
     std::string sid;
+    // Rooms whose presence was withheld from this socket while its session was inactive:
+    // what `active` answers for. Always rooms the socket is in (a leave takes its room out).
+    std::unordered_set<std::string> presence_withheld;
+    // Its rooms were told the device left because its session said `inactive`: no list,
+    // presence frame or online answer names it, while delivery still reaches it.
+    bool hidden = false;
+    // When this socket's next presence pass may run, and whether one waits for it.
+    std::chrono::steady_clock::time_point next_presence_pass{};
+    bool presence_pass_queued = false;
     // A fetch socket's rooms, kept apart from `RelayState::peer_rooms`: that set
     // belongs to the device's full socket, whose auth resets it, and a fetch slot
     // it forgot would outlive the fetch socket.
@@ -253,11 +273,19 @@ struct RelayState {
 
     // peer_id -> its resumable session, live or in grace (session_bounds.h).
     std::unordered_map<std::string, session::Session> sessions;
+    // Which of them gives way first at the table cap or a full address (session_bounds.h).
+    session::Book session_book;
     // When each grace ends and when each owed ack falls due, in that order (the grace
     // length is fixed per process, the ack delay fixed): the session timer pops the
     // front, and an entry whose session moved on since is skipped.
     std::deque<std::pair<std::chrono::steady_clock::time_point, std::string>> grace_ends;
     std::deque<std::pair<std::chrono::steady_clock::time_point, std::string>> acks_due;
+    // Presence passes waiting for their socket's pace, earliest first, by device: one per socket
+    // with a pass owed, beside whatever entries the device's closed sockets left, which the
+    // sweep skips or queues again. Each socket's pace ends at its own time, so the entries do not
+    // come in deadline order.
+    using PresenceDue = std::pair<std::chrono::steady_clock::time_point, std::string>;
+    std::priority_queue<PresenceDue, std::vector<PresenceDue>, std::greater<PresenceDue>> presence_due;
 
     // Per-IP connection tracking (in-memory only, never logged/persisted)
     std::unordered_map<std::string, IpState> ip_states;

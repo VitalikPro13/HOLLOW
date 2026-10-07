@@ -55,7 +55,12 @@ class MobileMinimisedCall extends ConsumerWidget {
         border: Border.all(color: hollow.border),
         boxShadow: floating ? HollowShadows.float : null,
       ),
-      child: SizedBox(height: MobileCallMetrics.bar, child: bar),
+      // Floating in the shell's stack it sits outside any Scaffold, where the
+      // app's fallback text style (a yellow double underline) would reach it.
+      child: DefaultTextStyle(
+        style: HollowTypography.label.copyWith(color: hollow.textPrimary),
+        child: SizedBox(height: MobileCallMetrics.bar, child: bar),
+      ),
     );
     if (!floating) {
       return Padding(

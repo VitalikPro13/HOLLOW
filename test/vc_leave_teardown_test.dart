@@ -5,6 +5,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart'
     show MediaStream, MediaStreamTrack, RTCVideoRenderer;
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
+import 'package:hollow/src/core/services/realtime_session_flag.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/core/services/voice_channel_service.dart';
@@ -79,6 +80,33 @@ void main() {
     expect(capture.disposes, 1);
     expect(api.withdrawnWatches, unorderedEquals(<String>['sharer', 's2']));
     expect(r.vc.service, isNull);
+  });
+
+  test('a forced leave lets go of the voice session flag', () async {
+    // A phone kept the flag after a kick, so it was never hidden or suspended
+    // in the background again until the app restarted.
+    RealtimeSessionFlag.reset();
+    addTearDown(RealtimeSessionFlag.reset);
+    final r = room();
+    RealtimeSessionFlag.acquire('voice-channel');
+    r.vc.debugAdoptCall(_Mesh());
+
+    r.vc.onLocalLeft();
+    await pumpEventQueue(times: 100);
+
+    expect(RealtimeSessionFlag.isActive, isFalse);
+  });
+
+  test('a forced leave keeps a DM call flag', () async {
+    RealtimeSessionFlag.reset();
+    addTearDown(RealtimeSessionFlag.reset);
+    final r = room();
+    RealtimeSessionFlag.acquire('voice-channel');
+    RealtimeSessionFlag.acquire('dm-call');
+
+    r.vc.onLocalLeft();
+
+    expect(RealtimeSessionFlag.holders, {'dm-call'});
   });
 
   test('each call gets its own teardown', () async {

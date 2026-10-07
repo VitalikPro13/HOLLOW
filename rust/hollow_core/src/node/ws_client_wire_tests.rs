@@ -34,6 +34,8 @@ fn quick() -> Timing {
         sleep_jump: Duration::from_secs(5),
         backoff_base: Duration::from_millis(20),
         backoff_cap: Duration::from_millis(200),
+        resume_backoff_cap: Duration::from_millis(200),
+        grace: Duration::from_secs(120),
         realtime_retry: Duration::from_millis(100),
         auth_reply: Duration::from_secs(3),
         handshake: Duration::from_secs(3),
@@ -65,6 +67,8 @@ struct Sess {
     acked: u64,
     ring: VecDeque<(u64, Message)>,
     conn: Option<u64>,
+    /// The `inactive` flag, kept across sockets as the relay keeps it.
+    inactive: bool,
 }
 
 impl Sess {
@@ -104,6 +108,32 @@ struct Relay {
     reprove: bool,
     /// Reset connection number 0 after it counted this many frames.
     reset_first_after: Option<usize>,
+    /// Every TCP connection accepted, authenticated or not.
+    tcp_accepts: usize,
+    /// Drop every new TCP connection before the WebSocket upgrade.
+    refuse_new: bool,
+    /// Auth frames read, before `auth_delay`.
+    auths_seen: usize,
+    /// Hold each auth frame this long before answering it.
+    auth_delay: Option<Duration>,
+    /// `inactive` / `active` / `end` with the connection each came on.
+    controls_on: Vec<(u64, String)>,
+    /// The connection of each `members` burst the real relay would send: one per
+    /// resume, one per `active` on a session.
+    bursts: Vec<u64>,
+    /// Resumes that took the session from a socket still open (make before break).
+    live_transfers: usize,
+    /// The connection each `hb` and each `ack` came on.
+    hbs_on: Vec<u64>,
+    acks_on: Vec<u64>,
+    /// Answer every auth frame (after `auth_delay`) with `auth_failed`.
+    refuse_auth: bool,
+    /// Hold each challenge this long: a slow new path.
+    challenge_delay: Option<Duration>,
+    /// When each TCP connection was accepted.
+    accept_times: Vec<Instant>,
+    /// The `type` of every client text frame, with its connection, in arrival order.
+    text_types: Vec<(u64, String)>,
 }
 
 impl Relay {
@@ -157,6 +187,11 @@ impl FakeRelay {
         let accept_state = state.clone();
         tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
+                {
+                    let mut r = accept_state.lock().unwrap();
+                    r.tcp_accepts += 1;
+                    r.accept_times.push(Instant::now());
+                }
                 tokio::spawn(serve(accept_state.clone(), tcp));
             }
         });
@@ -258,6 +293,9 @@ fn verify_auth(auth: &Value, nonce: &str) -> bool {
 }
 
 async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
+    if state.lock().unwrap().refuse_new {
+        return;
+    }
     let _ = tcp.set_zero_linger();
     let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else { return };
     let (mut w, mut r) = ws.split();
@@ -274,6 +312,10 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
     if offer {
         challenge["session"] = json!(1);
     }
+    let held = state.lock().unwrap().challenge_delay;
+    if let Some(d) = held {
+        tokio::time::sleep(d).await;
+    }
     if w.send(Message::Text(challenge.to_string().into())).await.is_err() {
         return;
     }
@@ -281,8 +323,23 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
         Some(Ok(Message::Text(t))) => serde_json::from_str(&t).unwrap_or_default(),
         _ => return,
     };
-    if !verify_auth(&auth, &nonce) {
+    let delay = {
+        let mut s = state.lock().unwrap();
+        s.auths_seen += 1;
+        s.auth_delay
+    };
+    if let Some(d) = delay {
+        tokio::time::sleep(d).await;
+    }
+    let refuse = state.lock().unwrap().refuse_auth;
+    if !verify_auth(&auth, &nonce) || refuse {
         let _ = w.send(Message::Text(r#"{"type":"auth_failed","error":"Authentication failed"}"#.into())).await;
+        if refuse {
+            // As the relay does: the refusal, its 1008 close, and no reset under it.
+            let close = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 1008.into(), reason: "bad_auth".into() };
+            let _ = w.send(Message::Close(Some(close))).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         return;
     }
 
@@ -331,13 +388,20 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
                 if let Some(c) = old.and_then(|o| s.conns.get(&o)) {
                     let _ = c.tx.send(Out::Close(1000, "moved"));
                 }
+                if old.is_some() {
+                    s.live_transfers += 1;
+                }
+                s.bursts.push(id);
                 sid_of_conn = Some(session.clone());
             } else {
                 let failed = session != "new";
                 let reason = if s.sessions.contains_key(&session) { "bad_h" } else { "unknown" };
                 s.sessions.clear();
                 let sid = random_hex(16);
-                s.sessions.insert(sid.clone(), Sess { in_h: 0, sent: 0, acked: 0, ring: VecDeque::new(), conn: Some(id) });
+                s.sessions.insert(
+                    sid.clone(),
+                    Sess { in_h: 0, sent: 0, acked: 0, ring: VecDeque::new(), conn: Some(id), inactive: false },
+                );
                 let mut ok = json!({ "type": "auth_ok", "sid": sid, "grace_secs": 120, "hb_secs": 15 });
                 if failed {
                     ok["resume_failed"] = json!(reason);
@@ -417,10 +481,12 @@ fn on_client_frame(state: &Arc<Mutex<Relay>>, id: u64, msg: Message) {
     match &msg {
         Message::Text(t) => {
             let v: Value = serde_json::from_str(t).unwrap_or_default();
+            s.text_types.push((id, v["type"].as_str().unwrap_or_default().to_string()));
             match v["type"].as_str().unwrap_or_default() {
                 "hb" => {
                     let h = v["h"].as_u64().unwrap_or_default();
                     s.hbs.push(h);
+                    s.hbs_on.push(id);
                     let in_h = match sid.as_ref().and_then(|x| s.sessions.get_mut(x)) {
                         Some(sess) => {
                             sess.ack(h);
@@ -436,13 +502,24 @@ fn on_client_frame(state: &Arc<Mutex<Relay>>, id: u64, msg: Message) {
                 "ack" => {
                     let h = v["h"].as_u64().unwrap_or_default();
                     s.acks.push(h);
+                    s.acks_on.push(id);
                     if let Some(sess) = sid.as_ref().and_then(|x| s.sessions.get_mut(x)) {
                         sess.ack(h);
                     }
                     return;
                 }
                 kind @ ("inactive" | "active" | "end") => {
-                    s.controls.push(kind.to_string());
+                    let r = &mut *s;
+                    r.controls.push(kind.to_string());
+                    r.controls_on.push((id, kind.to_string()));
+                    if kind != "end"
+                        && let Some(sess) = sid.as_ref().and_then(|x| r.sessions.get_mut(x))
+                    {
+                        sess.inactive = kind == "inactive";
+                        if kind == "active" {
+                            r.bursts.push(id);
+                        }
+                    }
                     return;
                 }
                 _ => {}
@@ -1109,4 +1186,735 @@ async fn the_client_acks_every_16_frames_or_after_the_window() {
     relay.wait("an ack at 16", T, |r| r.acks.contains(&16)).await;
     relay.wait("an ack at 20 after the window", T, |r| r.acks.contains(&20)).await;
     assert_eq!(relay.with(|r| r.acks.clone()), [16, 20]);
+}
+
+// -- The app's lifecycle and the move to a better network (plan 11.4, 3.7) --
+
+fn spawn_routed_client(url: &str, timing: Timing, route: Arc<Mutex<Option<std::net::IpAddr>>>) -> Client {
+    spawn_seamed_client(url, timing, route, Arc::new(AtomicBool::new(false)))
+}
+
+/// A client whose route lookup and call flag the test sets.
+fn spawn_seamed_client(
+    url: &str,
+    timing: Timing,
+    route: Arc<Mutex<Option<std::net::IpAddr>>>,
+    in_call: Arc<AtomicBool>,
+) -> Client {
+    let kp = keypair();
+    let (cmd, cmd_rx) = mpsc::unbounded_channel();
+    let (event_tx, events) = mpsc::unbounded_channel();
+    let (ctl, ctl_rx) = mpsc::unbounded_channel();
+    let route: Route = Arc::new(move |relay| route.lock().unwrap().or_else(|| route_source(relay)));
+    let realtime: Realtime = Arc::new(move || in_call.load(Ordering::SeqCst));
+    let task = spawn_routed(
+        url.to_string(),
+        kp.peer_id(),
+        kp.to_protobuf_encoding().unwrap(),
+        base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf()),
+        timing,
+        route,
+        realtime,
+        cmd_rx,
+        event_tx,
+        ctl_rx,
+    );
+    Client { cmd, ctl, events, log: Vec::new(), directs: Vec::new(), _task: task }
+}
+
+/// An address on no interface of this machine: the OS "now" routes the relay elsewhere.
+fn new_network() -> Option<std::net::IpAddr> {
+    Some("10.255.255.1".parse().unwrap())
+}
+
+impl Client {
+    fn app_nudge(&self, reason: &str) {
+        let _ = self.ctl.send(Control::Nudge { reason: reason.into(), external: true });
+    }
+
+    fn background(&self, background: bool) {
+        let _ = self.ctl.send(Control::Background(background));
+    }
+
+    async fn suspend(&mut self) {
+        let (done, wait) = oneshot::channel();
+        self.ctl.send(Control::Suspend(done)).unwrap();
+        tokio::time::timeout(T, wait).await.expect("suspend returns").unwrap();
+        self.wait_kind("Suspended", T).await;
+    }
+}
+
+impl Relay {
+    fn controls_of(&self, conn: u64) -> Vec<String> {
+        self.controls_on.iter().filter(|(c, _)| *c == conn).map(|(_, k)| k.clone()).collect()
+    }
+
+    fn holds_inactive(&mut self) -> Option<bool> {
+        self.live_session().map(|s| s.inactive)
+    }
+
+    fn bursts_on(&self, conn: u64) -> usize {
+        self.bursts.iter().filter(|c| **c == conn).count()
+    }
+
+    fn text_types_on(&self, conn: u64) -> Vec<String> {
+        self.text_types.iter().filter(|(c, _)| *c == conn).map(|(_, t)| t.clone()).collect()
+    }
+}
+
+/// The relay hides a device from presence only once it holds `inactive`, and a fresh
+/// session starts shown: the client writes the flag before its join replay, or every
+/// room a backgrounded phone joins again would announce it first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_session_writes_inactive_before_its_join_replay() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    c.background(true);
+    c.send(WsCommand::JoinRoom { room_code: ROOM.into() });
+    relay
+        .wait("inactive and the join on the first session", T, |r| {
+            r.controls_of(0) == ["inactive"] && r.joins().iter().any(|(conn, _)| *conn == 0)
+        })
+        .await;
+
+    relay.with(|r| r.forget_sessions = true);
+    relay.kill();
+    c.wait_kind("Connected", T).await;
+    relay.wait("the replayed join on the fresh session", T, |r| r.joins().iter().any(|(conn, _)| *conn == 1)).await;
+    let order = relay.with(|r| r.text_types_on(1));
+    let inactive = order.iter().position(|t| t == "inactive");
+    let join = order.iter().position(|t| t == "join");
+    assert!(
+        inactive.zip(join).is_some_and(|(flag, join)| flag < join),
+        "`inactive` comes before the first join on a fresh session: {order:?}"
+    );
+}
+
+/// Pinned FFI semantics: a flag the app sets while no socket is open reaches the relay
+/// on the next open, a resume and a fresh session alike.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flag_set_with_no_socket_goes_out_on_the_next_open() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    c.suspend().await;
+    c.background(true);
+    c.settle(Duration::from_millis(300)).await;
+    assert_eq!(relay.with(|r| r.tcp_accepts), 1, "going to the background reopens nothing");
+
+    c.app_nudge("call");
+    c.wait_kind("Resumed", T).await;
+    relay.wait("the resumed session held inactive", T, |r| r.holds_inactive() == Some(true)).await;
+    assert_eq!(relay.with(|r| r.controls_of(1)), ["inactive"]);
+
+    relay.with(|r| r.forget_sessions = true);
+    relay.kill();
+    c.wait_kind("Connected", T).await;
+    relay.wait("the fresh session held inactive", T, |r| r.holds_inactive() == Some(true)).await;
+    assert_eq!(relay.with(|r| r.controls_of(2)), ["inactive"]);
+}
+
+/// Plan 11.4: an app that comes back while suspended resumes with the relay holding it
+/// active again, so presence is no longer withheld.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_app_back_while_suspended_resumes_active() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    c.background(true);
+    relay.wait("inactive on the first socket", T, |r| r.holds_inactive() == Some(true)).await;
+    c.suspend().await;
+    c.background(false);
+    c.wait_kind("Resumed", T).await;
+    relay.wait("active again", T, |r| r.holds_inactive() == Some(false)).await;
+    assert_eq!(relay.with(|r| r.controls_of(1)), ["active"]);
+    assert_eq!(relay.with(|r| r.bursts_on(1)), 2, "the resume's members, then the one `active` asks for");
+}
+
+/// `inactive` / `active` are uncounted and never resent: a flag written into a socket
+/// that turned out dead is written again on the socket that resumes the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flag_written_into_a_dead_socket_is_written_again() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing {
+        heartbeat: Duration::from_secs(30),
+        heartbeat_background: Duration::from_millis(200),
+        dead_after: Duration::from_secs(20),
+        ..quick()
+    };
+    let mut c = spawn_client(&relay.url(), t);
+    c.wait_kind("Connected", T).await;
+    c.background(true);
+    relay.wait("inactive", T, |r| r.holds_inactive() == Some(true)).await;
+    let beats = relay.with(|r| r.hbs.len());
+    relay.wait("two heartbeats after it, answered", T, |r| r.hbs.len() >= beats + 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    relay.zombie();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    c.background(false);
+    c.wait_kind("Resumed", T).await;
+    relay.wait("active on the socket that resumed", T, |r| r.holds_inactive() == Some(false)).await;
+    assert_eq!(relay.with(|r| r.controls_of(1)), ["active"]);
+}
+
+/// No flag frame, so no second `members` burst, when the relay already holds the app's
+/// flag: a confirmed flag is not written again after a resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_flag_and_no_second_members_burst_when_nothing_changed() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing { heartbeat_background: Duration::from_millis(200), ..quick() };
+    let mut c = spawn_client(&relay.url(), t);
+    c.wait_kind("Connected", T).await;
+    c.post(1);
+    relay.wait("the post", T, |r| r.binaries().len() == 1).await;
+    relay.kill();
+    c.wait_kind("Resumed", T).await;
+    c.settle(Duration::from_millis(300)).await;
+    relay.with(|r| {
+        assert!(r.controls_of(1).is_empty(), "the relay starts every session active: {:?}", r.controls_on);
+        assert_eq!(r.bursts_on(1), 1, "only the resume's own members");
+    });
+
+    c.background(true);
+    relay.wait("inactive", T, |r| r.controls_of(1) == ["inactive"]).await;
+    let beats = relay.with(|r| r.hbs.len());
+    relay.wait("two heartbeats after it, answered", T, |r| r.hbs.len() >= beats + 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    relay.kill();
+    c.wait_kind("Resumed", T).await;
+    c.settle(Duration::from_millis(300)).await;
+    relay.with(|r| {
+        assert!(r.controls_of(2).is_empty(), "the relay is known to hold inactive: {:?}", r.controls_on);
+        assert_eq!(r.holds_inactive(), Some(true));
+    });
+}
+
+/// Pinned FFI semantics: a suspend ends only when the app comes back (`foreground`,
+/// `focus`, `call`, `push`, or `relay_set_background(false)`); network and wake nudges,
+/// the client's own included, never reopen the socket, cut a suspend short or move it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_app_coming_back_ends_a_suspend() {
+    let relay = FakeRelay::start(true).await;
+    let route = Arc::new(Mutex::new(None));
+    let mut c = spawn_routed_client(&relay.url(), quick(), route.clone());
+    c.wait_kind("Connected", T).await;
+    c.suspend().await;
+    for reason in ["network", "wake", "other"] {
+        c.app_nudge(reason);
+    }
+    let _ = c.ctl.send(Control::Nudge { reason: "wake".into(), external: false });
+    c.settle(Duration::from_millis(600)).await;
+    assert_eq!(relay.with(|r| r.tcp_accepts), 1, "closed on purpose stays closed");
+
+    let mut conn = 0;
+    for reopen in ["focus", "call", "push", "background"] {
+        if reopen == "background" {
+            c.background(false);
+        } else {
+            c.app_nudge(reopen);
+        }
+        c.wait_kind("Resumed", T).await;
+        conn += 1;
+        c.suspend().await;
+        relay
+            .wait("the suspend close", T, |r| r.closes.iter().any(|(id, code, why)| *id == conn && *code == 1000 && why == "suspend"))
+            .await;
+    }
+
+    c.app_nudge("foreground");
+    c.wait_kind("Resumed", T).await;
+    conn += 1;
+    relay.with(|r| {
+        r.withhold_acks = true;
+        r.mute_hb_acks = true;
+    });
+    c.post(1);
+    relay.wait("the post", T, |r| r.binaries().len() == 1).await;
+    let accepts = relay.with(|r| r.tcp_accepts);
+    let (done, wait) = oneshot::channel();
+    c.ctl.send(Control::Suspend(done)).unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    *route.lock().unwrap() = new_network();
+    c.app_nudge("network");
+    tokio::time::timeout(T, wait).await.expect("suspend returns").unwrap();
+    relay
+        .wait("a suspend a network nudge did not cut short", T, |r| {
+            r.closes.iter().any(|(id, code, why)| *id == conn && *code == 1000 && why == "suspend")
+        })
+        .await;
+    c.settle(Duration::from_millis(600)).await;
+    assert_eq!(relay.with(|r| r.tcp_accepts), accepts, "nor moved to a new socket");
+}
+
+/// A probe that was out when the app suspended is not raced: a socket raced past the
+/// suspend would reopen what the app closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_probe_out_when_the_app_suspends_is_never_raced() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing { heartbeat: Duration::from_secs(30), ..quick() };
+    let mut c = spawn_client(&relay.url(), t);
+    c.wait_kind("Connected", T).await;
+    relay.with(|r| {
+        r.withhold_acks = true;
+        r.mute_hb_acks = true;
+    });
+    c.post(1);
+    relay.wait("the post", T, |r| r.binaries().len() == 1).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    c.app_nudge("foreground");
+    relay.wait("the probe", T, |r| r.hbs.len() == 1).await;
+    c.suspend().await;
+    c.settle(Duration::from_millis(600)).await;
+    assert_eq!(c.log, ["Connected", "Suspended"]);
+    assert_eq!(relay.with(|r| r.tcp_accepts), 1, "no socket raced past the suspend");
+}
+
+/// A move whose new socket fails judges the old socket from a fresh heartbeat, not from
+/// one that was out before the move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_move_judges_the_old_socket_afresh() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing { heartbeat: Duration::from_secs(30), dead_after: Duration::from_millis(400), ..quick() };
+    let mut c = spawn_routed_client(&relay.url(), t, Arc::new(Mutex::new(new_network())));
+    c.wait_kind("Connected", T).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    relay.with(|r| {
+        r.mute_hb_acks = true;
+        r.auth_delay = Some(Duration::from_millis(600));
+        r.refuse_auth = true;
+    });
+    c.app_nudge("foreground");
+    relay.wait("the probe", T, |r| r.hbs.len() == 1).await;
+    c.app_nudge("network");
+    relay.wait("the move's auth", T, |r| r.auths_seen == 2).await;
+    relay.with(|r| r.mute_hb_acks = false);
+    c.settle(Duration::from_millis(1200)).await;
+    assert_eq!(c.log, ["Connected"], "the old socket answered the heartbeat after the failed move");
+    assert_eq!(relay.with(|r| r.tcp_accepts), 2);
+}
+
+/// A race or a move may take the session off the old socket, so an answer heard there
+/// after it started proves no flag arrived.
+#[test]
+fn a_second_socket_makes_the_old_ones_answers_prove_nothing() {
+    let kp = keypair();
+    let dial = Dial {
+        url: "ws://127.0.0.1:9/ws".into(),
+        peer_id: kp.peer_id(),
+        keypair_proto: kp.to_protobuf_encoding().unwrap(),
+        pub_key_b64: base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf()),
+        license_key: None,
+        fetch: false,
+    };
+    for purpose in [Purpose::Race, Purpose::Move] {
+        let (event_tx, _events) = mpsc::unbounded_channel();
+        let mut client = super::Client::new(dial.clone(), quick(), event_tx, false);
+        client.flag.fresh_session();
+        client.flag.wrote(true);
+        client.start_attempt(purpose);
+        client.flag.beat_sent();
+        client.flag.answered();
+        client.flag.new_socket();
+        assert!(client.flag.needs(true), "{purpose:?}");
+    }
+}
+
+/// Coalescing: while a probe is out or a connect is under way, more nudges, the
+/// foreground `relay_set_background(false)` among them, add nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nudges_coalesce_into_one_probe_or_one_connect() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing { heartbeat: Duration::from_secs(30), ..quick() };
+    let mut c = spawn_client(&relay.url(), t);
+    c.wait_kind("Connected", T).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    relay.with(|r| r.mute_hb_acks = true);
+    c.background(false);
+    relay.wait("the probe", T, |r| r.hbs.len() == 1).await;
+    for reason in ["foreground", "focus", "call", "network"] {
+        c.app_nudge(reason);
+    }
+    c.settle(Duration::from_millis(120)).await;
+    relay.with(|r| {
+        assert_eq!(r.hbs.len(), 1, "one probe while it is out");
+        assert!(r.controls_of(0).is_empty(), "the relay already holds active: {:?}", r.controls_on);
+        r.mute_hb_acks = false;
+    });
+    c.wait_kind("Resumed", T).await;
+
+    c.suspend().await;
+    let accepts = relay.with(|r| {
+        r.auth_delay = Some(Duration::from_millis(400));
+        r.tcp_accepts
+    });
+    c.background(false);
+    relay.wait("the connect under way", T, |r| r.tcp_accepts == accepts + 1).await;
+    for reason in ["foreground", "focus", "call", "network"] {
+        c.app_nudge(reason);
+    }
+    c.wait_kind("Resumed", T).await;
+    c.settle(Duration::from_millis(300)).await;
+    assert_eq!(relay.with(|r| r.tcp_accepts), accepts + 1, "one connect");
+}
+
+/// While a move is under way the old socket gets nothing: no queued frame, heartbeat or
+/// ack is written into it (the flag: `a_network_change_moves_...`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_writes_nothing_into_the_old_socket() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing { heartbeat: Duration::from_millis(150), ack_after: Duration::from_millis(100), ..quick() };
+    let mut c = spawn_routed_client(&relay.url(), t, Arc::new(Mutex::new(new_network())));
+    c.wait_kind("Connected", T).await;
+    relay.with(|r| r.auth_delay = Some(Duration::from_millis(600)));
+    relay.push(direct(b"s1"));
+    c.wait_directs(&[b"s1"], T).await;
+    c.app_nudge("network");
+    relay.wait("the move's auth", T, |r| r.auths_seen == 2).await;
+    let before = relay.with(|r| (r.hbs_on.clone(), r.acks_on.clone(), r.got.len()));
+    c.post(1);
+    c.wait_kind("Resumed", T).await;
+    relay.with(|r| {
+        let on_old = |seen: &[u64]| seen.iter().filter(|c| **c == 0).count();
+        assert_eq!(on_old(&r.hbs_on), on_old(&before.0), "no heartbeat");
+        assert_eq!(on_old(&r.acks_on), on_old(&before.1), "no ack");
+        assert!(r.got[before.2..].iter().all(|(conn, _)| *conn == 1), "no queued frame");
+    });
+}
+
+/// Plan 3.7: a network change that routes the relay through another local address moves
+/// the session to a new socket while the old one still works. The old socket is left
+/// unread meanwhile, so what the relay wrote into it comes back once, in the replay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_network_change_moves_the_session_before_the_old_socket_breaks() {
+    let relay = FakeRelay::start(true).await;
+    let route = Arc::new(Mutex::new(None));
+    let t = Timing { heartbeat: Duration::from_secs(30), ..quick() };
+    let mut c = spawn_routed_client(&relay.url(), t, route.clone());
+    c.wait_kind("Connected", T).await;
+    c.send(WsCommand::JoinRoom { room_code: ROOM.into() });
+    c.post(1);
+    relay.wait("the post", T, |r| r.binaries() == posts(1..=1)).await;
+    relay.push(direct(b"s1"));
+    c.wait_directs(&[b"s1"], T).await;
+    relay.wait("the client's ack of s1", T, |r| r.live_session().is_some_and(|s| s.acked == 1)).await;
+
+    *route.lock().unwrap() = new_network();
+    relay.with(|r| r.auth_delay = Some(Duration::from_millis(500)));
+    c.app_nudge("network");
+    relay.wait("the move's auth", T, |r| r.auths_seen == 2).await;
+    relay.push(direct(b"s2"));
+    relay.push(direct(b"s3"));
+    c.post(2);
+    c.background(true);
+    c.app_nudge("network");
+    c.app_nudge("foreground");
+    c.wait_kind("Resumed", T).await;
+    relay.with(|r| r.auth_delay = None);
+    c.wait_directs(&[b"s1", b"s2", b"s3"], T).await;
+    relay.wait("every post once, in order", T, |r| r.binaries() == posts(1..=2)).await;
+    c.settle(Duration::from_millis(300)).await;
+    assert_eq!(c.log, ["Connected", "Suspended", "Resumed{gap:false}"]);
+    assert_eq!(c.directs.len(), 3, "nothing delivered twice");
+    relay.with(|r| {
+        assert!(r.acks.iter().chain(&r.hbs).all(|h| *h <= 3), "the client counted what the relay sent: {:?} {:?}", r.acks, r.hbs);
+        assert_eq!(r.live_transfers, 1, "the session moved off a socket that was still open");
+        assert_eq!(r.tcp_accepts, 2, "one move at a time");
+        assert_eq!((r.auths[1].0, r.auths[1].2), (3, 1), "a resume counting only what the old socket delivered");
+        assert!(r.closes.is_empty(), "the client never closed the old socket; the relay did");
+        assert_eq!(r.joins().len(), 1, "a move rejoins nothing");
+        assert_eq!(r.got.iter().filter(|(conn, _)| *conn == 0).count(), 2, "the join and the first post only");
+        assert_eq!((r.controls_of(0), r.controls_of(1)), (vec![], vec!["inactive".to_string()]), "nothing is written into the old socket");
+    });
+
+    *route.lock().unwrap() = None;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    c.app_nudge("network");
+    c.settle(Duration::from_millis(500)).await;
+    assert_eq!(relay.with(|r| r.tcp_accepts), 2, "the new socket is on the OS's route now");
+}
+
+/// The app suspending in the middle of a move: the move is dropped, the old socket closes
+/// on purpose and stays closed, and what the relay wrote into the unread socket comes
+/// back once on the resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_suspend_during_a_move_cancels_it() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing { heartbeat: Duration::from_secs(30), ..quick() };
+    let mut c = spawn_routed_client(&relay.url(), t, Arc::new(Mutex::new(new_network())));
+    c.wait_kind("Connected", T).await;
+    relay.push(direct(b"s1"));
+    c.wait_directs(&[b"s1"], T).await;
+    relay.with(|r| r.auth_delay = Some(Duration::from_millis(500)));
+    c.app_nudge("network");
+    relay.wait("the move's auth", T, |r| r.auths_seen == 2).await;
+    relay.push(direct(b"s2"));
+    c.suspend().await;
+    c.settle(Duration::from_millis(800)).await;
+    assert_eq!(c.log, ["Connected", "Suspended"], "suspended means closed, the move included");
+    relay.with(|r| r.auth_delay = None);
+    c.app_nudge("foreground");
+    c.wait_kind("Resumed", T).await;
+    relay.push(direct(b"s3"));
+    c.wait_directs(&[b"s1", b"s2", b"s3"], T).await;
+    c.settle(Duration::from_millis(300)).await;
+    assert_eq!(c.directs.len(), 3, "nothing delivered twice");
+}
+
+/// A network event that leaves the relay's route alone (a VPN or virtual adapter coming
+/// and going) costs nothing but the probe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_network_event_on_the_same_route_costs_only_the_probe() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing { heartbeat: Duration::from_secs(30), ..quick() };
+    let mut c = spawn_routed_client(&relay.url(), t, Arc::new(Mutex::new(None)));
+    c.wait_kind("Connected", T).await;
+    relay.push(direct(b"fresh"));
+    c.wait_directs(&[b"fresh"], T).await;
+    c.app_nudge("network");
+    c.settle(Duration::from_millis(250)).await;
+    assert_eq!(relay.with(|r| r.hbs.len()), 0, "a socket that just spoke is not even probed");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    c.app_nudge("network");
+    c.settle(Duration::from_millis(500)).await;
+    relay.with(|r| assert_eq!((r.hbs.len(), r.tcp_accepts), (1, 1)));
+    assert_eq!(c.log, ["Connected"]);
+}
+
+/// A move whose new socket fails leaves the old socket as it was: no event, nothing
+/// lost, the old socket carries on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_move_keeps_the_old_socket() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing { heartbeat: Duration::from_secs(30), ..quick() };
+    let mut c = spawn_routed_client(&relay.url(), t, Arc::new(Mutex::new(new_network())));
+    c.wait_kind("Connected", T).await;
+    relay.with(|r| r.refuse_new = true);
+    c.app_nudge("network");
+    relay.wait("the refused move", T, |r| r.tcp_accepts == 2).await;
+    c.settle(Duration::from_millis(300)).await;
+    c.post(1);
+    relay.push(direct(b"s1"));
+    relay.wait("the post on the old socket", T, |r| r.got.iter().filter(|(conn, _)| *conn == 0).count() == 1).await;
+    c.wait_directs(&[b"s1"], T).await;
+    assert_eq!(c.log, ["Connected"]);
+    assert_eq!(relay.conn_count(), 1);
+}
+
+/// On a relay without sessions a new socket is a fresh login that drops what was in
+/// flight on the old one, so a network change only probes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_without_sessions_is_only_probed_on_a_network_change() {
+    let relay = FakeRelay::start(false).await;
+    let t = Timing { heartbeat: Duration::from_secs(30), ..quick() };
+    let mut c = spawn_routed_client(&relay.url(), t, Arc::new(Mutex::new(new_network())));
+    c.wait_kind("Connected", T).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    c.app_nudge("network");
+    c.settle(Duration::from_millis(600)).await;
+    assert_eq!(relay.with(|r| r.tcp_accepts), 1);
+    assert_eq!(c.log, ["Connected"]);
+}
+
+/// A move holds nothing while its new socket is still being set up (a captive portal or a
+/// slow path can take seconds): the old socket keeps carrying both ways until the new one
+/// has the relay's challenge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_holds_nothing_while_its_socket_is_dialled() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing { heartbeat: Duration::from_secs(30), ..quick() };
+    let mut c = spawn_routed_client(&relay.url(), t, Arc::new(Mutex::new(new_network())));
+    c.wait_kind("Connected", T).await;
+    relay.with(|r| r.challenge_delay = Some(Duration::from_millis(800)));
+    c.app_nudge("network");
+    relay.wait("the move's socket", T, |r| r.tcp_accepts == 2).await;
+    let sent = Instant::now();
+    relay.push(direct(b"s1"));
+    c.post(1);
+    c.wait_directs(&[b"s1"], T).await;
+    assert!(sent.elapsed() < Duration::from_millis(400), "delivered while the new socket waited: {:?}", sent.elapsed());
+    relay
+        .wait("the post on the old socket", T, |r| r.got.iter().any(|(conn, m)| *conn == 0 && matches!(m, Message::Binary(_))))
+        .await;
+    c.wait_kind("Resumed", T).await;
+    relay.with(|r| r.challenge_delay = None);
+    relay.push(direct(b"s2"));
+    c.post(2);
+    c.wait_directs(&[b"s1", b"s2"], T).await;
+    relay.wait("both posts once, in order", T, |r| r.binaries() == posts(1..=2)).await;
+    c.settle(Duration::from_millis(300)).await;
+    assert_eq!(c.directs.len(), 2, "nothing delivered twice");
+    assert_eq!(c.log, ["Connected", "Suspended", "Resumed{gap:false}"]);
+}
+
+/// A call in the background keeps the foreground heartbeat, so its signalling has fast
+/// liveness; the background beat comes back once the call ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_in_the_background_keeps_the_foreground_heartbeat() {
+    let relay = FakeRelay::start(true).await;
+    let t = Timing { heartbeat: Duration::from_millis(150), heartbeat_background: Duration::from_secs(5), ..quick() };
+    let in_call = Arc::new(AtomicBool::new(false));
+    let mut c = spawn_seamed_client(&relay.url(), t, Arc::new(Mutex::new(None)), in_call.clone());
+    c.wait_kind("Connected", T).await;
+    c.background(true);
+    relay.wait("inactive", T, |r| r.controls_of(0) == ["inactive"]).await;
+    let beats = |relay: &FakeRelay| relay.with(|r| r.hbs.len());
+    let idle = beats(&relay);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(beats(&relay), idle, "the background beat");
+
+    in_call.store(true, Ordering::SeqCst);
+    let _ = c.ctl.send(Control::Realtime);
+    let calling = beats(&relay);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(beats(&relay) >= calling + 3, "the foreground beat while the call lasts: {}", beats(&relay) - calling);
+
+    in_call.store(false, Ordering::SeqCst);
+    let _ = c.ctl.send(Control::Realtime);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let ended = beats(&relay);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(beats(&relay), ended, "the background beat once the call ended");
+    c.drain();
+    assert_eq!(c.log, ["Connected"]);
+}
+
+/// While the relay can still resume our session, a path that comes back by itself (no OS
+/// event to nudge) is tried again within the short cap; past the grace, or once the relay
+/// refused us, the full backoff.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_session_retries_within_the_short_cap_until_the_grace_ends_or_a_refusal() {
+    let t = Timing {
+        backoff_base: Duration::from_millis(20),
+        backoff_cap: Duration::from_secs(3),
+        resume_backoff_cap: Duration::from_millis(100),
+        grace: Duration::from_millis(2500),
+        ..quick()
+    };
+    let ms = Duration::from_millis;
+    let tries = |relay: &FakeRelay, from: Instant, to: Instant| {
+        relay.with(|r| r.accept_times.iter().filter(|at| **at >= from && **at < to).count())
+    };
+
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), t.clone());
+    c.wait_kind("Connected", T).await;
+    relay.with(|r| r.refuse_new = true);
+    relay.kill();
+    c.wait_kind("Suspended", T).await;
+    let suspended = Instant::now();
+    tokio::time::sleep_until(suspended + ms(2000)).await;
+    let early = tries(&relay, suspended + ms(500), suspended + ms(2000));
+    assert!(early >= 8, "{early} tries in 1.5 s inside the grace");
+    tokio::time::sleep_until(suspended + ms(5000)).await;
+    let late = tries(&relay, suspended + ms(3000), suspended + ms(5000));
+    assert!(late <= 5, "{late} tries in 2 s past the grace");
+
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), Timing { grace: Duration::from_secs(30), ..t });
+    c.wait_kind("Connected", T).await;
+    relay.with(|r| r.refuse_auth = true);
+    relay.kill();
+    c.wait_kind("Suspended", T).await;
+    let suspended = Instant::now();
+    tokio::time::sleep_until(suspended + ms(3000)).await;
+    let refused = tries(&relay, suspended + ms(1500), suspended + ms(3000));
+    assert!(refused <= 4, "{refused} refused tries in 1.5 s");
+
+    relay.with(|r| r.refuse_auth = false);
+    c.wait_kind("Resumed", Duration::from_secs(10)).await;
+    relay.with(|r| r.refuse_new = true);
+    relay.kill();
+    c.wait_kind("Suspended", T).await;
+    let suspended = Instant::now();
+    tokio::time::sleep_until(suspended + ms(2000)).await;
+    let again = tries(&relay, suspended + ms(500), suspended + ms(2000));
+    assert!(again >= 8, "{again} tries in 1.5 s: a refusal is forgotten once a socket is up");
+}
+
+// -- A hostile relay against the client (handshake review, RESUMABLE_SESSIONS_PLAN.md
+// section 4; audit file rs_handshake_review.md) --
+
+/// A relay that resumes us below what it already acked is not describing our session:
+/// the client starts over instead of resending into numbers it cannot trust.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_relay_a_resume_below_its_own_ack_is_session_lost() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    for k in 1..=3 {
+        c.post(k);
+    }
+    relay.wait("three posts, each acked", T, |r| r.binaries().len() == 3 && r.live_session().is_some_and(|s| s.in_h == 3)).await;
+    c.settle(Duration::from_millis(300)).await;
+    relay.with(|r| r.resume_h = Some(1));
+    relay.kill();
+    c.wait_kind("Suspended", T).await;
+    c.wait_kind("SessionLost", T).await;
+    c.wait_kind("Connected", T).await;
+    assert_eq!(c.log, ["Connected", "Suspended", "SessionLost", "Connected"]);
+    let auths = relay.with(|r| r.auths.iter().map(|a| a.1.clone()).collect::<Vec<_>>());
+    assert_eq!(auths.last().map(String::as_str), Some("new"), "the next socket asks for a fresh session");
+}
+
+/// A gap the relay says stands for 2^64-1 frames neither panics nor wedges the client: the
+/// count saturates, the next resume is refused, and a fresh session carries on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_relay_a_gap_of_2_pow_64_neither_panics_nor_wedges() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    relay.push(Message::Text(json!({ "type": "gap", "n": u64::MAX }).to_string().into()));
+    relay.push(direct(b"after-the-gap"));
+    c.wait_directs(&[b"after-the-gap"], T).await;
+    relay.wait("an ack naming the saturated count", T, |r| r.acks.contains(&u64::MAX) || r.hbs.contains(&u64::MAX)).await;
+    relay.kill();
+    c.wait_kind("Suspended", T).await;
+    c.wait_kind("Connected", T).await;
+    assert_eq!(c.log, ["Connected", "Suspended", "SessionLost", "Connected"]);
+    assert_eq!(relay.with(|r| r.auths[1].2), u64::MAX, "the resume named the count it held");
+    c.post(9);
+    relay.wait("a post on the fresh session", T, |r| r.binaries() == posts(9..=9)).await;
+}
+
+/// Auth answers arriving after the handshake are not answers: a mid-stream `resumed` or
+/// `auth_ok` changes no session and no sid the client resumes with later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_relay_answers_outside_the_handshake_change_nothing() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    let sid = relay.with(|r| r.sessions.keys().next().cloned().unwrap());
+    let planted = "ffeeddccbbaa99887766554433221100";
+    relay.tell(json!({ "type": "resumed", "h": 0, "gap": true, "reprove": true, "grace_secs": 1, "hb_secs": 1 }));
+    relay.tell(json!({ "type": "auth_ok", "sid": planted, "resume_failed": "unknown" }));
+    relay.tell(json!({ "type": "auth_failed", "error": "license_key_required" }));
+    relay.tell(json!({ "type": "auth_challenge", "nonce": "00".repeat(32), "door_key": "k", "session": 1 }));
+    relay.push(direct(b"still-here"));
+    c.wait_directs(&[b"still-here"], T).await;
+    c.settle(Duration::from_millis(300)).await;
+    assert_eq!(c.log, ["Connected"], "nothing happened to the session");
+    relay.kill();
+    c.wait_kind("Resumed", T).await;
+    assert_eq!(relay.with(|r| r.auths[1].1.clone()), sid, "the resume names the session the handshake gave");
+}
+
+/// A drain hint naming the longest wait there is still yields to the app: a nudge resumes
+/// at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_relay_a_drain_hint_cannot_outwait_a_nudge() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    relay.tell(json!({ "type": "reconnect", "after_ms": u64::MAX }));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    relay.kill();
+    c.wait_kind("Suspended", T).await;
+    c.settle(Duration::from_millis(300)).await;
+    assert_eq!(relay.conn_count(), 1, "the hint is honoured");
+    let nudged = Instant::now();
+    c.nudge();
+    c.wait_kind("Resumed", T).await;
+    assert!(nudged.elapsed() < Duration::from_secs(2), "a nudge ends the wait: {:?}", nudged.elapsed());
 }

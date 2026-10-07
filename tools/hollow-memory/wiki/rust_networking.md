@@ -79,7 +79,7 @@ relay only ever sees DEVICE ids.
 - A drop with a session: `Suspended`, then `Resumed { gap }`, or `SessionLost` + `Connected`.
 - A drop without one (a relay without sessions): `SessionLost`, then `Connected`. Each failed
   connect attempt while no session is held emits `SessionLost` again.
-- A make-before-break win: `Suspended`, then `Resumed`.
+- A make-before-break win (a race or a move): `Suspended`, then `Resumed`.
 - `Resumed` reaches the node before any frame the relay replays.
 - While a sid is held, a failed connect emits nothing: the client never declares the session lost
   on its own, because the relay's grace started at the relay's own detection. Dart shows Offline
@@ -88,6 +88,9 @@ relay only ever sees DEVICE ids.
   `SessionLost`, that socket is dropped, and a fresh connect follows at once (`Connected`).
 
 ### Handshake: `ws_client.rs:open_socket()`
+
+`open_socket` = `challenge()` (steps 1 and 2) then `sign_in()` (steps 3 to 5); a move runs the two
+apart (see "Move to a better network").
 
 1. `dial_websocket()` opens the TCP stream itself, so socket options go on before TLS:
    `TCP_USER_TIMEOUT` 20 s on Linux and Android (`limit_unacked_send_time`, socket2), so the kernel
@@ -175,7 +178,7 @@ FRONT of the queue a join of every room in `Rooms::joined` (own `inbox:` rooms f
 `JoinInbox` with their stored roster, the rest sorted), then every stored subscription, then the
 offline-delivery opt-in, and emits `RoomBudgetUpdate`. So after a `resume_failed` the wire order is
 the replay, the dead session's unacked frames, then the unwritten queue. A fresh session opened while
-backgrounded writes `inactive` at once.
+backgrounded writes `inactive` at once (see "The app's flag").
 
 **Join echo rule** (`render_join`, `replayed_joins`): the swarm's `Connected` work joins the same
 rooms again. The first join of a room that renders byte-identical to the replay's join within
@@ -192,7 +195,10 @@ the command is still queued.
 
 ### Liveness
 
-- Heartbeat every 15 s in the foreground, 60 s in the background (`Timing::heartbeat_every`):
+- Heartbeat every 15 s in the foreground, 60 s in the background, but 15 s in the background too
+  while a call is live (`Timing::heartbeat_for`, `Client::beat_every`; a call's signalling needs a
+  dead path found in seconds). `set_realtime_active` tells every client (`Control::Realtime`): a
+  call starting brings the next beat forward, one ending slows the beat after the next one.
   `{"type":"hb","h":N}` on a session socket, a WebSocket ping on a relay without sessions (which
   answers pings with pongs, so it gets the fast liveness too). The client answers the relay's pings.
 - **Dead rule** (`Liveness::dead_at`): nothing at all heard for 10 s after a heartbeat went out ->
@@ -204,34 +210,97 @@ the command is still queued.
 
 ### Nudge, background, suspend
 
-- `nudge(reason)` (reasons `foreground`, `focus`, `network`, `wake`, anything else `other`) sends
-  `Control::Nudge { external: true }` to every client. `Client::nudge` resets the backoff. With a
-  socket: nothing if a frame arrived in the last 2 s (`wants_probe`), a probe is out or an attempt
-  is open; otherwise a heartbeat with a 1 s deadline (`probe_sent`), and on a miss a NEW socket opens
-  and resumes while the old one is still judged (**make before break**, `start_attempt(true)`). The
-  first to answer wins: any frame on the old socket drops the race; the new socket winning drops the
-  old one quietly (no close frame) and emits `Suspended` then `Resumed`; a failed race is ignored
-  (the dead rule decides the old socket). With no socket: connect now (a drain wait is cancelled);
-  an attempt older than 2 s is started over, a younger one is left alone.
+- `nudge(reason)` (reasons `foreground`, `focus`, `network`, `wake`, `call`, `push`, anything else
+  `other`: `relay_session::app_reason`) sends `Control::Nudge { external: true }` to every client.
+  `Client::nudge` resets the backoff. Every open attempt (`Purpose::Connect`, `Race`, `Move`) absorbs
+  further nudges, so a burst costs one probe or one connect. With a socket: an app `network` nudge
+  may MOVE the session (below); otherwise nothing if a frame arrived in the last 2 s
+  (`wants_probe`) or a probe is out; else a heartbeat with a 1 s deadline (`probe_sent`), and on a
+  miss a NEW socket opens and resumes while the old one is still judged (**make before break**,
+  `Purpose::Race`). The first to answer wins: any frame on the old socket drops the race; the new
+  socket winning drops the old one quietly (no close frame) and emits `Suspended` then `Resumed`; a
+  failed race is ignored (the dead rule decides the old socket). With no socket: connect now (a
+  drain wait is cancelled); an attempt older than 2 s is started over, a younger one is left alone.
+- **A suspend ends only when the app comes back** (`relay_session::ends_suspend`): an app nudge
+  `foreground`, `focus`, `call` (an incoming call or a call kept alive in the background) or `push`
+  (a push woke the live process: the ring holds what woke it; the app suspends again 10 s later),
+  or `set_background(false)`. App `network` and `wake` nudges, unknown reasons and the client's own
+  `wake` (the sleep detector) do nothing while suspended or while a suspend is waiting to close: a
+  phone socket closed on purpose stays closed.
 - `set_background(bg)`: kept process-wide (`BACKGROUND`, so a new client starts in it); switches the
-  heartbeat interval; writes `inactive` or `active` (uncounted) on a session socket; `false` also
-  nudges `foreground`.
+  heartbeat interval; tells the relay the flag if it does not hold it yet (`sync_flag`); `false` is
+  also the phone's ONE foreground nudge (it ends a suspend and probes; the app does not nudge
+  `foreground` as well).
 - `suspend()`: the client first takes what the node already queued, then (`begin_suspend`,
   `check_suspend`) waits until the queue is written and the relay acked it all (asking with one
   `hb`), at most `Timing::suspend_wait` (2 s); acks what it received; closes 1000 `suspend` and
   waits up to 2 s for the relay's close reply (`goodbye`). The session goes into grace and the
-  client stays closed (`suspended`) until an EXTERNAL nudge: its own `wake` nudge never ends a
-  suspend. With no socket open it is suspended at once.
+  client stays closed (`suspended`). A race or move in flight is dropped first, and a probe that
+  misses while the suspend waits is not raced (a socket raced past the suspend would reopen what
+  the app closed). With no socket open it is suspended at once.
+
+### The app's flag (`relay_session::Flag`, `sync_flag`)
+
+`inactive` / `active` are uncounted and never resent, so the client tracks what the relay holds (the
+relay keeps it across grace, resume and its snapshot). A fresh session starts active. A flag write is
+known to have arrived only once the relay answered (`hb_ack`) a heartbeat written AFTER it on the
+same socket; a socket a race or move may take the session from (`doubt`) proves nothing. After every
+open (fresh session, resume, move win) and on every `set_background`, the app's flag is written
+unless the relay is known to hold it (or it is already in flight on this socket); with no socket open
+it waits for the next open. Why so careful: every `active` makes the relay send one `members` per
+room, as every resume already does, so a resume where nothing changed writes no flag at all. The
+usual phone return (inactive held, back while suspended) writes `active` after `resumed`: one extra
+burst, the price of clearing the flag (a relay that skipped that burst when nothing was withheld
+would make it free). A fresh session writes the flag before its join replay goes out (`sync_flag`
+writes, `replay_rooms` only queues): the relay hides a device only once it holds `inactive`, so a
+replayed join ahead of it would announce a backgrounded phone in every room
+(`a_fresh_session_writes_inactive_before_its_join_replay`).
+
+### Move to a better network (plan 3.7, `route_moved`, `Purpose::Move`)
+
+On an app `network` nudge with a session socket and no attempt open, the client asks the `Route` seam
+(`route_source`: a UDP `connect` to the live socket's relay address sends no packet and names the
+local address the routing table would use; the debug `relay_connect` override is the address
+dialled, so it counts as the relay's) whether it differs from the live socket's local address
+(`Socket::path`, read from the TCP stream at dial time).
+- **Different**: two stages (`Step`). First the new socket is dialled and takes the relay's
+  challenge (`challenge()`) while the old one carries on as usual, both ways: a captive portal or a
+  slow path costs the old socket nothing. Then (`sign_in_move`, `Attempt::signing`) the new socket
+  signs in to resume (`sign_in()`) while the old one stays open but untouched: not read
+  (`read_next` held), not written (no queue, heartbeat, ack or flag), not judged
+  (`Liveness::pause`, no dead rule or probe deadline). The resume signs the count of what the old
+  socket delivered; whatever the relay still wrote into it stays unacked in its ring and comes back
+  once in the replay. The relay moves the session and closes the old socket 1000 `moved`; the client
+  drops it quietly and emits `Suspended` then `Resumed`, like a race win. A move that fails while
+  dialling changes nothing; one that fails signing in leaves the old socket as it was: read again,
+  judged from one heartbeat, told the flag the app set meanwhile, no event.
+- **Same** (a VPN or virtual adapter event, `NotifyIpInterfaceChange` noise): today's probe and
+  nothing else. A failed lookup also only probes.
+- **No move on a relay without sessions**: a new socket there is a fresh login that supersedes the
+  old one and drops whatever is in flight on it, so a network change is only probed.
+- Known cost: an IPv6 temporary-address rotation followed by a network event moves once (harmless,
+  one socket).
 
 ### Reconnect timing: `schedule()`, `relay_session::Backoff`
 
 - After a dead socket, a failed write or a drain close: at once, backoff reset.
 - After a close or a failed connect: the drain time when one is set, else full jitter, uniform in
-  `[0, min(30 s, 0.5 s * 2^attempt)]` (`Backoff::next`, a `getrandom` roll). While
-  `realtime_active()` (a call, voice channel or conference is live) a steady 1 s
-  (`Timing::realtime_retry`) and no climb, so an ICE restart offer can reach the relay inside the
-  call's hold-open window. The attempt count resets on every success and every nudge.
+  `[0, min(cap, 0.5 s * 2^attempt)]` (`Backoff::next_within`, a `getrandom` roll). The cap
+  (`relay_session::backoff_cap`) is 5 s (`Timing::resume_backoff_cap`) while we hold a session and
+  are inside the relay's grace counted from our own `Suspended` (`suspended_at`, 120 s,
+  `Timing::grace`), so a path that comes back by itself (router or ISP flap, a zombie that thaws:
+  no OS event, no nudge) is resumed within seconds; otherwise 30 s. **A refusal brings the 30 s cap
+  back at once** (`refused`: a 1008 close, in the handshake (`rate_limit`, `ip_limit`, `bad_auth`)
+  or on a live socket, an `auth_failed`, a license refusal; `ConnectError::Refused`): each refused
+  socket spends the relay's 10-new-a-minute budget of the address, an unreachable path costs
+  nothing. Cleared when a socket is up. While `realtime_active()` (a call, voice channel or
+  conference is live) a steady 1 s (`Timing::realtime_retry`) and no climb, so an ICE restart offer
+  can reach the relay inside the call's hold-open window. The attempt count resets on every
+  success and every nudge.
 - Never while suspended.
+- Handshake errors never carry relay text verbatim: a frame that does not parse is named by its
+  `type` only (`reply_kind`), relay codes pass only when short and plain (`log_word`, at most 24
+  letters, so no sid), and close reasons are logged the same way.
 
 ### Drain hint
 

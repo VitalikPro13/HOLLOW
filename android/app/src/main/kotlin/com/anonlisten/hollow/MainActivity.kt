@@ -6,10 +6,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PersistableBundle
-import android.os.PowerManager
 import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterFragmentActivity
@@ -21,7 +19,6 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterFragmentActivity() {
     private val CHANNEL = "com.anonlisten.hollow/platform"
     private val SECRET_CLIP_LABEL = "hollow-secret"
-    private var wifiLock: WifiManager.WifiLock? = null
     private var relayNetworkWatch: RelayNetworkWatch? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -58,19 +55,6 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                         result.success(installer)
                     }
-                    "isBatteryOptimized" -> {
-                        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                        result.success(!pm.isIgnoringBatteryOptimizations(packageName))
-                    }
-                    "requestBatteryExemption" -> {
-                        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                            intent.data = Uri.parse("package:$packageName")
-                            startActivity(intent)
-                        }
-                        result.success(null)
-                    }
                     // Per-app notification settings exist from O; older
                     // releases only have the app details page.
                     "openNotificationSettings" -> {
@@ -88,23 +72,6 @@ class MainActivity : FlutterFragmentActivity() {
                             false
                         }
                         result.success(opened)
-                    }
-                    "acquireWifiLock" -> {
-                        if (wifiLock == null) {
-                            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "hollow:ws")
-                            wifiLock?.setReferenceCounted(false)
-                        }
-                        if (wifiLock?.isHeld != true) {
-                            wifiLock?.acquire()
-                        }
-                        result.success(null)
-                    }
-                    "releaseWifiLock" -> {
-                        if (wifiLock?.isHeld == true) {
-                            wifiLock?.release()
-                        }
-                        result.success(null)
                     }
                     else -> result.notImplemented()
                 }
@@ -178,9 +145,6 @@ class MainActivity : FlutterFragmentActivity() {
     override fun onDestroy() {
         relayNetworkWatch?.stop()
         relayNetworkWatch = null
-        if (wifiLock?.isHeld == true) {
-            wifiLock?.release()
-        }
         super.onDestroy()
     }
 }

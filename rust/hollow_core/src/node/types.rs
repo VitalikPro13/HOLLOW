@@ -1570,6 +1570,8 @@ pub(crate) struct DebugSnapshotReply {
     pub synced_peers: Vec<String>,
     /// Stream ids of the WS transfers we are receiving.
     pub ws_transfers: Vec<String>,
+    /// Sender DEVICE id -> frames the inbound rate limit has dropped from it.
+    pub rate_dropped: std::collections::HashMap<String, u64>,
 }
 
 // -- Wire protocol types (v2: encrypted) --

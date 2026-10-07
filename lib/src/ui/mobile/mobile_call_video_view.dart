@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/call/call_stage_sources.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
+import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
 import 'package:hollow/src/ui/mobile/mobile_share_fullscreen.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
@@ -69,8 +70,13 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     }
   }
 
+  /// The call shows its own link (the other person's); the app-wide relay line
+  /// steps aside, since the call itself rides peer to peer.
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ConnectionIndicatorCover(child: _screen(context));
+
+  Widget _screen(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
     final call = ref.watch(callProvider);

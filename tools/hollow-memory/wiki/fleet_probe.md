@@ -745,13 +745,14 @@ FLEET_BACKEND=android pwsh scripts/fleet_send.ps1 -Command "$(cat /tmp/cmd.json)
   OpenSSL paths) is in memory `reference_mac_ssh_build`.
 - **Android cuts a backgrounded app's network within seconds.** `adb shell input keyevent
   KEYCODE_HOME` and three seconds later the log shows `Software caused connection abort`, then
-  DNS failures: the relay sees the phone go, its nickname with it. That is the real behaviour
-  for anyone who did not grant the battery exemption, so lifecycle tests keep it.
-- **Hollow's own battery-exemption prompt** (`RequestIgnoreBatteryOptimizations`) sits on top
-  of the app after launch. The probe keeps answering under it, but once the app is sent home
-  and brought back (`am start -n com.anonlisten.hollow/.MainActivity`) the task returns with
-  the prompt in front and the probe stops answering until `adb shell input keyevent
-  KEYCODE_BACK` dismisses it. Check with `dumpsys activity activities | grep topResumedActivity`.
+  DNS failures: the relay sees the phone go, its nickname with it. That was the real behaviour
+  for anyone who did not grant the battery exemption. Since wave 2 of resumable sessions the
+  app closes the socket itself 10 s after HOME (`relay_suspend`) and the relay holds the session.
+- **Hollow's own battery-exemption prompt** (`RequestIgnoreBatteryOptimizations`) sat on top of
+  the app after launch and came back in front on every return, wedging the probe until
+  `KEYCODE_BACK`. Wave 2 removed the prompt and its permission; `fleet_lifecycle.ps1` still
+  dismisses one if an older build shows it. Check with `dumpsys activity activities | grep
+  topResumedActivity`.
 
 ## A mixed phone fleet: iPhone and Android in one run (2026-10-06)
 
@@ -1070,9 +1071,13 @@ Linux: pause/resume (`kill`) and the proxy route only; background/foreground ref
   strips it): the session ops name the other identity `contact`.
 - **The iOS Simulator and the desktops share their host's network stack**, so `net_off` there
   freezes that peer's route on the zombie proxy (`tools/zombie_proxy`, `fleet.ps1 -NetProxy`,
-  port 18500 + letter index, control 18549). The app reaches the proxy only once ws_client
-  honours `relay_connect` (one `host:port` line in the data dir, debug builds; the fleet writes
-  it): until then `net_off` refuses with that reason instead of silently cutting nothing.
+  port 18500 + letter index, control 18549). The app reaches the proxy through `relay_connect`
+  (one `host:port` line in the data dir, debug builds; the fleet writes it). The proxy's
+  upstream is `relay.anonlisten.com:443` unless `FLEET_RELAY_CONNECT=host:port` names another
+  listener of the same relay (a canary such as `141.227.186.209:8443`): the app keeps the
+  relay's TLS name and auth domain either way. On thaw the proxy dials upstream only for held
+  connections whose client is still there, so abandoned attempts never spend the relay's
+  10-new-sockets-a-minute budget.
 
 Probe ops for this (`integration_test/probe/probe_session_ops.dart`): `lifecycle` (`resumed`
 or `inactive` only, the others stop the frames the probe answers with), `clock`, `friend`
@@ -1093,4 +1098,9 @@ DM stream; received = the DATABASE, where every delivery path ends).
   counter.
 - `scripts/resume_e2e.sh` (Linux VM): the real relay, the zombie proxy and the real ws_client
   (`node/resume_e2e.rs`, ignored test) with B's path frozen for each `--windows` entry, then
-  thawed or dropped; per-window report and `summary.md`.
+  thawed or dropped; per-window report and `summary.md`, counted per kind (`--kinds
+  direct,broadcast,topic,chunk`) and per phase. A window up to `--grace` (120, also the relay's
+  `--session-grace-secs`) must keep B's session and lose nothing; a longer one is judged by the
+  outcome (B's own frames and the newest DMs `offline_buffer` keeps, `--optin` for 500).
+  `--restart-at s` restarts the relay mid-window through a `systemd-run --user` fd store, so the
+  snapshot really moves between processes.

@@ -1462,6 +1462,7 @@ pub(crate) async fn handle_edit_dm_message(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
+    frame_budget: &mut super::frame_budget::FrameBudget,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
@@ -1506,7 +1507,10 @@ pub(crate) async fn handle_edit_dm_message(
     // Update any queued pending message so a later drain sends the edited text.
     // The original was queued PER DEVICE, under device ids rather than the master,
     // so scan every queue.
-    rewrite_pending_dm_edits(pending_messages, &message_id, &new_text, edit_timestamp, &sig, &pk);
+    rewrite_pending_dm_edits(
+        pending_messages.values_mut().flatten().chain(frame_budget.entries_mut()),
+        &message_id, &new_text, edit_timestamp, &sig, &pk,
+    );
 
     let envelope = MessageEnvelope::EditMessage {
         mid: message_id.clone(),
@@ -1541,20 +1545,18 @@ pub(crate) async fn handle_edit_dm_message(
     }).await;
 }
 
-/// Rewrite every queued copy of an edited DM across ALL per-device pending queues,
-/// so a later drain sends the edited text rather than the stale original.
-fn rewrite_pending_dm_edits(
-    pending_messages: &mut HashMap<String, Vec<String>>,
+/// Rewrite every queued copy of an edited DM, in every per-device pending queue and
+/// every copy waiting in the frame budget, so a later drain sends the edited text.
+fn rewrite_pending_dm_edits<'a>(
+    entries: impl Iterator<Item = &'a mut String>,
     message_id: &str,
     new_text: &str,
     edit_timestamp: i64,
     sig: &Option<String>,
     pk: &Option<String>,
 ) {
-    for queued in pending_messages.values_mut() {
-        for entry in queued.iter_mut() {
-            rewrite_pending_entry_if_edited(entry, message_id, new_text, edit_timestamp, sig, pk);
-        }
+    for entry in entries {
+        rewrite_pending_entry_if_edited(entry, message_id, new_text, edit_timestamp, sig, pk);
     }
 }
 
@@ -1931,6 +1933,7 @@ pub(crate) async fn handle_attach_dm_link_preview(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
+    frame_budget: &mut super::frame_budget::FrameBudget,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
@@ -1974,7 +1977,8 @@ pub(crate) async fn handle_attach_dm_link_preview(
     // that envelope in place rather than letting a bare `lp_set` chase a message
     // they have not received: on reconnect they get ONE message with its card.
     rewrite_pending_dm_preview(
-        pending_messages, &message_id, lp, &signed.sig, &signed.pk,
+        pending_messages.values_mut().flatten().chain(frame_budget.entries_mut()),
+        &message_id, lp, &signed.sig, &signed.pk,
     );
 
     let envelope = MessageEnvelope::LinkPreviewSet {
@@ -2005,38 +2009,36 @@ pub(crate) async fn handle_attach_dm_link_preview(
     }).await;
 }
 
-/// Rewrite every queued copy of a DM whose preview just landed, across ALL
-/// per-device pending queues. Mirrors [`rewrite_pending_dm_edits`]: the queued
-/// message keeps its text and gains the card plus the signature covering it.
-fn rewrite_pending_dm_preview(
-    pending_messages: &mut HashMap<String, Vec<String>>,
+/// Rewrite every queued copy of a DM whose preview just landed, wherever
+/// [`rewrite_pending_dm_edits`] looks: the queued message keeps its text and gains
+/// the card plus the signature covering it.
+fn rewrite_pending_dm_preview<'a>(
+    entries: impl Iterator<Item = &'a mut String>,
     message_id: &str,
     preview: Option<&LinkPreviewRef>,
     sig: &Option<String>,
     pk: &Option<String>,
 ) {
-    for queued in pending_messages.values_mut() {
-        for entry in queued.iter_mut() {
-            let Ok(MessageEnvelope::DirectMessage { inner }) =
-                serde_json::from_str::<MessageEnvelope>(entry)
-            else {
-                continue;
-            };
-            if inner.mid.as_deref() != Some(message_id) {
-                continue;
-            }
-            let updated = MessageEnvelope::DirectMessage {
-                inner: Box::new(DirectMessagePayload {
-                    link_preview: preview.cloned(),
-                    sig: sig.clone(),
-                    pk: pk.clone(),
-                    ..*inner
-                }),
-            };
-            if let Ok(json) = serde_json::to_string(&updated) {
-                *entry = json;
-                hollow_log!("[HOLLOW-LP] Updated pending DM {message_id} with its late preview");
-            }
+    for entry in entries {
+        let Ok(MessageEnvelope::DirectMessage { inner }) =
+            serde_json::from_str::<MessageEnvelope>(entry)
+        else {
+            continue;
+        };
+        if inner.mid.as_deref() != Some(message_id) {
+            continue;
+        }
+        let updated = MessageEnvelope::DirectMessage {
+            inner: Box::new(DirectMessagePayload {
+                link_preview: preview.cloned(),
+                sig: sig.clone(),
+                pk: pk.clone(),
+                ..*inner
+            }),
+        };
+        if let Ok(json) = serde_json::to_string(&updated) {
+            *entry = json;
+            hollow_log!("[HOLLOW-LP] Updated pending DM {message_id} with its late preview");
         }
     }
 }

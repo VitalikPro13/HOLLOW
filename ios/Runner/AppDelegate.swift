@@ -116,6 +116,53 @@ final class ForegroundBannerPresenter: NSObject, UNUserNotificationCenterDelegat
   }
 }
 
+/// The background task relay_triggers.dart holds while it closes the relay
+/// socket after the app leaves the screen: Dart begins it, suspends the socket,
+/// and ends it once the suspend has returned.
+final class RelayBackgroundTask {
+  private let channel: FlutterMethodChannel
+  private var task: UIBackgroundTaskIdentifier = .invalid
+
+  init(channel: FlutterMethodChannel) {
+    self.channel = channel
+    channel.setMethodCallHandler { [weak self] call, result in
+      switch call.method {
+      case "begin":
+        result(self?.begin())
+      case "end":
+        self?.end()
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+  }
+
+  /// The seconds iOS still grants, or nil when it sets no limit (the foreground
+  /// reports the largest double).
+  private func begin() -> Double? {
+    if task == .invalid {
+      task = UIApplication.shared.beginBackgroundTask(withName: "hollow.relay.suspend") {
+        [weak self] in self?.expire()
+      }
+    }
+    let remaining = UIApplication.shared.backgroundTimeRemaining
+    return remaining < 3600 ? remaining : nil
+  }
+
+  /// Dart suspends at once; iOS ends an app whose task outlives this handler.
+  private func expire() {
+    channel.invokeMethod("expiring", arguments: nil)
+    end()
+  }
+
+  private func end() {
+    guard task != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(task)
+    task = .invalid
+  }
+}
+
 // CLASSIC FlutterAppDelegate lifecycle (NOT the UIScene / FlutterImplicitEngineDelegate
 // template). Plugins register against the AppDelegate via register(with: self), which is
 // what firebase_messaging's APNs swizzling expects on iOS — Messaging.messaging().delegate
@@ -141,6 +188,7 @@ final class ForegroundBannerPresenter: NSObject, UNUserNotificationCenterDelegat
   private let foregroundBanners = ForegroundBannerPresenter()
 
   private var relayTriggers: RelayTriggers?
+  private var relayBackgroundTask: RelayBackgroundTask?
 
   override func application(
     _ application: UIApplication,
@@ -243,6 +291,12 @@ final class ForegroundBannerPresenter: NSObject, UNUserNotificationCenterDelegat
       }
       triggers.start()
       relayTriggers = triggers
+
+      // hollow/relay_background -> the background task of the relay suspend.
+      relayBackgroundTask = RelayBackgroundTask(
+        channel: FlutterMethodChannel(
+          name: "hollow/relay_background",
+          binaryMessenger: controller.binaryMessenger))
     }
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)

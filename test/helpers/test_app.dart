@@ -14,6 +14,7 @@ import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -155,7 +156,13 @@ Future<void> pumpHollowMobile(
 
   await tester.pumpWidget(
     ProviderScope(
-      overrides: hollowTestOverrides(extra: extraOverrides),
+      overrides: hollowTestOverrides(extra: [
+        // Connected unless a test says otherwise: a link left at the default
+        // "connecting" raises the shell's connection indicator, whose spinner
+        // never lets the shell settle.
+        connectionStatusProvider.overrideWith(TestRelayStatus.new),
+        ...extraOverrides,
+      ]),
       child: MaterialApp(
         title: 'Hollow Test',
         debugShowCheckedModeBanner: false,
@@ -213,6 +220,19 @@ Future<void> pumpHollowApp(
 // ---------------------------------------------------------------------------
 // Mock Notifiers — return static test data, never call FFI.
 // ---------------------------------------------------------------------------
+
+/// The relay link a test sets by hand, connected unless told otherwise.
+class TestRelayStatus extends ConnectionStatusNotifier {
+  final RelayConnectionStatus initial;
+
+  TestRelayStatus([this.initial = RelayConnectionStatus.connected]);
+
+  @override
+  ConnectionStatusState build() => ConnectionStatusState(relayStatus: initial);
+
+  void set(RelayConnectionStatus status) =>
+      state = state.copyWithRelay(status);
+}
 
 class _MockIdentityNotifier extends IdentityNotifier {
   @override

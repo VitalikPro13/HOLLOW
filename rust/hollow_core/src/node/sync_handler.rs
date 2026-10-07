@@ -1007,6 +1007,68 @@ pub(crate) async fn repair_after_gap(
     dm_peers.sort();
     dm_peers.dedup();
 
+    ask_peers_to_fill(
+        ws_cmd_tx, server_states, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, mls, local_peer,
+        db_path, db_passphrase,
+    )
+    .await;
+    hollow_log!(
+        "[HOLLOW-SYNC] Gap repair after a resume: {} room(s), {} server peer(s), {} DM peer(s)",
+        rooms.len(), server_peers.len(), dm_peers.len(),
+    );
+}
+
+/// A peer our inbound rate limit dropped frames from, back inside its bucket: ask it
+/// again for what those frames may have carried, as [`repair_after_gap`] asks every
+/// peer. A stranger shares no DM room or server with us and is asked nothing. Returns
+/// (servers asked about, whether its DM history was).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn repair_after_drops(
+    peer: &str,
+    ws_cmd_tx: &WsCmdTx,
+    server_states: &ServerStates,
+    ws_room_peers: &WsRoomPeers,
+    join_hold: &super::join_hold::JoinHold,
+    sync_coordinator: &mut SyncCoordinator,
+    mls: Option<&MlsManager>,
+    local_peer: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> (usize, bool) {
+    let in_room = |room: &str| ws_room_peers.get(room).is_some_and(|peers| peers.contains(peer));
+    let server_peers: Vec<(String, String)> = server_states
+        .iter()
+        .filter(|(sid, state)| !state.is_deleted() && state.is_member(local_peer) && state.is_member(peer) && in_room(sid))
+        .map(|(sid, _)| (sid.clone(), peer.to_string()))
+        .collect();
+    let dm_peers: Vec<String> = in_room(&dm_room_code(local_peer, &super::resolver::resolve(peer)))
+        .then(|| peer.to_string())
+        .into_iter()
+        .collect();
+    ask_peers_to_fill(
+        ws_cmd_tx, server_states, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, mls, local_peer,
+        db_path, db_passphrase,
+    )
+    .await;
+    (server_peers.len(), !dm_peers.is_empty())
+}
+
+/// Ask each `(server, member device)` for a server sync and its channels, and each
+/// friend device for a DM sync behind a gap digest: what fell out comes back from the
+/// peers that hold it.
+#[allow(clippy::too_many_arguments)]
+async fn ask_peers_to_fill(
+    ws_cmd_tx: &WsCmdTx,
+    server_states: &ServerStates,
+    server_peers: &[(String, String)],
+    dm_peers: &[String],
+    nonce: u64,
+    sync_coordinator: &mut SyncCoordinator,
+    mls: Option<&MlsManager>,
+    local_peer: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
     let channels: Vec<(String, Vec<String>)> = server_peers
         .iter()
         .map(|(sid, _)| sid.clone())
@@ -1041,7 +1103,7 @@ pub(crate) async fn repair_after_gap(
     .await
     .unwrap_or_default();
 
-    for (sid, device) in &server_peers {
+    for (sid, device) in server_peers {
         let Some(state) = server_states.get(sid) else { continue };
         if let Ok(state_vector_json) = serde_json::to_string(&crate::crdt::sync::StateVector::from_server_state(state)) {
             super::olm_lane::carry(
@@ -1050,7 +1112,7 @@ pub(crate) async fn repair_after_gap(
                     server_id: sid.clone(),
                     state_vector_json,
                     mls_epoch: mls.and_then(|m| m.epoch(sid).ok()),
-                    nonce: Some(join_hold.ask()),
+                    nonce: Some(nonce),
                 },
                 super::olm_lane::NoSession::Queue,
             );
@@ -1064,10 +1126,6 @@ pub(crate) async fn repair_after_gap(
             super::olm_lane::NoSession::Drop,
         );
     }
-    hollow_log!(
-        "[HOLLOW-SYNC] Gap repair after a resume: {} room(s), {} server peer(s), {} DM peer(s)",
-        rooms.len(), server_peers.len(), dm_peers.len(),
-    );
 }
 
 // ── 2. CreateChannel ──────────────────────────────────────────────────

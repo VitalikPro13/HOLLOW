@@ -7,9 +7,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::stream::{SplitSink, SplitStream};
@@ -24,7 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 use base64::Engine;
 
 use super::relay_session::{
-    self, Ask, AuthReply, Backoff, Class, Clocks, Entry, Established, Frame, Inbound, Liveness, Note, Outbound,
+    self, Ask, AuthReply, Backoff, Class, Clocks, Entry, Established, Flag, Frame, Inbound, Liveness, Note, Outbound,
     Queued, Timing,
 };
 
@@ -500,11 +501,15 @@ static REALTIME_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Set from the FFI when a call / voice channel / conference starts or ends.
 pub fn set_realtime_active(active: bool) {
     REALTIME_ACTIVE.store(active, Ordering::Relaxed);
+    tell_all(|| Control::Realtime);
 }
 
 pub(crate) fn realtime_active() -> bool {
     REALTIME_ACTIVE.load(Ordering::Relaxed)
 }
+
+/// Whether a call is live; a seam for tests.
+pub(crate) type Realtime = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// What the FFI asks of a running client.
 #[derive(Debug)]
@@ -514,6 +519,8 @@ pub(crate) enum Control {
     Nudge { reason: String, external: bool },
     Background(bool),
     Suspend(oneshot::Sender<()>),
+    /// A call started or ended.
+    Realtime,
 }
 
 /// Every running full client, one per relay; a closed one drops out on the next send.
@@ -529,12 +536,9 @@ fn tell_all(make: impl Fn() -> Control) {
 }
 
 /// Look at the relay connection now: the app came to the foreground, the network
-/// changed, the machine woke (RESUMABLE_SESSIONS_PLAN.md 9.6).
+/// changed, the machine woke, a call needs the socket (RESUMABLE_SESSIONS_PLAN.md 9.6).
 pub fn nudge(reason: &str) {
-    let reason = match reason {
-        "foreground" | "focus" | "network" | "wake" => reason,
-        _ => "other",
-    };
+    let reason = relay_session::app_reason(reason);
     tell_all(|| Control::Nudge { reason: reason.to_string(), external: true });
 }
 
@@ -543,6 +547,28 @@ pub fn nudge(reason: &str) {
 pub fn set_background(background: bool) {
     BACKGROUND.store(background, Ordering::Relaxed);
     tell_all(|| Control::Background(background));
+}
+
+/// Whether the app has left the screen: the relay hides this device from every room
+/// while our own view of presence stays frozen (plan decision 6).
+pub(crate) fn backgrounded() -> bool {
+    #[cfg(test)]
+    if let Ok(away) = TEST_AWAY.try_with(|away| away.load(Ordering::Relaxed)) {
+        return away;
+    }
+    BACKGROUND.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// One harness node's flag: its nodes share this process, and so `BACKGROUND`.
+    static TEST_AWAY: Arc<AtomicBool>;
+}
+
+/// Run a harness node's event loop with its own background flag.
+#[cfg(test)]
+pub(crate) fn with_test_away<F: Future>(away: Arc<AtomicBool>, event_loop: F) -> impl Future<Output = F::Output> {
+    TEST_AWAY.scope(away, event_loop)
 }
 
 /// Flush, wait briefly for the relay's ack, close cleanly into the session's grace and
@@ -599,6 +625,43 @@ pub(crate) fn spawn_with(
     tokio::spawn(Client::new(dial, timing, event_tx, false).run(cmd_rx, ctl_rx))
 }
 
+/// [`spawn_with`], with the route lookup and the call flag in the test's hands.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_routed(
+    relay_url: String,
+    peer_id: String,
+    keypair_proto: Vec<u8>,
+    pub_key_b64: String,
+    timing: Timing,
+    route: Route,
+    realtime: Realtime,
+    cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
+    event_tx: mpsc::UnboundedSender<WsEvent>,
+    ctl_rx: mpsc::UnboundedReceiver<Control>,
+) -> JoinHandle<()> {
+    let dial = Dial { url: relay_url, peer_id, keypair_proto, pub_key_b64, license_key: None, fetch: false };
+    let mut client = Client::new(dial, timing, event_tx, false);
+    client.route = route;
+    client.realtime = realtime;
+    tokio::spawn(client.run(cmd_rx, ctl_rx))
+}
+
+/// The local address the OS would use now to reach a relay address; a seam for tests.
+pub(crate) type Route = Arc<dyn Fn(SocketAddr) -> Option<IpAddr> + Send + Sync>;
+
+/// A UDP `connect` sends no packet: it only asks the routing table which local address
+/// a packet to `relay` would leave from.
+pub(crate) fn route_source(relay: SocketAddr) -> Option<IpAddr> {
+    let any: SocketAddr = match relay {
+        SocketAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+        SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    let udp = std::net::UdpSocket::bind(any).ok()?;
+    udp.connect(relay).ok()?;
+    Some(udp.local_addr().ok()?.ip())
+}
+
 // -- The client --
 
 /// What every connect attempt needs.
@@ -640,13 +703,37 @@ struct Socket {
     /// The relay keeps a session for this socket: frames are counted and acked.
     session: bool,
     live: Liveness,
+    /// The local and the relay's address this socket runs between.
+    path: Option<(SocketAddr, SocketAddr)>,
 }
 
 struct Attempt {
-    fut: Pin<Box<dyn Future<Output = Result<Opened, ConnectError>> + Send>>,
-    /// Racing a socket that is still being judged (make before break).
-    racing: bool,
+    fut: Pin<Box<dyn Future<Output = Result<Step, ConnectError>> + Send>>,
+    purpose: Purpose,
+    /// A move's auth is out: the old socket is left alone until the answer.
+    signing: bool,
     started: Instant,
+}
+
+/// How far an attempt got.
+enum Step {
+    /// A move's socket has the relay's challenge and waits to be signed in.
+    Challenged(Box<Challenged>),
+    Opened(Box<Opened>),
+}
+
+/// What a connect attempt is for. The last two run beside a live socket (make before
+/// break).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Purpose {
+    /// There is no socket.
+    Connect,
+    /// A probe went unanswered: whichever socket answers first wins; the queue waits.
+    Race,
+    /// The OS routes the relay through another local address now: the new socket is
+    /// dialled while the old one carries on, then signed in while the old one is left
+    /// alone, kept in case the move fails.
+    Move,
 }
 
 struct Suspending {
@@ -679,6 +766,10 @@ struct Client {
     inbound: Inbound,
     /// The session the relay holds for us.
     sid: Option<String>,
+    /// What the relay holds of the app's background flag.
+    flag: Flag,
+    route: Route,
+    realtime: Realtime,
     /// What this session's door proofs are made for: the challenge of the socket that
     /// minted it, until a `reprove` resume (section 9.8).
     session_door: Option<RelaySession>,
@@ -693,6 +784,11 @@ struct Client {
     /// Set by the relay's drain hint: resume no earlier than this.
     drain_at: Option<Instant>,
     backoff: Backoff,
+    /// When this outage's `Suspended` went to the node: the relay's grace runs from about
+    /// then, and while it does the backoff stays short.
+    suspended_at: Option<Instant>,
+    /// The relay refused a socket of this outage: the full backoff, whatever the grace.
+    refused: bool,
     background: bool,
     /// Closed on purpose until an external nudge.
     suspended: bool,
@@ -704,16 +800,18 @@ struct Client {
     stopped: bool,
 }
 
+/// The socket's next frame; never while `held` (a move is under way).
 async fn read_next(
     socket: &mut Option<Socket>,
+    held: bool,
 ) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
     match socket {
-        Some(s) => s.read.next().await,
-        None => std::future::pending().await,
+        Some(s) if !held => s.read.next().await,
+        _ => std::future::pending().await,
     }
 }
 
-async fn poll_attempt(attempt: &mut Option<Attempt>) -> Result<Opened, ConnectError> {
+async fn poll_attempt(attempt: &mut Option<Attempt>) -> Result<Step, ConnectError> {
     match attempt {
         Some(a) => (&mut a.fut).await,
         None => std::future::pending().await,
@@ -725,7 +823,7 @@ impl Client {
         let now = Instant::now();
         Self {
             relay_host: relay_auth_domain(&dial.url).unwrap_or_default(),
-            next_beat: now + timing.heartbeat_every(background),
+            next_beat: now + timing.heartbeat_for(background, realtime_active()),
             clocks: Clocks { wall_ms: super::frame_auth::now_ms(), mono: now },
             dial,
             timing,
@@ -734,6 +832,9 @@ impl Client {
             out: Outbound::default(),
             inbound: Inbound::default(),
             sid: None,
+            flag: Flag::default(),
+            route: Arc::new(route_source),
+            realtime: Arc::new(realtime_active),
             session_door: None,
             replayed_joins: HashMap::new(),
             socket: None,
@@ -741,6 +842,8 @@ impl Client {
             reconnect_at: Some(now),
             drain_at: None,
             backoff: Backoff::default(),
+            suspended_at: None,
+            refused: false,
             background,
             suspended: false,
             suspending: None,
@@ -754,8 +857,9 @@ impl Client {
         loop {
             let deadline = tokio::time::Instant::from_std(self.next_deadline());
             let pump = self.can_pump();
+            let held = self.moving();
             tokio::select! {
-                frame = read_next(&mut self.socket) => self.on_frame(frame).await,
+                frame = read_next(&mut self.socket, held) => self.on_frame(frame).await,
                 opened = poll_attempt(&mut self.attempt) => self.on_attempt(opened).await,
                 cmd = cmd_rx.recv(), if self.takes_commands() => match cmd {
                     Some(cmd) => self.enqueue(cmd),
@@ -793,7 +897,18 @@ impl Client {
         self.socket.is_none() || self.out.has_room()
     }
 
+    /// An attempt runs beside the live socket: a race or a move.
+    fn beside(&self) -> bool {
+        self.attempt.as_ref().is_some_and(|a| a.purpose != Purpose::Connect)
+    }
+
+    /// A move is signing in: the old socket is neither read, written nor judged.
+    fn moving(&self) -> bool {
+        self.attempt.as_ref().is_some_and(|a| a.signing)
+    }
+
     fn next_deadline(&self) -> Instant {
+        let moving = self.moving();
         let mut at = self.next_beat;
         let mut consider = |t: Option<Instant>| {
             if let Some(t) = t {
@@ -801,10 +916,12 @@ impl Client {
             }
         };
         if let Some(s) = &self.socket {
-            consider(s.live.dead_at(&self.timing));
-            consider(s.live.probe_missed_at());
-            if s.session {
-                consider(self.inbound.ack_due_at(&self.timing));
+            if !moving {
+                consider(s.live.dead_at(&self.timing));
+                consider(s.live.probe_missed_at());
+                if s.session {
+                    consider(self.inbound.ack_due_at(&self.timing));
+                }
             }
             consider(self.drain_at);
         } else if self.attempt.is_none() {
@@ -882,7 +999,7 @@ impl Client {
 
     fn can_pump(&self) -> bool {
         let Some(s) = &self.socket else { return false };
-        !self.attempt.as_ref().is_some_and(|a| a.racing)
+        !self.attempt.as_ref().is_some_and(|a| a.purpose == Purpose::Race || a.signing)
             && self.out.has_unwritten()
             && (!s.session || self.out.can_write())
     }
@@ -1048,7 +1165,7 @@ impl Client {
         let Some(socket) = self.socket.as_mut() else { return };
         socket.live.heard(now);
         let session = socket.session;
-        if self.attempt.as_ref().is_some_and(|a| a.racing) {
+        if self.attempt.as_ref().is_some_and(|a| a.purpose == Purpose::Race) {
             hollow_log!("[HOLLOW-WS] The old socket answered first; the new one is dropped");
             self.attempt = None;
         }
@@ -1069,8 +1186,11 @@ impl Client {
             }
             Message::Close(frame) => {
                 // The relay never closes silently (bad_license, auth timeout, moved).
-                let reason = frame.as_ref().map(|f| f.reason.to_string()).unwrap_or_default();
+                let reason = frame.as_ref().map(|f| log_word(&f.reason)).unwrap_or_default();
                 hollow_log!("[HOLLOW-WS] Connection closed by server: {reason}");
+                if frame.as_ref().is_some_and(|f| f.code == CloseCode::Policy) {
+                    self.refused = true;
+                }
                 self.drop_socket(Why::Lost).await;
                 false
             }
@@ -1083,9 +1203,16 @@ impl Client {
 
     fn on_text(&mut self, text: &str) {
         let Ok(msg) = serde_json::from_str::<ServerMsg>(text) else { return };
+        let session = self.socket.as_ref().is_some_and(|s| s.session);
         match msg {
-            ServerMsg::HbAck { h } | ServerMsg::Ack { h } => {
-                if self.socket.as_ref().is_some_and(|s| s.session) {
+            ServerMsg::HbAck { h } => {
+                if session {
+                    self.out.ack(h);
+                    self.flag.answered();
+                }
+            }
+            ServerMsg::Ack { h } => {
+                if session {
                     self.out.ack(h);
                 }
             }
@@ -1123,12 +1250,25 @@ impl Client {
     async fn beat(&mut self) -> bool {
         let Some(socket) = self.socket.as_mut() else { return false };
         let msg = if socket.session {
+            self.flag.beat_sent();
             relay_session::hb_frame(self.inbound.acked()).to_message()
         } else {
             Message::Ping(vec![0x01].into())
         };
         socket.live.beat_sent(Instant::now());
         self.write_control(msg).await
+    }
+
+    /// Tell the relay the app's flag unless it is known to hold it already: each `active`
+    /// costs a `members` burst. False when the write failed and took the socket with it.
+    async fn sync_flag(&mut self) -> bool {
+        let open = self.socket.as_ref().is_some_and(|s| s.session) && !self.moving();
+        if !open || !self.flag.needs(self.background) {
+            return true;
+        }
+        self.flag.wrote(self.background);
+        let frame = if self.background { relay_session::INACTIVE } else { relay_session::ACTIVE };
+        self.write_control(Message::Text(frame.into())).await
     }
 
     // -- Timers --
@@ -1142,6 +1282,22 @@ impl Client {
             self.drain_at = None;
             self.drop_socket(Why::Drain).await;
         }
+        if !self.moving() {
+            self.judge_socket(now).await;
+        }
+        if now >= self.next_beat {
+            self.on_beat(now).await;
+        }
+        let reconnect =
+            self.socket.is_none() && self.attempt.is_none() && self.reconnect_at.is_some_and(|at| now >= at);
+        if reconnect {
+            self.reconnect_at = None;
+            self.start_attempt(Purpose::Connect);
+        }
+    }
+
+    /// The dead rule, the probe deadline and the ack timer of the live socket.
+    async fn judge_socket(&mut self, now: Instant) {
         let dead = self.socket.as_ref().and_then(|s| s.live.dead_at(&self.timing)).is_some_and(|at| now >= at);
         if dead {
             hollow_log!("[HOLLOW-WS] Nothing heard for {}s after a heartbeat: the socket is dead", self.timing.dead_after.as_secs());
@@ -1152,24 +1308,16 @@ impl Client {
             if let Some(s) = self.socket.as_mut() {
                 s.live.probe_given_up();
             }
-            if self.attempt.is_none() {
+            // A socket the app is closing is not raced: the new one would outlive the suspend.
+            if self.attempt.is_none() && self.suspending.is_none() {
                 hollow_log!("[HOLLOW-WS] No answer to the probe: racing a new socket");
-                self.start_attempt(true);
+                self.start_attempt(Purpose::Race);
             }
         }
         let ack_due = self.socket.as_ref().is_some_and(|s| s.session)
             && self.inbound.ack_due_at(&self.timing).is_some_and(|at| now >= at);
         if ack_due {
             self.send_ack().await;
-        }
-        if now >= self.next_beat {
-            self.on_beat(now).await;
-        }
-        let reconnect =
-            self.socket.is_none() && self.attempt.is_none() && self.reconnect_at.is_some_and(|at| now >= at);
-        if reconnect {
-            self.reconnect_at = None;
-            self.start_attempt(false);
         }
     }
 
@@ -1179,13 +1327,18 @@ impl Client {
         let reading = Clocks { wall_ms: super::frame_auth::now_ms(), mono: now };
         let slept = self.clocks.slept(&reading, &self.timing);
         self.clocks = reading;
-        self.next_beat = now + self.timing.heartbeat_every(self.background);
+        self.next_beat = now + self.beat_every();
         if slept {
             hollow_log!("[HOLLOW-WS] The clocks drifted apart: the machine slept");
             self.nudge("wake", false).await;
-        } else if self.socket.is_some() {
+        } else if self.socket.is_some() && !self.moving() {
             self.beat().await;
         }
+    }
+
+    /// How often to beat now: the background interval only while no call is live.
+    fn beat_every(&self) -> Duration {
+        self.timing.heartbeat_for(self.background, (self.realtime)())
     }
 
     // -- Controls --
@@ -1195,29 +1348,30 @@ impl Client {
             Control::Nudge { reason, external } => self.nudge(&reason, external).await,
             Control::Background(background) => {
                 self.background = background;
-                self.next_beat = Instant::now() + self.timing.heartbeat_every(background);
-                if self.socket.as_ref().is_some_and(|s| s.session) {
-                    let frame = if background { relay_session::INACTIVE } else { relay_session::ACTIVE };
-                    if !self.write_control(Message::Text(frame.into())).await {
-                        return;
-                    }
+                self.next_beat = Instant::now() + self.beat_every();
+                if !self.sync_flag().await {
+                    return;
                 }
                 if !background {
                     self.nudge("foreground", true).await;
                 }
             }
             Control::Suspend(done) => self.begin_suspend(done),
+            // A call starting brings the next beat forward; one ending lets the beat after
+            // the next one slow down.
+            Control::Realtime => self.next_beat = self.next_beat.min(Instant::now() + self.beat_every()),
         }
     }
 
     /// Section 9.6: a socket that spoke in the quiet window is fine; otherwise probe it
     /// and race a new socket on a miss. With no socket, connect now. Every nudge resets
-    /// the backoff.
+    /// the backoff. While the app keeps the socket closed, only its coming back counts.
     async fn nudge(&mut self, reason: &str, external: bool) {
-        if self.suspended && !external {
-            return;
-        }
-        if external {
+        let reopens = relay_session::ends_suspend(reason, external);
+        if self.suspended || self.suspending.is_some() {
+            if !reopens {
+                return;
+            }
             self.suspended = false;
             if let Some(s) = self.suspending.take() {
                 let _ = s.done.send(());
@@ -1225,32 +1379,52 @@ impl Client {
         }
         self.backoff.reset();
         let now = Instant::now();
-        match &self.socket {
-            Some(socket) => {
-                if self.attempt.is_some() || !socket.live.wants_probe(now, &self.timing) {
-                    return;
-                }
-                hollow_log!("[HOLLOW-WS] Nudge ({reason}): probing the socket");
-                if self.beat().await
-                    && let Some(socket) = self.socket.as_mut()
-                {
-                    socket.live.probe_sent(now, &self.timing);
-                }
+        if self.socket.is_some() {
+            // One probe or one new socket at a time, however many nudges arrive.
+            if self.attempt.is_some() {
+                return;
             }
-            None => match &self.attempt {
-                Some(a) if now.saturating_duration_since(a.started) >= self.timing.nudge_quiet => {
-                    hollow_log!("[HOLLOW-WS] Nudge ({reason}): starting the connect over");
-                    self.attempt = None;
-                    self.start_attempt(false);
-                }
-                Some(_) => {}
-                None => {
-                    hollow_log!("[HOLLOW-WS] Nudge ({reason}): connecting now");
-                    self.drain_at = None;
-                    self.reconnect_at = Some(now);
-                }
-            },
+            if reason == "network" && self.route_moved() {
+                hollow_log!("[HOLLOW-WS] Nudge (network): the relay is routed elsewhere now, moving the session");
+                self.start_attempt(Purpose::Move);
+                return;
+            }
+            if !self.socket.as_ref().is_some_and(|s| s.live.wants_probe(now, &self.timing)) {
+                return;
+            }
+            hollow_log!("[HOLLOW-WS] Nudge ({reason}): probing the socket");
+            if self.beat().await
+                && let Some(socket) = self.socket.as_mut()
+            {
+                socket.live.probe_sent(now, &self.timing);
+            }
+            return;
         }
+        match &self.attempt {
+            Some(a) if now.saturating_duration_since(a.started) >= self.timing.nudge_quiet => {
+                hollow_log!("[HOLLOW-WS] Nudge ({reason}): starting the connect over");
+                self.attempt = None;
+                self.start_attempt(Purpose::Connect);
+            }
+            Some(_) => {}
+            None => {
+                hollow_log!("[HOLLOW-WS] Nudge ({reason}): connecting now");
+                self.drain_at = None;
+                self.reconnect_at = Some(now);
+            }
+        }
+    }
+
+    /// Plan 3.7: whether the OS would now reach the relay from another local address than
+    /// the live socket's (a better network appeared). Only a session socket moves: on a
+    /// relay without sessions a new socket is a fresh login that drops what is in flight on
+    /// the old one, so there a network change is only probed.
+    fn route_moved(&self) -> bool {
+        let Some(socket) = &self.socket else { return false };
+        let Some((local, relay)) = socket.path else { return false };
+        socket.session
+            && self.sid.is_some()
+            && (self.route)(relay).is_some_and(|ip| ip.to_canonical() != local.ip().to_canonical())
     }
 
     fn begin_suspend(&mut self, done: oneshot::Sender<()>) {
@@ -1263,7 +1437,7 @@ impl Client {
             let _ = done.send(());
             return;
         }
-        if self.attempt.as_ref().is_some_and(|a| a.racing) {
+        if self.beside() {
             self.attempt = None;
         }
         if let Some(previous) = self.suspending.take() {
@@ -1307,32 +1481,76 @@ impl Client {
 
     // -- Sockets --
 
-    fn start_attempt(&mut self, racing: bool) {
-        if !racing {
-            let _ = self.event_tx.send(WsEvent::Connecting { reconnecting: self.attempts > 0 });
-            hollow_log!("[HOLLOW-WS] Connecting to {}...", self.dial.url);
+    /// A move only dials and takes the relay's challenge here; it signs in at
+    /// [`Self::sign_in_move`], so a slow new path never holds the old socket.
+    fn start_attempt(&mut self, purpose: Purpose) {
+        match purpose {
+            Purpose::Connect => {
+                let _ = self.event_tx.send(WsEvent::Connecting { reconnecting: self.attempts > 0 });
+                hollow_log!("[HOLLOW-WS] Connecting to {}...", self.dial.url);
+            }
+            Purpose::Race | Purpose::Move => self.flag.doubt(),
         }
         self.attempts += 1;
-        let held = self.sid.clone().map(|sid| (sid, self.inbound.h()));
-        let fut = open_socket(self.dial.clone(), true, held, self.timing.clone());
-        self.attempt = Some(Attempt { fut: Box::pin(fut), racing, started: Instant::now() });
+        let (dial, timing) = (self.dial.clone(), self.timing.clone());
+        let fut: Pin<Box<dyn Future<Output = Result<Step, ConnectError>> + Send>> = if purpose == Purpose::Move {
+            Box::pin(async move { challenge(&dial, &timing).await.map(|c| Step::Challenged(Box::new(c))) })
+        } else {
+            let held = self.sid.clone().map(|sid| (sid, self.inbound.h()));
+            Box::pin(async move { open_socket(dial, true, held, timing).await.map(|o| Step::Opened(Box::new(o))) })
+        };
+        self.attempt = Some(Attempt { fut, purpose, signing: false, started: Instant::now() });
     }
 
-    async fn on_attempt(&mut self, result: Result<Opened, ConnectError>) {
+    /// The move's socket has the relay's challenge: sign in with the count of what the old
+    /// socket delivered and leave that socket alone from here on. What the relay still
+    /// writes into it stays unacked in its ring and comes back once, in the replay.
+    fn sign_in_move(&mut self, attempt: Attempt, challenged: Challenged) {
+        let held = self.sid.clone().map(|sid| (sid, self.inbound.h()));
+        let signing = attempt.purpose == Purpose::Move;
+        if signing && let Some(s) = self.socket.as_mut() {
+            s.live.pause();
+        }
+        let (dial, timing) = (self.dial.clone(), self.timing.clone());
+        let fut = Box::pin(async move {
+            sign_in(&dial, challenged, true, held, &timing).await.map(|o| Step::Opened(Box::new(o)))
+        });
+        self.attempt = Some(Attempt { fut, purpose: attempt.purpose, signing, started: attempt.started });
+    }
+
+    async fn on_attempt(&mut self, result: Result<Step, ConnectError>) {
         let Some(attempt) = self.attempt.take() else { return };
+        let result = match result {
+            Ok(Step::Challenged(challenged)) => {
+                self.sign_in_move(attempt, *challenged);
+                return;
+            }
+            Ok(Step::Opened(opened)) => Ok(*opened),
+            Err(e) => Err(e),
+        };
         let held = self.sid.is_some();
         let judged = result.and_then(|opened| {
             relay_session::judge(&opened.ask, held, opened.reply)
-                .map(|established| (opened.stream, opened.door, established))
+                .map(|established| (opened.stream, opened.door, established, opened.path))
                 .map_err(ConnectError::Other)
         });
-        let (stream, door, established) = match judged {
+        let (stream, door, established, path) = match judged {
             Ok(up) => up,
             Err(e) => {
                 hollow_log!("[HOLLOW-WS] Connection failed: {e}");
-                if attempt.racing {
+                if matches!(e, ConnectError::Refused(_) | ConnectError::License(_)) {
+                    self.refused = true;
+                }
+                match attempt.purpose {
                     // The old socket is still being judged; the dead rule decides it.
-                    return;
+                    Purpose::Race => return,
+                    Purpose::Move => {
+                        if attempt.signing {
+                            self.stay_after_failed_move().await;
+                        }
+                        return;
+                    }
+                    Purpose::Connect => {}
                 }
                 // A busy key is still OUR key: the holder is usually our own ghost
                 // socket or a sibling device, so keep retrying and tell the UI once
@@ -1351,7 +1569,7 @@ impl Client {
                         self.stopped = true;
                         return;
                     }
-                    ConnectError::Other(_) => {}
+                    ConnectError::Refused(_) | ConnectError::Other(_) => {}
                 }
                 if !held {
                     let _ = self.event_tx.send(WsEvent::SessionLost);
@@ -1360,18 +1578,41 @@ impl Client {
                 return;
             }
         };
-        if attempt.racing {
-            // The new socket answered first; the old one goes quietly and the relay
-            // moves the session over.
+        if attempt.purpose != Purpose::Connect {
+            // The new socket is up; the old one goes quietly and the relay moves the
+            // session over.
             if let Some(old) = self.socket.take() {
                 self.forget_socket(&old);
             }
             self.notify(relay_session::on_drop(held));
         }
-        self.establish(stream, door, established).await;
+        self.establish_on(stream, door, established, path).await;
     }
 
+    /// A move that failed signing in leaves the old socket as it was: read and judged again
+    /// from a heartbeat, told the flag the app set meanwhile.
+    async fn stay_after_failed_move(&mut self) {
+        if self.socket.is_none() {
+            return;
+        }
+        hollow_log!("[HOLLOW-WS] The move failed: staying on the old socket");
+        if self.beat().await {
+            self.sync_flag().await;
+        }
+    }
+
+    #[cfg(test)]
     async fn establish(&mut self, stream: WsStream, door: RelaySession, established: Established) {
+        self.establish_on(stream, door, established, None).await;
+    }
+
+    async fn establish_on(
+        &mut self,
+        stream: WsStream,
+        door: RelaySession,
+        established: Established,
+        path: Option<(SocketAddr, SocketAddr)>,
+    ) {
         let now = Instant::now();
         let (write, read) = stream.split();
         match established {
@@ -1385,13 +1626,12 @@ impl Client {
                 self.sid = sid;
                 self.inbound = Inbound::default();
                 self.replayed_joins.clear();
-                self.socket = Some(Socket { write, read, door, session, live: Liveness::new(now) });
+                self.socket = Some(Socket { write, read, door, session, live: Liveness::new(now), path });
+                self.flag.fresh_session();
                 self.up(now);
                 hollow_log!("[HOLLOW-WS] Connected and authenticated ({})", if session { "new session" } else { "no session" });
                 self.replay_rooms();
-                if self.background && session {
-                    self.write_control(Message::Text(relay_session::INACTIVE.into())).await;
-                }
+                self.sync_flag().await;
             }
             Established::Resumed { h, gap, reprove } => {
                 let Some(resend) = self.out.resume(h) else {
@@ -1406,13 +1646,17 @@ impl Client {
                 if reprove {
                     self.session_door = Some(door.clone());
                 }
-                self.socket = Some(Socket { write, read, door, session: true, live: Liveness::new(now) });
+                self.socket = Some(Socket { write, read, door, session: true, live: Liveness::new(now), path });
+                self.flag.new_socket();
                 self.up(now);
                 hollow_log!(
                     "[HOLLOW-WS] Session resumed: {} frame(s) to send again{}",
                     resend.len(),
                     if gap { ", the relay's ring had a gap" } else { "" }
                 );
+                if !self.sync_flag().await {
+                    return;
+                }
                 for frame in resend {
                     if !self.write_control(frame.to_message()).await {
                         return;
@@ -1429,7 +1673,9 @@ impl Client {
         self.backoff.reset();
         self.license_busy_notified = false;
         self.reconnect_at = None;
-        self.next_beat = now + self.timing.heartbeat_every(self.background);
+        self.suspended_at = None;
+        self.refused = false;
+        self.next_beat = now + self.beat_every();
     }
 
     /// The session is gone: its unacked data waits for the next one, its numbers and
@@ -1437,6 +1683,7 @@ impl Client {
     fn lose_session(&mut self) {
         self.out.lose_session();
         self.inbound = Inbound::default();
+        self.suspended_at = None;
         self.sid = None;
         self.session_door = None;
         self.replayed_joins.clear();
@@ -1457,8 +1704,13 @@ impl Client {
             _ => drop(socket),
         }
         self.notify(relay_session::on_drop(self.sid.is_some()));
+        if self.sid.is_some() {
+            self.suspended_at.get_or_insert_with(Instant::now);
+        }
+        // An attempt beside the socket that went is now the one that brings it back.
         if let Some(a) = self.attempt.as_mut() {
-            a.racing = false;
+            a.purpose = Purpose::Connect;
+            a.signing = false;
         }
         if let Some(s) = self.suspending.take() {
             self.suspended = true;
@@ -1493,13 +1745,15 @@ impl Client {
         // A call riding on this socket retries at a steady short interval and does
         // NOT let the ladder climb, so an ICE restart can be delivered inside the
         // call's hold-open window. See REALTIME_ACTIVE.
-        if realtime_active() {
+        if (self.realtime)() {
             self.backoff.reset();
             return self.timing.realtime_retry;
         }
         let mut roll = [0u8; 8];
         let _ = getrandom::fill(&mut roll);
-        self.backoff.next(u64::from_le_bytes(roll), &self.timing)
+        let since = self.suspended_at.map(|at| at.elapsed());
+        let cap = relay_session::backoff_cap(&self.timing, self.sid.is_some(), since, self.refused);
+        self.backoff.next_within(u64::from_le_bytes(roll), &self.timing, cap)
     }
 
     /// The node is shutting down: end the session so the relay hands its ring to the
@@ -1761,6 +2015,9 @@ pub(crate) type WsStream = tokio_tungstenite::WebSocketStream<
 #[derive(Debug)]
 pub(crate) enum ConnectError {
     License(LicenseRefusal),
+    /// The relay turned the socket away (a 1008 close, `auth_failed`): each such socket
+    /// spends its per-address budget, so the next try waits the full backoff.
+    Refused(String),
     Other(String),
 }
 
@@ -1795,6 +2052,7 @@ impl std::fmt::Display for ConnectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::License(r) => write!(f, "{}", r.code()),
+            Self::Refused(why) => write!(f, "refused by the relay ({why})"),
             Self::Other(e) => write!(f, "{e}"),
         }
     }
@@ -1863,7 +2121,8 @@ fn is_auth_nonce(nonce: &str) -> bool {
     nonce.len() == 64 && nonce.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Reads the relay's next text frame as an [`AuthReply`], within `limit`.
+/// Reads the relay's next text frame as an [`AuthReply`], within `limit`, with the
+/// frame's kind ([`reply_kind`]) for an error message. A 1008 close is a refusal.
 async fn read_auth_reply<S>(read: &mut S, limit: Duration) -> Result<(AuthReply, String), ConnectError>
 where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
@@ -1878,18 +2137,40 @@ where
         let text = match response {
             Message::Text(text) => text,
             Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Close(Some(frame)) if frame.code == CloseCode::Policy => {
+                return Err(ConnectError::Refused(log_word(&frame.reason)));
+            }
             _ => return Err("Unexpected auth response".to_string().into()),
         };
+        let kind = reply_kind(&text);
         return match serde_json::from_str::<AuthReply>(&text) {
-            Ok(reply) => Ok((reply, text.to_string())),
-            Err(_) => Err(format!("Auth rejected: {text}").into()),
+            Ok(reply) => Ok((reply, kind)),
+            Err(_) => Err(format!("Auth rejected: a {kind} frame").into()),
         };
     }
 }
 
+/// What a relay frame may say in a log line: its `type`, never the frame itself, which can
+/// carry a sid or other session material.
+fn reply_kind(text: &str) -> String {
+    #[derive(Deserialize)]
+    struct Typed {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+    serde_json::from_str::<Typed>(text).ok().map(|t| log_word(&t.kind)).unwrap_or_else(|| "unparsable".into())
+}
+
+/// Relay text short and plain enough to log (an error code), else `unparsable`. A sid is
+/// 32 characters, so it can never pass.
+fn log_word(text: &str) -> String {
+    let plain = (1..=24).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_alphabetic() || b == b'_' || b == b' ');
+    if plain { text.to_string() } else { "unparsable".into() }
+}
+
 /// A WebSocket over a TCP stream we opened ourselves, so the stream's options are set
 /// before TLS.
-async fn dial_websocket(url: &str) -> Result<WsStream, ConnectError> {
+async fn dial_websocket(url: &str) -> Result<(WsStream, Option<(SocketAddr, SocketAddr)>), ConnectError> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let request = url.into_client_request().map_err(|e| format!("Bad relay URL: {e}"))?;
     let host = request.uri().host().ok_or_else(|| format!("Bad relay URL: {url}"))?;
@@ -1908,10 +2189,11 @@ async fn dial_websocket(url: &str) -> Result<WsStream, ConnectError> {
         .await
         .map_err(|e| format!("WebSocket connect failed: {e}"))?;
     limit_unacked_send_time(&tcp);
+    let path = tcp.local_addr().ok().zip(tcp.peer_addr().ok());
     let (stream, _response) = tokio_tungstenite::client_async_tls_with_config(request, tcp, None, None)
         .await
         .map_err(|e| format!("WebSocket connect failed: {e}"))?;
-    Ok(stream)
+    Ok((stream, path))
 }
 
 /// Debug builds only: a `relay_connect` file in the data dir (one `ip:port` line) is
@@ -1950,13 +2232,30 @@ struct Opened {
     door: RelaySession,
     ask: Ask,
     reply: AuthReply,
+    path: Option<(SocketAddr, SocketAddr)>,
 }
 
 /// Connect, take the relay's challenge and sign in: v3 with a session (resuming
 /// `held`) only to a relay that offered sessions and only when `want_session`, else v2.
 async fn open_socket(dial: Dial, want_session: bool, held: Option<(String, u64)>, timing: Timing) -> Result<Opened, ConnectError> {
+    let challenged = challenge(&dial, &timing).await?;
+    sign_in(&dial, challenged, want_session, held, &timing).await
+}
+
+/// A socket holding the relay's challenge, not signed in yet.
+struct Challenged {
+    write: WsSink,
+    read: SplitStream<WsStream>,
+    /// The challenge and the relay's door key, which this socket's door proofs cover.
+    door: RelaySession,
+    offered: bool,
+    path: Option<(SocketAddr, SocketAddr)>,
+}
+
+/// Connect (TCP, TLS, the upgrade) and take the relay's challenge.
+async fn challenge(dial: &Dial, timing: &Timing) -> Result<Challenged, ConnectError> {
     let domain = relay_auth_domain(&dial.url).ok_or_else(|| format!("Bad relay URL: {}", dial.url))?;
-    let stream = tokio::time::timeout(timing.handshake, dial_websocket(&dial.url))
+    let (stream, path) = tokio::time::timeout(timing.handshake, dial_websocket(&dial.url))
         .await
         .map_err(|_| "WebSocket connect timed out".to_string())??;
     let (mut write, mut read) = stream.split();
@@ -1965,7 +2264,7 @@ async fn open_socket(dial: Dial, want_session: bool, held: Option<(String, u64)>
     bounded_send(&mut write, Message::Text(hello.into()))
         .await
         .map_err(|e| format!("Failed to ask for a challenge: {e}"))?;
-    let (challenge, text) = read_auth_reply(&mut read, timing.auth_reply).await?;
+    let (challenge, kind) = read_auth_reply(&mut read, timing.auth_reply).await?;
     let offered = challenge.offers_sessions();
     let (nonce, door_key) = match challenge {
         AuthReply::AuthChallenge { nonce, door_key, .. } if is_auth_nonce(&nonce) => (nonce, door_key),
@@ -1973,9 +2272,22 @@ async fn open_socket(dial: Dial, want_session: bool, held: Option<(String, u64)>
         AuthReply::AuthFailed { .. } => {
             return Err("The relay offers no auth challenge (it needs updating)".to_string().into());
         }
-        _ => return Err(format!("Auth rejected: {text}").into()),
+        _ => return Err(format!("Auth rejected: a {kind} frame").into()),
     };
+    let door = RelaySession { domain, nonce, peer_id: dial.peer_id.clone(), door_key };
+    Ok(Challenged { write, read, door, offered, path })
+}
 
+/// Sign in on a challenged socket and read the relay's answer.
+async fn sign_in(
+    dial: &Dial,
+    challenged: Challenged,
+    want_session: bool,
+    held: Option<(String, u64)>,
+    timing: &Timing,
+) -> Result<Opened, ConnectError> {
+    let Challenged { mut write, mut read, door, offered, path } = challenged;
+    let (domain, nonce) = (door.domain.clone(), door.nonce.clone());
     let ask = Ask::choose(offered && want_session, dial.fetch, held.as_ref().map(|(sid, in_h)| (sid.as_str(), *in_h)));
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1994,7 +2306,6 @@ async fn open_socket(dial: Dial, want_session: bool, held: Option<(String, u64)>
         .map_err(|e| format!("Failed to decode keypair: {e}"))?;
     let signature = base64::engine::general_purpose::STANDARD.encode(keypair.sign(sign_payload.as_bytes()));
 
-    let door = RelaySession { domain: domain.clone(), nonce: nonce.clone(), peer_id: dial.peer_id.clone(), door_key };
     let auth = ClientMsg::Auth {
         v: if session.is_some() { 3 } else { 2 },
         peer_id: dial.peer_id.clone(),
@@ -2016,12 +2327,12 @@ async fn open_socket(dial: Dial, want_session: bool, held: Option<(String, u64)>
     match read_auth_reply(&mut read, timing.auth_reply).await? {
         (AuthReply::AuthFailed { error }, _) => Err(match LicenseRefusal::from_code(&error) {
             Some(refusal) => ConnectError::License(refusal),
-            None => ConnectError::Other(error),
+            None => ConnectError::Refused(log_word(&error)),
         }),
-        (AuthReply::AuthChallenge { .. }, text) => Err(format!("Auth rejected: {text}").into()),
+        (AuthReply::AuthChallenge { .. }, kind) => Err(format!("Auth rejected: a {kind} frame").into()),
         (reply, _) => {
             let stream = read.reunite(write).map_err(|e| format!("Reunite error: {e}"))?;
-            Ok(Opened { stream, door, ask, reply })
+            Ok(Opened { stream, door, ask, reply, path })
         }
     }
 }
@@ -2260,6 +2571,45 @@ mod tests {
             "a stamp alone cannot tell junk from an order sharing it",
         );
         assert_eq!(kill_ack_frame(None), serde_json::json!({ "type": "kill_ack" }), "only a wipe acks everything");
+    }
+
+    fn auth_frames(msg: Message) -> impl futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin {
+        futures_util::stream::iter(vec![Ok(msg)])
+    }
+
+    /// No handshake frame reaches a log line verbatim: one that does not parse is named by
+    /// its type alone, so a sid or other session material is never logged.
+    #[tokio::test]
+    async fn a_bad_auth_reply_is_named_by_its_type_alone() {
+        let sid = "abcdefabcdefabcdefabcdefabcdefab";
+        for (text, kind) in [
+            (format!(r#"{{"type":"resumed","h":"x","sid":"{sid}"}}"#), "resumed"),
+            (format!("not json {sid}"), "unparsable"),
+            (format!(r#"{{"type":"{sid}"}}"#), "unparsable"),
+        ] {
+            let mut frames = auth_frames(Message::Text(text.into()));
+            let e = read_auth_reply(&mut frames, Duration::from_secs(1)).await.unwrap_err().to_string();
+            assert!(!e.contains(sid) && e.contains(kind), "{e}");
+        }
+    }
+
+    /// A policy close in the handshake (`rate_limit`, `ip_limit`, `bad_auth`) is the relay
+    /// refusing us; any other close is not.
+    #[tokio::test]
+    async fn a_policy_close_in_the_handshake_is_a_refusal() {
+        let close = |code: u16| Message::Close(Some(CloseFrame { code: CloseCode::from(code), reason: "rate_limit".into() }));
+        let refused = read_auth_reply(&mut auth_frames(close(1008)), Duration::from_secs(1)).await;
+        assert!(matches!(refused, Err(ConnectError::Refused(_))), "{refused:?}");
+        let gone = read_auth_reply(&mut auth_frames(close(1001)), Duration::from_secs(1)).await;
+        assert!(matches!(gone, Err(ConnectError::Other(_))), "{gone:?}");
+    }
+
+    /// The route lookup asks the routing table only, and names the address a socket to
+    /// the relay would leave from.
+    #[test]
+    fn the_route_to_a_relay_names_the_local_address_it_leaves_from() {
+        let loopback: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(route_source("127.0.0.1:9".parse().unwrap()), Some(loopback));
     }
 
     #[test]

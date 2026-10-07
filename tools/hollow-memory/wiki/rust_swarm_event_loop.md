@@ -89,7 +89,9 @@ The loop owns ~40 mutable state variables. They are NOT consolidated into a stru
 - `pending_friend_requests: HashMap<String, i64>` — queued friend requests for offline peers.
 
 ### Rate Limiting
-- `peer_rate_tokens: HashMap<String, (u32, Instant)>` — per-peer token bucket (100 burst, 20/sec refill). Our OWN devices are exempt (session 24): a new sibling's first sync bursts far past the bucket (friend lists, read markers, DM sync, signals) and every dropped frame was state the new device never got; harness `a_siblings_burst_is_never_rate_limited` (160 sibling copies, 67 lost without the exemption). A removed device no longer resolves to us, so it is limited like anyone.
+- `frame_budget: FrameBudget` (`node/frame_budget.rs`, 2026-10-07) — the per-sender-device token bucket (100 burst, 20/sec refill) plus what it implies on the send side. Our OWN devices are exempt (session 24): a new sibling's first sync bursts far past the bucket (friend lists, read markers, DM sync, signals) and every dropped frame was state the new device never got; harness `a_siblings_burst_is_never_rate_limited` (160 sibling copies, 67 lost without the exemption). A removed device no longer resolves to us, so it is limited like anyone.
+- **A drop is never final.** The limiter remembers each sender it dropped from (one entry per sender however much it sent, at most 1024). Once that sender's bucket is FULL again (it stopped flooding) and not within 30 s of its last repair, the 100 ms `sync_dispatch_timer` runs `sync_handler::repair_after_drops`: a `DmSyncRequest` with the gap digest if it sits in our DM room, a `SyncRequest` plus channel sync for every server we share with it (the per-peer half of `repair_after_gap`), and the DM copies we hold for it go out paced (its own sync ask may have been one of the dropped frames). A stranger gets nothing. Field cause: a phone back past the relay's grace got the relay's `offline_buffer` replay, the friend's pending-queue drain of the same DMs and the friend's sync answer within a second; the bucket dropped 99 frames including the answer and nothing asked again.
+- **Our catch-up bulk stays inside the receiver's bucket.** At a non-sibling's return (`PeerJoined`/`RoomMembers` with `is_new`, via `ensure_olm_session_and_drain`), the queued DM copies (`DirectMessage`, edit, delete, reactions, `LinkPreviewSet`: already handed to the relay, which is replaying them right now) are HELD for 6 s (past the receiver's 5 s full refill); everything else goes paced at once. Pacing: 20 frames at once, then 10/s per device. A re-key (`on_session_ready`, `KeyBundle`) sends the queue and the held copies paced on the new session. A device that is out of reach (or without a session) when its turn comes gets everything back at the front of `pending_messages`. DM edits and late cards rewrite the held and paced copies too. Nothing in the queue is trimmed: the sender cannot tell a resumed session (ring replayed everything) from a fresh one (offline_buffer kept at most 100/500, JSON directs none), and a sync answer that would supersede a copy can itself be dropped at the receiver, whose re-ask then starts from a newer anchor. Harness: `a_friend_back_past_grace_gets_every_dm_once`, `kept_dm_copies_reach_a_friend_back_past_grace_inside_its_bucket`, `a_burst_past_the_bucket_from_an_online_friend_is_asked_for_again`, `a_resumed_ring_past_the_bucket_is_asked_for_again`, `a_flood_past_the_bucket_costs_one_repair_after_it_stops`.
 - `vc_signal_rate_tokens: HashMap<String, (u32, Instant)>` — tighter sub-limiter for VC signaling (30 burst, 10/sec).
 
 ## Main Loop Structure
@@ -240,7 +242,7 @@ forgotten). Orders: a drop with a session gives `Suspended`, then `Resumed` or `
 - Clears `synced_peers` — ensures full re-sync on reconnect (without this, peers skip sync because they're already in the set).
 - Clears `key_request_in_flight` — allows fresh key exchange after reconnect.
 - Clears `mls_bootstrap_requested` — allows MLS bootstrap retry.
-- Drains `pending_messages` — stale queued messages from pre-disconnect.
+- Keeps `pending_messages`: each device's queue drains on its next return.
 - Cleans up in-progress WS stream transfers.
 
 ### WsEvent::PeerJoined { room, peer_id }
@@ -253,7 +255,7 @@ Critical path — triggers most of the sync machinery:
 6. If `synced_peers.insert(peer_id)` returns true (first time this session):
    - Sends own profile (with invisible flag).
    - Initiates Olm key exchange if no session exists.
-   - If Olm session exists: emits SessionEstablished, drains pending_messages, flushes pending_sync_requests.
+   - If Olm session exists: emits SessionEstablished, hands pending_messages to the frame budget (DM copies held 6 s, the rest paced; a sibling's at once), flushes pending_sync_requests.
    - For each shared server: sends CRDT SyncReq (always plaintext — MLS epoch may be stale after reconnect), registers for channel sync via coordinator, requests MLS KeyPackage if coordinator.
    - Re-broadcasts voice channel joins to reconnecting peer.
    - Sends DmSyncRequest for DM history.
@@ -284,7 +286,7 @@ Fires when we join a room — provides the full member list. This is the relay's
 ### WsEvent::Message / DirectMessage { room, from, data }
 The main incoming message path:
 1. Parses JSON as `HavenMessage`.
-2. Rate limiting: token bucket check (100 burst, 20/sec per peer; our own devices exempt). Drop if rate-limited.
+2. Rate limiting: token bucket check (100 burst, 20/sec per peer; our own devices exempt). Drop if rate-limited, remembered for one repair once the sender stops (see Rate Limiting above).
 3. **Recovery interception:** if message is a Recovery* variant, handle inline and `continue`.
 4. **Share interception:** if message is a Share* variant, dispatch to `share_handler::handle_envelope_share_*()` and `continue`.
 5. Otherwise: passes to `handle_incoming_request()`.

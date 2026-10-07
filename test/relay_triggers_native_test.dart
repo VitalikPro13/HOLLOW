@@ -72,4 +72,43 @@ void main() {
     expect(_read('flatpak/com.anonlisten.Hollow.yml'),
         contains('--system-talk-name=org.freedesktop.login1'));
   });
+
+  test('iOS holds the background task the phone model asks for', () {
+    final delegate = _read('ios/Runner/AppDelegate.swift');
+    expect(delegate, contains('"${IosRelayBackgroundTask.channelName}"'));
+    for (final word in ['"begin"', '"end"', '"expiring"']) {
+      expect(delegate, contains(word), reason: word);
+    }
+    expect(delegate, contains('beginBackgroundTask('));
+    expect(delegate, contains('endBackgroundTask('));
+  });
+
+  test('Android works with the OS: no battery exemption, no Wi-Fi lock', () {
+    // Plan 3.8: Play lists a chat app with high-priority FCM as not acceptable
+    // for the exemption, and a Wi-Fi lock does nothing for a background socket.
+    expect(_read('android/app/src/main/AndroidManifest.xml'),
+        isNot(contains('REQUEST_IGNORE_BATTERY_OPTIMIZATIONS')));
+    final activity = _read(_channelOwners['android']!);
+    for (final gone in [
+      'IGNORE_BATTERY_OPTIMIZATIONS',
+      'isIgnoringBatteryOptimizations',
+      'WifiLock',
+      'WifiManager',
+    ]) {
+      expect(activity, isNot(contains(gone)), reason: gone);
+    }
+    for (final dart in [
+      'lib/src/core/android_platform.dart',
+      'lib/src/ui/shell/hollow_shell.dart',
+    ]) {
+      final source = _read(dart);
+      for (final gone in [
+        'BatteryOptimized',
+        'BatteryExemption',
+        'WifiLock',
+      ]) {
+        expect(source, isNot(contains(gone)), reason: '$dart: $gone');
+      }
+    }
+  });
 }

@@ -303,6 +303,23 @@ class Freeze(ProxyTestCase):
         self.assertTrue(wait_until(lambda: any(
             self.upstream.received(i) == b'knock' for i in range(self.upstream.count()))))
 
+    def test_a_held_connection_whose_client_gave_up_never_reaches_the_upstream(self):
+        self.ctl('freeze route:t')
+        before = self.upstream.count()
+        gone = self.connect('t')
+        gone.sendall(b'knock')
+        self.assertTrue(wait_until(lambda: len(self.connections()) == 1))
+        gone.close()
+        live = self.connect('t')
+        live.sendall(b'still here')
+        self.assertTrue(wait_until(lambda: len(self.connections()) == 2))
+        self.ctl('thaw route:t')
+        self.assertTrue(wait_until(lambda: self.upstream.count() == before + 1))
+        self.assertTrue(wait_until(lambda: self.upstream.received(before) == b'still here'))
+        time.sleep(QUIET)
+        self.assertEqual(self.upstream.count(), before + 1, 'a connection its client had left reached the upstream')
+        self.assertEqual(len(self.connections()), 1)
+
     def test_freeze_all_covers_every_route_and_thaw_all_releases_them(self):
         a, a_index = self.established('t')
         b, b_index = self.established('u')
@@ -434,6 +451,12 @@ class TlsUpstream(TlsPassThrough):
     def test_a_tls_session_survives_a_freeze_and_thaw(self):
         self.skipTest('the client side of a :tls route is plain')
 
+    def test_a_client_close_reaches_the_upstream_as_a_tls_close(self):
+        sock, index = self.established()
+        sock.shutdown(socket.SHUT_WR)
+        self.assertTrue(wait_until(lambda: self.upstream.conn(index)['end'] == 'eof'),
+                        f"the upstream saw {self.upstream.conn(index)['end']}")
+
 
 class FakeTransport:
     def __init__(self):
@@ -442,12 +465,13 @@ class FakeTransport:
         self.paused = False
         self.closed = False
         self.aborted = False
+        self.half_close = True
 
     def write(self, data):
         self.written += data
 
     def can_write_eof(self):
-        return True
+        return self.half_close
 
     def write_eof(self):
         self.eof = True
@@ -500,6 +524,13 @@ class Layers(unittest.TestCase):
         self.assertEqual(bytes(self.upstream.written), b'up')
         self.assertEqual(bytes(self.client.written), b'down')
         self.assertTrue(self.upstream.eof)
+
+    def test_an_end_a_tls_upstream_cannot_half_close_is_a_close(self):
+        self.upstream.half_close = False
+        self.conn.eof_from(True)
+        self.assertFalse(self.upstream.closed)
+        self.conn.thaw()
+        self.assertTrue(self.upstream.closed, 'the client end never reached a TLS upstream')
 
     def test_an_end_that_goes_away_while_frozen_is_mirrored_only_at_the_thaw(self):
         self.conn.lost(False, None)

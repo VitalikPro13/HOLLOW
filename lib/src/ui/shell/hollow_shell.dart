@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' show Helper;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/android_platform.dart';
 import 'package:hollow/src/core/services/android_version.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
@@ -1168,17 +1167,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
     }
 
-    // The WiFi lock is what stops Android throttling the socket.
-    if (Platform.isAndroid) {
-      await acquireWifiLock();
-      // Primed so the screen-share sheet can lock the audio toggle on
-      // Android < 10 without a first-frame flash.
-      await AndroidScreenAudioSupport.prime();
-      final optimized = await isBatteryOptimized();
-      if (optimized && mounted) {
-        await requestBatteryExemption();
-      }
-    }
+    // Primed so the screen-share sheet can lock the audio toggle on Android < 10
+    // without a first-frame flash.
+    if (Platform.isAndroid) await AndroidScreenAudioSupport.prime();
   }
 
   @override
@@ -1188,17 +1179,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // it is set BEFORE the _initialized guard and is always current.
     ref.read(appLifecycleProvider.notifier).state = state;
     if (!_initialized) return;
-    // The relay probe on resume is RelayTriggers' foreground nudge.
+    // The relay socket follows the lifecycle in RelayTriggers: closed a few
+    // seconds into the background, resumed by its foreground probe.
     if (state == AppLifecycleState.resumed) {
-      debugPrint('[HOLLOW] App resumed — WiFi lock');
       _lockAfterBackground();
-      acquireWifiLock();
       _updateIosPushHeartbeat(active: true);
     } else if (state == AppLifecycleState.paused) {
-      debugPrint('[HOLLOW] App paused — releasing WiFi lock');
       _pausedAt ??= DateTime.now();
-      releaseWifiLock();
-      // A live node only receives while resumed, so the NSE has to run its own
+      // The live node lets go of the relay soon after, so the NSE runs its own
       // fetch while we are gone.
       _updateIosPushHeartbeat(active: false);
     }

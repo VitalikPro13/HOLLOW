@@ -30,7 +30,8 @@ Control commands, one line in and one JSON line out:
     freeze all|route:NAME|ID    stop moving bytes; a frozen route also holds every
                                 connection opened while it is frozen (accepted,
                                 read nothing, no upstream yet)
-    thaw all|route:NAME|ID      move bytes again; held connections reach upstream
+    thaw all|route:NAME|ID      move bytes again; held connections whose client is
+                                still there reach upstream, the others are closed
     drop all|route:NAME|ID      reset both ends (RST, never FIN); a dropped route
                                 takes new connections normally again
     stats                       totals per route
@@ -54,6 +55,9 @@ import sys
 import time
 
 READ_PAUSED_LIMIT = 4 * 1024 * 1024
+# How long a thawed held connection reads before it dials, so a client that gave
+# up while held is seen to have closed.
+HELD_SETTLE_S = 0.05
 
 
 def _parse_hostport(text):
@@ -181,7 +185,13 @@ class Conn:
             self._connect_upstream()
 
     def _connect_upstream(self):
-        if self.connecting or self.upstream is not None or self.closed:
+        if self.connecting or self.upstream is not None or self.closed or self.frozen:
+            return
+        if self.client_gone or self.eof_to_upstream:
+            # Gave up while held: an attempt made into a dead network never
+            # reaches the server later.
+            self.proxy.log(f'abandoned {self.id}: its client left while held')
+            self._close_both(reset=False)
             return
         self.connecting = True
         asyncio.ensure_future(self._dial())
@@ -258,8 +268,12 @@ class Conn:
         if down is not None and self.to_client and not self.client_gone:
             down.write(bytes(self.to_client))
             self.to_client.clear()
-        if self.eof_to_upstream and up is not None and not self.upstream_gone and up.can_write_eof():
-            up.write_eof()
+        if self.eof_to_upstream and up is not None and not self.upstream_gone:
+            if up.can_write_eof():
+                up.write_eof()
+            else:
+                # TLS has no half-close: the upstream sees the client's end as a close.
+                up.close()
             self.eof_to_upstream = False
         if self.eof_to_client and down is not None and not self.client_gone and down.can_write_eof():
             down.write_eof()
@@ -296,10 +310,12 @@ class Conn:
         self.frozen = False
         self.proxy.log(f'thaw {self.id}')
         if self.upstream is None:
-            # Held since it was accepted: it reaches the upstream only now.
+            # Held since it was accepted: it reaches the upstream only now, and
+            # only if its client is still there. A paused socket shows no end, so
+            # read first and dial once what the client left behind has arrived.
             if self.client is not None:
                 self.client.transport.resume_reading()
-            self._connect_upstream()
+            asyncio.get_running_loop().call_later(HELD_SETTLE_S, self._connect_upstream)
             return
         self._flush()
         self._resume()

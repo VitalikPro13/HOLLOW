@@ -236,12 +236,16 @@ and subscriptions and answers `resumed{h, gap:true}`; the client then runs the e
 - When the socket closes or is declared dead, the session enters **grace** for a fixed window.
   Proposal: **120 s** on the official relay, a setting on self-hosted relays. Prosody uses 600 s,
   Signal keeps its socket 2 min after backgrounding.
-- **Presence follows the socket, delivery follows the session.** Peers get `peer_left` as soon as
-  the socket is known dead, so friends see you offline within the liveness deadline (section
-  3.6). The session keeps receiving: frames addressed to the device go into its ring. A resume
-  sends `peer_joined` again. Presence is honest and nothing is lost.
-- A short trip out of the app does not flap presence: a socket that is resumed before the
-  liveness deadline was never declared dead.
+- **Presence follows the socket and the screen, delivery follows the session.** Peers get
+  `peer_left` as soon as the socket is known dead, so friends see you offline within the liveness
+  deadline (section 3.6), and as soon as the app says `inactive` (decision 6): a device whose
+  session is inactive is hidden from everyone else's presence while its socket stays open. The
+  session keeps receiving: frames addressed to the device go into its ring, or reach its hidden
+  socket live. A resume sends `peer_joined` again unless the session is inactive. Presence is
+  honest and nothing is lost.
+- A short network drop does not flap presence: a socket that is resumed before the liveness
+  deadline was never declared dead. A trip out of the app on a phone does, on purpose: it hides
+  the device (decision 6).
 - During grace, a frame that would wake a fully offline device today (DM, channel mention, call)
   still triggers the push path, debounced as now.
 - **Grace expiry.** Ring frames that are bufferable today move into `offline_buffer` under their
@@ -410,7 +414,8 @@ Linux get small platform listeners, or a Rust crate if one fits.
   a DM round trip).
 - **Targets**: zero lost frames across 5 s, 30 s, 2 min and 10 min away; Connected within 1.5 s
   (p50) and 3 s (p95) after foreground on a good network; a hard drop shows offline to friends
-  within 45 s; no presence flap on a trip away under 10 s; a relay restart costs no rejoin.
+  within 45 s; no presence flap on a trip away under 10 s (superseded by decision 6: a phone off
+  screen shows offline at once); a relay restart costs no rejoin.
 - A one-hour churn soak on the mixed fleet (random background, network cuts, relay restart on
   the canary) with the loss counter at zero.
 
@@ -443,6 +448,15 @@ wire spec of section 9 lets steps 1 to 4 and 6 run at once.
    once again, it needs to be blazingly fast without any stupid stallings with waiting on dead
    connection... literally like all big apps do." Hence 3.7: never wait on an old socket, race a
    new one after 1 s, resume in one round trip, target Connected within 1.5 s p50 and 3 s p95.
+6. **A phone shows online to others only while the app is on screen** (2026-10-07, amends
+   decision 2), as Telegram and WhatsApp do, not whenever its relay socket is open. `inactive`
+   hides the device from everyone else's presence at once and `active` shows it again; delivery
+   never depended on presence and still follows the session. A phone in a call, voice channel,
+   conference or screen share, or with a call ringing in, is still in use and stays shown until
+   that ends. Why: in the mixed-fleet check a backgrounded Android phone receiving a DM every 2 s
+   reconnected about every 12 s (push wake, resume, close 10 s later). Its friend saw 12 online
+   flickers in 150 s, and each `PeerJoined` made the friend run a DM catch-up of 104 to 200 rows
+   that found nothing new.
 
 ## 9. Wire specification (wave 0, 2026-10-06)
 
@@ -497,8 +511,9 @@ and both sides change with them.
   hands off as on grace expiry (9.7), its rooms are left silently.
 - After `resumed`, in this order: every waiting `kill_signal`, then one `members` per session room
   (with `proved` for locked rooms), then the ring replay of every stream frame after the client's
-  `in_h`, then `peer_joined` to whoever sees the device in each room. Nothing is rejoined and
-  nothing is resubscribed. After a fresh `auth_ok`, the kill signals as today.
+  `in_h`, then `peer_joined` to whoever sees the device in each room, none while the session is
+  inactive (9.7). Nothing is rejoined and nothing is resubscribed. After a fresh `auth_ok`, the
+  kill signals as today.
 
 ### 9.3 Counting
 
@@ -525,7 +540,8 @@ frame refused by a membership gate was still handled.
   previous ack, is ignored.
 - **Relay ring.** Every stream frame to a session, live or in grace, enters its ring before the
   socket write, and leaves only by ack. Caps per session: 8 MiB and 4096 real frames; all rings
-  also count toward the global 512 MB buffer budget (OfflineIndex). Over a cap, the oldest real
+  share their own 256 MiB pool, apart from the 512 MB buffer budget (HOL-SEC-170, section 11.5).
+  Over a cap, the oldest real
   frame of the sender share holding the most bytes in that ring becomes a **tombstone**, adjacent
   tombstones merge, and a tombstone replays as one counted `{"type":"gap","n":N}`. A frame larger
   than the ring cap is still written live but enters the ring as a tombstone. Fan-out frames share
@@ -558,7 +574,8 @@ frame refused by a membership gate was still handled.
 
 Three FFI entry points (`api/network.rs`, stubbed in wave 0, codegen done):
 
-- `relay_nudge(reason)`: reasons `foreground`, `focus`, `network`, `wake`. If a frame arrived in
+- `relay_nudge(reason)`: reasons `foreground`, `focus`, `network`, `wake`, `call`, `push` (the
+  last two since wave 2, section 11.5). If a frame arrived in
   the last 2 s, nothing. Otherwise a heartbeat with a 1 s deadline; on a miss, open a new socket
   and resume on it while the old one is still judged (make before break), the first to answer
   wins. With no socket, cancel the backoff sleep and connect now. Every nudge resets the backoff.
@@ -575,9 +592,9 @@ Three FFI entry points (`api/network.rs`, stubbed in wave 0, codegen done):
 
 - **States** live, grace, gone. Grace lasts 120 s (`--session-grace-secs`, 30 to 600).
 - **Presence follows the socket.** On close or idle timeout the device leaves room presence
-  (`peer_left` to whoever saw it, as today) and `peer_sockets`. The session keeps its rooms with
-  inbox owner flags and, within this process, door standing; its subscriptions; its nickname and
-  link code; its inactive flag.
+  (`peer_left` to whoever saw it, as today, unless it was hidden already) and `peer_sockets`.
+  The session keeps its rooms with inbox owner flags and, within this process, door standing;
+  its subscriptions; its nickname and link code; its inactive flag.
 - **Delivery follows the session.** Fan-out and directs reach live room slots and grace sessions
   alike; a grace session's frames go into its ring only. A device whose fetch socket holds a room
   slot while its full session is in grace gets both copies (the receiver dedups by message id).
@@ -591,8 +608,20 @@ Three FFI entry points (`api/network.rs`, stubbed in wave 0, codegen done):
   them). Then the session's rooms are left (presence already went at socket death) and it is gone.
 - **Re-checks on resume.** Inbox ownership against the roster book's fold (an owner it no longer
   counts loses the inbox, as `drop_inbox_owners`); kill signals first; door standing as below.
-- **`inactive` / `active`.** While inactive the relay withholds presence frames from the session;
-  `active` (and every resume) sends one fresh `members` per room.
+- **`inactive` / `active`.** While inactive the relay withholds presence frames from the session
+  and hides its device from everyone else's presence (decision 6). On `inactive` every room that
+  sees the device is told `peer_left`, exactly as if its socket had died. While hidden it is in
+  no `members` list and no `discover_peers` or `check_peers` answer, and nothing announces it: not
+  a join, a leave, its socket dropping, a resume, a door proved or a door's grace running out.
+  Frames still reach it live, what it sends still goes out, and it stays in `peer_sockets`, so
+  the relay never pushes it. `active` sends `peer_joined` to whoever sees it in each room, and
+  one fresh `members` for each room whose presence it withheld, never one per room held
+  (HOL-SEC-164); every resume sends one per room. A resume of an inactive session announces
+  nothing; a fresh session starts shown, and the client writes `inactive` before its join replay.
+  One socket's presence passes come at least 2 s apart, more after a pass that walked many
+  peers (250 us per room and per peer in it): a change inside the gap waits for its end and one
+  undone meanwhile tells nobody, so toggling cannot make the relay walk every room of a session
+  at will. The device's own siblings see it hidden too.
 - **`end`.** The session is gone now: the expiry hand-off runs at once, then the normal close.
 - **Bounds.** A grace session holds its slot in the per-IP connection cap (`ip_limit_key`) until
   gone. The session table holds at most 262,144 sessions; past it, the session of the address
@@ -638,7 +667,9 @@ Three FFI entry points (`api/network.rs`, stubbed in wave 0, codegen done):
 |---|---|---|
 | Grace | 120 s (30 to 600) | relay |
 | Ring caps per session | 8 MiB, 4096 real frames | relay |
+| Ring pool, all sessions | 256 MiB (beside the 512 MB buffer budget) | relay |
 | Session table | 262,144 | relay |
+| Presence passes (hide or show) | per socket at least 2 s apart, plus 250 us per room and peer the last one walked | relay |
 | `idleTimeout` | 45 s | relay |
 | Drain spread | 2 to 10 s | relay |
 | Heartbeat | 15 s foreground, 60 s background | client |
@@ -809,3 +840,147 @@ the wire; these are the rules the code follows on top of it. The wikis describe 
   plan accepts this (the relay deploys first); confirm it.
 - The 10-minute zero-loss target holds at the transport only while frames fit `offline_buffer`
   after grace; past that, the node's gap repair carries it, which only the fleet can show.
+
+Wave 2 settled each of these; section 11.5 says how.
+
+## 11.5 As built (wave 2, 2026-10-07)
+
+Five agents: mobile-model, client-lifecycle, two hostile reviewers (handshake, bounds) and e2e.
+
+### Decisions
+
+- **The move to a better network (3.7) is built** (client-lifecycle). A `network` nudge on a
+  working socket compares the source address the OS would now use to reach the relay with the
+  live socket's own; only a different address moves the session, so spurious network events cost
+  one probe.
+- **A new client on an old relay** losing what it wrote into a 25 to 70 s freeze (11.4) is
+  accepted: the relay deploys first.
+- **The phone's one foreground probe is `relay_set_background(false)`.** A suspend ends only on it
+  or on an app nudge `foreground`, `focus`, `call` or `push`; `network` and `wake` never reopen a
+  socket the phone closed on purpose.
+- **Resume cost** (about 80 ms of relay CPU for a session in 10,000 rooms, bounded by the
+  per-address connection rate, the same work as a fresh login) is a phase G residual.
+- **Shared addresses** (carrier NAT): at a full address a newcomer takes the oldest grace slot
+  there, only after its login and at most 10 a minute. Before sessions a neighbour could already
+  hold every slot.
+
+### Phones (mobile-model)
+
+- Away means hidden, paused or detached; `inactive` is still on screen (notification shade, app
+  switcher, a biometric prompt) and keeps the socket. Away: `relay_set_background(true)` at once,
+  `relay_suspend()` 10 s later, unless a call, voice channel, conference, screen share or ringing
+  call holds the phone: then both wait until it ends while still away (decision 6). Back: cancel,
+  `relay_set_background(false)`, the same with or without a call.
+- iOS holds a background task (`RelayBackgroundTask` in AppDelegate.swift) from leaving until the
+  suspend has returned, and suspends at 10 s or 6 s before the task's grant runs out.
+- A relay connection that comes back while the phone is away (a push wake) closes again 10 s later.
+- A push on Android with the process alive sends `relay_nudge('push')` before the room join, so the
+  suspended session resumes and the live node shows the real notification.
+- Gone: the launch battery prompt, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, the Wi-Fi lock.
+- Android's own background network cut aborts the socket about 5 s after HOME, before the 10 s
+  close; the session's grace starts there.
+
+### Client (client-lifecycle)
+
+- The client tracks the flag the relay holds (`relay_session::Flag`): a fresh session starts
+  active, and a written flag counts as arrived only once the relay answers a heartbeat sent after
+  it on the same socket (a socket a race or move may replace proves nothing). After every fresh
+  session, resume and race or move win, and on every `relay_set_background`, the flag is written
+  only when it differs from what the relay is known to hold; a flag set with no socket goes out on
+  the next open.
+- A suspend ends only on `relay_set_background(false)` or an app nudge `foreground`, `focus`,
+  `call` or `push`; nothing races a socket while a suspend waits for its acks.
+- A nudge while a probe is out or a connect is under way adds nothing.
+- The move (3.7): the `Route` seam asks the OS, by a UDP `connect` that sends no packet, which
+  local address it would now use for the live socket's relay address. A different one starts the
+  move in two stages: dial and take the challenge beside the old socket, which keeps working both
+  ways, then sign in with the old socket's count while the old socket is left unread and unwritten
+  (at most one auth round trip). A win emits `Suspended` then `Resumed`; a failure leaves the old
+  socket in place and judges it afresh. One move at a time; only on a relay with sessions. An IPv6
+  temporary address rotation followed by a network event moves once, harmlessly.
+- A live call keeps the 15 s heartbeat in the background (`Control::Realtime`).
+- While the client holds a session inside 120 s of its own `Suspended`, backoff is capped at 5 s
+  (full jitter); past that, or after any refusal (a 1008 close, `auth_failed`, a license refusal),
+  30 s. A refused attempt spends the relay's per-address budget, an unreachable path does not.
+- Relay text never reaches a log: an unparsable reply is named by its `type`, close reasons only
+  when short and plain, so a sid can never pass.
+
+### The node's own rate limit (rate-repair, found by the mixed fleet)
+
+- A phone back past grace lost DMs for good: its per-sender bucket (100 frames, 20 a second,
+  `node/frame_budget.rs`) dropped the relay's replay, the friend's queued copies AND the sync answer
+  meant to repair them, and nothing asked again. Now a dropped frame is asked for again: the
+  bucket remembers who it dropped (one entry per sender, at most 1024), and once that sender's
+  bucket is full again (at most every 30 s) the node runs a DM gap sync and a server sync with it;
+  a stranger is asked nothing.
+- Our own bulk to one device is paced to fit the receiver's bucket: 20 frames at once, then 10 a
+  second (reconnect drain, re-key drains). Queued DM copies to a returning peer wait 6 s, past the
+  relay's replay, then go paced. Nothing is trimmed: the sender cannot tell a resumed session from
+  a fresh one, so no copy is provably redundant.
+- An answer we asked for gets no bypass: the bucket judges a frame before Olm decryption, where an
+  answer looks like any other frame, and the repair re-asks a dropped answer a refill later.
+
+### Relay (review-handshake, review-bounds)
+
+- `active` answers only for rooms whose presence was withheld (`PerSocketData::presence_withheld`,
+  HOL-SEC-164).
+- A session queues at most one ack deadline (`Session::count_in`); an ack may come earlier than 2 s
+  after a frame, never later than 2.25 s (HOL-SEC-165).
+- A device's own fetch socket joining a room while its session is in grace also gets that room's
+  ring DMs (`Direct`, `DirectImage`), uncounted and left in the ring, an inbox only once proved
+  (`replay_grace_directs`). Push-woken NSE and fetch nodes show the text during grace.
+- Rings have their own 256 MiB pool: bytes charged to the sender once per fan-out buffer, 1 KiB of
+  holding to the receiving session's share; pool pressure buries the heaviest sender's frame in the
+  ring that holds it (HOL-SEC-170).
+- No bound check scans a whole table: a per-share index inside each ring and `session::Book`
+  (sessions by share, grace slots by address), kept by every mint, grace, resume, end and restore
+  (HOL-SEC-171). Sessions are added or ended only through the `session_bounds` seam.
+- Adjacent tombstones merge lazily; a replay still sends one `gap` per run.
+- At the per-IP cap `.open` admits a socket only against a grace slot the address holds and ends
+  nobody; the login settles the slot (`settle_ip_slot`, HOL-SEC-172).
+
+### Presence (decision 6)
+
+- The relay keeps what a device's rooms were told on its socket (`PerSocketData::hidden`), so a
+  session that ends under a hidden socket (`end`, eviction, a 1008) leaves nobody a second time.
+  `settle_presence` runs the pass that tells every room of the session, and every list, online
+  answer and announcement reads the mark. A socket the session moves to takes the mark and the
+  pace; one back from grace starts as the session's flag says.
+- Passes are paced per socket: the next comes at least 2 s later (`PRESENCE_PASS_MS`), and 250 us
+  more per room walked and per peer in it (`PRESENCE_PASS_US_PER_PEER`); a change inside the gap
+  waits on `presence_due` (a min-heap, since each socket's gap ends at its own time; at most one
+  entry per socket). A pass costs one `peer_left` or `peer_joined` per member of each room the
+  session holds, so unpaced toggles were the HOL-SEC-164 stall again, multiplied by room size.
+  Measured (`RELAY_LIVE_PROBE=hide`, `-O1`): a pass over 5,000 rooms shared with one other
+  socket holds the loop about 19 ms (about 1.3 us per room and peer); 401 toggles in one write
+  cost one pass. Paced by its own size, one session's passes hold the loop well under 1% of the
+  time however many rooms and members it has; many sessions at once are the per-address and
+  churn residual phase G already holds.
+- Nothing about delivery changed: a hidden device stays in its rooms' `peers` and in
+  `peer_sockets`, so it gets every frame live and the relay never pushes it. A sender that now
+  counts it offline takes its own offline branch: a DM goes to the device id in the DM room
+  (`offline_session_devices`, it holds an Olm session) and the relay hands it over live; a
+  channel post's `0x09` copy for it is dropped, since it is in the room and got the broadcast.
+- Its own siblings see it hidden too. They treat it as offline (DM echo through the offline
+  branch, delivered live; MLS committer and coordinator choices skip it) and, on `active`, run
+  their reconnect work for it again (pending DM queue drained, sibling verify with the call
+  state, profile and device list), as they would for a device coming online.
+- Phones (`RelayTriggers`): `relay_set_background(true)` waits while `relayRealtimeProvider` is
+  live (a call, voice channel, meeting, a meeting lobby or a call ringing in) and goes out when
+  that session ends while still away, once per trip.
+- A device takes no MLS turn while away or while its socket is down (`crypto_handler::MlsTurn`):
+  the others already count it offline and elect someone else, so a commit of its own would fork
+  the group. The batch tick keeps its rebind and add queues, no group is created, it is never the
+  vault coordinator. Back, it commits only once its session has been live for 2 s, so the commits
+  replayed on resume merge first. This holds for desktops whose socket dropped too.
+
+### Proof
+
+- e2e (real client, real relay, zombie proxy): 5, 30 and 120 s freezes, thawed or dropped, four
+  frame kinds each way: nothing lost. A relay restart mid-window (snapshot through a real fd
+  store): nothing lost. 600 s: everything B sent arrives; A's DMs to B lose only the oldest beyond
+  `offline_buffer`'s 100 (500 opted in); broadcast, topic and chunk frames sent while B was gone are
+  the node's gap repair.
+- Time to healthy against the canary relay, p50 / p95 to Connected: Android back after a 20 s
+  suspend 944 / 1016 ms, iOS 826 / 1386 ms, a desktop after a 30 s network freeze 321 / 421 ms,
+  after a 60 s process pause 603 / 724 ms.

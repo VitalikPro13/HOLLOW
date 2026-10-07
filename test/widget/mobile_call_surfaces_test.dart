@@ -149,6 +149,38 @@ void main() {
       expect(_semantic('Leave the call'), findsNothing);
     });
 
+    testWidgets('floating on the shell, outside any Scaffold, its text '
+        'carries no fallback underline', (tester) async {
+      await _pump(
+        tester,
+        const Stack(children: [MobileMinimisedCall()]),
+        extra: [
+          callProvider.overrideWith(() => _InCall(CallState(
+                status: CallStatus.active,
+                peerId: kFriendPeerId1,
+                callId: 'c1',
+                direction: CallDirection.outgoing,
+                startedAt: DateTime.now(),
+              ))),
+        ],
+        // The shell's stack sits outside any Scaffold, so the app's fallback
+        // text style (yellow double underline) is what reaches the bar.
+        builder: (context, child) => Stack(children: [
+          child!,
+          const MobileMinimisedCall(),
+        ]),
+      );
+      final texts = tester.widgetList<RichText>(find.descendant(
+          of: find.byType(MobileMinimisedCall).last,
+          matching: find.byType(RichText)));
+      expect(texts, isNotEmpty);
+      for (final t in texts) {
+        expect(t.text.style?.decoration, isNot(TextDecoration.underline),
+            reason: '"${t.text.toPlainText()}" is underlined');
+      }
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('nothing at all without a call', (tester) async {
       await _pump(tester, const Stack(children: [MobileMinimisedCall()]));
       expect(find.byType(DecoratedBox), findsNothing);

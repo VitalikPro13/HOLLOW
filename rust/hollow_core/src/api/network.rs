@@ -1442,8 +1442,8 @@ pub fn set_realtime_session_active(active: bool) {
     crate::node::ws_client::set_realtime_active(active);
 }
 
-/// Look at the relay connection now instead of waiting for a timer. `reason` is one
-/// of `foreground`, `focus`, `network`, `wake`, for the log only.
+/// Look at the relay connection now instead of waiting for a timer. `foreground`,
+/// `focus`, `call` and `push` also end a suspend; `network` and `wake` only probe.
 #[frb]
 pub fn relay_nudge(reason: String) {
     crate::node::ws_client::nudge(&reason);

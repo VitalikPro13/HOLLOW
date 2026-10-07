@@ -11,6 +11,7 @@ import 'package:hollow/src/core/hidden_notification.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/services/relay_triggers.dart' show kPushNudge;
 import 'package:hollow/src/core/services/unified_push_service.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -505,11 +506,25 @@ Future<(String, Uint8List?, String)> _resolveDmPushProfile(
   return (displayName, avatarBytes, personKey);
 }
 
+/// The live node's half of a push wake. A phone closes its relay socket a few
+/// seconds into the background and keeps it closed until told otherwise, so
+/// the session comes back first; the rejoin would wait in the client's queue
+/// until the app returned. The relay replays the session's frames on resume,
+/// and the phone closes again shortly after (relay_triggers.dart).
+@visibleForTesting
+Future<bool> rejoinThroughLiveNode(Future<bool> Function() rejoin) async {
+  try {
+    await network_api.relayNudge(reason: kPushNudge);
+  } catch (_) {}
+  return rejoin();
+}
+
 /// Android keeps the FULL node registered while backgrounded, so
 /// `startFetchNode` refuses to start and every backgrounded DM push used to
 /// degrade to a "Sent you a message" placeholder. Nudge the LIVE node
-/// instead: it rejoins the DM room, the relay replays the buffered ciphertext
-/// on join, and the MAIN isolate posts the real content notification through
+/// instead: its session resumes and it rejoins the DM room, the relay replays
+/// what it holds (the session's ring, the offline buffer), and the MAIN
+/// isolate posts the real content notification through
 /// the normal routing, with mute and message-id dedup respected. This handler
 /// then only confirms delivery and stays silent.
 ///
@@ -518,7 +533,8 @@ Future<(String, Uint8List?, String)> _resolveDmPushProfile(
 /// timeout the caller's generic fallback still fires.
 Future<(bool, bool)> _tryLiveDmNudge(String sender, String personKey) async {
   try {
-    if (await network_api.nudgeLiveDmFetch(senderPeerId: sender)) {
+    if (await rejoinThroughLiveNode(
+        () => network_api.nudgeLiveDmFetch(senderPeerId: sender))) {
       await _pushLog('Live node running — nudged DM room join, waiting for arrival');
       final arrived = await _waitForLiveDmArrival(personKey);
       await _pushLog(arrived
@@ -902,7 +918,8 @@ Future<(String, String, String)?> _loadChannelWakeMeta(
 /// (liveNodeHandled, arrived).
 Future<(bool, bool)> _tryLiveChannelNudge(String server, String channel) async {
   try {
-    if (await network_api.nudgeLiveRoomJoin(roomCode: server)) {
+    if (await rejoinThroughLiveNode(
+        () => network_api.nudgeLiveRoomJoin(roomCode: server))) {
       await _pushLog('channel_wake: live node running — nudged server room join');
       final arrived = await _waitForLiveChannelArrival(server, channel);
       await _pushLog(arrived

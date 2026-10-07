@@ -68,8 +68,9 @@ wait_all() {
 }
 
 us_c="gcc -std=c11 $flags -DLIBUS_USE_OPENSSL -I../uSockets/src"
-# A session grace of seconds, so the tests watch one run out.
-relay_cxx="g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_GRACE_SECS=5 -I../uWebSockets/src -I../uSockets/src -I../src"
+# A session grace of seconds, so the tests watch one run out; three sockets fill an
+# address, so they fill one under its rate of ten new sockets a minute.
+relay_cxx="g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_GRACE_SECS=5 -DHOLLOW_RELAY_TEST_CONNS_PER_IP=3 -I../uWebSockets/src -I../uSockets/src -I../src"
 # Both builds set every switch, so flipping a default on release day changes neither.
 switches() {
     local s
@@ -142,10 +143,12 @@ run_variant() {
         fi
     done
 
-    timeout 120 "$dir/client" "$port" "$domain" "$v" > "$dir/client_$v.log" 2>&1
+    # The client's last case sends the relay SIGTERM itself (the drain hint); its pid
+    # also lets a probe read the relay's memory. Under ASan the run takes about 96 s.
+    RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" "$v" > "$dir/client_$v.log" 2>&1
     local rc=$?
     # A relay that does not exit on SIGTERM is down until systemd kills it.
-    kill -TERM "$relay_pid"
+    kill -TERM "$relay_pid" 2> /dev/null
     local exited=0
     for _ in $(seq 100); do
         if ! kill -0 "$relay_pid" 2> /dev/null; then

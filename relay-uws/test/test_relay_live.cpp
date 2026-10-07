@@ -29,12 +29,14 @@
 #include <netinet/tcp.h>
 #include <openssl/ssl.h>
 #include <poll.h>
+#include <signal.h>
 #include <sodium.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -54,6 +56,8 @@ static std::string g_domain;
 static bool g_legacy = true;
 static SSL_CTX* g_ctx = nullptr;
 static int g_next_source = 0;
+// Non-negative: every new socket comes from this one source address (Socket::open).
+static int g_pin_source = -1;
 static int g_sync = 0;
 static std::string g_tag;
 
@@ -154,7 +158,7 @@ class Socket {
     bool open() {
         fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (fd_ < 0) return false;
-        const int n = g_next_source++;
+        const int n = g_pin_source >= 0 ? g_pin_source : g_next_source++;
         sockaddr_in src{};
         src.sin_family = AF_INET;
         src.sin_addr.s_addr = htonl(0x7f000000u | static_cast<uint32_t>(1 + n / 250) << 8 | static_cast<uint32_t>(2 + n % 250));
@@ -187,6 +191,18 @@ class Socket {
 
     void send_frame(uint8_t opcode, const std::string& payload) {
         if (!ssl_ || closed_) return;
+        write_all(encode(opcode, payload));
+    }
+
+    // Many frames in one write, the way a client in a hurry sends them.
+    void send_frames(const std::vector<std::pair<uint8_t, std::string>>& frames) {
+        if (!ssl_ || closed_) return;
+        std::string all;
+        for (const auto& [op, payload] : frames) all += encode(op, payload);
+        write_all(all);
+    }
+
+    static std::string encode(uint8_t opcode, const std::string& payload) {
         std::string f(1, static_cast<char>(0x80 | opcode));
         if (payload.size() < 126) {
             f.push_back(static_cast<char>(0x80 | payload.size()));
@@ -202,7 +218,7 @@ class Socket {
         randombytes_buf(mask, sizeof(mask));
         f.append(reinterpret_cast<const char*>(mask), 4);
         for (size_t i = 0; i < payload.size(); i++) f.push_back(static_cast<char>(payload[i] ^ mask[i % 4]));
-        write_all(f);
+        return f;
     }
 
     // Reads until one more data frame is in `inbox`; false on timeout or close.
@@ -2025,29 +2041,35 @@ static void test_session_push_in_grace() {
         printf("  skip push in grace (127.0.0.1:3001 is taken)\n");
         return;
     }
-    auto wake = [lfd](int timeout_ms) {
-        pollfd p{lfd, POLLIN, 0};
-        if (poll(&p, 1, timeout_ms) <= 0) return std::string();
-        int c = accept(lfd, nullptr, nullptr);
-        if (c < 0) return std::string();
-        std::string req;
-        char buf[4096];
-        for (int i = 0; i < 20 && req.find("\r\n\r\n") == std::string::npos; i++) {
+    // Only a post naming this run's token counts: another relay on the machine may post here.
+    const std::string token = "token-" + g_tag;
+    auto wake = [lfd, &token](int timeout_ms) {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (left_ms(deadline) > 0) {
+            pollfd p{lfd, POLLIN, 0};
+            if (poll(&p, 1, left_ms(deadline)) <= 0) break;
+            int c = accept(lfd, nullptr, nullptr);
+            if (c < 0) break;
+            std::string req;
+            char buf[4096];
+            for (int i = 0; i < 20 && req.find("\r\n\r\n") == std::string::npos; i++) {
+                pollfd q{c, POLLIN, 0};
+                if (poll(&q, 1, 500) <= 0) break;
+                ssize_t n = read(c, buf, sizeof(buf));
+                if (n <= 0) break;
+                req.append(buf, static_cast<size_t>(n));
+            }
             pollfd q{c, POLLIN, 0};
-            if (poll(&q, 1, 500) <= 0) break;
-            ssize_t n = read(c, buf, sizeof(buf));
-            if (n <= 0) break;
-            req.append(buf, static_cast<size_t>(n));
+            if (poll(&q, 1, 500) > 0) {
+                ssize_t n = read(c, buf, sizeof(buf));
+                if (n > 0) req.append(buf, static_cast<size_t>(n));
+            }
+            const std::string ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            (void)!write(c, ok.data(), ok.size());
+            close(c);
+            if (req.find(token) != std::string::npos) return req;
         }
-        pollfd q{c, POLLIN, 0};
-        if (poll(&q, 1, 500) > 0) {
-            ssize_t n = read(c, buf, sizeof(buf));
-            if (n > 0) req.append(buf, static_cast<size_t>(n));
-        }
-        const std::string ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        (void)!write(c, ok.data(), ok.size());
-        close(c);
-        return req;
+        return std::string();
     };
     const std::string room = room_name("sess-push");
     Ident ida;
@@ -2055,7 +2077,7 @@ static void test_session_push_in_grace() {
     auto b = login(Ident());
     join(*a, room);
     join(*b, room);
-    a->send({{"type", "register_push_token"}, {"token", "token-" + g_tag}, {"platform", "android"}});
+    a->send({{"type", "register_push_token"}, {"token", token}, {"platform", "android"}});
     check("the device registers a token", next(*a, typed("push_token_registered")).has_value());
     b->send_bin(frame(0x04, {room, ida.peer}, "push-live"));
     next(*a, bin(frame(0x06, {room, b->id.peer}, "push-live")));
@@ -2065,14 +2087,1636 @@ static void test_session_push_in_grace() {
     check("the device left", next(*b, about("peer_left", room, ida.peer)).has_value());
     b->send_bin(frame(0x04, {room, ida.peer}, "push-grace"));
     const std::string req = wake(WAIT_MS);
-    check("a device in grace is", req.find("\"sender\":\"" + b->id.peer + "\"") != std::string::npos &&
-                                      req.find("token-" + g_tag) != std::string::npos);
+    check("a device in grace is", req.find("\"sender\":\"" + b->id.peer + "\"") != std::string::npos);
     auto a2 = login3(ida, a->sid, read);
     check("and still gets the frame on resume", next(*a2, bin(frame(0x06, {room, b->id.peer}, "push-grace"))).has_value());
     a2->send({{"type", "unregister_push_token"}});
     sync(*a2);
     close(lfd);
 }
+
+// ---------------------------------------------------------------------------
+// A device whose session said `inactive` is hidden from everyone's presence (plan section
+// 8, decision 6): every room that saw it is told it left, no list or presence answer names
+// it, nothing it does announces it, and `active` tells its rooms it is back. Delivery
+// follows the session all the while.
+
+// The relay's PRESENCE_PASS_MS (state.h): one socket's presence passes come no closer.
+static constexpr int PRESENCE_PACE_MS = 2000;
+
+// Holds 127.0.0.1:3001, where the relay posts pushes, waiting while another suite has it.
+static int hold_push_port() {
+    for (int attempt = 0; attempt < 40; attempt++) {
+        int lfd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in at{};
+        at.sin_family = AF_INET;
+        at.sin_port = htons(3001);
+        at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        int one = 1;
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        if (lfd >= 0 && bind(lfd, reinterpret_cast<sockaddr*>(&at), sizeof(at)) == 0 && listen(lfd, 16) == 0) return lfd;
+        if (lfd >= 0) close(lfd);
+        sleep_ms(500);
+    }
+    return -1;
+}
+
+// Whether the relay posts a push naming `token` within `timeout_ms`; every post is
+// answered so its worker moves on, since another relay on the machine may post here too.
+static bool pushed(int lfd, const std::string& token, int timeout_ms) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (left_ms(deadline) > 0) {
+        pollfd p{lfd, POLLIN, 0};
+        if (poll(&p, 1, left_ms(deadline)) <= 0) return false;
+        int c = accept(lfd, nullptr, nullptr);
+        if (c < 0) return false;
+        std::string req;
+        char buf[4096];
+        for (int i = 0; i < 4; i++) {
+            pollfd q{c, POLLIN, 0};
+            if (poll(&q, 1, 300) <= 0) break;
+            ssize_t n = read(c, buf, sizeof(buf));
+            if (n <= 0) break;
+            req.append(buf, static_cast<size_t>(n));
+        }
+        const std::string ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        (void)!write(c, ok.data(), ok.size());
+        close(c);
+        if (req.find(token) != std::string::npos) return true;
+    }
+    return false;
+}
+
+static void test_hidden_presence() {
+    printf("presence: an inactive device is hidden from every room, delivery goes on\n");
+    const std::string r1 = room_name("hide-1"), r2 = room_name("hide-2"), r3 = room_name("hide-3");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*b, r1);
+    join(*b, r2);
+    join(*b, r3);
+    join(*a, r1);
+    join(*a, r2);
+    check("(the rooms see it come)", next(*b, about("peer_joined", r1, ida.peer)).has_value() &&
+                                         next(*b, about("peer_joined", r2, ida.peer)).has_value());
+    a->send({{"type", "inactive"}});
+    check("inactive: every room that saw it is told it left",
+          next(*b, about("peer_left", r1, ida.peer)).has_value() && next(*b, about("peer_left", r2, ida.peer)).has_value());
+    auto c = login(Ident());
+    auto mc = join(*c, r1);
+    check("a newcomer's members leave it out", mc && peers_of(*mc) == std::set<std::string>{b->id.peer, c->id.peer});
+    check("so does discover_peers", discover(*b, r1) == std::set<std::string>{c->id.peer});
+    check("and check_peers counts it offline", online(*b, {ida.peer, c->id.peer}) == std::set<std::string>{c->id.peer});
+    Ident ide;
+    auto e = login3(ide, "new", 0);
+    join(*e, r1);
+    const uint64_t e_read = e->ws.counted;
+    e->ws.abort();
+    check("(another device drops)", next(*b, about("peer_left", r1, ide.peer)).has_value());
+    auto e2 = login3(ide, e->sid, e_read);
+    auto me = next_json(*e2, typed("members", r1));
+    check("a resuming device's members leave it out",
+          resumed(*e2) && me && peers_of(*me) == std::set<std::string>{b->id.peer, c->id.peer, ide.peer});
+
+    b->send_bin(frame(0x04, {r1, ida.peer}, "hide-direct"));
+    check("a direct to it still arrives live", next(*a, bin(frame(0x06, {r1, b->id.peer}, "hide-direct"))).has_value());
+    c->send_bin(frame(0x03, {r1}, "hide-bcast"));
+    check("and the room's broadcasts", next(*a, bin(frame(0x05, {r1, c->id.peer}, "hide-bcast"))).has_value());
+    a->send_bin(frame(0x03, {r1}, "from-hidden"));
+    check("and what it sends reaches the room", next(*b, bin(frame(0x05, {r1, ida.peer}, "from-hidden"))).has_value());
+    join(*a, r3);
+    a->send({{"type", "leave"}, {"room", r2}});
+    settle({a.get(), b.get()});
+    check("a room it joins while hidden is told nothing", !got(*b, about("peer_joined", r3, ida.peer)));
+    check("nor one it leaves", !got(*b, about("peer_left", r2, ida.peer)));
+
+    a->send({{"type", "active"}});
+    check("active: each room it is in is told it is back",
+          next(*b, about("peer_joined", r1, ida.peer)).has_value() &&
+              next(*b, about("peer_joined", r3, ida.peer)).has_value() &&
+              next(*c, about("peer_joined", r1, ida.peer)).has_value());
+    settle({a.get(), b.get()});
+    check("but not the one it left", !got(*b, about("peer_joined", r2, ida.peer)));
+    auto d = login(Ident());
+    auto md = join(*d, r1);
+    check("and every list names it again", md && peers_of(*md).count(ida.peer) != 0 &&
+                                               online(*b, {ida.peer}) == std::set<std::string>{ida.peer} &&
+                                               discover(*b, r1).count(ida.peer) != 0);
+}
+
+static void test_hidden_session() {
+    printf("presence: a hidden device's session drops, resumes and moves as before, shown to nobody\n");
+    const std::string room = room_name("hide-sess");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*b, room);
+    join(*a, room);
+    next(*b, about("peer_joined", room, ida.peer));
+    a->send({{"type", "inactive"}});
+    check("(it is hidden)", next(*b, about("peer_left", room, ida.peer)).has_value());
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    // Nothing announces the close: give the relay a moment to read it.
+    sleep_ms(300);
+    b->send_bin(frame(0x04, {room, ida.peer}, "hide-grace"));
+    settle({b.get()});
+    check("its socket dropping tells the room nothing more", !got(*b, about("peer_left", room, ida.peer)));
+    auto a2 = login3(ida, a->sid, read);
+    check("the session resumes", resumed(*a2));
+    check("its ring kept what came meanwhile", next(*a2, bin(frame(0x06, {room, b->id.peer}, "hide-grace"))).has_value());
+    settle({a2.get(), b.get()});
+    check("a resume while inactive announces nothing", !got(*b, about("peer_joined", room, ida.peer)));
+    check("and it stays hidden", discover(*b, room).empty() && online(*b, {ida.peer}).empty());
+
+    auto a3 = login3(ida, a->sid, a2->ws.counted);
+    check("it moves to another socket", resumed(*a3) && closed_by_relay(*a2));
+    settle({a3.get(), b.get()});
+    check("hidden still, and nobody is told", !got(*b, about("peer_joined", room, ida.peer)) &&
+                                                  !got(*b, about("peer_left", room, ida.peer)) &&
+                                                  online(*b, {ida.peer}).empty());
+    a3->send({{"type", "active"}});
+    check("active on the new socket shows it", next(*b, about("peer_joined", room, ida.peer)).has_value());
+    a3->send({{"type", "inactive"}});
+    check("(hidden again)", next(*b, about("peer_left", room, ida.peer)).has_value());
+
+    // The client tells a fresh session `inactive` before it replays its joins.
+    auto a4 = login3(ida, "new", 0);
+    a4->send({{"type", "inactive"}});
+    join(*a4, room);
+    settle({a4.get(), b.get()});
+    check("a fresh session told inactive before its joins is never shown",
+          !got(*b, about("peer_joined", room, ida.peer)) && !got(*b, about("peer_left", room, ida.peer)) &&
+              discover(*b, room).empty());
+    a4->send({{"type", "active"}});
+    check("until it says active", next(*b, about("peer_joined", room, ida.peer)).has_value());
+
+    a4->send({{"type", "inactive"}});
+    check("(hidden once more)", next(*b, about("peer_left", room, ida.peer)).has_value());
+    a4->send({{"type", "end"}});
+    check("(it ends its session)", closed_by_relay(*a4));
+    settle({b.get()});
+    check("an end while hidden tells the room nothing more", !got(*b, about("peer_left", room, ida.peer)));
+}
+
+static void test_hidden_no_push() {
+    printf("presence: a hidden device whose socket is live is never woken\n");
+    const int lfd = hold_push_port();
+    if (lfd < 0) {
+        printf("  skip hidden push (127.0.0.1:3001 is taken)\n");
+        return;
+    }
+    const std::string token = "hide-token-" + g_tag;
+    const std::string room = room_name("hide-push"), server = room_name("hide-push-srv"),
+                      elsewhere = room_name("hide-push-else");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*b, room);
+    join(*b, server);
+    join(*b, elsewhere);
+    join(*a, room);
+    join(*a, server);
+    check("(the rooms see it come)", next(*b, about("peer_joined", room, ida.peer)).has_value() &&
+                                         next(*b, about("peer_joined", server, ida.peer)).has_value());
+    a->send({{"type", "register_push_token"}, {"token", token}, {"platform", "android"}});
+    check("(the device registers a token)", next(*a, typed("push_token_registered")).has_value());
+    a->send({{"type", "inactive"}});
+    check("(it is hidden)", next(*b, about("peer_left", room, ida.peer)).has_value());
+    // What a sender that now counts it offline sends: a DM, a channel copy for an offline
+    // member, a deposit in a room it is not in.
+    b->send_bin(frame(0x04, {room, ida.peer}, "hp-direct"));
+    b->send({{"type", "direct"}, {"room", room}, {"target", ida.peer}, {"data", "hp-json"}});
+    b->send_bin(channel_frame(server, ida.peer, "chan", "hp-channel"));
+    b->send_bin(frame(0x04, {elsewhere, ida.peer}, "hp-elsewhere"));
+    check("its directs arrive live", next(*a, bin(frame(0x06, {room, b->id.peer}, "hp-direct"))).has_value() &&
+                                         next(*a, json_where([](const json& j) {
+                                             return j.value("type", "") == "direct" && j.value("data", "") == "hp-json";
+                                         })).has_value());
+    settle({b.get()});
+    check("and nothing wakes it", !pushed(lfd, token, 1500));
+
+    // The control: once its socket is gone, a member's direct does wake it.
+    a->send({{"type", "active"}});
+    check("(shown again)", next(*b, about("peer_joined", room, ida.peer)).has_value());
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("(its socket drops)", next(*b, about("peer_left", room, ida.peer)).has_value());
+    b->send_bin(frame(0x04, {room, ida.peer}, "hp-grace"));
+    check("while a device in grace is woken as before", pushed(lfd, token, WAIT_MS));
+    auto a2 = login3(ida, a->sid, read);
+    check("(the session resumes)", resumed(*a2));
+    a2->send({{"type", "unregister_push_token"}});
+    sync(*a2);
+    close(lfd);
+}
+
+static void test_hidden_pacing() {
+    printf("presence: one socket's presence passes come at most one a pace\n");
+    const std::string room = room_name("hide-pace");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*b, room);
+    join(*a, room);
+    next(*b, about("peer_joined", room, ida.peer));
+    const auto t0 = std::chrono::steady_clock::now();
+    a->send({{"type", "inactive"}});
+    a->send({{"type", "active"}});
+    check("the first change is told at once", next(*b, about("peer_left", room, ida.peer)).has_value());
+    settle({a.get(), b.get()});
+    check("the next one waits", !got(*b, about("peer_joined", room, ida.peer)));
+    auto back = next(*b, about("peer_joined", room, ida.peer));
+    const auto waited =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    check("for the pace, then is told", back && waited >= PRESENCE_PACE_MS);
+
+    std::vector<std::pair<uint8_t, std::string>> burst;
+    for (int i = 0; i < 10; i++) {
+        burst.push_back({0x1, R"({"type":"inactive"})"});
+        burst.push_back({0x1, R"({"type":"active"})"});
+    }
+    a->ws.send_frames(burst);
+    sleep_ms(PRESENCE_PACE_MS + 500);
+    settle({a.get(), b.get()});
+    check("a burst that ends where it began tells nobody anything",
+          count(*b, about("peer_left", room, ida.peer)) == 0 && count(*b, about("peer_joined", room, ida.peer)) == 0);
+    burst.clear();
+    for (int i = 0; i < 10; i++) {
+        burst.push_back({0x1, R"({"type":"active"})"});
+        burst.push_back({0x1, R"({"type":"inactive"})"});
+    }
+    a->ws.send_frames(burst);
+    check("one that ends hidden is told", next(*b, about("peer_left", room, ida.peer)).has_value());
+    sleep_ms(PRESENCE_PACE_MS + 500);
+    settle({a.get(), b.get()});
+    check("once", count(*b, about("peer_left", room, ida.peer)) == 0 && count(*b, about("peer_joined", room, ida.peer)) == 0);
+
+    // A pass owed when the session moves to another socket comes there, at the old pace.
+    a->send({{"type", "active"}});
+    check("(shown)", next(*b, about("peer_joined", room, ida.peer)).has_value());
+    const auto t1 = std::chrono::steady_clock::now();
+    a->send({{"type", "inactive"}});
+    sync(*a);
+    auto a2 = login3(ida, a->sid, a->ws.counted);
+    check("(it moves)", resumed(*a2) && closed_by_relay(*a));
+    auto owed = next(*b, about("peer_left", room, ida.peer));
+    const auto owed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t1).count();
+    check("a pass owed across a move still comes, no sooner", owed && owed_ms >= PRESENCE_PACE_MS - 200);
+
+    // An entry left queued by a socket that died never runs the next socket's pass early:
+    // the show owed here goes with its socket, and the resume shows the device itself.
+    a2->send({{"type", "active"}});
+    sync(*a2);
+    const uint64_t read = a2->ws.counted;
+    a2->ws.abort();
+    sleep_ms(300);
+    auto a3 = login3(ida, a->sid, read);
+    check("(it resumes, shown)", resumed(*a3) && next(*b, about("peer_joined", room, ida.peer)).has_value());
+    const auto t2 = std::chrono::steady_clock::now();
+    a3->send({{"type", "inactive"}});
+    a3->send({{"type", "active"}});
+    check("(hidden at once)", next(*b, about("peer_left", room, ida.peer)).has_value());
+    auto late = next(*b, about("peer_joined", room, ida.peer));
+    const auto late_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t2).count();
+    check("the next socket's pass keeps its own pace", late && late_ms >= PRESENCE_PACE_MS);
+
+    // Each socket's pace ends at its own time: a pass queued later may be due sooner. Here y's
+    // show falls due about 1.7 s before the one a3 queued just ahead of it.
+    sleep_ms(PRESENCE_PACE_MS);
+    Ident idy;
+    auto y = login3(idy, "new", 0);
+    join(*y, room);
+    check("(another device comes)", next(*b, about("peer_joined", room, idy.peer)).has_value());
+    y->send({{"type", "inactive"}});
+    check("(and hides)", next(*b, about("peer_left", room, idy.peer)).has_value());
+    sleep_ms(PRESENCE_PACE_MS - 300);
+    a3->send({{"type", "inactive"}});
+    a3->send({{"type", "active"}});
+    check("(a3 hides at once, its show queued)", next(*b, about("peer_left", room, ida.peer)).has_value());
+    const auto t3 = std::chrono::steady_clock::now();
+    y->send({{"type", "active"}});
+    auto soon = next(*b, about("peer_joined", room, idy.peer));
+    const auto soon_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t3).count();
+    check("a pass due sooner never waits behind one queued before it", soon && soon_ms < PRESENCE_PACE_MS - 800);
+}
+
+// The relay's PRESENCE_PASS_US_PER_PEER (state.h): the gap after a pass grows with what it walked.
+static constexpr int PRESENCE_US_PER_PEER = 250;
+
+static void test_hidden_big_pass() {
+    printf("presence: after a pass over many peers the next one waits longer\n");
+    const int rooms = 4000;
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    std::vector<std::pair<uint8_t, std::string>> joins;
+    for (int i = 0; i < rooms; i++) {
+        joins.push_back({0x1, json{{"type", "join"}, {"room", room_name("hide-big") + "-" + std::to_string(i)}}.dump()});
+    }
+    // Bursts are read whole and dropped before any barrier: `sync` parses its whole inbox again
+    // for every frame that arrives.
+    const auto drain = [](Peer& p) {
+        while (p.ws.pump(500)) {
+        }
+        p.ws.inbox.clear();
+        sync(p);
+        p.ws.inbox.clear();
+    };
+    a->ws.send_frames(joins);
+    drain(*a);
+    b->ws.send_frames(joins);
+    drain(*b);
+    drain(*a);
+    const auto of_a = [&](const char* type) {
+        return [&ida, type](const json& j) { return j.value("type", "") == type && j.value("peer_id", "") == ida.peer; };
+    };
+    const auto t0 = std::chrono::steady_clock::now();
+    a->send({{"type", "inactive"}});
+    a->send({{"type", "active"}});
+    // Read the burst whole, then judge it once: `next` would parse the inbox again per frame.
+    while (b->ws.pump(300)) {
+    }
+    const auto told = std::count_if(b->ws.inbox.begin(), b->ws.inbox.end(),
+                                    [&](const Frame& f) { return is_json(f, of_a("peer_left")); });
+    check("(the hide is told in every room)", told == rooms);
+    b->ws.inbox.clear();
+    const bool shown = b->ws.pump(15000);
+    const auto waited =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    // Each room walked counts once and once per peer in it: here the device and one other.
+    check("the show waits a gap that grows with the peers walked",
+          shown && is_json(b->ws.inbox.front(), of_a("peer_joined")) &&
+              waited >= static_cast<int64_t>(rooms) * 3 * PRESENCE_US_PER_PEER / 1000);
+    printf("  (the show came %lld ms after the hide)\n", static_cast<long long>(waited));
+}
+
+static json successor_link(const std::string& server, uint64_t n, const Door& door, const Ident& change,
+                           const Ident& signer);
+
+// `through_grace` waits out the 60 s door grace too (RELAY_LIVE_ONLY=door_grace).
+static void test_hidden_door_rooms(bool through_grace) {
+    printf("presence: a hidden device in a locked room is shown to no prover%s\n",
+           through_grace ? ", through the door's grace" : "");
+    Ident owner, change, change2;
+    Door door, door2;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    const json base = base_link(room, door, change, owner, nonce, true);
+    auto b = login(Ident());
+    b->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", base}});
+    next(*b, typed("lock_chain"));
+    join(*b, room, {{"door_proof", door_proof(*b, room, door)}});
+    Ident ida, idd;
+    auto a = login3(ida, "new", 0);
+    join(*a, room, {{"door_proof", door_proof(*a, room, door)}});
+    check("(a prover sees it come)", next(*b, about("peer_joined", room, ida.peer)).has_value());
+    a->send({{"type", "inactive"}});
+    check("(it is hidden)", next(*b, about("peer_left", room, ida.peer)).has_value());
+    auto d = login3(idd, "new", 0);
+    d->send({{"type", "inactive"}});
+    auto md = join(*d, room, {{"door_proof", door_proof(*d, room, door2)}});
+    auto c = login(Ident());
+    auto mc = join(*c, room, {{"door_proof", door_proof(*c, room, door2)}});
+    check("(two hold the next door before the lock does)",
+          md && !md->value("proved", true) && mc && !mc->value("proved", true));
+    json links = base;
+    links.push_back(successor_link(room, 2, door2, change2, change));
+    b->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", links}});
+    auto put = next_json(*b, typed("lock_chain"));
+    check("(the lock moves to it)", put && put->value("put", false));
+    auto m = next_json(*c, typed("members", room));
+    check("a device the move proves is shown the room without the hidden ones",
+          m && m->value("proved", false) && peers_of(*m) == std::set<std::string>{b->id.peer, c->id.peer});
+    check("the provers are told it came", next(*b, about("peer_joined", room, c->id.peer)).has_value());
+    settle({b.get()});
+    check("but not of the hidden one the move proved", !got(*b, about("peer_joined", room, idd.peer)));
+    if (!through_grace) return;
+    // Past the door grace and its 5 s sweep, every socket kept alive meanwhile: the old
+    // door's grace ends for a, hidden, and for b, shown.
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(door_room::GRACE_MS + 7000);
+    while (left_ms(until) > 0) {
+        sleep_ms(std::min(5000, left_ms(until)));
+        for (Peer* p : {a.get(), b.get(), c.get(), d.get()}) sync(*p);
+    }
+    settle({b.get(), c.get()});
+    check("a hidden device's door grace ends with nothing said", !got(*c, about("peer_left", room, ida.peer)));
+    check("a shown one's with its departure", got(*c, about("peer_left", room, b->id.peer)));
+}
+
+static void test_hidden_inbox_owner() {
+    printf("presence: an owner the roster drops while hidden leaves its siblings once\n");
+    Ident master, d1, d2;
+    const std::string inbox = "inbox:" + master.peer;
+    auto a = login3(d1, "new", 0);
+    auto b = login(d2);
+    join(*b, inbox, {{"inbox_roster", legacy_roster(master, {&d1, &d2})}});
+    join(*a, inbox, {{"inbox_roster", legacy_roster(master, {&d1, &d2})}});
+    check("(its sibling sees it)", next(*b, about("peer_joined", inbox, d1.peer)).has_value());
+    a->send({{"type", "inactive"}});
+    check("a sibling is told it left too", next(*b, about("peer_left", inbox, d1.peer)).has_value());
+    join(*b, inbox, {{"inbox_roster", roster_removing(master, {&d1, &d2}, d1, d2)}});
+    settle({b.get()});
+    check("the roster dropping it tells the sibling nothing more", !got(*b, about("peer_left", inbox, d1.peer)));
+}
+
+static void test_hidden() {
+    test_hidden_presence();
+    test_hidden_session();
+    test_hidden_no_push();
+    test_hidden_pacing();
+    test_hidden_big_pass();
+    test_hidden_door_rooms(false);
+    test_hidden_inbox_owner();
+}
+
+// ---------------------------------------------------------------------------
+// Hostile review of the resume handshake and the session's authority
+// (RESUMABLE_SESSIONS_PLAN.md section 4, audit file rs_handshake_review.md). Each case is
+// something a stranger, a sibling or a client with its own valid keys tries; each must be
+// refused or change nothing.
+
+// A fresh socket of `id` holding its challenge, not logged in.
+static std::unique_ptr<Peer> challenged(const Ident& id) {
+    auto p = open_socket(id);
+    p->send({{"type", "auth_hello"}});
+    auto ch = next_json(*p, typed("auth_challenge"));
+    if (ch) {
+        p->challenge = *ch;
+        p->nonce = ch->value("nonce", "");
+        p->relay_key = ch->value("door_key", "");
+    }
+    return p;
+}
+
+// A v3 auth frame with each field as given; the signature covers `signed_msg`.
+static json auth3_frame(const Ident& id, const std::string& nonce, const json& session, const json& in_h,
+                        uint64_t ts, const std::string& domain, const std::string& signed_msg) {
+    return {{"type", "auth"},    {"v", 3},           {"peer_id", id.peer}, {"public_key", id.pub_b64},
+            {"timestamp", ts},   {"nonce", nonce},   {"domain", domain},   {"session", session},
+            {"in_h", in_h},      {"signature", id.sign(signed_msg)}};
+}
+
+static std::string v3_bytes(const Peer& p, const std::string& session, uint64_t in_h, uint64_t ts,
+                            const std::string& mode = "full") {
+    return auth_v3_message(g_domain, p.nonce, p.id.peer, ts, mode, "", session, in_h);
+}
+
+// The relay's answer to `auth` on `p`: "auth_ok", "auth_failed", "resumed", or "" for none.
+static std::string answer_to(Peer& p, const json& auth, int timeout_ms = 3000) {
+    p.send(auth);
+    auto r = next_json(p, json_where([](const json& j) {
+        const std::string t = j.value("type", "");
+        return t == "auth_ok" || t == "auth_failed" || t == "resumed";
+    }), timeout_ms);
+    p.answer = r ? *r : json::object();
+    return r ? r->value("type", "") : "";
+}
+
+static void hs_sids() {
+    printf("handshake review: another device's sid opens nothing and costs its owner nothing\n");
+    Ident d1, d2, stranger;
+    const std::string room = room_name("hs-sid");
+    auto a = login3(d1, "new", 0);
+    auto sib = login3(d2, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("the device is in grace", next(*b, about("peer_left", room, d1.peer)).has_value());
+    b->send_bin(frame(0x04, {room, d1.peer}, "hs-in-grace"));
+    settle({b.get()});
+
+    auto by_sibling = login3(d2, a->sid, read);
+    check("a sibling naming the device's sid, signed with its own key, gets a fresh session of its own",
+          answer_type(*by_sibling) == "auth_ok" && resume_failed(*by_sibling) == "unknown" &&
+              is_sid(by_sibling->sid) && by_sibling->sid != a->sid);
+    auto by_stranger = login3(stranger, a->sid, read);
+    auto guess = login3(Ident(), random_hex(16), 0);
+    check("a stranger naming it is answered exactly like a guess",
+          resume_failed(*by_stranger) == "unknown" && keys_of(by_stranger->answer) == keys_of(guess->answer) &&
+              keys_of(by_sibling->answer) == keys_of(guess->answer));
+
+    // The device's id with another key: refused at the key binding, its session untouched.
+    auto forged = challenged(d1);
+    const uint64_t ts = now_unix_secs();
+    json f = auth3_frame(stranger, forged->nonce, a->sid, read, ts, g_domain,
+                         auth_v3_message(g_domain, forged->nonce, d1.peer, ts, "full", "", a->sid, read));
+    f["peer_id"] = d1.peer;
+    check("a resume claiming the device's id with another key is refused", answer_to(*forged, f) == "auth_failed");
+    for (const std::string mode : {"full", "guest"}) {
+        auto v2 = challenged(d1);
+        json j = {{"type", "auth"},       {"v", 2},           {"peer_id", d1.peer}, {"public_key", stranger.pub_b64},
+                  {"timestamp", ts},      {"nonce", v2->nonce}, {"domain", g_domain},
+                  {"signature", stranger.sign(auth_v2_message(g_domain, v2->nonce, d1.peer, ts, mode, ""))}};
+        if (mode == "guest") j["guest"] = true;
+        check("so is a v2 " + mode + " login that would end its session", answer_to(*v2, j) == "auth_failed");
+    }
+
+    auto back = login3(d1, a->sid, read);
+    check("the device still resumes its own session", resumed(*back));
+    check("with the frame its ring took during grace",
+          next(*back, bin(frame(0x06, {room, b->id.peer}, "hs-in-grace"))).has_value());
+    b->send_bin(frame(0x04, {room, d1.peer}, "hs-after"));
+    check("and its directs reach it", next(*back, bin(frame(0x06, {room, b->id.peer}, "hs-after"))).has_value());
+
+    // The device's own push isolate holds no session: its session controls touch none.
+    auto fetch = login3(d1, "none", 0, "fetch");
+    fetch->send({{"type", "inactive"}});
+    fetch->send({{"type", "end"}});
+    check("its fetch socket's heartbeat names no session", hb(*fetch, 0).value("h", 1) == 0);
+    auto c = login(Ident());
+    join(*c, room);
+    check("a fetch socket's inactive mutes nothing", next(*back, about("peer_joined", room, c->id.peer)).has_value());
+    const uint64_t back_read = back->ws.counted;
+    back->ws.abort();
+    check("and its end ends nothing", resumed(*login3(d1, a->sid, back_read)));
+}
+
+static void hs_replays_and_shapes() {
+    printf("handshake review: replayed, grafted and malformed v3 frames are refused\n");
+    Ident id;
+    auto a = login3(id, "new", 0);
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+
+    // A genuine resume frame, made for one socket's challenge, then shown to another.
+    auto x = challenged(id);
+    x->ws.counted = read;
+    const uint64_t ts = now_unix_secs();
+    const json genuine = auth3_frame(id, x->nonce, a->sid, read, ts, g_domain, v3_bytes(*x, a->sid, read, ts));
+    auto y = challenged(id);
+    check("a resume frame replayed on another socket is refused", answer_to(*y, genuine) == "auth_failed");
+    check("and that socket is closed", closed_by_relay(*y));
+    auto cold = open_socket(id);
+    check("so is one sent to a socket that never asked for a challenge", answer_to(*cold, genuine) == "auth_failed");
+    check("the session it named is untouched", answer_to(*x, genuine) == "resumed");
+    check("one frame, one attempt: a second auth on a logged-in socket is not answered",
+          answer_to(*x, genuine, 1000).empty() && !x->ws.closed());
+    check("and the socket keeps its session", hb(*x, read).value("h", 1) == 0);
+    const uint64_t x_read = x->ws.counted;
+    x->ws.abort();
+
+    struct Case {
+        const char* what;
+        std::function<void(json&, const Peer&)> edit;
+    };
+    const std::string sid = a->sid;
+    // Signed over exactly what the frame says, so the shape rule alone has to refuse it
+    // (a signature that also failed would hide a missing rule).
+    auto signed_as_sent = [&](json& j, const Peer& p) {
+        auto field = [&](const char* k) { auto it = j.find(k); return it == j.end() ? json() : *it; };
+        const bool guest = field("guest").is_boolean() && field("guest").get<bool>();
+        const bool fetch = field("fetch").is_boolean() && field("fetch").get<bool>();
+        const std::string mode = guest ? "guest" : fetch ? "fetch" : "full";
+        const std::string session = field("session").is_string() ? field("session").get<std::string>() : field("session").dump();
+        const uint64_t in_h = field("in_h").is_number_unsigned() ? field("in_h").get<uint64_t>() : 0;
+        j["signature"] = id.sign(auth_v3_message(g_domain, p.nonce, id.peer, ts, mode, "", session, in_h));
+    };
+    const std::vector<Case> shapes = {
+        {"in_h as text", [&](json& j, const Peer&) { j["in_h"] = std::to_string(x_read); }},
+        {"in_h negative", [&](json& j, const Peer&) { j["in_h"] = -1; }},
+        {"in_h fractional", [&](json& j, const Peer&) { j["in_h"] = 1.5; }},
+        {"in_h past 64 bits", [&](json& j, const Peer&) { j["in_h"] = 1e30; }},
+        {"no in_h", [&](json& j, const Peer&) { j.erase("in_h"); }},
+        {"no session", [&](json& j, const Peer&) { j.erase("session"); }},
+        {"a null session", [&](json& j, const Peer&) { j["session"] = nullptr; }},
+        {"a numeric session", [&](json& j, const Peer&) { j["session"] = 7; }},
+        {"an uppercase sid", [&](json& j, const Peer&) { j["session"] = "00112233445566778899AABBCCDDEEFF"; }},
+        {"a 31-character sid", [&](json& j, const Peer&) { j["session"] = std::string(31, 'a'); }},
+        {"a 33-character sid", [&](json& j, const Peer&) { j["session"] = std::string(33, 'a'); }},
+        {"a sid with a non-hex character", [&](json& j, const Peer&) { j["session"] = std::string(31, 'a') + "g"; }},
+        {"\"new\" with a count", [&](json& j, const Peer&) { j["session"] = "new"; j["in_h"] = 1; }},
+        {"\"none\" with a count", [&](json& j, const Peer&) { j["fetch"] = true; j["session"] = "none"; j["in_h"] = 1; }},
+        {"a full socket asking for none", [&](json& j, const Peer&) { j["session"] = "none"; j["in_h"] = 0; }},
+        {"a fetch socket asking to resume", [&](json& j, const Peer&) { j["fetch"] = true; }},
+        {"a fetch socket asking for a new one", [&](json& j, const Peer&) { j["fetch"] = true; j["session"] = "new"; j["in_h"] = 0; }},
+        {"a guest asking to resume", [&](json& j, const Peer&) { j["guest"] = true; }},
+        {"a guest asking for a new one", [&](json& j, const Peer&) { j["guest"] = true; j["session"] = "new"; j["in_h"] = 0; }},
+        {"a socket claiming fetch and guest", [&](json& j, const Peer&) { j["fetch"] = true; j["guest"] = true; j["session"] = "none"; j["in_h"] = 0; }},
+        {"version 4", [&](json& j, const Peer&) { j["v"] = 4; }},
+        {"version as text", [&](json& j, const Peer&) { j["v"] = "3"; }},
+    };
+    for (const auto& c : shapes) {
+        auto p = challenged(id);
+        json j = auth3_frame(id, p->nonce, sid, x_read, ts, g_domain, v3_bytes(*p, sid, x_read, ts));
+        c.edit(j, *p);
+        signed_as_sent(j, *p);
+        check(std::string("refused by its shape: ") + c.what, answer_to(*p, j) == "auth_failed");
+    }
+    const std::vector<Case> refused = {
+        {"signed for another relay",
+         [&](json& j, const Peer& p) {
+             j["domain"] = "another.relay";
+             j["signature"] = id.sign(auth_v3_message("another.relay", p.nonce, id.peer, ts, "full", "", sid, x_read));
+         }},
+        {"two minutes old",
+         [&](json& j, const Peer& p) {
+             j["timestamp"] = ts - 120;
+             j["signature"] = id.sign(v3_bytes(p, sid, x_read, ts - 120));
+         }},
+        {"two minutes ahead",
+         [&](json& j, const Peer& p) {
+             j["timestamp"] = ts + 120;
+             j["signature"] = id.sign(v3_bytes(p, sid, x_read, ts + 120));
+         }},
+        {"a v3 frame signed with v2 bytes",
+         [&](json& j, const Peer& p) { j["signature"] = id.sign(auth_v2_message(g_domain, p.nonce, id.peer, ts, "full", "")); }},
+        {"a v2 frame signed with v3 bytes", [&](json& j, const Peer&) { j["v"] = 2; }},
+        {"a count the signature does not cover", [&](json& j, const Peer&) { j["in_h"] = x_read + 1; }},
+        {"a sid the signature does not cover", [&](json& j, const Peer&) { j["session"] = random_hex(16); }},
+    };
+    for (const auto& c : refused) {
+        auto p = challenged(id);
+        json j = auth3_frame(id, p->nonce, sid, x_read, ts, g_domain, v3_bytes(*p, sid, x_read, ts));
+        c.edit(j, *p);
+        check(std::string("refused: ") + c.what, answer_to(*p, j) == "auth_failed");
+    }
+    auto again = login3(id, sid, x_read);
+    check("none of them touched the session", resumed(*again));
+
+    // A v2 frame carrying session fields: the relay reads no session from it.
+    Ident other;
+    auto v = challenged(other);
+    json v2 = {{"type", "auth"},  {"v", 2},           {"peer_id", other.peer}, {"public_key", other.pub_b64},
+               {"timestamp", ts}, {"nonce", v->nonce}, {"domain", g_domain},    {"session", sid},
+               {"in_h", 0},       {"signature", other.sign(auth_v2_message(g_domain, v->nonce, other.peer, ts, "full", ""))}};
+    check("a v2 frame with session fields logs in without any session",
+          answer_to(*v, v2) == "auth_ok" && v->answer == json{{"type", "auth_ok"}});
+}
+
+// A legacy-base roster for `master` with `devices` and each listed removal.
+static json hs_roster(const Ident& master, const std::vector<const Ident*>& devices,
+                      const std::vector<std::pair<const Ident*, const Ident*>>& removals) {
+    roster::Roster r = roster::Roster::named(master.peer);
+    for (const auto* d : devices) {
+        r.legacy.push_back({d->peer, master.sign(roster::legacy_payload(master.peer, d->peer))});
+        r.consents.push_back({d->peer, d->sign(roster::consent_payload(master.peer, d->peer))});
+    }
+    for (const auto& [gone, by] : removals) {
+        roster::Removal x;
+        x.base = roster::LEGACY_BASE;
+        x.device = gone->peer;
+        x.by = by->peer;
+        x.sig = by->sign(roster::removal_payload(master.peer, roster::LEGACY_BASE, gone->peer, {}));
+        r.removals.push_back(x);
+    }
+    return json::parse(roster::to_json(r).dump());
+}
+
+static void hs_removed_in_grace() {
+    printf("handshake review: a device removed during grace keeps no inbox, gap or not\n");
+    Ident master, d1, d2;
+    const std::string inbox = "inbox:" + master.peer;
+    const std::string room = room_name("hs-rm");
+    auto a = login3(d1, "new", 0);
+    auto m = join(*a, inbox, {{"inbox_roster", hs_roster(master, {&d1, &d2}, {})}});
+    check("the device owns the inbox", m && peers_of(*m) == std::set<std::string>{d1.peer});
+    join(*a, room);
+    auto b = login(d2);
+    join(*b, inbox, {{"inbox_roster", hs_roster(master, {&d1, &d2}, {})}});
+    auto s = login(Ident());
+    join(*s, inbox);
+    join(*s, room);
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("its sibling sees it go", next(*b, about("peer_left", inbox, d1.peer)).has_value());
+    join(*b, inbox, {{"inbox_roster", hs_roster(master, {&d1, &d2}, {{&d1, &d2}})}});
+    s->send_bin(frame(0x04, {inbox, master.peer}, "hs-mail-after-removal"));
+    check("the deposit reaches the owner left", next(*b, bin(frame(0x06, {inbox, s->id.peer}, "hs-mail-after-removal"))).has_value());
+    // Overflow the ring, so the resume reports a gap.
+    for (int i = 0; i < 9; i++) s->send_bin(frame(0x03, {room}, std::string(1024 * 1024, 'r') + std::to_string(i)));
+    settle({s.get()});
+    auto a2 = login3(d1, a->sid, read);
+    check("the session resumes with a gap", resumed(*a2) && a2->answer.value("gap", false));
+    auto m2 = next_json(*a2, typed("members", inbox));
+    check("seeing only itself in the inbox", m2 && peers_of(*m2) == std::set<std::string>{d1.peer});
+    settle({a2.get()});
+    check("its gapped resume replays no mailbox of the inbox it lost",
+          !got(*a2, bin(frame(0x06, {inbox, s->id.peer}, "hs-mail-after-removal"))));
+    auto stale = join(*a2, inbox, {{"inbox_roster", hs_roster(master, {&d1, &d2}, {})}});
+    check("its own stale roster, shown again, makes it no owner", stale && peers_of(*stale) == std::set<std::string>{d1.peer});
+    settle({a2.get()});
+    check("and replays no mailbox", !got(*a2, bin(frame(0x06, {inbox, s->id.peer}, "hs-mail-after-removal"))));
+    s->send_bin(frame(0x04, {inbox, master.peer}, "hs-mail-later"));
+    check("a later deposit reaches the owner", next(*b, bin(frame(0x06, {inbox, s->id.peer}, "hs-mail-later"))).has_value());
+    settle({s.get(), a2.get()});
+    check("and not the removed device", !got(*a2, bin(frame(0x06, {inbox, s->id.peer}, "hs-mail-later"))));
+    check("nor is it announced to the owner", !got(*b, about("peer_joined", inbox, d1.peer)));
+}
+
+// The phrase recovers the identity while the device sits in grace, keeping only its sibling.
+static void hs_recovered_in_grace() {
+    printf("handshake review: a recovery during grace that leaves the device out takes its inbox\n");
+    Ident master, d1, d2, phrase;
+    const std::string inbox = "inbox:" + master.peer;
+    auto a = login3(d1, "new", 0);
+    auto m = join(*a, inbox, {{"inbox_roster", hs_roster(master, {&d1, &d2}, {})}});
+    check("the device owns the inbox", m && peers_of(*m) == std::set<std::string>{d1.peer});
+    auto b = login(d2);
+    join(*b, inbox, {{"inbox_roster", hs_roster(master, {&d1, &d2}, {})}});
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("its sibling sees it go", next(*b, about("peer_left", inbox, d1.peer)).has_value());
+    json recovered = hs_roster(master, {&d1, &d2}, {});
+    const std::string r_pub = b64(phrase.pk, sizeof(phrase.pk));
+    const int64_t at = wall_ms() - 1000;
+    const std::string p = roster::recovery_payload(master.peer, r_pub, at, {d2.peer}, false);
+    recovered["r_pub"] = r_pub;
+    json recovery = {{"at_ms", at}, {"sig_r", phrase.sign(p)}, {"sig_m", master.sign(p)}};
+    recovery["keep"] = json::array({d2.peer});
+    recovered["recoveries"] = json::array({recovery});
+    auto mb = join(*b, inbox, {{"inbox_roster", recovered}});
+    check("the recovery keeps the sibling", mb && peers_of(*mb) == std::set<std::string>{d2.peer});
+    auto s = login(Ident());
+    join(*s, inbox);
+    s->send_bin(frame(0x04, {inbox, master.peer}, "hs-mail-after-recovery"));
+    check("a deposit reaches the sibling", next(*b, bin(frame(0x06, {inbox, s->id.peer}, "hs-mail-after-recovery"))).has_value());
+    auto a2 = login3(d1, a->sid, read);
+    check("the session resumes", resumed(*a2));
+    auto m2 = next_json(*a2, typed("members", inbox));
+    check("without the inbox", m2 && peers_of(*m2) == std::set<std::string>{d1.peer});
+    settle({a2.get(), b.get()});
+    check("and with nothing deposited after the recovery",
+          !got(*a2, bin(frame(0x06, {inbox, s->id.peer}, "hs-mail-after-recovery"))));
+    auto stale = join(*a2, inbox, {{"inbox_roster", hs_roster(master, {&d1, &d2}, {})}});
+    check("its roster from before the recovery makes it no owner", stale && peers_of(*stale) == std::set<std::string>{d1.peer});
+}
+
+static void hs_moved_socket() {
+    printf("handshake review: a socket the session moved away from acts on nothing\n");
+    signal(SIGPIPE, SIG_IGN);
+    const std::string room = room_name("hs-mv"), room2 = room_name("hs-mv2");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    b->send_bin(frame(0x04, {room, ida.peer}, "hs-mv-0"));
+    next(*a, bin(frame(0x06, {room, b->id.peer}, "hs-mv-0")));
+    auto a2 = login3(ida, a->sid, a->ws.counted);
+    check("the session moves", resumed(*a2));
+    // The old socket has not read its close yet and keeps writing.
+    a->send_bin(frame(0x03, {room}, "hs-from-moved"));
+    a->send({{"type", "msg"}, {"room", room}, {"data", "hs-moved-msg"}});
+    a->send_bin(frame(0x04, {room, b->id.peer}, "hs-moved-direct"));
+    a->send({{"type", "join"}, {"room", room2}});
+    a->send({{"type", "leave"}, {"room", room}});
+    a->send({{"type", "end"}});
+    a->send({{"type", "hb"}, {"h", 0}});
+    settle({a2.get(), b.get()});
+    check("nothing it sends reaches the room", !got(*b, bin(frame(0x05, {room, ida.peer}, "hs-from-moved"))) &&
+                                                   !got(*b, json_where([](const json& j) { return j.value("data", "") == "hs-moved-msg"; })) &&
+                                                   !got(*b, bin(frame(0x06, {room, ida.peer}, "hs-moved-direct"))));
+    check("its leave and end change nothing: the room still lists the device", discover(*b, room) == std::set<std::string>{ida.peer});
+    b->send_bin(frame(0x04, {room, ida.peer}, "hs-mv-1"));
+    check("the room slot stays the new socket's", next(*a2, bin(frame(0x06, {room, b->id.peer}, "hs-mv-1"))).has_value());
+    auto m = join(*b, room2);
+    check("its join took no room", m && peers_of(*m) == std::set<std::string>{b->id.peer});
+    const uint64_t read = a2->ws.counted;
+    a2->ws.abort();
+    check("the session is still there to resume", resumed(*login3(ida, a->sid, read)));
+}
+
+static void hs_hostile_counts() {
+    printf("handshake review: counts and acks a client lies about\n");
+    Ident id;
+    auto a = login3(id, "new", 0);
+    const uint64_t base = hb(*a, 0).value("h", 99);
+    for (const json& h : {json(-1), json(1.5), json("3"), json(nullptr), json(UINT64_MAX), json(1e30)}) {
+        a->send({{"type", "ack"}, {"h", h}});
+        a->send({{"type", "hb"}, {"h", h}});
+    }
+    a->send({{"type", "ack"}});
+    a->send({{"type", "hb"}});
+    size_t answers = 0;
+    while (next(*a, typed("hb_ack"), 2000)) {
+        if (++answers == 7) break;
+    }
+    check("every heartbeat is answered, malformed or not", answers == 7);
+    a->send({{"type", "gap"}, {"n", 1000}});
+    check("a gap frame from a client counts as one", hb(*a, 0).value("h", 0) == base + 1);
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    auto big = login3(id, a->sid, UINT64_MAX);
+    check("a count of 2^64-1 is bad_h, nothing worse", resume_failed(*big) == "bad_h" && is_sid(big->sid));
+    check("(the earlier session is gone with it)", resume_failed(*login3(id, a->sid, read)) == "unknown");
+}
+
+// RED before HOL-SEC-164: one `active` frame made the relay build a members snapshot for
+// every room the session holds, a CPU cost a client could ask for at will.
+static void hs_active_costs_what_was_withheld() {
+    printf("handshake review: active answers only for presence it withheld\n");
+    const int rooms = 40;
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    for (int i = 0; i < rooms; i++) a->send({{"type", "join"}, {"room", room_name("hs-act") + std::to_string(i)}});
+    settle({a.get()});
+    check("the device holds every room", count(*a, typed("members")) == static_cast<size_t>(rooms));
+    const std::string watched = room_name("hs-act") + "7";
+    auto b = login(Ident());
+    join(*b, watched);
+    next(*a, about("peer_joined", watched, b->id.peer));
+
+    a->send({{"type", "active"}});
+    settle({a.get()});
+    check("active with nothing withheld sends no members", count(*a, typed("members")) == 0);
+    a->send({{"type", "inactive"}});
+    a->send({{"type", "active"}});
+    settle({a.get()});
+    check("nor does a toggle with nothing in between", count(*a, typed("members")) == 0);
+
+    a->send({{"type", "inactive"}});
+    sync(*a);
+    auto c = login(Ident());
+    join(*c, watched);
+    settle({c.get(), a.get()});
+    check("presence is withheld while inactive", !got(*a, about("peer_joined", watched, c->id.peer)));
+    a->send({{"type", "active"}});
+    settle({a.get()});
+    size_t members = 0;
+    bool right = false;
+    for (auto it = a->ws.inbox.begin(); it != a->ws.inbox.end();) {
+        auto j = as_json(*it);
+        if (j && j->value("type", "") == "members") {
+            members++;
+            right = j->value("room", "") == watched &&
+                    peers_of(*j) == std::set<std::string>{ida.peer, b->id.peer, c->id.peer};
+            it = a->ws.inbox.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    check("active sends members for the one room whose presence it withheld", members == 1 && right);
+    a->send({{"type", "inactive"}});
+    a->send({{"type", "active"}});
+    settle({a.get()});
+    check("and owes nothing after it", count(*a, typed("members")) == 0);
+    c->send({{"type", "leave"}, {"room", watched}});
+    check("and presence flows again", next(*a, about("peer_left", watched, c->id.peer)).has_value());
+}
+
+// RED before HOL-SEC-165: a heartbeat resets the relay's ack window, and every frame after
+// it queued another ack timer, one queue entry per (frame, hb) pair a client sends.
+static void hs_one_ack_timer() {
+    printf("handshake review: a reset ack window never queues a second timer\n");
+    Ident id;
+    auto a = login3(id, "new", 0);
+    const auto t0 = std::chrono::steady_clock::now();
+    a->send({{"type", "discover_peers"}, {"room", room_name("hs-ack0")}});
+    next(*a, typed("discovered_peers"));
+    hb(*a, a->ws.counted);
+    // Late in the first window: a second timer would ack near 3.9 s, the first one by 2.25 s.
+    sleep_ms(std::max(0, 1900 - static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                    std::chrono::steady_clock::now() - t0).count())));
+    a->send({{"type", "discover_peers"}, {"room", room_name("hs-ack1")}});
+    auto ack = next_json(*a, typed("ack"), 3500);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    check("the ack comes by the first frame's deadline", ack && ack->value("h", 0) == 2 && ms < 3000);
+}
+
+static void hs_push_reach() {
+    printf("handshake review: grace gives a stranger no new way to wake a phone\n");
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in at{};
+    at.sin_family = AF_INET;
+    at.sin_port = htons(3001);
+    at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int one = 1;
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    if (lfd < 0 || bind(lfd, reinterpret_cast<sockaddr*>(&at), sizeof(at)) != 0 || listen(lfd, 8) != 0) {
+        if (lfd >= 0) close(lfd);
+        printf("  skip push reach (127.0.0.1:3001 is taken)\n");
+        return;
+    }
+    // Only a post naming this run's token counts: another relay on the machine may post here.
+    const std::string token = "hs-token-" + g_tag;
+    auto woken = [lfd, token](int timeout_ms) {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (left_ms(deadline) > 0) {
+            pollfd p{lfd, POLLIN, 0};
+            if (poll(&p, 1, left_ms(deadline)) <= 0) return false;
+            int c = accept(lfd, nullptr, nullptr);
+            if (c < 0) return false;
+            std::string req;
+            char buf[4096];
+            for (int i = 0; i < 4; i++) {
+                pollfd q{c, POLLIN, 0};
+                if (poll(&q, 1, 300) <= 0) break;
+                ssize_t n = read(c, buf, sizeof(buf));
+                if (n <= 0) break;
+                req.append(buf, static_cast<size_t>(n));
+            }
+            const std::string ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            (void)!write(c, ok.data(), ok.size());
+            close(c);
+            if (req.find(token) != std::string::npos) return true;
+        }
+        return false;
+    };
+    const std::string room = room_name("hs-push");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    a->send({{"type", "register_push_token"}, {"token", token}, {"platform", "android"}});
+    next(*a, typed("push_token_registered"));
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("the device is in grace", next(*b, about("peer_left", room, ida.peer)).has_value());
+    auto s = login(Ident());
+    s->send_bin(frame(0x04, {room, ida.peer}, "hs-outside"));
+    s->send({{"type", "direct"}, {"room", room}, {"target", ida.peer}, {"data", "hs-outside-json"}});
+    s->send_bin(frame(0x02, {room, ida.peer}, "hs-outside-chunk"));
+    auto g = login(Ident(), "guest");
+    join(*g, room);
+    g->send_bin(frame(0x04, {room, ida.peer}, "hs-guest"));
+    g->send({{"type", "direct"}, {"room", room}, {"target", ida.peer}, {"data", "hs-guest-json"}});
+    settle({s.get(), g.get()});
+    check("a stranger outside the room it holds, or a guest in it, wakes nothing", !woken(1000));
+    b->send_bin(frame(0x04, {room, ida.peer}, "hs-member"));
+    check("while a member's direct does", woken(WAIT_MS));
+    auto a2 = login3(ida, a->sid, read);
+    check("the session resumes", resumed(*a2));
+    settle({a2.get()});
+    check("and its ring took none of it",
+          !got(*a2, bin(frame(0x06, {room, s->id.peer}, "hs-outside"))) &&
+              !got(*a2, json_where([](const json& j) { return j.value("data", "").rfind("hs-", 0) == 0; })) &&
+              !got(*a2, bin(frame(0x02, {room, s->id.peer}, "hs-outside-chunk"))) &&
+              !got(*a2, bin(frame(0x06, {room, g->id.peer}, "hs-guest"))));
+    a2->send({{"type", "unregister_push_token"}});
+    sync(*a2);
+    close(lfd);
+}
+
+// A push wakes the device while its session is in grace: its fetch socket's join reads the
+// DMs that session's ring holds for that room, and only those, leaving them for the resume.
+static void hs_fetch_reads_grace_dms() {
+    printf("handshake review: a fetch socket woken during grace reads that room's ring DMs\n");
+    Ident master, d1, other;
+    const std::string room = room_name("hs-fg"), room2 = room_name("hs-fg2");
+    const std::string inbox = "inbox:" + master.peer;
+    auto a = login3(d1, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*a, room2);
+    join(*a, inbox, {{"inbox_roster", hs_roster(master, {&d1}, {})}});
+    join(*b, room);
+    join(*b, room2);
+    join(*b, inbox);
+    // A channel copy parked for the device, replayed into its ring by its join and never
+    // read: a kind offline_buffer takes, but not a DM.
+    const std::string server = room_name("hs-fg-srv");
+    join(*b, server);
+    b->send_bin(channel_frame(server, d1.peer, "ch", "fg-chan"));
+    settle({b.get()});
+    const uint64_t read = a->ws.counted;
+    join(*a, server);
+    a->ws.abort();
+    check("the device is in grace", next(*b, about("peer_left", room, d1.peer)).has_value());
+    const std::string sender = b->id.peer;
+    b->send_bin(frame(0x04, {room, d1.peer}, "fg-dm"));
+    b->send_bin(frame(0x08, {room, d1.peer}, "fg-image"));
+    b->send_bin(frame(0x03, {room}, "fg-bcast"));
+    b->send({{"type", "direct"}, {"room", room}, {"target", d1.peer}, {"data", "fg-json"}});
+    b->send_bin(frame(0x02, {room, d1.peer}, "fg-chunk"));
+    b->send_bin(frame(0x04, {room2, d1.peer}, "fg-dm-elsewhere"));
+    b->send_bin(frame(0x04, {inbox, d1.peer}, "fg-dm-inbox"));
+    settle({b.get()});
+
+    auto stranger = login3(other, "none", 0, "fetch");
+    stranger->send({{"type", "join"}, {"room", room}});
+    settle({stranger.get()});
+    check("another device's fetch socket reads nothing of it",
+          !got(*stranger, bin(frame(0x06, {room, sender}, "fg-dm"))) && stranger->ws.inbox.empty());
+
+    auto f = login3(d1, "none", 0, "fetch");
+    f->send({{"type", "join"}, {"room", room}});
+    settle({f.get()});
+    check("the device's fetch socket reads the DM", got(*f, bin(frame(0x06, {room, sender}, "fg-dm"))));
+    check("and the inlined image", got(*f, bin(frame(0x06, {room, sender}, "fg-image"))));
+    check("and nothing else of the ring: no broadcast, JSON direct or chunk",
+          !got(*f, bin(frame(0x05, {room, sender}, "fg-bcast"))) &&
+              !got(*f, json_where([](const json& j) { return j.value("data", "") == "fg-json"; })) &&
+              !got(*f, bin(frame(0x02, {room, sender}, "fg-chunk"))));
+    check("nor another room's DM", !got(*f, bin(frame(0x06, {room2, sender}, "fg-dm-elsewhere"))));
+    f->send({{"type", "join"}, {"room", server}});
+    settle({f.get()});
+    check("nor a channel copy", !got(*f, bin(frame(0x06, {server, sender}, "fg-chan"))));
+    f->send({{"type", "join"}, {"room", inbox}});
+    settle({f.get()});
+    check("an inbox it does not prove gives nothing", !got(*f, bin(frame(0x06, {inbox, sender}, "fg-dm-inbox"))));
+    f->send({{"type", "join"}, {"room", inbox}, {"inbox_roster", hs_roster(master, {&d1}, {})}});
+    settle({f.get()});
+    check("one it proves gives its DM", got(*f, bin(frame(0x06, {inbox, sender}, "fg-dm-inbox"))));
+    check("(the fetch socket is told no count)", !got(*f, typed("ack")) && hb(*f, 0).value("h", 1) == 0);
+
+    auto a2 = login3(d1, a->sid, read);
+    check("the session still resumes at the same count", resumed(*a2) && !a2->answer.value("gap", true));
+    const auto upto = through(*a2, bin(frame(0x06, {inbox, sender}, "fg-dm-inbox")));
+    check("and its ring still replays every frame the fetch socket read",
+          std::any_of(upto.begin(), upto.end(), bin(frame(0x06, {room, sender}, "fg-dm"))) &&
+              std::any_of(upto.begin(), upto.end(), bin(frame(0x06, {room, sender}, "fg-image"))) &&
+              std::any_of(upto.begin(), upto.end(), bin(frame(0x05, {room, sender}, "fg-bcast"))) &&
+              std::any_of(upto.begin(), upto.end(), bin(frame(0x06, {room2, sender}, "fg-dm-elsewhere"))));
+}
+
+// Link `n` of a lock, signed by the change key of the link before it.
+static json successor_link(const std::string& server, uint64_t n, const Door& door, const Ident& change,
+                           const Ident& signer) {
+    LockLink l;
+    l.n = n;
+    l.door = door.text;
+    l.change = change.pub_b64;
+    l.sig = signer.sign(join_lock::payload(server, l));
+    return join_lock::links_to_json({l})[0];
+}
+
+// The door grace is 60 s and has no test override, so this needs a relay whose session
+// grace outlasts it (RELAY_LIVE_ONLY=door_grace against one built with a longer test
+// grace, about 70 s); against run_live.sh's 5 s grace it skips.
+static void hs_door_moved_in_grace() {
+    printf("handshake review: a door that moved during grace is not carried past its grace\n");
+    Ident owner, change, change2;
+    Door door, door2;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    if (a->answer.value("grace_secs", 0) * 1000 <= door_room::GRACE_MS + 10000) {
+        printf("  skip door moved in grace (the session grace is shorter than the door's)\n");
+        return;
+    }
+    auto b = login(Ident());
+    const json base = base_link(room, door, change, owner, nonce, true);
+    b->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", base}});
+    next(*b, typed("lock_chain"));
+    auto ma = join(*a, room, {{"door_proof", door_proof(*a, room, door)}});
+    auto mb = join(*b, room, {{"door_proof", door_proof(*b, room, door)}});
+    check("both prove the door", ma && ma->value("proved", false) && mb && mb->value("proved", false));
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("the device is in grace", next(*b, about("peer_left", room, ida.peer)).has_value());
+    json links = base;
+    links.push_back(successor_link(room, 2, door2, change2, change));
+    b->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", links}});
+    auto put = next_json(*b, typed("lock_chain"));
+    check("the lock moves (a kick)", put && put->value("put", false));
+    auto mb2 = join(*b, room, {{"door_proof", door_proof(*b, room, door2)}});
+    check("the member left proves the new door", mb2 && mb2->value("proved", false));
+    b->send_bin(frame(0x03, {room}, "hs-within-door-grace"));
+    settle({b.get()});
+    // Past the door grace and the 5 s sweep, the member's socket kept alive meanwhile.
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(door_room::GRACE_MS + 7000);
+    while (left_ms(until) > 0) {
+        sleep_ms(std::min(5000, left_ms(until)));
+        sync(*b);
+    }
+    b->send_bin(frame(0x03, {room}, "hs-after-door-grace"));
+    b->send({{"type", "msg"}, {"room", room}, {"data", "hs-after-door-grace-msg"}});
+    settle({b.get()});
+    auto a2 = login3(ida, a->sid, read);
+    check("the session resumes", resumed(*a2));
+    auto m = next_json(*a2, typed("members", room));
+    check("hidden in the room: not proved, sees only itself",
+          m && !m->value("proved", true) && peers_of(*m) == std::set<std::string>{ida.peer});
+    settle({a2.get(), b.get()});
+    check("its ring kept what the room said within the door's grace, as a live member gets it",
+          got(*a2, bin(frame(0x05, {room, b->id.peer}, "hs-within-door-grace"))));
+    check("and nothing said after it", !got(*a2, bin(frame(0x05, {room, b->id.peer}, "hs-after-door-grace"))) &&
+                                           !got(*a2, json_where([](const json& j) { return j.value("data", "") == "hs-after-door-grace-msg"; })));
+    check("the provers are not told it came back", !got(*b, about("peer_joined", room, ida.peer)));
+    b->send_bin(frame(0x03, {room}, "hs-after-resume"));
+    settle({b.get(), a2.get()});
+    check("nor does it hear the room now", !got(*a2, bin(frame(0x05, {room, b->id.peer}, "hs-after-resume"))));
+    auto old = join(*a2, room, {{"door_proof", door_proof_for(*a2, a->nonce, room, door)}});
+    check("the old door proves nothing", old && !old->value("proved", true));
+    auto fresh = join(*a2, room, {{"door_proof", door_proof_for(*a2, a->nonce, room, door2)}});
+    check("the new door, once it holds it, proves", fresh && fresh->value("proved", false));
+}
+
+static bool wait_for_file(const std::string& path, std::string& content, int timeout_ms) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (left_ms(deadline) > 0) {
+        if (FILE* f = fopen(path.c_str(), "r")) {
+            char buf[64] = {};
+            size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+            fclose(f);
+            content.assign(buf, n);
+            if (!content.empty()) return true;
+        }
+        sleep_ms(50);
+    }
+    return false;
+}
+
+// Across a relay restart (test/run_restart.sh: SIGTERM, the snapshot handed over, a new
+// process): the restored session comes back with no door standing, so until it proves
+// its door again a locked room shows it nothing and nobody there sees it; an inbox the
+// roster took away during the new process's grace is gone; kill signals still come first.
+static void hs_restart(const std::string& dir) {
+    printf("handshake review: a session restored from a snapshot proves its doors again\n");
+    Ident owner, change, master, d1, d2;
+    Door door;
+    const std::string nonce = random_hex(16);
+    const std::string locked = genesis_server_id(owner.peer, nonce);
+    const std::string plain = room_name("rs-plain");
+    const std::string inbox = "inbox:" + master.peer;
+    Ident idb;
+    auto a = login3(d1, "new", 0);
+    auto b = login(idb);
+    b->send({{"type", "lock_put"}, {"server", locked}, {"owner", ""}, {"links", base_link(locked, door, change, owner, nonce, true)}});
+    check("the relay takes the lock", next(*b, typed("lock_chain")).has_value());
+    auto ml = join(*a, locked, {{"door_proof", door_proof(*a, locked, door)}});
+    join(*b, locked, {{"door_proof", door_proof(*b, locked, door)}});
+    join(*a, plain);
+    join(*b, plain);
+    auto mi = join(*a, inbox, {{"inbox_roster", hs_roster(master, {&d1, &d2}, {})}});
+    check("the device proves the door and owns the inbox",
+          ml && ml->value("proved", false) && mi && peers_of(*mi) == std::set<std::string>{d1.peer});
+    settle({a.get()});
+    const uint64_t read = a->ws.counted;
+    // A phone in the background: hidden from the room when the relay stops.
+    Ident ide;
+    auto e = login3(ide, "new", 0);
+    join(*e, plain);
+    e->send({{"type", "inactive"}});
+    check("(a second device hides)", next(*b, about("peer_left", plain, ide.peer)).has_value());
+    const uint64_t e_read = e->ws.counted;
+    // Written into its socket and never read: they are in its ring when the relay stops.
+    b->send_bin(frame(0x03, {plain}, "rs-plain-before"));
+    b->send_bin(frame(0x03, {locked}, "rs-locked-before"));
+    settle({b.get()});
+
+    if (FILE* f = fopen((dir + "/ready").c_str(), "w")) {
+        fputs("1", f);
+        fclose(f);
+    }
+    std::string port;
+    if (!wait_for_file(dir + "/port2", port, 30000)) {
+        check("the relay came back", false);
+        return;
+    }
+    g_port = atoi(port.c_str());
+
+    auto b2 = login(idb);
+    auto mb = join(*b2, locked, {{"door_proof", door_proof(*b2, locked, door)}});
+    check("the lock survived the restart", mb && mb->value("proved", false));
+    join(*b2, plain);
+    b2->send_bin(frame(0x03, {locked}, "rs-locked-after"));
+    b2->send_bin(frame(0x03, {plain}, "rs-plain-after"));
+    auto sib = login(d2);
+    join(*sib, inbox, {{"inbox_roster", hs_roster(master, {&d1, &d2}, {{&d1, &d2}})}});
+    auto s = login(Ident());
+    join(*s, inbox);
+    s->send_bin(frame(0x04, {inbox, master.peer}, "rs-mail-after-removal"));
+    check("a deposit reaches the owner left", next(*sib, bin(frame(0x06, {inbox, s->id.peer}, "rs-mail-after-removal"))).has_value());
+    b2->send({{"type", "kill_deposit"}, {"blob", "AAAA"}, {"issued_at_ms", 9}, {"targets", json::array({d1.peer})}});
+    check("a destroy signal waits for it", next(*b2, typed("kill_deposited")).has_value());
+    settle({b2.get(), s.get()});
+
+    auto a2 = login3(d1, a->sid, read);
+    check("the session resumes and must prove its doors again",
+          resumed(*a2) && a2->answer.value("reprove", false) && !a2->answer.value("gap", true));
+    const auto upto = through(*a2, bin(frame(0x05, {plain, idb.peer}, "rs-plain-after")));
+    check("the waiting kill signal comes first", !upto.empty() && is_json(upto[0], [](const json& j) {
+                                                    return j.value("type", "") == "kill_signal" && j.value("issued_at_ms", 0) == 9;
+                                                }));
+    auto members_in = [&](const std::string& room) -> std::optional<json> {
+        for (const auto& f : upto) {
+            auto j = as_json(f);
+            if (j && j->value("type", "") == "members" && j->value("room", "") == room) return j;
+        }
+        return std::nullopt;
+    };
+    auto m_locked = members_in(locked);
+    check("the locked room shows it nothing until it proves",
+          m_locked && !m_locked->value("proved", true) && peers_of(*m_locked) == std::set<std::string>{d1.peer});
+    auto m_inbox = members_in(inbox);
+    check("the inbox the roster took away during grace is gone", m_inbox && peers_of(*m_inbox) == std::set<std::string>{d1.peer});
+    check("what its ring held at the restart replays",
+          std::any_of(upto.begin(), upto.end(), bin(frame(0x05, {plain, idb.peer}, "rs-plain-before"))) &&
+              std::any_of(upto.begin(), upto.end(), bin(frame(0x05, {locked, idb.peer}, "rs-locked-before"))));
+    settle({a2.get(), b2.get()});
+    check("the locked room's broadcast from before the proof never reached its ring",
+          std::none_of(upto.begin(), upto.end(), bin(frame(0x05, {locked, idb.peer}, "rs-locked-after"))) &&
+              !got(*a2, bin(frame(0x05, {locked, idb.peer}, "rs-locked-after"))));
+    check("nor did the deposit after its removal",
+          std::none_of(upto.begin(), upto.end(), bin(frame(0x06, {inbox, s->id.peer}, "rs-mail-after-removal"))) &&
+              !got(*a2, bin(frame(0x06, {inbox, s->id.peer}, "rs-mail-after-removal"))));
+    check("the provers are not told it came back", !got(*b2, about("peer_joined", locked, d1.peer)));
+    check("the plain room is", got(*b2, about("peer_joined", plain, d1.peer)));
+
+    auto old = join(*a2, locked, {{"door_proof", door_proof_for(*a2, a->nonce, locked, door)}});
+    check("a proof for the session's first challenge proves nothing now", old && !old->value("proved", true));
+    auto fresh = join(*a2, locked, {{"door_proof", door_proof(*a2, locked, door)}});
+    check("one for the resuming socket's challenge proves", fresh && fresh->value("proved", false) &&
+                                                               peers_of(*fresh).count(idb.peer) != 0);
+    check("and the provers see it", next(*b2, about("peer_joined", locked, d1.peer)).has_value());
+    b2->send_bin(frame(0x03, {locked}, "rs-locked-proved"));
+    check("it hears the room again", next(*a2, bin(frame(0x05, {locked, idb.peer}, "rs-locked-proved"))).has_value());
+    a2->send({{"type", "kill_ack"}});
+    sync(*a2);
+
+    auto e2 = login3(ide, e->sid, e_read);
+    check("a session restored inactive resumes", resumed(*e2));
+    settle({e2.get(), b2.get()});
+    check("hidden: the room is told nothing", !got(*b2, about("peer_joined", plain, ide.peer)) &&
+                                                  discover(*b2, plain).count(ide.peer) == 0);
+    e2->send({{"type", "active"}});
+    check("until it says active", next(*b2, about("peer_joined", plain, ide.peer)).has_value());
+}
+
+static void test_handshake_review() {
+    hs_sids();
+    hs_replays_and_shapes();
+    hs_removed_in_grace();
+    hs_recovered_in_grace();
+    hs_moved_socket();
+    hs_hostile_counts();
+    hs_active_costs_what_was_withheld();
+    hs_one_ack_timer();
+    hs_push_reach();
+    hs_fetch_reads_grace_dms();
+    hs_door_moved_in_grace();
+}
+
+// --- Session bounds (rs_bounds_review.md) ---------------------------------------------
+//
+// The test build caps an address at three sockets (run_live.sh), so these fill one under
+// its rate of ten new sockets a minute. Each case pins its sockets to an address of its own.
+
+struct PinnedSource {
+    explicit PinnedSource(int n) { g_pin_source = n; }
+    ~PinnedSource() { g_pin_source = -1; }
+};
+
+// A socket the relay closes at once: the address is full.
+static bool refused_at_open(const Ident& id) {
+    auto p = open_socket(id);
+    p->send({{"type", "auth_hello"}});
+    return closed_by_relay(*p) && p->ws.close_code == 1008 && p->ws.close_reason == "ip_limit";
+}
+
+static void test_bounds_full_address() {
+    printf("bounds: a full address and the grace slots it holds\n");
+    {
+        PinnedSource pin(50001);
+        const std::string room = room_name("full-own");
+        auto x = login(Ident());
+        auto y = login(Ident());
+        Ident idd;
+        auto d = login3(idd, "new", 0);
+        join(*x, room);
+        join(*d, room);
+        const uint64_t read = d->ws.counted;
+        d->ws.abort();
+        check("(the device dropped)", next(*x, about("peer_left", room, idd.peer)).has_value());
+        auto d2 = login3(idd, d->sid, read);
+        check("a device coming back to its full address resumes its own session", resumed(*d2));
+    }
+    {
+        PinnedSource pin(50002);
+        const std::string room = room_name("full-two");
+        auto x = login(Ident());
+        join(*x, room);
+        Ident i1, i2;
+        auto d1 = login3(i1, "new", 0);
+        auto d2 = login3(i2, "new", 0);
+        join(*d1, room);
+        join(*d2, room);
+        const uint64_t r1 = d1->ws.counted, r2 = d2->ws.counted;
+        d1->ws.abort();
+        check("(the first dropped)", next(*x, about("peer_left", room, i1.peer)).has_value());
+        d2->ws.abort();
+        check("(the second dropped)", next(*x, about("peer_left", room, i2.peer)).has_value());
+        auto back2 = login3(i2, d2->sid, r2);
+        check("the later of two devices in grace comes back", resumed(*back2));
+        auto back1 = login3(i1, d1->sid, r1);
+        check("without costing the earlier one its session", resumed(*back1));
+    }
+    {
+        PinnedSource pin(50003);
+        const std::string room = room_name("full-new");
+        auto x = login(Ident());
+        auto y = login(Ident());
+        Ident idd;
+        auto d = login3(idd, "new", 0);
+        join(*x, room);
+        join(*d, room);
+        const uint64_t read = d->ws.counted;
+        d->ws.abort();
+        check("(the device dropped)", next(*x, about("peer_left", room, idd.peer)).has_value());
+        auto s = login(Ident());
+        check("a newcomer to a full address gets the slot a session in grace held", s->ok);
+        check("the address is full again", refused_at_open(Ident()));
+        check("(the newcomer leaves)", s->ws.close_clean());
+        auto d2 = login3(idd, d->sid, read);
+        check("and that session is gone", answer_type(*d2) == "auth_ok" && resume_failed(*d2) == "unknown");
+    }
+    {
+        PinnedSource pin(50004);
+        auto x = login(Ident());
+        auto y = login(Ident());
+        auto z = login3(Ident(), "new", 0);
+        check("an address full of live sockets refuses the next", refused_at_open(Ident()));
+    }
+}
+
+static void test_bounds_active() {
+    printf("bounds: active tells a session only the presence it was spared\n");
+    const std::string r1 = room_name("act-1"), r2 = room_name("act-2");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, r1);
+    join(*a, r2);
+    join(*b, r1);
+    settle({a.get()});
+    a->send({{"type", "active"}});
+    settle({a.get()});
+    check("active on a session that is active sends nothing", count(*a, typed("members")) == 0);
+    a->send({{"type", "inactive"}});
+    a->send({{"type", "active"}});
+    settle({a.get()});
+    check("inactive then active with nothing withheld sends nothing", count(*a, typed("members")) == 0);
+    a->send({{"type", "inactive"}});
+    sync(*a);
+    auto c = login(Ident());
+    join(*c, r1);
+    settle({c.get(), a.get()});
+    check("(presence is withheld)", !got(*a, about("peer_joined", r1, c->id.peer)));
+    a->send({{"type", "active"}});
+    auto m = next_json(*a, typed("members", r1));
+    check("active sends a fresh members for the room whose presence was withheld",
+          m && peers_of(*m) == std::set<std::string>{ida.peer, b->id.peer, c->id.peer});
+    settle({a.get()});
+    check("and none for a room where nothing was", count(*a, typed("members", r2)) == 0);
+}
+
+// The relay posts a push to 127.0.0.1:3001; held here, and only then is a token registered.
+static void test_bounds_push_debounce() {
+    printf("bounds: frames into a ring in grace wake the phone once per debounce\n");
+    // Another suite on a shared machine may hold the port for a few seconds.
+    int lfd = -1;
+    for (int attempt = 0; attempt < 40 && lfd < 0; attempt++) {
+        lfd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in at{};
+        at.sin_family = AF_INET;
+        at.sin_port = htons(3001);
+        at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        int one = 1;
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        if (lfd >= 0 && (bind(lfd, reinterpret_cast<sockaddr*>(&at), sizeof(at)) != 0 || listen(lfd, 16) != 0)) {
+            close(lfd);
+            lfd = -1;
+            sleep_ms(500);
+        }
+    }
+    if (lfd < 0) {
+        printf("  skip push debounce (127.0.0.1:3001 is taken)\n");
+        return;
+    }
+    // The pushes naming this run's token within `ms`, every post answered so the relay's
+    // worker moves on: another relay on the machine may post here too.
+    const std::string token = "burst-" + g_tag;
+    auto pushes = [lfd, &token](int ms) {
+        int n = 0;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        for (;;) {
+            pollfd p{lfd, POLLIN, 0};
+            if (poll(&p, 1, left_ms(deadline)) <= 0) return n;
+            int c = accept(lfd, nullptr, nullptr);
+            if (c < 0) return n;
+            std::string req;
+            char buf[4096];
+            for (int i = 0; i < 4; i++) {
+                pollfd q{c, POLLIN, 0};
+                if (poll(&q, 1, 300) <= 0) break;
+                ssize_t got_n = read(c, buf, sizeof(buf));
+                if (got_n <= 0) break;
+                req.append(buf, static_cast<size_t>(got_n));
+            }
+            const std::string ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            (void)!write(c, ok.data(), ok.size());
+            close(c);
+            if (req.find(token) != std::string::npos) n++;
+        }
+    };
+    const std::string room = room_name("push-burst");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    a->send({{"type", "register_push_token"}, {"token", token}, {"platform", "android"}});
+    check("(the device registers a token)", next(*a, typed("push_token_registered")).has_value());
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("(the device left)", next(*b, about("peer_left", room, ida.peer)).has_value());
+    for (int i = 0; i < 6; i++) b->send_bin(frame(0x04, {room, ida.peer}, "burst-" + std::to_string(i)));
+    b->send({{"type", "direct"}, {"room", room}, {"target", ida.peer}, {"data", "burst-json"}});
+    settle({b.get()});
+    check("a burst into a ring in grace wakes the phone once", pushes(3000) == 1);
+    auto a2 = login3(ida, a->sid, read);
+    size_t got_all = 0;
+    for (int i = 0; i < 6; i++) got_all += next(*a2, bin(frame(0x06, {room, b->id.peer}, "burst-" + std::to_string(i)))).has_value();
+    check("and every frame still arrives on resume", resumed(*a2) && got_all == 6);
+    a2->send({{"type", "unregister_push_token"}});
+    sync(*a2);
+    close(lfd);
+}
+
+// The relay's resident memory in KiB, from the pid run_live.sh passes; 0 when unknown.
+static long relay_rss_kb() {
+    const char* pid = getenv("RELAY_LIVE_PID");
+    if (!pid) return 0;
+    FILE* f = fopen(("/proc/" + std::string(pid) + "/status").c_str(), "r");
+    if (!f) return 0;
+    char line[256];
+    long kb = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "VmRSS:", 6) == 0) kb = atol(line + 6);
+    }
+    fclose(f);
+    return kb;
+}
+
+// RELAY_LIVE_PROBE=acks: what a counted frame between heartbeats costs the relay in queued
+// acks. Prints the growth; Session::count_in's unit test is the regression check.
+static void probe_ack_queue() {
+    printf("probe: a counted frame between heartbeats\n");
+    const std::string beat = json{{"type", "hb"}, {"h", 0}}.dump();
+    std::vector<std::pair<uint8_t, std::string>> frames;
+    for (int i = 0; i < 500; i++) {
+        frames.push_back({0x2, std::string(1, '\0')});
+        frames.push_back({0x1, beat});
+    }
+    auto a = login3(Ident(), "new", 0);
+    sync(*a);
+    const long before = relay_rss_kb();
+    const auto t0 = std::chrono::steady_clock::now();
+    int rounds = 0;
+    size_t beats = 0;
+    for (; rounds < 400 && !a->ws.closed(); rounds++) {
+        a->ws.send_frames(frames);
+        while (a->ws.pump(2)) {
+        }
+        beats += count(*a, typed("hb_ack"));
+    }
+    // A loaded relay may still be working through the burst.
+    for (int i = 0; i < 12 && !sync(*a); i++) {
+    }
+    beats += count(*a, typed("hb_ack"));
+    const long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    const long after = relay_rss_kb();
+    printf("  relay RSS %ld KiB, then %ld KiB after %d rounds of 500 counted frames each followed by a heartbeat in"
+           " %ld ms (%+ld KiB; %zu answered, socket %s)\n",
+           before, after, rounds, ms, after - before, beats, a->ws.closed() ? "closed" : "open");
+}
+
+// RELAY_LIVE_PROBE=active: what `inactive` then `active` costs the relay for a session in
+// many rooms, read as how long another socket's round trip waits behind a burst of them.
+static void probe_active_burst() {
+    printf("probe: inactive then active for a session in many rooms\n");
+    auto a = login3(Ident(), "new", 0);
+    const int rooms = 5000;
+    std::vector<std::pair<uint8_t, std::string>> joins;
+    for (int i = 0; i < rooms; i++) {
+        joins.push_back({0x1, json{{"type", "join"}, {"room", room_name("many") + "-" + std::to_string(i)}}.dump()});
+    }
+    a->ws.send_frames(joins);
+    for (int i = 0; i < 12 && !sync(*a); i++) {
+    }
+    a->ws.inbox.clear();
+    auto b = login(Ident());
+    sync(*b);
+    std::vector<std::pair<uint8_t, std::string>> toggles;
+    for (int i = 0; i < 20; i++) {
+        toggles.push_back({0x1, R"({"type":"inactive"})"});
+        toggles.push_back({0x1, R"({"type":"active"})"});
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    a->ws.send_frames(toggles);
+    sleep_ms(5);
+    bool through = false;
+    for (int i = 0; i < 12 && !(through = sync(*b)); i++) {
+    }
+    const long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    size_t members = 0;
+    while (a->ws.pump(500)) members += count(*a, typed("members"));
+    members += count(*a, typed("members"));
+    printf("  20 toggles from a session in %d rooms: another socket's round trip took %ld ms (%s);"
+           " the session was sent %zu members frames\n",
+           rooms, ms, through ? "answered" : "not answered", members);
+}
+
+// RELAY_LIVE_PROBE=hide: what one hide and one show pass cost the relay for a session in many
+// rooms, each shared with one other socket, read as how long a third socket's round trip
+// waits behind it; then a burst of toggles, which the pace folds into at most one more pass.
+static void probe_hide_pass() {
+    printf("probe: hide and show passes for a session in many rooms\n");
+    const int rooms = 5000;
+    auto a = login3(Ident(), "new", 0);
+    auto b = login(Ident());
+    std::vector<std::pair<uint8_t, std::string>> joins;
+    for (int i = 0; i < rooms; i++) {
+        joins.push_back({0x1, json{{"type", "join"}, {"room", room_name("hide-many") + "-" + std::to_string(i)}}.dump()});
+    }
+    a->ws.send_frames(joins);
+    for (int i = 0; i < 12 && !sync(*a); i++) {
+    }
+    b->ws.send_frames(joins);
+    for (int i = 0; i < 12 && !sync(*b); i++) {
+    }
+    while (a->ws.pump(200)) {
+    }
+    a->ws.inbox.clear();
+    b->ws.inbox.clear();
+    auto c = login(Ident());
+    sync(*c);
+    auto timed = [&](const char* type, const char* label) {
+        const auto t0 = std::chrono::steady_clock::now();
+        a->send({{"type", type}});
+        sleep_ms(1);
+        bool through = false;
+        for (int i = 0; i < 12 && !(through = sync(*c)); i++) {
+        }
+        const long ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        size_t told = 0;
+        while (b->ws.pump(300)) {
+        }
+        for (auto it = b->ws.inbox.begin(); it != b->ws.inbox.end(); it = b->ws.inbox.erase(it)) told++;
+        printf("  %s pass over %d rooms: another socket's round trip took %ld ms (%s); %zu frames to the room's other socket\n",
+               label, rooms, ms, through ? "answered" : "not answered", told);
+    };
+    timed("inactive", "hide");
+    sleep_ms(PRESENCE_PACE_MS + 300);
+    timed("active", "show");
+    sleep_ms(PRESENCE_PACE_MS + 300);
+    std::vector<std::pair<uint8_t, std::string>> toggles;
+    for (int i = 0; i < 200; i++) {
+        toggles.push_back({0x1, R"({"type":"inactive"})"});
+        toggles.push_back({0x1, R"({"type":"active"})"});
+    }
+    toggles.push_back({0x1, R"({"type":"inactive"})"});
+    const auto t0 = std::chrono::steady_clock::now();
+    a->ws.send_frames(toggles);
+    sleep_ms(PRESENCE_PACE_MS * 2 + 600);
+    sync(*c);
+    while (b->ws.pump(300)) {
+    }
+    size_t told = 0;
+    for (auto it = b->ws.inbox.begin(); it != b->ws.inbox.end(); it = b->ws.inbox.erase(it)) told++;
+    const long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    printf("  401 toggles in one write: the room's other socket was sent %zu frames in %ld ms\n", told, ms);
+}
+
+// Last of all: SIGTERM to the relay (its pid from run_live.sh), which then exits.
+static void test_bounds_drain() {
+    printf("bounds: on SIGTERM each session socket is told when to come back, then closed\n");
+    const char* pid = getenv("RELAY_LIVE_PID");
+    if (!pid) {
+        printf("  skip drain (no relay pid)\n");
+        return;
+    }
+    const std::string room = room_name("drain");
+    auto a = login3(Ident(), "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    settle({a.get(), b.get()});
+    a->ws.inbox.clear();
+    b->ws.inbox.clear();
+    if (kill(static_cast<pid_t>(atoi(pid)), SIGTERM) != 0) {
+        check("(the relay takes the signal)", false);
+        return;
+    }
+    check("the session socket is closed", closed_by_relay(*a));
+    check("and the one without a session", closed_by_relay(*b));
+    size_t hints = 0, counted_after = 0;
+    int64_t wait = -1;
+    for (const auto& f : a->ws.inbox) {
+        auto j = as_json(f);
+        if (j && j->value("type", "") == "reconnect") {
+            hints++;
+            wait = j->value("after_ms", static_cast<int64_t>(-1));
+        } else if (hints) {
+            counted_after += counts_as(f);
+        }
+    }
+    check("it was told once to come back after a wait in [2, 10] s", hints == 1 && wait >= 2000 && wait <= 10000);
+    check("and nothing counted came after that", counted_after == 0);
+    check("a socket without a session is told nothing", count(*b, typed("reconnect")) == 0);
+}
+
 
 int main(int argc, char** argv) {
     if (argc != 4 || (std::string(argv[3]) != "on" && std::string(argv[3]) != "off")) {
@@ -2087,9 +3731,37 @@ int main(int argc, char** argv) {
     g_ctx = SSL_CTX_new(TLS_client_method());
     SSL_CTX_set_verify(g_ctx, SSL_VERIFY_NONE, nullptr);
 
-    // RELAY_LIVE_ONLY=sessions runs the session cases alone (the mutation pass).
+    // RELAY_LIVE_RESTART=<dir>: the restart case alone, driven by test/run_restart.sh.
+    if (const char* restart = getenv("RELAY_LIVE_RESTART")) {
+        hs_restart(restart);
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // RELAY_LIVE_ONLY=sessions runs the session cases alone, =bounds the bounds cases alone
+    // (the mutation passes), =probe only the RELAY_LIVE_PROBE probes and the drain.
     const char* only = getenv("RELAY_LIVE_ONLY");
-    const bool all = !only || std::string(only) != "sessions";
+    if (only && std::string(only) == "door_grace") {
+        hs_door_moved_in_grace();
+        test_hidden_door_rooms(true);
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =presence: the hidden-presence cases and the inactive/active ones beside them.
+    if (only && std::string(only) == "presence") {
+        test_session_inactive();
+        hs_active_costs_what_was_withheld();
+        test_bounds_active();
+        test_hidden();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    const std::string only_cases = only ? only : "";
+    const bool probe_only = only_cases == "probe";
+    const bool bounds_only = only_cases == "bounds" || probe_only;
+    const bool all = only_cases != "sessions" && !bounds_only;
     if (all) {
         test_auth();
         test_nicknames();
@@ -2103,22 +3775,36 @@ int main(int argc, char** argv) {
         test_fetch();
         test_door_rooms();
     }
-    test_session_logins();
-    test_session_resume();
-    test_session_counting();
-    test_session_acks();
-    test_session_gap();
-    test_session_transfer();
-    test_session_fresh_over_held();
-    test_session_inactive();
-    test_session_end();
-    test_session_fetch_in_grace();
-    test_session_doors_and_kills();
-    test_session_inbox_recheck();
-    test_session_gap_mailbox();
-    test_session_push_in_grace();
-    test_session_expiry();
+    if (!bounds_only) {
+        test_session_logins();
+        test_session_resume();
+        test_session_counting();
+        test_session_acks();
+        test_session_gap();
+        test_session_transfer();
+        test_session_fresh_over_held();
+        test_session_inactive();
+        test_session_end();
+        test_session_fetch_in_grace();
+        test_session_doors_and_kills();
+        test_session_inbox_recheck();
+        test_session_gap_mailbox();
+        test_session_push_in_grace();
+        test_session_expiry();
+        test_handshake_review();
+        test_hidden();
+    }
+    if (!probe_only) {
+        test_bounds_full_address();
+        test_bounds_active();
+        test_bounds_push_debounce();
+    }
     if (all) test_deep_json();
+    const char* probe = getenv("RELAY_LIVE_PROBE");
+    if (probe && std::string(probe) == "acks") probe_ack_queue();
+    if (probe && std::string(probe) == "active") probe_active_burst();
+    if (probe && std::string(probe) == "hide") probe_hide_pass();
+    test_bounds_drain();
 
     SSL_CTX_free(g_ctx);
     if (failures) {

@@ -664,9 +664,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
     if (!await ensureTurnForCallFromRef(ref)) return;
     _noTurnWarned = false;
-    // While a voice session is live the relay socket retries every second
-    // instead of backing off toward thirty, so a blinking Wi-Fi is back fast.
-    RealtimeSessionFlag.acquire('voice-channel');
     // Block if in a 1:1 call. Say so — a silent return reads as a dead
     // button (issue #49).
     final callState = ref.read(callProvider);
@@ -689,10 +686,20 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await leaveChannel();
     }
 
-    await network_api.voiceChannelJoin(
-      serverId: serverId,
-      channelId: channelId,
-    );
+    // While a voice session is live the relay socket retries every second
+    // instead of backing off toward thirty, so a blinking Wi-Fi is back fast;
+    // a phone also stays visible and connected in the background. Taken only
+    // now: a blocked join or the old room's leave above must not strand it.
+    RealtimeSessionFlag.acquire('voice-channel');
+    try {
+      await network_api.voiceChannelJoin(
+        serverId: serverId,
+        channelId: channelId,
+      );
+    } catch (_) {
+      RealtimeSessionFlag.release('voice-channel');
+      rethrow;
+    }
   }
 
   /// True once this join has been superseded (left, forced out, or joined
@@ -715,6 +722,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Called after the local join event arrives to update state and start audio.
   Future<void> onLocalJoined(String serverId, String channelId) async {
+    // A join this device did not start through joinChannel holds it too.
+    RealtimeSessionFlag.acquire('voice-channel');
     final gen = ++_joinGen;
 
     String? channelName = ref.read(channelListProvider)[channelId]?.name;
@@ -1284,6 +1293,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// A non-null `_service` means Rust FORCED us out (lost visibility, demoted,
   /// kicked) and the call is still running, so the media teardown must run here.
   void onLocalLeft() {
+    // A forced leave never runs leaveChannel, which is the other release.
+    RealtimeSessionFlag.release('voice-channel');
     final ownLeave = _leaving;
     _leaving = false;
     if (state.isInVoiceChannel) {

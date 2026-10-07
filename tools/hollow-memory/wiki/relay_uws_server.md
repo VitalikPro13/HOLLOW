@@ -159,7 +159,7 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   `socket_of(session)`.
 - **Presence follows the socket, delivery follows the session.** `enter_grace` (the close handler,
   for a socket whose session is live): the device leaves each room's `peers` now (`peer_left` to
-  whoever saw it) and goes into `WsRoom::held`; it leaves `peer_sockets` and `peer_rooms`
+  whoever saw it, unless it was hidden already) and goes into `WsRoom::held`; it leaves `peer_sockets` and `peer_rooms`
   (`go_offline`: offline for push, push debounce reset, license seat released); the session keeps
   its rooms with owner flags and door standing, its subscriptions, nickname, link code and inactive
   flag, and the closing socket's per-IP slot (`hold_ip_slot`; the close handler skips its own
@@ -167,7 +167,10 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   `peers` (live sockets, `send_stream`) and then `held` (`send_held`, ring only) under the same
   audience gates; topic frames to a grace session pass the session's stored filter. A device whose
   fetch socket holds the room slot while its full session is in grace gets both copies (the
-  receiver dedups by message id).
+  receiver dedups by message id). A fetch socket that JOINS a room while its own device's session
+  is in grace also gets that room's ring DMs (`Direct`, `DirectImage`; an inbox only once proved),
+  uncounted and left in the ring (`replay_grace_directs`), so a push-woken NSE or fetch node shows
+  the text during grace instead of a name-only banner.
 - **Send-site classification** (every relay-to-client write is one of these):
   - `send_stream(ws, bytes, binary, Meta)`: a stream frame. On a live session's socket it enters
     the ring (`ring_in` -> `session_bounds::ring_push`) BEFORE `write_raw`. Every forwarded frame
@@ -191,13 +194,18 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   before any handler or gate decides on it; a frame a gate refuses was still handled. Text over
   1 MiB is never parsed but still counts, as does text that does not parse. The relay acks
   `{"type":"ack","h":in_h}` after 16 frames, or 2 s after the first unacked one (the `acks_due`
-  queue, popped by `sweep_sessions` on a 250 ms session timer). `hb` is answered at once with
+  queue, popped by `sweep_sessions` on a 250 ms session timer). One ack is queued per session at
+  a time (`Session::count_in`): a frame after an ack or a heartbeat rides the one still waiting,
+  so a client beating between frames cannot grow the queue (HOL-SEC-165). `hb` is answered at once with
   `hb_ack { h: in_h }` and acks the ring at the `hb`'s own `h`; `hb` on a socket without a session
   gets `hb_ack { h: 0 }`. An `h` out of range acks nothing.
 - **The ring** (`session::Ring`): its entries cover `(acked, sent]` exactly once, in order, each a
   real frame or a tombstone run. Per-session caps 8 MiB and 4096 real frames (`enforce`): past them
   the oldest real frame of the sender share holding the most weight (bytes plus 1 KiB per frame)
-  becomes a tombstone (`evict_one`, `bury`) and adjacent tombstones merge. A frame over 8 MiB is
+  becomes a tombstone (`evict_one`, `bury`). The ring indexes its frames by sender share (weight,
+  oldest first), so every step is logarithmic or amortized constant: a full ring takes every frame
+  of a fan-out (HOL-SEC-171). A tombstone merges with a neighbour where the erase is cheap and at
+  the next compaction otherwise; a replay sends each run of tombstones as one gap either way. A frame over 8 MiB is
   still written live but enters the ring as a tombstone (`push_gap`). A tombstone replays as one
   counted `{"type":"gap","n":N}`, only the part after the client's `in_h`. The rings of one fan-out
   share one buffer (`shared_ptr`). No refusal and no dropped socket: overflow only ever becomes a gap.
@@ -227,38 +235,72 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   cover them). A grace session then lets go of its rooms (`let_go`: held, owner flag, door standing;
   the room goes with its last peer) and of its nickname and link code (`release_bindings`); a live
   one leaves its socket without a session (`sid` cleared). The held IP slot is freed.
-- **`inactive` / `active`**: `inactive` sets the flag (presence withheld by `send_presence`);
-  `active` clears it and sends one `members` per room (`send_all_members`). The flag survives grace,
-  resume and the snapshot. `end` without a session is ignored.
+- **`inactive` / `active`**: `inactive` sets the flag (presence withheld by `send_presence`, which
+  notes the room in `PerSocketData::presence_withheld`; a leave takes it out); `active` clears it and
+  sends one `members` for each room whose presence was withheld (`send_withheld_members`), nothing
+  when none was. Every other room's presence the device already has; a flag toggled in a loop costs
+  nothing more (HOL-SEC-164). The flag survives grace, resume and the snapshot. `end` without a session is ignored.
+- **Hidden while inactive** (plan section 8, decision 6: a phone shows online only while the app is
+  on screen). `settle_presence` makes others see what the flag asks: on `inactive` every room the
+  session holds tells whoever sees the device `peer_left`, on `active` `peer_joined`, and the socket
+  records what was told (`PerSocketData::hidden`). While hidden the device is in no `members`
+  (`members_of`, the join answer, `roster_for`), no `discover_peers` or `check_peers` answer, and
+  nothing announces it: a join, a leave (`is_invisible_in_room`), its socket dropping
+  (`enter_grace`), a resume (`came_back`), a relock, a door grace ending (`sweep_door_grace`), a
+  roster dropping its inbox (`drop_inbox_owners`). Delivery is untouched: it stays in `peers` and
+  `peer_sockets`, gets every frame live, sends as before, and is never pushed (a hidden live
+  socket is not offline). A resume from grace starts as the flag says (an inactive session comes
+  back announcing nothing); a move hands on the mark and the pace. **Passes are paced** per
+  socket: the next waits `PRESENCE_PASS_MS` (2 s, state.h) or, after a big pass,
+  `PRESENCE_PASS_US_PER_PEER` (250 us) per room walked and per peer in it, so one session's passes
+  hold the loop well under 1% of the time (a pass costs about 1.3 us per room and peer,
+  `RELAY_LIVE_PROBE=hide`). A change inside the gap waits on `presence_due` (a min-heap: each
+  socket's gap ends at its own time; one entry per socket, popped by `sweep_sessions`; an entry
+  whose socket moved on is skipped, and one an older socket left that comes early only queues
+  again, since `settle_presence` keeps the pace itself) and one undone meanwhile tells nobody. Without the pace a toggle loop would walk every room and its members per frame (the
+  HOL-SEC-164 stall, times room size). The device's
+  own siblings see it hidden too. Tests: the `presence:` cases in `test_relay_live.cpp`
+  (`RELAY_LIVE_ONLY=presence`; the door grace one needs `=door_grace`, about 70 s) and the restored
+  inactive session in `hs_restart`.
 - **Nickname**: a binding whose holder has a session, live or in grace, is not stale
   (`nickname_binding_is_stale`).
 - **The hooks seam, `session_bounds.h`**: every ring mutation, mint and end goes through
   `ring_push`, `ring_ack`, `ring_take_all`, `make_room`, `hold_ip_slot`, `release_ip_slot`,
-  `grace_slot_victim`. **CRITICAL: never mutate a `Ring` directly**: the global budget and the
-  per-IP counts then drift silently. **Never `ring_push` while iterating a ring**: a push appends
+  `grace_slot_victim`, `admits`, `settle_victim`. **CRITICAL: never mutate a `Ring` directly, nor
+  add or erase a session outside these**: the rings' pool, the book and the per-IP counts then
+  drift silently. **Never `ring_push` while iterating a ring**: a push appends
   and may bury entries, which invalidates the deque's iterators (`resume_session` replays the ring
   with `write_raw`, and the gap mailbox replay, which does push, runs after the ring loop). A
-  `ring_push` never drops a buffered DM or topic frame itself, because it runs inside loops over
-  those buffers (a replay on join, a topic catch-up): such a budget victim waits for the settle
-  point, `enforce_buffer_budget` in main.cpp's loop post-handler, or the next deposit.
-- **Global budget** (`offline_index.h`): ring frames share the one 512 MB `OfflineIndex` budget
-  with DM and topic frames (`stamp_session`). A fan-out buffer held by many rings is RAM once, so its
-  bytes are charged once, keyed by the buffer pointer, to one holder; every holder pays its own 1 KiB
-  overhead, and when the charged holder lets go another holder is reweighed to carry the bytes.
+  `ring_push` never drops a buffered DM or topic frame, because it runs inside loops over those
+  buffers (a replay on join, a topic catch-up): the rings' pool is apart from their budget.
+- **The rings' pool** (`offline_index.h`, HOL-SEC-170): ring frames have a 256 MiB pool of their
+  own (`OfflineIndex::rings`, `ring_budget`), apart from the 512 MB budget of DM and topic frames,
+  so neither ever pushes the other out. A frame's bytes are charged to its sender's share, once per
+  fan-out buffer while any ring holds it (keyed by the buffer pointer), and its holding (1 KiB) to
+  the share that minted the receiving session: how long a ring keeps a frame is its device's
+  choice. Past the pool (`bury_over_pool`, run by every `ring_push`) the share holding the most
+  gives way: holding goes as the oldest frame of the heaviest sender in that session's ring, so a
+  flood into a ring buries the flood; bytes go as that buffer from every ring holding it.
   **CRITICAL: exact only while every frame leaving a ring goes through `forget(budget_seq)`** (an
-  ack, the ring caps, the session's end: `session_bounds::detail::forget` is the ring's on-drop). A
-  budget victim inside a ring is buried there (`bury_session` -> `Ring::evict_budget_seq`) and the
-  device later sees it as a `gap`.
-- **Table cap** (`make_room`, from `mint_session`): at most 262,144 sessions. Past it, the address
-  share holding the most sessions (the newcomer counted; a tie goes against the newcomer's own
-  share) gives one up: a session in grace before a live one, then the one closest to its end. It
-  ends as on expiry; a live victim's socket closes 1000 `session_lost`.
+  ack, the ring caps, the pool, the session's end: `session_bounds::detail::forget` is the ring's
+  on-drop). The ring's device sees a buried frame as a `gap`.
+- **The book** (`session::Book`, `RelayState::session_book`, HOL-SEC-171): sessions by share (in
+  grace before live, the earlier into grace first) and grace slots by address, kept in step at
+  every mint (`make_room`), grace (`hold_ip_slot`), resume (`release_ip_slot`), end
+  (`ring_take_all`) and snapshot restore (`place`), and rebuilt from the table only if the two
+  disagree. The table cap and the per-IP slots read it instead of walking the table.
+- **Table cap** (`make_room(st, share, peer)`, from `mint_session`): at most 262,144 sessions. Past
+  it, the address share holding the most sessions (the newcomer counted; a tie goes against the
+  newcomer's own share) gives one up: a session in grace before a live one, then the one closest to
+  its end. It ends as on expiry; a live victim's socket closes 1000 `session_lost`.
 - **Per-IP slots**: a grace session keeps its socket's slot under `MAX_CONNS_PER_IP` (34) until
-  gone. In `.open` the rate check (10 new per minute) runs first; at the cap, `grace_slot_victim`
-  picks the session in grace at that address closest to its end and ends it, so a device coming back
-  is not refused by the slot its own session holds; with none, `ip_limit`. `data->ip_key` is set only
-  once the slot is taken, so a refused socket gives nothing back on close (the old code decremented a
-  slot it never took). Restored sessions hold no slot (addresses are never snapshotted).
+  gone. In `.open` the rate check (10 new per minute) runs first; at the cap a socket comes in only
+  while the address has more grace slots than sockets over the cap (`admits`), and ends nobody
+  then: once its login is through, its own session resumed or ended, `settle_ip_slot` ends the
+  grace session there closest to its end while the address is still over (HOL-SEC-172), so a
+  device coming back takes back its own slot. `data->ip_key` is set only once the slot is taken,
+  so a refused socket gives nothing back on close. Restored sessions hold no slot (addresses are
+  never snapshotted). The live tests build the relay with `-DHOLLOW_RELAY_TEST_CONNS_PER_IP=3`.
 - **Grace length**: `--session-grace-secs` (Docker `SESSION_GRACE_SECS`, `SELF_HOSTING.md`
   "Dropped connections"), default 120, held to 30..600 (`parse_grace_secs`, clamped again in
   `setup_ws_handler`). The test-only define `-DHOLLOW_RELAY_TEST_GRACE_SECS=5` (`test/run_live.sh`)
@@ -271,9 +313,9 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   written once, plus binary flag, share, kind, room and the old budget stamp). Not carried: door
   standing, the door nonce, the per-IP slot, ack timers. Restore: `prepare` judges each record
   (shapes, `Ring::restore` coverage, the ring cap per frame) and drops a bad one alone
-  (`sessions_dropped`), and caps the table by the heaviest share; the ring frames rejoin the budget
-  in old-stamp order, interleaved with DM and topic frames (`snapshot.cpp:apply`); `place` restores a
-  nickname or link code only if unexpired and free. `adopt_restored_sessions` (in `setup_ws_handler`)
+  (`sessions_dropped`), and caps the table by the heaviest share; the ring frames rejoin the rings'
+  pool in old-stamp order (`snapshot.cpp:apply`), `place` books every session in grace and holds the
+  pool to its budget, and restores a nickname or link code only if unexpired and free. `adopt_restored_sessions` (in `setup_ws_handler`)
   puts every one in grace with the timer starting at load, `restored = true` (its resume answers
   `reprove: true`, its locked rooms come back unproved), its rooms `held` with their owner flags.
 - **Drain** (`drain.h`, main.cpp's shutdown tick): on SIGTERM, in one loop tick, every live
@@ -372,6 +414,7 @@ Attached to every WebSocket via uWebSockets' templated user data. Fields:
 | `last_binary_activity` | `steady_clock::time_point` | Last 0x03 binary frame timestamp (for guest idle timeout) |
 | `binary_frames_this_minute` | `uint32_t` | Guest rate limit counter (reset every 60s) |
 | `minute_window_start` | `steady_clock::time_point` | Start of current rate limit window |
+| `hidden`, `next_presence_pass`, `presence_pass_queued` | `bool`, `steady_clock::time_point`, `bool` | The device's rooms were told it left (session `inactive`, decision 6); when this socket's next presence pass may run and whether one waits (`presence_due`) |
 
 ### IpState (per-IP connection tracking)
 

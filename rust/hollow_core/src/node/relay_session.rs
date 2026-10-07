@@ -33,6 +33,10 @@ pub(crate) struct Timing {
     pub sleep_jump: Duration,
     pub backoff_base: Duration,
     pub backoff_cap: Duration,
+    /// The backoff cap while a held session can still be resumed (`grace`).
+    pub resume_backoff_cap: Duration,
+    /// The relay's grace, counted here from our own `Suspended`.
+    pub grace: Duration,
     pub realtime_retry: Duration,
     /// Each auth reply.
     pub auth_reply: Duration,
@@ -56,6 +60,8 @@ impl Default for Timing {
             sleep_jump: Duration::from_secs(5),
             backoff_base: Duration::from_millis(500),
             backoff_cap: Duration::from_secs(30),
+            resume_backoff_cap: Duration::from_secs(5),
+            grace: Duration::from_secs(120),
             realtime_retry: Duration::from_secs(1),
             auth_reply: Duration::from_secs(5),
             handshake: Duration::from_secs(10),
@@ -67,6 +73,12 @@ impl Default for Timing {
 impl Timing {
     pub(crate) fn heartbeat_every(&self, background: bool) -> Duration {
         if background { self.heartbeat_background } else { self.heartbeat }
+    }
+
+    /// The heartbeat for the app's state: a call keeps the fast one in the background too,
+    /// because its signalling needs a dead path found in seconds.
+    pub(crate) fn heartbeat_for(&self, background: bool, realtime: bool) -> Duration {
+        self.heartbeat_every(background && !realtime)
     }
 }
 
@@ -633,6 +645,100 @@ impl Liveness {
     pub(crate) fn probe_given_up(&mut self) {
         self.probe_until = None;
     }
+
+    /// Stop judging this socket: it is left unread while a move is under way.
+    pub(crate) fn pause(&mut self) {
+        self.beat_out = None;
+        self.probe_until = None;
+    }
+}
+
+// -- Nudges (section 9.6) --
+
+/// The reason an app nudge carries; anything unknown is `other`.
+pub(crate) fn app_reason(reason: &str) -> &'static str {
+    match reason {
+        "foreground" => "foreground",
+        "focus" => "focus",
+        "network" => "network",
+        "wake" => "wake",
+        "call" => "call",
+        "push" => "push",
+        _ => "other",
+    }
+}
+
+/// Whether a nudge reopens a socket the app closed on purpose: only the app coming back
+/// does, a call that needs the socket and a push wake (the ring holds what woke it)
+/// included. A network change or a wake is no reason to undo what the app decided, and
+/// the client's own nudges never are.
+pub(crate) fn ends_suspend(reason: &str, external: bool) -> bool {
+    external && matches!(reason, "foreground" | "focus" | "call" | "push")
+}
+
+// -- The app's background flag (section 9.7 `inactive` / `active`) --
+
+/// What the relay holds of the app's `inactive` flag (`true` = inactive). The flag frames
+/// are uncounted and never resent, so a write is known to have arrived only once the
+/// relay answered a heartbeat written after it on the same socket; until then the next
+/// socket writes the app's flag again.
+#[derive(Debug, Default)]
+pub(crate) struct Flag {
+    /// What the relay is known to hold; None while a write may or may not have arrived.
+    held: Option<bool>,
+    /// The last write on this socket not yet known to have arrived, with how many
+    /// heartbeats this socket had written before it.
+    written: Option<(bool, u64)>,
+    beats: u64,
+    answers: u64,
+    /// The session may have moved off this socket, whose answers then prove nothing.
+    doubted: bool,
+}
+
+impl Flag {
+    /// The relay starts every session active.
+    pub(crate) fn fresh_session(&mut self) {
+        *self = Self { held: Some(false), ..Self::default() };
+    }
+
+    /// The session goes on over a new socket.
+    pub(crate) fn new_socket(&mut self) {
+        let held = if self.written.is_some() { None } else { self.held };
+        *self = Self { held, ..Self::default() };
+    }
+
+    /// Whether the relay must be told `inactive` for it to hold it.
+    pub(crate) fn needs(&self, inactive: bool) -> bool {
+        match self.written {
+            Some((written, _)) => written != inactive,
+            None => self.held != Some(inactive),
+        }
+    }
+
+    pub(crate) fn wrote(&mut self, inactive: bool) {
+        self.written = Some((inactive, self.beats));
+    }
+
+    pub(crate) fn beat_sent(&mut self) {
+        self.beats += 1;
+    }
+
+    /// The relay answered this socket's next heartbeat (it answers each, in order).
+    pub(crate) fn answered(&mut self) {
+        self.answers += 1;
+        if let Some((written, beats_before)) = self.written
+            && !self.doubted
+            && self.answers > beats_before
+        {
+            self.held = Some(written);
+            self.written = None;
+        }
+    }
+
+    /// A second socket may take the session over from this one.
+    pub(crate) fn doubt(&mut self) {
+        self.doubted = true;
+    }
 }
 
 /// A wall-clock reading next to a monotonic one.
@@ -669,15 +775,30 @@ impl Backoff {
         self.attempt
     }
 
+    /// [`Self::next_within`] the normal cap.
+    #[cfg(test)]
+    pub(crate) fn next(&mut self, roll: u64, t: &Timing) -> Duration {
+        self.next_within(roll, t, t.backoff_cap)
+    }
+
     /// Full jitter: uniform in `[0, min(cap, base * 2^attempt)]` for a `roll` uniform
     /// over u64, so a reconnect wave spreads out.
-    pub(crate) fn next(&mut self, roll: u64, t: &Timing) -> Duration {
+    pub(crate) fn next_within(&mut self, roll: u64, t: &Timing, cap: Duration) -> Duration {
         let factor = 1u32.checked_shl(self.attempt).unwrap_or(u32::MAX);
-        let ceiling = t.backoff_base.checked_mul(factor).unwrap_or(t.backoff_cap).min(t.backoff_cap);
+        let ceiling = t.backoff_base.checked_mul(factor).unwrap_or(cap).min(cap);
         self.attempt = self.attempt.saturating_add(1);
         let span = u64::try_from(ceiling.as_nanos()).unwrap_or(u64::MAX);
         Duration::from_nanos(roll % span.saturating_add(1).max(1))
     }
+}
+
+/// The backoff cap for the next try. While the relay can still resume the session we hold
+/// (inside its grace, counted from our own `Suspended`), a path that comes back by itself
+/// must not wait out a long backoff; once the relay refused us, every socket spends its
+/// per-address budget, so the full cap applies again.
+pub(crate) fn backoff_cap(t: &Timing, holding: bool, since_suspended: Option<Duration>, refused: bool) -> Duration {
+    let resumable = holding && !refused && since_suspended.is_some_and(|d| d < t.grace);
+    if resumable { t.resume_backoff_cap.min(t.backoff_cap) } else { t.backoff_cap }
 }
 
 /// How long the drain hint says to wait before resuming elsewhere.
@@ -1118,10 +1239,91 @@ mod tests {
     }
 
     #[test]
+    fn a_paused_socket_is_not_judged() {
+        let t = Timing::default();
+        let t0 = Instant::now();
+        let mut l = Liveness::new(t0);
+        l.probe_sent(t0 + secs(3), &t);
+        l.pause();
+        assert_eq!((l.probe_missed_at(), l.dead_at(&t)), (None, None), "no verdict on a socket left unread");
+        assert!(l.wants_probe(t0 + secs(3), &t), "the quiet window still runs from what was heard");
+    }
+
+    /// Pinned FFI semantics: a suspend ends only when the app comes back (foreground,
+    /// focus, a call needing the socket); a network change or a wake never reopens it,
+    /// and the client's own nudges never do.
+    #[test]
+    fn only_the_app_coming_back_ends_a_suspend() {
+        for (reason, external, ends) in [
+            ("foreground", true, true),
+            ("focus", true, true),
+            ("call", true, true),
+            ("push", true, true),
+            ("network", true, false),
+            ("wake", true, false),
+            ("other", true, false),
+            ("foreground", false, false),
+            ("push", false, false),
+            ("wake", false, false),
+        ] {
+            assert_eq!(ends_suspend(reason, external), ends, "{reason} external={external}");
+        }
+        for reason in ["foreground", "focus", "network", "wake", "call", "push"] {
+            assert_eq!(app_reason(reason), reason);
+        }
+        assert_eq!(app_reason("resume"), "other");
+        assert_eq!(app_reason(""), "other");
+    }
+
+    /// Section 9.7 with uncounted flag frames: a write is known to have reached the relay
+    /// only once a heartbeat written after it on the same socket was answered; a new
+    /// socket writes the flag again unless the relay is known to hold it.
+    #[test]
+    fn the_relays_flag_is_known_only_once_a_later_heartbeat_is_answered() {
+        let mut f = Flag::default();
+        f.fresh_session();
+        assert!(!f.needs(false), "a fresh session starts active");
+        assert!(f.needs(true));
+
+        f.beat_sent();
+        f.wrote(true);
+        assert!(!f.needs(true), "written on this socket and in flight");
+        assert!(f.needs(false), "the app changed its mind");
+        f.answered();
+        f.new_socket();
+        assert!(f.needs(true) && f.needs(false), "an answer to a beat sent before the write proves nothing");
+
+        f.wrote(true);
+        f.beat_sent();
+        f.answered();
+        f.new_socket();
+        assert!(!f.needs(true), "a later beat answered: the relay holds it across sockets");
+        assert!(f.needs(false));
+
+        f.wrote(false);
+        f.doubt();
+        f.beat_sent();
+        f.answered();
+        f.new_socket();
+        assert!(f.needs(false) && f.needs(true), "the session may have moved off a doubted socket");
+
+        f.fresh_session();
+        f.wrote(true);
+        f.beat_sent();
+        f.answered();
+        assert!(!f.needs(true));
+        f.fresh_session();
+        assert!(f.needs(true) && !f.needs(false), "a new session forgets the old one's flag");
+    }
+
+    #[test]
     fn heartbeats_are_15_s_in_the_foreground_and_60_s_in_the_background() {
         let t = Timing::default();
         assert_eq!(t.heartbeat_every(false), secs(15));
         assert_eq!(t.heartbeat_every(true), secs(60));
+        assert_eq!(t.heartbeat_for(true, false), secs(60));
+        assert_eq!(t.heartbeat_for(true, true), secs(15), "a call in the background keeps fast liveness");
+        assert_eq!((t.heartbeat_for(false, false), t.heartbeat_for(false, true)), (secs(15), secs(15)));
         assert_eq!((t.dead_after, t.nudge_quiet, t.probe, t.ack_after), (secs(10), secs(2), secs(1), secs(2)));
         assert_eq!((t.suspend_wait, t.sleep_jump, t.backoff_base, t.backoff_cap), (secs(2), secs(5), ms(500), secs(30)));
         assert_eq!(t.realtime_retry, secs(1));
@@ -1158,6 +1360,28 @@ mod tests {
         assert!(b.next(u64::MAX, &t) <= ms(500));
         assert_eq!(drain_wait(4_000), secs(4));
         assert_eq!(drain_wait(u64::MAX), MAX_DRAIN_WAIT);
+    }
+
+    /// A session the relay still holds is retried within 5 s, so a path that comes back by
+    /// itself resumes quickly; past the relay's grace, with no session, or once the relay
+    /// refused us (each refused socket costs its per-address budget), the 30 s cap.
+    #[test]
+    fn a_held_session_retries_within_5_s_until_the_grace_is_over_or_the_relay_refused() {
+        let t = Timing::default();
+        assert_eq!((t.resume_backoff_cap, t.grace), (secs(5), secs(120)));
+        assert_eq!(backoff_cap(&t, true, Some(secs(0)), false), secs(5));
+        assert_eq!(backoff_cap(&t, true, Some(secs(119)), false), secs(5));
+        assert_eq!(backoff_cap(&t, true, Some(secs(120)), false), secs(30), "the relay's grace is over");
+        assert_eq!(backoff_cap(&t, true, Some(secs(3)), true), secs(30), "the relay refused us");
+        assert_eq!(backoff_cap(&t, false, Some(secs(3)), false), secs(30), "no session to resume");
+        assert_eq!(backoff_cap(&t, true, None, false), secs(30), "never suspended");
+
+        let mut b = Backoff::default();
+        for _ in 0..40 {
+            assert!(b.next_within(u64::MAX, &t, secs(5)) <= secs(5));
+        }
+        assert_eq!(b.next_within(5_000_000_000, &t, secs(5)), secs(5), "the cap is reachable");
+        assert_eq!(b.next(30_000_000_000, &t), secs(30), "the attempt count carries over to the normal cap");
     }
 
     #[test]

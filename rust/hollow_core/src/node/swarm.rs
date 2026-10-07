@@ -123,6 +123,8 @@ async fn ensure_olm_session_and_drain(
     device_peer_id: &str,
     peer_id: &str,
     context: &str,
+    // `None` drains at once: the forwarder lane, a few control frames that must go now.
+    budget: Option<&mut super::frame_budget::FrameBudget>,
 ) -> bool {
     // An outbound-only session is NOT proof the peer can decrypt us. Reporting
     // SessionEstablished for an unconfirmed session is the "A writes and B does not
@@ -138,17 +140,29 @@ async fn ensure_olm_session_and_drain(
                 "[HOLLOW-CRYPTO] {context}: draining {} pending messages for {peer_id}",
                 queued.len()
             );
-            for text in queued {
-                send_encrypted_message(
-                    olm,
-                    crypto_store,
-                    peer_id,
-                    &text,
-                    event_tx,
-                    ws_cmd_tx,
-                    ws_room_peers,
-                )
-                .await;
+            // Our own devices are exempt from each other's limit.
+            match budget.filter(|_| !super::resolver::same_identity(peer_id, device_peer_id)) {
+                Some(budget) => {
+                    budget.welcome_back(peer_id, queued, std::time::Instant::now());
+                    super::frame_budget::pump(
+                        budget, olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers, pending_messages,
+                    )
+                    .await;
+                }
+                None => {
+                    for text in queued {
+                        send_encrypted_message(
+                            olm,
+                            crypto_store,
+                            peer_id,
+                            &text,
+                            event_tx,
+                            ws_cmd_tx,
+                            ws_room_peers,
+                        )
+                        .await;
+                    }
+                }
             }
         }
         true
@@ -170,6 +184,54 @@ async fn ensure_olm_session_and_drain(
     }
 }
 
+/// Everything that waited for `peer`, re-encrypted on the session just built with it:
+/// the peer lost the ratchet our earlier copies rode, held copies included. Paced, as
+/// the whole queue can come at once, except to our own devices.
+#[allow(clippy::too_many_arguments)]
+async fn resend_on_new_session(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    budget: &mut super::frame_budget::FrameBudget,
+    master_peer_str: &str,
+    peer_str: &str,
+) {
+    // Boxed: awaited from three arms of `handle_incoming_request`.
+    Box::pin(resend_on_new_session_inner(
+        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers, pending_messages, budget, master_peer_str, peer_str,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resend_on_new_session_inner(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    budget: &mut super::frame_budget::FrameBudget,
+    master_peer_str: &str,
+    peer_str: &str,
+) {
+    let queued = message_ops::take_queued(pending_messages, peer_str).unwrap_or_default();
+    if !queued.is_empty() {
+        hollow_log!("[HOLLOW-CRYPTO] Draining {} pending messages for {peer_str}", queued.len());
+    }
+    if super::resolver::same_identity(peer_str, master_peer_str) {
+        for text in queued {
+            send_encrypted_message(olm, crypto_store, peer_str, &text, event_tx, ws_cmd_tx, ws_room_peers).await;
+        }
+        return;
+    }
+    budget.send_now(peer_str, queued, std::time::Instant::now());
+    super::frame_budget::pump(budget, olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers, pending_messages).await;
+}
+
 /// Our session with `peer` was just built or switched to: report it once it is
 /// confirmed, acknowledge it so the peer's outbound half confirms too, and send what
 /// waited for a session.
@@ -189,6 +251,7 @@ async fn on_session_ready(
     peer_str: &str,
     had_session: bool,
     ack: bool,
+    budget: &mut super::frame_budget::FrameBudget,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -204,14 +267,10 @@ async fn on_session_ready(
             olm, crypto_store, peer_str, &ack_json, event_tx, ws_cmd_tx, ws_room_peers,
         ).await;
     }
-    if let Some(queued) = message_ops::take_queued(pending_messages, peer_str) {
-        hollow_log!("[HOLLOW-CRYPTO] Draining {} pending messages for {peer_str}", queued.len());
-        for text in queued {
-            send_encrypted_message(
-                olm, crypto_store, peer_str, &text, event_tx, ws_cmd_tx, ws_room_peers,
-            ).await;
-        }
-    }
+    resend_on_new_session(
+        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers, pending_messages, budget, master_peer_str, peer_str,
+    )
+    .await;
     // With no session, the peer's DMs in that window may never have rendered here:
     // ask it to re-serve from our high-water mark.
     if !had_session {
@@ -542,8 +601,9 @@ pub(crate) async fn spawn_node(
 /// and instead takes an injected WS channel pair, so an in-process `MockRelay`
 /// can route between several nodes with no network, TLS or auth.
 ///
-/// Returns `(master_peer_id, event_loop_handle, ws_cmd_rx, ws_event_tx)`: the
-/// broker drains `ws_cmd_rx` and pushes into `ws_event_tx`.
+/// Returns `(master_peer_id, event_loop_handle, ws_cmd_rx, ws_event_tx, away)`: the
+/// broker drains `ws_cmd_rx` and pushes into `ws_event_tx`; `away` is the node's
+/// background flag.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_node_mock(
@@ -563,6 +623,7 @@ pub(crate) async fn spawn_node_mock(
     tokio::task::JoinHandle<()>,
     tokio::sync::mpsc::UnboundedReceiver<super::ws_client::WsCommand>,
     tokio::sync::mpsc::UnboundedSender<super::ws_client::WsEvent>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
 ), String> {
     let bundle_keypair = native_keypair.clone();
     let master_peer_id = native_keypair.peer_id();
@@ -573,13 +634,15 @@ pub(crate) async fn spawn_node_mock(
     let (ws_cmd_tx, ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (ws_event_tx, ws_event_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let handle = tokio::spawn(super::olm_lane::with_carry_book(super::door_room::with_heard_routes(Box::pin(run_event_loop(
+    // This node's own `relay_set_background` flag, which the test sets.
+    let away = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    )))));
+    ))))));
 
-    Ok((master_peer_id, handle, ws_cmd_rx, ws_event_tx))
+    Ok((master_peer_id, handle, ws_cmd_rx, ws_event_tx, away))
 }
 
 /// The main event loop. Runs until the task is aborted.
@@ -1244,6 +1307,8 @@ async fn run_event_loop(
     let mut pending_mls_key_packages: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
     // MLS batch removal queue: collect peers needing removal before re-add (recovery).
     let mut pending_mls_removals: HashMap<String, Vec<String>> = HashMap::new();
+    // Both queues wait while the app is away or the socket is down: when the batch tick may commit.
+    let mut mls_turn = crate::node::crypto_handler::MlsTurn::default();
     let mut mls_batch_interval = Duration::from_secs(2);
     let mut mls_batch_timer = tokio::time::interval(mls_batch_interval);
     mls_batch_timer.tick().await; // consume immediate first tick
@@ -1265,11 +1330,9 @@ async fn run_event_loop(
     // Guest sync: rooms joined as a non-member for browsing public channels.
     let mut guest_rooms = super::guest_view::GuestView::new();
 
-    // SECURITY: Per-peer rate limiter — token bucket (100 burst, refill 20/sec).
-    // Prevents message flooding from malicious peers.
-    let mut peer_rate_tokens: HashMap<String, (u32, std::time::Instant)> = HashMap::new();
-    const RATE_LIMIT_BURST: u32 = 100;
-    const RATE_LIMIT_REFILL: u32 = 20; // tokens per second
+    // SECURITY: the per-sender inbound bucket against floods; what it drops is asked
+    // for again once the sender stops. It also paces our bulk to a device back from away.
+    let mut frame_budget = super::frame_budget::FrameBudget::default();
 
     // SECURITY (Phase 6.25): Sub-rate-limiter for VC signaling on both lanes: refills at
     // half the frame bucket's rate (VC signals are less frequent than chat).
@@ -1403,7 +1466,7 @@ async fn run_event_loop(
                 let fwd_bridge: FwdBridge = std::marker::PhantomData;
                 Box::pin(handle_incoming_request(
                     &mut olm, &crypto_store, &crdt_store, &event_tx,
-                    &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                    &mut pending_messages, &mut frame_budget, &mut key_request_in_flight, &mut key_bundle_sent_to,
                     &mut server_states, &bundle_keypair,
                     &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                     &mut pending_server_joins,
@@ -2297,7 +2360,7 @@ async fn run_event_loop(
                     NodeCommand::EditDmMessage { peer_id: peer_id_str, message_id, new_text } => {
                         message_ops::handle_edit_dm_message(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &mut pending_messages, &mut key_request_in_flight,
+                            &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                             &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id, new_text,
                             &db_path, &db_passphrase,
@@ -2315,7 +2378,7 @@ async fn run_event_loop(
                     NodeCommand::AttachDmLinkPreview { peer_id: peer_id_str, message_id, preview } => {
                         message_ops::handle_attach_dm_link_preview(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &mut pending_messages, &mut key_request_in_flight,
+                            &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                             &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id, preview,
                             &db_path, &db_passphrase,
@@ -3234,7 +3297,7 @@ async fn run_event_loop(
                             let fwd_bridge: FwdBridge = std::marker::PhantomData;
                             handle_incoming_request(
                                 &mut olm, &crypto_store, &crdt_store, &event_tx,
-                                &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                                &mut pending_messages, &mut frame_budget, &mut key_request_in_flight, &mut key_bundle_sent_to,
                                 &mut server_states, &bundle_keypair,
                                 &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                 &mut pending_server_joins,
@@ -3444,6 +3507,7 @@ async fn run_event_loop(
                             .collect();
                         snap.synced_peers = synced_peers.iter().cloned().collect();
                         snap.ws_transfers = pending_ws_transfers.keys().cloned().collect();
+                        snap.rate_dropped = frame_budget.limiter.dropped_totals();
                         let _ = reply.send(snap);
                     }
                 }
@@ -3458,6 +3522,7 @@ async fn run_event_loop(
                     }
                     WsEvent::Connected => {
                         hollow_log!("[HOLLOW-WS] Fresh relay session: joining inbox, server and DM rooms");
+                        mls_turn.on_session(true);
                         // `RelayConnected` waits for the relay's answer to the inbox join.
                         awaiting_inbox_answer = Some(format!("inbox:{local_peer_str}"));
                         // TURN credentials over the authed socket (fresh set on
@@ -3625,12 +3690,14 @@ async fn run_event_loop(
                     // throttle, ask and transfer stays, and sends wait in ws_client's queue.
                     WsEvent::Suspended => {
                         hollow_log!("[HOLLOW-WS] Relay socket lost, session held: keeping every room and peer");
+                        mls_turn.on_session(false);
                         let _ = event_tx.send(NetworkEvent::RelaySuspended).await;
                     }
                     // Nothing was rejoined and nothing needs to be: the relay replayed what we
                     // missed. Only a gap (frames that fell out of its ring) runs the catch-ups.
                     WsEvent::Resumed { gap } => {
                         hollow_log!("[HOLLOW-WS] Relay session resumed (gap: {gap})");
+                        mls_turn.on_session(true);
                         awaiting_inbox_answer = None;
                         if gap {
                             Box::pin(sync_handler::repair_after_gap(
@@ -3645,6 +3712,7 @@ async fn run_event_loop(
                     }
                     WsEvent::SessionLost => {
                         hollow_log!("[HOLLOW-WS] Relay session lost: purging, a fresh one follows");
+                        mls_turn.on_session(false);
                         pending_nickname_resolve = None;
                         nick_hold.on_disconnected();
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
@@ -3753,7 +3821,7 @@ async fn run_event_loop(
                                 &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
                                 &ws_room_peers, &mut pending_messages,
                                 &mut key_request_in_flight, &device_keypair,
-                                &device_peer_id, &peer_id, "PeerJoined(fwd)",
+                                &device_peer_id, &peer_id, "PeerJoined(fwd)", None,
                             ).await;
                         }
 
@@ -4002,7 +4070,7 @@ async fn run_event_loop(
                                         &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
                                         &ws_room_peers, &mut pending_messages,
                                         &mut key_request_in_flight, &device_keypair,
-                                        &device_peer_id, &peer_id, "PeerJoined",
+                                        &device_peer_id, &peer_id, "PeerJoined", Some(&mut frame_budget),
                                     ).await {
                                         sync_handler::flush_pending_sync_requests(
                                             &mut pending_sync_requests, &peer_id,
@@ -4457,7 +4525,7 @@ async fn run_event_loop(
                                         &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
                                         &ws_room_peers, &mut pending_messages,
                                         &mut key_request_in_flight, &device_keypair,
-                                        &device_peer_id, pid_str, "RoomMembers(fwd)",
+                                        &device_peer_id, pid_str, "RoomMembers(fwd)", None,
                                     ).await;
                                 }
                             }
@@ -4657,7 +4725,7 @@ async fn run_event_loop(
                                         &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
                                         &ws_room_peers, &mut pending_messages,
                                         &mut key_request_in_flight, &device_keypair,
-                                        &device_peer_id, pid_str, "RoomMembers",
+                                        &device_peer_id, pid_str, "RoomMembers", Some(&mut frame_budget),
                                     ).await {
                                         sync_handler::flush_pending_sync_requests(
                                             &mut pending_sync_requests, pid_str,
@@ -4936,7 +5004,7 @@ async fn run_event_loop(
                             let fwd_bridge: FwdBridge = std::marker::PhantomData;
                             handle_incoming_request(
                                 &mut olm, &crypto_store, &crdt_store, &event_tx,
-                                &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                                &mut pending_messages, &mut frame_budget, &mut key_request_in_flight, &mut key_bundle_sent_to,
                                 &mut server_states, &bundle_keypair,
                                 &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                 &mut pending_server_joins,
@@ -5162,29 +5230,20 @@ async fn run_event_loop(
                                         hollow_log!("[HOLLOW-SECURITY] Dropped a {} from {from}: a master id its roster does not count is no device", msg.wire_kind());
                                         continue;
                                     }
-                                    // Rate limiting (same as libp2p path). Not for our own
-                                    // devices: a new sibling's first sync is a legitimate
-                                    // burst far past the bucket, and every frame lost there
-                                    // is state the new device never gets.
-                                    let rate_ok = super::resolver::same_identity(&from, &local_peer_str) || {
-                                        let (tokens, last_refill) = peer_rate_tokens
-                                            .entry(from.clone())
-                                            .or_insert((RATE_LIMIT_BURST, std::time::Instant::now()));
-                                        let elapsed = last_refill.elapsed().as_secs_f64();
-                                        let refill = (elapsed * RATE_LIMIT_REFILL as f64) as u32;
-                                        if refill > 0 {
-                                            *tokens = (*tokens + refill).min(RATE_LIMIT_BURST);
-                                            *last_refill = std::time::Instant::now();
-                                        }
-                                        if *tokens == 0 {
-                                            false
-                                        } else {
-                                            *tokens -= 1;
-                                            true
-                                        }
-                                    };
+                                    // Not for our own devices: a new sibling's first sync is a
+                                    // legitimate burst far past the bucket, and every frame lost
+                                    // there is state the new device never gets.
+                                    let rate_ok = super::resolver::same_identity(&from, &local_peer_str)
+                                        || match frame_budget.limiter.admit(&from, std::time::Instant::now()) {
+                                            super::frame_budget::Admission::Admitted => true,
+                                            super::frame_budget::Admission::Dropped { first } => {
+                                                if first {
+                                                    hollow_log!("[HOLLOW-SECURITY] Rate limited WS peer {from}: dropping its frames past the bucket");
+                                                }
+                                                false
+                                            }
+                                        };
                                     if !rate_ok {
-                                        hollow_log!("[HOLLOW-SECURITY] Rate limited WS peer {from} — dropping message");
                                         continue;
                                     }
                                     if msg.live_only()
@@ -5456,7 +5515,7 @@ async fn run_event_loop(
                                         let synced = join_hold.sync_mark(&msg, &from, &server_states);
                                         handle_incoming_request(
                                             &mut olm, &crypto_store, &crdt_store, &event_tx,
-                                            &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                                            &mut pending_messages, &mut frame_budget, &mut key_request_in_flight, &mut key_bundle_sent_to,
                                             &mut server_states, &bundle_keypair,
                                             &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                             &mut pending_server_joins,
@@ -5610,12 +5669,16 @@ async fn run_event_loop(
                         }
                     }
 
+                    let our_turn = mls_turn.take();
+
                     // Phase 1: our own leaves that predate binding. Before any commit of
                     // ours, since receivers refuse commits from an unbound leaf.
-                    crate::node::crypto_handler::rebind_unbound_leaves(
-                        mls_mgr, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                        &server_states, &mut mls_bootstrap_requested, &local_peer_str, &device_peer_id,
-                    ).await;
+                    if our_turn {
+                        crate::node::crypto_handler::rebind_unbound_leaves(
+                            mls_mgr, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &server_states, &mut mls_bootstrap_requested, &local_peer_str, &device_peer_id,
+                        ).await;
+                    }
 
                     // Phase 1b: leaves our view removed (a leave, a missed removal commit).
                     crate::node::crypto_handler::sweep_unseated_leaves(
@@ -5629,10 +5692,12 @@ async fn run_event_loop(
                     // Phase 2: ONE commit per group for every queued removal and add. A
                     // current member's leaf leaves only alongside a re-add of its device,
                     // exactly what receivers accept; the rest waits for its KeyPackage.
-                    let mut group_keys: Vec<String> = pending_mls_removals.keys()
-                        .chain(pending_mls_key_packages.keys())
-                        .cloned()
-                        .collect();
+                    // Off our turn both queues stay as they are.
+                    let mut group_keys: Vec<String> = if our_turn {
+                        pending_mls_removals.keys().chain(pending_mls_key_packages.keys()).cloned().collect()
+                    } else {
+                        Vec::new()
+                    };
                     group_keys.sort();
                     group_keys.dedup();
                     let ourselves = crate::crypto::LeafIdentity {
@@ -5975,7 +6040,7 @@ async fn run_event_loop(
                 eviction_counter += 1;
                 if eviction_counter % 10 == 0 {
                     let stale = Duration::from_secs(300);
-                    peer_rate_tokens.retain(|_, (_, last)| last.elapsed() < stale);
+                    frame_budget.limiter.forget_idle(stale, std::time::Instant::now());
                     vc_signal_rate_tokens.retain(|_, (_, last)| last.elapsed() < stale);
                     decrypt_fail_cooldown.retain(|_, instant| instant.elapsed() < REKEY_COOLDOWN);
                     channel_sync_sent.retain(|_, instant| instant.elapsed() < Duration::from_secs(30));
@@ -6064,6 +6129,24 @@ async fn run_event_loop(
                 }
 
                 sync_coordinator.cleanup_stale();
+
+                // A sender whose frames the rate limit dropped and that stopped: ask it
+                // again, and send it the DM copies we hold, as the ask it sent us may have
+                // been one of the dropped frames.
+                let now = std::time::Instant::now();
+                for (peer, lost) in frame_budget.limiter.due_repairs(now) {
+                    let (servers, dm) = Box::pin(sync_handler::repair_after_drops(
+                        &peer, &ws_cmd_tx, &server_states, &ws_room_peers, &join_hold, &mut sync_coordinator,
+                        mls.as_ref(), &local_peer_str, &db_path, &db_passphrase,
+                    ))
+                    .await;
+                    hollow_log!("[HOLLOW-SECURITY] Rate limited WS peer {peer}: {lost} frame(s) dropped, asked again ({servers} server(s), DM history: {dm})");
+                    frame_budget.send_now(&peer, Vec::new(), now);
+                }
+                super::frame_budget::pump(
+                    &mut frame_budget, &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers, &mut pending_messages,
+                )
+                .await;
             }
 
             // -- Stream transfer progress poll (every 500ms) --
@@ -6302,7 +6385,8 @@ async fn run_event_loop(
             // -- Event-driven vault rebalance (debounced 10s) --
             _ = rebalance_debounce.tick() => {
                 arm_started = Some(("timer", "rebalance_debounce", std::time::Instant::now()));
-                if !rebalance_pending.is_empty() {
+                // The vault coordinator is never us while the app is away: what is due waits.
+                if !rebalance_pending.is_empty() && !super::ws_client::backgrounded() {
                     let servers_to_check: Vec<String> = rebalance_pending.drain().collect();
                     hollow_log!("[HOLLOW-VAULT] Event-driven rebalance for {} servers", servers_to_check.len());
 
@@ -7431,6 +7515,7 @@ async fn handle_incoming_request(
     crdt_store: &super::crdt_store::CrdtStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     pending_messages: &mut HashMap<String, Vec<String>>,
+    frame_budget: &mut super::frame_budget::FrameBudget,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     key_bundle_sent_to: &mut std::collections::HashSet<String>,
     server_states: &mut HashMap<String, ServerState>,
@@ -7663,15 +7748,11 @@ async fn handle_incoming_request(
                             ws_cmd_tx, ws_room_peers,
                         ).await;
 
-                        if let Some(queued) = message_ops::take_queued(pending_messages, peer_str) {
-                            hollow_log!("[HOLLOW-CRYPTO] Draining {} pending messages for {peer_str}", queued.len());
-                            for text in queued {
-                                send_encrypted_message(
-                                    olm, crypto_store, peer_str, &text, event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-                                ).await;
-                            }
-                        }
+                        resend_on_new_session(
+                            olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers, pending_messages, frame_budget,
+                            master_peer_str, peer_str,
+                        )
+                        .await;
 
                         sync_handler::flush_pending_sync_requests(
                             pending_sync_requests, peer_str,
@@ -7755,7 +7836,7 @@ async fn handle_incoming_request(
                                 olm, crypto_store, crdt_store, bundle_keypair, event_tx,
                                 ws_cmd_tx, ws_room_peers, pending_messages, pending_sync_requests,
                                 key_request_in_flight, master_peer_str, peer_str, had_session,
-                                true, db_path, db_passphrase,
+                                true, frame_budget, db_path, db_passphrase,
                             ).await;
                         }
                         opened.plaintext
@@ -7804,7 +7885,7 @@ async fn handle_incoming_request(
                                 olm, crypto_store, crdt_store, bundle_keypair, event_tx,
                                 ws_cmd_tx, ws_room_peers, pending_messages, pending_sync_requests,
                                 key_request_in_flight, master_peer_str, peer_str, had_session,
-                                false, db_path, db_passphrase,
+                                false, frame_budget, db_path, db_passphrase,
                             ).await;
                         } else if !was_confirmed {
                             // A decrypted reply proves the peer holds the other half.
@@ -10464,7 +10545,7 @@ async fn handle_incoming_request(
                                     // Lazily create the server group exactly as
                                     // the MlsKeyPackage handler does: only the
                                     // owner may, and only when nobody holds one.
-                                    if !mls_mgr.has_group(&server_id) && is_owner {
+                                    if !mls_mgr.has_group(&server_id) && is_owner && !super::ws_client::backgrounded() {
                                         hollow_log!("[HOLLOW-MLS] Lazily creating MLS group {server_id} for a parked admission");
                                         if let Err(e) = mls_mgr.create_group(&server_id) {
                                             hollow_log!("[HOLLOW-MLS] Failed to create MLS group: {e}");
@@ -11674,8 +11755,12 @@ async fn handle_incoming_request(
 
             if let Some(mls_mgr) = mls {
                 // Create MLS group lazily if it doesn't exist (server group: migration
-                // for pre-MLS servers; subgroup: first restricted-channel join).
+                // for pre-MLS servers; subgroup: first restricted-channel join). Not while
+                // the app is away: nobody else would see the group, and the sender asks again.
                 if !mls_mgr.has_group(&group_key) {
+                    if super::ws_client::backgrounded() {
+                        return;
+                    }
                     hollow_log!("[HOLLOW-MLS] Lazily creating MLS group {group_key}");
                     if let Err(e) = mls_mgr.create_group(&group_key) {
                         hollow_log!("[HOLLOW-MLS] Failed to create MLS group: {e}");

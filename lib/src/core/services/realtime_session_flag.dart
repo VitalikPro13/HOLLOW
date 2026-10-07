@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 import '../../rust/api/network.dart' as network_api;
 
 /// Tells the relay client whether a real-time session is live, so it can
@@ -22,24 +24,32 @@ class RealtimeSessionFlag {
   /// Current holder keys, for tests and diagnostics.
   static Set<String> get holders => Set.unmodifiable(_holders);
 
+  /// [isActive] for listeners: a phone keeps its relay socket while it is true.
+  static final live = ValueNotifier<bool>(false);
+
   /// Declare that [key] has a live real-time session.
   static void acquire(String key) {
     if (!_holders.add(key)) return;
-    if (_holders.length == 1) _push(true);
+    if (_holders.length == 1) _edge(true);
   }
 
   /// Declares that [key]'s session has ended. Safe when it never started,
   /// which matters because teardown paths run on failures too.
   static void release(String key) {
     if (!_holders.remove(key)) return;
-    if (_holders.isEmpty) _push(false);
+    if (_holders.isEmpty) _edge(false);
   }
 
   /// Drop every holder. For app shutdown and for tests.
   static void reset() {
     if (_holders.isEmpty) return;
     _holders.clear();
-    _push(false);
+    _edge(false);
+  }
+
+  static void _edge(bool active) {
+    _push(active);
+    live.value = active;
   }
 
   /// Overridable for widget tests, which have no Rust library loaded.

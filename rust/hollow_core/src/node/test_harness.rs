@@ -246,6 +246,9 @@ struct RelayInner {
     /// replay when the target next joins that room. Mirrors the relay's
     /// offline buffer (the load-bearing peer-fallback path).
     offline: HashMap<String, Vec<BufferedMsg>>,
+    /// The relay's per-device buffer cap (`MAX_BUFFERED_MSGS_PER_PEER`) once a test sets
+    /// one: past it the oldest direct gives way. Unset keeps everything.
+    offline_cap: Option<usize>,
     /// (room_code, channel/topic) -> ring of (sender_device, frame data), mirroring
     /// the relay's per-channel topic buffers: key presence means registered, inbound
     /// topic frames tee in, catch-up replays them. Caps and TTL are not modelled.
@@ -315,6 +318,9 @@ struct RelayInner {
     /// a room whose lock the relay does not hold (a legacy server, an evicted record).
     kept_in_view: HashSet<(String, String)>,
     door_sweeper: bool,
+    /// Devices whose app said `inactive` (plan decision 6): in no member list and
+    /// announced to nobody, and told no presence they did not ask for.
+    hidden: HashSet<String>,
     /// Everything the relay can read while a test has the tap on (claim C-24).
     tap: Option<Wiretap>,
     /// Optional load meter (scaling benchmark). When `Some`, every command the
@@ -684,7 +690,7 @@ impl MockRelay {
         inner
             .conns
             .iter()
-            .filter(|(_, c)| c.online)
+            .filter(|(id, c)| c.online && !inner.hidden.contains(*id))
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -1408,7 +1414,7 @@ impl RelayInner {
                     .filter(|s| s.contains(from) && inner.receives(&room_code, from))
                     .map(|s| {
                         s.iter()
-                            .filter(|p| *p != from && inner.shares(&room_code, p, from))
+                            .filter(|p| *p != from && inner.shares(&room_code, p, from) && !inner.hidden.contains(*p))
                             .cloned()
                             .collect()
                     })
@@ -1419,7 +1425,7 @@ impl RelayInner {
                 inner.check_peers_log.push((from.to_string(), peers.clone()));
                 let online: Vec<String> = peers
                     .into_iter()
-                    .filter(|p| inner.conns.get(p).map(|c| c.online).unwrap_or(false))
+                    .filter(|p| inner.conns.get(p).map(|c| c.online).unwrap_or(false) && !inner.hidden.contains(p))
                     .collect();
                 // The relay no longer answers the room-activity probe (it let
                 // anyone holding two peer_ids test whether their deterministic
@@ -1708,11 +1714,13 @@ impl RelayInner {
         let mut members: Vec<String> = self
             .rooms
             .get(room)
-            .map(|s| s.iter().filter(|p| *p != peer && self.receives(room, p)).cloned().collect())
+            .map(|s| s.iter().filter(|p| *p != peer && self.receives(room, p) && !self.hidden.contains(*p)).cloned().collect())
             .unwrap_or_default();
         members.push(peer.to_string());
         self.tell(peer, WsEvent::DoorStatus { room: room.to_string(), proved: true });
-        self.tell(peer, WsEvent::RoomMembers { room: room.to_string(), peers: members });
+        if !self.hidden.contains(peer) {
+            self.tell(peer, WsEvent::RoomMembers { room: room.to_string(), peers: members });
+        }
         self.broadcast_except(room, peer, WsEvent::PeerJoined { room: room.to_string(), peer_id: peer.to_string() });
     }
 
@@ -1736,7 +1744,9 @@ impl RelayInner {
             }
             self.broadcast_except(&room, &peer, WsEvent::PeerLeft { room: room.clone(), peer_id: peer.clone() });
             self.tell(&peer, WsEvent::DoorStatus { room: room.clone(), proved: false });
-            self.tell(&peer, WsEvent::RoomMembers { room: room.clone(), peers: vec![peer.clone()] });
+            if !self.hidden.contains(&peer) {
+                self.tell(&peer, WsEvent::RoomMembers { room: room.clone(), peers: vec![peer.clone()] });
+            }
         }
     }
 
@@ -1776,7 +1786,7 @@ impl RelayInner {
         let existing: Vec<String> = if visible {
             self.rooms
                 .get(room)
-                .map(|s| s.iter().filter(|p| *p != from && self.shares(room, p, from)).cloned().collect())
+                .map(|s| s.iter().filter(|p| *p != from && self.shares(room, p, from) && !self.hidden.contains(*p)).cloned().collect())
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -1791,11 +1801,13 @@ impl RelayInner {
             room: room.to_string(),
             peers: members,
         });
-        for m in &existing {
-            self.tell(m, WsEvent::PeerJoined {
-                room: room.to_string(),
-                peer_id: from.to_string(),
-            });
+        if !self.hidden.contains(from) {
+            for m in &existing {
+                self.tell(m, WsEvent::PeerJoined {
+                    room: room.to_string(),
+                    peer_id: from.to_string(),
+                });
+            }
         }
         self.replay_offline(from, room);
     }
@@ -1862,6 +1874,11 @@ impl RelayInner {
     /// number of frames actually delivered to a socket (the relay egress for
     /// this one command — this is the O(N) fan-out the benchmark measures).
     fn broadcast_except(&self, room: &str, from: &str, event: WsEvent) -> u64 {
+        // A hidden device is announced to nobody and told nobody's coming and going.
+        let presence = matches!(event, WsEvent::PeerJoined { .. } | WsEvent::PeerLeft { .. });
+        if presence && self.hidden.contains(from) {
+            return 0;
+        }
         let members: Vec<String> = self
             .rooms
             .get(room)
@@ -1872,7 +1889,7 @@ impl RelayInner {
             if m == from {
                 continue; // no self-echo (matches relay)
             }
-            if !self.shares(room, &m, from) {
+            if !self.shares(room, &m, from) || (presence && self.hidden.contains(&m)) {
                 continue;
             }
             if self.tell(&m, event.clone()) {
@@ -1936,13 +1953,24 @@ impl RelayInner {
             // Target offline (or connected but not in the room): buffer for
             // replay on the target's next join of this room. This is the
             // load-bearing peer-fallback path.
-            self.offline.entry(target.to_string()).or_default().push(BufferedMsg {
+            self.buffer_offline(target, BufferedMsg {
                 room: room.to_string(),
                 from: from.to_string(),
                 data,
                 direct,
             });
             0
+        }
+    }
+
+    /// Keep a direct for `target`'s next join, within the relay's cap when one is set.
+    fn buffer_offline(&mut self, target: &str, msg: BufferedMsg) {
+        let buf = self.offline.entry(target.to_string()).or_default();
+        buf.push(msg);
+        if let Some(cap) = self.offline_cap
+            && buf.len() > cap
+        {
+            buf.drain(..buf.len() - cap);
         }
     }
 
@@ -2008,6 +2036,37 @@ impl MockRelay {
         self.inner.lock().unwrap().resume(dev);
     }
 
+    /// `relay_set_background(away)` on `node`, its socket staying up: the flag in its
+    /// process, and the relay's `inactive` / `active` (plan decision 6). Away, every
+    /// room it shares sees it leave while its own view of presence stays frozen; back,
+    /// they see it join and it gets a fresh `members` per room. Frames reach it either way.
+    pub(crate) fn set_background(&self, node: &TestNode, away: bool) {
+        node.away.store(away, std::sync::atomic::Ordering::Relaxed);
+        let mut inner = self.inner.lock().unwrap();
+        let dev = node.device_id.as_str();
+        if away == inner.hidden.contains(dev) {
+            return;
+        }
+        let rooms: Vec<String> = inner
+            .rooms
+            .iter()
+            .filter(|(room, s)| s.contains(dev) && inner.receives(room, dev))
+            .map(|(room, _)| room.clone())
+            .collect();
+        if away {
+            for room in &rooms {
+                inner.broadcast_except(room, dev, WsEvent::PeerLeft { room: room.clone(), peer_id: dev.to_string() });
+            }
+            inner.hidden.insert(dev.to_string());
+        } else {
+            inner.hidden.remove(dev);
+            for room in &rooms {
+                inner.broadcast_except(room, dev, WsEvent::PeerJoined { room: room.clone(), peer_id: dev.to_string() });
+                inner.members_to(dev, room);
+            }
+        }
+    }
+
     /// From now on `dev`'s socket swallows every frame both ways while both ends think it
     /// is up: what a path that died under a still-open TCP connection does.
     pub(crate) fn zombie(&self, dev: &str) {
@@ -2061,6 +2120,12 @@ impl MockRelay {
         if inner.sessions.get(dev).is_some_and(|s| s.socket == Socket::Gone) {
             inner.end_session(dev);
         }
+    }
+
+    /// Hold at most `frames` directs for each device that is away, as the relay's
+    /// offline buffer does (`MAX_BUFFERED_MSGS_PER_PEER`, 100).
+    pub(crate) fn set_offline_cap(&self, frames: usize) {
+        self.inner.lock().unwrap().offline_cap = Some(frames);
     }
 
     /// The relay process restarts, with or without its memfd snapshot. Every node hears
@@ -2358,7 +2423,7 @@ impl RelayInner {
         let mut members: Vec<String> = if visible {
             self.rooms
                 .get(room)
-                .map(|s| s.iter().filter(|p| *p != dev && self.shares(room, p, dev)).cloned().collect())
+                .map(|s| s.iter().filter(|p| *p != dev && self.shares(room, p, dev) && !self.hidden.contains(*p)).cloned().collect())
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -2502,7 +2567,7 @@ impl RelayInner {
         let Some(session) = self.sessions.remove(dev) else { return };
         for slot in session.ring {
             if let RingSlot::Frame(WsEvent::DirectMessage { room, from, data }) = slot {
-                self.offline.entry(dev.to_string()).or_default().push(BufferedMsg { room, from, data, direct: true });
+                self.buffer_offline(dev, BufferedMsg { room, from, data, direct: true });
             }
         }
         for room in &session.held_rooms {
@@ -2575,6 +2640,8 @@ pub(crate) struct TestNode {
     /// node's behalf needs it, because a CrdtOp is bound to its author by
     /// signature now.
     pub master_kp: NativeKeypair,
+    /// What `relay_set_background` set in this node's process ([`MockRelay::set_background`]).
+    away: Arc<std::sync::atomic::AtomicBool>,
     _join: AbortOnDrop,
     // Keep the tempdir alive for the node's lifetime.
     _tmp: crate::test_tmp::TestDir,
@@ -2989,6 +3056,12 @@ impl TestNode {
             .collect()
     }
 
+    /// How many frames from `device` this node's inbound rate limit dropped so far;
+    /// `None` when the loop did not answer, never read as zero.
+    pub(crate) async fn rate_dropped_from(&self, device: &str) -> Option<u64> {
+        self.debug_snapshot().await.map(|s| s.rate_dropped.get(device).copied().unwrap_or(0))
+    }
+
     /// Every message of wire `kind` this node sent over the Olm lane, to anyone, as
     /// the JSON a plaintext frame of it would have carried: the Olm-lane twin of
     /// [`frames_of_type`].
@@ -3299,7 +3372,7 @@ async fn spawn_node_staged(
     let (cmd_tx, cmd_rx) = mpsc::channel::<NodeCommand>(256);
     let cmd_tx_clone = cmd_tx.clone();
 
-    let (master_id, join, ws_cmd_rx, ws_event_tx) = super::swarm::spawn_node_mock(
+    let (master_id, join, ws_cmd_rx, ws_event_tx, away) = super::swarm::spawn_node_mock(
         master.clone(),
         device.clone(),
         event_tx,
@@ -3328,6 +3401,7 @@ async fn spawn_node_staged(
         db_path,
         passphrase,
         master_kp: master.clone(),
+        away,
         _join: AbortOnDrop(join),
         _tmp: tmp,
     }
@@ -3372,7 +3446,7 @@ async fn spawn_node_on_db(
     let (cmd_tx, cmd_rx) = mpsc::channel::<NodeCommand>(256);
     let cmd_tx_clone = cmd_tx.clone();
 
-    let (master_id, join, ws_cmd_rx, ws_event_tx) = super::swarm::spawn_node_mock(
+    let (master_id, join, ws_cmd_rx, ws_event_tx, away) = super::swarm::spawn_node_mock(
         master.clone(),
         device.clone(),
         event_tx,
@@ -3401,6 +3475,7 @@ async fn spawn_node_on_db(
         db_path,
         passphrase,
         master_kp: master.clone(),
+        away,
         _join: AbortOnDrop(join),
         _tmp: tmp,
     }
@@ -27182,7 +27257,11 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // nobody parks while B stays connected (4.0 s).
     // 2026-10-06: the resumable-session tests added two spawn staggers (in their pair
     // helpers) and one auto-download advert window (3.4 s).
-    const BUDGET_MS: u64 = 720_850;
+    // 2026-10-07: the flood test spaces two bursts inside one refill and proves the
+    // absence of a second repair (4.5 s).
+    // 2026-10-07: the away-phone tests added five spawn staggers and three absence
+    // proofs, a commit the backgrounded phone never makes across two batch ticks (21.0 s).
+    const BUDGET_MS: u64 = 746_350;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -31360,6 +31439,253 @@ async fn a_fork_between_the_owners_devices_heals_without_a_restart() {
     drain_events(&mut low);
     drain_events(&mut high);
     drain_events(&mut v);
+}
+
+// ---------------------------------------------------------------------------
+// A phone the app left (RESUMABLE_SESSIONS_PLAN.md decision 6) takes no MLS turn.
+// ---------------------------------------------------------------------------
+
+/// Hand on every direct held from `from` to `to` except those of `kind`.
+fn pass_held_but(relay: &MockRelay, from: &str, to: &str, kind: &str) {
+    for held in relay.held_kinds(from, to) {
+        if held != kind {
+            relay.release_held_kind(from, to, &held);
+        }
+    }
+}
+
+/// `joiner` joins `server_id`, and its one join KeyPackage is held back from each of
+/// `owner_devices` until the test hands it over: what a sender whose view of presence
+/// is a moment old sends.
+async fn join_holding_key_package_from_all(relay: &MockRelay, joiner: &TestNode, owner_devices: &[&TestNode], server_id: &str) {
+    for d in owner_devices {
+        relay.hold_direct(&joiner.device_id, &d.device_id);
+    }
+    joiner
+        .cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.to_string(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(server_id),
+        })
+        .await
+        .unwrap();
+    let ready = wait_until(30, async || {
+        let mut ready = true;
+        for d in owner_devices {
+            pass_held_but(relay, &joiner.device_id, &d.device_id, "mls_kp");
+            ready &= relay.held_kinds(&joiner.device_id, &d.device_id).iter().any(|k| k == "mls_kp")
+                && d.live_server_state(server_id).await.is_some_and(|s| s.is_member(&joiner.master_id));
+        }
+        ready
+    })
+    .await;
+    assert!(ready, "the joiner is a member and its KeyPackage waits for every device of the owner");
+}
+
+fn mls_commits_from(relay: &MockRelay, device: &str) -> usize {
+    relay.wiretap().frames.iter().filter(|f| f.from == device && f.kind() == "mls_commit").count()
+}
+
+/// A phone in the background is hidden from everyone, its own desktop included, while
+/// its own view of presence stays as it was: both would count themselves the owner's
+/// committing device and fork the group. The desktop alone commits meanwhile; back on
+/// screen the phone catches up, and then commits for the identity again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_backgrounded_phone_leaves_the_commit_to_its_desktop() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const M_MASTER: u8 = 230;
+    const J_MASTER: u8 = 233;
+    const V_MASTER: u8 = 234;
+    // The phone sorts first: on screen it is the device that commits for the owner.
+    let (phone_tag, desk_tag) = if tag_kp(231).peer_id() < tag_kp(232).peer_id() { (231, 232) } else { (232, 231) };
+    let m_master = tag_kp(M_MASTER).peer_id();
+    super::resolver::seed_self(&m_master, &[tag_kp(phone_tag).peer_id(), tag_kp(desk_tag).peer_id()]);
+
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&m_master]).await;
+    let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&m_master]).await;
+    sleep_ms(1500).await;
+    let friends = [tag_kp(J_MASTER).peer_id(), tag_kp(V_MASTER).peer_id()];
+    let friends: Vec<&str> = friends.iter().map(String::as_str).collect();
+    let mut phone = spawn_node_with_friends(&relay, M_MASTER, phone_tag, &friends).await;
+    sleep_ms(1500).await;
+    let mut desk = spawn_node_with_friends(&relay, M_MASTER, desk_tag, &friends).await;
+    for owner in [&phone, &desk] {
+        expect_dm_pair_ready(&relay, &j, owner, 15).await;
+        expect_dm_pair_ready(&relay, &v, owner, 15).await;
+    }
+    expect_siblings_ready(&relay, &phone, &desk, 15).await;
+
+    let server_id = create_server_and_wait(&mut desk, "Phone And Desktop").await;
+    expect_mls_leaf(&desk, &server_id, &phone.device_id, 30).await;
+    assert!(quiet_agreed_group(&[&phone, &desk], &server_id, 30).await.is_some(), "one group before anyone joins");
+    join_holding_key_package_from_all(&relay, &j, &[&phone, &desk], &server_id).await;
+
+    relay.set_background(&phone, true);
+    assert!(
+        wait_until(10, async || !desk.sees_peer(&phone.device_id).await).await,
+        "the desktop no longer sees the phone",
+    );
+    assert!(phone.sees_peer(&desk.device_id).await, "the phone's own view stays as it was");
+    // Each device of the owner hears the other's commit only after its own batch ticks.
+    relay.hold_broadcasts(&phone.device_id, &desk.device_id);
+    relay.hold_broadcasts(&desk.device_id, &phone.device_id);
+    relay.start_wiretap();
+    for d in [&phone, &desk] {
+        relay.release_held(&j.device_id, &d.device_id);
+    }
+    expect_mls_leaf(&desk, &server_id, &j.device_id, 20).await;
+    // Absence proof across the phone's batch ticks.
+    sleep_ms(4500).await;
+    assert_eq!(mls_commits_from(&relay, &phone.device_id), 0, "the phone committed while the app was away");
+    assert_eq!(mls_commits_from(&relay, &desk.device_id), 1, "the desktop adds the joiner, once");
+    relay.release_broadcasts(&phone.device_id, &desk.device_id);
+    relay.release_broadcasts(&desk.device_id, &phone.device_id);
+    expect_mls_leaf(&phone, &server_id, &j.device_id, 20).await;
+
+    relay.set_background(&phone, false);
+    assert!(wait_until(10, async || desk.sees_peer(&phone.device_id).await).await, "the desktop sees the phone again");
+    assert!(
+        quiet_agreed_group(&[&phone, &desk, &j], &server_id, 30).await.is_some(),
+        "one group, no fork: phone={:?} desk={:?} joiner={:?}",
+        phone.mls_epoch_state(&server_id).await,
+        desk.mls_epoch_state(&server_id).await,
+        j.mls_epoch_state(&server_id).await,
+    );
+
+    relay.start_wiretap();
+    v.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(&server_id),
+        })
+        .await
+        .unwrap();
+    expect_mls_leaf(&v, &server_id, &v.device_id, 30).await;
+    assert!(quiet_agreed_group(&[&phone, &desk, &j, &v], &server_id, 40).await.is_some(), "one group with the later joiner");
+    assert!(mls_commits_from(&relay, &phone.device_id) >= 1, "back on screen, the phone commits for its identity again");
+    assert_eq!(mls_commits_from(&relay, &desk.device_id), 0, "and the desktop leaves it to the phone");
+    drain_events(&mut phone);
+    drain_events(&mut desk);
+    drain_events(&mut j);
+    drain_events(&mut v);
+}
+
+/// A phone that is its identity's only device keeps what it was asked to commit while
+/// the app was away, and commits it once it is back on screen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_backgrounded_phone_commits_its_deferred_work_once_back() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const M_MASTER: u8 = 235;
+    const PHONE: u8 = 236;
+    const J_MASTER: u8 = 237;
+    let m_master = tag_kp(M_MASTER).peer_id();
+    super::resolver::seed_self(&m_master, &[tag_kp(PHONE).peer_id()]);
+
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&m_master]).await;
+    sleep_ms(1500).await;
+    let mut phone = spawn_node_with_friends(&relay, M_MASTER, PHONE, &[&tag_kp(J_MASTER).peer_id()]).await;
+    expect_dm_pair_ready(&relay, &j, &phone, 15).await;
+    let server_id = create_server_and_wait(&mut phone, "Phone Alone").await;
+    join_holding_key_package_from_all(&relay, &j, &[&phone], &server_id).await;
+
+    relay.set_background(&phone, true);
+    assert!(wait_until(10, async || !j.sees_peer(&phone.device_id).await).await, "the joiner no longer sees the phone");
+    relay.start_wiretap();
+    relay.release_held(&j.device_id, &phone.device_id);
+    // Absence proof across the phone's batch ticks.
+    sleep_ms(4500).await;
+    assert_eq!(mls_commits_from(&relay, &phone.device_id), 0, "the phone committed while the app was away");
+    assert!(!j.mls_members(&server_id).await.contains(&j.device_id), "the joiner has no leaf yet");
+
+    relay.set_background(&phone, false);
+    expect_mls_leaf(&j, &server_id, &j.device_id, 20).await;
+    assert_eq!(mls_commits_from(&relay, &phone.device_id), 1, "back on screen, the phone adds the joiner, once");
+    assert!(quiet_agreed_group(&[&phone, &j], &server_id, 30).await.is_some(), "one group");
+    drain_events(&mut phone);
+    drain_events(&mut j);
+}
+
+/// Back on screen before its session resumed, a phone still waits: the commits made
+/// while it was away come in the resume's replay, and one of its own made before them
+/// would fork the group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_phone_back_before_its_session_waits_for_the_replay() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const M_MASTER: u8 = 238;
+    const J_MASTER: u8 = 241;
+    let (phone_tag, desk_tag) = if tag_kp(239).peer_id() < tag_kp(240).peer_id() { (239, 240) } else { (240, 239) };
+    let m_master = tag_kp(M_MASTER).peer_id();
+    super::resolver::seed_self(&m_master, &[tag_kp(phone_tag).peer_id(), tag_kp(desk_tag).peer_id()]);
+
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&m_master]).await;
+    sleep_ms(1500).await;
+    let j_master = tag_kp(J_MASTER).peer_id();
+    let mut phone = spawn_node_with_friends(&relay, M_MASTER, phone_tag, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut desk = spawn_node_with_friends(&relay, M_MASTER, desk_tag, &[&j_master]).await;
+    expect_dm_pair_ready(&relay, &j, &phone, 15).await;
+    expect_dm_pair_ready(&relay, &j, &desk, 15).await;
+    expect_siblings_ready(&relay, &phone, &desk, 15).await;
+    let server_id = create_server_and_wait(&mut desk, "Slow Resume").await;
+    expect_mls_leaf(&desk, &server_id, &phone.device_id, 30).await;
+    assert!(quiet_agreed_group(&[&phone, &desk], &server_id, 30).await.is_some(), "one group before anyone joins");
+    join_holding_key_package_from_all(&relay, &j, &[&phone, &desk], &server_id).await;
+
+    relay.set_background(&phone, true);
+    assert!(
+        wait_until(10, async || !desk.sees_peer(&phone.device_id).await).await,
+        "the desktop no longer sees the phone",
+    );
+    relay.hold_broadcasts(&desk.device_id, &phone.device_id);
+    relay.start_wiretap();
+    for d in [&phone, &desk] {
+        relay.release_held(&j.device_id, &d.device_id);
+    }
+    expect_mls_leaf(&desk, &server_id, &j.device_id, 20).await;
+    // The phone's socket closes while it is away; the desktop's commit waits in its ring.
+    relay.suspend(&phone.device_id);
+    relay.release_broadcasts(&desk.device_id, &phone.device_id);
+    relay.set_background(&phone, false);
+    // Absence proof: back on screen with the session not resumed, across its batch ticks.
+    sleep_ms(4500).await;
+    relay.resume(&phone.device_id);
+    expect_mls_leaf(&phone, &server_id, &j.device_id, 20).await;
+    assert!(
+        quiet_agreed_group(&[&phone, &desk, &j], &server_id, 30).await.is_some(),
+        "one group, no fork: phone={:?} desk={:?} joiner={:?}",
+        phone.mls_epoch_state(&server_id).await,
+        desk.mls_epoch_state(&server_id).await,
+        j.mls_epoch_state(&server_id).await,
+    );
+    assert_eq!(mls_commits_from(&relay, &phone.device_id), 0, "the phone committed before its session caught up");
+
+    // Its session back, the phone commits for the identity again.
+    relay.start_wiretap();
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    expect_no_mls_leaf(&desk, &server_id, &j.device_id, 20).await;
+    assert_eq!(mls_commits_from(&relay, &phone.device_id), 1, "the phone removes the leaver");
+    assert_eq!(mls_commits_from(&relay, &desk.device_id), 0, "and the desktop leaves it to the phone");
+    drain_events(&mut phone);
+    drain_events(&mut desk);
+    drain_events(&mut j);
 }
 
 // ---------------------------------------------------------------------------
@@ -41784,4 +42110,333 @@ async fn the_once_per_session_gates_hold_across_a_resume_and_reset_after_session
         wait_until(10, async || relay.nickname_master("sessionnick").is_some()).await,
         "the fresh session claims the nickname again",
     );
+}
+
+// ---------------------------------------------------------------------------
+// The inbound rate limit across a return (RESUMABLE_SESSIONS_PLAN.md 11.5): what the
+// bucket drops is asked for again once the sender's bucket refills, and our own
+// catch-up bulk to a device that just came back stays inside its bucket.
+// ---------------------------------------------------------------------------
+
+/// Every DM id `node` stores in its conversation with `friend_master`, a row per id.
+fn stored_dm_ids(node: &TestNode, friend_master: &str) -> Vec<String> {
+    let convo = super::resolver::resolve(friend_master);
+    node.store()
+        .get_dm_messages_for_sibling(&convo, 0, 5000)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| m.message_id)
+        .collect()
+}
+
+/// How many of `ids` `node` does not hold in its conversation with `friend_master`.
+fn dm_ids_missing(node: &TestNode, friend_master: &str, ids: &[String]) -> usize {
+    let held: HashSet<String> = stored_dm_ids(node, friend_master).into_iter().collect();
+    ids.iter().filter(|id| !held.contains(*id)).count()
+}
+
+/// Wait until `node` stores every one of `ids` with `friend_master`, emptying its event
+/// channel meanwhile (a full one stalls the node). Returns how many never came.
+async fn expect_dms(node: &mut TestNode, friend_master: &str, ids: &[String], secs: u64) -> usize {
+    let mut missing = usize::MAX;
+    wait_until(secs, async || {
+        drain_events(node);
+        missing = dm_ids_missing(node, friend_master, ids);
+        missing == 0
+    })
+    .await;
+    missing
+}
+
+/// `n` DMs from `from` to `to_master`, ids `{prefix}-{i}`.
+async fn send_dms(from: &mut TestNode, to_master: &str, prefix: &str, n: usize) -> Vec<String> {
+    let ids: Vec<String> = (0..n).map(|i| format!("{prefix}-{i}")).collect();
+    for id in &ids {
+        drain_events(from);
+        from.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: to_master.to_string(),
+                text: format!("dm {id}"),
+                message_id: id.clone(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    }
+    ids
+}
+
+/// [`expect_relay_drained`] for a node busy with a long burst: its events are emptied
+/// while the barrier waits, or a full event channel stalls it before the barrier.
+async fn drain_and_settle(relay: &MockRelay, node: &mut TestNode, tag: &str) {
+    let room = format!("barrier:{}:{}", node.device_id, tag);
+    node.cmd_tx.send(NodeCommand::JoinRoom { room_code: room.clone() }).await.unwrap();
+    let device = node.device_id.clone();
+    let ok = wait_until(60, async || {
+        drain_events(node);
+        relay.room_devices(&room).contains(&device)
+    })
+    .await;
+    assert!(ok, "the relay never drained {device}'s queued commands (barrier {room})");
+}
+
+/// Direct frames `from` handed the relay for `room` since `mark`.
+fn directs_since(relay: &MockRelay, from: &str, room: &str, mark: usize) -> usize {
+    relay
+        .commands_since(from, mark)
+        .into_iter()
+        .filter(|(kind, r, _)| *kind == "send_direct" && r.as_deref() == Some(room))
+        .count()
+}
+
+/// `asker` sent its asks, `answerer` handled them and sent its answers, and `asker`
+/// handled those: one round trip of whatever a step set off, both ways settled.
+async fn settle_round_trip(relay: &MockRelay, asker: &mut TestNode, answerer: &mut TestNode, tag: &str) {
+    drain_and_settle(relay, asker, &format!("{tag}-asked")).await;
+    flush_frames(relay, answerer).await;
+    drain_and_settle(relay, answerer, &format!("{tag}-answered")).await;
+    flush_frames(relay, asker).await;
+}
+
+/// B back past the relay's grace (a fresh session) with A holding 300 DMs for it: the
+/// relay's buffer kept the newest 100, which empty B's bucket for A, so A's answer to
+/// B's sync ask is dropped too. Nothing is lost for good and nothing stored twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_friend_back_past_grace_gets_every_dm_once() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.set_offline_cap(100);
+    let (mut a, mut b) = session_friend_pair(&relay, 246, 248).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+
+    drain_events(&mut b);
+    relay.suspend(&b.device_id);
+    assert!(wait_until(10, async || !a.sees_peer(&b.device_id).await).await, "A sees B leave");
+    let ids = send_dms(&mut a, &b.master_id.clone(), "away", 300).await;
+    drain_and_settle(&relay, &mut a, "away").await;
+    relay.expire_session(&b.device_id);
+    // B takes exactly what its bucket for A holds, however fast this machine is.
+    super::frame_budget::pause_refill(&a.device_id, true);
+    let mark = relay.log_mark();
+    relay.resume(&b.device_id);
+    let (ok, seen) = relay_status_until(&mut b, 20, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+    assert!(ok && seen.contains(&"disconnected"), "past grace B starts a fresh session, saw {seen:?}");
+    settle_round_trip(&relay, &mut b, &mut a, "return").await;
+    let dropped = b.rate_dropped_from(&a.device_id).await.expect("B answers");
+    super::frame_budget::pause_refill(&a.device_id, false);
+    assert!(dropped > 0, "the replay never emptied B's bucket for A");
+
+    let a_master = a.master_id.clone();
+    let missing = expect_dms(&mut b, &a_master, &ids, 60).await;
+    assert!(
+        missing == 0,
+        "{missing} of {} DMs never reached B ({:?} frames of A's dropped by B's rate limit)",
+        ids.len(),
+        b.rate_dropped_from(&a.device_id).await,
+    );
+    // The copies A kept for B follow once B's bucket has room; they change nothing.
+    let a_dev = a.device_id.clone();
+    assert!(
+        wait_until(60, async || {
+            drain_events(&mut a);
+            drain_events(&mut b);
+            directs_since(&relay, &a_dev, &room, mark) >= ids.len()
+        })
+        .await,
+        "A never handed over the copies it kept for B",
+    );
+    flush_frames(&relay, &mut b).await;
+    let stored = stored_dm_ids(&b, &a_master);
+    let unique: HashSet<&String> = stored.iter().collect();
+    assert_eq!(stored.len(), unique.len(), "a DM stored twice");
+}
+
+/// The DM copies A kept for B wait out the relay's replay of them, then go paced: B,
+/// back past grace, drops not one frame of A's catch-up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn kept_dm_copies_reach_a_friend_back_past_grace_inside_its_bucket() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    // Room in B's bucket for the replay and A's few catch-up frames, not for A's
+    // copies on top.
+    relay.set_offline_cap(85);
+    let (mut a, mut b) = session_friend_pair(&relay, 250, 252).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+
+    drain_events(&mut b);
+    relay.suspend(&b.device_id);
+    assert!(wait_until(10, async || !a.sees_peer(&b.device_id).await).await, "A sees B leave");
+    let ids = send_dms(&mut a, &b.master_id.clone(), "kept", 200).await;
+    drain_and_settle(&relay, &mut a, "kept").await;
+    relay.expire_session(&b.device_id);
+    super::frame_budget::pause_refill(&a.device_id, true);
+    let mark = relay.log_mark();
+    relay.resume(&b.device_id);
+    let (ok, seen) = relay_status_until(&mut b, 20, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+    assert!(ok && seen.contains(&"disconnected"), "past grace B starts a fresh session, saw {seen:?}");
+    // The return itself, inside the bucket B held for A: the replay, A's catch-up frames
+    // and its answer to B's ask.
+    settle_round_trip(&relay, &mut b, &mut a, "return").await;
+    super::frame_budget::pause_refill(&a.device_id, false);
+
+    let a_master = a.master_id.clone();
+    let missing = expect_dms(&mut b, &a_master, &ids, 30).await;
+    assert!(missing == 0, "{missing} of {} DMs never reached B", ids.len());
+    let a_dev = a.device_id.clone();
+    assert!(
+        wait_until(60, async || {
+            drain_events(&mut a);
+            drain_events(&mut b);
+            directs_since(&relay, &a_dev, &room, mark) >= ids.len()
+        })
+        .await,
+        "A never handed over the copies it kept for B",
+    );
+    flush_frames(&relay, &mut b).await;
+    assert_eq!(b.rate_dropped_from(&a.device_id).await, Some(0), "B's rate limit dropped frames of A's catch-up");
+}
+
+/// A friend's burst far past the bucket while both are online: B drops what does not
+/// fit, and once A's bucket has refilled B asks A again and gets every DM.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_burst_past_the_bucket_from_an_online_friend_is_asked_for_again() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut a, mut b) = session_friend_pair(&relay, 254, 244).await;
+
+    let before = sync_asks_to(&b, &a.device_id).await.0;
+    super::frame_budget::pause_refill(&a.device_id, true);
+    let ids = send_dms(&mut a, &b.master_id.clone(), "burst", 300).await;
+    drain_and_settle(&relay, &mut a, "burst").await;
+    flush_frames(&relay, &mut b).await;
+    let dropped = b.rate_dropped_from(&a.device_id).await.expect("B answers");
+    super::frame_budget::pause_refill(&a.device_id, false);
+    assert!(dropped >= 200, "B took more of the burst than its bucket holds: {dropped} dropped");
+
+    let a_master = a.master_id.clone();
+    let missing = expect_dms(&mut b, &a_master, &ids, 60).await;
+    assert!(missing == 0, "{missing} of {} DMs never reached B", ids.len());
+    assert!(sync_asks_to(&b, &a.device_id).await.0 > before, "B never asked A again");
+}
+
+/// A session resumed in grace whose ring holds more of one member's posts than the
+/// bucket takes: what the bucket drops comes back from that member's channel sync.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_resumed_ring_past_the_bucket_is_asked_for_again() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut j, server_id) = session_server_pair(&relay, 249, 251).await;
+    let general = general_channel_of(&server_id);
+
+    relay.suspend(&j.device_id);
+    assert!(wait_until(10, async || !o.sees_peer(&j.device_id).await).await, "O sees J leave");
+    const POSTS: usize = 160;
+    for i in 0..POSTS {
+        drain_events(&mut o);
+        o.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(),
+                channel_id: general.clone(),
+                text: format!("ring post {i}"),
+                message_id: format!("ring-post-{i}"),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    }
+    drain_and_settle(&relay, &mut o, "ring-posts").await;
+    assert!(relay.ring_len(&j.device_id) >= POSTS, "the ring holds every post");
+
+    super::frame_budget::pause_refill(&o.device_id, true);
+    relay.resume(&j.device_id);
+    let (ok, seen) = relay_status_until(&mut j, 20, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+    assert!(ok && !seen.contains(&"disconnected"), "J resumed, saw {seen:?}");
+    settle_round_trip(&relay, &mut j, &mut o, "replay").await;
+    let dropped = j.rate_dropped_from(&o.device_id).await.expect("J answers");
+    super::frame_budget::pause_refill(&o.device_id, false);
+    assert!(dropped > 0, "the ring replay fit J's bucket");
+
+    let missing = |j: &TestNode| {
+        let held: HashSet<String> = j.channel_messages(&server_id, &general).into_iter().map(|m| m.text).collect();
+        (0..POSTS).filter(|i| !held.contains(&format!("ring post {i}"))).count()
+    };
+    let mut left = POSTS;
+    wait_until(60, async || {
+        drain_events(&mut j);
+        drain_events(&mut o);
+        left = missing(&j);
+        left == 0
+    })
+    .await;
+    assert!(left == 0, "{left} of {POSTS} posts never reached J ({dropped} frames of O's dropped by J's rate limit)");
+}
+
+/// A peer that floods past the bucket keeps being limited, and costs one repair, asked
+/// only once its bucket is full again: never one per dropped frame, never mid-flood.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_flood_past_the_bucket_costs_one_repair_after_it_stops() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = session_friend_pair(&relay, 234, 236).await;
+    let (a_dev, a_master, b_dev) = (a.device_id.clone(), a.master_id.clone(), b.device_id.clone());
+    let room = super::types::dm_room_code(&a_master, &b.master_id);
+    // A frame that costs a token and then dies at the lane rule: a plaintext copy of
+    // what rides Olm.
+    let junk = serde_json::to_vec(&super::types::HavenMessage::DmSyncRequest {
+        since_timestamp: 0,
+        both_directions: false,
+        gap: None,
+    })
+    .unwrap();
+    let flood = |n: usize| {
+        for _ in 0..n {
+            relay.inject_direct(&room, &a_dev, &b_dev, junk.clone());
+        }
+    };
+    flush_frames(&relay, &mut b).await;
+    let before = sync_asks_to(&b, &a_dev).await.0;
+    let dropped_before = b.rate_dropped_from(&a_dev).await.expect("B answers");
+
+    let started = std::time::Instant::now();
+    flood(400);
+    flush_frames(&relay, &mut b).await;
+    // A second burst before A's bucket could be full again (counted in BUDGET_MS).
+    sleep_ms(3000).await;
+    flood(150);
+    flush_frames(&relay, &mut b).await;
+    let flooded_for = started.elapsed().as_secs_f64();
+    let dropped = b.rate_dropped_from(&a_dev).await.expect("B answers") - dropped_before;
+    let allowed = 100.0 + 20.0 * flooded_for.ceil();
+    assert!(
+        dropped as f64 >= 550.0 - allowed,
+        "B took {} of 550 flood frames in {flooded_for:.1}s; its bucket allows {allowed}",
+        550 - dropped,
+    );
+    assert_eq!(sync_asks_to(&b, &a_dev).await.0, before, "B asked A again while it flooded");
+
+    assert!(
+        wait_until(15, async || sync_asks_to(&b, &a_dev).await.0 > before).await,
+        "B never asked A again after the flood",
+    );
+    // ABSENCE: a second ask would follow within one dispatch tick (counted in BUDGET_MS).
+    sleep_ms(1500).await;
+    assert_eq!(sync_asks_to(&b, &a_dev).await.0, before + 1, "one repair per flood, not one per frame");
+    drop(a);
 }
