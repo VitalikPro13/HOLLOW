@@ -90,7 +90,7 @@ if ($hasOpus -and $hasWebp) { Write-Host "    libopus + libwebp: OK" }
 $versionInfo = @"
 Source: $source
 Fetched: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-License: LGPL (subprocess invocation only — no linking)
+License: LGPL 2.1 or later (run as a separate process, not linked)
 Size: $([math]::Round($ffmpegSize / 1MB, 1)) MB
 "@
 Set-Content -LiteralPath $dstVersion -Value $versionInfo -Encoding utf8

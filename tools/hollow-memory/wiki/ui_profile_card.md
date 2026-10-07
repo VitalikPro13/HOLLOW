@@ -42,7 +42,14 @@ Edit showcase (compact: Edit profile only).
 
 `SupportMarksChip` (`components/support_glyph.dart`) is the icon alone on every
 density, plus "×N" past one piece; the tooltip lists every piece
-("VitalikPro13: Headphones").
+("VitalikPro13: Headphones"). Its box is `HollowChip`'s (sm/xs padding, border,
+a 14 px icon and an invisible `label` line), so it stands exactly as tall as the
+Twitch chip beside it at any text scale. On a phone (`touch: true`, the touch
+density) there is no hover: a tap opens `showSupportMarksSheet`, "Supports
+independent artists" + every piece by its artist; the target is at least 44 px
+with the mark standing at its foot (`minHeight`, never a fixed padding above it:
+the corner is only 44 px tall and a fixed reach squeezed the mark below the
+chip), and the corner row aligns to the avatar's foot.
 
 `_canManageMember()` gates on `serverId != null` plus (role ladder via
 shared `core/role_hierarchy.dart` `canManageRole`/`assignableRoles`) OR

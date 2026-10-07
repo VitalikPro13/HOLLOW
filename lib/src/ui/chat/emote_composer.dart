@@ -384,7 +384,12 @@ class EmoteAutocomplete {
               boxShadow: HollowShadows.float,
             ),
             constraints: const BoxConstraints(maxHeight: 240),
-            child: ListView.builder(
+            // No scrollbar gutter, so a row's fill keeps the same gap on
+            // both sides, as in a menu.
+            child: ScrollConfiguration(
+              behavior:
+                  ScrollConfiguration.of(context).copyWith(scrollbars: false),
+              child: ListView.builder(
               shrinkWrap: true,
               padding: const EdgeInsets.all(HollowSpacing.xs),
               itemCount: _candidates.length,
@@ -393,7 +398,7 @@ class EmoteAutocomplete {
                 final selected = i == _selected;
                 return HollowPressable(
                   onTap: () => _accept(c),
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  borderRadius: BorderRadius.circular(hollow.radiusXs),
                   backgroundColor: selected
                       ? hollow.accent.withValues(alpha: 0.12)
                       : null,
@@ -429,6 +434,7 @@ class EmoteAutocomplete {
                   ),
                 );
               },
+            ),
             ),
           ),
         ),

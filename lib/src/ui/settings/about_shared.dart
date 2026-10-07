@@ -96,12 +96,13 @@ void openHollowSite() {
   );
 }
 
-/// Flutter's license page with the Hollow branding.
-void showHollowLicensesPage(BuildContext context) {
+/// Flutter's license page with the Hollow branding, under the same version
+/// line as About.
+void showHollowLicensesPage(BuildContext context, {String version = ''}) {
   showLicensePage(
     context: context,
     applicationName: 'Hollow',
-    applicationVersion: 'Beta',
+    applicationVersion: version.isEmpty ? 'Beta' : 'v$version · beta',
     applicationIcon: Padding(
       padding: const EdgeInsets.all(HollowSpacing.md),
       child: ClipRRect(

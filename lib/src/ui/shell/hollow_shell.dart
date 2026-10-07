@@ -1790,11 +1790,15 @@ class _HollowShellState extends ConsumerState<HollowShell>
           child: Row(
             children: [
               const RepaintBoundary(child: ServerStrip()),
-              if (ref.watch(settingsTabOpenProvider))
-                const Expanded(child: SettingsPlace())
-              else if (_serverSettingsPlace(settingsOpen) case final place?)
-                Expanded(child: place)
-              else ...[
+              // Help is a tool over every place, Settings included.
+              if (ref.watch(settingsTabOpenProvider)) ...[
+                const Expanded(child: SettingsPlace()),
+                HelpPanelSlider(visible: helpPanelOpen),
+              ] else if (_serverSettingsPlace(settingsOpen)
+                  case final place?) ...[
+                Expanded(child: place),
+                HelpPanelSlider(visible: helpPanelOpen),
+              ] else ...[
               _buildChannelSidebar(
                 peers: peers,
                 lastMessages: lastMessages,
@@ -1918,6 +1922,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
         : selectedServerId;
 
     final singleKey = selectedChannelId ?? selectedPeerId ?? 'empty';
+    final settingsPlace = ref.watch(settingsTabOpenProvider)
+        ? const SettingsPlace()
+        : _serverSettingsPlace(settingsOpen);
 
     return Column(
       children: [
@@ -1928,9 +1935,15 @@ class _HollowShellState extends ConsumerState<HollowShell>
         const SystemStatusBanner(),
 
         Expanded(
-          child: ref.watch(settingsTabOpenProvider)
-              ? const SettingsPlace()
-              : _serverSettingsPlace(settingsOpen) ?? ClipRect(child: Row(
+          child: settingsPlace != null
+              // Help is a tool over every place, Settings included.
+              ? Row(
+                  children: [
+                    Expanded(child: settingsPlace),
+                    HelpPanelSlider(visible: helpPanelOpen),
+                  ],
+                )
+              : ClipRect(child: Row(
             children: [
               if (selectedServerId != null)
                 Row(

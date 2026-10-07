@@ -50,6 +50,7 @@ import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
+import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/mention_preview_provider.dart';
 import 'package:hollow/src/core/providers/vault_status_provider.dart';
@@ -414,6 +415,12 @@ class EventStreamNotifier extends Notifier<bool> {
             ref.read(selectedPeerProvider) == dmMaster &&
             ref.read(selectedServerProvider) == null &&
             ref.read(chatAtBottomProvider);
+        // Landed in front of the person (scrolled up or not): never "new".
+        if (windowVisible && appActive) {
+          ref
+              .read(unreadMarkerProvider.notifier)
+              .noteLive(dmMarkerKey(dmMaster), messageId);
+        }
         final isDmMuted = !ref
             .read(notificationSettingsProvider.notifier)
             .isDmEnabled(dmMaster);
@@ -483,6 +490,12 @@ class EventStreamNotifier extends Notifier<bool> {
             ref.read(selectedServerProvider) == serverId &&
             ref.read(selectedChannelProvider) == channelId &&
             ref.read(chatAtBottomProvider);
+        // Landed in front of the person (scrolled up or not): never "new".
+        if (ref.read(windowVisibleProvider) && chAppActive) {
+          ref
+              .read(unreadMarkerProvider.notifier)
+              .noteLive(channelMarkerKey(serverId, channelId), messageId);
+        }
         final channelNotifLevel = ref
             .read(notificationSettingsProvider.notifier)
             .effectiveChannelLevel(serverId, channelId);
@@ -1545,6 +1558,16 @@ class EventStreamNotifier extends Notifier<bool> {
               'conf-$senderPeerId-$timestamp',
               '',
             );
+        // The page marks a meeting chat seen like any channel, so a message
+        // landing in front of the person must not draw the "new" line.
+        final confActive = (Platform.isAndroid || Platform.isIOS)
+            ? !ref.read(appLifecycleProvider).isBackground
+            : ref.read(windowFocusedProvider);
+        if (ref.read(windowVisibleProvider) && confActive) {
+          ref.read(unreadMarkerProvider.notifier).noteLive(
+              channelMarkerKey(conferenceServerId(confId), kConferenceChannelId),
+              'conf-$senderPeerId-$timestamp');
+        }
 
       case NetworkEvent_ConferenceEnded(:final confId, :final byPeerId):
         unawaited(

@@ -16,6 +16,8 @@ import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/album_grouping.dart';
+import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -62,6 +64,7 @@ import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
@@ -105,9 +108,6 @@ const String _kFilePrefix = '[file:';
 
 /// Display name given to recorded voice notes.
 const String _kVoiceMessageName = 'Voice message.ogg';
-
-String _hhmm(DateTime t) =>
-    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
 class MobileChatRoute extends ConsumerStatefulWidget {
   /// The RouteSettings name every push site tags its route with. A notification
@@ -164,9 +164,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   bool _isRecordingVoice = false;
   bool _searchOpen = false;
 
-  /// The emoji, GIF and sticker panel sits in the keyboard's place.
-  bool _expressionsOpen = false;
-
   // @mention autocomplete, server channels only.
   List<_MobileMentionCandidate> _mentionCandidates = [];
   int _mentionAtPosition = -1;
@@ -179,7 +176,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
   final _search = ChatSearchResults<storage_api.StoredChannelMessage>();
+  final _dmSearch = ChatSearchResults<storage_api.StoredMessage>();
   int? _highlightIndex;
+
+  /// A meeting's chat: memory only, never stored.
+  bool get _isConference => widget.serverId?.startsWith('conf:') ?? false;
 
   /// The first history read: until it lands the list shows no empty state, and
   /// a failed read offers a retry instead of "nothing here".
@@ -208,7 +209,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   void initState() {
     super.initState();
     _positionsListener.itemPositions.addListener(_checkAutoScroll);
-    _focusNode.addListener(_onComposerFocus);
     if (widget.isDm) {
       _initDmOpen();
     } else {
@@ -390,6 +390,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       : (ref.read(channelChatProvider)[_channelKey]?.length ?? 0);
 
   void _markSeen() {
+    // Away is not reading: what lands now stays unread until the person is
+    // back, as on desktop with an unfocused window.
+    if (ref.read(appLifecycleProvider).isBackground) return;
     if (widget.isDm) {
       final msgs = ref.read(chatProvider)[widget.peerId!];
       final latestId = msgs != null && msgs.isNotEmpty ? msgs.last.messageId : null;
@@ -457,18 +460,37 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               const <ChannelChatMessage>[])
           .length;
 
-  Future<void> _onSearch(String query) => _search.run(
+  Future<void> _onSearch(String query) {
+    void apply(VoidCallback change) {
+      if (mounted && !_routeDeactivated) setState(change);
+    }
+
+    if (widget.isDm) {
+      return _dmSearch.run(
         query,
-        (q) => storage_api.searchChannelMessages(
-          serverId: widget.serverId!,
-          channelId: widget.channelId!,
-          query: q,
-          limit: 20,
-        ),
-        (apply) {
-          if (mounted && !_routeDeactivated) setState(apply);
-        },
+        (q) => storage_api.searchDmMessages(
+            peerId: widget.peerId!, query: q, limit: 20),
+        apply,
       );
+    }
+    return _search.run(
+      query,
+      (q) async => _isConference
+          ? searchLoadedChannelMessages(
+              ref.read(channelChatProvider)[_channelKey] ?? const [],
+              q,
+              serverId: widget.serverId!,
+              channelId: widget.channelId!,
+            )
+          : storage_api.searchChannelMessages(
+              serverId: widget.serverId!,
+              channelId: widget.channelId!,
+              query: q,
+              limit: 20,
+            ),
+      apply,
+    );
+  }
 
   /// Bottom snap, INSTANT: an animated scroll renders the new row and then
   /// glides to it, which reads as a jump followed by a move.
@@ -479,7 +501,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   void _startEditing(String messageId) {
     setState(() {
-      _expressionsOpen = false;
       _editingMessageId = messageId;
       _editSeededFor = null;
     });
@@ -1100,46 +1121,65 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       if (mounted) _focusNode.requestFocus();
     });
   }
-  /// The smiley swaps the keyboard for the emoji, GIF and sticker panel at
-  /// the same height, and back. An emoji goes into the text and the panel
-  /// stays for the next one; a GIF or sticker sends (issue #36).
-  void _toggleExpressions() {
-    if (_expressionsOpen) {
-      // The focus listener closes the panel once the keyboard is on its way.
-      _focusNode.requestFocus();
-      return;
-    }
+  /// The emoji, GIF and sticker picker as a tall sheet over the chat. Like the
+  /// desktop popover, an emoji goes into the text and closes it, and a GIF or
+  /// sticker sends (issue #36) and closes it.
+  Future<void> _openExpressions() async {
+    final hadKeyboard = _focusNode.hasFocus;
     _focusNode.unfocus();
-    setState(() => _expressionsOpen = true);
+    var picked = false;
+    await showHollowSheet<void>(
+      context: context,
+      scrollControlled: true,
+      maxHeightFactor: kSheetTallHeightFactor,
+      builder: (sheetContext) {
+        void close() {
+          picked = true;
+          Navigator.of(sheetContext).pop();
+        }
+
+        final media = MediaQuery.of(sheetContext);
+        return SizedBox(
+          height: media.size.height * kSheetTallHeightFactor,
+          child: Padding(
+            // The panel's own search raises the keyboard over the sheet.
+            padding: EdgeInsets.only(
+                bottom: media.viewInsets.bottom + media.padding.bottom),
+            child: ExpressionPanel(
+              // Null in a DM or a conference: the rating clamp, the Server
+              // tabs and server emotes only apply to real servers.
+              serverId: _isConference ? null : widget.serverId,
+              assets: true,
+              // Emote tokens become 1-char placeholders rendered inline as the
+              // image.
+              onEmoji: (emoji) {
+                close();
+                _insertAtCursor(_controller.displayTextFor(emoji));
+              },
+              onAsset: (token) {
+                close();
+                _sendAsset(token);
+              },
+              onSharePack: (path, name) async {
+                close();
+                await _shareFileToChat(path, name);
+              },
+            ),
+          ),
+        );
+      },
+    );
+    // Closed without a pick: the keyboard comes back only if it was up.
+    if (mounted && !picked && hadKeyboard) _focusNode.requestFocus();
   }
 
-  void _closeExpressions() {
-    if (_expressionsOpen) setState(() => _expressionsOpen = false);
+  /// A tap on the conversation puts the keyboard away, from whichever of the
+  /// page's fields raised it.
+  void _dismissKeyboard() {
+    _focusNode.unfocus();
+    _editFocusNode.unfocus();
+    _searchFocusNode.unfocus();
   }
-
-  /// A tap on the composer brings the keyboard back over the panel.
-  void _onComposerFocus() {
-    if (_focusNode.hasFocus) _closeExpressions();
-  }
-
-  Widget _buildExpressionPanel(BuildContext context) => ExpressionPanel(
-        // Null in a DM or a conference: the rating clamp, the Server tabs and
-        // server emotes only apply to real servers.
-        serverId: (widget.serverId?.startsWith('conf:') ?? true)
-            ? null
-            : widget.serverId,
-        assets: true,
-        // Emote tokens become 1-char placeholders rendered inline as the
-        // image. No refocus: that would raise the keyboard over the panel.
-        onEmoji: (emoji) =>
-            _insertAtCursor(_controller.displayTextFor(emoji), refocus: false),
-        onAsset: _sendAsset,
-        onSharePack: (path, name) async {
-          // Sharing sends, so the panel gets out of the way of the result.
-          _closeExpressions();
-          await _shareFileToChat(path, name);
-        },
-      );
 
   /// Inserts [text] at the composer's cursor, replacing any selection.
   void _insertAtCursor(String text, {bool refocus = true}) {
@@ -1155,8 +1195,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (refocus) _focusNode.requestFocus();
   }
 
-  /// Send-on-click (issue #36). Focus stays put: the panel is open in the
-  /// keyboard's place, and refocusing would swap it out on every pick.
+  /// Send-on-click (issue #36). No keyboard afterwards: the sent GIF or
+  /// sticker is what the person wants to see.
   Future<void> _sendAsset(String token) async {
     _insertAtCursor(_controller.displayTextFor(token), refocus: false);
     await _handleSend(refocus: false);
@@ -1414,8 +1454,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     Widget scaffold = Scaffold(
       backgroundColor:
           bg.hasBackground ? Colors.transparent : hollow.background,
-      // The dock under the composer makes room for the keyboard itself, so the
-      // expression panel can take its place without the composer moving.
+      // The spacer under the composer makes room for the keyboard itself, in
+      // the composer's colour down to the screen's edge.
       resizeToAvoidBottomInset: false,
       // Custom-emote pull source for every token and reaction: a DM asks the
       // counterpart's devices, a channel asks a room member.
@@ -1481,11 +1521,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                     if (!widget.isDm && _slowModeReadyAt != null)
                       _buildSlowModeNotice(hollow),
                     _buildComposerOrBanner(hollow),
-                    MobileKeyboardPanelDock(
-                      open: _expressionsOpen,
-                      keyboardFocus: _focusNode,
-                      panelBuilder: _buildExpressionPanel,
-                    ),
+                    const MobileKeyboardSpacer(),
                   ],
                 ),
               ),
@@ -1499,25 +1535,18 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       scaffold = _wrapWithBackground(scaffold, bg, hollow);
     }
 
-    // Back closes the expression panel before it leaves the chat.
-    return PopScope(
-      canPop: !_expressionsOpen,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) _closeExpressions();
-      },
-      child: Stack(
-        children: [
-          scaffold,
-          // For messages arriving in OTHER conversations. Offset below the status
-          // bar and chat header so it cannot cover the header controls.
-          MobileInChatBanner(
-            currentPeerId: widget.peerId,
-            currentServerId: widget.serverId,
-            currentChannelId: widget.channelId,
-            topOffset: MediaQuery.paddingOf(context).top + 64,
-          ),
-        ],
-      ),
+    return Stack(
+      children: [
+        scaffold,
+        // For messages arriving in OTHER conversations. Offset below the status
+        // bar and chat header so it cannot cover the header controls.
+        MobileInChatBanner(
+          currentPeerId: widget.peerId,
+          currentServerId: widget.serverId,
+          currentChannelId: widget.channelId,
+          topOffset: MediaQuery.paddingOf(context).top + 64,
+        ),
+      ],
     );
   }
 
@@ -1525,6 +1554,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   /// Riverpod requires. The message-list growth listeners stay inside the list
   /// builders so they register only while a list actually shows.
   void _registerBuildListeners() {
+    // Back from the background at the bottom of the chat: what came in while
+    // away is read now.
+    ref.listen<AppLifecycleState>(appLifecycleProvider, _onLifecycleChanged);
     // The channel being viewed can stop being visible in real time (tier raised,
     // or a demotion); the CRDT already propagated, so this only pops the route.
     if (!widget.isDm && widget.serverId != null && widget.channelId != null) {
@@ -1537,6 +1569,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             _onServerListedChanged);
       }
     }
+  }
+
+  void _onLifecycleChanged(AppLifecycleState? prev, AppLifecycleState next) {
+    if (!mounted || _routeDeactivated) return;
+    if (next.isBackground || !(prev?.isBackground ?? false)) return;
+    if (_isInAutoScrollZone && _frozenLen == null) _markSeen();
   }
 
   void _onServerListedChanged(bool? wasListed, bool listed) {
@@ -1589,19 +1627,15 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       channelId: widget.channelId,
       channelName: widget.channelName,
       searchOpen: _searchOpen,
-      onSearchToggle: widget.isDm ? null : _toggleSearch,
+      onSearchToggle: _toggleSearch,
       onJumpToMessage: _jumpToMessageId,
     );
   }
 
   void _toggleSearch() {
     setState(() {
-      _expressionsOpen = false;
       _searchOpen = !_searchOpen;
-      if (!_searchOpen) {
-        _searchController.clear();
-        _search.clear();
-      }
+      if (!_searchOpen) _clearSearch();
     });
     if (_searchOpen) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1626,16 +1660,18 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             ? MediaContext(contextType: 'dm', contextId: widget.peerId ?? '')
             : MediaContext(contextType: 'channel', contextId: _channelKey),
         actions: _mediaActions(),
-        // A tap on the chat closes the panel; rows that take taps win first.
-        // Always present, so opening the panel never remounts the list.
+        // The whole area, empty space included, so a tap anywhere on the
+        // conversation counts; rows that take taps still win first.
         child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTap: _expressionsOpen ? _closeExpressions : null,
-          child: Stack(
-            children: [
-              widget.isDm ? _buildDmMessages() : _buildChannelMessages(),
-              _buildUnreadPillOverlay(),
-            ],
+          behavior: HitTestBehavior.opaque,
+          onTap: _dismissKeyboard,
+          child: SizedBox.expand(
+            child: Stack(
+              children: [
+                widget.isDm ? _buildDmMessages() : _buildChannelMessages(),
+                _buildUnreadPillOverlay(),
+              ],
+            ),
           ),
         ),
       ),
@@ -1812,12 +1848,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   Widget _buildInputArea() {
+    // The recorder sits in the composer's own bar, as on desktop.
     if (_isRecordingVoice) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm,
-          vertical: HollowSpacing.sm,
-        ),
+      return chatInputBarShell(
+        HollowTheme.of(context),
+        flushTop: _replyToMessageId != null || _staged.isNotEmpty,
         child: VoiceRecorderBar(
           onFinished: _stageVoiceMessage,
           onCancelled: () => setState(() => _isRecordingVoice = false),
@@ -1837,11 +1872,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         onKey: (_) => KeyEventResult.ignored,
         onAttach: _showAttachSheet,
         onRecord: _startVoiceRecording,
-        onExpressions: (_) => _toggleExpressions(),
+        onExpressions: (_) => _openExpressions(),
         onSend: _handleSend,
         hasStaged: _staged.isNotEmpty,
         autofocus: false,
-        expressionsOpen: _expressionsOpen,
       ),
     );
   }
@@ -1867,10 +1901,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       );
       return;
     }
-    setState(() {
-      _expressionsOpen = false;
-      _isRecordingVoice = true;
-    });
+    setState(() => _isRecordingVoice = true);
   }
 
   Widget _wrapWithBackground(
@@ -2014,14 +2045,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       if (anchorIndex != null) indexById.putIfAbsent(e.key, () => anchorIndex);
     }
 
+    final visit = ref.watch(unreadMarkerProvider)[markerKey];
+    final seen = visit?.from;
     final unreadIndex = unreadDividerIndex(
       count: messages.length,
-      entrySeenId: () {
-        final seen = ref.watch(unreadMarkerProvider)[markerKey];
-        return seen == null ? null : _albumAnchors[seen] ?? seen;
-      }(),
+      entrySeenId: seen == null ? null : _albumAnchors[seen] ?? seen,
       messageIdAt: (i) => messageIdOf(messages[i]),
       isMineAt: (i) => isMine(messages[i]),
+      isLiveAt: (i) => visit?.live.contains(messageIdOf(messages[i])) ?? false,
     );
 
     return reversedChatList(
@@ -2739,7 +2770,98 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _resyncPreviewAfterEdit(messageId, newText);
   }
 
+  void _clearSearch() {
+    _searchController.clear();
+    _search.clear();
+    _dmSearch.clear();
+  }
+
+  /// Closes search and scrolls to the hit. The index is against the DISPLAY
+  /// list, possibly frozen, which is what [_scrollToMessage] takes.
+  void _jumpToSearchHit(String? messageId) {
+    final ids = widget.isDm
+        ? [
+            for (final m in _displayMessages(
+                ref.read(chatProvider)[widget.peerId!] ??
+                    const <ChatMessage>[]))
+              m.messageId,
+          ]
+        : [
+            for (final m in _displayMessages(
+                ref.read(channelChatProvider)[_channelKey] ??
+                    const <ChannelChatMessage>[]))
+              m.messageId,
+          ];
+    final idx = messageId == null
+        ? -1
+        : ids.indexOf(_albumAnchors[messageId] ?? messageId);
+    setState(() {
+      _searchOpen = false;
+      _clearSearch();
+    });
+    if (idx != -1) _scrollToMessage(idx);
+  }
+
+  /// The search field and its hits, the desktop panes' bar at touch size.
   Widget _buildSearchBar(HollowTheme hollow) {
+    // Sized to the space left above the keyboard, or a small phone shows two
+    // results while typing.
+    final resultsHeight = ((MediaQuery.sizeOf(context).height -
+                MediaQuery.viewInsetsOf(context).bottom) *
+            0.35)
+        .clamp(120.0, 360.0);
+    final profiles = ref.watch(profileProvider);
+    final Widget results;
+    final String hint;
+    if (widget.isDm) {
+      final peer = widget.peerId!;
+      final savedId = ref.watch(savedMessagesPeerIdProvider);
+      final isSaved = savedId != null &&
+          ref.watch(deviceLinkProvider).identityOf(peer) == savedId;
+      final name = displayNameFor(profiles, peer);
+      hint = isSaved ? 'Search in Saved messages' : 'Search in $name';
+      results = ChatSearchResultsView<storage_api.StoredMessage>(
+        results: _dmSearch,
+        onRetry: () => _onSearch(_searchController.text),
+        maxHeight: resultsHeight,
+        // A DM has two sides, so the sender is a bool.
+        itemBuilder: (msg) {
+          final mine = msg.isMine || isSaved;
+          return ChatSearchResultRow(
+            name: mine ? 'You' : name,
+            nameColor: mine ? hollow.accentText : nameColorFor(peer, hollow),
+            time: DateTime.fromMillisecondsSinceEpoch(msg.timestamp.toInt()),
+            text: messagePreviewText(msg.text),
+            onTap: () => _jumpToSearchHit(msg.messageId),
+          );
+        },
+      );
+    } else {
+      hint = _isConference
+          ? 'Search this meeting'
+          : 'Search in #${widget.channelName ?? 'channel'}';
+      final links = ref.watch(deviceLinkProvider);
+      final me = links.identityOf(ref.watch(identityProvider).peerId ?? '');
+      final nicknames = ref.watch(serverNicknamesProvider(widget.serverId!));
+      results = ChatSearchResultsView<storage_api.StoredChannelMessage>(
+        results: _search,
+        onRetry: () => _onSearch(_searchController.text),
+        maxHeight: resultsHeight,
+        itemBuilder: (msg) {
+          // Collapse device to master so a result shows the person.
+          final master = links.identityOf(msg.senderId);
+          return ChatSearchResultRow(
+            name: serverDisplayNameForPeer(profiles[master], master,
+                nickname: nicknames[master] ?? ''),
+            nameColor:
+                master == me ? hollow.accentText : nameColorFor(master, hollow),
+            time: DateTime.fromMillisecondsSinceEpoch(msg.timestamp.toInt()),
+            text: messagePreviewText(msg.text),
+            onTap: () => _jumpToSearchHit(msg.messageId),
+          );
+        },
+      );
+    }
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
@@ -2752,106 +2874,16 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          TextField(
+          HollowTextField(
             controller: _searchController,
             focusNode: _searchFocusNode,
+            hintText: hint,
             autofocus: true,
-            style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-            decoration: InputDecoration(
-              hintText: 'Search in #${widget.channelName}...',
-              hintStyle:
-                  HollowTypography.body.copyWith(color: hollow.textSecondary),
-              prefixIcon: Icon(LucideIcons.search,
-                  size: 16, color: hollow.textSecondary),
-              filled: true,
-              fillColor: hollow.elevated,
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.md,
-                vertical: HollowSpacing.sm,
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(hollow.radiusLg),
-                borderSide: BorderSide.none,
-              ),
-            ),
+            isDense: true,
+            prefixIcon: const Icon(LucideIcons.search, size: 16),
             onChanged: _onSearch,
           ),
-          ChatSearchResultsView<storage_api.StoredChannelMessage>(
-            results: _search,
-            onRetry: () => _onSearch(_searchController.text),
-            // Sized to the space left above the keyboard, or a small phone
-            // shows two results while typing.
-            maxHeight: ((MediaQuery.sizeOf(context).height -
-                        MediaQuery.viewInsetsOf(context).bottom) *
-                    0.35)
-                .clamp(120.0, 360.0),
-            itemBuilder: (msg) {
-                  final profiles = ref.watch(profileProvider);
-                  // Collapse device to master so a result shows the person.
-                  final name = displayNameFor(profiles,
-                      ref.watch(deviceLinkProvider).identityOf(msg.senderId));
-                  final time = DateTime.fromMillisecondsSinceEpoch(
-                      msg.timestamp.toInt());
-                  final timeStr = _hhmm(time);
-                  return Padding(
-                    padding: const EdgeInsets.only(top: HollowSpacing.xs),
-                    child: HollowPressable(
-                      subtle: true,
-                      onTap: () {
-                        // Against the DISPLAY list, possibly frozen;
-                        // _scrollToMessage converts to the reversed index.
-                        final messages = _displayMessages(
-                            ref.read(channelChatProvider)[_channelKey] ??
-                                const <ChannelChatMessage>[]);
-                        final idx = messages.indexWhere(
-                            (m) => m.messageId == msg.messageId);
-                        setState(() {
-                          _searchOpen = false;
-                          _searchController.clear();
-                          _search.clear();
-                        });
-                        if (idx != -1) _scrollToMessage(idx);
-                      },
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: HollowSpacing.sm,
-                        vertical: HollowSpacing.xs,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Text(
-                                name,
-                                style: HollowTypography.caption.copyWith(
-                                  color: hollow.accentText,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              const SizedBox(width: HollowSpacing.sm),
-                              Text(
-                                timeStr,
-                                style: HollowTypography.caption
-                                    .copyWith(color: hollow.textTertiary),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: HollowSpacing.xxs),
-                          Text(
-                            msg.text,
-                            style: HollowTypography.bodySmall
-                                .copyWith(color: hollow.textPrimary),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-          ),
+          results,
         ],
       ),
     );
@@ -3005,7 +3037,6 @@ class _MobileChatHeader extends ConsumerWidget {
       ),
     );
   }
-  /// Title and subtitle column, tappable for the DM profile sheet.
   /// The avatar and names, tappable through to the person's profile in a DM.
   Widget _titleBlock(BuildContext context, WidgetRef ref, HollowTheme hollow,
       {required bool isDm, required bool isSaved}) {
@@ -3083,10 +3114,8 @@ class _MobileChatHeader extends ConsumerWidget {
       ),
     );
   }
-  /// Right-edge header actions: the DM call and mute buttons, or the channel
-  /// cluster.
-  /// The DM's call and mute, or the channel's status, members, pins and
-  /// search.
+  /// The DM's calls, search and mute, or the channel's status, pins, members
+  /// and search.
   List<Widget> _trailingActions(
       BuildContext context, WidgetRef ref, HollowTheme hollow,
       {required bool isDm, required bool isSaved}) {
@@ -3101,6 +3130,7 @@ class _MobileChatHeader extends ConsumerWidget {
           ),
         // Saved messages hides the call buttons: you cannot call yourself.
         if (!isSaved) _DmCallButtons(peerId: peerId!),
+        if (onSearchToggle != null) _searchButton(),
         _DmMuteButton(peerId: peerId!),
       ];
     }
@@ -3125,16 +3155,17 @@ class _MobileChatHeader extends ConsumerWidget {
           size: 44,
           onPressed: () => showMobileMemberPanel(context, serverId!),
         ),
-      if (onSearchToggle != null)
-        HollowIconButton(
-          icon: LucideIcons.search,
-          label: 'Search messages',
-          size: 44,
-          selected: searchOpen,
-          onPressed: onSearchToggle,
-        ),
+      if (onSearchToggle != null) _searchButton(),
     ];
   }
+
+  Widget _searchButton() => HollowIconButton(
+        icon: LucideIcons.search,
+        label: 'Search messages',
+        size: 44,
+        selected: searchOpen,
+        onPressed: onSearchToggle,
+      );
   void _showPinnedMessagesSheet(
     BuildContext context,
     WidgetRef ref,

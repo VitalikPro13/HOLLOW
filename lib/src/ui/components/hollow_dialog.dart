@@ -439,8 +439,18 @@ class HollowDialogSurface extends StatelessWidget {
     final isCompact = screenSize.width < compactBreakpoint;
     final radius =
         BorderRadius.circular(isCompact ? hollow.radiusXl : hollow.radiusLg);
+    // The margin starts past the status bar, the notch and the home
+    // indicator, so a tall dialog on a phone keeps a gap at every edge. A
+    // desktop window has no safe area and keeps the plain margin.
+    final safe = MediaQuery.paddingOf(context);
+    final margin = EdgeInsets.fromLTRB(
+      HollowSpacing.xl + safe.left,
+      HollowSpacing.xl + safe.top,
+      HollowSpacing.xl + safe.right,
+      HollowSpacing.xl + safe.bottom,
+    );
     final available =
-        (screenSize.width - HollowSpacing.xl * 2).clamp(0.0, double.infinity);
+        (screenSize.width - margin.horizontal).clamp(0.0, double.infinity);
 
     final double min;
     final double max;
@@ -457,14 +467,14 @@ class HollowDialogSurface extends StatelessWidget {
     // Capped to the screen so a Flexible scroll region inside clamps and a
     // sticky action row is never pushed off a short display.
     final screenMaxHeight =
-        (screenSize.height - HollowSpacing.xl * 2).clamp(0.0, double.infinity);
+        (screenSize.height - margin.vertical).clamp(0.0, double.infinity);
     final effectiveMaxHeight = maxHeight == null
         ? screenMaxHeight
         : maxHeight!.clamp(0.0, screenMaxHeight);
 
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
+        padding: margin,
         child: ConstrainedBox(
           constraints: BoxConstraints(
             minWidth: min,

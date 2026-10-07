@@ -8,7 +8,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/export_to_file.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
@@ -158,21 +158,16 @@ class _ExportArchiveDialogContentState
           const SizedBox(height: HollowSpacing.lg),
           const SettingsFieldLabel(label: 'Files'),
           const SizedBox(height: HollowSpacing.sm),
-          Row(
-            children: [
-              for (var i = 0; i < _fileModes.length; i++) ...[
-                if (i > 0) const SizedBox(width: HollowSpacing.sm),
-                Expanded(
-                  child: HollowChip(
-                    expand: true,
-                    label: _fileModes[i].$2,
-                    selected: _fileMode == _fileModes[i].$1,
-                    onTap: actionRunning
-                        ? null
-                        : () => setState(() => _fileMode = _fileModes[i].$1),
-                  ),
-                ),
-              ],
+          // Stacks on a narrow phone rather than cut the labels short.
+          HollowChipTabs<String>(
+            expand: true,
+            selected: _fileMode,
+            onSelected: (mode) {
+              if (!actionRunning) setState(() => _fileMode = mode);
+            },
+            tabs: [
+              for (final (mode, label, _) in _fileModes)
+                HollowChipTab(value: mode, label: label),
             ],
           ),
           const SizedBox(height: HollowSpacing.sm),

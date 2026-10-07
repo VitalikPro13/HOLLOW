@@ -33,8 +33,7 @@ void showMobileProfileSheet(
     scrollControlled: true,
     // The handle rides over the banner, so the art meets the sheet's top.
     handle: false,
-    // Room above the sheet to tap it closed.
-    maxHeightFactor: 0.9,
+    maxHeightFactor: kSheetTallHeightFactor,
     builder: (_) => MobileProfileSheet(
       peerId: peerId,
       role: role,

@@ -18,7 +18,7 @@ import 'package:hollow/src/ui/archive/recovery_pool_dashboard.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
@@ -50,17 +50,6 @@ class MobileArchiveTab extends ConsumerWidget {
     // when the app first boots.
     if (ref.watch(mobileTabProvider) != 2) return const SizedBox.shrink();
 
-    void show(ArchiveSection s) =>
-        ref.read(archiveSectionProvider.notifier).state = s;
-    Widget chip(String label, ArchiveSection s) => Expanded(
-          child: HollowChip(
-            expand: true,
-            label: label,
-            selected: section == s,
-            onTap: () => show(s),
-          ),
-        );
-
     return Column(
       children: [
         Container(
@@ -76,13 +65,19 @@ class MobileArchiveTab extends ConsumerWidget {
                   style: HollowTypography.heading
                       .copyWith(color: hollow.textPrimary)),
               const SizedBox(height: HollowSpacing.sm),
-              Row(
-                children: [
-                  chip('Messages', ArchiveSection.messages),
-                  const SizedBox(width: HollowSpacing.sm),
-                  chip('Vault files', ArchiveSection.vault),
-                  const SizedBox(width: HollowSpacing.sm),
-                  chip('Imported', ArchiveSection.imported),
+              // The desktop place's tab row, equal widths on a phone.
+              HollowChipTabs<ArchiveSection>(
+                expand: true,
+                selected: section,
+                onSelected: (s) =>
+                    ref.read(archiveSectionProvider.notifier).state = s,
+                tabs: const [
+                  HollowChipTab(
+                      value: ArchiveSection.messages, label: 'Messages'),
+                  HollowChipTab(
+                      value: ArchiveSection.vault, label: 'Vault files'),
+                  HollowChipTab(
+                      value: ArchiveSection.imported, label: 'Imported'),
                 ],
               ),
             ],

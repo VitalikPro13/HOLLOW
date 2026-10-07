@@ -158,6 +158,7 @@ flutter:
     # notification) lives here alongside the default ringtone.
     - assets/sounds/
     - assets/rust_licenses.txt
+    - assets/extra_licenses.txt
     - assets/help/manifest.json
     - assets/help/media/
     - legal/PRIVACY_POLICY.md

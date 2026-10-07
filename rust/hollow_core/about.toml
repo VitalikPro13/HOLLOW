@@ -1,3 +1,10 @@
+# Generates assets/rust_licenses.txt, the Rust half of the app's licenses page.
+# Run from rust/hollow_core with the features the app ships (cargokit.yaml):
+#   cargo about generate --locked --features forwarder about.hbs -o ../../assets/rust_licenses.txt
+# cargo-about 0.6.6 drops deep_filter's optional rust-ini subtree (rust-ini,
+# ordered-multimap, dlv-list, hashbrown 0.13, const-random); those are
+# credited by hand in assets/extra_licenses.txt, with the native libraries.
+
 accepted = [
     "MIT",
     "Apache-2.0",

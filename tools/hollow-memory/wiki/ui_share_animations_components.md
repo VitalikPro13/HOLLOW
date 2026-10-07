@@ -199,6 +199,8 @@ The profile card, server folder and download popups hand-roll the same popover m
 
 **`showHollowMenu` motion** (`components/hollow_menu.dart`): route `transitionDuration` = `HollowDurations.fast`. Scale from `HollowMotion.popoverScale` with `HollowCurves.enter` / `exit`; the fade's reverse curve is `Interval(1/3, 1, curve: HollowCurves.exit)`, so the exit fade finishes in the first two thirds of the reverse (about `HollowDurations.exit`). The transition wraps the FULL-SCREEN `_HollowMenuHost`, not the menu card, so the scale origin is the click point converted to screen fractions inside a `LayoutBuilder` (`Alignment(anchor.dx / width * 2 - 1, anchor.dy / height * 2 - 1)`); a corner of the screen would slide the menu in from across the window. The card uses `HollowShadows.float`.
 
+**`showHollowMenu` layout (2026-10-07):** the row list sits in a `SingleChildScrollView` with `_kMenuInset` (`xs`, 4) padding on all four sides under `copyWith(scrollbars: false)`: `HollowScrollBehavior`'s 10 px desktop gutter used to stop every hover short on the right while it touched the frame on the left (Vitalik: "Remove from Your art"). Rows (`_MenuRow`, `_MenuBackRow`) span the full inner width, hover rounded `radiusXs` (nested in the card's `radiusMd`), `_kMenuRowPadding` (`sm`) sides; section labels and notes align to that text edge; dividers take `xs` above and below; icons 16. The emote `:` autocomplete and the channel `@` autocomplete follow the same rule (xs inset, no gutter, `radiusXs` rows). Test: `test/widget/hollow_menu_insets_test.dart`.
+
 
 ## AmbientBackground
 

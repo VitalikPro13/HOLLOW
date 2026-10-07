@@ -1261,12 +1261,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // reversed index handed to the rail and the chronological one handed to the
     // rows cannot disagree (issue #54).
     final calls = ref.watch(dmCallRecordsProvider(_callPeer));
+    final visit = ref.watch(unreadMarkerProvider)[dmMarkerKey(widget.peerId)];
     final unreadIndex = unreadDividerIndex(
       count: messages.length,
-      entrySeenId: _albumRowId(
-          ref.watch(unreadMarkerProvider)[dmMarkerKey(widget.peerId)]),
+      entrySeenId: _albumRowId(visit?.from),
       messageIdAt: (i) => messages[i].messageId,
       isMineAt: (i) => messages[i].isMe,
+      isLiveAt: (i) => visit?.live.contains(messages[i].messageId) ?? false,
     );
     return MediaViewerScope(
       mediaContext:

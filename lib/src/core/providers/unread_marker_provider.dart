@@ -1,10 +1,29 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 
-/// The read pointer a conversation had when you WALKED INTO it (issue #54).
+/// One visit to a conversation, as the "new messages" line needs it.
+@immutable
+class UnreadVisit {
+  /// The read pointer the conversation had when the visit began; empty when
+  /// it had never been read.
+  final String from;
+
+  /// Messages that arrived while the conversation was on screen and the app
+  /// was in use: seen as they came, so never "new".
+  final Set<String> live;
+
+  const UnreadVisit({required this.from, this.live = const {}});
+
+  UnreadVisit withLive(String messageId) =>
+      UnreadVisit(from: from, live: {...live, messageId});
+}
+
+/// The read pointer a conversation had when you WALKED INTO it (issue #54),
+/// and what arrived in front of you since.
 ///
 /// The badge pointer in `unreadProvider` cannot answer "where did I leave
 /// off?", because opening a conversation is what moves it. So this keeps a
@@ -13,22 +32,27 @@ import 'package:hollow/src/core/providers/split_view_provider.dart';
 ///
 /// **The arming rule is what keeps the line honest.** A conversation is armed
 /// whenever it is not the one on screen, and the FIRST mark-seen after that
-/// records the pointer and disarms it, so no line appears above a reply that
-/// lands while you read, or above your own message.
+/// records the pointer and disarms it, so the line does not slide as you read.
+/// A message that lands while you are looking ([noteLive]) never opens a run:
+/// the line is for what you missed.
 ///
 /// The disarm is driven off the SELECTION providers rather than pane
 /// lifecycles: `markDmSeen` runs from five different places, and a listener
 /// that only touches the conversation being LEFT cannot race any of them.
-class UnreadMarkerNotifier extends Notifier<Map<String, String>> {
+class UnreadMarkerNotifier extends Notifier<Map<String, UnreadVisit>> {
   /// Conversations currently being viewed — their marker is already recorded
   /// and must not move again until they are left.
   final Set<String> _disarmed = <String>{};
+
+  /// Live arrivals that beat the visit's first mark-seen (the history still
+  /// loading), folded in when it is recorded.
+  final Map<String, Set<String>> _pendingLive = {};
 
   String? _lastChannelKey;
   String? _lastSplitChannelKey;
 
   @override
-  Map<String, String> build() {
+  Map<String, UnreadVisit> build() {
     ref.listen<String?>(selectedPeerProvider, (prev, next) {
       if (prev != null && prev != next) _leave(dmMarkerKey(prev));
     });
@@ -75,8 +99,9 @@ class UnreadMarkerNotifier extends Notifier<Map<String, String>> {
   /// fresh one (and a visit with nothing new draws none at all).
   void _leave(String key) {
     _disarmed.remove(key);
+    _pendingLive.remove(key);
     if (!state.containsKey(key)) return;
-    final next = Map<String, String>.from(state)..remove(key);
+    final next = Map<String, UnreadVisit>.from(state)..remove(key);
     state = next;
   }
 
@@ -89,14 +114,35 @@ class UnreadMarkerNotifier extends Notifier<Map<String, String>> {
     // about to read it, so drop any line and leave it armed for the real visit.
     if (!_isOnScreen(key)) {
       _disarmed.remove(key);
+      _pendingLive.remove(key);
       if (state.containsKey(key)) {
-        state = Map<String, String>.from(state)..remove(key);
+        state = Map<String, UnreadVisit>.from(state)..remove(key);
       }
       return;
     }
     if (_disarmed.contains(key)) return;
     _disarmed.add(key);
-    state = {...state, key: previousSeenId ?? ''};
+    state = {
+      ...state,
+      key: UnreadVisit(
+        from: previousSeenId ?? '',
+        live: _pendingLive.remove(key) ?? const {},
+      ),
+    };
+  }
+
+  /// A message from someone else just arrived in [key] while the app was in
+  /// use. When that conversation is on screen it was seen as it came, so it
+  /// never takes the line; anything that lands while the app is away does.
+  void noteLive(String key, String messageId) {
+    if (messageId.isEmpty || !_isOnScreen(key)) return;
+    final visit = state[key];
+    if (visit == null) {
+      _pendingLive.putIfAbsent(key, () => <String>{}).add(messageId);
+      return;
+    }
+    if (visit.live.contains(messageId)) return;
+    state = {...state, key: visit.withLive(messageId)};
   }
 
   /// Whether [key] is a conversation currently on screen, in either pane.
@@ -122,7 +168,7 @@ class UnreadMarkerNotifier extends Notifier<Map<String, String>> {
   }
 
   /// The entry pointer for [key], or null when this visit has none.
-  String? entrySeenId(String key) => state[key];
+  String? entrySeenId(String key) => state[key]?.from;
 }
 
 String dmMarkerKey(String peerId) => 'dm:$peerId';
@@ -131,5 +177,5 @@ String channelMarkerKey(String serverId, String channelId) =>
     'ch:$serverId:$channelId';
 
 final unreadMarkerProvider =
-    NotifierProvider<UnreadMarkerNotifier, Map<String, String>>(
+    NotifierProvider<UnreadMarkerNotifier, Map<String, UnreadVisit>>(
         UnreadMarkerNotifier.new);

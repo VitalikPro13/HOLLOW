@@ -153,11 +153,11 @@ Unread clearing: `_markSeen()` called after history loads in `initState` `.then(
 Scaffold
 ├── SafeArea (inside EmoteScope)
 │   └── Column
-│       ├── _MobileChatHeader (back, name, status, users icon, pins, search icon, mute bell)
+│       ├── _MobileChatHeader (back, name, status; DM: calls, search, mute bell; channel: status, pins, members, search)
 │       ├── MobileMinimisedCall(floating: false) (the call or room you are in, docked)
-│       ├── _buildSearchBar (channel only, when _searchOpen)
+│       ├── _buildSearchBar (DM, channel and meeting, when _searchOpen)
 │       ├── _buildSyncIndicator (channel only)
-│       ├── Expanded → Stack   (or _buildNoReadPermission when read gate denies)
+│       ├── Expanded → GestureDetector(opaque, tap = _dismissKeyboard) → SizedBox.expand → Stack   (or _buildNoReadPermission when read gate denies)
 │       │   ├── reversedChatList (shared shell, selectionArea: false)
 │       │   │   └── LongPressMessage → MessageBubble / ChannelMessageBubble (isHighlighted for search)
 │       │   └── _buildUnreadPillOverlay → shared UnreadJumpFade
@@ -168,9 +168,15 @@ Scaffold
 │           ├── StagedLinkArea (shared; hollow-link or OG preview)
 │           ├── StagedAttachmentStrip (if files staged, shared; reorderable for an album)
 │           ├── _buildSlowModePill (channel, cooldown active)
-│           ├── _buildComposerOrBanner: blocked banner (no-post/muted) OR VoiceRecorderBar OR the shared `ChatComposerRow` ([+] attach sheet (Photo or video, File) + text with the expression button inside + mic that becomes Send; no autofocus; `expressionsOpen` swaps the smiley for a keyboard icon, "Show keyboard")
-│           └── MobileKeyboardPanelDock (the keyboard's inset, or the expression panel in its place)
+│           ├── _buildComposerOrBanner: blocked banner (no-post/muted) OR VoiceRecorderBar (inside `chatInputBarShell`, as on desktop) OR the shared `ChatComposerRow` ([+] attach sheet (Photo or video, File) + text with the expression button inside + mic that becomes Send; no autofocus)
+│           └── MobileKeyboardSpacer (the keyboard's inset, else the home indicator strip, painted `surface` so the composer bar runs to the screen's bottom edge)
 ```
+
+**Keyboard:** a tap anywhere on the message area unfocuses the composer, the inline edit field and the search field (`_dismissKeyboard`); rows that take taps win first. The area is `SizedBox.expand` so an empty or loading conversation counts too (the history skeleton is zero-width for its first second).
+
+**Read while away:** `_markSeen` does nothing while `appLifecycleProvider.isBackground`; `_onLifecycleChanged` marks seen on the return when at the bottom and not frozen. Same as desktop's unfocused window: arrivals in the background stay unread until the person is back.
+
+**Search:** `_onSearch` runs `searchDmMessages` for a DM, `searchChannelMessages` for a channel, and `searchLoadedChannelMessages` (in memory) for a meeting, whose chat is never stored. The bar is `HollowTextField` + `ChatSearchResultsView` + `ChatSearchResultRow`, the desktop panes' pieces.
 
 ### Message Rendering
 Uses the shared `reversedChatList()` shell: `reverse: true`, newest at builder index 0 bottom-pinned, `findChildIndexCallback` keyed-row reuse, `_frozenLen` display freeze while scrolled up (see chat_pane scroll model). The displayed list folds every album into its earliest item; `indexById` also maps each album item to its anchor row (replies, jumps, unread marker), and the anchor's bubble gets `album: dmAlbumItems(...)` / `channelAlbumItems(...)` with a preview from `albumPreviewText`.
@@ -212,15 +218,13 @@ Both DM and channel builders wire:
 - **Post gate:** If `canPostInChannelProvider` returns false, replaces input bar with "no permission to send" notice. Checks bitmask AND channel posting mode.
 - **Sync indicator:** Below header for channel chats. Uses `serverSyncStatusProvider`. Shows spinner + "Syncing..."/"Retrying..." (warning color) / "Sync failed" with tappable "Retry" link. Hidden when idle/synced/connecting.
 
-### Expression panel in the keyboard's place (2026-09-24)
-The smiley inside the composer (`_toggleExpressions`) swaps the software keyboard for the shared `ExpressionPanel` (Emoji / GIFs / Stickers, from `expression_picker.dart`) at the same height, and the button becomes a keyboard icon ("Show keyboard") that swaps back. There is no sheet any more (`showExpressionSheet` is deleted).
+### Expression picker sheet (2026-10-07, was a keyboard-slot panel)
+The smiley inside the composer (`_openExpressions`) opens the shared `ExpressionPanel` (Emoji / GIFs / Stickers, `expression_picker.dart`) in a `showHollowSheet` at `kSheetTallHeightFactor` (Vitalik: Discord's taller sheet; the keyboard-height panel was too small to pick from). The keyboard-slot panel, `MobileKeyboardPanelDock`, `_expressionsOpen` and the "Show keyboard" toggle are gone.
 
-- `_expressionsOpen` flag. Opening unfocuses the composer; closing requests focus, and the focus listener `_onComposerFocus` drops the panel once the keyboard is on its way (so a tap on the field also brings the keyboard back).
-- The panel is `MobileKeyboardPanelDock(open, keyboardFocus: _focusNode, panelBuilder: _buildExpressionPanel)` (`lib/src/ui/mobile/mobile_keyboard_panel.dart`), the last child under the composer. The route's `Scaffold` sets `resizeToAvoidBottomInset: false` and its `SafeArea` `bottom: false`: the dock itself makes room for the keyboard, so the composer never moves while keyboard and panel swap.
-- Dock sizing: remembers the last keyboard height seen this run (`_lastKeyboardHeight`; 40% of the screen before any keyboard). Open = max(stored, inset). When the panel's own search field raises the keyboard, the panel sits above it at most 45% of the remaining space. A panel closing while the composer has focus stays up until the rising keyboard covers it (a 700 ms timeout covers hardware keyboards that never raise one). The panel is on the composer's `surface` with a top hairline, no scrim, and pads for the home indicator.
-- An emoji goes into the text and the panel stays open for the next one (`refocus: false`); a GIF or sticker sends (issue #36); sharing a pack closes the panel first. Editing, search and voice recording close it.
-- Back (`PopScope(canPop: !_expressionsOpen)`) closes the panel before it leaves the chat, and a tap on the message area closes it (an always-present translucent `GestureDetector`, so opening the panel never remounts the list).
-- Pinned by `test/widget/mobile_keyboard_panel_test.dart`.
+- Like the desktop popover: an emoji goes into the text, closes the sheet and raises the keyboard; a GIF or sticker sends (issue #36) and closes; sharing a pack closes first. Closed with no pick, the keyboard returns only if it was up before.
+- The sheet pads by the keyboard inset, so the panel's own search keeps its results above the keyboard.
+- The route's `Scaffold` keeps `resizeToAvoidBottomInset: false` + `SafeArea(bottom: false)`; `MobileKeyboardSpacer` makes room for the keyboard.
+- Tests: `test/widget/mobile_chat_route_touch_test.dart` (tall sheet, keyboard away, DM search, bottom strip colour), `test/widget/mobile_keyboard_panel_test.dart` (the spacer).
 
 ---
 
@@ -277,7 +281,18 @@ The desktop person menu's labels, as touch `HollowListRow`s under `HollowSheetTi
 
 ## Bottom Sheet Motion
 
-`showHollowSheet` passes `sheetAnimationStyle: _sheetMotion()`, read per open so Reduce motion reaches the next sheet: `AnimationStyle.noAnimation` when `HollowDurations.animationsDisabled`, else `HollowCurves.enter` both ways (a reverse curve runs backwards, so the enter curve is also the easing-in exit), `HollowDurations.normal` in and `fast` out. A drag still tracks the finger (the route rebinds to the raw controller while dragging). A sheet travels its full height: it is attached to an edge and dismissed by a gesture (design language 3.8).
+`showHollowSheet` passes `sheetAnimationStyle: _sheetMotion()`, read per open so Reduce motion reaches the next sheet: zero durations when `HollowDurations.animationsDisabled`, else `HollowDurations.normal` in and `fast` out. The curve is `_kSheetCurve` (`HollowCurves.enter`) both ways and under Reduce motion too: the pull below maps the finger through it. A sheet travels its full height: it is attached to an edge and dismissed by a gesture (design language 3.8).
+
+## Pull to close (2026-10-07)
+
+Every `showHollowSheet` closes the way a phone's own sheets do. Flutter's sheet drag lost every pull that started on scrolling content (the content's Scrollable wins the vertical drag), so a pull on the profile only overscrolled it.
+
+- Route `enableDrag: false`; `_SheetPullScope` owns all drags. A `GestureDetector` takes drags on content that cannot scroll; `_SheetPullPhysics` (injected through `ScrollConfiguration`, one instance per sheet, since a new physics object rebuilds every scroll position and ends the drag) hands a downward drag at the content's top to the sheet, and an upward one back to the sheet first while it is pulled down. Content scrolled down scrolls back to its top first, then the sheet follows.
+- It drives the route's own controller (`TransitionRoute.controller`, protected; the curve inverse `_valueFor` keeps it under the finger), so the scrim fades with the pull and a close runs the normal exit from where it was let go.
+- Release: closes past `_kSheetCloseShare` (25%) of the sheet's height or on a downward fling (`_kSheetFlingVelocity`, 700 px/s), else settles back. `ScrollEndNotification` is the fallback release for content whose own physics never asks its parent for a fling. `enableDrag: false` on a call turns all of it off.
+- `kSheetTallHeightFactor` (0.85) is the height cap of a tall sheet (profile, game card, support marks, expression picker): the strip above shows what it covers and takes the tap that closes it.
+- `DraggableScrollableSheet` builders (member panel, legal sheet) keep their own behaviour: they close at min extent before the pull engages.
+- Test: `test/widget/hollow_sheet_pull_test.dart`.
 
 ## Bottom Sheet SafeArea Pattern
 
@@ -355,7 +370,7 @@ A voice channel tap in the Chats tab pushes TWO routes: `MobileChatRoute` (the c
 
 ## Audio, ringtone and About on the phone
 
-The Audio & video and About pages are the shared `settings/audio_section.dart` and `settings/about_section.dart` at touch density (wiki `ui_user_settings`); the phone-only `_MicGainSlider`, `_VoiceEnhanceToggle`, `_InfoRow`, `_MobileBrandIcon` and friends are gone. Provider semantics (mic gain, Voice Enhancement, ringtone keys): wiki `providers_event_settings`. The ringtone row's Trim opens `showRingtoneClipEditor()`, whose waveform is REAL since 2026-09-25: `loadRingtoneWaveform` asks Rust `audio_waveform(path, buckets)` (`api/waveform.rs` over `audio_peaks.rs`, symphonia) for the decoded duration and per-bucket min/max + RMS, drawn by `RingtoneWaveformPainter`; a format symphonia lacks (Opus in Ogg) falls back to the player's duration with no waveform, so it still trims by time. Legal documents open in `_showLegalSheet` (`about_section.dart`).
+The Audio & video and About pages are the shared `settings/audio_section.dart` and `settings/about_section.dart` at touch density (wiki `ui_user_settings`); the phone-only `_MicGainSlider`, `_VoiceEnhanceToggle`, `_InfoRow`, `_MobileBrandIcon` and friends are gone. Provider semantics (mic gain, Voice Enhancement, ringtone keys): wiki `providers_event_settings`. The ringtone row's Trim opens `showRingtoneClipEditor()`, whose waveform is REAL since 2026-09-25: `loadRingtoneWaveform` asks Rust `audio_waveform(path, buckets)` (`api/waveform.rs` over `audio_peaks.rs`, symphonia) for the decoded duration and per-bucket min/max + RMS, drawn by `RingtoneWaveformPainter`; a format symphonia lacks (Opus in Ogg) falls back to the player's duration with no waveform, so it still trims by time. Legal documents open in `_showLegalSheet` (`about_section.dart`). About ends with Diagnostics on iOS AND Android (since 2026-10-07): "Debug logs" exports one redacted text file (push log, debug log tail, crash log tail; the NSE metrics and heartbeat only on iOS) through `FilePicker.saveFile(bytes:)`.
 
 ---
 
@@ -410,8 +425,8 @@ The phone's storage dashboard is gone with the desktop dialog. Server settings o
 Watches `mobileTabProvider` — returns `SizedBox.shrink()` when `activeTab != 2`. Prevents `archiveDmListProvider` from firing before the message store is open at startup.
 
 ### Top-Level Structure
-- "Archive" heading + pill sub-tab row: "My Data" | "Imported" (uses `archiveSubTabProvider`)
-- Switches between `_MobileMyDataView` and `_MobileImportedArchivesView` instantly
+- "Archive" heading + `HollowChipTabs<ArchiveSection>(expand: true)`: Messages | Vault files | Imported (`archiveSectionProvider`, the desktop place's tabs; they stack full width when a label would not fit)
+- Switches between the three views instantly
 
 ### _MobileMyDataView (ConsumerStatefulWidget)
 - Inner pill tabs: DMs | Channels (uses `myDataInnerTabProvider`, no Vault Files — deferred to Section 25)
@@ -591,7 +606,7 @@ One-pass fixes from the production-readiness audit:
 - **Keyboard-aware dialogs (global):** `showHollowDialog` wraps every pageBuilder in `AnimatedPadding(MediaQuery.viewInsetsOf)` + `MediaQuery.removeViewInsets` (mirrors Flutter's Dialog). NEVER add viewInsets padding inside a dialog builder — double-pad. `HollowDialog` itself: full-width-minus-padding under 600px, content in `Flexible > SingleChildScrollView`, actions in `Wrap`.
 - **Add friend** is a bottom sheet (`_AddFriendSheet` in mobile_friends_tab.dart): input + full-width "Send request" directly below, the temporary-nickname claim (`HowOthersAddYou`) under it. `isScrollControlled` + manual viewInsets bottom padding + SafeArea.
 - **Send jump fix (mobile_chat_route.dart):** sending uses post-frame `_jumpToBottom()` (instant), never animated scrollTo — the animated path raced the chatProvider listener auto-scroll + the input bar collapsing after `clear()` (the iOS "jump for a second"). `_scrollToBottom` (incoming messages) is post-frame-safe with mounted/isAttached guards.
-- **In-channel search:** results box sizes to `(visible height - keyboard) * 0.35` clamped 120–360 (was fixed 200px).
+- **In-chat search (DM, channel, meeting):** results box sizes to `(visible height - keyboard) * 0.35` clamped 120–360 (was fixed 200px).
 - **Inline edit:** `_startEditing` scrolls the editor to alignment 0.15 after a 300ms delay (post keyboard animation) so it's never hidden behind the keyboard.
 - **Message actions sheet:** `isScrollControlled` + 85%-height cap + internal `SingleChildScrollView` (emoji grid clipped on short phones).
 - **Toast position:** `HollowToast` bottom = 32 + keyboard inset + (width<600 ? 56 + viewPadding.bottom : 0) — floats above the nav bar and keyboard.

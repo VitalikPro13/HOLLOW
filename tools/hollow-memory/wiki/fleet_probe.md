@@ -238,9 +238,9 @@ where they start: the iOS back swipe must begin in the 20 px strip on the screen
 the way to scroll a phone list by finger. Two scenarios use it or came with it:
 
 - `fleet/mobile_swipe_back.json` (iOS Simulator, one peer, no server): opens Saved messages, a
-  70 px drag from `x: 6` settles back, a 300 px one pops to Chats; then with the expression panel
-  open the same long drag does nothing (the chat's `PopScope` refuses, so the swipe is blocked and
-  Back closes the panel first); "Show keyboard" brings the keyboard back.
+  70 px drag from `x: 6` settles back, a 300 px one pops to Chats. STALE since 2026-10-07: its
+  expression-panel steps (the chat's `PopScope` blocking the swipe, "Show keyboard") describe the
+  keyboard-slot panel, which is now a modal sheet (wiki `ui_mobile`); rewrite them before the next run.
 - `fleet/chat_panel_fixes.json` (desktop, a and b, creates and deletes `chat-probe`): the DM profile
   panel at its default width, dragged narrow and to the minimum (avatar shrinks with the banner,
   icon strip moves under the name, Verify stacks under its text) and to the maximum through
@@ -248,8 +248,9 @@ the way to scroll a phone list by finger. Two scenarios use it or came with it:
   toggle last); the hover bar centred on a one-line row; and a channel with nobody typing (no strip
   above the composer).
 
-`chat_mobile.json` shoots the expression panel in the keyboard's place on each tab; it has no scrim,
-so the scenario closes it by tapping a message, not the space above it.
+`chat_mobile.json` shoots the expression picker on each tab. Since 2026-10-07 it is a tall modal sheet
+with a scrim, so a tap on the chat above it closes it (the scenario's tap on a message lands on the
+scrim, which also works).
 
 ## Rules that are not optional
 

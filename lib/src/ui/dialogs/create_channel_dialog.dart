@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -78,27 +78,14 @@ class _CreateChannelDialogState extends State<_CreateChannelDialog>
             'Choose a type and name for your new channel.',
           ),
           const SizedBox(height: HollowSpacing.lg),
-          Row(
-            children: [
-              Expanded(
-                child: HollowChip(
-                  expand: true,
-                  icon: LucideIcons.hash,
-                  label: 'Text',
-                  selected: !_isVoice,
-                  onTap: () => setState(() => _isVoice = false),
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: HollowChip(
-                  expand: true,
-                  icon: LucideIcons.volume2,
-                  label: 'Voice',
-                  selected: _isVoice,
-                  onTap: () => setState(() => _isVoice = true),
-                ),
-              ),
+          HollowChipTabs<bool>(
+            expand: true,
+            selected: _isVoice,
+            onSelected: (voice) => setState(() => _isVoice = voice),
+            tabs: const [
+              HollowChipTab(value: false, label: 'Text', icon: LucideIcons.hash),
+              HollowChipTab(
+                  value: true, label: 'Voice', icon: LucideIcons.volume2),
             ],
           ),
           const SizedBox(height: HollowSpacing.lg),

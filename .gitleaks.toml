@@ -185,6 +185,7 @@ keywords = ["password", "pass"]
 description = "Generated or vendored text: third-party license texts, lockfile checksums, OpenSSL headers"
 paths = [
   '''(?:^|/)assets/rust_licenses\.txt$''',
+  '''(?:^|/)assets/extra_licenses\.txt$''',
   '''(?:^|/)(?:Cargo|pubspec|Podfile)\.lock$''',
   '''^rust/hollow_core/\.cargo/android-openssl-headers/''',
 ]

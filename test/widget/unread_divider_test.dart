@@ -21,13 +21,15 @@ import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import '../helpers/test_app.dart';
 
 /// A conversation of [count] messages, `m0` oldest. [mine] are the indexes the
-/// local user sent.
-int? _divider(int count, String? entrySeenId, {Set<int> mine = const {}}) =>
+/// local user sent; [live] the ones that arrived while the person was looking.
+int? _divider(int count, String? entrySeenId,
+        {Set<int> mine = const {}, Set<int> live = const {}}) =>
     unreadDividerIndex(
       count: count,
       entrySeenId: entrySeenId,
       messageIdAt: (i) => 'm$i',
       isMineAt: (i) => mine.contains(i),
+      isLiveAt: (i) => live.contains(i),
     );
 
 Future<void> _pumpRow(
@@ -104,6 +106,31 @@ void main() {
 
     test('an empty conversation draws no line', () {
       expect(_divider(0, ''), isNull);
+    });
+  });
+
+  // The line is for what was MISSED: a message that lands while the person is
+  // in the conversation, app in use, was seen as it came. It used to take the
+  // line whenever the visit started with nothing unread.
+  group('messages that arrive while you are looking', () {
+    test('never open a run', () {
+      expect(_divider(5, 'm2', live: {3, 4}), isNull);
+    });
+
+    test('leave the line on what was missed before the visit', () {
+      expect(_divider(6, 'm1', live: {4, 5}), 2);
+    });
+
+    test('a run missed in the background takes the line', () {
+      // Read live, then the app went away and two messages came in.
+      expect(_divider(6, 'm1', live: {2, 3}), 4);
+    });
+
+    test('a reply marks everything above it as read', () {
+      expect(_divider(4, 'm0', mine: {2}, live: {3}), 1,
+          reason: 'nothing missed after the reply: the line stays put');
+      expect(_divider(6, 'm0', mine: {2}), 3,
+          reason: 'missed after the reply: the line moves to that run');
     });
   });
 

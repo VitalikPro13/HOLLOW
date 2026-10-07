@@ -72,7 +72,7 @@ class HollowMenuDivider extends HollowMenuEntry {
   const HollowMenuDivider();
 }
 
-/// A small uppercase caption above a group.
+/// A small caption above a group.
 class HollowMenuSection extends HollowMenuEntry {
   final String label;
   const HollowMenuSection(this.label);
@@ -208,6 +208,13 @@ class _ShowContextMenuIntent extends Intent {
 
 const double _kMenuMinWidth = 210;
 const double _kMenuMaxWidth = 320;
+
+/// The gap between the menu's frame and every row's hover, the same on all
+/// four sides.
+const double _kMenuInset = HollowSpacing.xs;
+
+/// A row's own side padding: its text sits this far inside its hover.
+const double _kMenuRowPadding = HollowSpacing.sm;
 
 /// Builds a menu's rows inside a [Consumer], so an open menu redraws instead of
 /// showing what was true when it opened.
@@ -394,17 +401,24 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
                   builder: (context, ref, _) {
                     final frame =
                         _resolve(widget.entriesBuilder(context, ref));
-                    return SingleChildScrollView(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          if (frame.title != null)
-                            _MenuBackRow(title: frame.title!, onTap: _pop),
-                          for (var i = 0; i < frame.entries.length; i++)
-                            _buildEntry(hollow, frame.entries[i], i),
-                          const SizedBox(height: HollowSpacing.xxs),
-                        ],
+                    // No scrollbar gutter: it would leave a wider gap on the
+                    // right of every row's hover than on the left. The one
+                    // inset on all four sides is what every hover keeps.
+                    return ScrollConfiguration(
+                      behavior: ScrollConfiguration.of(context)
+                          .copyWith(scrollbars: false),
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.all(_kMenuInset),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (frame.title != null)
+                              _MenuBackRow(title: frame.title!, onTap: _pop),
+                            for (var i = 0; i < frame.entries.length; i++)
+                              _buildEntry(hollow, frame.entries[i], i),
+                          ],
+                        ),
                       ),
                     );
                   },
@@ -421,15 +435,15 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
     switch (entry) {
       case HollowMenuDivider():
         return Padding(
-          padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xxs),
+          padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
           child: Divider(height: 1, thickness: 1, color: hollow.border),
         );
       case HollowMenuSection(:final label):
         return Padding(
           padding: const EdgeInsets.fromLTRB(
-            HollowSpacing.sm + 2,
+            _kMenuRowPadding,
             HollowSpacing.sm,
-            HollowSpacing.sm,
+            _kMenuRowPadding,
             HollowSpacing.xxs,
           ),
           child: Text(
@@ -443,9 +457,9 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
       case HollowMenuNote(:final text):
         return Padding(
           padding: const EdgeInsets.fromLTRB(
-            HollowSpacing.sm + 2,
+            _kMenuRowPadding,
             HollowSpacing.sm,
-            HollowSpacing.sm + 2,
+            _kMenuRowPadding,
             HollowSpacing.xs,
           ),
           child: Text(
@@ -458,12 +472,7 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
         );
       case HollowMenuCustom(:final child):
         return Padding(
-          padding: const EdgeInsets.fromLTRB(
-            HollowSpacing.xs,
-            HollowSpacing.xs,
-            HollowSpacing.xs,
-            HollowSpacing.xxs,
-          ),
+          padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
           child: child,
         );
       case HollowMenuItem():
@@ -500,13 +509,14 @@ class _MenuBackRow extends StatelessWidget {
           onTap: onTap,
           subtle: true,
           hoverColor: hollow.hover,
+          borderRadius: BorderRadius.circular(hollow.radiusXs),
           padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm + 2,
+            horizontal: _kMenuRowPadding,
             vertical: HollowSpacing.sm,
           ),
           child: Row(
             children: [
-              Icon(LucideIcons.chevronLeft, size: 15, color: hollow.textSecondary),
+              Icon(LucideIcons.chevronLeft, size: 16, color: hollow.textSecondary),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: Text(
@@ -521,7 +531,10 @@ class _MenuBackRow extends StatelessWidget {
             ],
           ),
         ),
-        Divider(height: 1, thickness: 1, color: hollow.border),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+          child: Divider(height: 1, thickness: 1, color: hollow.border),
+        ),
       ],
     );
   }
@@ -549,14 +562,15 @@ class _MenuRow extends StatelessWidget {
       hoverColor: item.isDanger
           ? hollow.error.withValues(alpha: 0.12)
           : hollow.hover,
+      borderRadius: BorderRadius.circular(hollow.radiusXs),
       padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm + 2,
+        horizontal: _kMenuRowPadding,
         vertical: HollowSpacing.sm,
       ),
       child: Row(
         children: [
           if (item.icon != null) ...[
-            Icon(item.icon, size: 15, color: iconTint),
+            Icon(item.icon, size: 16, color: iconTint),
             const SizedBox(width: HollowSpacing.sm),
           ],
           Expanded(

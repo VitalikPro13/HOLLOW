@@ -170,7 +170,7 @@ class _PickerHost extends StatelessWidget {
 }
 
 /// The three tabs themselves, for a host that places them: the desktop
-/// popover, or the phone composer where the panel takes the keyboard's place.
+/// popover, or the phone's tall sheet.
 class ExpressionPanel extends StatefulWidget {
   final String? serverId;
   final bool assets;

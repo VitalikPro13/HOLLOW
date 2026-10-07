@@ -28,7 +28,7 @@ ChatPane (`lib/src/ui/chat/chat_pane.dart`) handles 1:1 DMs with Olm encryption.
 - **@mention highlighting**: ChannelChatPane checks if message text contains `@everyone`, `@localName`, or `@localNick` and passes `isMentioned` to `ChannelMessageBubble` for highlight styling. ChatPane has no mention highlighting.
 - **Permission gating**: ChannelChatPane checks `canPostInChannelProvider` and `myPermissionsProvider` to hide input or show "no permission" message. ChatPane has no permission checks.
 - **Pinned messages**: ChannelChatPane has a pin icon in the header showing count, opening a pinned messages dialog. ChatPane has no pins.
-- **In-channel search**: ChannelChatPane has a search bar (Ctrl+K toggle) that queries `storage_api.searchChannelMessages()`. ChatPane has no search.
+- **In-channel search**: ChannelChatPane has a search bar (Ctrl+K toggle) that queries `storage_api.searchChannelMessages()`, or for a meeting (never stored) `searchLoadedChannelMessages` over the messages in memory. ChatPane has its own DM search (`searchDmMessages`).
 - **Sync status**: ChannelChatPane shows `_ChannelConnectionStatus` + `_SyncIndicator` + `_VaultHealthIndicator` in the header. ChatPane shows simpler connection status.
 - **Split view**: ChannelChatPane supports `splitPaneIndex` for dock-mode split view; ChatPane does not.
 - **Message bubble**: Uses `ChannelMessageBubble` (server-oriented, with mention highlight) vs `MessageBubble` (DM-oriented).
@@ -379,4 +379,4 @@ The list is built by `reversedChatList`, which since 2026-08-21 hangs `ChatScrol
 
 ## The unread line (issue #54, 2026-08-21)
 
-The pane reads `unreadMarkerProvider[channelMarkerKey(serverId, channelId)]` once per build, feeds `unreadDividerIndex` the display list, and hands the chronological index to `dateSeparatedChatRow(unreadDivider:)` and its REVERSED twin to `reversedChatList(unreadRevIndex:)`. One computation per build, so the index the rail marks and the index the row draws cannot disagree. Placement, rendering and the rail mark live in `wiki/ui_chat_pane_shared.md`; the pointer in `wiki/providers_event_settings.md`.
+The pane reads `unreadMarkerProvider[channelMarkerKey(serverId, channelId)]` (an `UnreadVisit`) once per build, feeds `unreadDividerIndex` the display list with `entrySeenId: visit.from` and `isLiveAt` over `visit.live` (messages that arrived while looking never take the line), and hands the chronological index to `dateSeparatedChatRow(unreadDivider:)` and its REVERSED twin to `reversedChatList(unreadRevIndex:)`. One computation per build, so the index the rail marks and the index the row draws cannot disagree. Placement, rendering and the rail mark live in `wiki/ui_chat_pane_shared.md`; the pointer in `wiki/providers_event_settings.md`.

@@ -253,9 +253,10 @@ vodozemac stack fits (phys_footprint counts touched pages + dead-strip).
 ### Diagnostics
 The "Export Push Diagnostics" button was REMOVED from mobile settings (2026-07-02,
 HOLLOW_PLAN 1976) — the NSE still writes `push_diag/nse_metrics.log` (now
-content-free, lengths only) and the Dart side writes `push_debug.log`; to read them
-off-device, pull the App Group container manually (Xcode Devices & Simulators or
-Finder file sharing).
+content-free, lengths only) and the Dart side writes `push_debug.log`. Settings >
+About > Diagnostics > "Debug logs" exports them in one redacted file, with the debug
+and crash log tails (iOS, and Android since 2026-10-07, where the NSE parts are
+skipped).
 
 ### Other iOS facts
 - Classic non-UIScene AppDelegate (`register(with: self)`); firebase pinned below

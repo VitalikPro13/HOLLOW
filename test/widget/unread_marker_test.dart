@@ -102,4 +102,38 @@ void main() {
     _c.read(selectedChannelProvider.notifier).state = 'random';
     expect(_markers.entrySeenId(channelMarkerKey('s1', 'general')), isNull);
   });
+
+  group('messages that land while you look', () {
+    Set<String> live(String peer) =>
+        _c.read(unreadMarkerProvider)[dmMarkerKey(peer)]?.live ?? const {};
+
+    test('are remembered for the visit', () {
+      _openDm('alice', had: 'm7');
+      _markers.noteLive(dmMarkerKey('alice'), 'm8');
+      expect(live('alice'), {'m8'});
+    });
+
+    test('one that beats the first mark-seen still counts', () {
+      // The history is still loading when it lands.
+      _c.read(selectedPeerProvider.notifier).state = 'alice';
+      _markers.noteLive(dmMarkerKey('alice'), 'm8');
+      _markers.noteSeen(dmMarkerKey('alice'), 'm7');
+      expect(live('alice'), {'m8'});
+    });
+
+    test('not for a conversation that is not on screen', () {
+      _c.read(selectedPeerProvider.notifier).state = 'bob';
+      _markers.noteLive(dmMarkerKey('alice'), 'm8');
+      _openDm('alice', had: 'm7');
+      expect(live('alice'), isEmpty);
+    });
+
+    test('forgotten on leaving', () {
+      _openDm('alice', had: 'm7');
+      _markers.noteLive(dmMarkerKey('alice'), 'm8');
+      _c.read(selectedPeerProvider.notifier).state = 'bob';
+      _openDm('alice', had: 'm8');
+      expect(live('alice'), isEmpty);
+    });
+  });
 }

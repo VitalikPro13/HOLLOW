@@ -140,7 +140,7 @@ Column
   ├── SystemStatusBanner
   └── Expanded Row
       ├── ServerStrip (RepaintBoundary, 72px implicit width)
-      ├── (server settings open: Expanded ServerSettingsPlace, and nothing below)
+      ├── (Settings or server settings open: Expanded SettingsPlace / ServerSettingsPlace + HelpPanelSlider, nothing else)
       ├── ChannelSidebar (240px fixed width) + _ChannelSidebarSeam
       ├── Expanded: chat area
       │   └── RepaintBoundary → AmbientBackground → Container(key: _mainPaneKey)
@@ -163,6 +163,7 @@ Column
 Column
   ├── _DockChromeClaim → FriendsBar (RepaintBoundary)
   ├── SystemStatusBanner
+  ├── Expanded: Settings or server settings open → Row(Expanded place, HelpPanelSlider); else:
   ├── Expanded Row (ClipRect)
   │   ├── if server selected: Row(ChannelSidebar (240px, dockMode=true, no UserBar) + _ChannelSidebarSeam)
   │   ├── Expanded: chat area

@@ -7,12 +7,14 @@ import 'package:hollow/src/core/message_limits.dart';
 import 'package:hollow/src/core/message_tokens.dart'
     show assetTokenRegex, emoteTokenRegex;
 import 'package:hollow/src/core/models/call_record.dart';
+import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -306,6 +308,36 @@ class ChatSearchResultsView<T> extends StatelessWidget {
   }
 }
 
+/// A meeting's chat is never stored, so its search runs over the messages in
+/// memory: newest first, at most [limit].
+List<storage_api.StoredChannelMessage> searchLoadedChannelMessages(
+  List<ChannelChatMessage> messages,
+  String query, {
+  required String serverId,
+  required String channelId,
+  int limit = 20,
+}) {
+  final needle = query.toLowerCase();
+  final hits = <storage_api.StoredChannelMessage>[];
+  for (var i = messages.length - 1; i >= 0 && hits.length < limit; i--) {
+    final m = messages[i];
+    if (m.messageId == null || !m.text.toLowerCase().contains(needle)) {
+      continue;
+    }
+    hits.add(storage_api.StoredChannelMessage(
+      id: 0,
+      serverId: serverId,
+      channelId: channelId,
+      senderId: m.senderId,
+      text: m.text,
+      isMine: m.isMe,
+      timestamp: m.timestamp.millisecondsSinceEpoch,
+      messageId: m.messageId,
+    ));
+  }
+  return hits;
+}
+
 /// The "Offline" header status when OUR link is down, else null: read only
 /// from [overallConnectionProvider], never from who else is online.
 Widget? ownLinkOfflineStatus(WidgetRef ref) =>
@@ -392,13 +424,19 @@ class DateSeparator extends StatelessWidget {
 /// [entrySeenId] is `unreadMarkerProvider`'s pointer to the last message read
 /// before this visit: null means no line, the empty string means the
 /// conversation was never read. An unrecognised pointer is older than the
-/// 200-row window, so everything loaded counts as new. Your own messages never
-/// open the run, because sending is not arriving.
+/// 200-row window, so everything loaded counts as new.
+///
+/// Only a MISSED message opens the run: never your own (sending is not
+/// arriving) and never one [isLiveAt] says landed while you were looking. A
+/// run missed after the last message you saw arrive or sent (the app was in
+/// the background) takes the line; otherwise it stays on the first message
+/// missed before the visit.
 int? unreadDividerIndex({
   required int count,
   required String? entrySeenId,
   required String? Function(int index) messageIdAt,
   required bool Function(int index) isMineAt,
+  bool Function(int index)? isLiveAt,
 }) {
   if (entrySeenId == null || count == 0) return null;
   var start = 0;
@@ -410,8 +448,16 @@ int? unreadDividerIndex({
       }
     }
   }
+  bool seen(int i) => isMineAt(i) || (isLiveAt?.call(i) ?? false);
+  var lastSeen = -1;
   for (var i = start; i < count; i++) {
-    if (!isMineAt(i)) return i;
+    if (seen(i)) lastSeen = i;
+  }
+  for (var i = lastSeen + 1; i < count; i++) {
+    if (i >= start && !seen(i)) return i;
+  }
+  for (var i = start; i < count; i++) {
+    if (!seen(i)) return i;
   }
   return null;
 }
@@ -1629,10 +1675,6 @@ class ChatComposerRow extends StatelessWidget {
   /// Off on a phone, where focus raises the keyboard over half the chat.
   final bool autofocus;
 
-  /// The phone's picker sits where the keyboard was, so the smiley offers the
-  /// keyboard back.
-  final bool expressionsOpen;
-
   const ChatComposerRow({
     super.key,
     required this.controller,
@@ -1648,7 +1690,6 @@ class ChatComposerRow extends StatelessWidget {
     this.hasStaged = false,
     this.beforeSend,
     this.autofocus = true,
-    this.expressionsOpen = false,
   });
 
   @override
@@ -1682,12 +1723,8 @@ class ChatComposerRow extends StatelessWidget {
                   padding: const EdgeInsets.only(right: HollowSpacing.xs),
                   child: Builder(
                     builder: (buttonContext) => HollowIconButton(
-                      icon: expressionsOpen
-                          ? LucideIcons.keyboard
-                          : LucideIcons.smile,
-                      label: expressionsOpen
-                          ? 'Show keyboard'
-                          : 'Emoji, GIFs and stickers',
+                      icon: LucideIcons.smile,
+                      label: 'Emoji, GIFs and stickers',
                       onPressed: () => onExpressions(buttonContext),
                     ),
                   ),

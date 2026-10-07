@@ -437,12 +437,19 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   Future<void> _onSearch(String query) => _search.run(
         query,
-        (q) => storage_api.searchChannelMessages(
-          serverId: widget.serverId,
-          channelId: widget.channelId,
-          query: q,
-          limit: 20,
-        ),
+        (q) async => _isConference
+            ? searchLoadedChannelMessages(
+                ref.read(channelChatProvider)[_stateKey] ?? const [],
+                q,
+                serverId: widget.serverId,
+                channelId: widget.channelId,
+              )
+            : storage_api.searchChannelMessages(
+                serverId: widget.serverId,
+                channelId: widget.channelId,
+                query: q,
+                limit: 20,
+              ),
         (apply) {
           if (mounted) setState(apply);
         },
@@ -612,18 +619,21 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
               border: Border.all(color: hollow.border),
               boxShadow: HollowShadows.float,
             ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
+            // One inset on every side and no scrollbar gutter, so a row's
+            // fill keeps the same gap all round, as in a menu.
+            child: ScrollConfiguration(
+              behavior:
+                  ScrollConfiguration.of(context).copyWith(scrollbars: false),
               child: ListView.builder(
                 shrinkWrap: true,
-                padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+                padding: const EdgeInsets.all(HollowSpacing.xs),
                 itemCount: _mentionCandidates.length,
                 itemBuilder: (ctx, i) {
                   final c = _mentionCandidates[i];
                   final selected = i == _mentionSelectedIndex;
                   return HollowPressable(
                     onTap: () => _acceptMention(c),
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
+                    borderRadius: BorderRadius.circular(hollow.radiusXs),
                     backgroundColor: selected
                         ? hollow.accent.withValues(alpha: 0.15)
                         : null,
@@ -1730,12 +1740,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             : null;
     // One computation per build feeds both the rail's mark and the row that
     // carries the line (issue #54).
+    final visit = ref.watch(unreadMarkerProvider)[
+        channelMarkerKey(widget.serverId, widget.channelId)];
     final unreadIndex = unreadDividerIndex(
       count: messages.length,
-      entrySeenId: _albumRowId(ref.watch(unreadMarkerProvider)[
-          channelMarkerKey(widget.serverId, widget.channelId)]),
+      entrySeenId: _albumRowId(visit?.from),
       messageIdAt: (i) => messages[i].messageId,
       isMineAt: (i) => messages[i].isMe,
+      isLiveAt: (i) => visit?.live.contains(messages[i].messageId) ?? false,
     );
     return MediaViewerScope(
       mediaContext: MediaContext(

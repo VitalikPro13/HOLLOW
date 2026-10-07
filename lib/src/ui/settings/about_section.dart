@@ -163,7 +163,8 @@ class AboutTab extends ConsumerWidget {
                   HollowButton.ghost(
                     compact: true,
                     semanticLabel: 'Open-source licenses',
-                    onPressed: () => showHollowLicensesPage(context),
+                    onPressed: () =>
+                        showHollowLicensesPage(context, version: appVersion),
                     child: const Text('Licenses'),
                   ),
                 ],
@@ -171,9 +172,9 @@ class AboutTab extends ConsumerWidget {
             ),
           ],
         ),
-        // iOS has no adb, so this file is the only way to pull logs off a
-        // test phone without a Mac.
-        if (Platform.isIOS)
+        // A phone's logs sit in the app's private storage, out of reach without
+        // a computer and developer tools; this file is the way to send them.
+        if (Platform.isIOS || Platform.isAndroid)
           const SettingsSection(
             title: 'Diagnostics',
             children: [_ExportDiagnosticsRow()],
@@ -271,8 +272,11 @@ Future<String> _collectDiagnostics() async {
     buf.writeln();
   }
 
-  appendFile('NSE metrics', '$container/push_diag/nse_metrics.log');
-  appendFile('App active heartbeat', '$container/push_diag/app_active.txt');
+  // The notification service extension and its heartbeat exist on iOS only.
+  if (Platform.isIOS) {
+    appendFile('NSE metrics', '$container/push_diag/nse_metrics.log');
+    appendFile('App active heartbeat', '$container/push_diag/app_active.txt');
+  }
   appendFile('Dart push log', await pushDebugLogPath());
   appendFile('Hollow debug log', '$hollowDataDir/hollow_debug.log',
       tailBytes: 2 * 1024 * 1024);

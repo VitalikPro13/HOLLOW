@@ -20,7 +20,9 @@ centre PLACE on desktop and the same page widgets pushed as sub-routes on the ph
 - `settingsCategoryProvider` remembers the page across closes.
 - `hollow_shell.dart` renders `SettingsPlace` in place of the whole centre row: Dock mode
   swaps the ClipRect row (sidebar + chat + member panel), Classic keeps the `ServerStrip`
-  and swaps the rest. Split view state survives underneath.
+  and swaps the rest. Split view state survives underneath. `HelpPanelSlider` stays beside
+  it (and beside server settings): Help is a tool over every place (2026-10-07, it vanished
+  with the row before).
 
 ## The place (`settings/settings_place.dart`)
 

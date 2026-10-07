@@ -406,7 +406,7 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
     final twitch = ref.watch(twitchLoginProvider(widget.peerId));
     final items = <Widget>[
       if (marks.isNotEmpty)
-        SupportMarksChip(peerId: widget.peerId),
+        SupportMarksChip(peerId: widget.peerId, touch: _touch),
       if (twitch != null && twitch.isNotEmpty)
         HollowChip(
           label: twitch,
@@ -425,6 +425,10 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
     if (items.isEmpty) return null;
     return Row(
       mainAxisSize: MainAxisSize.min,
+      // On a phone the support mark's target reaches above it; the marks
+      // still stand on the avatar's foot.
+      crossAxisAlignment:
+          _touch ? CrossAxisAlignment.end : CrossAxisAlignment.center,
       children: [
         for (var i = 0; i < items.length; i++) ...[
           if (i > 0) const SizedBox(width: HollowSpacing.xs),

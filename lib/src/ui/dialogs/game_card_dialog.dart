@@ -63,7 +63,7 @@ void showGameCardDialog(
     showHollowSheet<void>(
       context: context,
       scrollControlled: true,
-      maxHeightFactor: 0.94,
+      maxHeightFactor: kSheetTallHeightFactor,
       builder: (_) => _GameCardSheet(data: data),
     );
     return;
