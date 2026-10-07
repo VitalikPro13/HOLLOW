@@ -91,6 +91,7 @@ $streams = @{ $x = "$tag-$x"; $y = "$tag-$y" }
 $started = Get-Date
 $deadline = $started.AddMinutes($Minutes)
 $nextRestart = $started.AddMinutes($RestartEveryMinutes)
+$nextPoke = $started.AddMinutes(10)
 
 Write-Host "[soak] $x <-> $y for $Minutes min, a message every $EveryMs ms each way, trips: $x [$($canTake[$x] -join ',')], $y [$($canTake[$y] -join ',')]" -ForegroundColor Cyan
 Invoke-FleetStepOrThrow $x @{ op = 'stream_start'; contact = $ids[$y]; tag = $streams[$x]; every_ms = $EveryMs } | Out-Null
@@ -108,6 +109,15 @@ try {
             $restarts += [pscustomobject]@{ at = $at.ToString('o'); ok = ($LASTEXITCODE -eq 0); output = $output.Trim() }
             $nextRestart = (Get-Date).AddMinutes($RestartEveryMinutes)
             continue
+        }
+
+        # Trips are host-side ops the probe never sees, so without a step now and then it
+        # stops listening at fleet.ps1's idle timeout and the closing stream_stats never land.
+        if ((Get-Date) -ge $nextPoke) {
+            foreach ($peer in @($x, $y)) {
+                Invoke-FleetStepOrThrow $peer @{ op = 'capture'; from = 'provider'; key = 'connection'; as = "SOAK_CONN_$peer" } 60 | Out-Null
+            }
+            $nextPoke = (Get-Date).AddMinutes(10)
         }
 
         $candidates = @(@($x, $y) | Where-Object { $canTake[$_].Count -gt 0 })

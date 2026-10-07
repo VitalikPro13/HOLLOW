@@ -1,7 +1,9 @@
 # Resumable relay sessions: a connection that survives phones, sleep and bad networks
 
-Status: planned 2026-10-06; wave 0 (the wire spec in section 9, shared stubs, the relay's ring
-core) done the same day, waves 1 and 2 by parallel worktree agents (section 10). Written after the
+Status: SHIPPED. Planned 2026-10-06; wave 0 (the wire spec in section 9, shared stubs, the
+relay's ring core) the same day, waves 1 and 2 by parallel worktree agents (section 10), the
+close-out in session 3 (2026-10-07, end of 11.5): relay 0.12.1 deployed 2026-10-07, the client
+ships in the 0.12.1 release. Left for phase G: the AR-36 residuals. Written after the
 mixed iPhone/Android fleet run that found a nickname dying with the socket and an accept lost to a
 dead connection. Research digest and code map from that session are folded in below; every claim
 about other apps carries its source. Section 9 binds every implementer; where it is more precise
@@ -919,6 +921,15 @@ Five agents: mobile-model, client-lifecycle, two hostile reviewers (handshake, b
   a fresh one, so no copy is provably redundant.
 - An answer we asked for gets no bypass: the bucket judges a frame before Olm decryption, where an
   answer looks like any other frame, and the repair re-asks a dropped answer a refill later.
+- Session 3 (sync): every sync page now continues from where the page ended, never from our own
+  newest row or watermark, which a message that arrives while paging moves past rows not served
+  yet (DM, sibling DM and channel pages, the MLS twin too). The channel responder answered one ask
+  per channel per 2 s, so every page after the first was dropped; it now de-dups by the ask itself.
+  A sibling page names every other conversation as done: one that left them out had them served
+  again from the start, and two devices paged each other without end. The bulk a return sets off
+  rides the same paced lane as the drains: per-server and per-channel asks, KeyPackages and their
+  asks, the repair asks and our channel sync answers. Server sync answers, DM answers and live
+  frames stay unpaced. No wire change.
 
 ### Relay (review-handshake, review-bounds)
 
@@ -928,7 +939,12 @@ Five agents: mobile-model, client-lifecycle, two hostile reviewers (handshake, b
   after a frame, never later than 2.25 s (HOL-SEC-165).
 - A device's own fetch socket joining a room while its session is in grace also gets that room's
   ring DMs (`Direct`, `DirectImage`), uncounted and left in the ring, an inbox only once proved
-  (`replay_grace_directs`). Push-woken NSE and fetch nodes show the text during grace.
+  (`replay_grace_directs`). Push-woken NSE and fetch nodes show the text during grace. Session 3
+  (was AR-36 item 2): each fetch socket reads a room once. `PerSocketData::grace_reads` keeps the
+  rooms read past a leave, at most 64, so a leave and a re-join no longer buy up to 8 MiB of ring
+  for a few bytes; the next push wake opens a fresh socket, which reads once again. A per-socket
+  byte budget would have let one socket re-read small DMs thousands of times and walk the ring
+  on every join; the room record bounds both.
 - Rings have their own 256 MiB pool: bytes charged to the sender once per fan-out buffer, 1 KiB of
   holding to the receiving session's share; pool pressure buries the heaviest sender's frame in the
   ring that holds it (HOL-SEC-170).
@@ -984,3 +1000,10 @@ Five agents: mobile-model, client-lifecycle, two hostile reviewers (handshake, b
 - Time to healthy against the canary relay, p50 / p95 to Connected: Android back after a 20 s
   suspend 944 / 1016 ms, iOS 826 / 1386 ms, a desktop after a 30 s network freeze 321 / 421 ms,
   after a 60 s process pause 603 / 724 ms.
+- Session 3 (2026-10-07), the one-hour churn soak of section 6 on the mixed fleet (an Android
+  emulator and an iOS Simulator) against an ASan canary restarted with `systemctl restart` every
+  15 minutes: the merged client and the final relay delivered 2,191 counted DMs with the loss
+  counter at zero, no duplicates, 98 trips away (background, network cut, pause) and every return
+  a resume without a gap; the same run on the wave 2 client, 2,239 DMs, also zero. The release
+  build then passed every live probe under a copy of the production unit and was deployed; its
+  restart handed the production buffers over through the fd store.

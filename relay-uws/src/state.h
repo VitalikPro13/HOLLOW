@@ -188,6 +188,8 @@ struct PerSocketData {
     // belongs to the device's full socket, whose auth resets it, and a fetch slot
     // it forgot would outlive the fetch socket.
     std::unordered_set<std::string> fetch_rooms;
+    // The rooms a fetch socket read its device's grace ring DMs for, kept past a leave.
+    session::FetchReads grace_reads;
     // Set when a NEWER socket for the same peer_id authenticates and takes over
     // this peer's room/socket state. A superseded ghost must NOT run the shared
     // peer cleanup on close (it would evict the live successor from every room);

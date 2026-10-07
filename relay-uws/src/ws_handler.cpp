@@ -916,13 +916,13 @@ static bool inbox_owner_by_roster(PerSocketData* data, const std::string& room,
     return r.member;
 }
 
-// The DMs (the 0x06 kinds offline_buffer takes on expiry) that `peer`'s session in grace
-// holds for `room`, for that device's own fetch socket. Uncounted and left in the ring: the
-// resume replays them too, and the receiver dedups by message id.
-static void replay_grace_directs(SSLWebSocket* ws, const std::string& peer, const std::string& room,
+// The DMs (the 0x06 kinds offline_buffer takes on expiry) that the device's session in grace
+// holds for `room`, for that device's own fetch socket, once per socket and room. Uncounted
+// and left in the ring: the resume replays them too, and the receiver dedups by message id.
+static void replay_grace_directs(SSLWebSocket* ws, PerSocketData* data, const std::string& room,
                                  RelayState& state) {
-    const session::Session* s = grace_session(state, peer);
-    if (!s) return;
+    const session::Session* s = grace_session(state, data->peer_id);
+    if (!s || !data->grace_reads.first(room)) return;
     for (const session::Frame& f : s->ring.entries()) {
         if (f.tombstone() || !f.bytes || f.room != room) continue;
         if (f.kind != session::Kind::Direct && f.kind != session::Kind::DirectImage) continue;
@@ -973,7 +973,7 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
             replay_buffered_msgs(ws, data->peer_id, room, /*full_node=*/false, state);
             // A DM for a device in grace waits in its ring, not in offline_buffer, so the
             // push isolate a wake started would find nothing; an inbox only once proved.
-            if (!is_inbox_room(room) || proved) replay_grace_directs(ws, data->peer_id, room, state);
+            if (!is_inbox_room(room) || proved) replay_grace_directs(ws, data, room, state);
         }
         if (proved) {
             replay_mailbox_no_delete(ws, room.substr(sizeof(INBOX_ROOM_PREFIX) - 1), room, state);

@@ -1095,7 +1095,12 @@ DM stream; received = the DATABASE, where every delivery path ends).
   counted DM streams both ways, random trips one peer at a time, a canary relay restart every
   `-RestartEveryMinutes` (refused for relay.anonlisten.com and for peers not on the canary),
   then a settle; exit 1 on any loss. `scripts/fleet_metrics_selftest.ps1` checks its loss
-  counter.
+  counter. Trips are host-side ops the probe never sees, so the soak sends both peers a
+  `capture` step every 10 min: without it the probes stop listening at `fleet.ps1`'s 40 min
+  idle timeout and the closing `stream_stats` never land (session 3, 2026-10-07). A canary
+  on relay.anonlisten.com:8443 (the `relay_connect` dial override) cannot pass `-CanaryRelay`
+  (it names the production domain): restart it from the lead side instead, with
+  `systemctl restart` so the fd store hands sessions over.
 - `scripts/resume_e2e.sh` (Linux VM): the real relay, the zombie proxy and the real ws_client
   (`node/resume_e2e.rs`, ignored test) with B's path frozen for each `--windows` entry, then
   thawed or dropped; per-window report and `summary.md`, counted per kind (`--kinds

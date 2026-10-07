@@ -629,6 +629,128 @@ pub(crate) fn channel_sync_request(
     }
 }
 
+/// Where a channel sync page ended, read before anything in it is filtered out: the
+/// next page continues from the page the responder served, not from what we kept.
+pub(crate) struct ChannelPageEnd {
+    last: i64,
+    senders: std::collections::BTreeSet<String>,
+}
+
+impl ChannelPageEnd {
+    /// `None` when a page from this end would serve the whole page again (one
+    /// millisecond fills it): paging stops there and the next catch-up takes the rest.
+    pub(crate) fn of(items: &[SyncMessageItem]) -> Option<Self> {
+        let last = items.iter().map(|m| m.ts).max()?;
+        items
+            .iter()
+            .any(|m| m.ts < last)
+            .then(|| Self { last, senders: items.iter().map(|m| m.s.clone()).collect() })
+    }
+}
+
+/// The next page of a channel sync: every sender from where the page ended. Our own
+/// watermarks are no cursor here: a post that arrived while paging moves its sender's
+/// past rows not served yet, and their lookback holds a busy page in place. A sender
+/// the ask does not name is served in full, which past this page is only rows at or
+/// after its end.
+pub(crate) fn channel_next_page_request(
+    store: &crate::storage::MessageStore,
+    server_id: &str,
+    channel_id: &str,
+    end: ChannelPageEnd,
+) -> HavenMessage {
+    let mut sender_timestamps: HashMap<String, i64> = store
+        .get_per_sender_timestamps(server_id, channel_id)
+        .unwrap_or_default()
+        .into_keys()
+        .map(|sender| (sender, end.last))
+        .collect();
+    sender_timestamps.extend(end.senders.into_iter().map(|sender| (sender, end.last)));
+    HavenMessage::ChannelSyncRequest {
+        server_id: server_id.to_string(),
+        channel_id: channel_id.to_string(),
+        since_timestamp: end.last,
+        sender_timestamps,
+        gap: None,
+    }
+}
+
+/// What tells two channel sync asks apart for the responder's de-dup: a repeat of one
+/// ask is answered once, the ask for the next page is answered too.
+pub(crate) fn channel_sync_ask_key(
+    since_timestamp: i64,
+    sender_timestamps: &HashMap<String, i64>,
+    gap: Option<&GapDigest>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut senders: Vec<(&String, &i64)> = sender_timestamps.iter().collect();
+    senders.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    since_timestamp.hash(&mut hasher);
+    senders.hash(&mut hasher);
+    serde_json::to_string(&gap).unwrap_or_default().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Where the next page of a DM sync starts: at the page's own end, never at our newest
+/// row, which a DM that arrived while paging moves past rows the responder has not
+/// served yet. `strict` = the next ask is `both_directions`, served by the
+/// `timestamp >` query, so it starts one millisecond early to keep the rows that share
+/// the page's last timestamp. `None` when that ask would serve this whole page again
+/// (one millisecond fills it, or edits keep it qualifying): paging stops there and the
+/// next catch-up takes the rest.
+pub(crate) fn dm_next_page_since(items: &[DmSyncItem], strict: bool) -> Option<i64> {
+    let last = items.iter().map(|m| m.ts).max()?;
+    let since = if strict { last - 1 } else { last };
+    let served_again = |m: &DmSyncItem| {
+        (if strict { m.ts > since } else { m.ts >= since })
+            || m.edited_at.max(m.hidden_at).is_some_and(|at| at >= since)
+    };
+    (!items.iter().all(served_again)).then_some(since)
+}
+
+/// How long a page we asked for counts as asked: two overlapping asks bring the same
+/// page twice, and one conversation must not page twice side by side.
+const DM_PAGE_REPEAT_WINDOW: Duration = Duration::from_secs(10);
+
+/// Whether `peer` was asked for this page of `convo` moments ago; records the ask
+/// when it was not.
+pub(crate) fn dm_page_asked(
+    asked: &mut HashMap<String, std::time::Instant>,
+    peer: &str,
+    convo: &str,
+    since: i64,
+) -> bool {
+    let key = format!("dm_page:{peer}:{convo}:{since}");
+    if asked.get(&key).is_some_and(|at| at.elapsed() < DM_PAGE_REPEAT_WINDOW) {
+        return true;
+    }
+    asked.insert(key, std::time::Instant::now());
+    false
+}
+
+/// What a sibling backfill names a conversation it wants nothing more of: no row is
+/// newer than it.
+const NOTHING_NEWER: i64 = i64::MAX;
+
+/// The next page of one conversation of a sibling backfill. The responder serves
+/// every conversation an ask leaves out from its start, so every other one we hold is
+/// named past its end: one page must not fetch every other conversation again.
+pub(crate) fn sibling_next_page_request(
+    store: &crate::storage::MessageStore,
+    convo: &str,
+    since: i64,
+) -> HavenMessage {
+    let mut per_convo_since: Vec<(String, i64)> = store
+        .get_dm_peer_ids()
+        .into_iter()
+        .filter(|held| held != convo)
+        .map(|held| (held, NOTHING_NEWER))
+        .collect();
+    per_convo_since.push((convo.to_string(), since));
+    HavenMessage::DmSiblingSyncRequest { per_convo_since, gaps: HashMap::new() }
+}
+
 pub(crate) fn build_channel_sync_batch(
     store: &crate::storage::MessageStore,
     sid: &str,
@@ -649,12 +771,14 @@ pub(crate) fn build_channel_sync_batch(
     if let Some(gap) = gap {
         let paged: std::collections::HashSet<String> =
             messages.iter().filter_map(|m| m.message_id.clone()).collect();
+        // A page cut by its limit takes no gap row past its end: the next pages serve
+        // every sender from that end, and a row past it would move the requester's
+        // next page over tail rows it has not had.
+        let tail_end = if tail_len >= 200 { messages.last().map(|m| m.timestamp) } else { None };
         let missed = store.get_channel_gap_messages(sid, cid, gap, 200).unwrap_or_default();
-        messages.extend(
-            missed
-                .into_iter()
-                .filter(|m| m.message_id.as_ref().is_some_and(|id| !paged.contains(id))),
-        );
+        messages.extend(missed.into_iter().filter(|m| {
+            m.message_id.as_ref().is_some_and(|id| !paged.contains(id)) && tail_end.is_none_or(|end| m.timestamp <= end)
+        }));
         messages.sort_by_key(|m| m.timestamp);
     }
     let gap_len = (messages.len() - tail_len) as u32;
@@ -961,6 +1085,7 @@ pub(crate) async fn repair_after_gap(
     join_hold: &mut super::join_hold::JoinHold,
     hidden: &(dyn Fn(&str) -> bool + Sync),
     sync_coordinator: &mut SyncCoordinator,
+    budget: &mut super::frame_budget::FrameBudget,
     mls: Option<&MlsManager>,
     master: &crate::identity::native_identity::NativeKeypair,
     local_peer: &str,
@@ -1008,7 +1133,7 @@ pub(crate) async fn repair_after_gap(
     dm_peers.dedup();
 
     ask_peers_to_fill(
-        ws_cmd_tx, server_states, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, mls, local_peer,
+        ws_cmd_tx, server_states, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, budget, mls, local_peer,
         db_path, db_passphrase,
     )
     .await;
@@ -1030,6 +1155,7 @@ pub(crate) async fn repair_after_drops(
     ws_room_peers: &WsRoomPeers,
     join_hold: &super::join_hold::JoinHold,
     sync_coordinator: &mut SyncCoordinator,
+    budget: &mut super::frame_budget::FrameBudget,
     mls: Option<&MlsManager>,
     local_peer: &str,
     db_path: &str,
@@ -1046,7 +1172,7 @@ pub(crate) async fn repair_after_drops(
         .into_iter()
         .collect();
     ask_peers_to_fill(
-        ws_cmd_tx, server_states, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, mls, local_peer,
+        ws_cmd_tx, server_states, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, budget, mls, local_peer,
         db_path, db_passphrase,
     )
     .await;
@@ -1055,7 +1181,7 @@ pub(crate) async fn repair_after_drops(
 
 /// Ask each `(server, member device)` for a server sync and its channels, and each
 /// friend device for a DM sync behind a gap digest: what fell out comes back from the
-/// peers that hold it.
+/// peers that hold it. The server asks are paced: one per server we share.
 #[allow(clippy::too_many_arguments)]
 async fn ask_peers_to_fill(
     ws_cmd_tx: &WsCmdTx,
@@ -1064,6 +1190,7 @@ async fn ask_peers_to_fill(
     dm_peers: &[String],
     nonce: u64,
     sync_coordinator: &mut SyncCoordinator,
+    budget: &mut super::frame_budget::FrameBudget,
     mls: Option<&MlsManager>,
     local_peer: &str,
     db_path: &str,
@@ -1106,15 +1233,14 @@ async fn ask_peers_to_fill(
     for (sid, device) in server_peers {
         let Some(state) = server_states.get(sid) else { continue };
         if let Ok(state_vector_json) = serde_json::to_string(&crate::crdt::sync::StateVector::from_server_state(state)) {
-            super::olm_lane::carry(
-                ws_cmd_tx, device, None,
+            super::frame_budget::pace_carried(
+                budget, ws_cmd_tx, local_peer, device,
                 &HavenMessage::SyncRequest {
                     server_id: sid.clone(),
                     state_vector_json,
                     mls_epoch: mls.and_then(|m| m.epoch(sid).ok()),
                     nonce: Some(nonce),
                 },
-                super::olm_lane::NoSession::Queue,
             );
         }
         sync_coordinator.register_peer(sid, device, channel_ts.get(sid).cloned().unwrap_or_default());
@@ -3821,6 +3947,8 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     messages: Vec<SyncMessageItem>,
     _total: u32,
     has_more: Option<bool>,
+    // Where the page ended as served, read before the caller filtered it.
+    page_end: Option<ChannelPageEnd>,
     crypto_store: &CryptoStore,
     _crdt_store: &CrdtStore,
     db_path: &str,
@@ -3842,12 +3970,14 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     }
     let _ = store.commit_transaction();
     if has_more == Some(true) {
-        // No digest: the first page already carried the rows behind the watermarks.
-        super::olm_lane::carry(
-            ws_cmd_tx, sender_peer_id, None,
-            &channel_sync_request(&store, &sid, &cid, false),
-            super::olm_lane::NoSession::Queue,
-        );
+        match page_end {
+            Some(end) => super::olm_lane::carry(
+                ws_cmd_tx, sender_peer_id, None,
+                &channel_next_page_request(&store, &sid, &cid, end),
+                super::olm_lane::NoSession::Queue,
+            ),
+            None => hollow_log!("[HOLLOW-SYNC] Channel page for {cid} from {sender_peer_id} cannot advance; the next catch-up takes the rest"),
+        }
     }
     if has_more != Some(true) {
         let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
@@ -4086,4 +4216,141 @@ fn apply_sync_item_extras(
         }
     }
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> crate::storage::MessageStore {
+        crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store")
+    }
+
+    fn dm_item(ts: i64, edited_at: Option<i64>) -> DmSyncItem {
+        serde_json::from_value(serde_json::json!({ "t": "x", "ts": ts, "mine": true, "edited_at": edited_at })).unwrap()
+    }
+
+    fn channel_item(sender: &str, ts: i64) -> SyncMessageItem {
+        serde_json::from_value(serde_json::json!({ "s": sender, "t": "x", "ts": ts })).unwrap()
+    }
+
+    fn channel_row(store: &crate::storage::MessageStore, sender: &str, ts: i64, mid: &str) {
+        store
+            .insert_channel_message("srv", "ch", sender, "x", false, ts, Some("sig"), Some("pk"), Some(mid), None, None, None, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_dm_page_continues_from_its_own_end() {
+        let page: Vec<DmSyncItem> = [10, 11, 12, 12].into_iter().map(|ts| dm_item(ts, None)).collect();
+        assert_eq!(dm_next_page_since(&page, false), Some(12), "`>=` keeps the rows sharing the last timestamp");
+        assert_eq!(dm_next_page_since(&page, true), Some(11), "`>` starts a millisecond early to keep them");
+        assert_eq!(dm_next_page_since(&[], true), None);
+    }
+
+    #[test]
+    fn a_dm_page_its_next_ask_would_serve_again_stops_paging() {
+        let one_ms: Vec<DmSyncItem> = (0..200).map(|_| dm_item(50, None)).collect();
+        assert_eq!(dm_next_page_since(&one_ms, false), None, "one millisecond fills the page");
+        assert_eq!(dm_next_page_since(&one_ms, true), None, "one millisecond fills the page");
+        let edited_since: Vec<DmSyncItem> = (1..=5).map(|ts| dm_item(ts, Some(100))).collect();
+        assert_eq!(dm_next_page_since(&edited_since, false), None, "rows edited after the page's end qualify again");
+        let mut one_left: Vec<DmSyncItem> = (1..=5).map(|ts| dm_item(ts, Some(100))).collect();
+        one_left[0] = dm_item(1, Some(2));
+        assert_eq!(dm_next_page_since(&one_left, false), Some(5), "a row the next ask leaves out is progress");
+    }
+
+    #[test]
+    fn a_repeated_dm_page_is_asked_once_per_window() {
+        let mut asked = HashMap::new();
+        assert!(!dm_page_asked(&mut asked, "dev", "convo", 7));
+        assert!(dm_page_asked(&mut asked, "dev", "convo", 7), "the same page again");
+        assert!(!dm_page_asked(&mut asked, "dev", "convo", 8), "the next page");
+        assert!(!dm_page_asked(&mut asked, "dev", "other", 7), "another conversation");
+    }
+
+    #[test]
+    fn a_sibling_page_names_every_other_conversation_past_its_end() {
+        let store = store();
+        for convo in ["a", "b", "c"] {
+            store.insert(convo, "x", true, 1, None, None, Some(&format!("m-{convo}")), None, None, None, None).unwrap();
+        }
+        let HavenMessage::DmSiblingSyncRequest { per_convo_since, gaps } = sibling_next_page_request(&store, "b", 5) else {
+            panic!("a sibling ask");
+        };
+        let mut named = per_convo_since;
+        named.sort();
+        assert_eq!(named, vec![("a".into(), NOTHING_NEWER), ("b".into(), 5), ("c".into(), NOTHING_NEWER)]);
+        assert!(gaps.is_empty());
+        assert!(store.get_dm_messages_for_sibling("a", NOTHING_NEWER, 200).unwrap().is_empty(), "nothing is newer");
+    }
+
+    #[test]
+    fn a_channel_page_end_needs_two_timestamps() {
+        assert!(ChannelPageEnd::of(&[]).is_none());
+        let one_ms: Vec<SyncMessageItem> = (0..200).map(|_| channel_item("x", 9)).collect();
+        assert!(ChannelPageEnd::of(&one_ms).is_none(), "one millisecond fills the page");
+        assert!(ChannelPageEnd::of(&[channel_item("x", 8), channel_item("x", 9)]).is_some());
+    }
+
+    #[test]
+    fn the_next_channel_page_starts_every_sender_at_the_page_end() {
+        let store = store();
+        channel_row(&store, "known", 3, "m1");
+        // A live post far newer than the page: its sender's watermark is no cursor.
+        channel_row(&store, "live", 10_000_000, "m2");
+        let end = ChannelPageEnd::of(&[channel_item("live", 4), channel_item("paged", 6)]).unwrap();
+        let HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, .. } =
+            channel_next_page_request(&store, "srv", "ch", end)
+        else {
+            panic!("a channel ask");
+        };
+        assert_eq!(since_timestamp, 6);
+        let mut named: Vec<(String, i64)> = sender_timestamps.into_iter().collect();
+        named.sort();
+        assert_eq!(named, vec![("known".into(), 6), ("live".into(), 6), ("paged".into(), 6)]);
+        assert!(gap.is_none(), "the first page carried the digest");
+    }
+
+    #[test]
+    fn a_repeated_channel_ask_keys_the_same_and_the_next_page_does_not() {
+        let first = HashMap::from([("a".to_string(), 1), ("b".to_string(), 2)]);
+        let same = HashMap::from([("b".to_string(), 2), ("a".to_string(), 1)]);
+        let next = HashMap::from([("a".to_string(), 5), ("b".to_string(), 5)]);
+        let gap = GapDigest { from: 1, until: 2, days: Vec::new() };
+        assert_eq!(channel_sync_ask_key(0, &first, None), channel_sync_ask_key(0, &same, None));
+        assert_ne!(channel_sync_ask_key(0, &first, None), channel_sync_ask_key(0, &next, None));
+        assert_ne!(channel_sync_ask_key(0, &first, None), channel_sync_ask_key(0, &first, Some(&gap)));
+        assert_ne!(channel_sync_ask_key(0, &first, None), channel_sync_ask_key(1, &first, None));
+    }
+
+    #[test]
+    fn a_page_cut_by_its_limit_takes_no_gap_row_past_its_end() {
+        const DAY: i64 = 24 * 60 * 60 * 1000;
+        let base = 400 * DAY;
+        let store = store();
+        for i in 0..250 {
+            channel_row(&store, "tail", base + i, &format!("t{i}"));
+        }
+        // Behind their sender's watermark, so only the digest serves them: one before the
+        // tail's first page ends, one after it, a day apart from the tail's own day.
+        channel_row(&store, "behind", base - 10, "before-end");
+        channel_row(&store, "behind", base + DAY + 300, "past-end");
+        channel_row(&store, "behind", base + 5 * DAY, "watermark");
+        let watermarks = HashMap::from([("tail".to_string(), base), ("behind".to_string(), base + 5 * DAY)]);
+        // The requester holds the tail's day and lacks the two days around it.
+        let mut theirs = store.channel_gap_anchor("srv", "ch").expect("a digest window");
+        theirs.days.retain(|day| day.d == base / DAY);
+        assert_eq!(theirs.days.len(), 1);
+        let mids = |envelope: MessageEnvelope| -> Vec<String> {
+            let MessageEnvelope::ChannelSyncBatch { messages, has_more, .. } = envelope else { panic!("a batch") };
+            assert_eq!(has_more, Some(true));
+            messages.into_iter().filter_map(|m| m.mid).collect()
+        };
+        let (page, _) = build_channel_sync_batch(&store, "srv", "ch", 0, &watermarks, Some(&theirs)).unwrap();
+        let page = mids(page);
+        assert!(page.contains(&"before-end".to_string()), "a gap row inside the page stays");
+        assert!(!page.contains(&"past-end".to_string()), "a gap row past the page's end waits for the next page");
+        assert_eq!(page.iter().filter(|m| m.starts_with('t')).count(), 200);
+    }
 }

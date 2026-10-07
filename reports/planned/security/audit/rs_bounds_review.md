@@ -1,6 +1,6 @@
 # Resumable sessions: bounds, fairness and restart review
 
-Wave 2 of `reports/planned/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md`, the hostile review
+Wave 2 of `reports/shipped/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md`, the hostile review
 of what section 4 names "a stranger filling rings, a session flood from one address", on the
 merged relay at 4dfa2b10. Method: `SECURITY_AUDIT_PLAN.md` sections 2.7 and 3, a hostile
 test first for every attack, run on the VM (`relay-uws/test/run_tests.sh`, then

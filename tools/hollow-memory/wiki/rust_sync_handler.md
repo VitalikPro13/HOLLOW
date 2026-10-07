@@ -708,9 +708,7 @@ Flow per message in batch:
 3. If `file_meta` is present: insert via `store.insert_file_metadata()`, emit `NetworkEvent::FileHeaderReceived`
 4. If message has reactions: insert each via `store.add_reaction()`
 
-Pagination: If `has_more == Some(true)`:
-1. Query updated per-sender timestamps and latest timestamp from DB
-2. Send follow-up `MessageEnvelope::ChannelSyncReq` via MLS to request next batch
+Pagination: If `has_more == Some(true)`, the caller read `ChannelPageEnd::of(&messages)` before filtering, and the follow-up is `channel_next_page_request(&store, sid, cid, end)` carried over Olm: every sender we hold rows of and every sender in the page, from the page's last timestamp. Never our own per-sender watermarks (a live post moves them past unserved rows; their lookback keeps a busy page in place). A page sharing one timestamp sends no follow-up.
 
 Completion: When `has_more != Some(true)`, emit `NetworkEvent::MessageSyncCompleted { server_id, new_message_count }`
 

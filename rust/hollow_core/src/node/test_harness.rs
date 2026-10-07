@@ -27261,7 +27261,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // absence of a second repair (4.5 s).
     // 2026-10-07: the away-phone tests added five spawn staggers and three absence
     // proofs, a commit the backgrounded phone never makes across two batch ticks (21.0 s).
-    const BUDGET_MS: u64 = 746_350;
+    // 2026-10-07: the sibling-backfill paging and many-channel return tests added two
+    // spawn staggers (2.4 s).
+    const BUDGET_MS: u64 = 748_750;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -42439,4 +42441,406 @@ async fn a_flood_past_the_bucket_costs_one_repair_after_it_stops() {
     sleep_ms(1500).await;
     assert_eq!(sync_asks_to(&b, &a_dev).await.0, before + 1, "one repair per flood, not one per frame");
     drop(a);
+}
+
+// ---------------------------------------------------------------------------
+// Sync pagination continues from where the page ended (RESUMABLE_SESSIONS_PLAN.md
+// 11.5): a row that arrives while a sync pages never moves the next page past rows
+// the responder has not served yet.
+// ---------------------------------------------------------------------------
+
+/// `rows` DM rows, `(ts, mid)` each, signed by `signer_tag`'s master as the send path
+/// signs them, into `store` in one transaction; see [`plant_signed_dm`].
+fn plant_signed_dm_rows(
+    store: &crate::storage::MessageStore,
+    signer_tag: u8,
+    recipient_master: &str,
+    convo: &str,
+    is_mine: bool,
+    rows: &[(i64, String)],
+) {
+    use base64::Engine as _;
+    let kp = tag_kp(signer_tag);
+    let pk_b64 = base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf());
+    store.begin_transaction().expect("begin");
+    for (ts, mid) in rows {
+        let text = format!("paged {mid}");
+        let extras = super::crypto_handler::SignedExtras { mid: Some(mid), order_us: Some(ts * 1000), ..Default::default() };
+        let (sig, pk) = super::crypto_handler::sign_message_versioned(
+            &kp, &pk_b64, "dm", recipient_master, &kp.peer_id(), *ts, &extras, &text,
+        );
+        store
+            .insert(convo, &text, is_mine, *ts, sig.as_deref(), pk.as_deref(), Some(mid), None, None, Some(ts * 1000), None)
+            .expect("plant dm row");
+    }
+    store.commit_transaction().expect("commit");
+}
+
+/// `rows` channel posts, `(ts, mid)` each, signed by `signer_tag`'s master, into
+/// `store` in one transaction; see [`plant_signed_channel_row`].
+fn plant_signed_channel_rows(
+    store: &crate::storage::MessageStore,
+    signer_tag: u8,
+    server_id: &str,
+    channel_id: &str,
+    rows: &[(i64, String)],
+) {
+    store.begin_transaction().expect("begin");
+    for (ts, mid) in rows {
+        plant_signed_channel_row(store, signer_tag, server_id, channel_id, true, *ts, mid, &format!("paged {mid}"));
+    }
+    store.commit_transaction().expect("commit");
+}
+
+/// `msg` as the Olm lane carries it.
+fn carried(msg: super::types::HavenMessage) -> super::types::MessageEnvelope {
+    super::types::MessageEnvelope::Carried { msg: Box::new(msg), at_ms: super::frame_auth::now_ms() }
+}
+
+/// Wait until the relay holds at least `n` direct frames from `from` to `to`.
+async fn expect_held(relay: &MockRelay, from: &str, to: &str, n: usize, what: &str) {
+    assert!(
+        wait_until(15, async || relay.held_kinds(from, to).len() >= n).await,
+        "{what}: the relay holds {:?} from {from} for {to}",
+        relay.held_kinds(from, to),
+    );
+}
+
+/// A's first DM page reaches B behind a live DM newer than every row A still has to
+/// serve: the next page starts where the page ended, and B ends with every row
+/// without another sync.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_dm_sync_page_continues_past_a_dm_that_arrived_while_paging() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const A: u8 = 150;
+    let (a, mut b) = session_friend_pair(&relay, A, 152).await;
+
+    const ROWS: i64 = 450;
+    let start = super::types::now_ms() - 2 * 60 * 60 * 1000;
+    let rows: Vec<(i64, String)> = (0..ROWS).map(|i| (start + i * 1000, format!("paged-{i}"))).collect();
+    plant_signed_dm_rows(&a.store(), A, &b.master_id, &b.master_id, true, &rows);
+
+    // The live DM and A's first page wait at the relay in that order, so B stores the
+    // live DM, newer than every planted row, before it reads the page.
+    relay.hold_direct(&a.device_id, &b.device_id);
+    a.cmd_tx
+        .send(NodeCommand::SendMessage { peer_id: b.master_id.clone(), text: "live while paging".into(), message_id: "live-while-paging".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    expect_held(&relay, &a.device_id, &b.device_id, 1, "the live DM").await;
+    let ask = super::types::HavenMessage::DmSyncRequest { since_timestamp: 0, both_directions: true, gap: None };
+    send_envelope_as(&b, &a, &carried(ask)).await;
+    expect_held(&relay, &a.device_id, &b.device_id, 2, "the first page").await;
+    relay.release_held(&a.device_id, &b.device_id);
+
+    let mut ids: Vec<String> = rows.iter().map(|(_, mid)| mid.clone()).collect();
+    ids.push("live-while-paging".into());
+    let a_master = a.master_id.clone();
+    let missing = expect_dms(&mut b, &a_master, &ids, 30).await;
+    assert_eq!(missing, 0, "{missing} of {} DMs never reached B: a page restarted past rows A had not served", ids.len());
+    let last_row = start + (ROWS - 1) * 1000;
+    let follow_ups: Vec<i64> = b
+        .carried_to(&a.device_id)
+        .await
+        .into_iter()
+        .filter_map(|m| match m {
+            super::types::HavenMessage::DmSyncRequest { since_timestamp, .. } if since_timestamp > 0 => Some(since_timestamp),
+            _ => None,
+        })
+        .collect();
+    assert!(!follow_ups.is_empty(), "B never asked for a second page");
+    assert!(follow_ups.iter().all(|since| *since <= last_row), "a page started past the rows A had not served: {follow_ups:?}");
+}
+
+/// O's first channel page reaches J after a live post from O: the next page starts
+/// where the page ended, for every sender, and J ends with every post.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_channel_sync_page_continues_past_a_post_that_arrived_while_paging() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 154;
+    let (o, mut j, server_id) = session_server_pair(&relay, O, 156).await;
+    let general = general_channel_of(&server_id);
+
+    // Inside the server's life (backfill refuses a post from before its author was a
+    // member), each at its own millisecond, all older than the live post.
+    let founded = o
+        .live_server_state(&server_id)
+        .await
+        .and_then(|s| s.op_log.iter().map(|op| op.hlc.physical_ms as i64).min())
+        .expect("the owner holds its server");
+    const ROWS: i64 = 450;
+    let rows: Vec<(i64, String)> = (0..ROWS).map(|i| (founded + 1 + i, format!("ch-paged-{i}"))).collect();
+    assert!(
+        wait_until(5, async || founded + ROWS < super::types::now_ms()).await,
+        "the server is older than the rows planted in it",
+    );
+    plant_signed_channel_rows(&o.store(), O, &server_id, &general, &rows);
+
+    relay.hold_direct(&o.device_id, &j.device_id);
+    // Not J's join-time ask, and asked again until answered: O used to answer one ask
+    // from J per channel and two seconds.
+    let ask = super::types::HavenMessage::ChannelSyncRequest {
+        server_id: server_id.clone(),
+        channel_id: general.clone(),
+        since_timestamp: 1,
+        sender_timestamps: HashMap::new(),
+        gap: None,
+    };
+    let mut answered = false;
+    for _ in 0..4 {
+        send_envelope_as(&j, &o, &carried(ask.clone())).await;
+        answered = wait_until(3, async || !relay.held_kinds(&o.device_id, &j.device_id).is_empty()).await;
+        if answered {
+            break;
+        }
+    }
+    assert!(answered, "O never answered J's ask");
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), text: "live while paging".into(), message_id: "ch-live-while-paging".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || {
+            drain_events(&mut j);
+            j.channel_messages(&server_id, &general).iter().any(|m| m.text == "live while paging")
+        })
+        .await,
+        "J takes O's live post",
+    );
+    relay.release_held(&o.device_id, &j.device_id);
+
+    let missing = |j: &TestNode| {
+        let held: HashSet<String> = j.channel_messages(&server_id, &general).into_iter().map(|m| m.text).collect();
+        rows.iter().filter(|(_, mid)| !held.contains(&format!("paged {mid}"))).count()
+    };
+    let mut left = rows.len();
+    wait_until(30, async || {
+        drain_events(&mut j);
+        left = missing(&j);
+        left == 0
+    })
+    .await;
+    assert_eq!(left, 0, "{left} of {ROWS} posts never reached J: a page restarted past rows O had not served");
+}
+
+/// D2 backfills two long conversations from its sibling D1 while a friend's live DM
+/// lands in one of them: each conversation pages from where its page ended, a page
+/// of one never fetches the other again, and the paging stops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_sibling_backfill_pages_each_conversation_once_past_a_live_dm() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const F: u8 = 160;
+    const M: u8 = 161;
+    const D1: u8 = 162;
+    const D2: u8 = 163;
+    const G: u8 = 164;
+    let (f_master, m_master, g_master) = (tag_kp(F).peer_id(), tag_kp(M).peer_id(), tag_kp(G).peer_id());
+    let (d1, d2) = (tag_kp(D1).peer_id(), tag_kp(D2).peer_id());
+    super::resolver::seed_self(&m_master, &[d1.clone(), d2.clone()]);
+    super::resolver::update_many(&m_master, [d1.as_str(), d2.as_str()]);
+    let f = spawn_node_with_friends(&relay, F, F, &[&m_master]).await;
+    sleep_ms(1200).await; // spawn stagger, as in the sibling DM gap test
+    let mut n1 = spawn_node_full(&relay, M, D1, &[&f_master], Some(&[D1, D2])).await;
+    let mut n2 = spawn_node_full(&relay, M, D2, &[&f_master], Some(&[D1, D2])).await;
+    expect_dm_pair_ready(&relay, &f, &n1, 15).await;
+    expect_dm_pair_ready(&relay, &f, &n2, 15).await;
+    expect_siblings_ready(&relay, &n1, &n2, 15).await;
+
+    const ROWS: i64 = 450;
+    let start = super::types::now_ms() - 2 * 60 * 60 * 1000;
+    let rows = |tag: &str| -> Vec<(i64, String)> { (0..ROWS).map(|i| (start + i * 1000, format!("sib-{tag}-{i}"))).collect() };
+    let (f_rows, g_rows) = (rows("f"), rows("g"));
+    plant_signed_dm_rows(&n1.store(), M, &f_master, &f_master, true, &f_rows);
+    plant_signed_dm_rows(&n1.store(), M, &g_master, &g_master, true, &g_rows);
+
+    // D1's first pages wait at the relay while the friend's live DM, newer than every
+    // planted row, reaches D2.
+    relay.hold_direct(&n1.device_id, &n2.device_id);
+    let ask = super::types::HavenMessage::DmSiblingSyncRequest { per_convo_since: Vec::new(), gaps: HashMap::new() };
+    send_envelope_as(&n2, &n1, &carried(ask)).await;
+    expect_held(&relay, &n1.device_id, &n2.device_id, 2, "both first pages").await;
+    f.cmd_tx
+        .send(NodeCommand::SendMessage { peer_id: m_master.clone(), text: "live while paging".into(), message_id: "sib-live".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    assert!(wait_until(15, async || n2.store().dm_message_exists("sib-live")).await, "D2 takes the friend's live DM");
+    relay.release_held(&n1.device_id, &n2.device_id);
+
+    let mut f_ids: Vec<String> = f_rows.iter().map(|(_, mid)| mid.clone()).collect();
+    f_ids.push("sib-live".into());
+    let g_ids: Vec<String> = g_rows.iter().map(|(_, mid)| mid.clone()).collect();
+    let missing_f = expect_dms(&mut n2, &f_master, &f_ids, 30).await;
+    let missing_g = expect_dms(&mut n2, &g_master, &g_ids, 30).await;
+    assert_eq!((missing_f, missing_g), (0, 0), "rows never reached D2 from its sibling (friend's conversation, the other)");
+
+    // Paging is over: another round trip each way asks nothing more.
+    let d1_dev = n1.device_id.clone();
+    let sibling_asks = async |n2: &TestNode| -> Vec<Vec<(String, i64)>> {
+        n2.carried_to(&d1_dev)
+            .await
+            .into_iter()
+            .filter_map(|m| match m {
+                super::types::HavenMessage::DmSiblingSyncRequest { per_convo_since, .. } => Some(per_convo_since),
+                _ => None,
+            })
+            .collect()
+    };
+    let asked = sibling_asks(&n2).await;
+    settle_round_trip(&relay, &mut n2, &mut n1, "paged").await;
+    settle_round_trip(&relay, &mut n2, &mut n1, "paged-again").await;
+    let asked_after = sibling_asks(&n2).await;
+    assert_eq!(asked_after.len(), asked.len(), "D2 kept asking D1 after every row came: {asked_after:?}");
+    let follow_ups: Vec<&Vec<(String, i64)>> = asked.iter().filter(|named| !named.is_empty()).collect();
+    assert!(follow_ups.len() <= 6, "{} follow-up asks for two conversations of three pages each", follow_ups.len());
+    let last = follow_ups.last().expect("D2 asked for a second page");
+    for convo in [&f_master, &g_master] {
+        assert!(last.iter().any(|(c, _)| c == convo), "a follow-up left {convo} out, so D1 served it again from its start: {last:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The bulk a return sets off is paced to the receiver's bucket (RESUMABLE_SESSIONS_PLAN.md
+// 11.5): our per-server and per-channel asks and our answers to its channel asks.
+// ---------------------------------------------------------------------------
+
+/// How many channel sync asks `node` aimed at `device`.
+async fn channel_asks_to(node: &TestNode, device: &str) -> usize {
+    node.carried_to(device)
+        .await
+        .iter()
+        .filter(|m| matches!(m, super::types::HavenMessage::ChannelSyncRequest { .. }))
+        .count()
+}
+
+/// J comes back on a fresh session to a server of many channels, with the bucket it
+/// holds for O paused: O's asks (a server sync and one ask per channel) and its answers
+/// to J's own asks (one per channel) stay inside that bucket, and every post J missed
+/// still arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_return_to_a_server_of_many_channels_stays_inside_the_bucket() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 166;
+    const J: u8 = 170;
+    let mut o = spawn_node_with_friends(&relay, O, O + 1, &[&tag_kp(J).peer_id()]).await;
+    sleep_ms(1200).await; // spawn stagger, as every pair here
+    let mut j = spawn_node_with_friends(&relay, J, J + 1, &[&tag_kp(O).peer_id()]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 20).await;
+
+    // The channels come before J joins, so its join takes them in one snapshot.
+    let server_id = create_server_and_wait(&mut o, "Many Channels").await;
+    const CHANNELS: usize = 60;
+    for i in 0..CHANNELS {
+        o.cmd_tx
+            .send(NodeCommand::CreateChannel {
+                server_id: server_id.clone(),
+                channel_id: crate::node::new_channel_id(&server_id),
+                name: format!("many-{i}"),
+                category: None,
+                channel_type: "text".into(),
+            })
+            .await
+            .unwrap();
+    }
+    assert!(
+        wait_until(15, async || {
+            drain_events(&mut o);
+            o.live_server_state(&server_id).await.is_some_and(|s| s.channels.len() > CHANNELS)
+        })
+        .await,
+        "O makes its channels",
+    );
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut j, &server_id, 20).await, "J joins");
+    expect_mls_group(&[&o, &j], &server_id, 30).await;
+    let state = o.live_server_state(&server_id).await.expect("O holds its server");
+    let text_channels: Vec<String> = state
+        .channels
+        .iter()
+        .filter(|(_, c)| c.channel_type == crate::crdt::server_state::ChannelType::Text)
+        .map(|(cid, _)| cid.clone())
+        .collect();
+    // The join's own channel sync is over before the return: one finished sync per channel.
+    let mut synced = 0;
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(40), |ev| {
+            if matches!(ev, NetworkEvent::MessageSyncCompleted { server_id: sid, .. } if *sid == server_id) {
+                synced += 1;
+            }
+            synced >= text_channels.len()
+        })
+        .await,
+        "J's join synced {synced} of {} channels",
+        text_channels.len(),
+    );
+
+    // A post in every channel that J never had.
+    let now = super::types::now_ms();
+    {
+        let store = o.store();
+        store.begin_transaction().unwrap();
+        for (i, cid) in text_channels.iter().enumerate() {
+            plant_signed_channel_row(&store, O, &server_id, cid, true, now - 1_000 + i as i64, &format!("missed-{i}"), &format!("missed post {i}"));
+        }
+        store.commit_transaction().unwrap();
+    }
+
+    relay.suspend(&j.device_id);
+    assert!(wait_until(10, async || !o.sees_peer(&j.device_id).await).await, "O sees J leave");
+    relay.expire_session(&j.device_id);
+    let dropped_before = j.rate_dropped_from(&o.device_id).await.expect("J answers");
+    let (o_asked, j_asked) = (channel_asks_to(&o, &j.device_id).await, channel_asks_to(&j, &o.device_id).await);
+    super::frame_budget::pause_refill(&o.device_id, true);
+    relay.resume(&j.device_id);
+    let (ok, seen) = relay_status_until(&mut j, 20, |ev| matches!(ev, NetworkEvent::RelayConnected)).await;
+    assert!(ok && seen.contains(&"disconnected"), "past grace J starts a fresh session, saw {seen:?}");
+    // Both sides have asked about every channel, and what went out at once was handled.
+    assert!(
+        wait_until(20, async || {
+            drain_events(&mut o);
+            drain_events(&mut j);
+            channel_asks_to(&o, &j.device_id).await >= o_asked + text_channels.len()
+                && channel_asks_to(&j, &o.device_id).await >= j_asked + text_channels.len()
+        })
+        .await,
+        "the return never asked about every channel both ways",
+    );
+    settle_round_trip(&relay, &mut j, &mut o, "return").await;
+    let dropped = j.rate_dropped_from(&o.device_id).await.expect("J answers") - dropped_before;
+    super::frame_budget::pause_refill(&o.device_id, false);
+    assert_eq!(dropped, 0, "J's rate limit dropped {dropped} frames of O's catch-up inside the bucket it held for O");
+
+    let missing = |j: &TestNode| -> usize {
+        (0..text_channels.len())
+            .filter(|i| {
+                let cid = &text_channels[*i];
+                !j.channel_messages(&server_id, cid).iter().any(|m| m.text == format!("missed post {i}"))
+            })
+            .count()
+    };
+    let mut left = text_channels.len();
+    wait_until(60, async || {
+        drain_events(&mut o);
+        drain_events(&mut j);
+        left = missing(&j);
+        left == 0
+    })
+    .await;
+    assert_eq!(left, 0, "{left} of {} channels never brought J the post it missed", text_channels.len());
+    assert_eq!(j.rate_dropped_from(&o.device_id).await, Some(dropped_before), "J's rate limit dropped frames of O's paced catch-up");
 }

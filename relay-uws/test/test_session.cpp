@@ -276,6 +276,18 @@ int main() {
         check("an empty ring missing frames is refused", !Ring::restore(7, 5, {}));
     }
 
+    // A fetch socket reads a room's grace DMs once, and the rooms of at most FETCH_READ_ROOMS.
+    {
+        session::FetchReads reads;
+        check("a fetch socket's first read of a room goes ahead", reads.first("room-0"));
+        check("its second does not", !reads.first("room-0"));
+        bool each = true;
+        for (size_t i = 1; i < session::FETCH_READ_ROOMS; i++) each = reads.first("room-" + std::to_string(i)) && each;
+        check("every other room up to the bound reads once", each && reads.size() == session::FETCH_READ_ROOMS);
+        check("a room past the bound reads nothing", !reads.first("room-past") && reads.size() == session::FETCH_READ_ROOMS);
+        check("nor does one read already", !reads.first("room-0") && !reads.first("room-1"));
+    }
+
     if (failures) {
         printf("%d FAILED\n", failures);
         return 1;

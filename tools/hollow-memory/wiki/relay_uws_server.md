@@ -128,7 +128,7 @@ Binary name: `hollow-relay`
 
 A device's session outlives its socket: both sides count the stream frames they handled, the relay
 keeps every frame it sent until the device acks it, and a socket that dies mid-write costs a resume,
-not a loss. Spec: `reports/planned/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md` section 9 (the wire,
+not a loss. Spec: `reports/shipped/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md` section 9 (the wire,
 binding) and section 11 (as built). Client half: `rust_networking.md`, ws_client.rs. Files:
 `session.h` (constants, the counted-frame classification, sid shape and constant-time `sid_equal`,
 `Ring`, `Session`), `session_bounds.h` (the hooks seam), `session_snapshot.h` (restart),
@@ -170,7 +170,15 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   receiver dedups by message id). A fetch socket that JOINS a room while its own device's session
   is in grace also gets that room's ring DMs (`Direct`, `DirectImage`; an inbox only once proved),
   uncounted and left in the ring (`replay_grace_directs`), so a push-woken NSE or fetch node shows
-  the text during grace instead of a name-only banner.
+  the text during grace instead of a name-only banner. **Once per socket and room**
+  (`PerSocketData::grace_reads`, a `session::FetchReads`): the record survives a leave and holds
+  at most `FETCH_READ_ROOMS` (64) rooms, past which the socket reads no further room; a leave and
+  a re-join cost a few bytes and used to buy up to 8 MiB of ring each time (AR-36 item 2). A room
+  is recorded only when the session is in grace, so a join made before the grace keeps its read,
+  and every ring frame reaches one fetch socket at most once this way. The next push wake opens a
+  fresh socket, which reads once again (`node/fetch.rs` joins one room per socket). Tests:
+  `hs_fetch_reads_grace_once` (`RELAY_LIVE_ONLY=fetch_grace` runs the fetch-in-grace cases alone)
+  and `test_session.cpp`.
 - **Send-site classification** (every relay-to-client write is one of these):
   - `send_stream(ws, bytes, binary, Meta)`: a stream frame. On a live session's socket it enters
     the ring (`ring_in` -> `session_bounds::ring_push`) BEFORE `write_raw`. Every forwarded frame
@@ -415,6 +423,7 @@ Attached to every WebSocket via uWebSockets' templated user data. Fields:
 | `binary_frames_this_minute` | `uint32_t` | Guest rate limit counter (reset every 60s) |
 | `minute_window_start` | `steady_clock::time_point` | Start of current rate limit window |
 | `hidden`, `next_presence_pass`, `presence_pass_queued` | `bool`, `steady_clock::time_point`, `bool` | The device's rooms were told it left (session `inactive`, decision 6); when this socket's next presence pass may run and whether one waits (`presence_due`) |
+| `fetch_rooms`, `grace_reads` | `unordered_set<string>`, `session::FetchReads` | A fetch socket's room slots (a leave takes one out), and the rooms it read its device's grace ring DMs for (kept past a leave, at most 64) |
 
 ### IpState (per-IP connection tracking)
 

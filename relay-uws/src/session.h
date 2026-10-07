@@ -472,6 +472,26 @@ struct Session {
     }
 };
 
+// A fetch socket reads the grace ring DMs of at most this many rooms; a push isolate joins one
+// (node/fetch.rs).
+static constexpr size_t FETCH_READ_ROOMS = 64;
+
+// The rooms one fetch socket has read a session's grace ring DMs for (replay_grace_directs).
+// Each room once: a leave and a join cost a few bytes, the ring up to RING_MAX_BYTES. What a
+// socket does not read waits in the ring for the resume or the expiry hand-off.
+class FetchReads {
+public:
+    // True the first time `room` is asked for, while fewer than FETCH_READ_ROOMS were read.
+    bool first(const std::string& room) {
+        if (rooms_.size() >= FETCH_READ_ROOMS) return false;
+        return rooms_.insert(room).second;
+    }
+    size_t size() const { return rooms_.size(); }
+
+private:
+    std::unordered_set<std::string> rooms_;
+};
+
 // Which session gives way when the session table is full, and which grace slot when an
 // address is (session_bounds.h): kept beside RelayState::sessions as they change, so
 // neither choice walks the table. At 262,144 sessions a walk costs tens of milliseconds

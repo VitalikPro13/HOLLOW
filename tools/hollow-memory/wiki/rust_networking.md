@@ -12,7 +12,7 @@ acks, the outbound queue, liveness, backoff, the v3 auth bytes; every rule unit-
 it instants), `node/ws_client_wire_tests.rs` (the client against an in-process relay speaking the
 section 9 wire: zombie windows, failed resumes, make before break, suspend, drain, door proofs) and
 `node/resume_e2e.rs` (ignored test: the real client against the real relay through the zombie
-proxy, run by `scripts/resume_e2e.sh`). Spec: `reports/planned/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md`
+proxy, run by `scripts/resume_e2e.sh`). Spec: `reports/shipped/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md`
 section 9 (the wire) and section 11 (as built). Relay half: `relay_uws_server.md`, "Resumable
 sessions".
 

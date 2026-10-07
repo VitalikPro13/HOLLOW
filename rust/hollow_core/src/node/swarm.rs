@@ -679,8 +679,6 @@ async fn run_event_loop(
     let master_peer_str = local_peer_str.clone();
     crypto_handler::bind_olm_identity(&mut olm, &device_keypair);
     let (ws_cmd_tx, mut carry_rx) = super::frame_auth::spawn_sealer(device_keypair.clone(), ws_cmd_tx);
-    #[cfg(test)]
-    let mut carry_log: Vec<(String, String)> = Vec::new();
     let mut frame_replays = super::frame_auth::ReplayGuard::default();
 
     // Decrypt-failure cooldown per peer: prevents session thrashing when many
@@ -1523,7 +1521,7 @@ async fn run_event_loop(
             Some((carry, done)) = carry_rx.recv(), if super::olm_lane::carry_lane_open(&device_peer_id) => {
                 if let super::ws_client::WsCommand::Carry { device, room, json, no_session, ticket } = carry {
                     #[cfg(test)]
-                    carry_log.push((device.clone(), json.clone()));
+                    frame_budget.note_carried(&device, &json);
                     let frames = super::olm_lane::OlmLane::new(
                         &mut olm, &crypto_store, &ws_room_peers,
                         &mut pending_messages, &mut key_request_in_flight, &device_keypair, &device_peer_id,
@@ -3499,7 +3497,7 @@ async fn run_event_loop(
                             peers.extend(set.iter().cloned());
                         }
                         snap.room_peers = peers.into_iter().collect();
-                        snap.carried = carry_log.clone();
+                        snap.carried = frame_budget.carried();
                         snap.olm_one_time_keys = olm.stored_one_time_key_count();
                         snap.pending_asks = pending_server_joins
                             .iter()
@@ -3703,7 +3701,7 @@ async fn run_event_loop(
                             Box::pin(sync_handler::repair_after_gap(
                                 &ws_cmd_tx, &crdt_store, &server_states, &ws_room_peers,
                                 &pending_server_joins, &mut relay_catchup_done, &mut join_hold,
-                                &|room: &str| door_rooms.is_hidden(room), &mut sync_coordinator,
+                                &|room: &str| door_rooms.is_hidden(room), &mut sync_coordinator, &mut frame_budget,
                                 mls.as_ref(), &master_keypair, &local_peer_str, &db_path, &db_passphrase,
                             ))
                             .await;
@@ -4084,15 +4082,16 @@ async fn run_event_loop(
 
                                     // CRDT sync and message sync for shared servers. Members are master-keyed and
                                     // `peer_id` is a DEVICE, so match by identity: a multi-device member's device
-                                    // still triggers sync and MLS bootstrap.
+                                    // still triggers sync and MLS bootstrap. One or two asks per server: paced,
+                                    // as a member of many servers would overrun the peer's bucket.
                                     for (sid, state) in server_states.iter() {
                                         if state.members.keys().any(|k| super::resolver::same_identity(&peer_id, k)) {
                                             let our_vector = StateVector::from_server_state(state);
                                             if let Ok(sv_json) = serde_json::to_string(&our_vector) {
                                                 // Olm, never MLS, for the post-reconnection SyncReq:
                                                 // the peer's MLS epoch may be stale, causing silent decrypt failure.
-                                                super::olm_lane::carry(
-                                                    &ws_cmd_tx, &peer_id, None,
+                                                super::frame_budget::pace_carried(
+                                                    &mut frame_budget, &ws_cmd_tx, &device_peer_id, &peer_id,
                                                     &HavenMessage::SyncRequest {
                                                         server_id: sid.clone(),
                                                         state_vector_json: sv_json,
@@ -4101,7 +4100,6 @@ async fn run_event_loop(
                                                         mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
                                                         nonce: Some(join_hold.ask()),
                                                     },
-                                                    super::olm_lane::NoSession::Queue,
                                                 );
                                             }
 
@@ -4127,9 +4125,9 @@ async fn run_event_loop(
                                                     let mls_members = mls_mgr.group_members(sid);
                                                     if !mls_members.contains(&peer_id) {
                                                         if is_mls_coordinator(mls_mgr, sid, &local_peer_str, &ws_room_peers) {
-                                                            send_message_to_peer(
-                                                                &ws_cmd_tx, &ws_room_peers,
-                                                                &peer_id, HavenMessage::MlsKeyPackageRequest {
+                                                            super::frame_budget::pace_plain(
+                                                                &mut frame_budget, &ws_cmd_tx, &ws_room_peers, &device_peer_id,
+                                                                &peer_id, &HavenMessage::MlsKeyPackageRequest {
                                                                     server_id: sid.clone(),
                                                                     channel_id: None,
                                                                 },
@@ -4142,8 +4140,8 @@ async fn run_event_loop(
                                                     hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {peer_id} for bootstrap (PeerJoined)");
                                                     if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, &crypto_store, sid, false) {
                                                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                        crate::node::crypto_handler::send_key_package_to_identity_of(
-                                                            &ws_cmd_tx, &ws_room_peers,
+                                                        super::frame_budget::pace_plain_to_identity_of(
+                                                            &mut frame_budget, &ws_cmd_tx, &ws_room_peers, &device_peer_id,
                                                             &peer_id, &HavenMessage::MlsKeyPackage {
                                                                 server_id: sid.clone(),
                                                                 key_package: kp_b64,
@@ -4638,8 +4636,9 @@ async fn run_event_loop(
                                     for (sid, state) in server_states.iter() {
                                         if state.is_member(pid_str) {
                                             if let Some(sv_json) = sv_cache.get(sid.as_str()) {
-                                                super::olm_lane::carry(
-                                                    &ws_cmd_tx, pid_str, None,
+                                                // Paced like the PeerJoined twin.
+                                                super::frame_budget::pace_carried(
+                                                    &mut frame_budget, &ws_cmd_tx, &device_peer_id, pid_str,
                                                     &HavenMessage::SyncRequest {
                                                         server_id: sid.clone(),
                                                         state_vector_json: sv_json.clone(),
@@ -4648,7 +4647,6 @@ async fn run_event_loop(
                                                         mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
                                                         nonce: Some(join_hold.ask()),
                                                     },
-                                                    super::olm_lane::NoSession::Queue,
                                                 );
                                             }
 
@@ -4683,8 +4681,8 @@ async fn run_event_loop(
                                             hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {pid_str} for bootstrap (RoomMembers)");
                                             if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, &crypto_store, sid, false) {
                                                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                crate::node::crypto_handler::send_key_package_to_identity_of(
-                                                    &ws_cmd_tx, &ws_room_peers,
+                                                super::frame_budget::pace_plain_to_identity_of(
+                                                    &mut frame_budget, &ws_cmd_tx, &ws_room_peers, &device_peer_id,
                                                     pid_str, &HavenMessage::MlsKeyPackage {
                                                         server_id: sid.clone(),
                                                         key_package: kp_b64,
@@ -6118,7 +6116,9 @@ async fn run_event_loop(
                                     gap: None,
                                 },
                             };
-                            super::olm_lane::carry(&ws_cmd_tx, &peer_str, None, &request, super::olm_lane::NoSession::Queue);
+                            // One ask per channel: paced, as a server of many channels would
+                            // overrun the peer's bucket.
+                            super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &peer_str, &request);
                         }
                     }
 
@@ -6137,7 +6137,7 @@ async fn run_event_loop(
                 for (peer, lost) in frame_budget.limiter.due_repairs(now) {
                     let (servers, dm) = Box::pin(sync_handler::repair_after_drops(
                         &peer, &ws_cmd_tx, &server_states, &ws_room_peers, &join_hold, &mut sync_coordinator,
-                        mls.as_ref(), &local_peer_str, &db_path, &db_passphrase,
+                        &mut frame_budget, mls.as_ref(), &local_peer_str, &db_path, &db_passphrase,
                     ))
                     .await;
                     hollow_log!("[HOLLOW-SECURITY] Rate limited WS peer {peer}: {lost} frame(s) dropped, asked again ({servers} server(s), DM history: {dm})");
@@ -8016,6 +8016,7 @@ async fn handle_incoming_request(
                     if !crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), peer_str, &cid) {
                         return;
                     }
+                    let page_end = if has_more == Some(true) { super::sync_handler::ChannelPageEnd::of(&messages) } else { None };
                     crypto_handler::backfill_filter(server_states.get(&sid), &mut messages);
                     let local_peer = local_peer_str.to_string();
                     let mut new_count = 0u32;
@@ -8035,15 +8036,18 @@ async fn handle_incoming_request(
                         }
                         let _ = store.commit_transaction();
 
-                        // Pagination: if has_more, send a follow-up ChannelSyncRequest
-                        // with updated per-sender timestamps from our DB.
                         if has_more == Some(true) {
-                            hollow_log!("[HOLLOW-SYNC] Requesting next page for {cid} in {sid}");
-                            super::olm_lane::carry(
-                                ws_cmd_tx, peer_str, None,
-                                &super::sync_handler::channel_sync_request(&store, &sid, &cid, false),
-                                super::olm_lane::NoSession::Queue,
-                            );
+                            match page_end {
+                                Some(end) => {
+                                    hollow_log!("[HOLLOW-SYNC] Requesting next page for {cid} in {sid}");
+                                    super::olm_lane::carry(
+                                        ws_cmd_tx, peer_str, None,
+                                        &super::sync_handler::channel_next_page_request(&store, &sid, &cid, end),
+                                        super::olm_lane::NoSession::Queue,
+                                    );
+                                }
+                                None => hollow_log!("[HOLLOW-SYNC] Channel page for {cid} from {peer_str} cannot advance; the next catch-up takes the rest"),
+                            }
                         }
                     }
 
@@ -8417,23 +8421,22 @@ async fn handle_incoming_request(
                         if has_more == Some(true) {
                             let multi_device =
                                 !super::resolver::devices_for(master_peer_str).is_empty();
-                            let since = if multi_device {
-                                store.get_latest_dm_timestamp_any(&convo_peer)
-                            } else {
-                                store.get_latest_dm_timestamp(&convo_peer)
+                            match super::sync_handler::dm_next_page_since(&messages, multi_device) {
+                                Some(since) if !super::sync_handler::dm_page_asked(channel_sync_sent, peer_str, &convo_peer, since) => {
+                                    hollow_log!("[HOLLOW-SYNC] Requesting next DM page from {peer_str} since {since} (both_directions={multi_device})");
+                                    super::olm_lane::carry(
+                                        ws_cmd_tx, peer_str, None,
+                                        &HavenMessage::DmSyncRequest {
+                                            since_timestamp: since,
+                                            both_directions: multi_device,
+                                            gap: None,
+                                        },
+                                        super::olm_lane::NoSession::Queue,
+                                    );
+                                }
+                                Some(_) => {}
+                                None => hollow_log!("[HOLLOW-SYNC] DM page from {peer_str} cannot advance; the next catch-up takes the rest"),
                             }
-                            .unwrap_or(None)
-                            .unwrap_or(0);
-                            hollow_log!("[HOLLOW-SYNC] Requesting next DM page from {peer_str} since {since} (both_directions={multi_device})");
-                            super::olm_lane::carry(
-                                ws_cmd_tx, peer_str, None,
-                                &HavenMessage::DmSyncRequest {
-                                    since_timestamp: since,
-                                    both_directions: multi_device,
-                                    gap: None,
-                                },
-                                super::olm_lane::NoSession::Queue,
-                            );
                         }
                     }
 
@@ -8648,21 +8651,20 @@ async fn handle_incoming_request(
                         }
                         let _ = store.commit_transaction();
 
-                        // Pagination: this convo has more — re-request it from the new high-water.
+                        // Pagination: this convo has more, from where the page ended.
                         if has_more == Some(true) {
-                            let since = store
-                                .get_latest_dm_timestamp_any(&convo_peer)
-                                .unwrap_or(None)
-                                .unwrap_or(0);
-                            hollow_log!("[HOLLOW-SYNC] Requesting next sibling DM page for {convo_peer} from {peer_str} since {since}");
-                            super::olm_lane::carry(
-                                ws_cmd_tx, peer_str, None,
-                                &HavenMessage::DmSiblingSyncRequest {
-                                    per_convo_since: vec![(convo_peer.clone(), since)],
-                                    gaps: HashMap::new(),
-                                },
-                                super::olm_lane::NoSession::Queue,
-                            );
+                            match super::sync_handler::dm_next_page_since(&messages, true) {
+                                Some(since) if !super::sync_handler::dm_page_asked(channel_sync_sent, peer_str, &convo_peer, since) => {
+                                    hollow_log!("[HOLLOW-SYNC] Requesting next sibling DM page for {convo_peer} from {peer_str} since {since}");
+                                    super::olm_lane::carry(
+                                        ws_cmd_tx, peer_str, None,
+                                        &super::sync_handler::sibling_next_page_request(&store, &convo_peer, since),
+                                        super::olm_lane::NoSession::Queue,
+                                    );
+                                }
+                                Some(_) => {}
+                                None => hollow_log!("[HOLLOW-SYNC] Sibling DM page for {convo_peer} cannot advance; the next backfill takes the rest"),
+                            }
                         }
                     }
 
@@ -10772,9 +10774,10 @@ async fn handle_incoming_request(
                 return;
             }
 
-            // Dedup: if we already responded to this peer+channel within 2s, skip.
-            // Prevents flood from multiple parallel sync triggers on the requester's side.
-            let resp_dedup_key = format!("{server_id}:{channel_id}:resp:{peer_str}");
+            // The same ask from this peer within 2 s is answered once (parallel sync
+            // triggers on its side); the ask for the next page differs and is answered.
+            let ask = super::sync_handler::channel_sync_ask_key(since_timestamp, &sender_timestamps, gap.as_ref());
+            let resp_dedup_key = format!("{server_id}:{channel_id}:resp:{peer_str}:{ask:x}");
             if channel_sync_sent.get(&resp_dedup_key).is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
                 return;
             }
@@ -10789,15 +10792,19 @@ async fn handle_incoming_request(
                     &store, &server_id, &channel_id, since_timestamp, &sender_timestamps, gap.as_ref(),
                 ) {
                     hollow_log!("[HOLLOW-SYNC] Sending {count} sync messages for {channel_id}");
-                    // Send via MLS if peer is in the group, otherwise Olm fallback.
-                    // Don't use MLS if peer hasn't joined yet (they sent plaintext request
-                    // before receiving Welcome) — they can't decrypt the MLS response.
-                    let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-                    send_encrypted_message(
-                        olm, crypto_store,
-                        peer_str, &envelope_json, event_tx,
-                        ws_cmd_tx, ws_room_peers,
-                    ).await;
+                    // Over Olm, never MLS: a peer that asked before its Welcome cannot
+                    // read MLS yet. Paced, as a peer asks once per channel and a server
+                    // of many channels would overrun its bucket; our own devices are exempt.
+                    if super::resolver::same_identity(peer_str, device_peer_id) {
+                        let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
+                        send_encrypted_message(
+                            olm, crypto_store,
+                            peer_str, &envelope_json, event_tx,
+                            ws_cmd_tx, ws_room_peers,
+                        ).await;
+                    } else if let Some(answer) = super::frame_budget::Paced::answer(&envelope) {
+                        frame_budget.pace(peer_str, answer, std::time::Instant::now());
+                    }
                 }
             }
         }
@@ -11334,11 +11341,12 @@ async fn handle_incoming_request(
 
                             MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, .. } => {
                                 if crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), &sender_master, &cid) {
+                                    let page_end = if has_more == Some(true) { sync_handler::ChannelPageEnd::of(&messages) } else { None };
                                     crypto_handler::backfill_filter(server_states.get(&sid), &mut messages);
                                     sync_handler::handle_envelope_channel_sync_batch(
                                         olm, bundle_keypair, event_tx, ws_cmd_tx,
                                         ws_room_peers, &local_peer, &sender_peer_id,
-                                        sid, cid, messages, total, has_more,
+                                        sid, cid, messages, total, has_more, page_end,
                                         crypto_store, crdt_store,
                                         db_path, db_passphrase,
                                     ).await;

@@ -3127,6 +3127,69 @@ static void hs_fetch_reads_grace_dms() {
               std::any_of(upto.begin(), upto.end(), bin(frame(0x06, {room2, sender}, "fg-dm-elsewhere"))));
 }
 
+// That read is one per fetch socket and room: a leave and a join are a few bytes, the ring up
+// to 8 MiB. The next push wake opens a fresh socket, which reads the room once again.
+static void hs_fetch_reads_grace_once() {
+    printf("handshake review: a fetch socket reads a room's grace DMs once\n");
+    Ident d1;
+    const std::string room = room_name("hs-fo"), early = room_name("hs-fo-early");
+    auto b = login(Ident());
+    join(*b, room);
+    join(*b, early);
+    // A fetch socket that joined before the device had a session in grace read nothing then.
+    auto pre = login3(d1, "none", 0, "fetch");
+    pre->send({{"type", "join"}, {"room", early}});
+    settle({pre.get()});
+    auto a = login3(d1, "new", 0);
+    join(*a, room);
+    join(*a, early);
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    check("the device is in grace", next(*b, about("peer_left", room, d1.peer)).has_value());
+    const std::string sender = b->id.peer;
+    b->send_bin(frame(0x04, {room, d1.peer}, "fo-dm"));
+    b->send_bin(frame(0x04, {early, d1.peer}, "fo-early"));
+    settle({b.get()});
+
+    auto f = login3(d1, "none", 0, "fetch");
+    f->send({{"type", "join"}, {"room", room}});
+    settle({f.get()});
+    check("a fetch socket's join reads the room's DM", count(*f, bin(frame(0x06, {room, sender}, "fo-dm"))) == 1);
+    f->send({{"type", "leave"}, {"room", room}});
+    f->send({{"type", "join"}, {"room", room}});
+    f->send({{"type", "leave"}, {"room", room}});
+    f->send({{"type", "join"}, {"room", room}});
+    f->send({{"type", "join"}, {"room", room}});
+    settle({f.get()});
+    check("leaving and joining it again reads nothing more", f->ws.inbox.empty());
+
+    auto f2 = login3(d1, "none", 0, "fetch");
+    f2->send({{"type", "join"}, {"room", room}});
+    settle({f2.get()});
+    check("a fresh fetch socket reads it once", count(*f2, bin(frame(0x06, {room, sender}, "fo-dm"))) == 1);
+    pre->send({{"type", "join"}, {"room", early}});
+    settle({pre.get()});
+    check("a join before the grace left the socket its read of the room",
+          count(*pre, bin(frame(0x06, {early, sender}, "fo-early"))) == 1);
+
+    // The record is bounded: a socket that read as many rooms as it may reads no further one.
+    auto f3 = login3(d1, "none", 0, "fetch");
+    std::vector<std::pair<uint8_t, std::string>> joins;
+    for (size_t i = 0; i < session::FETCH_READ_ROOMS; i++) {
+        joins.push_back({0x1, json{{"type", "join"}, {"room", room_name("hs-fo-" + std::to_string(i))}}.dump()});
+    }
+    joins.push_back({0x1, json{{"type", "join"}, {"room", room}}.dump()});
+    f3->ws.send_frames(joins);
+    settle({f3.get()});
+    check("past its rooms a fetch socket reads nothing more", f3->ws.inbox.empty());
+
+    auto a2 = login3(d1, a->sid, read);
+    check("all inside the grace: the session resumes", resumed(*a2));
+    const auto upto = through(*a2, bin(frame(0x06, {early, sender}, "fo-early")));
+    check("and still replays the DMs its fetch sockets read",
+          std::any_of(upto.begin(), upto.end(), bin(frame(0x06, {room, sender}, "fo-dm"))));
+}
+
 // Link `n` of a lock, signed by the change key of the link before it.
 static json successor_link(const std::string& server, uint64_t n, const Door& door, const Ident& change,
                            const Ident& signer) {
@@ -3344,6 +3407,7 @@ static void test_handshake_review() {
     hs_one_ack_timer();
     hs_push_reach();
     hs_fetch_reads_grace_dms();
+    hs_fetch_reads_grace_once();
     hs_door_moved_in_grace();
 }
 
@@ -3744,6 +3808,15 @@ int main(int argc, char** argv) {
     if (only && std::string(only) == "door_grace") {
         hs_door_moved_in_grace();
         test_hidden_door_rooms(true);
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =fetch_grace: what a fetch socket reads of a session in grace.
+    if (only && std::string(only) == "fetch_grace") {
+        test_session_fetch_in_grace();
+        hs_fetch_reads_grace_dms();
+        hs_fetch_reads_grace_once();
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;

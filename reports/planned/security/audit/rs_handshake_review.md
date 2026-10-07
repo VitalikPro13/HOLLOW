@@ -1,6 +1,6 @@
 # Resumable sessions: hostile review of the resume handshake and session authority
 
-Wave 2 of `reports/planned/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md` (section 4: "a security
+Wave 2 of `reports/shipped/relay-and-sync/RESUMABLE_SESSIONS_PLAN.md` (section 4: "a security
 review of the resume handshake goes through the audit method before the relay deploys").
 Reviewed 2026-10-07 against the merged waves 0 and 1 (commit `4dfa2b10`): the relay's
 session code in `relay-uws/src/ws_handler.cpp` (`handle_auth`, `mint_session`,
@@ -133,7 +133,7 @@ banner without text for the first two minutes after the app left. Now the fetch 
 | Reading another room's frames, or kinds that are not DMs (broadcast, JSON `direct`, 0x02 chunk, a channel copy replayed into the ring) | same, "nor another room's DM", "nothing else of the ring", "nor a channel copy" | Refused |
 | An inbox room without the proof the mailbox replay needs | same, "an inbox it does not prove gives nothing", "one it proves gives its DM" | Only once proved, the same gate as the mailbox |
 | Counting or acking through the fetch socket | same, "(the fetch socket is told no count)", "the session still resumes at the same count", "and its ring still replays every frame the fetch socket read" | Nothing counted on either side; the resume still replays everything (receivers dedup by message id and the Olm read mark, as with today's `offline_buffer` replay to a fetch node and the full node) |
-| A joined socket re-joining to re-read its own ring | reading | Costs the device's own ring (at most 8 MiB) per join, to itself; the same class as a repeated `topic_catchup` or an inbox re-join replaying the mailbox (phase G) |
+| A joined socket re-joining to re-read its own ring | `hs_fetch_reads_grace_once` "leaving and joining it again reads nothing more", "past its rooms a fetch socket reads nothing more"; `test_session` FetchReads cases | Fixed in session 3 (was AR-36 item 2, at most 8 MiB per join): one read per fetch socket and room (`PerSocketData::grace_reads`, kept past a leave, at most 64 rooms); a fresh socket reads once again. A repeated `topic_catchup` and an inbox re-join replaying the mailbox stay the same class (phase G) |
 
 ## 9. Logging and parse paths
 
