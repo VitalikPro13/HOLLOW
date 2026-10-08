@@ -1073,19 +1073,21 @@ async fn only_the_nodes_echo_of_the_replay_is_dropped() {
     let joins_on = |r: &mut Relay, conn: u64| {
         r.joins().iter().filter(|(c, _)| *c == conn).map(|(_, v)| v["room"].as_str().unwrap().to_string()).collect::<Vec<_>>()
     };
+    // By content, not count: a reset can eat a post's ack, and a lost session sends it again.
+    let saw = |k: u8| move |r: &mut Relay| r.binaries().contains(&vec![b'c', k]);
 
     for room in [ROOM, ROOM, "room-b"] {
         c.send(WsCommand::JoinRoom { room_code: room.into() });
     }
     c.post(1);
-    relay.wait("the first post", T, |r| r.binaries().len() == 1).await;
+    relay.wait("the first post", T, saw(1)).await;
     assert_eq!(relay.with(|r| joins_on(r, 0)), [ROOM, ROOM, "room-b"], "a re-join is written: it asks for a fresh members");
 
     relay.kill();
     c.wait_kind("Resumed", T).await;
     c.send(WsCommand::JoinRoom { room_code: "room-b".into() });
     c.post(2);
-    relay.wait("the second post", T, |r| r.binaries().len() == 2).await;
+    relay.wait("the second post", T, saw(2)).await;
     assert_eq!(relay.with(|r| joins_on(r, 1)), ["room-b"], "a resume rejoins nothing; a join after it is written");
 
     relay.with(|r| r.forget_sessions = true);
@@ -1095,7 +1097,7 @@ async fn only_the_nodes_echo_of_the_replay_is_dropped() {
         c.send(WsCommand::JoinRoom { room_code: room.into() });
     }
     c.post(3);
-    relay.wait("the third post", T, |r| r.binaries().len() == 3).await;
+    relay.wait("the third post", T, saw(3)).await;
     assert_eq!(
         relay.with(|r| joins_on(r, 2)),
         [ROOM, "room-b", ROOM],
@@ -1107,7 +1109,7 @@ async fn only_the_nodes_echo_of_the_replay_is_dropped() {
     tokio::time::sleep(t.replay_echo + Duration::from_millis(300)).await;
     c.send(WsCommand::JoinRoom { room_code: ROOM.into() });
     c.post(4);
-    relay.wait("the fourth post", T, |r| r.binaries().len() == 4).await;
+    relay.wait("the fourth post", T, saw(4)).await;
     assert_eq!(relay.with(|r| joins_on(r, 3)), [ROOM, "room-b", ROOM], "outside the window a join is no echo");
 }
 
