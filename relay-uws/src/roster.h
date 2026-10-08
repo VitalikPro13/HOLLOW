@@ -524,6 +524,41 @@ struct Roster {
         return out.compacted(c);
     }
 
+    // `merged` for a holder that keeps a clock of pending joins (identity/roster.rs
+    // `merged_by_first_sight`): past their ceiling, asks give way by when this holder
+    // first saw them, an unseen one after every seen one, so a later flood of asks under
+    // ids the master key picks pushes out no earlier ask.
+    Roster merged_by_first_sight(
+        const Roster& incoming, const RosterCrypto& c,
+        const std::function<std::optional<int64_t>(const std::string& base, const std::string& device)>& first_seen)
+        const {
+        Roster out = merged(incoming, c);
+        if (!master.empty() && incoming.master != master) return out;
+        const std::string b = out.base(c);
+        std::vector<Pending> asks;
+        for (const auto* list : {&pendings, &incoming.pendings}) {
+            for (const auto& p : *list) {
+                if (p.base == b) asks.push_back(p);
+            }
+        }
+        std::sort(asks.begin(), asks.end());
+        asks.erase(std::unique(asks.begin(), asks.end()), asks.end());
+        if (asks.size() <= MAX_PENDING) return out;
+        auto seen = [&](const Pending& p) {
+            auto s = first_seen(p.base, p.device);
+            return s ? *s : INT64_MAX;
+        };
+        std::stable_sort(asks.begin(), asks.end(), [&](const Pending& x, const Pending& y) { return seen(x) < seen(y); });
+        const std::set<Pending> kept(asks.begin(), asks.begin() + MAX_PENDING);
+        auto trim = [&](Roster r) {
+            r.pendings.erase(std::remove_if(r.pendings.begin(), r.pendings.end(),
+                                            [&](const Pending& p) { return p.base == b && !kept.count(p); }),
+                             r.pendings.end());
+            return r;
+        };
+        return trim(*this).merged(trim(incoming), c);
+    }
+
     // Who belongs to this identity now, for one observer: `first_seen` is when it first
     // saw a device's pending join. The roster must already be verified.
     State fold(const std::function<std::optional<int64_t>(const std::string&)>& first_seen, int64_t now_ms,

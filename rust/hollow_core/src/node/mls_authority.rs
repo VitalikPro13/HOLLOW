@@ -354,6 +354,133 @@ pub(crate) fn unseated(leaf: &LeafIdentity, rules: &GroupRules) -> bool {
     refused(leaf) || rules.membership(&leaf.master, "") != Verdict::Accept
 }
 
+/// How long a sibling's ask for a leaf counts as its saying it holds no copy of the
+/// group: a device without one asks again every `MLS_BOOTSTRAP_TIMEOUT`.
+pub(crate) const SIBLING_ASK_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(super::swarm::MLS_BOOTSTRAP_TIMEOUT.as_secs() + 10);
+
+/// Whether this device founds a group that no device of our identity holds a copy of:
+/// every other online device of ours asked us for a leaf in it lately, and ours sorts
+/// lowest. A device holding the group never asks, so while one is online nobody founds
+/// a second copy, and two founders at once would fork the group.
+pub(crate) fn we_found_for_our_identity(local_device: &str, online_siblings: &[String], asked: &[String]) -> bool {
+    online_siblings.iter().all(|d| local_device < d.as_str() && asked.contains(d))
+}
+
+/// [`we_found_for_our_identity`] for `group_key`, over our online devices the roster counts.
+pub(crate) fn may_found_group(
+    mls: &MlsManager,
+    group_key: &str,
+    local_master: &str,
+    ws_room_peers: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> bool {
+    let local_device = mls.credential_identity();
+    let siblings: Vec<String> = super::crypto_handler::online_devices_for(ws_room_peers, local_master)
+        .into_iter()
+        .filter(|d| {
+            *d != local_device && super::resolver::is_device_of(d, local_master) && !super::resolver::is_revoked(d)
+        })
+        .collect();
+    we_found_for_our_identity(&local_device, &siblings, &mls.sibling_asks(group_key, SIBLING_ASK_WINDOW))
+}
+
+/// Whether a KeyPackage's certified leaf is another device of ours asking for a leaf;
+/// one that comes while we hold no copy of the group is kept for [`may_found_group`].
+/// This and the two below stay out of line: the KeyPackage arm's poll frame sits at
+/// the edge of the worker stack.
+#[inline(never)]
+pub(crate) fn sibling_ask(
+    mls: Option<&mut MlsManager>,
+    group_key: &str,
+    leaf: &LeafIdentity,
+    local_master: &str,
+    local_device: &str,
+) -> bool {
+    let ours = leaf.master == local_master
+        && leaf.device != local_device
+        && super::resolver::is_device_of(&leaf.device, local_master);
+    if ours && let Some(mls) = mls {
+        mls.note_sibling_ask(group_key, &leaf.device);
+    }
+    ours
+}
+
+/// [`may_found_group`], saying so in the log when it refuses.
+#[inline(never)]
+pub(crate) fn may_found_here(
+    mls: &MlsManager,
+    group_key: &str,
+    local_master: &str,
+    ws_room_peers: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> bool {
+    let founds = may_found_group(mls, group_key, local_master, ws_room_peers);
+    if !founds {
+        crate::hollow_log!("[HOLLOW-MLS] No copy of {group_key} here and a device of ours may hold it, not founding one");
+    }
+    founds
+}
+
+/// Whether a KeyPackage for a group we hold no copy of makes this device found it. A
+/// subgroup is founded by its coordinator: for a device of ours asking, our identity
+/// when it commits for the subgroup; for anyone else, the lowest online qualifying
+/// member other than the sender. A server group only by its owner. Of our devices only
+/// the one [`may_found_group`] names, or a second copy forks the group.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn founds_on_key_package(
+    mls: &MlsManager,
+    state: &ServerState,
+    group_key: &str,
+    channel: Option<&str>,
+    sender: &LeafIdentity,
+    from_sibling: bool,
+    local_master: &str,
+    ws_room_peers: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> bool {
+    match channel {
+        Some(cid) => {
+            let coordinator = if from_sibling {
+                super::crypto_handler::elect_subgroup_coordinator(state, cid, local_master, ws_room_peers)
+            } else {
+                state.members.keys()
+                    .filter(|m| state.can_see_channel(m, cid))
+                    .filter(|m| !super::resolver::same_identity(&sender.device, m) && **m != sender.master)
+                    .filter(|m| m.as_str() == local_master || super::crypto_handler::peer_is_reachable(ws_room_peers, m))
+                    .min()
+                    .cloned()
+            };
+            if coordinator.as_deref() != Some(local_master) {
+                crate::hollow_log!("[HOLLOW-MLS] Not subgroup coordinator for {group_key}, skipping KeyPackage");
+                return false;
+            }
+        }
+        None => {
+            let is_owner = state.roles.get(local_master)
+                .is_some_and(|r| *r.read() == crate::crdt::operations::MemberRole::Owner);
+            if !is_owner {
+                crate::hollow_log!("[HOLLOW-MLS] No MLS group for {group_key} and not owner, skipping KeyPackage");
+                return false;
+            }
+        }
+    }
+    may_found_here(mls, group_key, local_master, ws_room_peers)
+}
+
+/// Found `group_key` on a KeyPackage (a server from before MLS, a subgroup's first
+/// leaf). A subgroup is marked for the batch tick to pull in everyone else who qualifies.
+#[inline(never)]
+pub(crate) fn found_group(mls: &mut MlsManager, group_key: &str) -> bool {
+    crate::hollow_log!("[HOLLOW-MLS] Lazily creating MLS group {group_key}");
+    if let Err(e) = mls.create_group(group_key) {
+        crate::hollow_log!("[HOLLOW-MLS] Failed to create MLS group: {e}");
+        return false;
+    }
+    if crate::crypto::split_group_key(group_key).1.is_some() {
+        mls.note_founded_subgroup(group_key);
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,5 +915,48 @@ mod tests {
         let arm = fetch.find("HavenMessage::MlsChannelMessage { server_id, body, channel_id } => {").expect("fetch arm");
         let arm = &fetch[arm..arm + fetch[arm..].find("subgroup_id(").expect("group key")];
         assert!(arm.contains("mls_authority::names_a_group("), "fetch.rs: the push fetch takes any server id");
+    }
+
+    /// One device of an identity founds a group none of its devices holds: the lowest,
+    /// once every other online one has asked it for a leaf there.
+    #[test]
+    fn one_device_of_an_identity_founds_a_group() {
+        let s = |ids: &[&str]| ids.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+        assert!(we_found_for_our_identity("d1", &[], &[]), "a lone device founds");
+        assert!(!we_found_for_our_identity("d1", &s(&["d2"]), &[]), "a sibling that never asked may hold it");
+        assert!(we_found_for_our_identity("d1", &s(&["d2"]), &s(&["d2"])), "the lower founds once its sibling asked");
+        assert!(!we_found_for_our_identity("d2", &s(&["d1"]), &s(&["d1"])), "the higher leaves it to the lower");
+        assert!(!we_found_for_our_identity("d1", &s(&["d2", "d3"]), &s(&["d2"])), "d3 may still hold it");
+        assert!(we_found_for_our_identity("d1", &s(&["d2", "d3"]), &s(&["d2", "d3"])));
+        assert!(!we_found_for_our_identity("d2", &s(&["d1", "d3"]), &s(&["d1", "d3"])));
+    }
+
+    /// The rule reads presence and the roster: a device the roster does not count, or a
+    /// removed one, holds nothing for us, and an ask stops counting once we hold the group.
+    #[test]
+    fn founding_reads_our_roster_presence_and_asks() {
+        use crate::identity::native_identity::NativeKeypair;
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let master = NativeKeypair::from_secret_bytes(&[41; 32]);
+        let (a, b) = (NativeKeypair::from_secret_bytes(&[42; 32]), NativeKeypair::from_secret_bytes(&[43; 32]));
+        let (low, high) = if a.peer_id() < b.peer_id() { (a, b) } else { (b, a) };
+        let (me, sibling) = (master.peer_id(), high.peer_id());
+        crate::node::resolver::update_many(&me, [low.peer_id().as_str(), sibling.as_str()]);
+        let mut mls = MlsManager::new(&low, &master).unwrap();
+        let mut rooms = std::collections::HashMap::new();
+        rooms.insert("inbox".to_string(), std::collections::HashSet::from(["stranger-d".to_string(), me.clone(), low.peer_id()]));
+        assert!(may_found_group(&mls, "g", &me, &rooms), "no other device of ours is online, and a bare master is none");
+        rooms.get_mut("inbox").unwrap().insert(sibling.clone());
+        assert!(!may_found_group(&mls, "g", &me, &rooms), "an online sibling may hold it");
+        mls.note_sibling_ask("g", &sibling);
+        assert!(may_found_group(&mls, "g", &me, &rooms), "it asked us, so it holds none");
+        assert!(!may_found_group(&mls, "h", &me, &rooms), "an ask names one group");
+        mls.create_group("g").unwrap();
+        mls.remove_group("g");
+        assert!(!may_found_group(&mls, "g", &me, &rooms), "an ask from before we held the group says nothing now");
+        crate::node::resolver::mark_revoked(std::slice::from_ref(&sibling));
+        assert!(may_found_group(&mls, "g", &me, &rooms), "a removed device holds nothing for us");
+        crate::node::resolver::clear_all();
     }
 }

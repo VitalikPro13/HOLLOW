@@ -282,7 +282,7 @@ fn relay_case(name: &str, now: i64, master: &str, device: &str, held: Option<(Ro
     let (base_roster, base_seen) = held.clone().unwrap_or_else(|| (Roster::new(master), BTreeMap::new()));
     let accepted = shown.master == master && shown.within_caps();
     let (merged, seen) = if accepted {
-        let merged = base_roster.merged(&shown.verified(now));
+        let merged = base_roster.merged_by_first_sight(&shown.verified(now), |b, d| base_seen.get(&seen_key(b, d)).copied());
         let seen: BTreeMap<String, i64> = merged
             .pendings
             .iter()
@@ -414,6 +414,17 @@ fn cases() -> Vec<Case> {
     refused.add_removal(sign_removal(&k.devices[0], &m, &rbase, &k.devices[5].peer_id(), &[]));
     let waited = BTreeMap::from([(seen_key(&rbase, &k.devices[5].peer_id()), NOW - 8 * DAY)]);
     out.push(relay_case("a-refused-join-removes-nobody", NOW, &m, &k.devices[0].peer_id(), Some((refused.clone().verified(NOW), waited)), refused));
+    // Sixteen asks under ids that sort first, shown after a real ask: the ask the relay
+    // saw first keeps its slot and its seven days (C-IDENTITY-16).
+    let real = k.devices[5].peer_id();
+    let mut flood_asks = asking.clone();
+    flood_asks.pendings.clear();
+    for j in (0u32..).map(junk_kp).filter(|j| j.peer_id() < real).take(MAX_PENDING) {
+        flood_asks.add_consent(sign_consent(&j, &m));
+        flood_asks.add_pending(sign_pending(&k.m, &base, &j.peer_id()));
+    }
+    let waited = BTreeMap::from([(seen_key(&base, &real), NOW - 8 * DAY)]);
+    out.push(relay_case("a-later-flood-keeps-the-real-ask", NOW, &m, &real, Some((asking.clone().verified(NOW), waited)), flood_asks));
     out
 }
 
@@ -448,4 +459,6 @@ fn roster_vectors_are_current() {
     assert!(!named("no-wait").member, "with the wait off nothing joins by waiting");
     let refused = named("a-refused-join-removes-nobody");
     assert!(refused.member && refused.removed.len() == 1, "a refused join gained removals by waiting");
+    let flooded = named("a-later-flood-keeps-the-real-ask");
+    assert!(flooded.member && flooded.merged_counts[4] == MAX_PENDING, "a later flood pushed out the real ask");
 }

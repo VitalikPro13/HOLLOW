@@ -762,6 +762,83 @@ pub(crate) fn encrypted_frame(olm: &OlmManager, message_type: usize, ciphertext:
     }
 }
 
+/// An Olm frame bound to the save of the session state that produced it: it leaves
+/// the process only once that save is on disk (AR-30), so no restart can encrypt
+/// again from a chain step a frame on the wire already used.
+pub(crate) struct OlmFrame {
+    data: Vec<u8>,
+    saved: crate::crypto::SessionSaved,
+    device: String,
+    plaintext: String,
+}
+
+/// The wire frame for a ciphertext `olm` just made for `device` from `plaintext`, with
+/// the save of the session that made it queued. Node code builds every Olm frame here.
+/// Never inlined: the session pickle it builds would sit in every caller's stack frame,
+/// the swarm's deepest arms included.
+#[inline(never)]
+pub(crate) fn olm_frame(
+    olm: &OlmManager,
+    crypto_store: &CryptoStore,
+    device: &str,
+    message_type: usize,
+    ciphertext: &[u8],
+    plaintext: &str,
+) -> OlmFrame {
+    let saved = match olm.session_save(device) {
+        Ok(Some((pickle, version))) => crypto_store.save_session_awaited(device.to_string(), pickle, version),
+        Ok(None) | Err(_) => crate::crypto::SessionSaved::failed(),
+    };
+    OlmFrame {
+        data: serde_json::to_vec(&encrypted_frame(olm, message_type, ciphertext)).unwrap_or_default(),
+        saved,
+        device: device.to_string(),
+        plaintext: plaintext.to_string(),
+    }
+}
+
+impl OlmFrame {
+    pub(crate) fn wire_len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Sent to the device through `room`.
+    pub(crate) fn direct(self, room_code: String) -> super::ws_client::WsCommand {
+        let target_peer = self.device.clone();
+        self.after_save(|data| super::ws_client::WsCommand::SendDirect { room_code, target_peer, data })
+    }
+
+    /// Sent to the device through `room` as an inlined image (0x08).
+    pub(crate) fn direct_image(self, room_code: String) -> super::ws_client::WsCommand {
+        let target_peer = self.device.clone();
+        self.after_save(|data| super::ws_client::WsCommand::SendDirectImage { room_code, target_peer, data })
+    }
+
+    fn after_save(self, send: impl FnOnce(Vec<u8>) -> super::ws_client::WsCommand) -> super::ws_client::WsCommand {
+        super::ws_client::WsCommand::AfterSave {
+            saved: self.saved,
+            frame: Box::new(send(self.data)),
+            device: self.device,
+            plaintext: self.plaintext,
+        }
+    }
+}
+
+/// Whether another process can save sessions while this node holds them in memory: the
+/// iOS extension, while the app sits suspended. Android's fetch node never runs beside
+/// a live node, and the desktops have none.
+const SESSIONS_SHARED_WITH_ANOTHER_PROCESS: bool = cfg!(any(target_os = "ios", test));
+
+/// Ask the store for every session another process moved past ours, and its read marks,
+/// for `olm` to take at its next change: the iOS extension decrypts and saves while the
+/// app sits suspended, and the app must not encrypt on a copy the store has since left
+/// behind. Run when the relay session comes back; the event loop never waits for it.
+pub(crate) fn ask_for_newer_olm_sessions(olm: &mut OlmManager, crypto_store: &CryptoStore) {
+    if SESSIONS_SHARED_WITH_ANOTHER_PROCESS {
+        olm.expect_newer(crypto_store.ask_newer(olm.session_versions()));
+    }
+}
+
 // -- Carried Olm key exchange (async friending) --
 
 /// How long a bundle CARRIED inside a friend request stays usable.
@@ -1889,9 +1966,11 @@ pub(crate) fn elect_subgroup_coordinator(
 }
 
 /// Send our KeyPackage to a restricted channel's subgroup coordinator so we can
-/// be added to (or bootstrap) the subgroup. No-op when WE are the coordinator or
-/// nobody qualifying is online. The `channel_id` tag is what makes the
-/// coordinator add us to the SUBGROUP rather than the server group.
+/// be added to (or bootstrap) the subgroup. When our identity coordinates it, to our
+/// other online devices instead: one of them holds it, or our asks are how they agree
+/// which of them founds it. No-op when nobody is there to ask. The `channel_id` tag
+/// is what makes the receiver add us to the SUBGROUP rather than the server group.
+/// True when a KeyPackage reached a device.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn request_subgroup_bootstrap(
     mls: &mut MlsManager,
@@ -1902,14 +1981,23 @@ pub(crate) fn request_subgroup_bootstrap(
     server_id: &str,
     channel_id: &str,
     local_peer: &str,
-) {
-    let coordinator = match elect_subgroup_coordinator(server, channel_id, local_peer, ws_room_peers) {
-        Some(c) if c != local_peer => c,
-        _ => return, // we're the coordinator (reconciler handles it) or nobody online
+) -> bool {
+    let Some(coordinator) = elect_subgroup_coordinator(server, channel_id, local_peer, ws_room_peers) else {
+        return false;
     };
+    let ours = coordinator == local_peer;
+    let local_device = mls.credential_identity();
+    let siblings: Vec<String> = if ours {
+        online_devices_for(ws_room_peers, local_peer).into_iter().filter(|d| *d != local_device).collect()
+    } else {
+        Vec::new()
+    };
+    if ours && siblings.is_empty() {
+        return false;
+    }
     let kp_bytes = match mint_group_key_package(mls, crypto_store, &crate::crypto::subgroup_id(server_id, channel_id), false) {
         Ok(kp) => kp,
-        Err(e) => { hollow_log!("[HOLLOW-MLS] subgroup KP gen failed: {e}"); return; }
+        Err(e) => { hollow_log!("[HOLLOW-MLS] subgroup KP gen failed: {e}"); return false; }
     };
     let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
     let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
@@ -1917,9 +2005,76 @@ pub(crate) fn request_subgroup_bootstrap(
         key_package: kp_b64,
         channel_id: Some(channel_id.to_string()),
     }).unwrap_or_default();
-    let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, data);
+    let sent = if ours {
+        let mut sent = 0;
+        for dev in &siblings {
+            if let Some(room) = ws_room_for_peer(ws_room_peers, dev) {
+                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                    room_code: room,
+                    target_peer: dev.clone(),
+                    data: data.clone(),
+                });
+                sent += 1;
+            }
+        }
+        sent
+    } else {
+        send_raw_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, data)
+    };
     if sent > 0 {
         hollow_log!("[HOLLOW-MLS] Sent subgroup KeyPackage to coordinator {coordinator} for {server_id}#{channel_id} ({sent} device(s))");
+    }
+    sent > 0
+}
+
+/// The batch tick's subgroup chores. A subgroup founded on a KeyPackage pulls in
+/// everyone else who qualifies, as [`reconcile_subgroups_for_server`] does when it
+/// founds one. And each restricted channel's subgroup we can see, hold no copy of, and
+/// our identity coordinates asks our other devices for a leaf once per
+/// `MLS_BOOTSTRAP_TIMEOUT`: only one of them can seat us, and with no post to prompt an
+/// ask they would never learn that none of them holds it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tend_own_subgroups(
+    mls: &mut MlsManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
+    pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+    welcome_grace: &HashMap<String, std::time::Instant>,
+    bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    local_peer: &str,
+) {
+    for group_key in mls.take_founded_subgroups() {
+        let (server_id, Some(cid)) = crate::crypto::split_group_key(&group_key) else { continue };
+        let Some(state) = server_states.get(&server_id) else { continue };
+        reconcile_subgroups_for_server(
+            mls, ws_cmd_tx, ws_room_peers, pending_mls_key_packages, pending_mls_removals,
+            state, &server_id, local_peer, Some(&cid),
+        );
+    }
+    for (server_id, state) in server_states {
+        if state.is_deleted() || super::conference::is_conference_sid(server_id) || !state.members.contains_key(local_peer) {
+            continue;
+        }
+        for cid in state.subgroup_channel_ids() {
+            let group_key = crate::crypto::subgroup_id(server_id, &cid);
+            let asked_lately = bootstrap_requested
+                .get(&group_key)
+                .is_some_and(|t| t.elapsed() < super::swarm::MLS_BOOTSTRAP_TIMEOUT);
+            if mls.has_group(&group_key)
+                || asked_lately
+                || welcome_grace.contains_key(&group_key)
+                || !state.can_see_channel(local_peer, &cid)
+                || elect_subgroup_coordinator(state, &cid, local_peer, ws_room_peers).as_deref() != Some(local_peer)
+            {
+                continue;
+            }
+            if request_subgroup_bootstrap(mls, crypto_store, ws_cmd_tx, ws_room_peers, state, server_id, &cid, local_peer) {
+                bootstrap_requested.insert(group_key, std::time::Instant::now());
+            }
+        }
     }
 }
 
@@ -2016,6 +2171,58 @@ pub(crate) fn request_server_leaf(
     sent > 0
 }
 
+/// Send the KeyPackage `data` a just-admitted member mints for its first leaf: to our
+/// own other devices when our identity owns the server (one of them holds the group,
+/// or they settle which founds it), else to the bootstrap target, else to the member
+/// that answered our join. True when the batch tick must not ask again: a second
+/// package in other hands gets this device seated twice at one epoch, a fork.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn send_join_leaf_ask(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    local_master: &str,
+    local_device: &str,
+    responder: &str,
+    data: Vec<u8>,
+) -> bool {
+    let owner_is_us = server.members.keys().any(|m| {
+        super::resolver::same_identity(m, local_master)
+            && server.roles.get(m).is_some_and(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+    });
+    let siblings: Vec<String> = if owner_is_us {
+        online_devices_for(ws_room_peers, local_master).into_iter().filter(|d| d != local_device).collect()
+    } else {
+        Vec::new()
+    };
+    if !siblings.is_empty() {
+        for dev in &siblings {
+            send_raw_to_peer(ws_cmd_tx, ws_room_peers, dev, data.clone());
+        }
+        hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to our own devices {siblings:?} for {server_id}");
+        return true;
+    }
+    let target = server_bootstrap_target(server, local_master, ws_room_peers)
+        .filter(|t| !super::resolver::same_identity(t, local_master));
+    let sent = match &target {
+        Some(t) => send_raw_to_identity(ws_cmd_tx, ws_room_peers, t, data.clone()),
+        None => 0,
+    };
+    if sent > 0 {
+        hollow_log!(
+            "[HOLLOW-MLS] Sent bootstrap KeyPackage to {} ({sent} device(s)) for {server_id}",
+            target.as_deref().unwrap_or_default(),
+        );
+        return true;
+    }
+    let reached = send_raw_to_identity(ws_cmd_tx, ws_room_peers, responder, data);
+    hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to join responder {responder} for {server_id} (no bootstrap target yet)");
+    // Unstamped for anyone else, so the message-triggered rescue can still ask.
+    reached > 0 && super::resolver::same_identity(responder, local_master)
+}
+
 /// Reconcile per-channel MLS subgroup membership against the CRDT after a
 /// lifecycle event (role or visibility change, channel create/delete, kick, ban,
 /// leave), for every restricted channel or just `only_channel`.
@@ -2053,6 +2260,12 @@ pub(crate) fn reconcile_subgroups_for_server(
         if !mls.has_group(&group_key) {
             // One made while the app is away would be a group the others never see.
             if super::ws_client::backgrounded() { continue; }
+            // Our identity coordinates, and another device of ours may hold the subgroup:
+            // a second copy would fork it. Our asks settle which device founds it.
+            if !super::mls_authority::may_found_group(mls, &group_key, local_peer, ws_room_peers) {
+                hollow_log!("[HOLLOW-MLS] reconcile: no copy of {group_key} here and a device of ours may hold it, not founding one");
+                continue;
+            }
             if let Err(e) = mls.create_group(&group_key) {
                 hollow_log!("[HOLLOW-MLS] reconcile: failed to create subgroup {group_key}: {e}");
                 continue;
@@ -2466,21 +2679,14 @@ pub(crate) async fn send_encrypted_message(
 ) -> bool {
     match super::olm_lane::encrypt_in_turn(olm, peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
-            persist_olm_session(olm, crypto_store, peer_id_str);
-
             if msg_type == 0 {
                 hollow_log!("[HOLLOW-CRYPTO] Sending PreKey (type 0) to {peer_id_str}");
             }
 
-            let haven_msg = encrypted_frame(olm, msg_type, &ciphertext);
+            let frame = olm_frame(olm, crypto_store, peer_id_str, msg_type, &ciphertext, text);
 
             if let Some(room) = send_room_for_peer(ws_room_peers, peer_id_str) {
-                let json = serde_json::to_string(&haven_msg).unwrap_or_default();
-                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                    room_code: room,
-                    target_peer: peer_id_str.to_string(),
-                    data: json.into_bytes(),
-                });
+                let _ = ws_cmd_tx.send(frame.direct(room));
                 true
             } else {
                 hollow_log!("[HOLLOW-CRYPTO] Encrypted message for {peer_id_str} but peer unreachable — not delivered");
@@ -2516,14 +2722,8 @@ pub(crate) async fn send_encrypted_message_in_room(
 ) -> bool {
     match super::olm_lane::encrypt_in_turn(olm, peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
-            persist_olm_session(olm, crypto_store, peer_id_str);
-            let haven_msg = encrypted_frame(olm, msg_type, &ciphertext);
-            let json = serde_json::to_string(&haven_msg).unwrap_or_default();
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                room_code: room_code.to_string(),
-                target_peer: peer_id_str.to_string(),
-                data: json.into_bytes(),
-            });
+            let frame = olm_frame(olm, crypto_store, peer_id_str, msg_type, &ciphertext, text);
+            let _ = ws_cmd_tx.send(frame.direct(room_code.to_string()));
             true
         }
         Err(e) => {
@@ -2556,14 +2756,8 @@ pub(crate) async fn send_encrypted_image_to_peer(
 ) -> bool {
     match super::olm_lane::encrypt_in_turn(olm, peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
-            persist_olm_session(olm, crypto_store, peer_id_str);
-            let haven_msg = encrypted_frame(olm, msg_type, &ciphertext);
-            let json = serde_json::to_string(&haven_msg).unwrap_or_default();
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirectImage {
-                room_code: dm_room,
-                target_peer: peer_id_str.to_string(),
-                data: json.into_bytes(),
-            });
+            let frame = olm_frame(olm, crypto_store, peer_id_str, msg_type, &ciphertext, text);
+            let _ = ws_cmd_tx.send(frame.direct_image(dm_room));
             true
         }
         Err(e) => {
@@ -2606,16 +2800,14 @@ pub(crate) fn persist_crypto_state(olm: &OlmManager, crypto_store: &CryptoStore,
     if let Ok(account_json) = olm.account_pickle_json() {
         crypto_store.save_account(account_json);
     }
-    if let Ok(Some(session_json)) = olm.session_pickle_json(peer_id) {
-        crypto_store.save_session(peer_id.to_string(), session_json);
-    }
+    persist_olm_session(olm, crypto_store, peer_id);
 }
 
-/// Persist only the session ratchet state (skip account pickle).
-/// Use for per-message encrypt/decrypt where only the ratchet advances.
+/// Persist only the session ratchet state (skip account pickle), fire-and-forget, for
+/// a change no frame waits on: a decrypt. An encrypt saves through [`olm_frame`].
 pub(crate) fn persist_olm_session(olm: &OlmManager, crypto_store: &CryptoStore, peer_id: &str) {
-    if let Ok(Some(session_json)) = olm.session_pickle_json(peer_id) {
-        crypto_store.save_session(peer_id.to_string(), session_json);
+    if let Ok(Some((session_json, version))) = olm.session_save(peer_id) {
+        crypto_store.save_session(peer_id.to_string(), session_json, version);
     }
 }
 

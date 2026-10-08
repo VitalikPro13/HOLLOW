@@ -54,6 +54,12 @@ has the whole pipeline.
   UnifiedPush endpoint REPLACES the FCM one and FCM re-registration no-ops while it is
   active; the sidecar = Web Push to PUBLIC https only; a killed app = `main()`
   `--unifiedpush-bg`. `project_unifiedpush_android`.
+- The pick STICKS (AR-33, 0.12.1): `push_unifiedpush_distributor` is changed only by `use()` /
+  `useFirebase()`, never by a failure; "Fall back to Google" (`push_firebase_fallback`, default
+  on) lets Google cover only WHILE the pick is broken, off = no Google token at the relay. The
+  controller heals itself (start, resume `_recheck`, `RelayTriggers.networkChanges`, backoff)
+  and shows a Home Needs Attention item after 20 s; `UnregisterPushToken` also clears the
+  node's held token, else a fresh session re-sends it.
 - App Lock on: every notification (desktop toast, phone banner live or push, iOS NSE) is
   ONE neutral "Hollow / New message" with no avatar and no reply action; replies are
   refused while locked, earlier toasts withdrawn when the lock rises; the iOS hints hold

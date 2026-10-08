@@ -238,13 +238,20 @@ Singleton row (id=1 enforced by CHECK constraint). Stores the vodozemac Olm acco
 ```sql
 CREATE TABLE IF NOT EXISTS olm_sessions (
     peer_id TEXT PRIMARY KEY,
-    pickle  TEXT NOT NULL
+    pickle  TEXT NOT NULL,
+    sends   INTEGER NOT NULL DEFAULT 0,  -- added 0.12.1 (AR-30)
+    reads   INTEGER NOT NULL DEFAULT 0
 )
+-- olm_session_floors(peer_id, sends): a removal's floor, so a late copy cannot revive it
 ```
 
-One session per peer. Pickle is JSON.
+One session per peer. Pickle is JSON. Since 0.12.1 (AR-30) a save is MAX-WINS on the
+session's version (`sends` first, then `reads`): an older copy from any process (the iOS NSE,
+a push fetch node, a late actor write) never replaces a newer one, and a node Olm frame
+leaves only after its own save committed (`crypto_handler::olm_frame` -> `WsCommand::AfterSave`
+-> the sealer waits `SAVE_WAIT`; a failed save parks the plaintext for a resend).
 
-- `messages.rs:save_olm_session()` -- Upsert by peer_id.
+- `messages.rs:save_olm_session(peer, pickle, sends, reads) -> bool` -- stores only past the row and its floor.
 - `messages.rs:load_olm_session()` -- `SELECT pickle WHERE peer_id = ?1`. Returns `Option<String>`.
 - `messages.rs:load_all_olm_sessions()` -- `SELECT peer_id, pickle FROM olm_sessions`. Returns `Vec<(String, String)>`.
 
@@ -750,6 +757,8 @@ Two formats detected by `encryption::detect_format()`:
 **Password protection (flags=0x01 or 0x03):** Argon2id (memory=64MB, iterations=3, parallelism=1) derives 32-byte wrapping key from password + random 16-byte salt. AES-256-GCM encrypts the 68-byte protobuf. When `require_on_launch=false` (flags=0x03), the derived key is also stored in OS keychain for silent unlock — identity file is encrypted but app opens normally on the same device.
 
 **OS Keychain / Device Protection (flags=0x02):** Random 32-byte wrapping key stored in platform credential store. Standalone option when no password is set. `flags=0x02`.
+
+**Keychain by default (0.12.1):** on Windows and macOS, on the OS's own data root only (never `HOLLOW_DATA_DIR`, portable, a pinned profile elsewhere, Linux), a NEW identity is locked to the keychain after onboarding's typed phrase check (`protect_new_identity_by_default`), and a 0.12.0 identity gets a one-time offer that needs the FULL phrase (`enable_os_keychain_protection_with_phrase`). Every switch is verified before the files change (fresh read-back, staged write + fsync + rename, rollback). Slots are PER PROFILE; the machine-wide legacy slot is only read (a wipe deletes it only when its key opens the wiped identity), and unlock tries up to 16 other Hollow slots, each proven by opening the file. A missing key = `keychain_key_missing` -> `key_missing_dialog.dart` (Try again / phrase / backup, deletes nothing); a phrase restore keeps encrypted files as `identity.{key,device}.locked` and sets `protection_offer_due`.
 
 **Windows dual storage:** `platform_keystore.rs` uses Windows Credential Manager (`CredWriteW`/`CredReadW` via `windows-sys`) as primary, DPAPI blob (`identity.dpapi`) as fallback. `store_key()` writes to both. `retrieve_key()` tries Credential Manager first, falls back to DPAPI, auto-migrates on success. macOS uses `security-framework` Keychain. Linux: not available.
 

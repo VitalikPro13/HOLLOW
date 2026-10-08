@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use super::crypto_handler::{
-    persist_olm_session, send_message_to_peer_in_room, signed_key_request,
+    olm_frame, send_message_to_peer_in_room, signed_key_request,
 };
 use super::types::{MessageEnvelope, NetworkEvent, StreamOrigin, MAX_SDP_SIZE};
 use crate::crypto::{CryptoStore, OlmManager};
@@ -176,20 +176,14 @@ pub(crate) async fn send_fwd_envelope_via_room(
     if olm.has_session(&target_peer) {
         match super::olm_lane::encrypt_in_turn(olm, &target_peer, env_json.as_bytes()) {
             Ok((msg_type, ciphertext)) => {
-                persist_olm_session(olm, crypto_store, &target_peer);
-                let haven = super::crypto_handler::encrypted_frame(olm, msg_type, &ciphertext);
-                let json = serde_json::to_string(&haven).unwrap_or_default();
+                let frame = olm_frame(olm, crypto_store, &target_peer, msg_type, &ciphertext, &env_json);
                 // Send-side observability: splits send-side from transit and
                 // receive-side. Envelope TYPE and sizes only, never content.
                 hollow_log!(
                     "[HOLLOW-FWD] send {label} -> {target_peer} via {room}: plain {} B, frame {} B, msg_type {msg_type}",
-                    env_json.len(), json.len()
+                    env_json.len(), frame.wire_len()
                 );
-                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                    room_code: room.to_string(),
-                    target_peer,
-                    data: json.into_bytes(),
-                });
+                let _ = ws_cmd_tx.send(frame.direct(room.to_string()));
             }
             Err(e) => {
                 hollow_log!("[HOLLOW-FWD] encrypt of {label} failed: {e}");

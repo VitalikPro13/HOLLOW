@@ -816,10 +816,8 @@ pub(crate) async fn handle_create_server(
     mls: &mut Option<MlsManager>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
-    local_device_id: &str,
     name: String,
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
@@ -862,8 +860,6 @@ pub(crate) async fn handle_create_server(
             let _ = author_op(state, crdt_store, &server_id, CrdtPayload::JoinKeySet { secret });
         }
     }
-    let join_key = server_states.get(&server_id).and_then(|s| s.join_public_text());
-
     if let Some(mls_mgr) = mls {
         match mls_mgr.create_group(&server_id) {
             Ok(()) => persist_mls_state(mls_mgr, crypto_store),
@@ -875,17 +871,8 @@ pub(crate) async fn handle_create_server(
         server_id: server_id.clone(),
         name,
     }).await;
-
-    // Our online siblings are not in the brand-new room and have no other way to
-    // learn it exists; offline ones hear it on reconnect, via re-announce.
-    let sent = super::olm_lane::carry_to_own_siblings(
-        ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id,
-        &HavenMessage::SiblingServerAnnounce { server_id: server_id.clone(), owner: Some(local_peer_str.to_string()), join_key },
-        super::olm_lane::NoSession::Queue,
-    );
-    if sent > 0 {
-        hollow_log!("[HOLLOW-CRDT] Announced new server {server_id} to {sent} online sibling device(s)");
-    }
+    // Our online siblings hear of it from `author_join_lock_op`, once its first join
+    // lock is on the relay: a sibling's join asked before then finds no lock.
 }
 
 // ── Relay offline catch-up registration ──────────────────────────────
@@ -2203,6 +2190,7 @@ pub(crate) fn author_join_lock_op(
     payload: CrdtPayload,
 ) {
     let Some(state) = server_states.get_mut(server_id) else { return };
+    let first_lock = !state.join_lock.has_lock();
     let Some(op) = author_op(state, crdt_store, server_id, payload) else {
         hollow_log!("[HOLLOW-CRDT] A join lock op for {server_id} did not pass our own rules");
         return;
@@ -2214,6 +2202,22 @@ pub(crate) fn author_join_lock_op(
             &HavenMessage::CrdtOpBroadcast { server_id: server_id.to_string(), op_json },
             super::olm_lane::NoSession::Queue,
         );
+    }
+    // A new server's online siblings are in no room of it yet, so this is how they
+    // learn it exists; offline ones hear it on reconnect, via re-announce.
+    if first_lock && state.join_lock.has_lock() {
+        let sent = super::olm_lane::carry_to_own_siblings(
+            ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id,
+            &HavenMessage::SiblingServerAnnounce {
+                server_id: server_id.to_string(),
+                owner: state.anchor_owner(),
+                join_key: state.join_public_text(),
+            },
+            super::olm_lane::NoSession::Queue,
+        );
+        if sent > 0 {
+            hollow_log!("[HOLLOW-CRDT] Announced new server {server_id} to {sent} online sibling device(s)");
+        }
     }
 }
 

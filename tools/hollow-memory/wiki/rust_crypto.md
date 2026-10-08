@@ -175,6 +175,16 @@ Convenience wrapper: checks if a group exists for `server_id`, gets the member l
 
 The coordinator is responsible for processing MLS membership changes (adding/removing members via commits).
 
+**ONE device per identity FOUNDS a group (2026-10-08, 0.12.1).** A device holding no copy of a
+server group or subgroup never creates one while another device of its identity is online:
+`mls_authority::may_found_group` lets the lowest online device of ours found, and only once every
+other online device of ours asked it for a leaf there within 70 s (`MlsManager::sibling_asks`).
+Gated at the `MlsKeyPackage` arm (`founds_on_key_package`), the parked-admission lazy creation and
+`reconcile_subgroups_for_server`; a lone device founds as before. Presence-based by decision: a
+backgrounded sibling holding the group is invisible, so a rare fork remains for the heal below. An
+owner device asks its OWN siblings for its leaf first (`send_join_leaf_ask`; the Welcome-grace re-ask
+is `request_server_leaf`), and `MemberAdded` also goes to our own devices.
+
 **ONE device per identity commits (2026-10-05, s37).** The elections above pick an IDENTITY, and
 every device of an identity hears what is sent to it, so two online owner devices both committed a
 joiner's KeyPackage at one epoch (a fork), and two upgrading 0.11 devices both rebound in place.

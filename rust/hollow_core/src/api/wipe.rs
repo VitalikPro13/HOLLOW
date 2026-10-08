@@ -29,6 +29,11 @@ const KEY_FILES: &[&str] = &[
     "identity.device",
     "identity.duress",
     "identity.dpapi",
+    "identity.key.tmp",
+    "identity.device.tmp",
+    "identity.dpapi.tmp",
+    "identity.key.locked",
+    "identity.device.locked",
     "pending_link.code",
     "pending_link.device",
 ];
@@ -280,12 +285,12 @@ fn destroy_with(root: &Path, outside: &Outside) -> Result<(), String> {
     // 1. The marker.
     mark_destroy(root)?;
 
-    // 2. Keys.
+    // 2. Keys. The legacy keystore slot is shared by every profile on the machine, so
+    // it goes only when its key opens THIS identity: the file is read first and the
+    // keystore asked after the zeroing, so a keystore that stalls holds up nothing.
+    let identity_before = std::fs::read(root.join("identity.key")).ok();
     zero_keys(root);
-    // TRAP: the keystore is process-wide, not rooted at `root`, and `delete_key`
-    // clears the legacy slot too, so a harness run would erase a real credential.
-    #[cfg(not(test))]
-    let _ = crate::identity::platform_keystore::delete_key();
+    crate::identity::platform_keystore::forget_key_at(root, identity_before.as_deref());
     crate::identity::encryption::clear_session_key();
     crate::node::at_rest::forget_stores();
     // The log goes with the identity, before anything else can add a line to it.
@@ -328,8 +333,9 @@ pub fn destroy_local() -> Result<(), String> {
 }
 
 /// Erases a profile this process is not running (Settings, desktop): the same
-/// routine against its root, marker and keys first. What belongs to the running
-/// process (keystore slots, its log, the shared temp folder) is not touched.
+/// routine against its root, marker and keys first, its own keystore slot with them.
+/// What belongs to the running process (its log, the shared temp folder) is not
+/// touched.
 #[frb]
 pub fn erase_profile_at(data_dir: String) -> Result<(), String> {
     let root = PathBuf::from(&data_dir);
@@ -346,7 +352,9 @@ pub fn erase_profile_at(data_dir: String) -> Result<(), String> {
         return Err("That folder doesn't look like Hollow data, so it stays.".into());
     }
     mark_destroy(&root)?;
+    let identity_before = std::fs::read(root.join("identity.key")).ok();
     zero_keys(&root);
+    crate::identity::platform_keystore::forget_key_at(&root, identity_before.as_deref());
     if sweep_root(&root) {
         let _ = std::fs::remove_file(root.join(MARKER));
     }
@@ -492,6 +500,14 @@ mod tests {
         std::fs::write(root.join("hollow.lock"), b"").unwrap();
         std::fs::create_dir_all(root.join("files")).unwrap();
         std::fs::write(root.join("files").join("a.bin"), b"HFE1 ciphertext").unwrap();
+    }
+
+    /// Keys a phrase restore set aside are key material like any other.
+    #[test]
+    fn keys_set_aside_by_a_restore_are_wiped() {
+        for (_, aside) in crate::identity::LOCKED_KEY_FILES {
+            assert!(KEY_FILES.contains(&aside), "{aside} would outlive a wipe");
+        }
     }
 
     /// Twice must converge, and a kill after the key step still ends clean.
@@ -934,6 +950,129 @@ mod tests {
             }
         }
         assert!(found.is_empty(), "log lines that name people, places, files or codes: {found:#?}");
+    }
+
+    /// A keychain-only identity at `root`, sealed under `key`.
+    fn keychain_identity(root: &Path, seed: u8, key: &[u8; 32]) {
+        use crate::identity::encryption;
+        let plain = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[seed; 32])
+            .to_protobuf_encoding()
+            .unwrap();
+        let sealed = encryption::encrypt_identity(&plain, key, &[0u8; 16], false, true).unwrap();
+        std::fs::write(root.join("identity.key"), sealed).unwrap();
+    }
+
+    /// True when some key this machine holds for `root` opens its identity.
+    fn opens(root: &Path) -> bool {
+        let Ok(bytes) = std::fs::read(root.join("identity.key")) else { return false };
+        crate::identity::platform_keystore::candidates_at(root).into_iter().any(|(_, k)| {
+            <[u8; 32]>::try_from(k.as_slice())
+                .is_ok_and(|k| crate::identity::encryption::decrypt_identity(&bytes, &k).is_ok())
+        })
+    }
+
+    /// Runs `body` on the in-memory keystore, then on this machine's real one (test
+    /// namespace, its own legacy slot) where there is one.
+    fn on_every_keystore(body: impl Fn()) {
+        body();
+        if let Some(_real) = crate::identity::platform_keystore::test_support::RealKeystore::enter() {
+            body();
+        }
+    }
+
+    /// Deferred item 1 (macOS data loss): a profile that never started since
+    /// per-profile slots came in has its key only in the legacy slot. Wiping ANOTHER
+    /// profile must leave that slot, so the first profile still opens.
+    #[test]
+    fn a_wipe_keeps_the_legacy_slot_another_profile_needs() {
+        use crate::identity::platform_keystore::test_support::*;
+        let _g = crate::node::resolver::test_lock();
+        on_every_keystore(|| {
+            let tmp = crate::test_tmp::tempdir().unwrap();
+            let (wiped, other) = (tmp.path().join("wiped"), tmp.path().join("other"));
+            for dir in [&wiped, &other] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            keychain_identity(&wiped, 0x51, &[0xA1; 32]);
+            set_profile(&wiped, &[0xA1; 32]);
+            keychain_identity(&other, 0x52, &[0xB2; 32]);
+            set_legacy(&[0xB2; 32]);
+            assert!(opens(&other));
+
+            destroy_with(&wiped, &Outside::default()).expect("wipe");
+
+            assert_eq!(profile_value(&wiped), None, "the wiped profile's own slot stayed");
+            assert_eq!(legacy_value(), Some(vec![0xB2; 32]), "the wipe took another profile's key");
+            assert!(opens(&other), "the other profile no longer opens");
+        });
+    }
+
+    /// A wipe of an identity that never used the keychain reads nothing from the
+    /// shared legacy slot: on macOS that read could put a prompt on screen during a
+    /// duress wipe.
+    #[test]
+    fn a_wipe_of_a_plaintext_identity_never_reads_the_legacy_slot() {
+        use crate::identity::platform_keystore::test_support::*;
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path();
+        let plain = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x56; 32])
+            .to_protobuf_encoding()
+            .unwrap();
+        std::fs::write(root.join("identity.key"), plain).unwrap();
+        set_legacy(&[0x57; 32]);
+        let _ = legacy_was_read();
+
+        destroy_with(root, &Outside::default()).expect("wipe");
+
+        assert!(!legacy_was_read(), "the wipe read the shared legacy slot");
+        assert_eq!(legacy_value(), Some(vec![0x57; 32]));
+    }
+
+    /// The legacy slot IS the wiped identity's own (an older build wrote it): it goes.
+    #[test]
+    fn a_wipe_takes_the_legacy_slot_when_it_holds_its_own_key() {
+        use crate::identity::platform_keystore::test_support::*;
+        let _g = crate::node::resolver::test_lock();
+        on_every_keystore(|| {
+            let tmp = crate::test_tmp::tempdir().unwrap();
+            let root = tmp.path();
+            keychain_identity(root, 0x53, &[0xC3; 32]);
+            set_profile(root, &[0xC3; 32]);
+            set_legacy(&[0xC3; 32]);
+
+            destroy_with(root, &Outside::default()).expect("wipe");
+
+            assert_eq!(profile_value(root), None);
+            assert_eq!(legacy_value(), None, "the wiped identity's own key outlived the wipe");
+        });
+    }
+
+    /// Erasing a profile the app is not running takes that profile's own slot, and
+    /// the legacy slot only when its key opened the erased identity.
+    #[test]
+    fn erasing_another_profile_forgets_only_its_own_keys() {
+        use crate::identity::platform_keystore::test_support::*;
+        let _g = crate::node::resolver::test_lock();
+        on_every_keystore(|| {
+            let tmp = crate::test_tmp::tempdir().unwrap();
+            let (running, erased) = (tmp.path().join("running"), tmp.path().join("erased"));
+            for dir in [&running, &erased] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            keychain_identity(&running, 0x54, &[0xD4; 32]);
+            set_legacy(&[0xD4; 32]);
+            keychain_identity(&erased, 0x55, &[0xE5; 32]);
+            set_profile(&erased, &[0xE5; 32]);
+            // SAFETY: serialized by the crate test lock.
+            unsafe { std::env::set_var("HOLLOW_DATA_DIR", &running) };
+
+            erase_profile_at(erased.display().to_string()).expect("erase");
+
+            assert_eq!(profile_value(&erased), None, "the erased profile's slot stayed");
+            assert_eq!(legacy_value(), Some(vec![0xD4; 32]), "erasing took the running profile's key");
+            assert!(opens(&running));
+        });
     }
 
     fn rust_sources(dir: &Path) -> Vec<(std::path::PathBuf, String)> {

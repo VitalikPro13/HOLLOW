@@ -75,7 +75,14 @@ struct RosterBook {
         Held held;
         if (!fresh) held = it->second;
         if (fresh) held.roster = roster::Roster::named(master);
-        roster::Roster merged = held.roster.merged(shown.verified(now_ms, c, fresh ? nullptr : &held.roster), c);
+        // Asks past their ceiling give way by the relay's first sight, as at every app.
+        roster::Roster merged = held.roster.merged_by_first_sight(
+            shown.verified(now_ms, c, fresh ? nullptr : &held.roster), c,
+            [&](const std::string& base, const std::string& d) -> std::optional<int64_t> {
+                auto s = held.seen_ms.find(seen_key(base, d));
+                if (s == held.seen_ms.end()) return std::nullopt;
+                return s->second;
+            });
         out.changed = merged != held.roster;
         held.roster = std::move(merged);
         // First sight of each pending join; a device that stopped asking is forgotten.

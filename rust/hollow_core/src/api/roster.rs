@@ -17,6 +17,8 @@ pub struct RosterDevice {
     pub this_device: bool,
     /// When this device first saw a pending join (its seven days run from here).
     pub first_seen_ms: Option<i64>,
+    /// Members this device added: removing it keeps them unless they go too.
+    pub added: Vec<String>,
 }
 
 /// What our own roster says, for the Devices page and the lock screens.
@@ -87,6 +89,7 @@ pub fn roster_status() -> Result<RosterStatus, String> {
             state: kind.to_string(),
             this_device: *d == me,
             first_seen_ms: seen.get(d).copied(),
+            added: if kind == "member" { roster.vouched_members_of(d, &state) } else { Vec::new() },
         });
     };
     for d in &state.members {
@@ -373,6 +376,39 @@ mod tests {
         let (held, _) = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase).unwrap();
         assert_eq!(held, upgraded, "the confirmation signed a new recovery");
         assert_eq!(stored_phrase_for_upgrade().unwrap(), None, "the confirmation kept the stored phrase");
+    }
+
+    /// C-IDENTITY-09. The Devices page learns what removing a device keeps: the
+    /// members it added, and nothing for a device that added none.
+    #[test]
+    fn the_roster_status_names_what_a_removal_keeps() {
+        use crate::identity::roster::{sign_consent, sign_vouch};
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = legacy_identity_on_disk(tmp.path(), None);
+        let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+        let (mut roster, _) = crate::node::roster_book::ensure_own(&store, &c.master, &c.device, &c.db_path);
+        let own = c.master.peer_id();
+        let (laptop, phone) = (NativeKeypair::from_secret_bytes(&[0x5d; 32]), NativeKeypair::from_secret_bytes(&[0x5e; 32]));
+        let base = roster.base();
+        roster.add_vouch(sign_vouch(&c.device, &own, &base, &laptop.peer_id()));
+        roster.add_vouch(sign_vouch(&laptop, &own, &base, &phone.peer_id()));
+        roster.add_consent(sign_consent(&laptop, &own));
+        roster.add_consent(sign_consent(&phone, &own));
+        crate::node::roster_book::merge_for_test(&store, &roster, &own, &c.device.peer_id());
+        drop(store);
+
+        let status = roster_status().unwrap();
+        let added = |d: &NativeKeypair| {
+            status.devices.iter().find(|x| x.device_peer_id == d.peer_id()).map(|x| x.added.clone()).unwrap_or_default()
+        };
+        assert_eq!(added(&laptop), vec![phone.peer_id()]);
+        assert_eq!(added(&c.device), vec![laptop.peer_id()]);
+        assert!(added(&phone).is_empty());
     }
 
     /// A device its 0.11 list does not name signed nothing at start: confirming the

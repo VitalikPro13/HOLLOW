@@ -1151,15 +1151,19 @@ pub(crate) async fn handle_voice_sframe_heal(
         if !mls_bootstrap_requested.get(&group_key)
             .is_some_and(|t| t.elapsed() < super::swarm::MLS_BOOTSTRAP_TIMEOUT)
         {
-            if restricted {
+            let asked = if restricted {
                 super::crypto_handler::request_subgroup_bootstrap(
                     mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers,
                     state, &server_id, &channel_id, local_peer_str,
-                );
-                mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
-            } else if super::crypto_handler::request_server_group_bootstrap(
-                mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, state, &server_id, local_peer_str,
-            ) {
+                )
+            } else {
+                super::crypto_handler::request_server_group_bootstrap(
+                    mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, state, &server_id, local_peer_str,
+                )
+            };
+            // Stamped only when an ask went out, so a moment with nobody to ask
+            // does not hold the next one back for the whole timeout.
+            if asked {
                 mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
             }
         }

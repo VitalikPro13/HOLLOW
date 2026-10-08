@@ -23,6 +23,7 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
+import 'package:hollow/src/core/services/unified_push_service.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -44,6 +45,7 @@ import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart' show shortenPeerId;
 import 'package:hollow/src/ui/shell/friends_bar.dart';
 import 'package:hollow/src/ui/shell/home_dashboard.dart'
     show
@@ -74,6 +76,8 @@ abstract class HomeActions {
   void addFriend(BuildContext context);
   void addServer(BuildContext context);
   void editProfile(BuildContext context);
+  void openNotificationSettings(BuildContext context);
+  void openDevices(BuildContext context);
 }
 
 class DesktopHomeActions extends HomeActions {
@@ -101,6 +105,16 @@ class DesktopHomeActions extends HomeActions {
   void editProfile(BuildContext context) => openSettings(
       ProviderScope.containerOf(context, listen: false).read,
       category: SettingsCategory.profile);
+
+  @override
+  void openNotificationSettings(BuildContext context) => openSettings(
+      ProviderScope.containerOf(context, listen: false).read,
+      category: SettingsCategory.notifications);
+
+  @override
+  void openDevices(BuildContext context) => openSettings(
+      ProviderScope.containerOf(context, listen: false).read,
+      category: SettingsCategory.devices);
 }
 
 // ---------------------------------------------------------------------------
@@ -152,10 +166,12 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
   @override
   Widget build(BuildContext context) {
     final items = [
+      ..._ownDeviceItems(),
       ..._securityItems(),
       ..._requestItems(),
       ..._phraseItems(),
       ..._updateItems(),
+      ..._pushItems(),
     ];
     if (items.isEmpty) return const SizedBox.shrink();
 
@@ -201,7 +217,10 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
     ref.watch(localNicknameProvider);
     final byPeer = <String, List<String>>{};
     for (final a in alerts) {
-      if (a.acknowledgedAt != null) continue;
+      if (a.acknowledgedAt != null ||
+          a.kind == SecurityAlertKind.ownDeviceAdded) {
+        continue;
+      }
       (byPeer[a.peerId] ??= []).add(a.kind);
     }
     return [
@@ -244,6 +263,44 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
           );
         }(),
     ];
+  }
+
+  /// Another of our devices added one (C-IDENTITY-09): each device once, with who
+  /// added it and when, until the person dismisses it.
+  List<_AttentionItem> _ownDeviceItems() {
+    final alerts = ref.watch(ownDeviceAlertsProvider);
+    final labels = ref.watch(deviceLabelProvider);
+    final kinds = ref.watch(deviceKindProvider);
+    String name(String id) =>
+        deviceGivenName(id, labels: labels, kinds: kinds) ?? shortenPeerId(id);
+    return [
+      for (final a in alerts)
+        if (ownDeviceAddedDetail(a) case final added?)
+          _AttentionItem(
+            id: 'own-device:${a.alertId}',
+            leading:
+                _GlyphTile(LucideIcons.monitorSmartphone, size: _leadingSize),
+            title: '${name(added.by)} added a device',
+            body: '${name(added.device)} joined your identity '
+                "${_addedLabel(a.createdAt.toInt())}. If you didn't add it, "
+                'remove it.',
+            secondaryLabel: 'Dismiss',
+            onSecondary: () => ref
+                .read(securityAlertsProvider.notifier)
+                .acknowledge(a.alertId),
+            primaryLabel: 'Review',
+            onPrimary: () async => widget.actions.openDevices(context),
+            failure: "Couldn't update the alert",
+          ),
+    ];
+  }
+
+  String _addedLabel(int atMs) {
+    final label =
+        conversationTimeLabel(DateTime.fromMillisecondsSinceEpoch(atMs));
+    if (label.contains(':')) return 'today at $label';
+    if (label == 'Yesterday') return 'yesterday';
+    return 'on $label';
   }
 
   List<_AttentionItem> _requestItems() {
@@ -326,6 +383,34 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
         primaryLabel: 'View update',
         onPrimary: () async => widget.actions.openUpdate(context),
         failure: "Couldn't open the update",
+      ),
+    ];
+  }
+
+  /// The chosen push service is broken past its grace; gone once it heals.
+  List<_AttentionItem> _pushItems() {
+    final push = ref.watch(pushAttentionProvider);
+    if (push == null) return const [];
+    final name = distributorLabel(push.distributor);
+    return [
+      _AttentionItem(
+        id: 'push:${push.distributor}:${push.googleWakes}',
+        leading: _GlyphTile(
+            push.googleWakes ? LucideIcons.bell : LucideIcons.bellOff,
+            size: _leadingSize),
+        title: push.googleWakes
+            ? 'Google is waking this phone'
+            : 'Notifications are off',
+        body: push.unanswered
+            ? "$name isn't answering yet. Open it once and Hollow picks it up."
+            : push.googleWakes
+            ? "$name isn't working right now, so Google wakes the phone "
+                "until it's back."
+            : "$name isn't working right now, so nothing wakes the phone "
+                "until it's back.",
+        primaryLabel: 'Open settings',
+        onPrimary: () async => widget.actions.openNotificationSettings(context),
+        failure: "Couldn't open the settings",
       ),
     ];
   }

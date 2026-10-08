@@ -10,8 +10,9 @@
 //!
 //! Deliberately NOT alerted: first contact (a baseline, not a change, and
 //! alerting there trains users to dismiss without reading), our own devices
-//! (the linked-devices UI is where the user is the actor), and device REMOVAL
-//! (revocation is the user cutting a device off, a safe act).
+//! added on THIS device (the user is the actor; another device's vouch is
+//! [`KIND_OWN_DEVICE_ADDED`]), and device REMOVAL (revocation is the user
+//! cutting a device off, a safe act).
 //!
 //! Alerts are deduplicated by a deterministic id, because device lists are
 //! re-ingested on every reconnect: a dismissed warning stays dismissed.
@@ -28,6 +29,39 @@ pub(crate) const KIND_IDENTITY_REAPPEARED: &str = "identity_reappeared";
 
 /// A contact's per-device Olm identity key changed — they reinstalled or re-keyed.
 pub(crate) const KIND_KEY_CHANGED: &str = "identity_key_changed";
+
+/// Another of our own devices added a device to our identity (C-IDENTITY-09): a
+/// stolen member device can add one, and removing it keeps what it added. Filed
+/// under our own master; the detail is `{device}:{voucher}` (peer ids hold no `:`).
+pub(crate) const KIND_OWN_DEVICE_ADDED: &str = "own_device_added";
+
+pub(crate) fn own_device_detail(device: &str, voucher: &str) -> String {
+    format!("{device}:{voucher}")
+}
+
+/// Record that `voucher`, one of our own devices, added `device` to our identity.
+/// The store half, run where the roster is saved; the store dedups, so a re-ingest
+/// returns `None`. Returns when the alert was recorded.
+pub(crate) fn record_own_device_added(
+    store: &crate::storage::MessageStore,
+    local_master_peer_id: &str,
+    device: &str,
+    voucher: &str,
+) -> Option<i64> {
+    let created_at = now_ms();
+    let detail = own_device_detail(device, voucher);
+    match store.record_security_alert(local_master_peer_id, KIND_OWN_DEVICE_ADDED, &detail, created_at) {
+        Ok(true) => {
+            hollow_log!("[HOLLOW-SECURITY] Own device {device} added by {voucher}");
+            Some(created_at)
+        }
+        Ok(false) => None,
+        Err(e) => {
+            hollow_log!("[HOLLOW-SECURITY] Failed to record alert: {e}");
+            None
+        }
+    }
+}
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -353,5 +387,18 @@ mod tests {
                 other => panic!("unexpected peer {other}"),
             }
         }
+    }
+
+    /// C-IDENTITY-09. An own-device alert is recorded once per device and voucher:
+    /// asked again, the store says it is old news, so nothing is emitted twice.
+    #[test]
+    fn an_own_device_alert_is_recorded_once() {
+        let (_dir, path, pass) = temp_db();
+        let store = MessageStore::open(&path, &pass).unwrap();
+        assert!(record_own_device_added(&store, "me", "devC", "devA").is_some());
+        assert_eq!(record_own_device_added(&store, "me", "devC", "devA"), None, "recorded twice");
+        let alerts = store.get_security_alerts().unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!((alerts[0].kind.as_str(), alerts[0].detail.as_str()), (KIND_OWN_DEVICE_ADDED, "devC:devA"));
     }
 }

@@ -15,6 +15,7 @@ import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
+import 'package:hollow/src/ui/dialogs/keychain_protection_dialogs.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -337,6 +338,61 @@ Future<String?> _chooseLockType(BuildContext context) {
   );
 }
 
+/// Desktop: sets the app password. True once it is set, false on Cancel.
+Future<bool> setAppPasswordFlow(BuildContext context) async {
+  final passphrase = await askSecretDialog(
+    context,
+    title: 'Set app password',
+    ask: SecretAsk.create,
+    confirmLabel: 'Set password',
+    message: 'Hollow asks for it whenever it locks. If you forget it, only '
+        'your recovery phrase brings your identity back.',
+    onSubmit: (_, next) async {
+      // Silent start: the keystore holds the key where the platform has one,
+      // and the secure-storage copy covers the rest, so the app lock is the
+      // only prompt and a duress code typed there signs the wide scopes.
+      await identity_api.enablePasswordProtection(
+          password: next, requireOnLaunch: false);
+      final appLock = AppLockService();
+      appLock.sessionSecret = next;
+      await appLock.storeLaunchSecret(next);
+    },
+  );
+  return passphrase != null;
+}
+
+/// Phone: a PIN or a password, chosen first. The calls are the desktop's;
+/// `requireOnLaunch` changes nothing where Rust has no platform keystore, and
+/// the stored launch secret gives the silent start. Resolves to `pin` or
+/// `password` once set, null when dismissed.
+Future<String?> setPhoneLockFlow(BuildContext context) async {
+  final type = await _chooseLockType(context);
+  if (type == null || !context.mounted) return null;
+  final isPin = type == 'pin';
+  final secret = await askSecretDialog(
+    context,
+    title: isPin ? 'Set a PIN' : 'Set a password',
+    ask: SecretAsk.create,
+    isPin: isPin,
+    confirmLabel: 'Turn on',
+    message: 'Hollow asks for it whenever it locks. If you forget it, only '
+        'your recovery phrase brings your identity back.',
+    onSubmit: (_, next) async {
+      await identity_api.enablePasswordProtection(
+          password: next, requireOnLaunch: true);
+      final appLock = AppLockService();
+      await appLock.setLockType(type);
+      // Any biometric secret stored before is stale now.
+      await appLock.disableBiometric();
+      appLock.sessionSecret = next;
+      // Hollow starts on its own and the app lock is the prompt, so a duress
+      // code typed there reaches the other devices even after a full close.
+      await appLock.storeLaunchSecret(next);
+    },
+  );
+  return secret == null ? null : type;
+}
+
 /// Kept for the legacy settings dialog, which still names it.
 typedef SecurityTab = SecuritySettingsPage;
 
@@ -440,6 +496,10 @@ class _SecurityAppLockSectionState
   bool _hasLaunchSecret = false;
   bool _protectionLoading = true;
 
+  /// Windows or macOS on the OS's own data root: where locking the identity to
+  /// this computer's keychain is offered at all.
+  bool _keychainEligible = false;
+
   /// The status read failed: the controls stay hidden, since defaults would
   /// offer a password holder "Set password".
   bool _protectionFailed = false;
@@ -469,6 +529,12 @@ class _SecurityAppLockSectionState
       final status = await identity_api.getIdentityProtectionStatus();
       final appLock = AppLockService();
       final launchSecret = await appLock.hasLaunchSecret();
+      var keychainEligible = false;
+      if (!_phone) {
+        try {
+          keychainEligible = await identity_api.keychainDefaultEligible();
+        } catch (_) {}
+      }
       if (_phone) {
         _lockType = await appLock.getLockType();
         _canBiometric = await appLock.canUseBiometrics();
@@ -484,6 +550,7 @@ class _SecurityAppLockSectionState
         _hasPassword = status.hasPassword;
         _hasOsKeychain = status.hasOsKeychain;
         _hasLaunchSecret = launchSecret;
+        _keychainEligible = keychainEligible;
         _protectionLoading = false;
         _protectionFailed = false;
       });
@@ -516,25 +583,7 @@ class _SecurityAppLockSectionState
       );
 
   Future<void> _enablePassword() async {
-    final passphrase = await askSecretDialog(
-      context,
-      title: 'Set app password',
-      ask: SecretAsk.create,
-      confirmLabel: 'Set password',
-      message: 'Hollow asks for it whenever it locks. If you forget it, only '
-          'your recovery phrase brings your identity back.',
-      onSubmit: (_, next) async {
-        // Silent start: the keystore holds the key where the platform has one,
-        // and the secure-storage copy covers the rest, so the app lock is the
-        // only prompt and a duress code typed there signs the wide scopes.
-        await identity_api.enablePasswordProtection(
-            password: next, requireOnLaunch: false);
-        final appLock = AppLockService();
-        appLock.sessionSecret = next;
-        await appLock.storeLaunchSecret(next);
-      },
-    );
-    if (passphrase == null || !mounted) return;
+    if (!await setAppPasswordFlow(context) || !mounted) return;
     await _loadProtectionStatus();
     if (!mounted) return;
     HollowToast.show(context, 'App lock enabled',
@@ -579,6 +628,23 @@ class _SecurityAppLockSectionState
     }
   }
 
+  /// Turning it on takes the recovery phrase; off asks once and goes back to a
+  /// plain identity file.
+  Future<void> _toggleKeychainLock(bool on) async {
+    final done = on
+        ? await showTurnOnKeychainDialog(context)
+        : await showTurnOffKeychainDialog(context);
+    if (!done || !mounted) return;
+    await _loadProtectionStatus();
+    if (!mounted) return;
+    HollowToast.show(
+        context,
+        on
+            ? 'Your identity is now locked to this computer.'
+            : 'Your identity is no longer locked to this computer.',
+        type: HollowToastType.success);
+  }
+
   Future<void> _changePassword() async {
     final newPass = await askSecretDialog(
       context,
@@ -617,38 +683,12 @@ class _SecurityAppLockSectionState
         type: HollowToastType.success);
   }
 
-  /// Phone: a PIN or a password, chosen first. The calls are the desktop's;
-  /// `requireOnLaunch` changes nothing where Rust has no platform keystore,
-  /// and the stored launch secret gives the silent start.
   Future<void> _enablePhoneLock() async {
-    final type = await _chooseLockType(context);
+    final type = await setPhoneLockFlow(context);
     if (type == null || !mounted) return;
-    final isPin = type == 'pin';
-    final secret = await askSecretDialog(
-      context,
-      title: isPin ? 'Set a PIN' : 'Set a password',
-      ask: SecretAsk.create,
-      isPin: isPin,
-      confirmLabel: 'Turn on',
-      message: 'Hollow asks for it whenever it locks. If you forget it, only '
-          'your recovery phrase brings your identity back.',
-      onSubmit: (_, next) async {
-        await identity_api.enablePasswordProtection(
-            password: next, requireOnLaunch: true);
-        final appLock = AppLockService();
-        await appLock.setLockType(type);
-        // Any biometric secret stored before is stale now.
-        await appLock.disableBiometric();
-        appLock.sessionSecret = next;
-        // Hollow starts on its own and the app lock is the prompt, so a duress
-        // code typed there reaches the other devices even after a full close.
-        await appLock.storeLaunchSecret(next);
-      },
-    );
-    if (secret == null || !mounted) return;
     await _loadProtectionStatus();
     if (!mounted) return;
-    HollowToast.show(context, isPin ? 'PIN set' : 'Password set',
+    HollowToast.show(context, type == 'pin' ? 'PIN set' : 'Password set',
         type: HollowToastType.success);
   }
 
@@ -827,6 +867,18 @@ class _SecurityAppLockSectionState
           )
         else
           ..._passwordOnRows(),
+        if (!_protectionLoading &&
+            !_protectionFailed &&
+            !_hasPassword &&
+            (_hasOsKeychain || _keychainEligible))
+          SettingsSwitchRow(
+            title: 'Lock to this computer',
+            subtitle: 'Encrypts your identity file with a key '
+                '${keychainStoreName()} keeps for your account, so a copy '
+                "won't open anywhere else",
+            value: _hasOsKeychain,
+            onChanged: _toggleKeychainLock,
+          ),
         const DuressCodeCard(wideScopes: true),
         const SettingsNote(
           'Forgot the password? Your recovery phrase brings your identity '

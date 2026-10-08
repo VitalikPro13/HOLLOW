@@ -282,3 +282,26 @@ unsafe fn cstr(p: *const c_char) -> Option<String> {
     }
     unsafe { CStr::from_ptr(p) }.to_str().ok().map(|s| s.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    /// The extension's fetch as a process of its own, for a simulator, where a pushed
+    /// notification never starts the extension (`xcrun simctl push` skips it): spawned
+    /// inside the simulator against the App Group data dir, it leaves a count of what it
+    /// read next to the data.
+    #[test]
+    #[ignore]
+    fn extension_fetch_stand_in() {
+        let (Ok(dir), Ok(sender)) = (std::env::var("HOLLOW_NSE_DATA_DIR"), std::env::var("HOLLOW_NSE_SENDER")) else {
+            return;
+        };
+        let summary = match super::fetch_and_decrypt(&dir, "relay.anonlisten.com", &sender, None, 18, None) {
+            Ok(json) => {
+                let read = serde_json::from_str::<serde_json::Value>(&json).ok().and_then(|v| v.as_array().map(Vec::len));
+                format!("ok, {} message(s)", read.unwrap_or(0))
+            }
+            Err(e) => format!("failed: {e}"),
+        };
+        std::fs::write(std::path::Path::new(&dir).join("extension_stand_in.txt"), summary).expect("write the summary");
+    }
+}

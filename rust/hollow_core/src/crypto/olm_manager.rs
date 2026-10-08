@@ -37,6 +37,44 @@ pub(crate) struct OlmManager {
     /// Per sending device, the newest seal time of a frame we decrypted from it. Saved,
     /// unlike [`Self::decrypted`], so a restart still knows a replay for one.
     read_marks: HashMap<String, i64>,
+    /// How far each peer's session has come, saved with its pickle. Kept when the
+    /// session goes, so whatever replaces it is stored past every older copy.
+    versions: HashMap<String, SessionVersion>,
+    /// The store's answer to which sessions another process saved further, taken at
+    /// the first change after it arrives.
+    awaiting_newer: Option<tokio::sync::oneshot::Receiver<super::store::Newer>>,
+}
+
+/// How far a peer's stored session has come, compared `sends` first (AR-30).
+///
+/// Only the node that encrypts moves `sends` (an encrypt, a new outbound session, a
+/// removal); any process that decrypts moves `reads`. A copy from a process that only
+/// decrypts (the push fetch, the iOS extension) therefore never outranks a state that
+/// sent, and storing max-wins never puts back a sending chain a frame already used.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SessionVersion {
+    pub sends: u64,
+    pub reads: u64,
+}
+
+impl SessionVersion {
+    /// From the two stored columns; a negative column (never written) counts as zero.
+    pub(crate) fn from_stored(sends: i64, reads: i64) -> Self {
+        Self { sends: sends.max(0) as u64, reads: reads.max(0) as u64 }
+    }
+
+    /// The two columns as stored.
+    pub(crate) fn stored(self) -> (i64, i64) {
+        (self.sends.min(i64::MAX as u64) as i64, self.reads.min(i64::MAX as u64) as i64)
+    }
+}
+
+/// A peer's session as the store holds it.
+#[derive(Clone, Debug)]
+pub(crate) struct StoredSession {
+    pub peer_id: String,
+    pub pickle: String,
+    pub version: SessionVersion,
 }
 
 /// A requesting device and the one-time key it was handed.
@@ -136,16 +174,33 @@ impl OlmManager {
             decrypted: HashMap::new(),
             key_slots: VecDeque::new(),
             read_marks: HashMap::new(),
+            versions: HashMap::new(),
+            awaiting_newer: None,
         }
     }
 
-    /// The saved account with its sessions and read marks, `None` before the first
-    /// account. A mark that fails to load only costs a replay its quiet drop.
+    /// The saved account with its sessions, their versions and read marks, `None`
+    /// before the first account. A mark that fails to load only costs a replay its
+    /// quiet drop.
     pub fn load(store: &crate::storage::MessageStore) -> Result<Option<Self>, String> {
         let Some(account_json) = store.load_olm_account()? else {
             return Ok(None);
         };
-        let mut olm = Self::from_pickles(&account_json, store.load_all_olm_sessions()?)?;
+        let rows = store.load_olm_sessions_versioned()?;
+        let versions: Vec<(String, SessionVersion)> = rows
+            .iter()
+            .map(|(peer, _, sends, reads)| (peer.clone(), SessionVersion::from_stored(*sends, *reads)))
+            .collect();
+        let mut olm = Self::from_pickles(
+            &account_json,
+            rows.into_iter().map(|(peer, pickle, _, _)| (peer, pickle)).collect(),
+        )?;
+        olm.versions.extend(versions);
+        for (peer, sends, reads) in store.load_olm_session_floors()? {
+            let floor = SessionVersion::from_stored(sends, reads);
+            let held = olm.versions.entry(peer).or_default();
+            *held = (*held).max(floor);
+        }
         match store.load_olm_read_marks() {
             Ok(marks) => olm.read_marks = marks.into_iter().collect(),
             Err(e) => hollow_log!("[HOLLOW-CRYPTO] Olm read marks not loaded: {e}"),
@@ -188,6 +243,8 @@ impl OlmManager {
             decrypted: HashMap::new(),
             key_slots: stored.key_slots,
             read_marks: HashMap::new(),
+            versions: HashMap::new(),
+            awaiting_newer: None,
         })
     }
 
@@ -304,6 +361,17 @@ impl OlmManager {
         self.account.stored_one_time_key_count()
     }
 
+    /// TEST-ONLY: the message key an Olm ciphertext was encrypted under, as its
+    /// ratchet key and chain index. Two ciphertexts naming the same pair reused it.
+    #[cfg(test)]
+    pub(crate) fn message_key_of(message_type: usize, ciphertext: &[u8]) -> Option<(String, u64)> {
+        let message = match OlmMessage::from_parts(message_type, ciphertext).ok()? {
+            OlmMessage::Normal(m) => m,
+            OlmMessage::PreKey(m) => m.message().clone(),
+        };
+        Some((message.ratchet_key().to_base64(), message.chain_index()))
+    }
+
     /// Create an outbound session using the peer's identity key + one-time key,
     /// retiring any session we held with the peer.
     pub fn create_outbound_session(
@@ -319,6 +387,7 @@ impl OlmManager {
         if small_order(&their_identity_key) || small_order(&their_otk) {
             return Err("Refused a small-order key".to_string());
         }
+        self.take_newer_if_answered();
 
         let session = self.account.create_outbound_session(
             SessionConfig::version_2(),
@@ -327,6 +396,7 @@ impl OlmManager {
         );
         self.install(peer_id, session);
         self.outbound_at.insert(peer_id.to_string(), (Instant::now(), false));
+        self.stepped(peer_id, true);
         Ok(())
     }
 
@@ -338,6 +408,19 @@ impl OlmManager {
     /// keep the lower device's session, the side the KeyBundle tiebreak lets build one.
     /// The new session is retired instead, so what the peer sent on it still reads.
     pub(crate) fn open_prekey(
+        &mut self,
+        peer_id: &str,
+        their_identity_key_b64: &str,
+        pre_key_message_bytes: &[u8],
+        local_device: &str,
+    ) -> Result<Opened, OlmFail> {
+        self.take_newer_if_answered();
+        let opened = self.open_prekey_inner(peer_id, their_identity_key_b64, pre_key_message_bytes, local_device)?;
+        self.stepped(peer_id, false);
+        Ok(opened)
+    }
+
+    fn open_prekey_inner(
         &mut self,
         peer_id: &str,
         their_identity_key_b64: &str,
@@ -416,6 +499,7 @@ impl OlmManager {
     /// Encrypt a plaintext message for a peer. Returns (message_type, ciphertext_bytes).
     /// message_type: 0 = PreKey, 1 = Normal.
     pub fn encrypt(&mut self, peer_id: &str, plaintext: &[u8]) -> Result<(usize, Vec<u8>), String> {
+        self.take_newer_if_answered();
         let session = self
             .sessions
             .get_mut(peer_id)
@@ -423,12 +507,25 @@ impl OlmManager {
         let olm_msg = session.encrypt(plaintext);
         let (msg_type, ciphertext) = olm_msg.to_parts();
         self.session_last_used.insert(peer_id.to_string(), Instant::now());
+        self.stepped(peer_id, true);
         Ok((msg_type, ciphertext))
     }
 
     /// Decrypt a message from a peer on our session, else on a retired one. A retired
     /// session that reads it is the one the peer is using, so we encrypt on it again.
     pub fn decrypt(
+        &mut self,
+        peer_id: &str,
+        message_type: usize,
+        ciphertext_bytes: &[u8],
+    ) -> Result<Opened, OlmFail> {
+        self.take_newer_if_answered();
+        let opened = self.decrypt_inner(peer_id, message_type, ciphertext_bytes)?;
+        self.stepped(peer_id, false);
+        Ok(opened)
+    }
+
+    fn decrypt_inner(
         &mut self,
         peer_id: &str,
         message_type: usize,
@@ -538,6 +635,98 @@ impl OlmManager {
         self.retired.remove(peer_id);
         self.outbound_at.remove(peer_id);
         self.session_last_used.remove(peer_id);
+        self.stepped(peer_id, true);
+    }
+
+    /// Note one change to `peer_id`'s session; `sent` for a change only the node that
+    /// encrypts makes (see [`SessionVersion`]).
+    fn stepped(&mut self, peer_id: &str, sent: bool) {
+        let version = self.versions.entry(peer_id.to_string()).or_default();
+        if sent {
+            version.sends += 1;
+        } else {
+            version.reads += 1;
+        }
+    }
+
+    /// How far `peer_id`'s session has come in this process.
+    pub(crate) fn session_version(&self, peer_id: &str) -> SessionVersion {
+        self.versions.get(peer_id).copied().unwrap_or_default()
+    }
+
+    /// Every version this process holds, for asking the store what came further.
+    pub(crate) fn session_versions(&self) -> HashMap<String, SessionVersion> {
+        self.versions.clone()
+    }
+
+    /// The pickle of the session we encrypt with for `peer_id`, with its version.
+    pub(crate) fn session_save(&self, peer_id: &str) -> Result<Option<(String, SessionVersion)>, String> {
+        Ok(self.session_pickle_json(peer_id)?.map(|pickle| (pickle, self.session_version(peer_id))))
+    }
+
+    /// Take a stored copy of `peer_id`'s session that came further than ours, as the
+    /// push fetch leaves one while this process sits suspended. The copy we held is
+    /// retired when it is another session, so what the peer sent on it still reads.
+    /// True when the copy was taken.
+    pub(crate) fn take_newer(&mut self, stored: &StoredSession) -> Result<bool, String> {
+        if stored.version <= self.session_version(&stored.peer_id) {
+            return Ok(false);
+        }
+        let pickle = serde_json::from_str(&stored.pickle)
+            .map_err(|e| format!("Failed to deserialize session pickle for {}: {e}", stored.peer_id))?;
+        let session = Session::from_pickle(pickle);
+        let same = self
+            .sessions
+            .get(&stored.peer_id)
+            .is_some_and(|held| held.session_id() == session.session_id());
+        if same {
+            self.sessions.insert(stored.peer_id.clone(), session);
+            self.touch(&stored.peer_id);
+        } else {
+            self.install(&stored.peer_id, session);
+        }
+        self.versions.insert(stored.peer_id.clone(), stored.version);
+        Ok(true)
+    }
+
+    /// Raise our read marks to what another process saved.
+    fn merge_read_marks(&mut self, marks: impl IntoIterator<Item = (String, i64)>) {
+        for (peer, sealed_ms) in marks {
+            self.note_read(&peer, sealed_ms);
+        }
+    }
+
+    /// Take the store's answer to which sessions came further than ours at the first
+    /// change after it arrives, instead of holding the caller until it does.
+    pub(crate) fn expect_newer(&mut self, answer: tokio::sync::oneshot::Receiver<super::store::Newer>) {
+        self.awaiting_newer = Some(answer);
+    }
+
+    /// Never inlined: a session restored from its pickle is large, and the change entry
+    /// points sit inside the swarm's deepest stack frames.
+    #[inline(never)]
+    fn take_newer_if_answered(&mut self) {
+        let Some(answer) = self.awaiting_newer.as_mut() else { return };
+        let newer = match answer.try_recv() {
+            Ok(newer) => newer,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                self.awaiting_newer = None;
+                return;
+            }
+        };
+        self.awaiting_newer = None;
+        for stored in &newer.sessions {
+            match self.take_newer(stored) {
+                Ok(true) => hollow_log!(
+                    "[HOLLOW-CRYPTO] Took the Olm session with {} another process saved further ({:?})",
+                    stored.peer_id, stored.version
+                ),
+                Ok(false) => {}
+                Err(e) => hollow_log!("[HOLLOW-CRYPTO] Stored Olm session with {} not taken: {e}", stored.peer_id),
+            }
+        }
+        self.merge_read_marks(newer.read_marks);
     }
 
     /// Remove sessions unused within the TTL, returning the pruned peer ids so the caller
@@ -1343,5 +1532,145 @@ mod tests {
         bytes[at..at + 32].copy_from_slice(&ORDER_8_POINT);
         let refused = bob.open_prekey(ALICE, &BASE64.encode(ORDER_8_POINT), &bytes, BOB).expect_err("opened");
         assert!(refused.to_string().contains("small-order"), "refused for another reason: {refused}");
+    }
+
+    // AR-30: the version saved with each session decides which copy the store keeps.
+
+    fn v(sends: u64, reads: u64) -> SessionVersion {
+        SessionVersion { sends, reads }
+    }
+
+    #[test]
+    fn every_session_change_moves_its_version_sends_only_for_the_sender() {
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let otk = bob.generate_one_time_key();
+        alice.create_outbound_session(BOB, &bob.identity_key_base64(), &otk).unwrap();
+        assert_eq!(alice.session_version(BOB), v(1, 0), "a new outbound session is the sender's step");
+        let hello = alice.encrypt(BOB, b"hello").unwrap();
+        assert_eq!(alice.session_version(BOB), v(2, 0), "an encrypt");
+        open(&mut bob, ALICE, &alice, hello, BOB);
+        assert_eq!(bob.session_version(ALICE), v(0, 1), "a PreKey that built the session");
+        let reply = bob.encrypt(ALICE, b"reply").unwrap();
+        open(&mut alice, BOB, &bob, reply.clone(), ALICE);
+        assert_eq!(alice.session_version(BOB), v(2, 1), "a decrypt");
+        assert!(alice.decrypt(BOB, reply.0, &reply.1).is_err());
+        assert_eq!(alice.session_version(BOB), v(2, 1), "a failed decrypt changes nothing");
+        alice.retire_session(BOB);
+        assert_eq!(alice.session_version(BOB), v(2, 1), "retiring stores nothing new");
+        alice.remove_session(BOB);
+        assert_eq!(alice.session_version(BOB), v(3, 1), "a removal outranks every copy stored before it");
+        assert!(v(1, 0) > v(0, 99), "sends first");
+    }
+
+    #[test]
+    fn a_restart_carries_each_version_and_the_floor_a_removal_left() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("olm.db").to_string_lossy().into_owned();
+        let store = crate::storage::MessageStore::open(&path, &"ab".repeat(32)).unwrap();
+        let (mut alice, _bob) = established_pair();
+        alice.encrypt(BOB, b"one more").unwrap();
+        store.save_olm_account(&alice.account_pickle_json().unwrap()).unwrap();
+        let (pickle, version) = alice.session_save(BOB).unwrap().unwrap();
+        let (sends, reads) = version.stored();
+        assert!(store.save_olm_session(BOB, &pickle, sends, reads).unwrap());
+        store.save_olm_session("gone", &pickle, 5, 5).unwrap();
+        store.delete_olm_session("gone").unwrap();
+
+        let back = OlmManager::load(&store).unwrap().unwrap();
+        assert_eq!(back.session_version(BOB), version);
+        assert_eq!(back.session_version("gone"), v(6, 0), "the floor of a removed session");
+        assert!(!back.has_session("gone"));
+    }
+
+    /// The iOS extension decrypts on its own copy and saves it while the app sits
+    /// suspended; the app takes that copy only when it came further than its own.
+    #[test]
+    fn a_suspended_process_takes_only_a_copy_that_came_further() {
+        let (mut alice, mut app) = established_pair();
+        let base = app.session_save(ALICE).unwrap().unwrap();
+        let mut nse = OlmManager::from_pickles(&app.account_pickle_json().unwrap(), vec![(ALICE.into(), base.0.clone())]).unwrap();
+        nse.versions.insert(ALICE.into(), base.1);
+
+        let pushed = alice.encrypt(BOB, b"read by the extension").unwrap();
+        open(&mut nse, ALICE, &alice, pushed, BOB);
+        let (pickle, version) = nse.session_save(ALICE).unwrap().unwrap();
+        let stored = StoredSession { peer_id: ALICE.into(), pickle, version };
+        assert!(app.take_newer(&stored).unwrap());
+        assert_eq!(app.session_version(ALICE), version);
+        assert!(!app.take_newer(&stored).unwrap(), "the same copy again");
+        let behind = StoredSession { peer_id: ALICE.into(), pickle: base.0, version: base.1 };
+        assert!(!app.take_newer(&behind).unwrap(), "an older copy");
+
+        let next = alice.encrypt(BOB, b"next").unwrap();
+        assert_eq!(open(&mut app, ALICE, &alice, next, BOB).plaintext, b"next");
+        let back = app.encrypt(ALICE, b"back").unwrap();
+        assert_eq!(open(&mut alice, BOB, &app, back, ALICE).plaintext, b"back");
+    }
+
+    /// The store's answer is taken at the first change after it arrives, so a reconnect
+    /// never waits on the disk; an answer that comes after a send finds the send ranked
+    /// higher and changes nothing.
+    #[test]
+    fn the_stores_answer_is_taken_at_the_next_change_unless_a_send_came_first() {
+        let fork = || {
+            let (mut alice, app) = established_pair();
+            let base = app.session_save(ALICE).unwrap().unwrap();
+            let mut nse = OlmManager::from_pickles(&app.account_pickle_json().unwrap(), vec![(ALICE.into(), base.0)]).unwrap();
+            nse.versions.insert(ALICE.into(), base.1);
+            let pushed = alice.encrypt(BOB, b"read by the extension").unwrap();
+            open(&mut nse, ALICE, &alice, pushed, BOB);
+            let (pickle, version) = nse.session_save(ALICE).unwrap().unwrap();
+            (alice, app, StoredSession { peer_id: ALICE.into(), pickle, version })
+        };
+        let answer = |stored: StoredSession| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tx.send(super::super::store::Newer { sessions: vec![stored], read_marks: vec![(ALICE.into(), 4_242)] }).unwrap();
+            rx
+        };
+
+        let (mut alice, mut app, stored) = fork();
+        app.expect_newer(answer(stored.clone()));
+        let sent = app.encrypt(ALICE, b"after the return").unwrap();
+        assert_eq!(app.session_version(ALICE), SessionVersion { sends: stored.version.sends + 1, ..stored.version });
+        assert!(app.read_past(ALICE, 4_242), "the extension's read marks came along");
+        assert_eq!(open(&mut alice, BOB, &app, sent, ALICE).plaintext, b"after the return");
+
+        let (_alice, mut app, stored) = fork();
+        app.encrypt(ALICE, b"sent before the answer").unwrap();
+        let ours = app.session_version(ALICE);
+        app.expect_newer(answer(stored));
+        app.encrypt(ALICE, b"next").unwrap();
+        assert_eq!(app.session_version(ALICE), SessionVersion { sends: ours.sends + 1, ..ours }, "a send outranks the copy");
+    }
+
+    /// Why `sends` comes first: a copy that only read still holds the sending chain as
+    /// it stood, so a process restarted on it would encrypt the next message under the
+    /// key a frame already used. The send outranks that copy, so the store keeps it.
+    #[test]
+    fn a_copy_that_only_read_ranks_below_a_send_it_would_reuse() {
+        let (mut alice, mut app) = established_pair();
+        let a1 = alice.encrypt(BOB, b"a1").unwrap();
+        open(&mut app, ALICE, &alice, a1, BOB);
+        let b1 = app.encrypt(ALICE, b"b1").unwrap();
+        let base = app.session_save(ALICE).unwrap().unwrap();
+        let mut nse = OlmManager::from_pickles(&app.account_pickle_json().unwrap(), vec![(ALICE.into(), base.0)]).unwrap();
+        nse.versions.insert(ALICE.into(), base.1);
+        // Written before Alice read b1, so on a chain the copy already knows.
+        for i in 0..2 {
+            let m = alice.encrypt(BOB, format!("pushed {i}").as_bytes()).unwrap();
+            open(&mut nse, ALICE, &alice, m, BOB);
+        }
+        let sent = app.encrypt(ALICE, b"b2").unwrap();
+        let copy_version = nse.session_version(ALICE);
+        assert!(app.session_version(ALICE) > copy_version, "the copy that only read outranked the send");
+        let from_copy = nse.encrypt(ALICE, b"what a restart on the copy would send").unwrap();
+        assert_eq!(
+            OlmManager::message_key_of(sent.0, &sent.1),
+            OlmManager::message_key_of(from_copy.0, &from_copy.1),
+            "precondition: the copy would reuse the key of the send",
+        );
+        assert_eq!(open(&mut alice, BOB, &app, b1, ALICE).plaintext, b"b1");
+        assert_eq!(open(&mut alice, BOB, &app, sent, ALICE).plaintext, b"b2");
     }
 }

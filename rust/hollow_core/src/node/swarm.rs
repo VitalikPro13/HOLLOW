@@ -1572,7 +1572,7 @@ async fn run_event_loop(
                         let before: std::collections::HashSet<String> = server_states.keys().cloned().collect();
                         sync_handler::handle_create_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id, name,
+                            &bundle_keypair, &local_peer_str, name,
                             &crypto_store, &crdt_store,
                         ).await;
                         // Its first join lock, before any invite can be used.
@@ -1779,6 +1779,8 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::UnregisterPushToken => {
+                        // A fresh session re-sends a held token, which would undo this.
+                        push_token = None;
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::UnregisterPushToken);
                     }
 
@@ -3521,6 +3523,7 @@ async fn run_event_loop(
                     WsEvent::Connected => {
                         hollow_log!("[HOLLOW-WS] Fresh relay session: joining inbox, server and DM rooms");
                         mls_turn.on_session(true);
+                        crypto_handler::ask_for_newer_olm_sessions(&mut olm, &crypto_store);
                         // `RelayConnected` waits for the relay's answer to the inbox join.
                         awaiting_inbox_answer = Some(format!("inbox:{local_peer_str}"));
                         // TURN credentials over the authed socket (fresh set on
@@ -3696,6 +3699,7 @@ async fn run_event_loop(
                     WsEvent::Resumed { gap } => {
                         hollow_log!("[HOLLOW-WS] Relay session resumed (gap: {gap})");
                         mls_turn.on_session(true);
+                        crypto_handler::ask_for_newer_olm_sessions(&mut olm, &crypto_store);
                         awaiting_inbox_answer = None;
                         if gap {
                             Box::pin(sync_handler::repair_after_gap(
@@ -5198,6 +5202,25 @@ async fn run_event_loop(
                             hollow_log!("[HOLLOW-SECURITY] Dropped a frame stamped with our own device in {room}");
                             continue;
                         }
+                        // Before the seal check, so a frame past the bucket costs a lookup
+                        // rather than a signature check. Not for our own devices: a new
+                        // sibling's first sync is a legitimate burst far past the bucket,
+                        // and every frame lost there is state the new device never gets.
+                        // Our bare master id is no device (G1), so it pays like anyone.
+                        let rate_ok = (!super::resolver::is_bare_master(&from)
+                            && super::resolver::same_identity(&from, &local_peer_str))
+                            || match frame_budget.limiter.admit(&from, std::time::Instant::now()) {
+                                super::frame_budget::Admission::Admitted => true,
+                                super::frame_budget::Admission::Dropped { first } => {
+                                    if first {
+                                        hollow_log!("[HOLLOW-SECURITY] Rate limited WS peer {from}: dropping its frames past the bucket");
+                                    }
+                                    false
+                                }
+                            };
+                        if !rate_ok {
+                            continue;
+                        }
                         let now_ms = super::frame_auth::now_ms();
                         let delivery = if direct {
                             super::frame_auth::Delivery::Direct { device: &device_peer_id, master: &local_peer_str }
@@ -5226,22 +5249,6 @@ async fn run_event_loop(
                             if let Ok(msg) = parsed {
                                     if !super::roster_book::heard_from(&from, &msg) {
                                         hollow_log!("[HOLLOW-SECURITY] Dropped a {} from {from}: a master id its roster does not count is no device", msg.wire_kind());
-                                        continue;
-                                    }
-                                    // Not for our own devices: a new sibling's first sync is a
-                                    // legitimate burst far past the bucket, and every frame lost
-                                    // there is state the new device never gets.
-                                    let rate_ok = super::resolver::same_identity(&from, &local_peer_str)
-                                        || match frame_budget.limiter.admit(&from, std::time::Instant::now()) {
-                                            super::frame_budget::Admission::Admitted => true,
-                                            super::frame_budget::Admission::Dropped { first } => {
-                                                if first {
-                                                    hollow_log!("[HOLLOW-SECURITY] Rate limited WS peer {from}: dropping its frames past the bucket");
-                                                }
-                                                false
-                                            }
-                                        };
-                                    if !rate_ok {
                                         continue;
                                     }
                                     if msg.live_only()
@@ -5426,7 +5433,7 @@ async fn run_event_loop(
                                             }
                                             Some(HavenMessage::ShareHave { root_hash, bitmap_b64, chunk_count }) => {
                                                 super::share_handler::handle_envelope_share_have(
-                                                    &mut share_registry, &from, root_hash, bitmap_b64, chunk_count,
+                                                    &mut share_registry, &ws_cmd_tx, &from, root_hash, bitmap_b64, chunk_count,
                                                 ).await;
                                             }
                                             Some(HavenMessage::ShareChunkRequest { root_hash, indices }) => {
@@ -5623,16 +5630,15 @@ async fn run_event_loop(
                             if !still_eligible { continue; }
                             hollow_log!("[HOLLOW-MLS] Welcome grace elapsed for {group_key}, requesting bootstrap");
                             let requested = match &cid {
-                                Some(c) => {
-                                    crate::node::crypto_handler::request_subgroup_bootstrap(
-                                        mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers,
-                                        state, &sid, c, &local_peer_str,
-                                    );
-                                    true
-                                }
-                                None => crate::node::crypto_handler::request_server_group_bootstrap(
+                                Some(c) => crate::node::crypto_handler::request_subgroup_bootstrap(
                                     mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers,
-                                    state, &sid, &local_peer_str,
+                                    state, &sid, c, &local_peer_str,
+                                ),
+                                // When the owner is us, our own devices: asking the owner
+                                // alone would ask nobody.
+                                None => crate::node::crypto_handler::request_server_leaf(
+                                    mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers,
+                                    state, &sid, &local_peer_str, &device_peer_id,
                                 ),
                             };
                             if requested {
@@ -5666,6 +5672,11 @@ async fn run_event_loop(
                             mls_bootstrap_requested.insert(sid, std::time::Instant::now());
                         }
                     }
+                    crate::node::crypto_handler::tend_own_subgroups(
+                        mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers, &server_states,
+                        &mut pending_mls_key_packages, &mut pending_mls_removals,
+                        &mls_welcome_grace, &mut mls_bootstrap_requested, &local_peer_str,
+                    );
 
                     let our_turn = mls_turn.take();
 
@@ -10046,23 +10057,10 @@ async fn handle_incoming_request(
                                     key_package: kp_b64,
                                     channel_id: None,
                                 }).unwrap_or_default();
-                                let target = crate::node::crypto_handler::server_bootstrap_target(
-                                    state, local_peer_str, ws_room_peers,
-                                )
-                                .filter(|t| !super::resolver::same_identity(t, local_peer_str));
-                                let sent = match &target {
-                                    Some(t) => send_raw_to_identity(ws_cmd_tx, ws_room_peers, t, data.clone()),
-                                    None => 0,
-                                };
-                                if sent > 0 {
+                                if crate::node::crypto_handler::send_join_leaf_ask(
+                                    ws_cmd_tx, ws_room_peers, state, &server_id, local_peer_str, device_peer_id, peer_str, data,
+                                ) {
                                     mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
-                                    hollow_log!(
-                                        "[HOLLOW-MLS] Sent bootstrap KeyPackage to {} ({sent} device(s)) for {server_id}",
-                                        target.as_deref().unwrap_or_default(),
-                                    );
-                                } else {
-                                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, peer_str, data);
-                                    hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to join responder {peer_str} for {server_id} (no bootstrap target yet)");
                                 }
                             }
                         }
@@ -10497,6 +10495,13 @@ async fn handle_incoming_request(
                                 super::olm_lane::NoSession::Queue,
                             );
                         }
+                        // Our own devices too: with no group copy here there is no MLS
+                        // broadcast, and a sibling that does not know the joiner refuses
+                        // to seat it.
+                        super::olm_lane::carry_to_own_siblings(
+                            ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &added,
+                            super::olm_lane::NoSession::Queue,
+                        );
                     }
 
                     let _ = event_tx.send(NetworkEvent::MemberJoined {
@@ -10547,7 +10552,9 @@ async fn handle_incoming_request(
                                     // Lazily create the server group exactly as
                                     // the MlsKeyPackage handler does: only the
                                     // owner may, and only when nobody holds one.
-                                    if !mls_mgr.has_group(&server_id) && is_owner && !super::ws_client::backgrounded() {
+                                    if !mls_mgr.has_group(&server_id) && is_owner && !super::ws_client::backgrounded()
+                                        && super::mls_authority::may_found_here(mls_mgr, &server_id, local_peer_str, ws_room_peers)
+                                    {
                                         hollow_log!("[HOLLOW-MLS] Lazily creating MLS group {server_id} for a parked admission");
                                         if let Err(e) = mls_mgr.create_group(&server_id) {
                                             hollow_log!("[HOLLOW-MLS] Failed to create MLS group: {e}");
@@ -11692,6 +11699,7 @@ async fn handle_incoming_request(
             if sibling_readd {
                 hollow_log!("[HOLLOW-MLS] Sibling re-add: adding our own sibling {peer_str}'s regenerated leaf to {group_key} (bypassing coordinator election)");
             }
+            let from_sibling = super::mls_authority::sibling_ask(mls.as_mut(), &group_key, &sender_leaf, local_peer_str, device_peer_id);
 
             // Distributed committer: the lowest online MLS member by MASTER identity
             // processes KeyPackages. The sender's IDENTITY is excluded from the
@@ -11724,40 +11732,11 @@ async fn handle_incoming_request(
                         hollow_log!("[HOLLOW-MLS] Not MLS coordinator for {group_key} (excluding sender identity), skipping KeyPackage");
                         return;
                     }
-                } else if kp_channel_id.is_some() {
-                    // Subgroup doesn't exist yet — the elected subgroup coordinator
-                    // (lowest online qualifying member, excluding the sender) creates
-                    // and populates it. Candidate set = members who can see the channel.
-                    let cid = kp_channel_id.as_deref().unwrap();
-                    let coordinator = server_states.get(&server_id).and_then(|s| {
-                        let mut masters: Vec<String> = s.members.keys()
-                            .filter(|m| s.can_see_channel(m, cid))
-                            .filter(|m| !super::resolver::same_identity(peer_str, m) && **m != sender_leaf.master)
-                            .filter(|m| m.as_str() == local_peer_str || peer_is_reachable(&ws_room_peers, m))
-                            .cloned()
-                            .collect();
-                        masters.sort();
-                        masters.dedup();
-                        masters.into_iter().next()
-                    });
-                    if coordinator.as_deref() != Some(local_peer_str) {
-                        hollow_log!("[HOLLOW-MLS] Not subgroup coordinator for {group_key}, skipping KeyPackage");
-                        return;
-                    }
-                } else {
-                    // No server MLS group yet — only the owner can create it.
-                    let local_peer = local_peer_str.to_string();
-                    let is_owner = server_states.get(&server_id)
-                        .map(|s| {
-                            s.roles.get(&local_peer)
-                                .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                                .unwrap_or(false)
-                        })
-                        .unwrap_or(false);
-                    if !is_owner {
-                        hollow_log!("[HOLLOW-MLS] No MLS group for {server_id} and not owner, skipping KeyPackage");
-                        return;
-                    }
+                } else if !super::mls_authority::founds_on_key_package(
+                    mls_mgr, state, &group_key, kp_channel_id.as_deref(), &sender_leaf, from_sibling,
+                    local_peer_str, ws_room_peers,
+                ) {
+                    return;
                 }
             } } // close `if let Some(mls_mgr)` + `if !sibling_readd`
 
@@ -11766,12 +11745,7 @@ async fn handle_incoming_request(
                 // for pre-MLS servers; subgroup: first restricted-channel join). Not while
                 // the app is away: nobody else would see the group, and the sender asks again.
                 if !mls_mgr.has_group(&group_key) {
-                    if super::ws_client::backgrounded() {
-                        return;
-                    }
-                    hollow_log!("[HOLLOW-MLS] Lazily creating MLS group {group_key}");
-                    if let Err(e) = mls_mgr.create_group(&group_key) {
-                        hollow_log!("[HOLLOW-MLS] Failed to create MLS group: {e}");
+                    if super::ws_client::backgrounded() || !super::mls_authority::found_group(mls_mgr, &group_key) {
                         return;
                     }
                 }

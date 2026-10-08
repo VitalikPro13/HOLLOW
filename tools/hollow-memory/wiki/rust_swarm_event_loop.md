@@ -286,8 +286,8 @@ Fires when we join a room — provides the full member list. This is the relay's
 
 ### WsEvent::Message / DirectMessage { room, from, data }
 The main incoming message path:
-1. Parses JSON as `HavenMessage`.
-2. Rate limiting: token bucket check (100 burst, 20/sec per peer; our own devices exempt). Drop if rate-limited, remembered for one repair once the sender stops (see Rate Limiting above).
+1. Rate limiting: token bucket check on the relay-stamped `from` (100 burst, 20/sec per peer; our own devices exempt), BEFORE the seal check and the parse, so a frame past the bucket costs a map lookup, not an Ed25519 verify (2026-10-08: the old verify-then-drop order cost ~10 ms per dropped frame under coverage, and a 300-frame burst outran the harness flush on CI). Drop if rate-limited, remembered for one repair once the sender stops (see Rate Limiting above).
+2. `frame_auth::open` against `from`'s key, then parses JSON as `HavenMessage`.
 3. **Recovery interception:** if message is a Recovery* variant, handle inline and `continue`.
 4. **Share interception:** if message is a Share* variant, dispatch to `share_handler::handle_envelope_share_*()` and `continue`.
 5. Otherwise: passes to `handle_incoming_request()`.

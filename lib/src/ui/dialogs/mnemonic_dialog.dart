@@ -15,14 +15,17 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/dialogs/keychain_protection_dialogs.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Shows a new identity's recovery phrase, once, and asks for a few words back.
 /// Hollow keeps no copy (design ID-1): once confirmed, the app forgets it.
+/// Only a confirmed phrase turns on the default lock to this computer's
+/// keychain, so nobody is locked to a keystore without a way back.
 void showMnemonicDialog(BuildContext context, String mnemonic) {
   final container = ProviderScope.containerOf(context, listen: false);
-  showHollowDialog(
+  showHollowDialog<bool>(
     context: context,
     barrierDismissible: false,
     builder: (_) => _PhraseRevealDialog(
@@ -37,7 +40,11 @@ void showMnemonicDialog(BuildContext context, String mnemonic) {
         await container.read(homeSetupProvider.notifier).markPhraseSaved();
       },
     ),
-  );
+  ).then((confirmed) async {
+    if (confirmed == true) {
+      await applyDefaultKeychainProtection(container, mnemonic);
+    }
+  });
 }
 
 /// An identity from before the phrase became its root: the phrase it stored, which

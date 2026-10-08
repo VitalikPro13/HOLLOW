@@ -1648,6 +1648,10 @@ pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
     land_snapshot(check_snapshot(zip_bytes)?)
 }
 
+/// Set once a link or a restore lands an identity: the app offers a lock at its next
+/// start and clears it (Dart `kProtectionOfferDueKey`).
+pub(crate) const PROTECTION_OFFER_DUE: &str = "protection_offer_due";
+
 fn land_snapshot(snapshot: CheckedSnapshot<'_>) -> Result<(), String> {
     use std::io::Read;
 
@@ -1703,20 +1707,34 @@ fn land_snapshot(snapshot: CheckedSnapshot<'_>) -> Result<(), String> {
     // identities. An older snapshot still carries its source's, and its phrase.
     if let Ok(passphrase) = derive_db_key() {
         let db_path = data_dir.join("messages.db");
-        if let Ok(store) = crate::storage::MessageStore::open(db_path.to_str().unwrap_or_default(), &passphrase)
-            && let Err(e) = store.scrub_device_secrets()
-        {
-            hollow_log!("[HOLLOW-LINK] Could not clear the source device's secrets: {e}");
+        if let Ok(store) = crate::storage::MessageStore::open(db_path.to_str().unwrap_or_default(), &passphrase) {
+            if let Err(e) = store.scrub_device_secrets() {
+                hollow_log!("[HOLLOW-LINK] Could not clear the source device's secrets: {e}");
+            }
+            // The keys landed unprotected whatever the source used (C-IDENTITY-15).
+            let _ = store.save_setting(PROTECTION_OFFER_DUE, "1");
         }
     }
 
     // Log what the imported identity resolves to: the master peer_id MUST match the
     // source device's, and the next launch derives the DB passphrase from this key.
     match crate::identity::load_or_create_identity() {
-        Ok(id) => hollow_log!(
-            "[HOLLOW-LINK] Import OK — imported identity peer_id={} device_peer_id={}",
-            id.peer_id, id.device_peer_id
-        ),
+        Ok(id) => {
+            hollow_log!(
+                "[HOLLOW-LINK] Import OK — imported identity peer_id={} device_peer_id={}",
+                id.peer_id, id.device_peer_id
+            );
+            // What the source device was told about our own devices happened before
+            // this one joined: no news here (C-IDENTITY-09).
+            if let Ok(passphrase) = derive_db_key()
+                && let Ok(store) = crate::storage::MessageStore::open(
+                    data_dir.join("messages.db").to_str().unwrap_or_default(),
+                    &passphrase,
+                )
+            {
+                let _ = store.acknowledge_security_alerts_for_peer(&id.peer_id);
+            }
+        }
         Err(e) => hollow_log!("[HOLLOW-LINK] Import WARNING — imported identity failed to load: {e}"),
     }
 
@@ -2115,7 +2133,7 @@ mod tests {
         {
             let store = open(&db);
             store.save_olm_account("{\"account\":1}").unwrap();
-            store.save_olm_session("peer", "{\"session\":1}").unwrap();
+            store.save_olm_session("peer", "{\"session\":1}", 1, 0).unwrap();
             store.save_mls_identity(b"signer", b"credential", b"storage").unwrap();
             store.save_setting("recovery_mnemonic", "abandon abandon about").unwrap();
             store.save_setting("kept", "yes").unwrap();
@@ -2341,6 +2359,67 @@ mod tests {
         for stash in ["pending_link.hollow", "pending_link.code", "pending_link.device"] {
             assert!(!tmp.path().join(stash).exists(), "{stash} outlived the import");
         }
+    }
+
+    /// C-IDENTITY-15. A link and a restore each land the identity unprotected, so each
+    /// leaves the lock offer due in the database it lands, whatever the source's copy said.
+    /// C-IDENTITY-09: what the source was told about our own devices came before the new
+    /// device joined, so it lands already seen.
+    #[test]
+    fn a_link_or_a_restore_leaves_a_lock_offer_due() {
+        use crate::identity::native_identity::NativeKeypair;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let out_dir = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let master = NativeKeypair::from_secret_bytes(&[0x66; 32]);
+        std::fs::write(tmp.path().join("identity.key"), master.to_protobuf_encoding().unwrap()).unwrap();
+        let pass = derive_db_key().unwrap();
+        let db = tmp.path().join("messages.db");
+        crate::storage::MessageStore::migrate_auto_vacuum_once(db.to_str().unwrap(), &pass).unwrap();
+        let due = || {
+            crate::storage::MessageStore::open(db.to_str().unwrap(), &derive_db_key().unwrap())
+                .unwrap()
+                .load_setting(PROTECTION_OFFER_DUE)
+                .unwrap()
+        };
+        let shown = || {
+            crate::storage::MessageStore::open(db.to_str().unwrap(), &derive_db_key().unwrap())
+                .unwrap()
+                .save_setting(PROTECTION_OFFER_DUE, "")
+                .unwrap()
+        };
+        shown();
+        let own_news = || {
+            crate::storage::MessageStore::open(db.to_str().unwrap(), &derive_db_key().unwrap())
+                .unwrap()
+                .get_security_alerts()
+                .unwrap()
+                .into_iter()
+                .filter(|a| a.kind == crate::node::security_alerts::KIND_OWN_DEVICE_ADDED)
+                .collect::<Vec<_>>()
+        };
+        {
+            let store = crate::storage::MessageStore::open(db.to_str().unwrap(), &pass).unwrap();
+            crate::node::security_alerts::record_own_device_added(&store, &master.peer_id(), "devC", "devA").unwrap();
+        }
+        let key = "cd".repeat(32);
+        let blob = export_backup_bytes(&key, false, false).unwrap();
+        let linked = NativeKeypair::from_secret_bytes(&[0x67; 32]);
+        stash_pending_link(&blob, &key, &linked.to_protobuf_encoding().unwrap()).unwrap();
+        import_pending_link().unwrap();
+        assert_eq!(due().as_deref(), Some("1"), "a link left no lock offer");
+        let news = own_news();
+        assert!(!news.is_empty() && news.iter().all(|a| a.acknowledged_at.is_some()), "the source's own-device news came along unread: {news:?}");
+
+        shown();
+        let out = out_dir.path().join("restore.hollow").to_string_lossy().to_string();
+        export_backup(out.clone(), false, false, "a long enough passphrase".into()).unwrap();
+        import_backup(out, "a long enough passphrase".into()).unwrap();
+        assert_eq!(due().as_deref(), Some("1"), "a restore left no lock offer");
     }
 }
 

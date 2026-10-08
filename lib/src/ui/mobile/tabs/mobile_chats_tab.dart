@@ -52,11 +52,14 @@ import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/ui/mobile/mobile_server_settings_route.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_friends_tab.dart'
     show showMobileAddFriendSheet;
+import 'package:hollow/src/core/providers/settings_place_provider.dart'
+    show SettingsCategory;
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart'
-    show openMobileProfileSettings;
+    show openMobileProfileSettings, openMobileSettingsPage;
 import 'package:hollow/src/ui/shell/home_dashboard.dart';
 import 'package:hollow/src/ui/shell/home_inbox.dart';
 import 'package:hollow/src/ui/shell/home_rail.dart';
@@ -103,6 +106,14 @@ class _MobileHomeActions extends HomeActions {
 
   @override
   void editProfile(BuildContext context) => openMobileProfileSettings(context);
+
+  @override
+  void openNotificationSettings(BuildContext context) =>
+      openMobileSettingsPage(context, SettingsCategory.notifications);
+
+  @override
+  void openDevices(BuildContext context) =>
+      openMobileSettingsPage(context, SettingsCategory.devices);
 }
 
 const _actions = _MobileHomeActions();

@@ -17,11 +17,12 @@ roster_api.RosterStatus _status({
       removedBy: removedBy,
       devices: hasRoster
           ? [
-              const roster_api.RosterDevice(devicePeerId: 'owner', state: 'member', thisDevice: false),
+              const roster_api.RosterDevice(devicePeerId: 'owner', state: 'member', thisDevice: false, added: []),
               roster_api.RosterDevice(
                 devicePeerId: 'me',
                 state: removedBy != null ? 'removed' : member ? 'member' : 'pending',
                 thisDevice: true,
+                added: const [],
               ),
             ]
           : const [],

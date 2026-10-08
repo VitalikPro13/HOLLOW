@@ -545,6 +545,34 @@ impl Roster {
         out.compacted()
     }
 
+    /// [`Self::merged`] for a holder that keeps a clock of pending joins. Past their
+    /// ceiling, asks give way by when this holder first saw them, `first_seen(base,
+    /// device)`, an unseen one after every seen one: anyone holding the master key can
+    /// sign asks under ids it picks, so a later flood must push out no earlier ask. Per
+    /// holder by design: the fold stays the same everywhere, only what each holder keeps
+    /// of a flood differs. The relay mirrors it (`roster.h`, `RosterBook::show`).
+    pub(crate) fn merged_by_first_sight(&self, incoming: &Roster, first_seen: impl Fn(&str, &str) -> Option<i64>) -> Roster {
+        let merged = self.merged(incoming);
+        if !self.master.is_empty() && incoming.master != self.master {
+            return merged;
+        }
+        let base = merged.base();
+        let mut asks: Vec<&Pending> = self.pendings.iter().chain(&incoming.pendings).filter(|p| p.base == base).collect();
+        asks.sort();
+        asks.dedup();
+        if asks.len() <= MAX_PENDING {
+            return merged;
+        }
+        asks.sort_by_cached_key(|p| (first_seen(&p.base, &p.device).unwrap_or(i64::MAX), (*p).clone()));
+        let kept: BTreeSet<&Pending> = asks.into_iter().take(MAX_PENDING).collect();
+        let trim = |r: &Roster| {
+            let mut r = r.clone();
+            r.pendings.retain(|p| p.base != base || kept.contains(p));
+            r
+        };
+        trim(self).merged(&trim(incoming))
+    }
+
     /// The newest recovery: its base id (ties: the lowest), its time, the union of the
     /// keep sets that share it, and whether any of them turned off joining by waiting.
     fn current_recovery(&self) -> Option<Current> {
@@ -1508,5 +1536,63 @@ mod tests {
         bare.recoveries.clear();
         assert_eq!(bare.reverified().r_pub, r_pub_of(&id.r), "a held pin was cleared");
         assert!(bare.verified(NOW).r_pub.is_empty(), "an arriving key with nothing behind it is no pin");
+    }
+
+    /// `n` asking devices of `id` in `held`'s base whose ids sort before `than`, as a
+    /// flood picks them.
+    fn low_asks(id: &Id, held: &Roster, than: &str, n: usize) -> Roster {
+        let base = held.base();
+        let mut flood = Roster { r_pub: held.r_pub.clone(), recoveries: held.recoveries.clone(), ..Roster::new(&id.master()) };
+        for p in (0u32..).map(junk_kp).filter(|p| p.peer_id().as_str() < than).take(n) {
+            flood.consents.push(sign_consent(&p, &id.master()));
+            flood.pendings.push(sign_pending(&id.m, &base, &p.peer_id()));
+        }
+        flood
+    }
+
+    /// C-IDENTITY-16. Sixteen asks under ids that sort first, arriving after a real
+    /// restored device asked, never push that ask out: a holder ranks asks by when it
+    /// first saw them, so the real one still matures after its seven days.
+    #[test]
+    fn authz_a_flood_of_pending_joins_never_hides_a_real_ask() {
+        let id = Id::new();
+        let owner = kp(10);
+        let real = kp(77);
+        let mut held = Roster::genesis(&id.m, &id.r, &owner, NOW - 30 * 24 * 3_600_000);
+        let base = held.base();
+        with_consent(&mut held, &real);
+        held.add_pending(sign_pending(&id.m, &base, &real.peer_id()));
+        let held = held.verified(NOW);
+        let flood = low_asks(&id, &held, &real.peer_id(), MAX_PENDING).verified(NOW);
+        assert_eq!(flood.pendings.len(), MAX_PENDING);
+
+        let seen = |_: &str, d: &str| (d == real.peer_id()).then_some(NOW - PENDING_MATURITY_MS);
+        let kept = held.merged_by_first_sight(&flood, seen);
+        assert!(kept.pendings.iter().any(|p| p.device == real.peer_id()), "a later flood pushed out the real ask");
+        assert_eq!(kept.pendings.len(), MAX_PENDING);
+        assert!(kept.fold(|d| seen("", d), NOW).is_member(&real.peer_id()), "the real ask never matured");
+        assert!(
+            !held.merged(&flood).pendings.iter().any(|p| p.device == real.peer_id()),
+            "control: by id alone the flood wins",
+        );
+
+        // Asks seen first keep their slots even against an unseen one whose id sorts
+        // before theirs: the clock decides, never the id.
+        let mut early = Roster::genesis(&id.m, &id.r, &owner, NOW - 30 * 24 * 3_600_000);
+        for p in (0u32..).map(junk_kp).filter(|p| p.peer_id() > real.peer_id()).take(MAX_PENDING) {
+            early.consents.push(sign_consent(&p, &id.master()));
+            early.pendings.push(sign_pending(&id.m, &base, &p.peer_id()));
+        }
+        let early = early.verified(NOW);
+        assert_eq!(early.pendings.len(), MAX_PENDING);
+        let early_seen = |_: &str, d: &str| (d != real.peer_id()).then_some(NOW - 1_000);
+        assert!(
+            !early.merged_by_first_sight(&held, early_seen).pendings.iter().any(|p| p.device == real.peer_id()),
+            "an ask seen after the slots filled took one",
+        );
+
+        // Under the ceiling nothing changes.
+        let few = low_asks(&id, &held, &real.peer_id(), 3).verified(NOW);
+        assert_eq!(held.merged_by_first_sight(&few, |_, _| None), held.merged(&few));
     }
 }

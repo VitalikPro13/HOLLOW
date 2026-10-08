@@ -331,7 +331,7 @@ fn handle_text_frame(text: &str) {
 
 /// Handle a relay binary frame.
 #[allow(clippy::too_many_arguments)]
-fn handle_binary_frame(
+pub(crate) fn handle_binary_frame(
     data: &[u8],
     server_room: Option<&str>,
     olm: &mut OlmManager,

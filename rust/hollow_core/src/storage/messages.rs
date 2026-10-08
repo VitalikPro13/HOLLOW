@@ -587,10 +587,23 @@ impl MessageStore {
                 pickle TEXT NOT NULL
             )")?;
 
+        // `sends`, `reads`: how far the session has come (crypto `SessionVersion`); a
+        // write that has not come further than the stored row is refused (AR-30).
         ddl(conn, "olm_sessions table",
             "CREATE TABLE IF NOT EXISTS olm_sessions (
                 peer_id TEXT PRIMARY KEY,
-                pickle  TEXT NOT NULL
+                pickle  TEXT NOT NULL,
+                sends   INTEGER NOT NULL DEFAULT 0,
+                reads   INTEGER NOT NULL DEFAULT 0
+            )")?;
+        migrate(conn, "ALTER TABLE olm_sessions ADD COLUMN sends INTEGER NOT NULL DEFAULT 0");
+        migrate(conn, "ALTER TABLE olm_sessions ADD COLUMN reads INTEGER NOT NULL DEFAULT 0");
+        // A removed session's last version, so no copy of it written later comes back.
+        ddl(conn, "olm_session_floors table",
+            "CREATE TABLE IF NOT EXISTS olm_session_floors (
+                peer_id TEXT PRIMARY KEY,
+                sends   INTEGER NOT NULL,
+                reads   INTEGER NOT NULL
             )")?;
 
         // Per sending device, the newest seal time of a frame our sessions decrypted.
@@ -1411,6 +1424,12 @@ impl MessageStore {
             .map_err(|e| format!("COMMIT failed: {e}"))
     }
 
+    /// Drop an open transaction whose COMMIT failed, which leaves it open.
+    pub fn rollback_transaction(&self) -> Result<(), String> {
+        self.conn.execute_batch("ROLLBACK")
+            .map_err(|e| format!("ROLLBACK failed: {e}"))
+    }
+
     /// Reconcile a synced or edited DM against an existing local row with the same
     /// (peer_id, timestamp, is_mine=0) but a NULL or different message_id, which
     /// happens when the original arrived by one path and its edit by another, so
@@ -1697,27 +1716,40 @@ impl MessageStore {
         }
     }
 
-    /// Save (upsert) an Olm session pickle for a peer.
-    pub fn save_olm_session(&self, peer_id: &str, pickle_json: &str) -> Result<(), String> {
-        self.conn
+    /// Store a peer's session pickle at version `(sends, reads)`, but only past the
+    /// stored row and any floor a removal left: two processes write this table (the
+    /// node and the push fetch), so an older copy must never replace a newer one.
+    /// Ordered `sends` first. An equal version keeps the row it finds, and counts as
+    /// stored when that row is this very pickle (a repeat of a save that landed).
+    /// Returns whether the pickle is now the stored one.
+    pub fn save_olm_session(&self, peer_id: &str, pickle_json: &str, sends: i64, reads: i64) -> Result<bool, String> {
+        let stored = self
+            .conn
             .execute(
-                "INSERT INTO olm_sessions (peer_id, pickle) VALUES (?1, ?2)
-                 ON CONFLICT(peer_id) DO UPDATE SET pickle = excluded.pickle",
-                params![peer_id, pickle_json],
+                "INSERT INTO olm_sessions (peer_id, pickle, sends, reads)
+                 SELECT ?1, ?2, ?3, ?4
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM olm_session_floors f
+                     WHERE f.peer_id = ?1 AND (f.sends, f.reads) >= (?3, ?4))
+                 ON CONFLICT(peer_id) DO UPDATE SET
+                     pickle = excluded.pickle, sends = excluded.sends, reads = excluded.reads
+                 WHERE (excluded.sends, excluded.reads) > (olm_sessions.sends, olm_sessions.reads)
+                    OR ((excluded.sends, excluded.reads) = (olm_sessions.sends, olm_sessions.reads)
+                        AND excluded.pickle = olm_sessions.pickle)",
+                params![peer_id, pickle_json, sends, reads],
             )
             .map_err(|e| format!("Failed to save olm session: {e}"))?;
-        Ok(())
+        Ok(stored > 0)
     }
 
-    /// Load an Olm session pickle for a specific peer.
-    #[allow(dead_code)]
-    pub fn load_olm_session(&self, peer_id: &str) -> Result<Option<String>, String> {
+    /// A peer's stored session with its version: (pickle_json, sends, reads).
+    pub fn load_olm_session(&self, peer_id: &str) -> Result<Option<(String, i64, i64)>, String> {
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT pickle FROM olm_sessions WHERE peer_id = ?1")
+            .prepare_cached("SELECT pickle, sends, reads FROM olm_sessions WHERE peer_id = ?1")
             .map_err(|e| format!("Failed to prepare olm_sessions query: {e}"))?;
         let mut rows = stmt
-            .query_map(params![peer_id], |row| row.get(0))
+            .query_map(params![peer_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .map_err(|e| format!("Failed to query olm_sessions: {e}"))?;
         match rows.next() {
             Some(Ok(pickle)) => Ok(Some(pickle)),
@@ -1727,15 +1759,37 @@ impl MessageStore {
     }
 
     /// Delete a persisted Olm session, so a revoked device's session is not resurrected
-    /// from the DB on restart. Idempotent.
+    /// from the DB on restart. Idempotent. The floor it leaves outranks every copy of
+    /// the session stored so far, so one written later by the push fetch, which loaded
+    /// it before the removal, is refused too.
     pub fn delete_olm_session(&self, peer_id: &str) -> Result<(), String> {
+        let drop_it = || -> rusqlite::Result<()> {
+            self.conn.execute(
+                "INSERT INTO olm_session_floors (peer_id, sends, reads)
+                 SELECT ?1, COALESCE((SELECT sends FROM olm_sessions WHERE peer_id = ?1), 0) + 1, 0
+                 WHERE true
+                 ON CONFLICT(peer_id) DO UPDATE SET sends = excluded.sends, reads = excluded.reads
+                 WHERE (excluded.sends, excluded.reads) > (olm_session_floors.sends, olm_session_floors.reads)",
+                params![peer_id],
+            )?;
+            self.conn.execute("DELETE FROM olm_sessions WHERE peer_id = ?1", params![peer_id])?;
+            Ok(())
+        };
         self.conn
-            .execute("DELETE FROM olm_sessions WHERE peer_id = ?1", params![peer_id])
+            .execute_batch("SAVEPOINT olm_session_drop")
             .map_err(|e| format!("Failed to delete olm session: {e}"))?;
-        Ok(())
+        match drop_it() {
+            Ok(()) => self.conn.execute_batch("RELEASE olm_session_drop"),
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK TO olm_session_drop; RELEASE olm_session_drop");
+                Err(e)
+            }
+        }
+        .map_err(|e| format!("Failed to delete olm session: {e}"))
     }
 
     /// Load all Olm session pickles (peer_id, pickle_json) pairs.
+    #[cfg(test)]
     pub fn load_all_olm_sessions(&self) -> Result<Vec<(String, String)>, String> {
         let mut stmt = self
             .conn
@@ -1745,6 +1799,54 @@ impl MessageStore {
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| format!("Failed to query olm_sessions: {e}"))?;
         collect_rows(rows, "olm_sessions")
+    }
+
+    /// Every stored session with its version: (peer_id, pickle_json, sends, reads).
+    pub fn load_olm_sessions_versioned(&self) -> Result<Vec<(String, String, i64, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT peer_id, pickle, sends, reads FROM olm_sessions")
+            .map_err(|e| format!("Failed to prepare olm_sessions query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .map_err(|e| format!("Failed to query olm_sessions: {e}"))?;
+        collect_rows(rows, "olm_sessions")
+    }
+
+    /// TEST-ONLY: put a stored session row back as it was, past every version check,
+    /// as a database restored from a backup does.
+    #[cfg(test)]
+    pub fn restore_olm_session_for_test(&self, peer_id: &str, row: &(String, i64, i64)) {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO olm_sessions (peer_id, pickle, sends, reads) VALUES (?1, ?2, ?3, ?4)",
+                params![peer_id, row.0, row.1, row.2],
+            )
+            .expect("restore an olm session row");
+    }
+
+    /// Every stored session's version, without its pickle: (peer_id, sends, reads).
+    pub fn load_olm_session_versions(&self) -> Result<Vec<(String, i64, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT peer_id, sends, reads FROM olm_sessions")
+            .map_err(|e| format!("Failed to prepare olm_sessions query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| format!("Failed to query olm_sessions: {e}"))?;
+        collect_rows(rows, "olm_sessions")
+    }
+
+    /// The floor each removed session left: (peer_id, sends, reads).
+    pub fn load_olm_session_floors(&self) -> Result<Vec<(String, i64, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT peer_id, sends, reads FROM olm_session_floors")
+            .map_err(|e| format!("Failed to prepare olm_session_floors query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| format!("Failed to query olm_session_floors: {e}"))?;
+        collect_rows(rows, "olm_session_floors")
     }
 
     /// Raise a sending device's read mark to `sealed_ms`. It never moves back: two
@@ -1779,6 +1881,7 @@ impl MessageStore {
             .execute_batch(
                 "PRAGMA secure_delete = ON;
                  DELETE FROM olm_sessions;
+                 DELETE FROM olm_session_floors;
                  DELETE FROM olm_read_marks;",
             )
             .map_err(|e| format!("Failed to erase Olm peers: {e}"))?;
@@ -2931,6 +3034,7 @@ impl MessageStore {
                 "PRAGMA secure_delete = ON;
                  DELETE FROM olm_account;
                  DELETE FROM olm_sessions;
+                 DELETE FROM olm_session_floors;
                  DELETE FROM mls_identity;
                  DELETE FROM app_settings WHERE key = 'recovery_mnemonic';",
             )
@@ -7645,5 +7749,71 @@ mod tests {
         assert_eq!(media_ids(&alice), vec!["a1"]);
         let channel = store.list_media_for_context("channel", "s1:c1", None, None, 50).unwrap();
         assert_eq!(media_ids(&channel), vec!["c1"]);
+    }
+
+    fn stored_session(store: &MessageStore, peer: &str) -> Option<(String, i64, i64)> {
+        store.load_olm_session(peer).unwrap()
+    }
+
+    /// AR-30: two processes write session pickles, so a copy that has not come as far
+    /// as the stored row never replaces it, and `sends` outranks `reads`: a copy from a
+    /// process that only decrypted can never put back a chain step that was sent.
+    #[test]
+    fn an_older_olm_session_copy_never_replaces_a_newer_one() {
+        let store = mem_store();
+        assert!(store.save_olm_session("bob", "sent-1", 1, 0).unwrap());
+        assert!(!store.save_olm_session("bob", "read-from-older", 0, 7).unwrap(), "fewer sends, more reads");
+        assert!(!store.save_olm_session("bob", "same-version", 1, 0).unwrap(), "an equal version keeps the row it finds");
+        assert_eq!(stored_session(&store, "bob"), Some(("sent-1".into(), 1, 0)));
+        assert!(store.save_olm_session("bob", "sent-1", 1, 0).unwrap(), "the same save again is stored");
+        assert!(store.save_olm_session("bob", "read-after-send", 1, 3).unwrap());
+        assert!(store.save_olm_session("bob", "sent-2", 2, 0).unwrap(), "a send outranks any number of reads");
+        assert!(!store.save_olm_session("bob", "read-after-send", 1, 3).unwrap(), "a late copy of an older state");
+        assert_eq!(stored_session(&store, "bob"), Some(("sent-2".into(), 2, 0)));
+        assert!(store.save_olm_session("carol", "first", 0, 1).unwrap(), "another peer's row is its own");
+    }
+
+    /// A removal leaves a floor past every stored copy, so the push fetch writing back
+    /// the session it loaded before the removal cannot bring it back.
+    #[test]
+    fn a_removed_olm_session_stays_removed_past_older_copies() {
+        let store = mem_store();
+        assert!(store.save_olm_session("dev", "live", 3, 2).unwrap());
+        store.delete_olm_session("dev").unwrap();
+        assert_eq!(stored_session(&store, "dev"), None);
+        assert!(!store.save_olm_session("dev", "loaded-before-removal", 3, 9).unwrap());
+        assert_eq!(stored_session(&store, "dev"), None, "an older copy came back");
+        assert_eq!(store.load_olm_session_floors().unwrap(), vec![("dev".to_string(), 4, 0)]);
+        assert!(store.save_olm_session("dev", "new-session", 4, 1).unwrap(), "a session built after the removal stores");
+        store.delete_olm_session("dev").unwrap();
+        assert_eq!(store.load_olm_session_floors().unwrap(), vec![("dev".to_string(), 5, 0)], "a floor only rises");
+        store.delete_olm_session("never-stored").unwrap();
+        assert!(store.save_olm_session("never-stored", "after", 1, 1).unwrap());
+    }
+
+    /// A 0.12.0 database holds sessions with no version: they read as version zero and
+    /// the first save of the new build replaces them.
+    #[test]
+    fn a_0_12_0_olm_sessions_table_gains_versions() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("old.db").to_string_lossy().into_owned();
+        let pass = "cd".repeat(32);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!("PRAGMA key = \"x'{pass}'\";")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE olm_sessions (peer_id TEXT PRIMARY KEY, pickle TEXT NOT NULL);
+                 INSERT INTO olm_sessions (peer_id, pickle) VALUES ('bob', 'from-0.12.0');",
+            )
+            .unwrap();
+        }
+        let store = MessageStore::open(&path, &pass).unwrap();
+        assert_eq!(store.load_olm_sessions_versioned().unwrap(), vec![("bob".into(), "from-0.12.0".into(), 0, 0)]);
+        assert!(!store.save_olm_session("bob", "same", 0, 0).unwrap());
+        assert!(store.save_olm_session("bob", "next", 0, 1).unwrap());
+        assert!(store.load_olm_session_floors().unwrap().is_empty());
+        drop(store);
+        let again = MessageStore::open(&path, &pass).unwrap();
+        assert_eq!(stored_session(&again, "bob"), Some(("next".into(), 0, 1)), "a reopen keeps the migrated row");
     }
 }

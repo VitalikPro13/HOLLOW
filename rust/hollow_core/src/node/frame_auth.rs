@@ -211,6 +211,9 @@ pub(crate) fn seal_command(keypair: &NativeKeypair, cmd: WsCommand) -> WsCommand
 /// the frames it became.
 pub(crate) type CarryRequest = (WsCommand, tokio::sync::oneshot::Sender<Vec<WsCommand>>);
 
+/// Where the sealing stage hands the node what only the node can encrypt or keep.
+pub(crate) type CarryTx = UnboundedSender<CarryRequest>;
+
 /// Put a sealing stage in front of the relay: whoever holds the returned sender can
 /// only send sealed frames, so the node hands it to everything that sends. A
 /// [`WsCommand::Carry`] comes back out of the returned receiver for the node to put
@@ -242,7 +245,17 @@ pub(crate) fn spawn_sealer(
                 }
                 cmd => vec![cmd],
             };
-            if out.into_iter().any(|cmd| relay.send(seal_command(&keypair, cmd)).is_err()) {
+            // An Olm frame waits here for its session save, and so does all that follows it.
+            let mut relay_gone = false;
+            for cmd in out {
+                if let Some(cmd) = super::olm_lane::released(cmd, &carry_tx).await
+                    && relay.send(seal_command(&keypair, cmd)).is_err()
+                {
+                    relay_gone = true;
+                    break;
+                }
+            }
+            if relay_gone {
                 break;
             }
         }

@@ -77,6 +77,7 @@ import 'package:hollow/src/ui/components/identity_destroyed_banner.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
+import 'package:hollow/src/ui/mobile/leave_with_server.dart';
 import 'package:hollow/src/ui/mobile/mobile_keyboard_panel.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/call/call_actions.dart' show startDmCallFlow;
@@ -1535,18 +1536,21 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       scaffold = _wrapWithBackground(scaffold, bg, hollow);
     }
 
-    return Stack(
-      children: [
-        scaffold,
-        // For messages arriving in OTHER conversations. Offset below the status
-        // bar and chat header so it cannot cover the header controls.
-        MobileInChatBanner(
-          currentPeerId: widget.peerId,
-          currentServerId: widget.serverId,
-          currentChannelId: widget.channelId,
-          topOffset: MediaQuery.paddingOf(context).top + 64,
-        ),
-      ],
+    return LeaveWithServer(
+      serverId: _listedServerId,
+      child: Stack(
+        children: [
+          scaffold,
+          // For messages arriving in OTHER conversations. Offset below the
+          // status bar and chat header so it cannot cover the header controls.
+          MobileInChatBanner(
+            currentPeerId: widget.peerId,
+            currentServerId: widget.serverId,
+            currentChannelId: widget.channelId,
+            topOffset: MediaQuery.paddingOf(context).top + 64,
+          ),
+        ],
+      ),
     );
   }
 
@@ -1561,40 +1565,21 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     // or a demotion); the CRDT already propagated, so this only pops the route.
     if (!widget.isDm && widget.serverId != null && widget.channelId != null) {
       ref.listen(visibleChannelsProvider, _onVisibleChannelsChanged);
-      // Kicked, banned, deleted or left from any device: the page leaves with
-      // its server. A meeting is never in the server list.
-      if (!widget.serverId!.startsWith('conf:')) {
-        ref.listen(
-            serverListProvider.select((s) => s.containsKey(widget.serverId)),
-            _onServerListedChanged);
-      }
     }
+  }
+
+  /// The server whose leaving the list closes this page. A meeting is never in
+  /// the server list.
+  String? get _listedServerId {
+    final sid = widget.serverId;
+    if (widget.isDm || sid == null || widget.channelId == null) return null;
+    return sid.startsWith('conf:') ? null : sid;
   }
 
   void _onLifecycleChanged(AppLifecycleState? prev, AppLifecycleState next) {
     if (!mounted || _routeDeactivated) return;
     if (next.isBackground || !(prev?.isBackground ?? false)) return;
     if (_isInAutoScrollZone && _frozenLen == null) _markSeen();
-  }
-
-  void _onServerListedChanged(bool? wasListed, bool listed) {
-    if (listed || !mounted || _routeDeactivated) return;
-    // A list that has not finished loading is filling in, not losing a server.
-    if (!ref.read(serverListLoadStateProvider).loaded) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _leaveRoute());
-  }
-
-  /// Leaves the stack wherever this route sits in it, so a page opened above
-  /// it (a DM from a member's profile) is not the one that goes.
-  void _leaveRoute() {
-    if (!mounted || _routeDeactivated) return;
-    final route = ModalRoute.of(context);
-    if (route == null || !route.isActive || route.isFirst) return;
-    if (route.isCurrent) {
-      Navigator.of(context).pop();
-    } else {
-      Navigator.of(context).removeRoute(route);
-    }
   }
 
   void _onVisibleChannelsChanged(

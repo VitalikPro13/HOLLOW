@@ -14,8 +14,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 Future<void> destroyLocal() => RustLib.instance.api.crateApiWipeDestroyLocal();
 
 /// Erases a profile this process is not running (Settings, desktop): the same
-/// routine against its root, marker and keys first. What belongs to the running
-/// process (keystore slots, its log, the shared temp folder) is not touched.
+/// routine against its root, marker and keys first, its own keystore slot with them.
+/// What belongs to the running process (its log, the shared temp folder) is not
+/// touched.
 Future<void> eraseProfileAt({required String dataDir}) =>
     RustLib.instance.api.crateApiWipeEraseProfileAt(dataDir: dataDir);
 

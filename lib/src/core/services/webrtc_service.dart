@@ -121,6 +121,17 @@ class WebRtcService {
   final Set<String> _connecting = {};
   final Set<String> _shareConnecting = {};
 
+  /// The conn id of each dial still building its connection, per peer.
+  final Map<String, String> _dialing = {};
+  final Map<String, String> _shareDialing = {};
+
+  /// Peers whose offer we are answering; no dial of ours starts meanwhile.
+  final Set<String> _answering = {};
+  final Set<String> _shareAnswering = {};
+
+  /// Dials that yielded to the peer's offer while still being built.
+  final Set<String> _yieldedDials = {};
+
   /// Timestamp of last keepalive ping sent per peer (for RTT measurement).
   final Map<String, DateTime> _pingSentAt = {};
 
@@ -164,13 +175,20 @@ class WebRtcService {
   /// answer path guessing.
   final Map<String, Map<String, dynamic>> _shareIceConfig = {};
 
+  /// Builds a peer connection from an ICE config; tests stand in for libwebrtc.
+  final Future<RTCPeerConnection> Function(Map<String, dynamic> config)
+      _newPeerConnection;
+
   WebRtcService({
     required this.localPeerId,
     Map<String, dynamic>? iceServers,
     this.relayDomain = 'relay.anonlisten.com',
     String Function(String peerId)? resolveIdentity,
+    Future<RTCPeerConnection> Function(Map<String, dynamic> config)?
+        newPeerConnection,
   })  : iceServers = iceServers ?? _defaultIceServers(domain: relayDomain),
-        resolveIdentity = resolveIdentity ?? ((p) => p);
+        resolveIdentity = resolveIdentity ?? ((p) => p),
+        _newPeerConnection = newPeerConnection ?? createPeerConnection;
 
   Map<String, _PeerConn> _connsFor(_Lane lane) =>
       lane == _Lane.share ? _shareConnections : _connections;
@@ -180,6 +198,22 @@ class WebRtcService {
 
   Set<String> _intentionalFor(_Lane lane) =>
       lane == _Lane.share ? _shareIntentionalClose : _intentionalClose;
+
+  Map<String, String> _dialingFor(_Lane lane) =>
+      lane == _Lane.share ? _shareDialing : _dialing;
+
+  Set<String> _answeringFor(_Lane lane) =>
+      lane == _Lane.share ? _shareAnswering : _answering;
+
+  /// Whether we give way when our dial and [peerId]'s offer cross. The lower
+  /// MASTER identity yields: the two ends must reach opposite answers, and a
+  /// multi-device peer shows each side a different device id.
+  bool _yieldsTo(String peerId) =>
+      resolveIdentity(localPeerId).compareTo(resolveIdentity(peerId)) < 0;
+
+  /// Whether [conn] is still the connection stored for its peer: events from a
+  /// superseded one must not touch the live one under the same key.
+  bool _isCurrent(_PeerConn conn) => _connsFor(conn.lane)[conn.peerId] == conn;
 
   String _sigOffer(_Lane lane) =>
       lane == _Lane.share ? _kSigShareOffer : _kSigOffer;
@@ -366,15 +400,32 @@ class WebRtcService {
   Future<void> _dial(
       String peerId, _Lane lane, Map<String, dynamic> config) async {
     final conns = _connsFor(lane);
+    // The peer's offer is being answered: that connection is the one to keep.
+    if (_answeringFor(lane).contains(peerId)) return;
     if (!_connectingFor(lane).add(peerId)) return;
 
     final isShare = lane == _Lane.share;
     final connId = _generateConnId();
+    _dialingFor(lane)[peerId] = connId;
     _log('[HOLLOW-WEBRTC-DART] Connecting to $peerId '
         '(lane=${_tag(lane)}, conn=$connId, local=$localPeerId)');
 
     try {
-      final pc = await createPeerConnection(config);
+      final RTCPeerConnection pc;
+      try {
+        pc = await _newPeerConnection(config);
+      } finally {
+        if (_dialingFor(lane)[peerId] == connId) _dialingFor(lane).remove(peerId);
+      }
+      // We gave way to the peer's offer while this was being built.
+      if (_yieldedDials.remove(connId)) {
+        _connectingFor(lane).remove(peerId);
+        _log('[HOLLOW-WEBRTC-DART] Dropping our dial to $peerId '
+            '(lane=${_tag(lane)}, conn=$connId): the peer\'s offer is answered');
+        await _closeConn(_PeerConn(
+            pc: pc, connId: connId, peerId: peerId, isOfferer: true, lane: lane));
+        return;
+      }
       final conn = _PeerConn(
         pc: pc,
         connId: connId,
@@ -390,7 +441,7 @@ class WebRtcService {
       final dc = await pc.createDataChannel(
           isShare ? 'hollow-share' : 'hollow-data', dcInit);
       conn.dataChannel = dc;
-      _setupDataChannel(dc, peerId, lane);
+      _setupDataChannel(dc, conn);
 
       pc.onIceCandidate = (candidate) {
         if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
@@ -415,11 +466,13 @@ class WebRtcService {
       };
 
       pc.onConnectionState = (state) {
-        _handleConnectionState(peerId, state, lane);
+        _handleConnectionState(conn, state);
       };
 
       final offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      // We gave way to the peer's offer meanwhile; ours would only be ignored.
+      if (!_isCurrent(conn)) return;
 
       // Raw SDP string, not JSON-wrapped: Rust puts it directly in
       // HavenMessage::RtcOffer.sdp / RtcShareOffer.sdp.
@@ -754,6 +807,11 @@ class WebRtcService {
     _pendingIceCandidates.clear(); // Phase 6.25 leak fix
     _connecting.clear();
     _shareConnecting.clear();
+    _dialing.clear();
+    _shareDialing.clear();
+    _answering.clear();
+    _shareAnswering.clear();
+    _yieldedDials.clear();
     _intentionalClose.clear();
     _shareIntentionalClose.clear();
     _shareIceConfig.clear();
@@ -774,8 +832,21 @@ class WebRtcService {
     // different ids on each side, so a raw compare is NOT antisymmetric
     // across the two machines: both compute "impolite", neither answers, and
     // the data channel never opens.
-    final bool politeSelf =
-        resolveIdentity(localPeerId).compareTo(resolveIdentity(peerId)) < 0;
+    final bool politeSelf = _yieldsTo(peerId);
+
+    // Our own dial to this peer is still building its connection: the same
+    // rule as a stored one, or both connections end up under one key.
+    final dialing = _dialingFor(lane)[peerId];
+    if (dialing != null) {
+      if (!politeSelf) {
+        _log('[HOLLOW-WEBRTC-DART] Glare (${_tag(lane)}): we are impolite, '
+            'ignoring offer from $peerId while our dial is built');
+        return;
+      }
+      _log('[HOLLOW-WEBRTC-DART] Glare (${_tag(lane)}): we are polite, '
+          'giving up our dial to $peerId while it is built');
+      _yieldedDials.add(dialing);
+    }
 
     final existing = conns[peerId];
     if (existing != null) {
@@ -817,18 +888,35 @@ class WebRtcService {
       // Different connId = glare on the initial connection. Resolved WITHIN
       // the lane: a Share offer must never tear down the general connection,
       // and they are independent transports.
-      if (politeSelf) {
-        _log('[HOLLOW-WEBRTC-DART] Glare (${_tag(lane)}): we are polite, '
-            'dropping our connection to $peerId');
-        if (lane == _Lane.share) {
-          await disconnectSharePeer(peerId);
-        } else {
-          await disconnectPeer(peerId);
-        }
-      } else {
+      if (!politeSelf) {
         _log('[HOLLOW-WEBRTC-DART] Glare (${_tag(lane)}): we are impolite, '
             'ignoring offer from $peerId');
         return;
+      }
+    }
+
+    // From here this offer's connection is the one we keep; a dial of ours
+    // that starts meanwhile stands down.
+    _answeringFor(lane).add(peerId);
+    try {
+      await _answerOffer(peerId, sdp, connId, lane, existing);
+    } finally {
+      _answeringFor(lane).remove(peerId);
+    }
+  }
+
+  Future<void> _answerOffer(String peerId, String sdp, String connId,
+      _Lane lane, _PeerConn? existing) async {
+    final conns = _connsFor(lane);
+    if (existing != null) {
+      _log('[HOLLOW-WEBRTC-DART] Glare (${_tag(lane)}): we are polite, '
+          'dropping our connection to $peerId');
+      // Its close event will be ignored as superseded, so an open channel is
+      // closed out here: its unfinished transfers fail and Rust hears of it.
+      if (existing.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen) {
+        await _onDataChannelClosed(peerId, lane);
+      } else {
+        await _cleanupConnection(peerId, lane);
       }
     }
 
@@ -838,7 +926,7 @@ class WebRtcService {
     // Close any prior connection for this peer before replacing it in the
     // map, or the old PC's data channel stays open and orphaned, still
     // delivering packets: duplicate audio and a leaked channel.
-    final prior = conns[peerId];
+    final prior = conns.remove(peerId);
     if (prior != null) {
       _log('[HOLLOW-WEBRTC-DART] Replacing prior ${_tag(lane)} connection to '
           '$peerId (closing orphan)');
@@ -854,7 +942,7 @@ class WebRtcService {
     final answerConfig =
         lane == _Lane.share ? _shareConfigFor(peerId) : iceServers;
 
-    final pc = await createPeerConnection(answerConfig);
+    final pc = await _newPeerConnection(answerConfig);
     final conn = _PeerConn(
       pc: pc,
       connId: connId, // Use THEIR connId — answers must match
@@ -871,7 +959,7 @@ class WebRtcService {
       _log('[HOLLOW-WEBRTC-DART] onDataChannel fired for $peerId '
           '(lane=${_tag(lane)}, label=${dc.label})');
       conn.dataChannel = dc;
-      _setupDataChannel(dc, peerId, lane);
+      _setupDataChannel(dc, conn);
     };
 
     pc.onIceCandidate = (candidate) {
@@ -895,7 +983,7 @@ class WebRtcService {
     };
 
     pc.onConnectionState = (state) {
-      _handleConnectionState(peerId, state, lane);
+      _handleConnectionState(conn, state);
     };
 
     await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
@@ -979,10 +1067,17 @@ class WebRtcService {
     }
   }
 
-  void _setupDataChannel(RTCDataChannel dc, String peerId, _Lane lane) {
+  void _setupDataChannel(RTCDataChannel dc, _PeerConn conn) {
+    final peerId = conn.peerId;
+    final lane = conn.lane;
     dc.onDataChannelState = (state) {
       _log('[HOLLOW-WEBRTC-DART] Data channel state: $peerId '
           '(${_tag(lane)}) -> $state');
+      if (!_isCurrent(conn)) {
+        _log('[HOLLOW-WEBRTC-DART] Ignoring a superseded ${_tag(lane)} '
+            'connection to $peerId (conn=${conn.connId})');
+        return;
+      }
       if (state == RTCDataChannelState.RTCDataChannelOpen) {
         _onDataChannelReady(peerId, lane);
       } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
@@ -1095,9 +1190,11 @@ class WebRtcService {
     return typeByte != _kTypeShareChunk;
   }
 
-  void _handleConnectionState(
-      String peerId, RTCPeerConnectionState state, _Lane lane) {
+  void _handleConnectionState(_PeerConn conn, RTCPeerConnectionState state) {
+    final peerId = conn.peerId;
+    final lane = conn.lane;
     _log('[HOLLOW-WEBRTC-DART] PC state: $peerId (${_tag(lane)}) -> $state');
+    if (!_isCurrent(conn)) return;
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       _logIceRoute(peerId, lane);
     }

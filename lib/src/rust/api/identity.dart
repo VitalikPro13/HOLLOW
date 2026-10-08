@@ -6,7 +6,9 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `code_is_the_password`, `duress_available`, `forget_duress_code`, `is_running_root`, `keychain_key_that_decrypts_opts`, `keychain_key_that_decrypts`, `open_typed_secret`, `owner_gate`, `protection_status_of`, `refuse_short_pin`, `save_duress_settings`
+// These functions are ignored because they are not marked as `pub`: `code_is_the_password`, `database_opens_with`, `db_key_of`, `debug_defaults_hook`, `default_eligible_for`, `default_eligible`, `duress_available`, `forget_duress_code`, `is_running_root`, `keychain_key_that_decrypts_at`, `keychain_key_that_decrypts`, `lands_as`, `lock_to_keychain`, `open_typed_secret`, `owner_gate`, `phrase_is_this_identitys`, `protection_status_of`, `read_plain_key_file`, `refuse_short_pin`, `refused`, `save_duress_settings`, `seal_for_keychain`, `switch_to_keychain`, `switch_to_plaintext`, `this_os`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DesktopOs`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `eq`, `fmt`
 
 /// Set the data directory path (Android/iOS: pass app documents dir).
 /// Must be called before load_or_create_identity() or start_node().
@@ -104,16 +106,45 @@ Future<void> setRequirePasswordOnLaunch({required bool require}) => RustLib
     .api
     .crateApiIdentitySetRequirePasswordOnLaunch(require: require);
 
-/// Enable OS keychain (DPAPI/Keychain) protection on the current identity.
-/// This is opt-in — the user must explicitly choose this from Settings.
-/// Requires the identity to be currently unlocked and unencrypted (or keychain-already).
+/// Whether this profile gets keychain protection by default, and the offer to
+/// existing identities: Windows and macOS on the OS's own data root.
+Future<bool> keychainDefaultEligible() =>
+    RustLib.instance.api.crateApiIdentityKeychainDefaultEligible();
+
+/// Enable OS keychain protection on a plaintext identity, verified before the files
+/// change (see `switch_to_keychain`).
 Future<void> enableOsKeychainProtection() =>
     RustLib.instance.api.crateApiIdentityEnableOsKeychainProtection();
 
-/// Disable OS keychain protection — writes identity back as plaintext.
-/// Requires the identity to be currently unlocked.
+/// The same, for an identity that already exists: the recovery phrase must be typed
+/// in full and be this identity's, because if the keychain ever loses the key, the
+/// phrase is the way back.
+Future<void> enableOsKeychainProtectionWithPhrase({required String phrase}) =>
+    RustLib.instance.api.crateApiIdentityEnableOsKeychainProtectionWithPhrase(
+      phrase: phrase,
+    );
+
+/// A new identity's default, run once its person confirmed the phrase at onboarding:
+/// true when it is now locked to the keychain, false where the default does not apply
+/// (see `default_eligible_for`) or the identity is already protected. An error leaves
+/// it exactly as it was.
+Future<bool> protectNewIdentityByDefault({required String phrase}) => RustLib
+    .instance
+    .api
+    .crateApiIdentityProtectNewIdentityByDefault(phrase: phrase);
+
+/// Turn keychain protection off: the identity goes back to plaintext files.
 Future<void> disableOsKeychainProtection() =>
     RustLib.instance.api.crateApiIdentityDisableOsKeychainProtection();
+
+/// Whether `phrase` belongs to the identity whose messages are in this profile: its
+/// database key opens `messages.db`. True when there is no database to compare with.
+/// Restoring by phrase over a locked identity checks this first, so another
+/// identity's phrase cannot take the place of the one on this computer.
+Future<bool> recoveryPhraseFitsThisProfile({required String phrase}) => RustLib
+    .instance
+    .api
+    .crateApiIdentityRecoveryPhraseFitsThisProfile(phrase: phrase);
 
 /// Get the current protection status of the identity file.
 Future<ProtectionStatus> getIdentityProtectionStatus() =>

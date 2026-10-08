@@ -6,12 +6,30 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
+import 'package:hollow/src/core/providers/security_alerts_provider.dart';
+import 'package:hollow/src/rust/api/verification.dart' as verification_api;
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/shell/home_inbox.dart';
 
 import '../helpers/test_app.dart';
+
+class _Alerts extends SecurityAlertsNotifier {
+  final List<verification_api.SecurityAlertFfi> seed;
+  _Alerts(this.seed);
+  @override
+  List<verification_api.SecurityAlertFfi> build() => seed;
+}
+
+class _Kinds extends DeviceKindNotifier {
+  @override
+  Map<String, String> build() => const {_desk: 'desktop', _added: 'phone'};
+}
+
+const _desk = '12D3KooWDeskDeskDeskDeskDeskDeskDeskDeskDesk';
+const _added = '12D3KooWAddedAddedAddedAddedAddedAddedAdded';
 
 class _Setup extends HomeSetupNotifier {
   final HomeSetupState seed;
@@ -21,7 +39,8 @@ class _Setup extends HomeSetupNotifier {
 }
 
 Future<void> _pump(WidgetTester tester, Widget child,
-    {HomeSetupState setup = const HomeSetupState(loaded: true)}) async {
+    {HomeSetupState setup = const HomeSetupState(loaded: true),
+    List<Override> extra = const []}) async {
   tester.view.physicalSize = const Size(1000, 900);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(() {
@@ -31,6 +50,7 @@ Future<void> _pump(WidgetTester tester, Widget child,
   await tester.pumpWidget(ProviderScope(
     overrides: hollowTestOverrides(extra: [
       homeSetupProvider.overrideWith(() => _Setup(setup)),
+      ...extra,
     ]),
     child: MaterialApp(
       theme: HollowThemeData.dark(),
@@ -85,5 +105,28 @@ void main() {
     await _pump(tester, const HomeAttention());
     expect(find.text("Your recovery phrase isn't backed up yet"),
         findsNothing);
+  });
+
+  testWidgets('a device another of ours added needs attention, never as a contact',
+      (tester) async {
+    const own = verification_api.SecurityAlertFfi(
+      alertId: 'own_device_added:me:$_added:$_desk',
+      peerId: 'me',
+      kind: SecurityAlertKind.ownDeviceAdded,
+      detail: '$_added:$_desk',
+      createdAt: 0,
+    );
+    await _pump(tester, const HomeAttention(), extra: [
+      securityAlertsProvider.overrideWith(() => _Alerts(const [own])),
+      deviceKindProvider.overrideWith(_Kinds.new),
+    ]);
+    expect(find.text('Desktop added a device'), findsOneWidget);
+    expect(find.textContaining('Phone joined your identity'), findsOneWidget);
+    expect(find.text('Review'), findsOneWidget);
+    expect(find.text('Verify'), findsNothing, reason: 'our own device is not a contact to verify');
+
+    final container = ProviderScope.containerOf(tester.element(find.byType(HomeAttention)));
+    expect(container.read(peersWithSecurityAlertsProvider), isEmpty);
+    expect(container.read(peerSecurityAlertsProvider('me')), isEmpty);
   });
 }

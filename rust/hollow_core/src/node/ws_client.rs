@@ -124,6 +124,11 @@ pub enum WsCommand {
     /// owns the sessions (`olm_lane`); `ticket` names it in the node loop's book of
     /// waiting carries.
     Carry { device: String, room: Option<String>, json: String, no_session: super::olm_lane::NoSession, ticket: Option<u64> },
+    /// An Olm `frame` to `device` that may leave only once the session save it waits on
+    /// is on disk (AR-30). Never reaches the relay: the sealing stage waits for the save
+    /// and sends the frame, or keeps it back and hands `plaintext` to the node's resend
+    /// queue (`olm_lane::released`).
+    AfterSave { saved: crate::crypto::SessionSaved, frame: Box<WsCommand>, device: String, plaintext: String },
     /// Subscribe to specific channel topics in a room (reduces fan-out).
     Subscribe { room_code: String, topics: Vec<String> },
     /// Broadcast to peers subscribed to a specific topic in a room.
@@ -1992,7 +1997,8 @@ fn command_frame(cmd: &WsCommand) -> Option<Frame> {
         | WsCommand::JoinInbox { .. }
         | WsCommand::LeaveRoom { .. }
         | WsCommand::SetDoor { .. }
-        | WsCommand::Carry { .. } => None,
+        | WsCommand::Carry { .. }
+        | WsCommand::AfterSave { .. } => None,
     }
 }
 

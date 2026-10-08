@@ -416,6 +416,8 @@ pub(crate) async fn handle_publish_destroy_identity(
     if notify_friends {
         announce_to_friends(olm, crypto_store, event_tx, ws_cmd_tx, local_master, &order, db_path, db_passphrase).await;
     }
+    // The wipe follows our answer at once: the orders' frames wait on these saves.
+    crypto_store.flushed(super::olm_lane::SAVE_WAIT).await;
     reached_devices.len() as u32
 }
 

@@ -143,6 +143,9 @@ class RelayTriggers with WidgetsBindingObserver {
 
   static const channelName = 'hollow/relay_triggers';
 
+  /// Counts network changes, for other things that retry when it returns.
+  static final networkChanges = ValueNotifier<int>(0);
+
   /// Phones follow the app lifecycle; desktops nudge on window focus.
   final bool phone;
 
@@ -339,6 +342,7 @@ class RelayTriggers with WidgetsBindingObserver {
   Future<void> _onNativeEvent(MethodCall call) async {
     final reason = call.method;
     if (!_nativeReasons.contains(reason)) return;
+    if (reason == 'network') networkChanges.value++;
     // A backgrounded phone keeps its socket only for a call; otherwise the
     // foreground probes on return.
     if (phone && _isAway && !_inCall()) return;

@@ -197,7 +197,7 @@ class _DeviceRow extends ConsumerWidget {
                       icon: LucideIcons.trash2,
                       label: 'Remove device',
                       isDanger: true,
-                      onTap: () => removeDeviceFlow(context, device),
+                      onTap: () => removeDeviceFlow(context, ref, device),
                     ),
                   ],
                 ),

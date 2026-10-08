@@ -19,6 +19,35 @@ pub(crate) enum NoSession {
     Queue,
     /// Lose it: a live signal that means nothing once late.
     Drop,
+    /// Park it without encrypting it now: an Olm frame held back because the save of
+    /// the session that encrypted it did not land. A live signal is lost instead.
+    Park,
+}
+
+/// How long the sealing stage waits for the session save an Olm frame needs before it
+/// keeps the frame back.
+pub(crate) const SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the sealing stage sends for `cmd`: a [`WsCommand::AfterSave`] frame once its
+/// session save is on disk, nothing when the save failed, was refused or did not land
+/// within [`SAVE_WAIT`], in which case its plaintext goes back to the node through
+/// `node`, to wait in the resend queue. Anything else passes unchanged.
+pub(crate) async fn released(cmd: WsCommand, node: &super::frame_auth::CarryTx) -> Option<WsCommand> {
+    let WsCommand::AfterSave { saved, frame, device, plaintext } = cmd else {
+        return Some(cmd);
+    };
+    match saved.settled(SAVE_WAIT).await {
+        crate::crypto::Saved::Stored => Some(*frame),
+        outcome => {
+            hollow_log!("[HOLLOW-SECURITY] Kept back an Olm frame to {device}: its session save did not land ({outcome:?})");
+            let park = WsCommand::Carry { device, room: None, json: plaintext, no_session: NoSession::Park, ticket: None };
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            if node.send((park, done_tx)).is_ok() {
+                let _ = tokio::time::timeout(SAVE_WAIT, done_rx).await;
+            }
+            None
+        }
+    }
 }
 
 /// Carry `msg` to one DEVICE from anywhere that holds the relay sender; the node
@@ -231,6 +260,13 @@ impl<'a> OlmLane<'a> {
     /// place. A device in no room we share, with no `room` pinned, is treated like one
     /// without a session.
     pub(crate) fn deliver(&mut self, device: &str, room: Option<&str>, json: &str, no_session: NoSession, ticket: Option<u64>) -> Vec<WsCommand> {
+        if no_session == NoSession::Park {
+            let live = serde_json::from_str::<MessageEnvelope>(json).is_ok_and(|env| env.live_only());
+            if !live && !self.pending_messages.get(device).is_some_and(|queue| queue.iter().any(|q| q == json)) {
+                self.park(device, json);
+            }
+            return Vec::new();
+        }
         // A direct send queued behind this carry may have encrypted it already.
         let sealed = ticket
             .and_then(|ticket| WAITING.try_with(|waiting| waiting.borrow_mut().take(ticket)).ok().flatten())
@@ -242,13 +278,8 @@ impl<'a> OlmLane<'a> {
         {
             match sealed.map_or_else(|| self.olm.encrypt(device, json.as_bytes()), Ok) {
                 Ok((msg_type, ciphertext)) => {
-                    super::crypto_handler::persist_olm_session(self.olm, self.crypto_store, device);
-                    let frame = super::crypto_handler::encrypted_frame(self.olm, msg_type, &ciphertext);
-                    return vec![WsCommand::SendDirect {
-                        room_code: room,
-                        target_peer: device.to_string(),
-                        data: serde_json::to_vec(&frame).unwrap_or_default(),
-                    }];
+                    let frame = super::crypto_handler::olm_frame(self.olm, self.crypto_store, device, msg_type, &ciphertext, json);
+                    return vec![frame.direct(room)];
                 }
                 Err(e) => hollow_log!("[HOLLOW-CRYPTO] Olm lane encrypt to {device} failed: {e}"),
             }
@@ -327,6 +358,55 @@ mod tests {
         .await;
     }
 
+    fn after_save(saved: crate::crypto::SessionSaved, plaintext: &str) -> WsCommand {
+        WsCommand::AfterSave {
+            saved,
+            frame: Box::new(WsCommand::SendDirect { room_code: "r".into(), target_peer: "bob".into(), data: b"olm".to_vec() }),
+            device: "bob".into(),
+            plaintext: plaintext.into(),
+        }
+    }
+
+    /// AR-30: the sealing stage sends an Olm frame only once its session save landed,
+    /// and hands one whose save did not land back to the node, never to the relay.
+    #[tokio::test]
+    async fn a_frame_goes_out_only_on_a_landed_save_and_is_handed_back_otherwise() {
+        let (node, mut asks) = tokio::sync::mpsc::unbounded_channel();
+        let sent = released(after_save(crate::crypto::SessionSaved::stored_for_test(), "{}"), &node).await;
+        assert!(matches!(sent, Some(WsCommand::SendDirect { .. })), "a saved frame must go: {sent:?}");
+        let plain = WsCommand::JoinRoom { room_code: "r".into() };
+        assert!(matches!(released(plain, &node).await, Some(WsCommand::JoinRoom { .. })));
+        assert!(asks.try_recv().is_err());
+
+        let kept = tokio::spawn(async move { released(after_save(crate::crypto::SessionSaved::failed(), "the plaintext"), &node).await });
+        let (park, done) = asks.recv().await.expect("the node is asked to keep it");
+        assert!(
+            matches!(&park, WsCommand::Carry { device, json, no_session: NoSession::Park, ticket: None, .. } if device == "bob" && json == "the plaintext"),
+            "{park:?}"
+        );
+        done.send(Vec::new()).unwrap();
+        assert!(kept.await.unwrap().is_none(), "a frame whose save failed went to the relay");
+    }
+
+    /// What the node keeps of a frame held back: a durable message waits in the resend
+    /// queue, once; a live signal, meaningless when late, is lost.
+    #[tokio::test]
+    async fn a_held_back_frame_waits_in_the_resend_queue_unless_it_is_live() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("lane.db").to_string_lossy().into_owned();
+        let store = CryptoStore::open(path, "6c".repeat(32)).unwrap();
+        let (mut alice, _bob) = established();
+        let keypair = NativeKeypair::from_secret_bytes(&[9; 32]);
+        let (rooms, mut pending, mut asked) = (WsRoomPeers::new(), HashMap::new(), HashMap::new());
+        let durable = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap();
+        let live = serde_json::to_string(&MessageEnvelope::Typing { sid: "s".into(), cid: "c".into() }).unwrap();
+        let mut lane = OlmLane::new(&mut alice, &store, &rooms, &mut pending, &mut asked, &keypair, "alice");
+        for json in [&durable, &durable, &live] {
+            assert!(lane.deliver("bob", None, json, NoSession::Park, None).is_empty(), "a held-back frame is never re-sent at once");
+        }
+        assert_eq!(pending.get("bob"), Some(&vec![durable]), "kept once, the live signal dropped");
+    }
+
     /// Node code reaches Olm only through [`encrypt_in_turn`], so no direct frame takes
     /// a ratchet step ahead of a carry queued before it.
     #[test]
@@ -351,5 +431,38 @@ mod tests {
             }
         }
         assert!(offenders.is_empty(), "Olm encrypt outside olm_lane::encrypt_in_turn in {offenders:?}");
+    }
+
+    /// AR-30: node code builds an Olm frame only through `crypto_handler::olm_frame`,
+    /// which binds it to its session save, so no frame reaches the sealing stage
+    /// without one to wait for.
+    #[test]
+    fn node_code_builds_olm_frames_only_bound_to_their_save() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node");
+        let mut uses = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("read src/node") {
+            let path = entry.expect("dir entry").path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            if !name.ends_with(".rs") || name == "test_harness.rs" {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read source").replace("\r\n", "\n");
+            let code = source.split("\n#[cfg(test)]\nmod tests").next().unwrap_or_default();
+            for line in code.lines().filter(|l| !l.trim_start().starts_with("//")) {
+                if line.contains("encrypted_frame(") {
+                    uses.push(format!("{name}: {}", line.trim()));
+                }
+            }
+            // A frame built by hand skips the save; the receive arms only match one.
+            let built = code.matches("HavenMessage::Encrypted {").count();
+            let receive_arms = ["swarm.rs", "fetch.rs"].contains(&name.as_str()) as usize;
+            let own = (name == "crypto_handler.rs") as usize;
+            assert_eq!(built, receive_arms + own, "{name} builds an Olm frame of its own");
+        }
+        let expected = [
+            "crypto_handler.rs: pub(crate) fn encrypted_frame(olm: &OlmManager, message_type: usize, ciphertext: &[u8]) -> HavenMessage {",
+            "crypto_handler.rs: data: serde_json::to_vec(&encrypted_frame(olm, message_type, ciphertext)).unwrap_or_default(),",
+        ];
+        assert_eq!(uses, expected, "an Olm frame built outside crypto_handler::olm_frame");
     }
 }

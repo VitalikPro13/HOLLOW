@@ -74,11 +74,15 @@ class RosterDevice {
   /// When this device first saw a pending join (its seven days run from here).
   final PlatformInt64? firstSeenMs;
 
+  /// Members this device added: removing it keeps them unless they go too.
+  final List<String> added;
+
   const RosterDevice({
     required this.devicePeerId,
     required this.state,
     required this.thisDevice,
     this.firstSeenMs,
+    required this.added,
   });
 
   @override
@@ -86,7 +90,8 @@ class RosterDevice {
       devicePeerId.hashCode ^
       state.hashCode ^
       thisDevice.hashCode ^
-      firstSeenMs.hashCode;
+      firstSeenMs.hashCode ^
+      added.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -96,7 +101,8 @@ class RosterDevice {
           devicePeerId == other.devicePeerId &&
           state == other.state &&
           thisDevice == other.thisDevice &&
-          firstSeenMs == other.firstSeenMs;
+          firstSeenMs == other.firstSeenMs &&
+          added == other.added;
 }
 
 /// What our own roster says, for the Devices page and the lock screens.

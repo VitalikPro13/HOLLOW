@@ -86,8 +86,8 @@ pub(crate) fn load_device_keypair_with_key(
         .map_err(|e| format!("Failed to decode device key: {e}"))
 }
 
-/// Re-encrypt `identity.device` to match a protection change just applied to
-/// Both files are wrapped with the SAME session key, so a password or keychain
+/// Re-encrypt `identity.device` to match a protection change just applied to the
+/// master. Both files are wrapped with the SAME session key, so a password or keychain
 /// change that rotates it must rewrite this one too or the device key becomes
 /// undecryptable on the next unlock. `wrapping_key` is the NEW key, `None` to
 /// write plaintext.
@@ -119,8 +119,7 @@ pub(crate) fn rewrite_device_key_protection(
         None => plaintext,
     };
 
-    fs::write(&path, bytes).map_err(|e| format!("Failed to write device key file: {e}"))?;
-    Ok(())
+    super::encryption::write_key_file(&path, &bytes)
 }
 
 #[cfg(test)]

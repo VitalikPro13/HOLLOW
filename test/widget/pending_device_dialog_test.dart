@@ -16,8 +16,8 @@ roster_api.RosterStatus _status(String askerState, {bool backupWait = true}) => 
       protected: true,
       backupWait: backupWait,
       devices: [
-        const roster_api.RosterDevice(devicePeerId: 'me', state: 'member', thisDevice: true),
-        roster_api.RosterDevice(devicePeerId: _asker, state: askerState, thisDevice: false),
+        const roster_api.RosterDevice(devicePeerId: 'me', state: 'member', thisDevice: true, added: []),
+        roster_api.RosterDevice(devicePeerId: _asker, state: askerState, thisDevice: false, added: const []),
       ],
     );
 

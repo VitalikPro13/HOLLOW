@@ -102,6 +102,28 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// The names an encrypted key file is kept under once a phrase restore replaces it.
+pub(crate) const LOCKED_KEY_FILES: [(&str, &str); 2] = [
+    ("identity.key", "identity.key.locked"),
+    ("identity.device", "identity.device.locked"),
+];
+
+/// Keeps encrypted key files a phrase restore is about to replace, so a keychain key
+/// that comes back later still opens the old device. Plaintext files are not kept:
+/// the restore rebuilds the master and mints a new device either way.
+pub(crate) fn set_aside_locked_keys(root: &std::path::Path) {
+    for (name, aside) in LOCKED_KEY_FILES {
+        let path = root.join(name);
+        let Ok(bytes) = fs::read(&path) else { continue };
+        if matches!(
+            super::encryption::detect_format(&bytes),
+            Ok(super::encryption::IdentityFormat::Encrypted { .. })
+        ) {
+            let _ = fs::rename(&path, root.join(aside));
+        }
+    }
+}
+
 /// Restore an identity from an existing mnemonic phrase.
 pub(crate) fn restore_identity_from_mnemonic(phrase: &str) -> Result<IdentityData, String> {
     let mnemonic: Mnemonic = phrase
@@ -111,6 +133,7 @@ pub(crate) fn restore_identity_from_mnemonic(phrase: &str) -> Result<IdentityDat
     let keypair = NativeKeypair::from_mnemonic(&mnemonic)?;
     let peer_id = keypair.peer_id();
 
+    set_aside_locked_keys(&data_dir()?);
     save_keypair(&keypair)?;
 
     // Restoring a mnemonic onto a device IS the multi-device case, so this device MUST
@@ -325,5 +348,27 @@ mod tests {
     fn invalid_mnemonic_rejected() {
         assert!("not a valid mnemonic phrase".parse::<Mnemonic>().is_err());
         assert!("".parse::<Mnemonic>().is_err());
+    }
+
+    /// The key-missing screen's phrase restore keeps the locked files, so the device
+    /// they hold is not lost if the keychain key comes back.
+    #[test]
+    fn a_phrase_restore_keeps_locked_keys_aside() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path();
+        let mut locked = b"HKEYV1".to_vec();
+        locked.push(0x02);
+        locked.resize(119, 7);
+        let mut plain = vec![0x08, 0x01, 0x12, 0x40];
+        plain.resize(68, 9);
+        fs::write(root.join("identity.key"), &locked).unwrap();
+        fs::write(root.join("identity.device"), &plain).unwrap();
+
+        set_aside_locked_keys(root);
+
+        assert_eq!(fs::read(root.join("identity.key.locked")).unwrap(), locked, "the locked master was not kept");
+        assert!(!root.join("identity.key").exists(), "the locked master stayed in place");
+        assert_eq!(fs::read(root.join("identity.device")).unwrap(), plain, "a plaintext key was moved");
+        assert!(!root.join("identity.device.locked").exists());
     }
 }

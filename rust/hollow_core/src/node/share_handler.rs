@@ -422,6 +422,9 @@ const SEED_REFILL_BPS: u64 = 20 * 1024 * 1024;
 const SEED_BURST_BYTES: u64 = 40 * 1024 * 1024;
 /// Pause share scheduling for this long after any messaging/voice traffic.
 pub const COEXIST_PAUSE: Duration = Duration::from_millis(200);
+/// How long a complete copy waits before dialling a peer it just met, so the
+/// downloader's offer arrives first and the two dials never cross.
+const SEEDER_DIAL_GRACE: Duration = Duration::from_secs(3);
 
 /// In-memory state for one active share. Persisted projection lives in the
 /// `shares` + `share_chunks` SQL tables.
@@ -448,6 +451,8 @@ pub struct ShareSwarmState {
     /// Currently outstanding chunk requests: chunk_idx → (peer_id, requested_at).
     /// Timed out after CHUNK_REQUEST_TIMEOUT and re-requested via the scheduler.
     pub inflight: HashMap<u32, (String, Instant)>,
+    /// Peers a complete copy holds its dial for, until the instant given.
+    pub dial_after: HashMap<String, Instant>,
     /// When we last sent our own Have bitmap into the swarm room.
     pub last_have_broadcast: Instant,
     /// Sliding window of (timestamp, bytes) for speed calculation.
@@ -700,6 +705,7 @@ pub async fn handle_command_share_create(
         bytes_downloaded: 0,
         peer_have: HashMap::new(),
         inflight: HashMap::new(),
+        dial_after: HashMap::new(),
         last_have_broadcast: now_inst,
         speed_samples: Vec::new(),
         speed_bps: 0,
@@ -785,6 +791,7 @@ pub async fn handle_command_share_open_link(
             bytes_downloaded: 0,
             peer_have: HashMap::new(),
             inflight: HashMap::new(),
+            dial_after: HashMap::new(),
             last_have_broadcast: now_inst,
             speed_samples: Vec::new(),
             speed_bps: 0,
@@ -1116,13 +1123,17 @@ pub async fn broadcast_have(
     root_hash: &str,
 ) {
     let Some(state) = registry.get(root_hash) else { return; };
+    if let Some(payload) = sealed_have(state, root_hash) {
+        let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: state.room_id(), data: payload });
+    }
+}
+
+/// Our Have bitmap for `root_hash`, sealed under the share's link key.
+fn sealed_have(state: &ShareSwarmState, root_hash: &str) -> Option<Vec<u8>> {
     let bitmap_b64 = base64::engine::general_purpose::STANDARD.encode(state.have.as_bytes());
     let chunk_count = state.have.chunk_count;
-    let room = state.room_id();
     let have = HavenMessage::ShareHave { root_hash: root_hash.to_string(), bitmap_b64, chunk_count };
-    if let Some(payload) = seal_control(&state.key, root_hash, &have) {
-        let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: room, data: payload });
-    }
+    seal_control(&state.key, root_hash, &have)
 }
 
 // ── Auto-rejoin on startup ───────────────────────────────────────────────
@@ -1200,6 +1211,7 @@ fn rebuild_seed_state(
         bytes_downloaded: 0,
         peer_have: HashMap::new(),
         inflight: HashMap::new(),
+        dial_after: HashMap::new(),
         last_have_broadcast: now_inst.checked_sub(HAVE_REBROADCAST_INTERVAL).unwrap_or(now_inst),
         speed_samples: Vec::new(),
         speed_bps: 0,
@@ -1397,12 +1409,14 @@ async fn tick_rebroadcast_have(
 }
 
 /// Tick phase 2: forget in-flight chunk requests older than CHUNK_REQUEST_TIMEOUT
-/// so the rarest-first picker can re-issue against another peer.
+/// so the rarest-first picker can re-issue against another peer, and dial holds
+/// that ran out.
 fn expire_inflight_requests(registry: &mut ShareRegistry, root_hash: &str, now: Instant) {
     if let Some(state) = registry.get_mut(root_hash) {
         state.inflight.retain(|_, (_, requested_at)| {
             now.duration_since(*requested_at) < CHUNK_REQUEST_TIMEOUT
         });
+        state.dial_after.retain(|_, at| now < *at);
     }
 }
 
@@ -1428,7 +1442,7 @@ async fn tick_schedule_requests(
         // symmetrically. `webrtc_share_peers` is the SHARE lane's set, not the
         // general one: a general channel proves nothing about Share reachability,
         // and treating it as if it did is how Share inherited TURN candidates.
-        request_missing_webrtc_links(state, webrtc_share_peers, event_tx).await;
+        request_missing_webrtc_links(state, webrtc_share_peers, event_tx, now).await;
 
         if state.have.is_complete() { return; }
         let Some(ref manifest) = state.manifest else { return; };
@@ -1450,10 +1464,12 @@ async fn request_missing_webrtc_links(
     state: &ShareSwarmState,
     webrtc_share_peers: &std::collections::HashSet<String>,
     event_tx: &mpsc::Sender<NetworkEvent>,
+    now: Instant,
 ) {
     let is_hidden = state.hidden;
     for peer_id in state.peer_have.keys() {
-        if !webrtc_share_peers.contains(peer_id.as_str()) {
+        let held = state.dial_after.get(peer_id).is_some_and(|at| now < *at);
+        if !held && !webrtc_share_peers.contains(peer_id.as_str()) {
             let _ = event_tx.send(NetworkEvent::ShareNeedWebRtc {
                 peer_id: peer_id.clone(),
                 hidden: is_hidden,
@@ -1644,6 +1660,7 @@ pub async fn handle_envelope_share_manifest_response(
 
 pub async fn handle_envelope_share_have(
     registry: &mut ShareRegistry,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     sender_peer_id: &str,
     root_hash: String,
     bitmap_b64: String,
@@ -1660,7 +1677,26 @@ pub async fn handle_envelope_share_have(
         Err(_) => return,
     };
     let bitmap = ChunkBitmap::from_bytes(bytes, chunk_count);
-    state.peer_have.insert(sender_peer_id.to_string(), bitmap);
+    let first_sight = state.peer_have.insert(sender_peer_id.to_string(), bitmap).is_none();
+    // The peer's Share-lane gate answers our dial only once it holds our Have
+    // (`holds_a_link_we_serve`), and the one we sent when it joined reached it before
+    // its manifest, so it was dropped. Ours goes out now, ahead of the tick's dial on
+    // the same socket, instead of with the next rebroadcast. One per new peer.
+    if first_sight {
+        if let Some(payload) = sealed_have(state, &root_hash) {
+            let _ = ws_cmd_tx.send(WsCommand::SendDirect {
+                room_code: state.room_id(),
+                target_peer: sender_peer_id.to_string(),
+                data: payload,
+            });
+        }
+        // Now both ends know each other at once; two dials crossing on the wire can
+        // leave the app with an orphaned channel, so a complete copy lets the
+        // downloader dial first.
+        if state.have.is_complete() {
+            state.dial_after.insert(sender_peer_id.to_string(), Instant::now() + SEEDER_DIAL_GRACE);
+        }
+    }
 }
 
 /// Whether `peer` opened a sealed Have in the room of a share we hold, so it holds
@@ -1717,6 +1753,7 @@ pub(crate) fn handle_share_transfer_failed(
 pub fn forget_peer(registry: &mut ShareRegistry, peer_id: &str) {
     for state in registry.values_mut() {
         state.inflight.retain(|_, (p, _)| p != peer_id);
+        state.dial_after.remove(peer_id);
         if state.have.is_complete() {
             state.peer_have.remove(peer_id);
         }
@@ -2166,7 +2203,7 @@ mod tests {
         ShareSwarmState {
             root_hash: [0; 32], key: [0; 32], manifest, file_ext: String::new(), save_dir: None,
             have, data_path: None, writer: None, seeding: true, bytes_uploaded: 0,
-            bytes_downloaded: 0, peer_have: HashMap::new(), inflight: HashMap::new(),
+            bytes_downloaded: 0, peer_have: HashMap::new(), inflight: HashMap::new(), dial_after: HashMap::new(),
             last_have_broadcast: now, speed_samples: Vec::new(), speed_bps: 0,
             manifest_requested_at: None, last_seeding_emit: now, sequential: false,
             hidden: false, server_id: None, context_type: None,
@@ -2196,10 +2233,124 @@ mod tests {
         assert_eq!(registry[&root].have.count_set(), 3, "a replayed manifest reset the seeder");
 
         registry.insert(root.clone(), seeding_share(None));
-        handle_envelope_share_have(&mut registry, "mallory", root.clone(), String::new(), u32::MAX).await;
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        handle_envelope_share_have(&mut registry, &ws_tx, "mallory", root.clone(), String::new(), u32::MAX).await;
         assert!(registry[&root].peer_have.is_empty(), "a Have before the manifest was taken");
         handle_envelope_share_manifest_response(&mut registry, &kp, &tx, root.clone(), b64).await;
         assert!(registry[&root].manifest.is_some(), "the first manifest lands");
+    }
+
+    fn sent_haves(rx: &mut mpsc::UnboundedReceiver<WsCommand>) -> Vec<(String, String, Vec<u8>)> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                WsCommand::SendDirect { room_code, target_peer, data } => out.push((room_code, target_peer, data)),
+                other => panic!("unexpected command {other:?}"),
+            }
+        }
+        out
+    }
+
+    /// The early share offer: a peer's first Have is answered with ours, straight to
+    /// it, so its Share-lane gate (HOL-SEC-141) holds us before our dial arrives. One
+    /// answer per new peer however many Haves it sends; a share without its manifest
+    /// takes no Have and so answers none.
+    #[tokio::test]
+    async fn a_new_link_holder_hears_our_have_once() {
+        let manifest = ShareManifest {
+            version: MANIFEST_VERSION, file_name: "a.bin".into(), mime: "application/octet-stream".into(),
+            total_size: 3 * CHUNK_SIZE as u64, chunk_size: CHUNK_SIZE, chunk_count: 3,
+            chunk_hashes: vec![[1; 32], [2; 32], [3; 32]], created_at: 1, note: None,
+        };
+        let root = hex::encode([7u8; 32]);
+        let mut state = seeding_share(Some(manifest));
+        state.root_hash = [7; 32];
+        state.key = [9; 32];
+        let room = state.room_id();
+        let mut registry = new_registry();
+        registry.insert(root.clone(), state);
+        let (ws_tx, mut ws_rx) = mpsc::unbounded_channel();
+        let none_held = base64::engine::general_purpose::STANDARD.encode([0u8]);
+
+        for _ in 0..50 {
+            handle_envelope_share_have(&mut registry, &ws_tx, "p1", root.clone(), none_held.clone(), 3).await;
+        }
+        let sent = sent_haves(&mut ws_rx);
+        assert_eq!(sent.len(), 1, "a flood of Haves from one peer drew {} answers", sent.len());
+        let (to_room, to_peer, data) = &sent[0];
+        assert_eq!((to_room.as_str(), to_peer.as_str()), (room.as_str(), "p1"), "the answer goes to that peer in the share's room");
+        let (r, n, c) = sealed_parts(data);
+        match open_control(&registry, &room, &r, &n, &c) {
+            Some(HavenMessage::ShareHave { bitmap_b64, chunk_count, .. }) => {
+                assert_eq!(chunk_count, 3);
+                let bits = base64::engine::general_purpose::STANDARD.decode(bitmap_b64).unwrap();
+                assert_eq!(ChunkBitmap::from_bytes(bits, 3).count_set(), 3, "the answer is our own Have");
+            }
+            _ => panic!("the answer is not our Have sealed under the link key"),
+        }
+
+        handle_envelope_share_have(&mut registry, &ws_tx, "p2", root.clone(), none_held.clone(), 3).await;
+        assert_eq!(sent_haves(&mut ws_rx).len(), 1, "a second peer hears ours too");
+        handle_envelope_share_have(&mut registry, &ws_tx, "p3", root.clone(), none_held.clone(), 4).await;
+        assert!(sent_haves(&mut ws_rx).is_empty(), "a Have that does not fit the manifest drew an answer");
+
+        let mut bare = seeding_share(None);
+        bare.root_hash = [7; 32];
+        registry.insert(root.clone(), bare);
+        handle_envelope_share_have(&mut registry, &ws_tx, "p4", root.clone(), none_held, 0).await;
+        assert!(sent_haves(&mut ws_rx).is_empty(), "a share without its manifest answered a Have");
+        assert!(registry[&root].peer_have.is_empty());
+    }
+
+    /// Once a first Have is answered both ends know each other at once, so a complete
+    /// copy holds its dial for the peer and the downloader's offer goes first; the
+    /// downloader dials at once, and the hold ends on time or when the peer leaves.
+    #[tokio::test]
+    async fn a_seeder_lets_the_downloader_dial_first() {
+        let manifest = ShareManifest {
+            version: MANIFEST_VERSION, file_name: "a.bin".into(), mime: "application/octet-stream".into(),
+            total_size: 3 * CHUNK_SIZE as u64, chunk_size: CHUNK_SIZE, chunk_count: 3,
+            chunk_hashes: vec![[1; 32], [2; 32], [3; 32]], created_at: 1, note: None,
+        };
+        let root = hex::encode([7u8; 32]);
+        let mut seed = seeding_share(Some(manifest.clone()));
+        seed.root_hash = [7; 32];
+        let mut registry = new_registry();
+        registry.insert(root.clone(), seed);
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let (ev_tx, mut ev_rx) = mpsc::channel(8);
+        let none_held = base64::engine::general_purpose::STANDARD.encode([0u8]);
+        let dialled = |rx: &mut mpsc::Receiver<NetworkEvent>| {
+            let mut out = Vec::new();
+            while let Ok(NetworkEvent::ShareNeedWebRtc { peer_id, .. }) = rx.try_recv() { out.push(peer_id); }
+            out
+        };
+
+        handle_envelope_share_have(&mut registry, &ws_tx, "leech", root.clone(), none_held.clone(), 3).await;
+        let now = Instant::now();
+        let ends = registry[&root].dial_after["leech"];
+        assert!(ends >= now + SEEDER_DIAL_GRACE - Duration::from_secs(1), "the hold is shorter than the grace");
+        let none = std::collections::HashSet::new();
+        request_missing_webrtc_links(&registry[&root], &none, &ev_tx, now).await;
+        request_missing_webrtc_links(&registry[&root], &none, &ev_tx, ends - Duration::from_millis(1)).await;
+        assert!(dialled(&mut ev_rx).is_empty(), "the seeder dialled a peer it just met");
+        request_missing_webrtc_links(&registry[&root], &none, &ev_tx, ends).await;
+        assert_eq!(dialled(&mut ev_rx), vec!["leech".to_string()], "the seeder never dialled after the hold");
+        expire_inflight_requests(&mut registry, &root, ends);
+        assert!(registry[&root].dial_after.is_empty(), "a spent hold stayed");
+
+        handle_envelope_share_have(&mut registry, &ws_tx, "other", root.clone(), none_held.clone(), 3).await;
+        forget_peer(&mut registry, "other");
+        assert!(registry[&root].dial_after.is_empty(), "a hold outlived its peer");
+
+        let mut leech = seeding_share(Some(manifest));
+        leech.root_hash = [7; 32];
+        leech.have = ChunkBitmap::empty(3);
+        registry.insert(root.clone(), leech);
+        handle_envelope_share_have(&mut registry, &ws_tx, "seed", root.clone(), none_held, 3).await;
+        assert!(registry[&root].dial_after.is_empty(), "a downloader held its dial");
+        request_missing_webrtc_links(&registry[&root], &none, &ev_tx, Instant::now()).await;
+        assert_eq!(dialled(&mut ev_rx), vec!["seed".to_string()], "the downloader did not dial at once");
     }
 
     fn sealed_parts(bytes: &[u8]) -> (String, String, String) {

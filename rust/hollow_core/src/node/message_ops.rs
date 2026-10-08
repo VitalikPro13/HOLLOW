@@ -639,12 +639,8 @@ async fn send_dm_online_recipient(
     dm_room: &str,
 ) {
     match encrypt_dm_wire(olm, crypto_store, device_peer, envelope_json, /*log_prekey*/ true) {
-        Ok(json) => {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                room_code: dm_room.to_string(),
-                target_peer: device_peer.to_string(),
-                data: json.into_bytes(),
-            });
+        Ok(frame) => {
+            let _ = ws_cmd_tx.send(frame.direct(dm_room.to_string()));
         }
         Err(e) => {
             let _ = event_tx
@@ -684,12 +680,8 @@ fn send_dm_offline_recipient(
     dm_room: &str,
 ) {
     match encrypt_dm_wire(olm, crypto_store, device_peer, envelope_json, /*log_prekey*/ false) {
-        Ok(json) => {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                room_code: dm_room.to_string(),
-                target_peer: device_peer.to_string(),
-                data: json.into_bytes(),
-            });
+        Ok(frame) => {
+            let _ = ws_cmd_tx.send(frame.direct(dm_room.to_string()));
             hollow_log!("[HOLLOW-PUSH] Sent encrypted DM to offline {device_peer} via DM room (push trigger)");
         }
         Err(e) => {
@@ -698,24 +690,21 @@ fn send_dm_offline_recipient(
     }
 }
 
-/// Encrypt one signed DM envelope to one device's Olm session and wrap it as
-/// `HavenMessage::Encrypted` wire JSON. Persists the ratcheted session on
-/// success only (encrypt failure leaves the stored session untouched).
+/// Encrypt one signed DM envelope to one device's Olm session as a frame bound to the
+/// save of the ratcheted session (encrypt failure leaves the stored session untouched).
 fn encrypt_dm_wire(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     device_peer: &str,
     envelope_json: &str,
     log_prekey: bool,
-) -> Result<String, String> {
+) -> Result<super::crypto_handler::OlmFrame, String> {
     let (msg_type, ciphertext) = super::olm_lane::encrypt_in_turn(olm, device_peer, envelope_json.as_bytes())
         .map_err(|e| e.to_string())?;
-    super::crypto_handler::persist_olm_session(olm, crypto_store, device_peer);
     if log_prekey && msg_type == 0 {
         hollow_log!("[HOLLOW-CRYPTO] Sending PreKey (type 0) to {device_peer}");
     }
-    let haven_msg = super::crypto_handler::encrypted_frame(olm, msg_type, &ciphertext);
-    Ok(serde_json::to_string(&haven_msg).unwrap_or_default())
+    Ok(super::crypto_handler::olm_frame(olm, crypto_store, device_peer, msg_type, &ciphertext, envelope_json))
 }
 
 /// Queue one signed envelope under a DEVICE id for silent re-delivery on that

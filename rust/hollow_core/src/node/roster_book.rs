@@ -57,6 +57,15 @@ fn stamp_pending(store: &MessageStore, roster: &Roster) {
     }
 }
 
+/// `incoming` merged into `held` as this node keeps rosters: asks past their ceiling
+/// give way by this node's first sight of them (C-IDENTITY-16).
+fn merged_here(store: &MessageStore, held: Option<&Roster>, incoming: &Roster) -> Roster {
+    let master = incoming.master.as_str();
+    held.cloned().unwrap_or_else(|| Roster::new(master)).merged_by_first_sight(incoming, |base, device| {
+        store.load_roster_seen(master, base).ok().and_then(|seen| seen.get(device).copied())
+    })
+}
+
 /// Persist `roster` and point its master's links at the members. The resolver
 /// follows: a device that stopped being a member stops resolving to the master, the
 /// master's own id included.
@@ -110,9 +119,7 @@ fn save(
 /// ingest would. Tests only: it stages state a scenario starts from.
 #[cfg(test)]
 pub(crate) fn merge_for_test(store: &MessageStore, roster: &Roster, local_master: &str, local_device: &str) {
-    let merged = load(store, &roster.master)
-        .unwrap_or_else(|| Roster::new(&roster.master))
-        .merged(&roster.verified(now_ms()));
+    let merged = merged_here(store, load(store, &roster.master).as_ref(), &roster.verified(now_ms()));
     stamp_pending(store, &merged);
     let state = fold(store, &merged);
     save(store, &merged, &state, local_master, local_device).expect("save roster");
@@ -707,7 +714,7 @@ async fn ingest_inner(
             .ok()
             .flatten()
     };
-    let Some((prev, now, changed, upgrade_admitted)) = folded else { return Ingested::default() };
+    let Some(Folded { prev, now, changed, upgrade_admitted, own_news }) = folded else { return Ingested::default() };
 
     let newly_revoked: Vec<String> = prev
         .members
@@ -719,6 +726,16 @@ async fn ingest_inner(
 
     if master == local_master {
         own_changes(event_tx, local_device, &prev, &now, db_path, db_passphrase).await;
+        for (device, voucher, created_at) in own_news {
+            let _ = event_tx
+                .send(NetworkEvent::SecurityAlert {
+                    peer_id: master.clone(),
+                    kind: super::security_alerts::KIND_OWN_DEVICE_ADDED.to_string(),
+                    detail: super::security_alerts::own_device_detail(&device, &voucher),
+                    created_at,
+                })
+                .await;
+        }
         if sender != local_device && now.is_member(sender) {
             super::crypto_handler::share_state_with_sibling(ws_cmd_tx, sender, db_path, db_passphrase);
         }
@@ -762,9 +779,53 @@ async fn ingest_inner(
     }
 }
 
+/// What [`fold_in`] did, for the async half to report.
+struct Folded {
+    /// Members as last saved, with the stored roster's fold.
+    prev: RosterState,
+    now: RosterState,
+    changed: bool,
+    /// Devices the saved roster's upgrade admitted.
+    upgrade_admitted: BTreeSet<String>,
+    /// Own-device alerts this ingest recorded: (device, voucher, recorded at).
+    own_news: Vec<(String, String, i64)>,
+}
+
+/// Members another of our devices vouched into our identity since `prev`, each with
+/// its voucher: what the rest of our devices are told (C-IDENTITY-09). Never a device
+/// this one vouched (the person was here), one the 0.11 upgrade admitted, or anything
+/// before this device was a member itself, its own admission included.
+fn vouched_by_a_sibling(
+    roster: &Roster,
+    prev: &RosterState,
+    now: &RosterState,
+    local_device: &str,
+    upgrade_admitted: &BTreeSet<String>,
+) -> Vec<(String, String)> {
+    if !prev.is_member(local_device) {
+        return Vec::new();
+    }
+    now.members
+        .difference(&prev.members)
+        .filter(|d| !upgrade_admitted.contains(*d))
+        .filter_map(|d| {
+            let vouchers: Vec<&str> = roster
+                .vouches
+                .iter()
+                .filter(|v| v.base == now.base && v.device == *d)
+                .map(|v| v.by.as_str())
+                .collect();
+            if vouchers.contains(&local_device) {
+                return None;
+            }
+            let by = vouchers.iter().find(|b| now.is_member(b)).or(vouchers.first())?;
+            Some((d.clone(), by.to_string()))
+        })
+        .collect()
+}
+
 /// The store half of [`ingest`], on the blocking pool: merge, fold, save, re-key the
-/// friend row. `(members as last saved, the fold now, whether anything changed, the
-/// devices the saved roster's upgrade admitted)`.
+/// friend row, and record what our own devices must be told.
 fn fold_in(
     db_path: &str,
     db_passphrase: &str,
@@ -772,7 +833,7 @@ fn fold_in(
     sender: &str,
     local_master: &str,
     local_device: &str,
-) -> Option<(RosterState, RosterState, bool, BTreeSet<String>)> {
+) -> Option<Folded> {
     let master = incoming.master.as_str();
     let store = MessageStore::open(db_path, db_passphrase).ok()?;
     let stored = load(&store, master);
@@ -786,11 +847,10 @@ fn fold_in(
             return None;
         }
     }
-    let base = stored.clone().unwrap_or_else(|| Roster::new(master));
     let merged = if master == local_master {
-        base.merged(&heard_for_own(&store, master, incoming))
+        merged_here(&store, stored.as_ref(), &heard_for_own(&store, master, incoming))
     } else {
-        base.merged(incoming)
+        merged_here(&store, stored.as_ref(), incoming)
     };
     stamp_pending(&store, &merged);
     // Members as last saved, not re-folded now: a pending join that matured since
@@ -826,7 +886,19 @@ fn fold_in(
         }
     }
     let upgrade_admitted = stored.as_ref().map(Roster::upgrade_admitted).unwrap_or_default();
-    Some((prev, now, changed, upgrade_admitted))
+    let own_news = if master == local_master && changed {
+        let upgrade: BTreeSet<String> = upgrade_admitted.union(&merged.upgrade_admitted()).cloned().collect();
+        vouched_by_a_sibling(&merged, &prev, &now, local_device, &upgrade)
+            .into_iter()
+            .filter_map(|(device, voucher)| {
+                let at = super::security_alerts::record_own_device_added(&store, master, &device, &voucher)?;
+                Some((device, voucher, at))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some(Folded { prev, now, changed, upgrade_admitted, own_news })
 }
 
 /// What a change to our own roster means for this device: removed, back, or asked.
@@ -942,7 +1014,7 @@ pub(crate) fn carried_member(
     let carried = carried.verified(now_ms());
     let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return false };
     let view = match load(&store, &carried.master) {
-        Some(stored) => stored.merged(&carried),
+        Some(stored) => merged_here(&store, Some(&stored), &carried),
         None => carried,
     };
     fold(&store, &view).is_member(device)
@@ -1266,7 +1338,8 @@ mod tests {
             src[start..start + end].to_string()
         };
         for (from, to, gate) in [
-            ("if let Ok(msg) = parsed {", "let rate_ok", "roster_book::heard_from(&from, &msg)"),
+            ("if let Ok(msg) = parsed {", "if msg.live_only()", "roster_book::heard_from(&from, &msg)"),
+            ("let rate_ok", "if !rate_ok", "resolver::is_bare_master(&from)"),
             ("WsEvent::BinaryDirect { room, from, data } => {", "ws_stream_receive(", "resolver::is_bare_master(&from)"),
             ("WsEvent::PeerJoined { room, peer_id } => {", "ws_room_peers.entry(", "bare_presence.admits(&peer_id)"),
             ("WsEvent::RoomMembers { room, peers } => {", "ws_room_peers.insert(", "bare_presence.admits(p)"),
@@ -1776,5 +1849,137 @@ mod tests {
         }
         assert!(joined.contains(&super::super::dm_room::dm_room_code(&local, &friend)), "control: a friend's room");
         assert!(!joined.contains(&super::super::dm_room::dm_room_code(&local, &blocked)), "a blocked friend's room");
+    }
+
+    /// C-IDENTITY-09, each rule alone. A member another device of ours vouched is news,
+    /// named with its voucher; a device this one vouched, one the upgrade admitted (even
+    /// with a vouch), one no vouch admitted, and anything while this device was not a
+    /// member yet are not.
+    #[test]
+    fn only_a_siblings_vouch_is_news_to_our_other_devices() {
+        let (master, me, p) = (kp(0x01).peer_id(), kp(0x02), kp(0x03));
+        let [n, q, u, x] = [0x04, 0x05, 0x06, 0x07].map(|t| kp(t).peer_id());
+        let mut r = Roster::new(&master);
+        r.add_vouch(sign_vouch(&p, &master, LEGACY_BASE, &n));
+        r.add_vouch(sign_vouch(&me, &master, LEGACY_BASE, &q));
+        r.add_vouch(sign_vouch(&p, &master, LEGACY_BASE, &u));
+        let state = |members: &[&str]| RosterState {
+            base: LEGACY_BASE.into(),
+            members: members.iter().map(|d| d.to_string()).collect(),
+            ..Default::default()
+        };
+        let (me_id, p_id) = (me.peer_id(), p.peer_id());
+        let prev = state(&[&me_id, &p_id]);
+        let now = state(&[&me_id, &p_id, &n, &q, &u, &x]);
+        let upgrade = BTreeSet::from([u.clone()]);
+        assert_eq!(vouched_by_a_sibling(&r, &prev, &now, &me_id, &upgrade), vec![(n.clone(), p_id.clone())]);
+        assert_eq!(
+            vouched_by_a_sibling(&r, &prev, &now, &me_id, &BTreeSet::new()).into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([(n.clone(), p_id.clone()), (u.clone(), p_id.clone())]),
+            "control: without the upgrade the vouched device is news",
+        );
+        let joining = state(&[&p_id]);
+        assert!(
+            vouched_by_a_sibling(&r, &joining, &now, &me_id, &upgrade).is_empty(),
+            "a device that just joined was told about itself or what came before it",
+        );
+        let other_base = RosterState { base: "f".repeat(32), ..now.clone() };
+        assert!(vouched_by_a_sibling(&r, &prev, &other_base, &me_id, &upgrade).is_empty(), "a vouch from another base");
+    }
+
+    /// C-IDENTITY-09. The ingest records the alert once with who added the device, tells
+    /// the UI, and a re-ingest of the same roster records nothing more.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_siblings_vouch_is_recorded_once_on_ingest() {
+        let _g = guard();
+        let mut me = Observer::new(0x01, 0x02);
+        let recovery = kp(0x03);
+        write_bootstrap(&me.dir(), &Roster::genesis(&me.master, &recovery, &me.device, now_ms())).unwrap();
+        me.own();
+        let (sibling, added) = (kp(0x04), kp(0x05));
+        let own = me.master.peer_id();
+        // The sibling joined through this device; then it linked a device of its own.
+        vouch(&me.master, &me.device, &sibling.peer_id(), &me.db, &me.pass).unwrap();
+        let mut roster = own_of(&me).0;
+        roster.add_consent(sign_consent(&sibling, &own));
+        me.ingest(&sibling.peer_id(), &roster).await;
+        let none = |me: &Observer| {
+            me.store().get_security_alerts().unwrap().into_iter().filter(|a| a.kind == super::super::security_alerts::KIND_OWN_DEVICE_ADDED).count()
+        };
+        assert_eq!(none(&me), 0, "this device's own link was news to it");
+        roster.add_vouch(sign_vouch(&sibling, &own, &roster.base(), &added.peer_id()));
+        roster.add_consent(sign_consent(&added, &own));
+        me.drain();
+        me.ingest(&sibling.peer_id(), &roster).await;
+        let detail = format!("{}:{}", added.peer_id(), sibling.peer_id());
+        let alerts = me.store().get_security_alerts().unwrap();
+        assert!(alerts.iter().any(|a| a.peer_id == own && a.kind == super::super::security_alerts::KIND_OWN_DEVICE_ADDED && a.detail == detail));
+        assert!(me.drain().iter().any(|e| matches!(e, NetworkEvent::SecurityAlert { detail: d, .. } if *d == detail)));
+        me.ingest(&sibling.peer_id(), &roster).await;
+        assert_eq!(none(&me), 1, "a re-ingest recorded it again");
+        assert!(!me.drain().iter().any(|e| matches!(e, NetworkEvent::SecurityAlert { .. })), "a re-ingest told the UI again");
+    }
+
+    /// C-IDENTITY-09. A device the 0.11 upgrade admitted is no news even when another
+    /// device of ours also vouched for it: the upgrade's admissions are fed to the rule
+    /// at the ingest, not only checked by it.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_upgrade_admission_is_no_news_even_with_a_vouch() {
+        let _g = guard();
+        let (s, t) = (kp(0x03), kp(0x04));
+        let me = legacy_device(0x02, &[&kp(0x02).peer_id(), &s.peer_id(), &t.peer_id()], &[], true);
+        let own = me.master.peer_id();
+        let (mut roster, state) = me.own();
+        assert!(state.protected && state.is_member(&me.device.peer_id()), "{state:?}");
+        roster.add_consent(sign_consent(&t, &own));
+        roster.add_consent(sign_consent(&s, &own));
+        roster.add_vouch(sign_vouch(&t, &own, &roster.base(), &s.peer_id()));
+        me.ingest(&t.peer_id(), &roster).await;
+        assert!(me.state_of(&own).is_member(&s.peer_id()), "control: the upgrade admitted s");
+        let news: Vec<_> = me
+            .store()
+            .get_security_alerts()
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.kind == super::super::security_alerts::KIND_OWN_DEVICE_ADDED)
+            .collect();
+        assert!(news.is_empty(), "an upgrade admission with a vouch was news: {news:?}");
+    }
+
+    /// C-IDENTITY-16 at the ingest: an ask this node saw first keeps its slot when a
+    /// flood of asks under lower ids arrives, and keeps maturing on its clock.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_ingested_flood_keeps_the_ask_this_node_saw_first() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (bob, bob_r, bob_dev, real) = (kp(0x60), kp(0x64), kp(0x61), kp(0x62));
+        let mut r = Roster::genesis(&bob, &bob_r, &bob_dev, now_ms() - 60_000);
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        r.add_consent(sign_consent(&real, &bob.peer_id()));
+        r.add_pending(sign_pending(&bob, &r.base(), &real.peer_id()));
+        me.ingest(&real.peer_id(), &r).await;
+        let mut flood = r.clone();
+        flood.pendings.clear();
+        for i in 0u32.. {
+            if flood.pendings.len() == roster::MAX_PENDING {
+                break;
+            }
+            let mut seed = [0x6bu8; 32];
+            seed[..4].copy_from_slice(&i.to_le_bytes());
+            let j = NativeKeypair::from_secret_bytes(&seed);
+            if j.peer_id() < real.peer_id() {
+                flood.add_consent(sign_consent(&j, &bob.peer_id()));
+                flood.add_pending(sign_pending(&bob, &r.base(), &j.peer_id()));
+            }
+        }
+        me.ingest(&bob_dev.peer_id(), &flood).await;
+        let held = load(&me.store(), &bob.peer_id()).unwrap();
+        assert!(held.pendings.iter().any(|p| p.device == real.peer_id()), "a later flood pushed out the ask seen first");
+        assert_eq!(held.pendings.len(), roster::MAX_PENDING);
+        me.store().set_roster_seen(&bob.peer_id(), &r.base(), &real.peer_id(), now_ms() - PENDING_MATURITY_MS).unwrap();
+        assert!(me.state_of(&bob.peer_id()).is_member(&real.peer_id()), "the ask seen first never matured");
     }
 }

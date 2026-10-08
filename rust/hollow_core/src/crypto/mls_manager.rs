@@ -414,6 +414,11 @@ pub(crate) struct MlsManager {
     /// Per group, the master we last answered with a KeyPackage and when. Outlives the
     /// group on purpose: the repair that evicts us arrives before its Welcome.
     answered_key_requests: HashMap<String, (String, std::time::Instant)>,
+    /// Per group we hold no copy of, our own devices that asked us for a leaf in it and
+    /// when: each ask says that device holds no copy either. RAM-only.
+    sibling_asks: HashMap<String, HashMap<String, std::time::Instant>>,
+    /// Subgroups we founded on a KeyPackage, for the batch tick to fill. RAM-only.
+    founded_subgroups: Vec<String>,
     /// Per group, whether the commit that evicted us re-added this device with a
     /// KeyPackage we hold, so its Welcome can be opened.
     evictions: HashMap<String, bool>,
@@ -463,6 +468,8 @@ impl MlsManager {
             held_welcomes: HashMap::new(),
             pinned_committers: HashMap::new(),
             answered_key_requests: HashMap::new(),
+            sibling_asks: HashMap::new(),
+            founded_subgroups: Vec::new(),
             evictions: HashMap::new(),
             minted: Mutex::new(HashMap::new()),
             seat_cache: Mutex::new(HashMap::new()),
@@ -745,6 +752,7 @@ impl MlsManager {
 
         hollow_log!("[HOLLOW-MLS] Created MLS group for server {server_id}");
         self.groups.insert(server_id.to_string(), group);
+        self.sibling_asks.remove(server_id);
         self.epoch_digests.remove(server_id);
         self.note_epoch(server_id);
         Ok(())
@@ -1036,6 +1044,7 @@ impl MlsManager {
             .map_err(|e| format!("Failed to create group from Welcome: {e:?}"))?;
         hollow_log!("[HOLLOW-MLS] Joined MLS group for server {group_key}, epoch: {:?}", group.epoch());
         self.groups.insert(group_key.to_string(), group);
+        self.sibling_asks.remove(group_key);
         self.note_epoch(group_key);
         Ok(())
     }
@@ -1573,6 +1582,37 @@ impl MlsManager {
         self.answered_key_requests.get(group_key).cloned()
     }
 
+    /// Record that our own `device` asked us for a leaf in a group we hold no copy of.
+    /// The caller has checked it is a device of ours, which bounds the map.
+    pub fn note_sibling_ask(&mut self, group_key: &str, device: &str) {
+        if self.groups.contains_key(group_key) {
+            return;
+        }
+        self.sibling_asks
+            .entry(group_key.to_string())
+            .or_default()
+            .insert(device.to_string(), std::time::Instant::now());
+    }
+
+    pub fn note_founded_subgroup(&mut self, group_key: &str) {
+        if !self.founded_subgroups.iter().any(|g| g == group_key) {
+            self.founded_subgroups.push(group_key.to_string());
+        }
+    }
+
+    pub fn take_founded_subgroups(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.founded_subgroups)
+    }
+
+    /// Our devices that asked us for a leaf in `group_key` within `window`, since we
+    /// last held a copy of it.
+    pub fn sibling_asks(&self, group_key: &str, window: std::time::Duration) -> Vec<String> {
+        self.sibling_asks
+            .get(group_key)
+            .map(|asks| asks.iter().filter(|(_, at)| at.elapsed() < window).map(|(d, _)| d.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Record a commit frame (authored or applied) for catch-up replay.
     /// Idempotent per epoch; keeps the ring ascending and capped.
     pub fn cache_commit(&mut self, group_key: &str, epoch: u64, commit_b64: String) {
@@ -1970,6 +2010,30 @@ mod tests {
         assert!(MlsManager::key_package_identity(&stolen).unwrap().bound().is_none());
         assert!(owner.commit_membership("s", &[], &[(victim_dev.clone(), stolen)]).is_err());
         assert_eq!(owner.member_count("s"), 1);
+    }
+
+    /// A sibling's ask for a leaf counts only while we hold no copy of the group:
+    /// joining or founding it forgets the ask, and one heard while we hold it is dropped.
+    #[test]
+    fn sibling_asks_count_only_while_we_hold_no_copy() {
+        let window = std::time::Duration::from_secs(60);
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group("s").unwrap();
+        let (mut ours, _) = bound(3, 4);
+        ours.note_sibling_ask("s", "d5");
+        assert_eq!(ours.sibling_asks("s", window), vec!["d5".to_string()]);
+        let (_, welcome) = owner.add_member("s", &ours.generate_key_package().unwrap()).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        ours.join_from_welcome("s", &welcome).unwrap();
+        ours.note_sibling_ask("s", "d6");
+        ours.remove_group("s");
+        assert!(ours.sibling_asks("s", window).is_empty(), "the join forgot d5, and d6 came while we held it");
+        ours.note_sibling_ask("s", "d7");
+        ours.create_group("s").unwrap();
+        ours.remove_group("s");
+        assert!(ours.sibling_asks("s", window).is_empty(), "founding the group forgot d7");
+        ours.note_sibling_ask("t", "d8");
+        assert!(ours.sibling_asks("t", std::time::Duration::ZERO).is_empty(), "an ask lapses with its window");
     }
 
     #[test]

@@ -10,3 +10,5 @@ pub(crate) mod roster;
 mod roster_vectors;
 
 pub(crate) use keys::{data_dir, set_data_dir, generate_new_identity, load_or_create_identity, load_existing_identity, restore_identity_from_mnemonic};
+#[cfg(test)]
+pub(crate) use keys::LOCKED_KEY_FILES;

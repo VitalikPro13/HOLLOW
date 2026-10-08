@@ -273,6 +273,22 @@ class _PushDeliverySectionState extends ConsumerState<_PushDeliverySection> {
   void initState() {
     super.initState();
     _loadDistributors();
+    if (_controller.firebaseFallback.value == null) {
+      _controller.loadFirebaseFallback().ignore();
+    }
+  }
+
+  Future<void> _setFallback(bool allowed) async {
+    try {
+      await _controller.setFirebaseFallback(allowed);
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(
+        context,
+        friendlyError(e, fallback: "Couldn't save the setting. Try again."),
+        type: HollowToastType.error,
+      );
+    }
   }
 
   Future<void> _loadDistributors() async {
@@ -312,13 +328,24 @@ class _PushDeliverySectionState extends ConsumerState<_PushDeliverySection> {
       if (next && prev != true) _loadDistributors();
     });
 
-    return ValueListenableBuilder<UnifiedPushStatus>(
-      valueListenable: _controller.status,
-      builder: (context, status, _) {
+    return ListenableBuilder(
+      listenable:
+          Listenable.merge([_controller.status, _controller.firebaseFallback]),
+      builder: (context, _) {
+        final status = _controller.status.value;
+        // Unread counts as on: the default, and what the row shows until read.
+        final fallback = _controller.firebaseFallback.value ?? true;
         final selected = status.phase == UnifiedPushPhase.off
             ? _google
             : status.distributor ?? _google;
         final failed = status.phase == UnifiedPushPhase.failed;
+        final googleWakes = !_controller.isActive;
+        // The pick stays listed while it is uninstalled or turned off.
+        final listed = [
+          ..._distributors,
+          if (selected != _google && !_distributors.contains(selected))
+            selected,
+        ];
         return SettingsSection(
           title: 'Push delivery',
           subtitle: 'Wakes this phone for messages while Hollow is closed. '
@@ -329,8 +356,12 @@ class _PushDeliverySectionState extends ConsumerState<_PushDeliverySection> {
               subtitleWidget: Text(
                 _busy != null
                     ? 'Switching…'
-                    : _statusText(status, _distributors.isEmpty),
-                style: failed ? TextStyle(color: hollow.error) : null,
+                    : _statusText(status, _distributors.isEmpty,
+                        googleWakes: googleWakes),
+                style: failed
+                    ? TextStyle(
+                        color: googleWakes ? hollow.warning : hollow.error)
+                    : null,
               ),
               wideTrailing: true,
               trailing: Wrap(
@@ -342,7 +373,7 @@ class _PushDeliverySectionState extends ConsumerState<_PushDeliverySection> {
                     selected: selected == _google,
                     onTap: () => _choose(_google),
                   ),
-                  for (final d in _distributors)
+                  for (final d in listed)
                     HollowChip(
                       label: distributorLabel(d),
                       selected: selected == d,
@@ -351,13 +382,22 @@ class _PushDeliverySectionState extends ConsumerState<_PushDeliverySection> {
                 ],
               ),
             ),
+            SettingsSwitchRow(
+              title: 'Fall back to Google',
+              subtitle: 'If the service you picked stops working, Google '
+                  'wakes the phone instead, so notifications keep coming but '
+                  'Google sees when they arrive.',
+              value: fallback,
+              onChanged: _setFallback,
+            ),
           ],
         );
       },
     );
   }
 
-  static String _statusText(UnifiedPushStatus status, bool noneInstalled) {
+  static String _statusText(UnifiedPushStatus status, bool noneInstalled,
+      {required bool googleWakes}) {
     final name = distributorLabel(status.distributor ?? '');
     return switch (status.phase) {
       UnifiedPushPhase.off => noneInstalled
@@ -366,19 +406,13 @@ class _PushDeliverySectionState extends ConsumerState<_PushDeliverySection> {
           : 'Wake-ups come through Google.',
       UnifiedPushPhase.registering => 'Connecting to $name…',
       UnifiedPushPhase.active => 'Wake-ups come through $name.',
-      UnifiedPushPhase.failed => switch (status.failure) {
-          FailedReason.network =>
-            '$name could not connect. Google wakes the phone until it does. '
-                'Pick it again once it is online.',
-          FailedReason.actionRequired =>
-            '$name needs you to open it first. Google wakes the phone until '
-                'then.',
-          FailedReason.vapidRequired =>
-            '$name asks for a server key Hollow does not send yet. Google '
-                'wakes the phone instead.',
-          _ => '$name did not work with Hollow. Google wakes the phone '
-              'instead.',
-        },
+      UnifiedPushPhase.failed when status.unanswered =>
+        "$name isn't answering yet. Open it once and it starts working.",
+      UnifiedPushPhase.failed => googleWakes
+          ? "$name isn't working right now. Google wakes the phone until "
+              "it's back."
+          : "$name isn't working right now. Notifications are off until "
+              "it's back.",
     };
   }
 }

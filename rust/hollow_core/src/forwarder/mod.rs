@@ -221,7 +221,7 @@ mod tests {
         client.create_outbound_session(&local, &old.identity_key_base64(), &otk).unwrap();
         let (_, prekey) = client.encrypt(&local, b"{}").unwrap();
         old.open_prekey(&from, &client.identity_key_base64(), &prekey, &local).unwrap();
-        store.save_olm_session(&from, &old.session_pickle_json(&from).unwrap().unwrap()).unwrap();
+        store.save_olm_session(&from, &old.session_pickle_json(&from).unwrap().unwrap(), 1, 0).unwrap();
         store.save_olm_read_mark(&from, 5).unwrap();
         assert!(store.load_olm_account().unwrap().unwrap().contains(&from), "the old account row names its requester");
         drop(store);

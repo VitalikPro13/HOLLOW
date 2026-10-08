@@ -84,32 +84,33 @@ pub fn restore_identity_from_mnemonic(phrase: String) -> Result<IdentityInfo, St
 /// OTHER profile's key, and trusting it unverified funnelled users into mnemonic
 /// recovery, which rotates the device key and discards the MLS identity and groups.
 fn keychain_key_that_decrypts(bytes: &[u8]) -> Option<[u8; 32]> {
-    keychain_key_that_decrypts_opts(bytes, true)
+    let root = crate::identity::data_dir().ok()?;
+    keychain_key_that_decrypts_at(&root, bytes, true)
 }
 
 /// `heal = false` is the read-only form: it answers "can this machine unwrap this
 /// file" WITHOUT re-storing the winning key. Every unlock path wants the healing form;
 /// the profile-erase gate must not, because the file it tests belongs to a DIFFERENT
-/// profile and writing that key into the shared slots is the overwrite that started
-/// all this.
-fn keychain_key_that_decrypts_opts(bytes: &[u8], heal: bool) -> Option<[u8; 32]> {
-    use crate::identity::{encryption, platform_keystore};
-    let candidates = platform_keystore::retrieve_key_candidates().ok()?;
-    for key_vec in candidates {
-        if key_vec.len() != 32 {
-            continue;
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&key_vec);
-        if encryption::decrypt_identity(bytes, &key).is_ok() {
-            if heal {
-                let _ = platform_keystore::store_key(&key);
-            }
-            return Some(key);
-        }
+/// profile. A key already in the profile's own slot is never re-written: a crash in
+/// the middle of that write would lose the only copy.
+fn keychain_key_that_decrypts_at(
+    root: &std::path::Path,
+    bytes: &[u8],
+    heal: bool,
+) -> Option<[u8; 32]> {
+    use crate::identity::platform_keystore;
+    let (source, key) = platform_keystore::key_that_opens(root, bytes)?;
+    if heal && source != platform_keystore::Source::Profile {
+        let _ = platform_keystore::store_key_at(root, &key);
     }
-    None
+    Some(key)
 }
+
+/// What unlock answers when a keychain-only identity's key cannot be had. Nothing on
+/// disk was touched, so the same files open again once the key is back (the keychain
+/// unlocked, the right account signed in). Dart matches the leading marker.
+const KEYCHAIN_KEY_MISSING: &str =
+    "keychain_key_missing: the key that opens this identity is not in this computer's keychain";
 
 /// The one gate for a secret typed on this machine, at the launch prompt, the app
 /// lock or any Settings confirmation. A TYPED secret always runs BOTH slots: two
@@ -171,15 +172,9 @@ pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>
             } else if encryption::flags_has_password(flags) {
                 return Err("Identity is password-protected. Provide a password.".into());
             } else if encryption::flags_has_os_keychain(flags) {
-                // Keychain-only (flags=0x02): silent unlock on same machine.
                 match keychain_key_that_decrypts(&bytes) {
                     Some(key) => key,
-                    None => {
-                        return Err(
-                            "Identity was protected with this device's credentials which are no longer available. Restore from backup or mnemonic."
-                                .into(),
-                        );
-                    }
+                    None => return Err(KEYCHAIN_KEY_MISSING.into()),
                 }
             } else {
                 return Err("Unknown identity protection flags".into());
@@ -252,16 +247,18 @@ pub fn enable_password_protection(
         use_keychain,
     )?;
 
-    if use_keychain {
-        platform_keystore::store_key(&wrapping_key)?;
-    } else {
-        let _ = platform_keystore::delete_key();
-    }
-
     let dir = crate::identity::data_dir()?;
     let path = dir.join("identity.key");
-    std::fs::write(&path, &encrypted)
-        .map_err(|e| format!("Failed to write encrypted identity: {e}"))?;
+    let before = std::fs::read(&path).ok();
+    // A key is stored before the file needs it and forgotten only after the file
+    // stopped needing it, so no failure in between leaves a file nothing opens.
+    if use_keychain {
+        platform_keystore::store_key_at(&dir, &wrapping_key)?;
+    }
+    encryption::write_key_file(&path, &encrypted)?;
+    if !use_keychain {
+        platform_keystore::forget_key_at(&dir, before.as_deref());
+    }
 
     encryption::set_session_key(wrapping_key);
 
@@ -322,11 +319,10 @@ pub fn change_password(old_password: String, new_password: String) -> Result<(),
         encryption::encrypt_identity(&plaintext, &new_key, &new_salt, true, had_keychain)?;
 
     if had_keychain {
-        let _ = platform_keystore::store_key(&new_key);
+        let _ = platform_keystore::store_key_at(&dir, &new_key);
     }
 
-    std::fs::write(&path, &encrypted)
-        .map_err(|e| format!("Failed to write encrypted identity: {e}"))?;
+    encryption::write_key_file(&path, &encrypted)?;
 
     // Re-encrypt the device key file under the new key (hazard R2). Read it with
     // the OLD key first, while we still have it.
@@ -367,17 +363,15 @@ pub fn remove_password_protection(password: String) -> Result<(), String> {
     let key = open_typed_secret(&password, &bytes, &salt)?;
     let plaintext = encryption::decrypt_identity(&bytes, &key)?;
 
-    // Write plaintext. OS keychain is a separate opt-in from Settings.
-    std::fs::write(&path, &plaintext)
-        .map_err(|e| format!("Failed to write identity: {e}"))?;
-
-    // Mirror onto the device key file: read with the old key, write plaintext.
+    // The device file first: a plaintext device beside a still-encrypted master opens,
+    // the other way round it does not. OS keychain is a separate opt-in from Settings.
     let device = identity::device_key::load_device_keypair_with_key(&key)?;
     identity::device_key::rewrite_device_key_protection(&device, None, false, false)?;
+    encryption::write_key_file(&path, &plaintext)?;
 
     // No prompt left to type a duress code into.
     let _ = forget_duress_code(false);
-    let _ = platform_keystore::delete_key();
+    platform_keystore::forget_key_at(&dir, Some(&bytes));
     encryption::clear_session_key();
 
     Ok(())
@@ -565,13 +559,12 @@ pub fn set_require_password_on_launch(require: bool) -> Result<(), String> {
         encryption::encrypt_identity(&plaintext, &session_key, &salt, true, want_keychain)?;
 
     if want_keychain {
-        platform_keystore::store_key(&session_key)?;
-    } else {
-        let _ = platform_keystore::delete_key();
+        platform_keystore::store_key_at(&dir, &session_key)?;
     }
-
-    std::fs::write(&path, &encrypted)
-        .map_err(|e| format!("Failed to write identity: {e}"))?;
+    encryption::write_key_file(&path, &encrypted)?;
+    if !want_keychain {
+        platform_keystore::forget_key_at(&dir, Some(&bytes));
+    }
 
     // Keep the device key file's flags in sync; the session key is unchanged either way.
     let device = identity::device_key::load_device_keypair_with_key(&session_key)?;
@@ -585,95 +578,336 @@ pub fn set_require_password_on_launch(require: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Enable OS keychain (DPAPI/Keychain) protection on the current identity.
-/// This is opt-in — the user must explicitly choose this from Settings.
-/// Requires the identity to be currently unlocked and unencrypted (or keychain-already).
-#[frb]
-pub fn enable_os_keychain_protection() -> Result<(), String> {
-    use crate::identity::encryption;
-    use crate::identity::platform_keystore;
+// -- OS keychain protection --
 
+/// What a failed keychain switch says. The switch only ever ends in the new state or
+/// in the old one, so "nothing changed" is always true when this is shown.
+const SWITCH_REFUSED: &str =
+    "Hollow couldn't lock your identity to this computer, so nothing changed.";
+const SWITCH_OFF_REFUSED: &str =
+    "Hollow couldn't turn off the lock to this computer, so nothing changed.";
+
+fn refused(base: &str, detail: impl std::fmt::Display) -> String {
+    crate::hollow_log!("[HOLLOW-KEYSTORE] {base} ({detail})");
+    base.to_string()
+}
+
+/// A key file's plaintext, or `None` when there is no file.
+fn read_plain_key_file(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+    use crate::identity::encryption;
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to read {}: {e}", path.display())),
+    };
+    if encryption::detect_format(&bytes)? != encryption::IdentityFormat::Plaintext {
+        return Err(format!("{} is already protected", path.display()));
+    }
+    identity::native_identity::NativeKeypair::from_protobuf_encoding(&bytes)
+        .map_err(|e| format!("{} does not hold a key: {e}", path.display()))?;
+    Ok(Some(bytes))
+}
+
+/// Seals `plain` for keychain-only protection and proves `key` opens the result.
+fn seal_for_keychain(plain: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+    use crate::identity::encryption;
+    let sealed = encryption::encrypt_identity(plain, key, &[0u8; 16], false, true)?;
+    if encryption::decrypt_identity(&sealed, key)? != plain {
+        return Err("a test envelope did not open to what was sealed".into());
+    }
+    Ok(sealed)
+}
+
+/// True when the file at `path` opens under `key` to exactly `plain`.
+fn lands_as(path: &std::path::Path, key: &[u8; 32], plain: &[u8]) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| crate::identity::encryption::decrypt_identity(&b, key).ok())
+        .is_some_and(|p| p == plain)
+}
+
+/// Plaintext key files to keychain-only protection. The key is stored, read back
+/// through a NEW keystore read, and must open test envelopes before either file is
+/// replaced; the master goes first (an encrypted master beside a plaintext device
+/// still opens), each file through a staged, flushed, read-back rename. Any failure
+/// puts the files and this profile's slot back exactly as they were.
+fn switch_to_keychain(root: &std::path::Path) -> Result<[u8; 32], String> {
+    use crate::identity::{encryption, platform_keystore};
     if !platform_keystore::is_available() {
         return Err("OS keychain is not available on this platform".into());
     }
+    let key_path = root.join("identity.key");
+    let dev_path = root.join("identity.device");
+    let master = read_plain_key_file(&key_path)
+        .map_err(|e| refused(SWITCH_REFUSED, e))?
+        .ok_or_else(|| refused(SWITCH_REFUSED, "no identity file"))?;
+    let device = read_plain_key_file(&dev_path).map_err(|e| refused(SWITCH_REFUSED, e))?;
 
-    let data = identity::load_or_create_identity()?;
-    let plaintext = data
-        .keypair
-        .to_protobuf_encoding()
-        .map_err(|e| format!("Failed to encode keypair: {e}"))?;
+    let mut fresh_key = zeroize::Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut fresh_key[..]).map_err(|e| format!("RNG error: {e}"))?;
+    let before = platform_keystore::snapshot_at(root);
+    let undo = |detail: String| {
+        platform_keystore::restore_snapshot(root, &before);
+        refused(SWITCH_REFUSED, detail)
+    };
 
-    let dir = crate::identity::data_dir()?;
-    let path = dir.join("identity.key");
-
-    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read identity file: {e}"))?;
-    let format = encryption::detect_format(&bytes)?;
-
-    match format {
-        encryption::IdentityFormat::Plaintext => {}
-        encryption::IdentityFormat::Encrypted { flags, .. } => {
-            if encryption::flags_has_password(flags) {
-                return Err(
-                    "Cannot enable OS keychain while password protection is active. Remove password first."
-                        .into(),
-                );
-            }
-            if encryption::flags_has_os_keychain(flags) {
-                return Ok(());
-            }
-        }
+    platform_keystore::store_key_at(root, &fresh_key[..]).map_err(&undo)?;
+    let read_back = match platform_keystore::read_profile_key_at(root) {
+        Ok(Some(k)) if k == fresh_key[..] => k,
+        Ok(Some(_)) => return Err(undo("the keystore gave back a different key".into())),
+        Ok(None) => return Err(undo("the keystore did not keep the key".into())),
+        Err(e) => return Err(undo(e)),
+    };
+    if platform_keystore::read_blob_key_at(root).is_some_and(|b| b != read_back) {
+        return Err(undo("the DPAPI copy gave back a different key".into()));
     }
+    let key = zeroize::Zeroizing::new(
+        <[u8; 32]>::try_from(read_back.as_slice()).map_err(|_| undo("short key".into()))?,
+    );
+    let sealed_master = seal_for_keychain(&master, &key).map_err(&undo)?;
+    let sealed_device = match &device {
+        Some(d) => Some(seal_for_keychain(d, &key).map_err(&undo)?),
+        None => None,
+    };
 
-    let mut wrapping_key = [0u8; 32];
-    getrandom::fill(&mut wrapping_key).map_err(|e| format!("RNG error: {e}"))?;
-    let salt = [0u8; 16];
+    let put_back = |detail: String| {
+        if let Some(d) = &device {
+            let _ = encryption::write_key_file(&dev_path, d);
+        }
+        let _ = encryption::write_key_file(&key_path, &master);
+        undo(detail)
+    };
+    encryption::write_key_file(&key_path, &sealed_master).map_err(&undo)?;
+    if let (Some(sealed), Some(_)) = (&sealed_device, &device) {
+        encryption::write_key_file(&dev_path, sealed).map_err(&put_back)?;
+    }
+    let device_landed = device.as_ref().is_none_or(|d| lands_as(&dev_path, &key, d));
+    if !lands_as(&key_path, &key, &master) || !device_landed {
+        return Err(put_back("a protected file did not read back".into()));
+    }
+    encryption::set_session_key(*key);
+    Ok(*key)
+}
 
-    let encrypted =
-        encryption::encrypt_identity(&plaintext, &wrapping_key, &salt, false, true)?;
+/// Keychain-only protection back to plaintext key files: the device file first (a
+/// plaintext device beside a still-encrypted master opens), then the master, then
+/// this profile's keys. Any failure leaves the files as they were.
+fn switch_to_plaintext(root: &std::path::Path) -> Result<(), String> {
+    use crate::identity::{encryption, platform_keystore};
+    let key_path = root.join("identity.key");
+    let dev_path = root.join("identity.device");
+    let sealed_master =
+        std::fs::read(&key_path).map_err(|e| refused(SWITCH_OFF_REFUSED, e))?;
+    match encryption::detect_format(&sealed_master)? {
+        encryption::IdentityFormat::Plaintext => return Ok(()),
+        encryption::IdentityFormat::Encrypted { flags, .. }
+            if encryption::flags_has_password(flags) =>
+        {
+            return Err("Your identity is locked with a password. Turn the password off first.".into());
+        }
+        encryption::IdentityFormat::Encrypted { .. } => {}
+    }
+    let key = encryption::get_session_key()
+        .filter(|k| encryption::decrypt_identity(&sealed_master, k).is_ok())
+        .or_else(|| keychain_key_that_decrypts_at(root, &sealed_master, false))
+        .ok_or_else(|| refused(SWITCH_OFF_REFUSED, "no key opens the identity"))?;
+    let key = zeroize::Zeroizing::new(key);
+    let master = encryption::decrypt_identity(&sealed_master, &key)?;
+    let device_file = std::fs::read(&dev_path).ok();
+    let device = match &device_file {
+        Some(bytes) => match encryption::detect_format(bytes)? {
+            encryption::IdentityFormat::Plaintext => Some(bytes.clone()),
+            encryption::IdentityFormat::Encrypted { .. } => Some(
+                encryption::decrypt_identity(bytes, &key).map_err(|e| refused(SWITCH_OFF_REFUSED, e))?,
+            ),
+        },
+        None => None,
+    };
 
-    platform_keystore::store_key(&wrapping_key)?;
-
-    std::fs::write(&path, &encrypted)
-        .map_err(|e| format!("Failed to write encrypted identity: {e}"))?;
-
-    encryption::set_session_key(wrapping_key);
-
-    // Mirror keychain protection onto the device key file (hazard R2).
-    identity::device_key::rewrite_device_key_protection(
-        &data.device_keypair,
-        Some(&wrapping_key),
-        false,
-        true,
-    )?;
-    wrapping_key.fill(0);
+    if let Some(d) = &device {
+        encryption::write_key_file(&dev_path, d).map_err(|e| refused(SWITCH_OFF_REFUSED, e))?;
+    }
+    if let Err(e) = encryption::write_key_file(&key_path, &master) {
+        if let Some(original) = &device_file {
+            let _ = encryption::write_key_file(&dev_path, original);
+        }
+        return Err(refused(SWITCH_OFF_REFUSED, e));
+    }
+    platform_keystore::forget_key_at(root, Some(&sealed_master));
+    encryption::clear_session_key();
     Ok(())
 }
 
-/// Disable OS keychain protection — writes identity back as plaintext.
-/// Requires the identity to be currently unlocked.
+/// Locks the identity to this computer's keychain, from plaintext. Already locked
+/// that way is a no-op; a password identity is left alone.
+fn lock_to_keychain(root: &std::path::Path) -> Result<(), String> {
+    use crate::identity::encryption;
+    let bytes = std::fs::read(root.join("identity.key"))
+        .map_err(|e| format!("Failed to read identity file: {e}"))?;
+    match encryption::detect_format(&bytes)? {
+        encryption::IdentityFormat::Plaintext => switch_to_keychain(root).map(|_| ()),
+        encryption::IdentityFormat::Encrypted { flags, .. }
+            if encryption::flags_has_password(flags) =>
+        {
+            Err("Cannot enable OS keychain while password protection is active. Remove password first.".into())
+        }
+        encryption::IdentityFormat::Encrypted { .. } => Ok(()),
+    }
+}
+
+/// `phrase` is this identity's recovery phrase: it yields this master, and the
+/// recovery key the held roster pinned when there is one.
+fn phrase_is_this_identitys(root: &std::path::Path, phrase: &str) -> Result<(), String> {
+    let id = identity::load_existing_identity()?.ok_or("There is no identity on this device yet.")?;
+    let (_, recovery) = crate::identity::recovery::recovery_key_for(&id.peer_id, phrase)?;
+    let db = root.join("messages.db");
+    if db.exists() {
+        let pass = crate::api::storage::derive_db_key_public()?;
+        let store = crate::storage::MessageStore::open(db.to_str().ok_or("Invalid path encoding")?, &pass)?;
+        if let Some(roster) = crate::node::roster_book::load(&store, &id.peer_id)
+            && !roster.r_pub.is_empty()
+            && roster.r_pub != crate::identity::roster::r_pub_of(&recovery)
+        {
+            return Err("That recovery phrase belongs to a different identity.".into());
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DesktopOs {
+    Windows,
+    MacOs,
+    Other,
+}
+
+fn this_os() -> DesktopOs {
+    if cfg!(windows) {
+        DesktopOs::Windows
+    } else if cfg!(target_os = "macos") {
+        DesktopOs::MacOs
+    } else {
+        DesktopOs::Other
+    }
+}
+
+/// Debug builds only: lets a throwaway fleet peer, which always runs on
+/// `HOLLOW_DATA_DIR`, see the default. A release build cannot read it.
+fn debug_defaults_hook() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("HOLLOW_TEST_KEYCHAIN_DEFAULTS").is_ok_and(|v| v == "1")
+}
+
+/// Whether keychain protection is on by default here: Windows and macOS only, and
+/// only on the OS's own data root. A data-dir override (`HOLLOW_DATA_DIR`, portable
+/// mode, a pinned profile elsewhere, removable media) can move to another machine or
+/// account, where the key would not follow.
+fn default_eligible_for(
+    os: DesktopOs,
+    env_override: Option<&str>,
+    root: &std::path::Path,
+    os_default_root: Option<&std::path::Path>,
+    debug_hook: bool,
+) -> bool {
+    if !matches!(os, DesktopOs::Windows | DesktopOs::MacOs) {
+        return false;
+    }
+    if env_override.is_some_and(|v| !v.is_empty()) {
+        return debug_hook;
+    }
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+    os_default_root.is_some_and(|d| canon(d).is_some() && canon(d) == canon(root))
+}
+
+fn default_eligible() -> bool {
+    let Ok(root) = crate::identity::data_dir() else { return false };
+    let env = std::env::var("HOLLOW_DATA_DIR").ok();
+    let os_default = dirs::data_dir().map(|d| d.join("hollow"));
+    crate::identity::platform_keystore::is_available()
+        && default_eligible_for(this_os(), env.as_deref(), &root, os_default.as_deref(), debug_defaults_hook())
+}
+
+/// Whether this profile gets keychain protection by default, and the offer to
+/// existing identities: Windows and macOS on the OS's own data root.
+#[frb]
+pub fn keychain_default_eligible() -> bool {
+    default_eligible()
+}
+
+/// Enable OS keychain protection on a plaintext identity, verified before the files
+/// change (see `switch_to_keychain`).
+#[frb]
+pub fn enable_os_keychain_protection() -> Result<(), String> {
+    lock_to_keychain(&crate::identity::data_dir()?)
+}
+
+/// The same, for an identity that already exists: the recovery phrase must be typed
+/// in full and be this identity's, because if the keychain ever loses the key, the
+/// phrase is the way back.
+#[frb]
+pub fn enable_os_keychain_protection_with_phrase(phrase: String) -> Result<(), String> {
+    let root = crate::identity::data_dir()?;
+    phrase_is_this_identitys(&root, &phrase)?;
+    lock_to_keychain(&root)
+}
+
+/// A new identity's default, run once its person confirmed the phrase at onboarding:
+/// true when it is now locked to the keychain, false where the default does not apply
+/// (see `default_eligible_for`) or the identity is already protected. An error leaves
+/// it exactly as it was.
+#[frb]
+pub fn protect_new_identity_by_default(phrase: String) -> Result<bool, String> {
+    use crate::identity::encryption;
+    if !default_eligible() {
+        return Ok(false);
+    }
+    let root = crate::identity::data_dir()?;
+    let bytes = std::fs::read(root.join("identity.key"))
+        .map_err(|e| format!("Failed to read identity file: {e}"))?;
+    if encryption::detect_format(&bytes)? != encryption::IdentityFormat::Plaintext {
+        return Ok(false);
+    }
+    phrase_is_this_identitys(&root, &phrase)?;
+    switch_to_keychain(&root).map(|_| true)
+}
+
+/// Turn keychain protection off: the identity goes back to plaintext files.
 #[frb]
 pub fn disable_os_keychain_protection() -> Result<(), String> {
-    use crate::identity::encryption;
-    use crate::identity::platform_keystore;
+    switch_to_plaintext(&crate::identity::data_dir()?)
+}
 
-    let data = identity::load_or_create_identity()?;
-    let plaintext = data
-        .keypair
+/// Whether `phrase` belongs to the identity whose messages are in this profile: its
+/// database key opens `messages.db`. True when there is no database to compare with.
+/// Restoring by phrase over a locked identity checks this first, so another
+/// identity's phrase cannot take the place of the one on this computer.
+#[frb]
+pub fn recovery_phrase_fits_this_profile(phrase: String) -> Result<bool, String> {
+    let (master, _) = crate::identity::recovery::keys_from_phrase(&phrase)?;
+    let db = crate::identity::data_dir()?.join("messages.db");
+    if !db.exists() {
+        return Ok(true);
+    }
+    Ok(database_opens_with(&db, &db_key_of(&master)?))
+}
+
+/// The database key `api::storage::derive_db_key` gives this master.
+fn db_key_of(master: &identity::native_identity::NativeKeypair) -> Result<String, String> {
+    let proto = master
         .to_protobuf_encoding()
         .map_err(|e| format!("Failed to encode keypair: {e}"))?;
+    Ok(hex::encode(&proto[..32.min(proto.len())]))
+}
 
-    let dir = crate::identity::data_dir()?;
-    let path = dir.join("identity.key");
-
-    std::fs::write(&path, &plaintext)
-        .map_err(|e| format!("Failed to write identity: {e}"))?;
-
-    // Mirror onto the device key file: write plaintext (hazard R2).
-    identity::device_key::rewrite_device_key_protection(&data.device_keypair, None, false, false)?;
-
-    let _ = platform_keystore::delete_key();
-    encryption::clear_session_key();
-    Ok(())
+fn database_opens_with(path: &std::path::Path, db_key: &str) -> bool {
+    use rusqlite::{Connection, OpenFlags};
+    let Ok(conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE) else {
+        return false;
+    };
+    conn.execute_batch(&format!("PRAGMA key = \"x'{db_key}'\";")).is_ok()
+        && conn
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
+            .is_ok()
 }
 
 /// Get the current protection status of the identity file.
@@ -741,7 +975,7 @@ pub fn verify_identity_password_at(
                 return Ok(encryption::decrypt_identity(&bytes, &key).is_ok());
             }
             if encryption::flags_has_os_keychain(flags) {
-                return Ok(keychain_key_that_decrypts_opts(&bytes, false).is_some());
+                return Ok(keychain_key_that_decrypts_at(std::path::Path::new(&data_dir), &bytes, false).is_some());
             }
             Ok(false)
         }
@@ -1116,7 +1350,6 @@ mod duress_tests {
         ];
         for (label, prompt) in prompts {
             let (_g, tmp) = temp_identity();
-            let _slots = crate::identity::platform_keystore::SlotGuard::capture();
             unlock();
             duress::set_code(CODE, duress::SCOPE_DEVICE, false, None).expect("set code");
 
@@ -1141,7 +1374,6 @@ mod duress_tests {
     fn turning_the_password_off_and_on_never_reports_a_dead_duress_code() {
         let (_g, _tmp) = temp_identity();
         let _s = crate::api::storage::store_test_lock();
-        let _slots = crate::identity::platform_keystore::SlotGuard::capture();
         crate::api::storage::set_test_store(
             crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).expect("store"),
         );
@@ -1234,5 +1466,472 @@ mod pin_floor_tests {
         encryption::clear_session_key();
         unlock_identity(Some("246810".into())).expect("the longer PIN opens it");
         encryption::clear_session_key();
+    }
+}
+
+#[cfg(test)]
+mod keychain_tests {
+    //! Keychain protection on by default, under the rules agreed for 0.12.1: only
+    //! after the phrase is confirmed, never on an override or on Linux, verified
+    //! before the files change, a missing key never costs a file, per profile.
+
+    use super::*;
+    use crate::identity::encryption::{self, test_faults};
+    use crate::identity::native_identity::NativeKeypair;
+    use crate::identity::platform_keystore::test_support::*;
+    use crate::identity::platform_keystore::{self, test_support::Fault};
+    use std::path::{Path, PathBuf};
+
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const OTHER: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+    struct Fixture {
+        _g: std::sync::MutexGuard<'static, ()>,
+        tmp: crate::test_tmp::TestDir,
+    }
+
+    impl Fixture {
+        fn root(&self) -> &Path {
+            self.tmp.path()
+        }
+
+        fn files(&self) -> (Vec<u8>, Vec<u8>) {
+            (
+                std::fs::read(self.root().join("identity.key")).unwrap(),
+                std::fs::read(self.root().join("identity.device")).unwrap(),
+            )
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            encryption::clear_session_key();
+            test_faults::clear();
+            clear_faults();
+            // SAFETY: still serialized by the guard, which drops after this.
+            unsafe { std::env::remove_var("HOLLOW_TEST_KEYCHAIN_DEFAULTS") };
+        }
+    }
+
+    /// A plaintext identity made from [`PHRASE`], with its device file, as a new
+    /// identity or a 0.12.0 install has it.
+    fn plaintext_identity() -> Fixture {
+        let g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().expect("tempdir");
+        // SAFETY: serialized by the lock above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        encryption::clear_session_key();
+        let (master, _) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        std::fs::write(tmp.path().join("identity.key"), master.to_protobuf_encoding().unwrap()).unwrap();
+        let device = NativeKeypair::from_secret_bytes(&[0x6d; 32]);
+        std::fs::write(tmp.path().join("identity.device"), device.to_protobuf_encoding().unwrap()).unwrap();
+        Fixture { _g: g, tmp }
+    }
+
+    fn flags_of(path: PathBuf) -> u8 {
+        match encryption::detect_format(&std::fs::read(path).unwrap()).unwrap() {
+            encryption::IdentityFormat::Encrypted { flags, .. } => flags,
+            encryption::IdentityFormat::Plaintext => 0,
+        }
+    }
+
+    /// A phrase restore over a locked identity (the key-missing screen) keeps the
+    /// locked files aside, so a keychain key that comes back still opens them.
+    #[test]
+    fn a_phrase_restore_keeps_the_locked_files_aside() {
+        let fx = plaintext_identity();
+        enable_os_keychain_protection().unwrap();
+        let (master, device) = fx.files();
+        assert_ne!(flags_of(fx.root().join("identity.key")), 0, "the fixture never locked");
+        encryption::clear_session_key();
+
+        restore_identity_from_mnemonic(PHRASE.into()).unwrap();
+
+        assert_eq!(std::fs::read(fx.root().join("identity.key.locked")).unwrap(), master);
+        assert_eq!(std::fs::read(fx.root().join("identity.device.locked")).unwrap(), device);
+        let (now_master, now_device) = fx.files();
+        assert_ne!(now_master, master, "the restore left the locked master in place");
+        assert_ne!(now_device, device, "the restore left the locked device in place");
+    }
+
+    /// Rule 4: Windows and macOS only, only on the OS's own data root.
+    #[test]
+    fn the_default_applies_only_on_windows_and_macos_on_the_os_root() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let os_root = tmp.path().join("hollow");
+        let elsewhere = tmp.path().join("stick").join("hollow_data");
+        for d in [&os_root, &elsewhere] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let eligible = |os, env: Option<&str>, root: &Path, hook| {
+            default_eligible_for(os, env, root, Some(&os_root), hook)
+        };
+        assert!(eligible(DesktopOs::Windows, None, &os_root, false));
+        assert!(eligible(DesktopOs::MacOs, None, &os_root, false));
+        assert!(!eligible(DesktopOs::Other, None, &os_root, false), "Linux stays opt-in");
+        assert!(!eligible(DesktopOs::Other, None, &os_root, true), "the debug hook never reaches Linux");
+        assert!(!eligible(DesktopOs::Windows, None, &elsewhere, false), "portable or a pinned profile elsewhere");
+        let env = os_root.to_string_lossy().to_string();
+        assert!(!eligible(DesktopOs::Windows, Some(&env), &os_root, false), "HOLLOW_DATA_DIR is an override");
+        assert!(eligible(DesktopOs::Windows, Some(""), &os_root, false), "an empty variable is no override");
+        assert!(!default_eligible_for(DesktopOs::Windows, None, &os_root, None, false), "no OS root known");
+        let missing = tmp.path().join("never-created");
+        assert!(!default_eligible_for(DesktopOs::MacOs, None, &missing, Some(&missing), false));
+    }
+
+    /// Every unit test runs on `HOLLOW_DATA_DIR`, which is exactly the override the
+    /// default never applies to: the call answers false and changes nothing.
+    #[test]
+    fn a_data_dir_override_gets_no_default() {
+        let fx = plaintext_identity();
+        let before = fx.files();
+        assert!(!keychain_default_eligible());
+        assert_eq!(protect_new_identity_by_default(PHRASE.into()), Ok(false));
+        assert_eq!(fx.files(), before);
+        assert_eq!(profile_value(fx.root()), None);
+    }
+
+    /// Rule 1, the Rust layer: the default needs this identity's phrase (Dart passes
+    /// it only once the person typed words of it back); with it the identity is
+    /// locked to the keychain and opens again after a restart.
+    #[test]
+    fn the_default_locks_a_new_identity_once_its_phrase_is_given() {
+        let fx = plaintext_identity();
+        // SAFETY: serialized by the fixture's lock.
+        unsafe { std::env::set_var("HOLLOW_TEST_KEYCHAIN_DEFAULTS", "1") };
+        let before = fx.files();
+        if this_os() == DesktopOs::Other {
+            // Linux stays opt-in, the debug hook included.
+            assert_eq!(protect_new_identity_by_default(PHRASE.into()), Ok(false));
+            assert_eq!(fx.files(), before);
+            return;
+        }
+        assert!(protect_new_identity_by_default(OTHER.into()).is_err(), "another identity's phrase");
+        assert!(protect_new_identity_by_default("not a phrase".into()).is_err());
+        assert_eq!(fx.files(), before, "a refused phrase changed the files");
+
+        assert_eq!(protect_new_identity_by_default(PHRASE.into()), Ok(true));
+        assert_eq!(flags_of(fx.root().join("identity.key")), 0x02);
+        assert_eq!(flags_of(fx.root().join("identity.device")), 0x02);
+        assert_eq!(protect_new_identity_by_default(PHRASE.into()), Ok(false), "already protected");
+
+        encryption::clear_session_key();
+        let id = unlock_identity(None).expect("opens silently after a restart");
+        let (master, _) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        assert_eq!(id.peer_id, master.peer_id());
+        assert_eq!(id.device_peer_id, NativeKeypair::from_secret_bytes(&[0x6d; 32]).peer_id());
+    }
+
+    /// Rule 2: an existing identity turns it on only with its own phrase typed in
+    /// full; a wrong one leaves everything as it was.
+    #[test]
+    fn turning_it_on_needs_this_identitys_phrase() {
+        let fx = plaintext_identity();
+        let before = fx.files();
+        for wrong in [OTHER, "", "abandon abandon abandon"] {
+            assert!(enable_os_keychain_protection_with_phrase(wrong.into()).is_err(), "{wrong:?}");
+        }
+        assert_eq!(fx.files(), before);
+        assert_eq!(profile_value(fx.root()), None, "a refused phrase stored a key");
+
+        enable_os_keychain_protection_with_phrase(PHRASE.into()).expect("its own phrase");
+        assert_eq!(flags_of(fx.root().join("identity.key")), 0x02);
+    }
+
+    /// The second layer of rule 2: the phrase must also match the recovery key the
+    /// held roster pinned, not only derive this master.
+    #[test]
+    fn the_phrase_must_match_the_rosters_pinned_recovery_key() {
+        let fx = plaintext_identity();
+        let (master, _) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        let (_, foreign_recovery) = crate::identity::recovery::keys_from_phrase(OTHER).unwrap();
+        let device = NativeKeypair::from_secret_bytes(&[0x6d; 32]);
+        let db = fx.root().join("messages.db").to_str().unwrap().to_string();
+        let pass = crate::api::storage::derive_db_key_public().unwrap();
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let pinned = crate::identity::roster::Roster::genesis(&master, &foreign_recovery, &device, 1_000);
+        crate::node::roster_book::merge_for_test(&store, &pinned, &master.peer_id(), &device.peer_id());
+        drop(store);
+
+        let before = fx.files();
+        let err = enable_os_keychain_protection_with_phrase(PHRASE.into())
+            .expect_err("the roster pins another recovery key");
+        assert!(err.contains("different identity"), "{err}");
+        assert_eq!(fx.files(), before);
+    }
+
+    /// Identities already using a password are left alone, by the default and by
+    /// the offer.
+    #[test]
+    fn a_password_identity_is_left_alone() {
+        let fx = plaintext_identity();
+        // SAFETY: serialized by the fixture's lock.
+        unsafe { std::env::set_var("HOLLOW_TEST_KEYCHAIN_DEFAULTS", "1") };
+        enable_password_protection("correct horse".into(), true).expect("password");
+        let before = fx.files();
+        assert_eq!(protect_new_identity_by_default(PHRASE.into()), Ok(false));
+        assert!(enable_os_keychain_protection_with_phrase(PHRASE.into()).is_err());
+        assert!(disable_os_keychain_protection().is_err());
+        assert_eq!(fx.files(), before);
+    }
+
+    /// Rule 3: the key is stored, read back through a new read, and must open the
+    /// sealed files before either is replaced. Each failure point leaves both files
+    /// and this profile's slot exactly as they were, and says so.
+    #[test]
+    fn every_failed_step_of_the_switch_leaves_the_identity_as_it_was() {
+        type Break = fn();
+        let breaks: [(&str, Break); 6] = [
+            ("the keystore refuses the write", || inject(Fault::StoreFails)),
+            ("the key does not read back", || inject(Fault::ReadBackMissing)),
+            ("a different key reads back", || inject(Fault::ReadBackWrong)),
+            ("the DPAPI copy opens to another key", || inject(Fault::BlobWrong)),
+            ("identity.key cannot be replaced", || test_faults::fail_rename_of("identity.key")),
+            ("identity.device cannot be replaced", || test_faults::fail_rename_of("identity.device")),
+        ];
+        for (label, apply) in breaks {
+            let fx = plaintext_identity();
+            set_profile(fx.root(), &[0x77; 32]);
+            let before = fx.files();
+            apply();
+            let err = enable_os_keychain_protection_with_phrase(PHRASE.into())
+                .expect_err(label);
+            assert!(err.contains("nothing changed"), "{label}: {err}");
+            clear_faults();
+            test_faults::clear();
+            assert_eq!(fx.files(), before, "{label}: the files changed");
+            assert_eq!(profile_value(fx.root()), Some(vec![0x77; 32]), "{label}: the slot changed");
+            assert!(!fx.root().join("identity.key.tmp").exists(), "{label}: a staging file stayed");
+            assert!(!fx.root().join("identity.device.tmp").exists(), "{label}: a staging file stayed");
+            assert!(encryption::get_session_key().is_none(), "{label}: a session key was set");
+            unlock_identity(None).expect("the untouched identity still opens");
+        }
+    }
+
+    /// Rule 5: a keychain-protected identity whose key is gone answers a marked
+    /// error and touches nothing; once the key is back it opens again.
+    #[test]
+    fn a_missing_key_never_costs_a_file_and_opens_once_it_is_back() {
+        let fx = plaintext_identity();
+        let key = switch_to_keychain(fx.root()).expect("switch");
+        let locked = fx.files();
+        encryption::clear_session_key();
+        delete_profile(fx.root());
+        let _ = std::fs::remove_file(fx.root().join("identity.dpapi"));
+
+        for _ in 0..3 {
+            let Err(err) = unlock_identity(None) else { panic!("no key, no unlock") };
+            assert!(err.starts_with("keychain_key_missing"), "{err}");
+            assert!(!err.to_lowercase().contains("password"), "Dart reads 'password' as a password prompt");
+        }
+        assert_eq!(fx.files(), locked, "a missing key cost a file");
+        assert!(encryption::get_session_key().is_none());
+
+        set_profile(fx.root(), &key);
+        unlock_identity(None).expect("the key is back, so it opens");
+        assert_eq!(fx.files(), locked);
+    }
+
+    /// A key already in this profile's own slot is never re-written at unlock; one
+    /// found only in the legacy slot is copied into the profile's slot, and the legacy
+    /// slot stays for whichever profile it belongs to.
+    #[test]
+    fn unlock_heals_from_the_legacy_slot_without_rewriting_a_good_slot() {
+        let fx = plaintext_identity();
+        let key = switch_to_keychain(fx.root()).expect("switch");
+        encryption::clear_session_key();
+        let _ = take_writes();
+        let _ = legacy_was_read();
+        unlock_identity(None).expect("unlock");
+        assert_eq!(take_writes(), 0, "unlock rewrote a slot that already held the key");
+        assert!(!legacy_was_read(), "unlock read the shared legacy slot though its own slot opened it");
+
+        delete_profile(fx.root());
+        let _ = std::fs::remove_file(fx.root().join("identity.dpapi"));
+        set_legacy(&key);
+        encryption::clear_session_key();
+        unlock_identity(None).expect("the legacy slot opens it");
+        assert_eq!(profile_value(fx.root()), Some(key.to_vec()), "the profile slot was not healed");
+        assert_eq!(legacy_value(), Some(key.to_vec()));
+    }
+
+    /// Rule 6: turning it off goes back to plaintext files and forgets this profile's
+    /// keys, and the legacy slot only when it was this identity's.
+    #[test]
+    fn turning_it_off_restores_plaintext_and_forgets_only_this_profiles_keys() {
+        let fx = plaintext_identity();
+        let (plain_master, plain_device) = fx.files();
+        switch_to_keychain(fx.root()).expect("switch");
+        set_legacy(&[0x99; 32]);
+
+        disable_os_keychain_protection().expect("off");
+        assert_eq!(fx.files(), (plain_master, plain_device));
+        assert_eq!(profile_value(fx.root()), None);
+        assert!(!fx.root().join("identity.dpapi").exists());
+        assert_eq!(legacy_value(), Some(vec![0x99; 32]), "another profile's legacy key went");
+        unlock_identity(None).expect("plaintext opens");
+
+        let key = switch_to_keychain(fx.root()).expect("on again");
+        set_legacy(&key);
+        disable_os_keychain_protection().expect("off again");
+        assert_eq!(legacy_value(), None, "the identity's own legacy key stayed");
+    }
+
+    /// Turning the protection off fails part-way: the files stay as they were.
+    #[test]
+    fn a_failed_turn_off_leaves_the_files_as_they_were() {
+        let fx = plaintext_identity();
+        switch_to_keychain(fx.root()).expect("switch");
+        let locked = fx.files();
+        test_faults::fail_rename_of("identity.key");
+        assert!(disable_os_keychain_protection().unwrap_err().contains("nothing changed"));
+        test_faults::clear();
+        assert_eq!(fx.files(), locked);
+        encryption::clear_session_key();
+        unlock_identity(None).expect("still opens from the keychain");
+    }
+
+    /// Per profile: two profiles' keys live in two slots, and switching one never
+    /// touches the other's.
+    #[test]
+    fn each_profile_keeps_its_own_key() {
+        let fx = plaintext_identity();
+        let other = fx.root().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        for f in ["identity.key", "identity.device"] {
+            std::fs::copy(fx.root().join(f), other.join(f)).unwrap();
+        }
+        let key_a = switch_to_keychain(fx.root()).expect("a");
+        let key_b = switch_to_keychain(&other).expect("b");
+        assert_ne!(key_a, key_b);
+        assert_eq!(profile_value(fx.root()), Some(key_a.to_vec()));
+        assert_eq!(profile_value(&other), Some(key_b.to_vec()));
+        switch_to_plaintext(&other).expect("b off");
+        assert_eq!(profile_value(fx.root()), Some(key_a.to_vec()), "b's change reached a");
+    }
+
+    /// The profile-erase gate asks ANOTHER profile's own slot about that profile,
+    /// and never writes a key anywhere while it does.
+    #[test]
+    fn the_erase_gate_asks_the_other_profiles_own_slot_and_writes_nothing() {
+        let fx = plaintext_identity();
+        let other = fx.root().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        for f in ["identity.key", "identity.device"] {
+            std::fs::copy(fx.root().join(f), other.join(f)).unwrap();
+        }
+        let key = switch_to_keychain(&other).expect("lock the other profile");
+        encryption::clear_session_key();
+        let _ = take_writes();
+        let dir = other.to_string_lossy().to_string();
+        assert_eq!(verify_identity_password_at(dir.clone(), None), Ok(true));
+        assert_eq!(take_writes(), 0, "asking about another profile wrote a key");
+        assert_eq!(profile_value(fx.root()), None, "the running profile's slot was written");
+        delete_profile(&other);
+        let _ = std::fs::remove_file(other.join("identity.dpapi"));
+        assert_eq!(verify_identity_password_at(dir, None), Ok(false));
+        let _ = key;
+    }
+
+    /// A profile folder that moved on this account (or the same folder under a path
+    /// written differently) keeps its key in the slot named after its old path. The
+    /// scan finds it, only a key that really opens the file counts, and the new
+    /// path's slot is healed, so the next launch finds it at once.
+    #[test]
+    fn a_moved_profile_still_opens_from_its_old_slot() {
+        let run = |fx: &Fixture| {
+            let old_key = switch_to_keychain(fx.root()).expect("lock at the old path");
+            encryption::clear_session_key();
+            let moved = fx.root().join("moved");
+            std::fs::create_dir_all(&moved).unwrap();
+            for f in ["identity.key", "identity.device"] {
+                std::fs::copy(fx.root().join(f), moved.join(f)).unwrap();
+            }
+            set_profile(&fx.root().join("someone-else"), &[0x13; 32]);
+            // SAFETY: serialized by the fixture's lock.
+            unsafe { std::env::set_var("HOLLOW_DATA_DIR", &moved) };
+            unlock_identity(None).expect("the moved profile opens from its old slot");
+            assert_eq!(profile_value(&moved), Some(old_key.to_vec()), "the new path's slot was not healed");
+            assert_eq!(profile_value(fx.root()), Some(old_key.to_vec()), "the old slot was touched");
+            encryption::clear_session_key();
+            // SAFETY: as above.
+            unsafe { std::env::set_var("HOLLOW_DATA_DIR", fx.root()) };
+        };
+        let fx = plaintext_identity();
+        run(&fx);
+        drop(fx);
+        let fx = plaintext_identity();
+        if let Some(_real) = RealKeystore::enter() {
+            run(&fx);
+        }
+    }
+
+    /// The scan never trusts a slot that does not open the file: with only other
+    /// identities' keys around, a missing key stays missing.
+    #[test]
+    fn the_scan_never_trusts_a_key_that_does_not_open_the_file() {
+        let fx = plaintext_identity();
+        switch_to_keychain(fx.root()).expect("switch");
+        encryption::clear_session_key();
+        delete_profile(fx.root());
+        let _ = std::fs::remove_file(fx.root().join("identity.dpapi"));
+        for (i, dir) in ["a", "b", "c"].iter().enumerate() {
+            set_profile(&fx.root().join(dir), &[0x20 + i as u8; 32]);
+        }
+        let Err(err) = unlock_identity(None) else { panic!("a foreign key opened the identity") };
+        assert!(err.starts_with("keychain_key_missing"), "{err}");
+    }
+
+    /// The key-missing screen's phrase restore first asks whether the phrase opens
+    /// this profile's messages, so another identity's phrase cannot replace it.
+    #[test]
+    fn a_phrase_fits_a_profile_only_when_it_opens_its_messages() {
+        let fx = plaintext_identity();
+        assert_eq!(recovery_phrase_fits_this_profile(OTHER.into()), Ok(true), "no database yet");
+        let db = fx.root().join("messages.db").to_str().unwrap().to_string();
+        let pass = crate::api::storage::derive_db_key_public().unwrap();
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        drop(crate::storage::MessageStore::open(&db, &pass).unwrap());
+
+        let (master, _) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        assert_eq!(db_key_of(&master).unwrap(), pass, "the key drifted from derive_db_key");
+        assert_eq!(recovery_phrase_fits_this_profile(PHRASE.into()), Ok(true));
+        assert_eq!(recovery_phrase_fits_this_profile(OTHER.into()), Ok(false));
+        assert!(recovery_phrase_fits_this_profile("nonsense words".into()).is_err());
+    }
+
+    /// The missing-key path on this machine's real keystore (test namespace): with
+    /// the slot gone nothing opens and nothing changes; with it back, it opens.
+    #[test]
+    fn a_missing_key_on_the_real_keystore_opens_once_it_is_back() {
+        let fx = plaintext_identity();
+        let Some(_real) = RealKeystore::enter() else { return };
+        let key = switch_to_keychain(fx.root()).expect("switch");
+        encryption::clear_session_key();
+        let locked = fx.files();
+        delete_profile(fx.root());
+        let _ = std::fs::remove_file(fx.root().join("identity.dpapi"));
+        let Err(err) = unlock_identity(None) else { panic!("opened with no key") };
+        assert!(err.starts_with("keychain_key_missing"), "{err}");
+        assert_eq!(fx.files(), locked, "a missing key cost a file");
+        set_profile(fx.root(), &key);
+        unlock_identity(None).expect("opens once the key is back");
+        switch_to_plaintext(fx.root()).expect("back to plaintext");
+    }
+
+    /// The same switch against this machine's real keystore, test namespace: the
+    /// key reads back through a new keystore call and the identity reopens.
+    #[test]
+    fn the_switch_round_trips_on_the_real_keystore() {
+        let fx = plaintext_identity();
+        let Some(_real) = RealKeystore::enter() else { return };
+        let before = fx.files();
+        switch_to_keychain(fx.root()).expect("switch");
+        encryption::clear_session_key();
+        unlock_identity(None).expect("reopens from the real keystore");
+        switch_to_plaintext(fx.root()).expect("off");
+        assert_eq!(fx.files(), before);
+        assert_eq!(platform_keystore::read_profile_key_at(fx.root()), Ok(None));
     }
 }

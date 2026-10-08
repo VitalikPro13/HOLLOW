@@ -181,6 +181,75 @@ pub(crate) fn decrypt_identity(
     Ok(plaintext)
 }
 
+/// The staging name a key file is written under before it replaces the real one.
+pub(crate) fn staging_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".tmp");
+    std::path::PathBuf::from(name)
+}
+
+/// Replaces a key file so a crash or a full disk leaves the old file or the new one,
+/// never a torn one: the bytes go to a staging file, are flushed, read back and must
+/// match before the rename, and the folder is flushed after it where the platform can.
+pub(crate) fn write_key_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let tmp = staging_path(path);
+    let staged = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    })();
+    let fail = |what: String| {
+        let _ = std::fs::remove_file(&tmp);
+        Err(what)
+    };
+    if let Err(e) = staged {
+        return fail(format!("Failed to write {}: {e}", tmp.display()));
+    }
+    if std::fs::read(&tmp).ok().as_deref() != Some(bytes) {
+        return fail(format!("{} did not read back as written", tmp.display()));
+    }
+    #[cfg(test)]
+    if test_faults::rename_fails(path) {
+        return fail(format!("injected: could not replace {}", path.display()));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        return fail(format!("Failed to replace {}: {e}", path.display()));
+    }
+    #[cfg(unix)]
+    if let Some(dir) = path.parent()
+        && let Ok(d) = std::fs::File::open(dir)
+    {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod test_faults {
+    //! A key file whose replacement fails, per test thread.
+
+    use std::cell::RefCell;
+
+    thread_local! {
+        static FAIL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Every later replacement of a file with this name fails on this thread.
+    pub(crate) fn fail_rename_of(file_name: &str) {
+        FAIL.with(|f| f.borrow_mut().push(file_name.to_string()));
+    }
+
+    pub(crate) fn clear() {
+        FAIL.with(|f| f.borrow_mut().clear());
+    }
+
+    pub(crate) fn rename_fails(path: &std::path::Path) -> bool {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        FAIL.with(|f| f.borrow().contains(&name))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

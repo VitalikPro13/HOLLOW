@@ -12,6 +12,7 @@ import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
+import 'package:hollow/src/ui/mobile/leave_with_server.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/server_settings/server_settings_catalog.dart';
@@ -39,10 +40,13 @@ class MobileServerSettingsRoute extends ConsumerWidget {
     final foreign = ref.read(selectedServerProvider) != serverId;
     Navigator.of(context).push(
       hollowMobileRoute(
-        builder: (_) => foreign
-            ? ForeignServerSettingsScope(
-                serverId: serverId, child: _page(page))
-            : _page(page),
+        builder: (_) => LeaveWithServer(
+          serverId: serverId,
+          child: foreign
+              ? ForeignServerSettingsScope(
+                  serverId: serverId, child: _page(page))
+              : _page(page),
+        ),
       ),
     );
   }

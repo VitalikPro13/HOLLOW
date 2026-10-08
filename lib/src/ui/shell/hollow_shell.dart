@@ -85,7 +85,9 @@ import 'package:hollow/src/ui/call/call_recording_toasts.dart';
 import 'package:hollow/src/ui/dialogs/incoming_call_dialog.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
+import 'package:hollow/src/ui/dialogs/keychain_protection_dialogs.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
+import 'package:hollow/src/ui/dialogs/protection_prompt.dart';
 import 'package:hollow/src/ui/dialogs/welcome_dialog.dart';
 import 'package:hollow/src/ui/dialogs/license_key_dialog.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
@@ -113,6 +115,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/ui/guides/help_panel.dart';
 import 'package:hollow/src/ui/shell/identity_unlock_dialogs.dart';
+import 'package:hollow/src/ui/shell/key_missing_dialog.dart';
 import 'package:hollow/src/ui/shell/bottom_bar.dart';
 import 'package:hollow/src/ui/shell/channel_sidebar.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
@@ -592,6 +595,46 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await showPhraseUpgradeDialog(context, stored);
   }
 
+  /// The start's own offers, one after another so their dialogs never stack.
+  Future<void> _offerAfterStart({required bool setUpThisLaunch}) async {
+    await _offerPhraseUpgrade();
+    await _offerProtection();
+    if (!setUpThisLaunch) await _offerKeychainLock();
+  }
+
+  /// A linked or restored device starts without a lock (C-IDENTITY-15). Offered
+  /// once it belongs and the app lock's cover is down: never above either lock.
+  Future<void> _offerProtection() async {
+    if (ref.read(rosterGateProvider).kind != RosterGateKind.none) {
+      final member = Completer<void>();
+      final sub = ref.listenManual<RosterGate>(rosterGateProvider, (_, gate) {
+        if (gate.kind == RosterGateKind.none && !member.isCompleted) {
+          member.complete();
+        }
+      });
+      await member.future;
+      sub.close();
+    }
+    await _untilUnlocked();
+    if (!mounted || ref.read(rosterGateProvider).kind != RosterGateKind.none) return;
+    await offerProtectionIfDue(context);
+  }
+
+  /// The one-time offer to lock an identity from before 0.12.1 to this
+  /// computer's keychain (`claimKeychainOffer` decides), never above the app
+  /// lock's cover or a roster lock.
+  Future<void> _offerKeychainLock() async {
+    await _untilUnlocked();
+    if (!mounted || ref.read(rosterGateProvider).kind != RosterGateKind.none) {
+      return;
+    }
+    if (!await claimKeychainOffer() || !mounted) return;
+    if (!await showKeychainOfferDialog(context) || !mounted) return;
+    ref.invalidate(identityProtectionProvider);
+    HollowToast.show(context, 'Your identity is now locked to this computer.',
+        type: HollowToastType.success);
+  }
+
   /// Unlocks the identity, showing a blocking dialog when one is needed.
   /// Returns false when the user cancelled.
   Future<bool> _unlockIdentity() async {
@@ -601,6 +644,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
       _silentStart = true;
       return true;
     } catch (e) {
+      // The files are untouched, so the screen offers Try again first.
+      if (isKeychainKeyMissing(e)) {
+        if (!mounted) return false;
+        return showKeyMissingScreen(context);
+      }
       final msg = e.toString();
       if (msg.contains('password') || msg.contains('Password')) {
         // The keystore-held secret starts Hollow on its own; the app lock
@@ -811,8 +859,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // A link transfer stashed an encrypted .hollow blob. Import it FIRST, in the
     // same pre-node-start window a manual restore uses, then fall through as a
     // normal restored launch.
+    var linkedThisLaunch = false;
     try {
       if (await storage_api.hasPendingLink()) {
+        linkedThisLaunch = true;
         await storage_api.importPendingLink();
       }
     } catch (e) {
@@ -1068,7 +1118,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     // The node brings our own roster up to date at start.
     await ref.read(rosterGateProvider.notifier).refresh();
-    unawaited(_offerPhraseUpgrade());
+    // A launch that set this identity up (new, restored, linked) asks its own
+    // questions, so the keychain offer waits for a later one.
+    final setUpThisLaunch = welcomeResult != null || linkedThisLaunch;
+    unawaited(_offerAfterStart(setUpThisLaunch: setUpThisLaunch));
 
     await _resumeInviteAfterRelaySwitch();
 
