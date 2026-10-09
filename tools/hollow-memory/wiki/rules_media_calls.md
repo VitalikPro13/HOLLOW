@@ -75,6 +75,11 @@ whitelist) stay in CLAUDE.md.
 
 ## Audio
 
+- Sound effects: ONE native player per sound, held from the START of its setup
+  (`SoundService._players` maps to the setup Future). A peer's leave arrives twice (MLS +
+  plaintext copy); a second audioplayers player created mid-setup froze the Windows UI
+  (platform and UI threads are merged), while Rust kept logging. No fixed player ids.
+  regress_voice3 3/18 -> 0/34 (s42, `test/sound_service_player_test.dart`).
 - Mic gain/loudness: WebRTC APM AGC is DISABLED, NEVER re-enable it. Voice Enhancement
   owns loudness (`setCaptureGain`/`setVoiceEnhance`; `setVolume()` = NO-OP); NEVER a
   per-sample leveler or a bypass of iOS VPIO. Chain/servo/3 ports + g++ harness:

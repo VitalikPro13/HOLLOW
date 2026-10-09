@@ -56,9 +56,20 @@ class SoundService {
   /// slider, independent of the effects volume above.
   static double ringtoneVolume = 0.5;
 
-  final Map<HollowSound, AudioPlayer> _players = {};
+  /// Makes every audioplayers player; tests stand in for the plugin.
+  @visibleForTesting
+  static AudioPlayer Function() newPlayer = AudioPlayer.new;
+
+  /// One player per sound, held from the moment its setup starts: a cue that
+  /// arrives during setup must reuse it, as a second native player for the
+  /// same sound froze the Windows UI.
+  final Map<HollowSound, Future<AudioPlayer>> _players = {};
   final Map<HollowSound, DateTime> _lastPlayed = {};
   AudioPlayer? _ringback;
+
+  /// The ringback's setup and first play; a stop waits for it, as a native
+  /// player disposed mid-setup would still get the setup's later calls.
+  Future<void>? _ringbackStart;
 
   /// Ringback idempotence lives here, not on [_ringback], null on native.
   bool _ringbackOn = false;
@@ -121,12 +132,14 @@ class SoundService {
 
   Future<void> _play(HollowSound sound) async {
     try {
-      var player = _players[sound];
-      if (player == null) {
-        player = AudioPlayer(playerId: 'hollow-sfx-${sound.name}');
-        await player.setReleaseMode(ReleaseMode.stop);
-        await player.setAudioContext(_context);
-        _players[sound] = player;
+      final pending = _players[sound] ??= _newSfxPlayer();
+      final AudioPlayer player;
+      try {
+        player = await pending;
+      } catch (_) {
+        // A failed setup must not stick: the next cue tries afresh.
+        if (identical(_players[sound], pending)) _players.remove(sound);
+        rethrow;
       }
       // Restart from the top: a re-trigger past the throttle should re-play,
       // not queue behind the tail of the previous one.
@@ -134,6 +147,19 @@ class SoundService {
       await player.play(AssetSource(sound.asset), volume: volume);
     } catch (e) {
       debugPrint('[HOLLOW-SFX] ${sound.name} failed: $e');
+    }
+  }
+
+  Future<AudioPlayer> _newSfxPlayer() async {
+    final player = newPlayer();
+    try {
+      await player.setReleaseMode(ReleaseMode.stop);
+      await player.setAudioContext(_context);
+      return player;
+    } catch (_) {
+      // The map forgets this player, so nothing else would release it.
+      unawaited(player.dispose().catchError((_) {}));
+      rethrow;
     }
   }
 
@@ -154,9 +180,9 @@ class SoundService {
       });
       return;
     }
-    final player = AudioPlayer(playerId: 'hollow-ringback');
+    final player = newPlayer();
     _ringback = player;
-    unawaited(() async {
+    _ringbackStart = () async {
       try {
         await player.setReleaseMode(ReleaseMode.loop);
         await player.setAudioContext(_context);
@@ -170,7 +196,7 @@ class SoundService {
       } catch (e) {
         debugPrint('[HOLLOW-SFX] ringback failed: $e');
       }
-    }());
+    }();
   }
 
   /// Stops the outgoing ringback. Safe to call when nothing is ringing.
@@ -184,9 +210,14 @@ class SoundService {
     final player = _ringback;
     if (player == null) return;
     _ringback = null;
+    final started = _ringbackStart;
+    _ringbackStart = null;
     unawaited(() async {
+      await started;
       try {
         await player.stop();
+      } catch (_) {}
+      try {
         await player.dispose();
       } catch (_) {}
     }());

@@ -93,7 +93,7 @@ pub fn open_message_store() -> Result<(), String> {
 
     let passphrase = derive_db_key()?;
     let path = db_path.to_str().ok_or("Invalid path encoding")?;
-    let ms = MessageStore::open(path, &passphrase)?;
+    let ms = MessageStore::open(path, &passphrase).inspect_err(|e| note_store_refusal(&hollow_dir, e))?;
     // Dart can open the store before the node starts, and it reads attachments
     // through the key ring the moment it has one.
     if let Err(e) = crate::node::at_rest::init(path, &passphrase) {
@@ -102,6 +102,21 @@ pub fn open_message_store() -> Result<(), String> {
 
     *guard = Some(ms);
     Ok(())
+}
+
+/// A database that will not open stops the app before the node opens the log, so the
+/// reason and which of the identity's files are there go into it here.
+fn note_store_refusal(root: &std::path::Path, e: &str) {
+    crate::log::init();
+    let files: Vec<String> = IDENTITY_SET
+        .iter()
+        .chain([LANDING_STAGE, LANDING_ASIDE].iter())
+        .filter_map(|name| {
+            let meta = std::fs::symlink_metadata(root.join(name)).ok()?;
+            Some(format!("{name}={}", meta.len()))
+        })
+        .collect();
+    hollow_log!("[HOLLOW-STORE] The database would not open with this identity: {e} (files: {})", files.join(" "));
 }
 
 // `save_message` / `save_channel_message` are deliberately absent: both were
@@ -1641,53 +1656,129 @@ fn scrubbed_db_copy(data_dir: &std::path::Path, db_path: &std::path::Path) -> Re
     scrubbed
 }
 
-/// Extract a plaintext snapshot ZIP into the data directory (REPLACES existing
-/// files of the same name). Shared core of `import_backup` and the link-snapshot
-/// import.
+/// Extract a plaintext snapshot ZIP into the data directory, replacing the identity and
+/// its database as one. Shared core of `import_backup` and the link-snapshot import.
 pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
-    land_snapshot(check_snapshot(zip_bytes)?)
+    land_snapshot(check_snapshot(zip_bytes)?, None)
 }
 
 /// Set once a link or a restore lands an identity: the app offers a lock at its next
 /// start and clears it (Dart `kProtectionOfferDueKey`).
 pub(crate) const PROTECTION_OFFER_DUE: &str = "protection_offer_due";
 
-fn land_snapshot(snapshot: CheckedSnapshot<'_>) -> Result<(), String> {
-    use std::io::Read;
+// ── Landing: an identity and its database change together ─────────────────────
+//
+// A key beside another identity's database, or beside that database's WAL, opens
+// nothing ("file is not a database" at every launch). So a landing writes the new set
+// to a stage, moves the whole old set aside, and only then moves the new one in; a
+// step that fails puts the old set back. Windows refuses to move a file another
+// program holds, so the move aside also proves nothing holds the old set.
 
-    let CheckedSnapshot { mut archive, landings } = snapshot;
-    let data_dir = crate::identity::data_dir()?;
+/// Everything that belongs to one identity. The database goes first: it is the file
+/// another program may hold, and nothing else has moved when it refuses.
+const IDENTITY_SET: [&str; 5] = [
+    "messages.db",
+    "messages.db-wal",
+    "messages.db-shm",
+    "identity.device",
+    "identity.key",
+];
+const LANDING_STAGE: &str = ".landing";
+const LANDING_ASIDE: &str = ".replaced";
+/// In the aside folder once the whole old set is in it.
+const ASIDE_MOVED: &str = "moved";
+/// In the root from the moment the whole new set is in place until every leftover of
+/// the landing is gone. It sits outside the folders the cleanup deletes, so no partial
+/// delete can make a finished landing look unfinished.
+const LANDED: &str = ".landed";
 
-    // CRITICAL: the link import runs while the node is LIVE on a throwaway identity, so
-    // the global STORE holds an open SQLCipher connection with its own WAL. Overwriting
-    // messages.db would let that WAL checkpoint back OVER the imported DB, so the live
-    // connection is dropped and its WAL/SHM deleted BEFORE the imported files land.
-    if let Ok(mut guard) = get_store().lock() {
-        let _ = guard.take(); // drops MessageStore → closes the connection
+/// What any start-up refusal says, a pending wipe's included: nothing on screen may
+/// tell that a wipe ran.
+pub(crate) const IDENTITY_NOT_READY: &str = "Hollow is still starting up. Try again in a moment.";
+
+/// How long a landing or a boot wipe waits for a file something else holds, such as
+/// a scanner that opened the database a moment ago.
+#[cfg(not(test))]
+const HELD_FILE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(test)]
+const HELD_FILE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Test hook: the commit fails at this file, as a full disk would.
+#[cfg(test)]
+static FAIL_COMMIT_AT: Mutex<Option<&'static str>> = Mutex::new(None);
+/// Test hook: the process dies at this file, so nothing after it runs.
+#[cfg(test)]
+static CRASH_COMMIT_AT: Mutex<Option<&'static str>> = Mutex::new(None);
+#[cfg(test)]
+static COMMIT_SAW_LANDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Test hook: the process dies at this step of a finished landing's cleanup.
+#[cfg(test)]
+static CRASH_CLEANUP_AT: Mutex<Option<&'static str>> = Mutex::new(None);
+
+#[cfg(test)]
+fn cleanup_crash_point(step: &'static str) {
+    if *CRASH_CLEANUP_AT.lock().unwrap_or_else(|e| e.into_inner()) == Some(step) {
+        panic!("the process died at the cleanup's {step} step");
     }
-    for stale in ["messages.db-wal", "messages.db-shm"] {
-        let p = data_dir.join(stale);
-        if p.exists() {
-            let _ = std::fs::remove_file(&p);
+}
+
+/// Set from the moment the old set starts moving until the new one is in place:
+/// a missing `identity.key` then is no reason to mint one.
+static LANDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn landing_in_progress() -> bool {
+    LANDING.load(std::sync::atomic::Ordering::Acquire)
+}
+
+struct LandingFlag;
+
+impl LandingFlag {
+    fn raise() -> Self {
+        LANDING.store(true, std::sync::atomic::Ordering::Release);
+        LandingFlag
+    }
+}
+
+impl Drop for LandingFlag {
+    fn drop(&mut self) {
+        LANDING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn present(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// A rename that tries again while the source is held, until `deadline`.
+fn rename_when_free(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    deadline: std::time::Instant,
+) -> std::io::Result<()> {
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            done => return done,
         }
     }
+}
 
-    // CRITICAL: delete the THROWAWAY identity.device. The snapshot carries only a
-    // plaintext identity.key, so keeping the throwaway's device file either cannot be
-    // decrypted once the plaintext master replaces identity.key (the identity then
-    // never loads) or leaves a device id minted under an identity that is gone. A
-    // restored backup then mints a fresh device key; a link installs the one its
-    // presenter vouched for.
-    let dev_path = data_dir.join("identity.device");
-    if dev_path.exists() {
-        let _ = std::fs::remove_file(&dev_path);
-        hollow_log!("[HOLLOW-LINK] Removed throwaway identity.device — fresh device key on restart");
-    }
+/// Writes the snapshot's files into `stage`, plus the device key a link installs.
+fn stage_new_set(
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    landings: &[(usize, std::path::PathBuf, u64)],
+    stage: &std::path::Path,
+    device: Option<&[u8]>,
+) -> Result<u64, String> {
+    use std::io::{Read, Write};
 
+    std::fs::create_dir_all(stage).map_err(|e| format!("Failed to create dir: {e}"))?;
     let mut landed = 0u64;
-    for (i, rel, size) in &landings {
+    for (i, rel, size) in landings {
         let mut entry = archive.by_index(*i).map_err(|e| format!("Zip read error: {e}"))?;
-        let out_path = data_dir.join(rel);
+        let out_path = stage.join(rel);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
         }
@@ -1695,9 +1786,230 @@ fn land_snapshot(snapshot: CheckedSnapshot<'_>) -> Result<(), String> {
             .map_err(|e| format!("Failed to write {}: {e}", rel.display()))?;
         std::io::copy(&mut (&mut entry).take(*size), &mut out)
             .map_err(|e| format!("Failed to write {}: {e}", rel.display()))?;
+        // A power cut after the rename must not leave an empty key or database.
+        out.sync_all().map_err(|e| format!("Failed to write {}: {e}", rel.display()))?;
         landed = landed.saturating_add(*size);
     }
-    hollow_log!("[HOLLOW-LINK] Import wrote {} file(s), {landed} bytes", landings.len());
+    if let Some(device) = device {
+        let mut out = std::fs::File::create(stage.join("identity.device"))
+            .map_err(|e| format!("Failed to install the new device key: {e}"))?;
+        out.write_all(device)
+            .and_then(|()| out.sync_all())
+            .map_err(|e| format!("Failed to install the new device key: {e}"))?;
+    }
+    Ok(landed)
+}
+
+/// Moves every file of the old set into `aside`, then marks it moved.
+fn set_aside_old_set(
+    root: &std::path::Path,
+    aside: &std::path::Path,
+    deadline: std::time::Instant,
+) -> Result<(), String> {
+    std::fs::create_dir_all(aside).map_err(|e| format!("Failed to make room for the old identity: {e}"))?;
+    for name in IDENTITY_SET {
+        let from = root.join(name);
+        if !present(&from) {
+            continue;
+        }
+        rename_when_free(&from, &aside.join(name), deadline)
+            .map_err(|e| format!("{name} is in use by another program ({e})"))?;
+    }
+    std::fs::write(aside.join(ASIDE_MOVED), b"")
+        .map_err(|e| format!("Failed to mark the old identity moved: {e}"))
+}
+
+/// Moves the staged identity and database into the root, then marks the landing done.
+fn commit_new_set(root: &std::path::Path, stage: &std::path::Path) -> Result<(), String> {
+    for name in ["identity.key", "identity.device", "messages.db"] {
+        let from = stage.join(name);
+        if !present(&from) {
+            continue;
+        }
+        #[cfg(test)]
+        if *FAIL_COMMIT_AT.lock().unwrap_or_else(|e| e.into_inner()) == Some(name) {
+            COMMIT_SAW_LANDING.store(landing_in_progress(), std::sync::atomic::Ordering::Release);
+            return Err(format!("Failed to place {name}: test fault"));
+        }
+        #[cfg(test)]
+        if *CRASH_COMMIT_AT.lock().unwrap_or_else(|e| e.into_inner()) == Some(name) {
+            panic!("the process died placing {name}");
+        }
+        std::fs::rename(&from, root.join(name)).map_err(|e| format!("Failed to place {name}: {e}"))?;
+    }
+    let marked = std::fs::File::create(root.join(LANDED)).and_then(|mark| mark.sync_all());
+    #[cfg(test)]
+    if *FAIL_COMMIT_AT.lock().unwrap_or_else(|e| e.into_inner()) == Some(LANDED) {
+        return Err("Failed to mark the new identity placed: test fault".to_string());
+    }
+    marked.map_err(|e| format!("Failed to mark the new identity placed: {e}"))
+}
+
+/// Undoes a landing that did not finish. The landed mark goes first, so a crash
+/// partway never leaves the old set aside under a mark that calls it replaced. Once
+/// the whole old set was moved, whatever stands in its place is new and goes; the
+/// moved mark goes before anything returns, so a second pass never takes the old set
+/// for new. Nothing is put back over a file already in the root.
+fn roll_back_landing(root: &std::path::Path, aside: &std::path::Path) -> Result<(), String> {
+    let landed = root.join(LANDED);
+    if present(&landed) {
+        std::fs::remove_file(&landed).map_err(|e| format!("Failed to clear the landed mark: {e}"))?;
+    }
+    if !present(aside) {
+        return Ok(());
+    }
+    let moved = aside.join(ASIDE_MOVED);
+    if present(&moved) {
+        for name in IDENTITY_SET {
+            let p = root.join(name);
+            if present(&p) {
+                std::fs::remove_file(&p).map_err(|e| format!("Failed to remove the new {name}: {e}"))?;
+            }
+        }
+        std::fs::remove_file(&moved).map_err(|e| format!("Failed to clear the moved mark: {e}"))?;
+    }
+    let back: Vec<&str> = IDENTITY_SET.into_iter().filter(|name| present(&aside.join(name))).collect();
+    if let Some(taken) = back.iter().find(|name| present(&root.join(name))) {
+        return Err(format!("{taken} is in place already, so the old set stays aside"));
+    }
+    for name in back {
+        std::fs::rename(aside.join(name), root.join(name)).map_err(|e| format!("Failed to put back {name}: {e}"))?;
+    }
+    std::fs::remove_dir_all(aside).map_err(|e| format!("Failed to clear the old identity's folder: {e}"))
+}
+
+/// Clears what a finished landing leaves behind, and returns how many content files
+/// would not go into place. The landed mark goes last, so what a crash or a held file
+/// leaves still reads as finished and goes at a later launch.
+fn finish_landing(root: &std::path::Path) -> (usize, Result<(), String>) {
+    #[cfg(test)]
+    cleanup_crash_point("content");
+    let stage = root.join(LANDING_STAGE);
+    let misplaced = place_content(&stage, root);
+    (misplaced, clear_landing_leftovers(root, &stage))
+}
+
+fn clear_landing_leftovers(root: &std::path::Path, stage: &std::path::Path) -> Result<(), String> {
+    if present(stage) {
+        std::fs::remove_dir_all(stage).map_err(|e| format!("Failed to clear the landing's stage: {e}"))?;
+    }
+    let aside = root.join(LANDING_ASIDE);
+    #[cfg(test)]
+    cleanup_crash_point("moved");
+    // Before the old set: should the landed mark ever be lost, what is left aside
+    // still never reads as a commit cut short.
+    let moved = aside.join(ASIDE_MOVED);
+    if present(&moved) {
+        std::fs::remove_file(&moved).map_err(|e| format!("Failed to clear the moved mark: {e}"))?;
+    }
+    #[cfg(test)]
+    cleanup_crash_point("aside");
+    if present(&aside) {
+        std::fs::remove_dir_all(&aside).map_err(|e| format!("Failed to clear the replaced identity: {e}"))?;
+    }
+    #[cfg(test)]
+    cleanup_crash_point("landed");
+    let landed = root.join(LANDED);
+    if present(&landed) {
+        std::fs::remove_file(&landed).map_err(|e| format!("Failed to clear the landed mark: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Finishes what a landing a crash cut short left behind: a finished one loses its
+/// leftovers, an unfinished one is undone. Runs before every landing and at every
+/// launch (`has_pending_link`), so a stale journal never meets a later identity.
+fn recover_interrupted_landing(root: &std::path::Path) -> Result<(), String> {
+    // A pending wipe owns the root and takes the leftovers with it; nothing may be
+    // put back into a root it is emptying.
+    if present(&root.join(PENDING_WIPE_MARKER)) {
+        return Ok(());
+    }
+    if present(&root.join(LANDED)) {
+        return finish_landing(root).1;
+    }
+    let stage = root.join(LANDING_STAGE);
+    if present(&stage) {
+        std::fs::remove_dir_all(&stage).map_err(|e| format!("Failed to clear an old landing: {e}"))?;
+    }
+    let aside = root.join(LANDING_ASIDE);
+    if !present(&aside) {
+        return Ok(());
+    }
+    let undone = roll_back_landing(root, &aside);
+    crate::log::init();
+    hollow_log!("[HOLLOW-LINK] Undid a landing that did not finish: {undone:?}");
+    undone
+}
+
+/// Moves the staged `vault/` and `files/` into the root; returns how many would not go.
+fn place_content(stage: &std::path::Path, root: &std::path::Path) -> usize {
+    let mut misplaced = 0;
+    for dir in ["vault", "files"] {
+        let Ok(entries) = std::fs::read_dir(stage.join(dir)) else { continue };
+        let target = root.join(dir);
+        if std::fs::create_dir_all(&target).is_err() {
+            misplaced += 1;
+            continue;
+        }
+        for entry in entries.flatten() {
+            if std::fs::rename(entry.path(), target.join(entry.file_name())).is_err() {
+                misplaced += 1;
+            }
+        }
+    }
+    misplaced
+}
+
+fn land_snapshot(snapshot: CheckedSnapshot<'_>, device: Option<&[u8]>) -> Result<(), String> {
+    let CheckedSnapshot { mut archive, landings } = snapshot;
+    let data_dir = crate::identity::data_dir()?;
+    // The next launch's wipe would take whatever lands now.
+    if present(&data_dir.join(PENDING_WIPE_MARKER)) {
+        return Err(IDENTITY_NOT_READY.to_string());
+    }
+    recover_interrupted_landing(&data_dir)?;
+
+    let stage = data_dir.join(LANDING_STAGE);
+    let landed = match stage_new_set(&mut archive, &landings, &stage, device) {
+        Ok(landed) => landed,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&stage);
+            return Err(e);
+        }
+    };
+
+    // This process lets go of the old database before it moves.
+    if let Ok(mut guard) = get_store().lock() {
+        let _ = guard.take();
+    }
+    crate::node::at_rest::forget_stores();
+
+    let aside = data_dir.join(LANDING_ASIDE);
+    let deadline = std::time::Instant::now() + HELD_FILE_WAIT;
+    let flag = LandingFlag::raise();
+    let swapped = set_aside_old_set(&data_dir, &aside, deadline)
+        .and_then(|()| commit_new_set(&data_dir, &stage));
+    if let Err(e) = swapped {
+        let undone = roll_back_landing(&data_dir, &aside);
+        drop(flag);
+        let _ = std::fs::remove_dir_all(&stage);
+        return Err(match undone {
+            Ok(()) => e,
+            Err(u) => format!("{e}; the old identity is not back yet ({u})"),
+        });
+    }
+    drop(flag);
+
+    crate::log::init();
+    let (misplaced, cleared) = finish_landing(&data_dir);
+    if let Err(e) = cleared {
+        hollow_log!("[HOLLOW-LINK] The replaced identity's files go at a later launch: {e}");
+    }
+    hollow_log!(
+        "[HOLLOW-LINK] Import wrote {} file(s), {landed} bytes, {misplaced} content file(s) not placed",
+        landings.len()
+    );
 
     // messages.db was just replaced, so the key ring must re-register against the
     // IMPORTED database rather than the one that is gone.
@@ -1889,6 +2201,11 @@ fn pending_link_device_path() -> Result<std::path::PathBuf, String> {
 /// device key this install will run as, to be imported on the NEXT launch before the
 /// node starts, the same window a manual "Restore from backup" uses.
 pub(crate) fn stash_pending_link(blob: &[u8], passphrase: &str, device: &[u8]) -> Result<(), String> {
+    // A new link gets all its tries, whatever an earlier one spent.
+    let tries = pending_link_tries_path()?;
+    if present(&tries) {
+        std::fs::remove_file(&tries).map_err(|e| format!("Failed to reset the link's tries: {e}"))?;
+    }
     std::fs::write(pending_link_blob_path()?, blob)
         .map_err(|e| format!("Failed to stash link blob: {e}"))?;
     std::fs::write(pending_link_code_path()?, passphrase.as_bytes())
@@ -1899,56 +2216,109 @@ pub(crate) fn stash_pending_link(blob: &[u8], passphrase: &str, device: &[u8]) -
 }
 
 /// True if a pending link blob is waiting to be imported on launch.
+///
+/// Dart asks this first at every launch, before anything reads the identity, so it
+/// also finishes or undoes a landing a crash cut short.
 #[frb]
 pub fn has_pending_link() -> Result<bool, String> {
+    if let Err(e) = recover_interrupted_landing(&crate::identity::data_dir()?) {
+        hollow_log!("[HOLLOW-LINK] A landing that did not finish is still in the way: {e}");
+    }
     Ok(pending_link_blob_path()?.exists() && pending_link_code_path()?.exists())
+}
+
+fn pending_link_tries_path() -> Result<std::path::PathBuf, String> {
+    Ok(crate::identity::data_dir()?.join("pending_link.tries"))
+}
+
+/// How many launches try a link whose files would not move before it is dropped.
+const LINK_LANDING_TRIES: u32 = 3;
+
+/// Why a stashed link did not land.
+enum LinkImportFailure {
+    /// The stash itself is unusable; trying again changes nothing.
+    Refused(String),
+    /// The old identity could not move out of the way; the next launch tries again.
+    NotLanded(String),
+}
+
+/// The code goes first: without it the stash no longer counts as pending.
+fn drop_pending_link() {
+    for path in [
+        pending_link_code_path(),
+        pending_link_blob_path(),
+        pending_link_device_path(),
+        pending_link_tries_path(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if present(&path) && std::fs::remove_file(&path).is_err() {
+            hollow_log!("[HOLLOW-LINK] Could not clear part of the link stash");
+        }
+    }
+}
+
+/// Counts one more launch that could not land the stash; true once it has had them all.
+fn spend_link_try() -> bool {
+    let Ok(path) = pending_link_tries_path() else { return true };
+    let spent = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+        .saturating_add(1);
+    std::fs::write(&path, spent.to_string()).is_err() || spent >= LINK_LANDING_TRIES
+}
+
+fn land_stashed_link(blob: &[u8], code: &str, device: &[u8]) -> Result<(), LinkImportFailure> {
+    use LinkImportFailure::{NotLanded, Refused};
+    // The presenter vouched for exactly this key, so nothing else may run here.
+    crate::identity::native_identity::NativeKeypair::from_protobuf_encoding(device)
+        .map_err(|_| Refused("The link didn't finish on this device. Link it again.".to_string()))?;
+    // Opened and checked BEFORE anything moves: a snapshot that does not decrypt, or
+    // that the check refuses, must cost the throwaway identity nothing.
+    let zip_bytes = decrypt_backup_bytes(blob, code.trim()).map_err(Refused)?;
+    let snapshot = check_snapshot(&zip_bytes).map_err(Refused)?;
+    land_snapshot(snapshot, Some(device)).map_err(NotLanded)
 }
 
 /// (Receiver, at launch BEFORE start_node) Import a stashed link blob through the same
 /// pipeline as a manual `.hollow` restore, then clean up the stash. After this the
-/// bootstrap proceeds as a normal restored-backup launch.
+/// bootstrap proceeds as a normal restored launch. A link that could not land leaves
+/// the throwaway identity whole and its stash for the next launch.
 #[frb]
 pub fn import_pending_link() -> Result<(), String> {
-    let blob_path = pending_link_blob_path()?;
-    let code_path = pending_link_code_path()?;
-    let device_path = pending_link_device_path()?;
-    let blob = std::fs::read(&blob_path)
+    // Its lines reach the debug log, which otherwise opens only when the node starts.
+    crate::log::init();
+    let blob = std::fs::read(pending_link_blob_path()?)
         .map_err(|e| format!("Failed to read pending link blob: {e}"))?;
     let code = zeroize::Zeroizing::new(
-        std::fs::read_to_string(&code_path).map_err(|e| format!("Failed to read pending link key: {e}"))?,
+        std::fs::read_to_string(pending_link_code_path()?)
+            .map_err(|e| format!("Failed to read pending link key: {e}"))?,
     );
-    let device = zeroize::Zeroizing::new(std::fs::read(&device_path).unwrap_or_default());
-    // Clean up the stash regardless of outcome (a failed import shouldn't loop).
-    let _ = std::fs::remove_file(&blob_path);
-    let _ = std::fs::remove_file(&code_path);
-    let _ = std::fs::remove_file(&device_path);
-    // The presenter vouched for exactly this key, so nothing else may run here.
-    crate::identity::native_identity::NativeKeypair::from_protobuf_encoding(&device)
-        .map_err(|_| "The link didn't finish on this device. Link it again.".to_string())?;
+    let device = zeroize::Zeroizing::new(std::fs::read(pending_link_device_path()?).unwrap_or_default());
 
-    // Open and check the blob BEFORE the identity it replaces is deleted: a snapshot
-    // that does not decrypt, or that the check refuses, must cost us nothing.
-    let zip_bytes = decrypt_backup_bytes(&blob, code.trim())?;
-    let snapshot = check_snapshot(&zip_bytes)?;
-
-    // Discard the throwaway identity so import lands on a clean slate, exactly like
-    // a fresh "Restore from backup" (which runs on first launch with no identity).
-    let data_dir = crate::identity::data_dir()?;
-    for name in ["identity.key", "identity.device", "messages.db", "messages.db-wal", "messages.db-shm"] {
-        let p = data_dir.join(name);
-        if p.exists() { let _ = std::fs::remove_file(&p); }
+    match land_stashed_link(&blob, &code, &device) {
+        Ok(()) => {
+            drop_pending_link();
+            hollow_log!("[HOLLOW-LINK] Pending link imported via backup pipeline ({} bytes)", blob.len());
+            Ok(())
+        }
+        Err(LinkImportFailure::Refused(e)) => {
+            drop_pending_link();
+            hollow_log!("[HOLLOW-LINK] Pending link import FAILED, link dropped: {e}");
+            Err(e)
+        }
+        Err(LinkImportFailure::NotLanded(e)) => {
+            if spend_link_try() {
+                drop_pending_link();
+                hollow_log!("[HOLLOW-LINK] Pending link import FAILED for the last time, link dropped: {e}");
+            } else {
+                hollow_log!("[HOLLOW-LINK] Pending link import FAILED, the next launch tries again: {e}");
+            }
+            Err(e)
+        }
     }
-
-    let result = land_snapshot(snapshot).and_then(|()| {
-        std::fs::write(data_dir.join("identity.device"), &device[..])
-            .map_err(|e| format!("Failed to install the new device key: {e}"))
-    });
-
-    match &result {
-        Ok(()) => hollow_log!("[HOLLOW-LINK] Pending link imported via backup pipeline ({} bytes)", blob.len()),
-        Err(e) => hollow_log!("[HOLLOW-LINK] Pending link import FAILED: {e}"),
-    }
-    result
 }
 
 // ── Pending data-dir wipe: next-boot clean slate ─────────────────────────────
@@ -1959,8 +2329,10 @@ pub fn import_pending_link() -> Result<(), String> {
 // messages.db encrypted with the throwaway passphrase and unopenable. So the wipe is
 // marked, the app relaunches, and the dir is nuked BEFORE the node starts.
 
+const PENDING_WIPE_MARKER: &str = "pending_wipe.marker";
+
 fn pending_wipe_marker_path() -> Result<std::path::PathBuf, String> {
-    Ok(crate::identity::data_dir()?.join("pending_wipe.marker"))
+    Ok(crate::identity::data_dir()?.join(PENDING_WIPE_MARKER))
 }
 
 /// Mark the data dir to be wiped clean on the next launch (pre-node-start). Call
@@ -1984,7 +2356,7 @@ pub fn has_pending_wipe() -> Result<bool, String> {
 /// beside the dir. The same sweep as the wipe itself. Idempotent.
 ///
 /// True when it finished a destroy, which ends the profile (Dart's profile list then
-/// forgets it); false for a cancelled link's throwaway.
+/// forgets it); false for a cancelled link's throwaway, or while the wipe is unfinished.
 #[frb]
 pub fn perform_pending_wipe() -> Result<bool, String> {
     let marker = pending_wipe_marker_path()?;
@@ -1993,10 +2365,40 @@ pub fn perform_pending_wipe() -> Result<bool, String> {
     let destroyed = std::fs::read(&marker).is_ok_and(|m| m == crate::api::wipe::DESTROY_MARK);
     crate::api::wipe::sweep_root(&data_dir);
     crate::api::wipe::clear_beside(&data_dir);
-    // Last, whatever the sweep left: a marker that never clears would refuse every
-    // new identity, and a crash before this line re-runs the wipe next launch.
+    // The marker stays while any of the identity's own files survived, a landing's
+    // leftovers included: without it the next identity is minted beside a database it
+    // can never open, or an old one is put back. The next launch wipes again. Anything
+    // else the sweep left (a recording still held) never blocks.
+    if !identity_set_gone(&data_dir, std::time::Instant::now() + HELD_FILE_WAIT) {
+        return Ok(false);
+    }
+    // Last: a crash before this line re-runs the wipe next launch.
     let _ = std::fs::remove_file(&marker);
     Ok(destroyed)
+}
+
+/// Removes what is left of the identity set and of any landing, waiting for a held
+/// file until `deadline`.
+fn identity_set_gone(root: &std::path::Path, deadline: std::time::Instant) -> bool {
+    loop {
+        let mut gone = true;
+        for name in IDENTITY_SET.into_iter().chain([LANDED]) {
+            let p = root.join(name);
+            if present(&p) && std::fs::remove_file(&p).is_err() {
+                gone = false;
+            }
+        }
+        for dir in [LANDING_STAGE, LANDING_ASIDE] {
+            let p = root.join(dir);
+            if present(&p) && std::fs::remove_dir_all(&p).is_err() {
+                gone = false;
+            }
+        }
+        if gone || std::time::Instant::now() >= deadline {
+            return gone;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 #[cfg(test)]
@@ -2210,7 +2612,7 @@ mod tests {
         (tmp, data)
     }
 
-    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    pub(super) fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
         use std::io::Write;
         let mut out = std::io::Cursor::new(Vec::new());
         let mut z = zip::ZipWriter::new(&mut out);
@@ -2460,5 +2862,760 @@ mod backup_passphrase_tests {
 
         let old = export_backup_bytes("hunter2", false, false).unwrap();
         assert!(decrypt_backup_bytes(&old, "hunter2").is_ok(), "an old short-passphrase file opens");
+    }
+}
+
+#[cfg(test)]
+mod landing_tests {
+    use super::*;
+    use super::tests::zip_of;
+    use crate::identity::native_identity::NativeKeypair;
+    use crate::storage::MessageStore;
+
+    /// Points the data root at `root` with the identity `seed` and a database of its
+    /// own holding `who`, and returns that database's key.
+    fn identity_in(root: &std::path::Path, seed: u8, who: &str) -> String {
+        std::fs::create_dir_all(root).unwrap();
+        // SAFETY: serialized by the callers' locks.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", root) };
+        crate::identity::encryption::clear_session_key();
+        let master = NativeKeypair::from_secret_bytes(&[seed; 32]);
+        std::fs::write(root.join("identity.key"), master.to_protobuf_encoding().unwrap()).unwrap();
+        let pass = derive_db_key().unwrap();
+        let db = root.join("messages.db");
+        MessageStore::migrate_auto_vacuum_once(db.to_str().unwrap(), &pass).unwrap();
+        MessageStore::open(db.to_str().unwrap(), &pass).unwrap().save_setting("who", who).unwrap();
+        pass
+    }
+
+    /// Who the database in the root says it belongs to, opened with the key the
+    /// identity in the root derives; an error when the two do not belong together.
+    fn pair_in_root() -> Result<String, String> {
+        let db = crate::identity::data_dir()?.join("messages.db");
+        let store = MessageStore::open(db.to_str().unwrap(), &derive_db_key()?)?;
+        Ok(store.load_setting("who")?.unwrap_or_default())
+    }
+
+    /// A link blob of the identity `seed`, made in a folder of its own, and the root
+    /// pointed back at `root`.
+    fn link_blob(tmp: &std::path::Path, seed: u8, code: &str) -> Vec<u8> {
+        identity_in(&tmp.join("source"), seed, "linked");
+        export_backup_bytes(code, false, false).unwrap()
+    }
+
+    /// The incident behind this test: a desktop linked to a phone and then could not
+    /// open its identity ("file is not a database"). Whatever holds the old database
+    /// while the import runs, the identity in the root and the database beside it
+    /// must still belong together, and a link that could not land is tried again.
+    #[test]
+    fn a_link_never_lands_beside_a_database_something_holds() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let code = "ef".repeat(32);
+        let blob = link_blob(tmp.path(), 0x71, &code);
+        let root = tmp.path().join("data");
+        let throwaway = identity_in(&root, 0x72, "throwaway");
+
+        // Holds the database the way a second SQLite connection does, with a write
+        // still in its WAL.
+        let holder = MessageStore::open(root.join("messages.db").to_str().unwrap(), &throwaway).unwrap();
+        holder.save_setting("late", "write").unwrap();
+
+        let device = NativeKeypair::from_secret_bytes(&[0x73; 32]).to_protobuf_encoding().unwrap();
+        stash_pending_link(&blob, &code, &device).unwrap();
+        let first = import_pending_link();
+        assert!(pair_in_root().is_ok(), "while held: {:?} after {first:?}", pair_in_root());
+        drop(holder);
+        assert!(pair_in_root().is_ok(), "once let go: {:?} after {first:?}", pair_in_root());
+
+        if first.is_err() {
+            assert_eq!(pair_in_root().as_deref(), Ok("throwaway"), "a refused landing kept nothing old");
+            assert!(has_pending_link().unwrap(), "a link that could not land was dropped");
+            import_pending_link().expect("the retry lands");
+        }
+        assert_eq!(pair_in_root().as_deref(), Ok("linked"));
+        assert!(!has_pending_link().unwrap());
+        for left in [LANDING_STAGE, LANDING_ASIDE, LANDED] {
+            assert!(!root.join(left).exists(), "{left} outlived the landing");
+        }
+    }
+
+    /// The incident's exact error: a program that opens the old database without
+    /// sharing writes (a scanner, a backup tool) used to leave the new identity beside
+    /// the old database, "file is not a database" at the next open.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_never_lands_beside_a_database_another_program_holds() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let code = "cd".repeat(32);
+        let blob = link_blob(tmp.path(), 0x78, &code);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x79, "throwaway");
+        let scanner = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(root.join("messages.db"))
+            .unwrap();
+
+        let device = NativeKeypair::from_secret_bytes(&[0x7a; 32]).to_protobuf_encoding().unwrap();
+        stash_pending_link(&blob, &code, &device).unwrap();
+        let first = import_pending_link();
+        assert!(pair_in_root().is_ok(), "while held: {:?} after {first:?}", pair_in_root());
+        assert!(first.is_err() && has_pending_link().unwrap(), "{first:?}");
+        drop(scanner);
+        import_pending_link().expect("the retry lands");
+        assert_eq!(pair_in_root().as_deref(), Ok("linked"));
+    }
+
+    /// A scanner that holds the database a moment is waited out, by the landing and by
+    /// the boot wipe alike.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_held_a_moment_is_waited_out() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let hold_briefly = |db: std::path::PathBuf| {
+            let scanner = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(db).unwrap();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                drop(scanner);
+            })
+        };
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let code = "5e".repeat(32);
+        let blob = link_blob(tmp.path(), 0x85, &code);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x86, "throwaway");
+        let _ = blob;
+        // No Argon2 in front of the landing, so the hold is still on when it moves the set.
+        let source = tmp.path().join("source");
+        let zip = zip_of(&[
+            ("identity.key", &std::fs::read(source.join("identity.key")).unwrap()),
+            ("messages.db", &std::fs::read(source.join("messages.db")).unwrap()),
+        ]);
+        let released = hold_briefly(root.join("messages.db"));
+        import_snapshot_bytes(&zip).expect("the landing waited for the scanner");
+        released.join().unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("linked"));
+
+        stash_pending_wipe().unwrap();
+        let released = hold_briefly(root.join("messages.db"));
+        perform_pending_wipe().unwrap();
+        released.join().unwrap();
+        assert!(!has_pending_wipe().unwrap(), "the wipe gave up on a file held a moment");
+    }
+
+    /// A wipe that could not take the database must not let the next identity be
+    /// minted beside it: the marker stays until the database is gone.
+    #[test]
+    fn a_boot_wipe_keeps_its_marker_while_the_database_survives() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        let pass = identity_in(&root, 0x74, "cancelled link");
+        let holder = MessageStore::open(root.join("messages.db").to_str().unwrap(), &pass).unwrap();
+        holder.save_setting("late", "write").unwrap();
+        stash_pending_wipe().unwrap();
+
+        perform_pending_wipe().unwrap();
+        let survived = ["messages.db", "messages.db-wal", "messages.db-shm"]
+            .into_iter()
+            .filter(|n| root.join(n).exists())
+            .collect::<Vec<_>>();
+        if !survived.is_empty() {
+            assert!(has_pending_wipe().unwrap(), "{survived:?} outlived the wipe and its marker went");
+            assert!(
+                crate::identity::load_or_create_identity().is_err(),
+                "an identity was minted beside {survived:?}",
+            );
+        }
+        drop(holder);
+        perform_pending_wipe().unwrap();
+        assert!(!has_pending_wipe().unwrap());
+        for name in ["identity.key", "messages.db", "messages.db-wal", "messages.db-shm"] {
+            assert!(!root.join(name).exists(), "{name} outlived the second wipe");
+        }
+    }
+
+    /// A field failure of the import must leave a trace: its lines reach the debug
+    /// log, which used to open only when the node started, after the import.
+    #[test]
+    fn a_link_import_writes_its_outcome_to_the_debug_log() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let code = "ab".repeat(32);
+        let blob = link_blob(tmp.path(), 0x75, &code);
+        let throwaway = identity_in(&tmp.path().join("data"), 0x76, "throwaway");
+        // This process's own store on the old database never stands in the way.
+        let db = tmp.path().join("data").join("messages.db");
+        set_test_store(MessageStore::open(db.to_str().unwrap(), &throwaway).unwrap());
+        crate::log::erase();
+        let device = NativeKeypair::from_secret_bytes(&[0x77; 32]).to_protobuf_encoding().unwrap();
+        stash_pending_link(&blob, &code, &device).unwrap();
+        import_pending_link().unwrap();
+        let log = crate::log::open_path().expect("the import ran with no log open");
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        crate::log::erase();
+        assert!(text.contains("[HOLLOW-LINK] Pending link imported"), "the outcome is not in the log: {text}");
+    }
+
+    /// A refused stash says why in the log too, and a restore onto a root with no
+    /// identity yet logs once its identity has landed.
+    #[test]
+    fn a_refused_link_and_a_first_restore_write_to_the_debug_log() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let blob = link_blob(tmp.path(), 0x82, "a long enough passphrase");
+        identity_in(&tmp.path().join("data"), 0x83, "throwaway");
+        crate::log::erase();
+        let device = NativeKeypair::from_secret_bytes(&[0x84; 32]).to_protobuf_encoding().unwrap();
+        stash_pending_link(b"HOLLOW-but-not-decryptable-at-all-000000000000000000", "", &device).unwrap();
+        assert!(import_pending_link().is_err());
+        let log = crate::log::open_path().expect("a refused link left no log");
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        crate::log::erase();
+        assert!(text.contains("Pending link import FAILED"), "the refusal is not in the log");
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &empty) };
+        import_backup_bytes(&blob, "a long enough passphrase").unwrap();
+        let log = crate::log::open_path().expect("a first restore left no log");
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        crate::log::erase();
+        assert!(text.contains("[HOLLOW-LINK] Import wrote"), "the restore is not in the log");
+    }
+
+    /// A landing that fails after the old set moved puts the old pair back and keeps
+    /// the stash for the next launch, a few launches at most.
+    #[test]
+    fn a_landing_that_fails_halfway_puts_the_old_pair_back() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let code = "9a".repeat(32);
+        let blob = link_blob(tmp.path(), 0x7b, &code);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x7c, "throwaway");
+        let device = NativeKeypair::from_secret_bytes(&[0x7d; 32]).to_protobuf_encoding().unwrap();
+        stash_pending_link(&blob, &code, &device).unwrap();
+
+        *FAIL_COMMIT_AT.lock().unwrap() = Some("messages.db");
+        let mut kept = Vec::new();
+        for _ in 0..LINK_LANDING_TRIES {
+            // The old set has no device key, so one after the failure would be the new one.
+            std::fs::remove_file(root.join("identity.device")).unwrap();
+            assert!(import_pending_link().is_err());
+            assert!(!root.join("identity.device").exists(), "the new device key stayed beside the old identity");
+            assert_eq!(pair_in_root().as_deref(), Ok("throwaway"), "the old pair did not come back");
+            kept.push(has_pending_link().unwrap());
+        }
+        *FAIL_COMMIT_AT.lock().unwrap() = None;
+        assert!(COMMIT_SAW_LANDING.load(std::sync::atomic::Ordering::Acquire), "the commit ran with no landing flag up");
+        assert!(!landing_in_progress(), "a failed landing left its flag up");
+        assert_eq!(kept, [true, true, false], "the stash outlived or missed its tries");
+        for left in [LANDING_STAGE, LANDING_ASIDE, LANDED] {
+            assert!(!root.join(left).exists(), "{left} outlived the failed landing");
+        }
+    }
+
+    /// A crash mid-landing leaves a journal: before the old set was all moved, or
+    /// before the new one was all in place, the old pair comes back; once the new one
+    /// was in place, only the leftovers go.
+    #[test]
+    fn a_landing_a_crash_cut_short_is_finished_at_the_next_launch() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let new_root = tmp.path().join("new");
+        identity_in(&new_root, 0x7e, "new");
+        let root = tmp.path().join("data");
+        let aside = root.join(LANDING_ASIDE);
+        let copy = |from: &std::path::Path, to: &std::path::Path, names: &[&str]| {
+            std::fs::create_dir_all(to).unwrap();
+            for name in names {
+                std::fs::copy(from.join(name), to.join(name)).unwrap();
+            }
+        };
+
+        // Cut short while the new pair was going in.
+        identity_in(&root, 0x7f, "old");
+        copy(&root, &aside, &["identity.key", "messages.db"]);
+        std::fs::write(aside.join(ASIDE_MOVED), b"").unwrap();
+        copy(&new_root, &root, &["identity.key", "messages.db"]);
+        has_pending_link().unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("old"), "mid-commit");
+        assert!(!aside.exists());
+
+        // Cut short while the old pair was moving out.
+        std::fs::create_dir_all(&aside).unwrap();
+        std::fs::rename(root.join("messages.db"), aside.join("messages.db")).unwrap();
+        has_pending_link().unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("old"), "mid-set-aside");
+        assert!(!aside.exists());
+
+        // Cut short after the new pair was in place.
+        copy(&root, &aside, &["identity.key", "messages.db"]);
+        std::fs::write(aside.join(ASIDE_MOVED), b"").unwrap();
+        copy(&new_root, &root, &["identity.key", "messages.db"]);
+        std::fs::write(root.join(LANDED), b"").unwrap();
+        has_pending_link().unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("new"), "after the commit");
+        assert!(!aside.exists() && !root.join(LANDED).exists());
+    }
+
+    /// A landing never starts over the leftovers of an earlier one: a stale "done" mark
+    /// would let a crash mid-commit pass for a finished landing and lose the old pair.
+    #[test]
+    fn a_landing_clears_an_earlier_ones_leftovers_before_it_starts() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        identity_in(&tmp.path().join("source"), 0x88, "linked");
+        let source = tmp.path().join("source");
+        let zip = zip_of(&[
+            ("identity.key", &std::fs::read(source.join("identity.key")).unwrap()),
+            ("messages.db", &std::fs::read(source.join("messages.db")).unwrap()),
+        ]);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x89, "throwaway");
+        std::fs::write(root.join(LANDED), b"").unwrap();
+
+        *CRASH_COMMIT_AT.lock().unwrap() = Some("messages.db");
+        let crashed = std::panic::catch_unwind(|| import_snapshot_bytes(&zip));
+        *CRASH_COMMIT_AT.lock().unwrap() = None;
+        assert!(crashed.is_err(), "the simulated crash did not happen");
+        assert!(!landing_in_progress());
+
+        has_pending_link().unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("throwaway"), "the crash cost the old pair");
+    }
+
+    /// The incident left no trace: a database that will not open with the identity
+    /// beside it now says so in the log, with which of the identity's files are there.
+    #[test]
+    fn a_database_that_will_not_open_says_so_in_the_log() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x8a, "someone else's");
+        let other = NativeKeypair::from_secret_bytes(&[0x8b; 32]);
+        std::fs::write(root.join("identity.key"), other.to_protobuf_encoding().unwrap()).unwrap();
+        crate::log::erase();
+        let _ = get_store().lock().unwrap_or_else(|e| e.into_inner()).take();
+        assert!(open_message_store().is_err());
+        let log = crate::log::open_path().expect("the refusal left no log");
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        crate::log::erase();
+        assert!(text.contains("[HOLLOW-STORE] The database would not open"), "{text}");
+        assert!(text.contains("messages.db=") && text.contains("identity.key="), "{text}");
+    }
+
+    /// Nothing mints an identity while a landing has the old one moved out.
+    #[test]
+    fn no_identity_is_minted_while_a_landing_runs() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        {
+            let _landing = LandingFlag::raise();
+            assert!(crate::identity::load_or_create_identity().is_err());
+            assert!(!tmp.path().join("identity.key").exists(), "a key was minted mid-landing");
+        }
+        assert!(crate::identity::load_or_create_identity().is_ok());
+    }
+
+    /// The restore from a backup file lands through the same swap as a link.
+    #[cfg(windows)]
+    #[test]
+    fn a_restore_never_lands_beside_a_database_another_program_holds() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let blob = link_blob(tmp.path(), 0x80, "a long enough passphrase");
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x81, "before the restore");
+        let scanner = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(root.join("messages.db"))
+            .unwrap();
+        assert!(import_backup_bytes(&blob, "a long enough passphrase").is_err());
+        assert_eq!(pair_in_root().as_deref(), Ok("before the restore"));
+        drop(scanner);
+        import_backup_bytes(&blob, "a long enough passphrase").unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("linked"));
+    }
+
+    // t1-review
+
+    /// Builds the state right after a finished commit: the new pair in the root, the
+    /// old pair in `.replaced` with its moved mark, the cleanup not begun.
+    fn review_committed_state(tmp: &std::path::Path) -> std::path::PathBuf {
+        landed_then_died_at(tmp, "content")
+    }
+
+    /// A crash while the cleanup deletes `.replaced` (after its first entries went,
+    /// before `moved` and the old database did) must not undo a finished landing.
+    #[test]
+    fn t1_review_a_crash_mid_cleanup_never_undoes_a_finished_landing() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = review_committed_state(tmp.path());
+        let aside = root.join(LANDING_ASIDE);
+        // What remove_dir_all leaves when cut short after its first entries.
+        std::fs::remove_file(aside.join("identity.key")).unwrap();
+        has_pending_link().unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("new"), "the next launch undid a finished landing");
+    }
+
+    /// The same state, made by the real cleanup: a file in `.replaced` that another
+    /// program holds stops remove_dir_all after it took the `committed` mark.
+    #[cfg(windows)]
+    #[test]
+    fn t1_review_a_held_replaced_file_never_undoes_a_finished_landing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = review_committed_state(tmp.path());
+        let aside = root.join(LANDING_ASIDE);
+        let scanner = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(aside.join("messages.db"))
+            .unwrap();
+        let _ = has_pending_link();
+        let left: Vec<String> = std::fs::read_dir(&aside)
+            .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        drop(scanner);
+        has_pending_link().unwrap();
+        assert_eq!(
+            pair_in_root().as_deref(),
+            Ok("new"),
+            "the next launch undid a finished landing; the held cleanup left {left:?}",
+        );
+    }
+
+    /// A new link's stash starts with all its tries, whatever an earlier one spent.
+    #[test]
+    fn t1_review_a_fresh_link_gets_all_its_tries() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let code = "9b".repeat(32);
+        let blob = link_blob(tmp.path(), 0x93, &code);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x94, "throwaway");
+        let device = NativeKeypair::from_secret_bytes(&[0x95; 32]).to_protobuf_encoding().unwrap();
+        *FAIL_COMMIT_AT.lock().unwrap() = Some("messages.db");
+        stash_pending_link(&blob, &code, &device).unwrap();
+        for _ in 0..LINK_LANDING_TRIES - 1 {
+            let _ = std::fs::remove_file(root.join("identity.device"));
+            assert!(import_pending_link().is_err());
+        }
+        // The person links again: a new stash.
+        stash_pending_link(&blob, &code, &device).unwrap();
+        let _ = std::fs::remove_file(root.join("identity.device"));
+        assert!(import_pending_link().is_err());
+        let kept = has_pending_link().unwrap();
+        *FAIL_COMMIT_AT.lock().unwrap() = None;
+        assert!(kept, "a fresh link was dropped after its first failed launch");
+    }
+
+    /// After a destroy (or a duress code) whose database something still holds at the
+    /// next launch, what the person sees on "Create" must not say a wipe ran.
+    #[cfg(windows)]
+    #[test]
+    fn t1_review_a_held_boot_wipe_never_names_a_wipe() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x96, "destroyed");
+        std::fs::write(root.join("pending_wipe.marker"), crate::api::wipe::DESTROY_MARK).unwrap();
+        let scanner = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(root.join("messages.db"))
+            .unwrap();
+        let finished = perform_pending_wipe().unwrap();
+        let shown = crate::identity::load_or_create_identity().err().unwrap_or_default();
+        drop(scanner);
+        assert!(!finished);
+        assert!(!shown.to_lowercase().contains("wipe"), "the next launch shows: {shown}");
+    }
+
+    // t1-linkimport-2
+
+    const CLEANUP_STEPS: [&str; 4] = ["content", "moved", "aside", "landed"];
+
+    /// A landing of the identity "new", with a content file, over the identity "old"
+    /// in `tmp/data`, cut short by a crash at the cleanup's `step`; returns the root.
+    fn landed_then_died_at(tmp: &std::path::Path, step: &'static str) -> std::path::PathBuf {
+        let source = tmp.join("new");
+        identity_in(&source, 0x91, "new");
+        let zip = zip_of(&[
+            ("identity.key", &std::fs::read(source.join("identity.key")).unwrap()),
+            ("messages.db", &std::fs::read(source.join("messages.db")).unwrap()),
+            ("files/ab12.png", b"HFE1"),
+        ]);
+        let root = tmp.join("data");
+        identity_in(&root, 0x92, "old");
+        *CRASH_CLEANUP_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(step);
+        let crashed = std::panic::catch_unwind(|| import_snapshot_bytes(&zip));
+        *CRASH_CLEANUP_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        assert!(crashed.is_err(), "the simulated crash at {step} did not happen");
+        assert_eq!(pair_in_root().as_deref(), Ok("new"), "the commit did not finish before {step}");
+        root
+    }
+
+    fn no_landing_left(root: &std::path::Path) -> Vec<&'static str> {
+        [LANDING_STAGE, LANDING_ASIDE, LANDED].into_iter().filter(|n| root.join(n).exists()).collect()
+    }
+
+    /// A crash at any step of a finished landing's cleanup: the next launch keeps the
+    /// new pair, places the content and clears every leftover.
+    #[test]
+    fn a_finished_landing_survives_a_crash_at_every_cleanup_step() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        for step in CLEANUP_STEPS {
+            let tmp = crate::test_tmp::tempdir().unwrap();
+            let root = landed_then_died_at(tmp.path(), step);
+            has_pending_link().unwrap();
+            assert_eq!(pair_in_root().as_deref(), Ok("new"), "a crash at {step} undid the landing");
+            assert!(no_landing_left(&root).is_empty(), "after {step}: {:?}", no_landing_left(&root));
+            assert!(root.join("files").join("ab12.png").exists(), "a crash at {step} lost the content");
+        }
+    }
+
+    /// Whatever part of the replaced set a cut-short delete took, a finished landing
+    /// stays finished.
+    #[test]
+    fn a_finished_landing_survives_any_partial_delete_of_what_it_replaced() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let entries = [ASIDE_MOVED, "identity.key", "messages.db"];
+        for taken in 0..(1u8 << entries.len()) {
+            let tmp = crate::test_tmp::tempdir().unwrap();
+            let root = landed_then_died_at(tmp.path(), "moved");
+            let gone: Vec<&str> = entries.iter().enumerate().filter(|(i, _)| taken & (1 << i) != 0).map(|(_, n)| *n).collect();
+            for name in &gone {
+                std::fs::remove_file(root.join(LANDING_ASIDE).join(name)).unwrap();
+            }
+            has_pending_link().unwrap();
+            assert_eq!(pair_in_root().as_deref(), Ok("new"), "with {gone:?} gone from the replaced set");
+            assert!(no_landing_left(&root).is_empty(), "with {gone:?} gone: {:?}", no_landing_left(&root));
+        }
+    }
+
+    /// Should the landed mark ever be lost once the cleanup began, what is left aside
+    /// still never displaces the new pair.
+    #[test]
+    fn a_finished_landing_that_lost_its_mark_is_never_undone() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        for step in ["aside", "landed"] {
+            let tmp = crate::test_tmp::tempdir().unwrap();
+            let root = landed_then_died_at(tmp.path(), step);
+            let _ = std::fs::remove_file(root.join(LANDED));
+            let _ = has_pending_link();
+            assert_eq!(pair_in_root().as_deref(), Ok("new"), "lost at {step}");
+        }
+    }
+
+    /// Without the moved mark, nothing aside is put back over a file in the root: that
+    /// file is not one the landing put there.
+    #[test]
+    fn a_put_back_never_lands_on_a_file_already_in_the_root() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let old = tmp.path().join("old");
+        identity_in(&old, 0x97, "old");
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x98, "new");
+        let aside = root.join(LANDING_ASIDE);
+        std::fs::create_dir_all(&aside).unwrap();
+        for name in ["identity.key", "messages.db"] {
+            std::fs::copy(old.join(name), aside.join(name)).unwrap();
+        }
+        assert!(has_pending_link().is_ok());
+        assert_eq!(pair_in_root().as_deref(), Ok("new"));
+    }
+
+    /// A held leftover of a finished landing is retried quietly at each launch, a later
+    /// landing waits for it, and once let go it goes.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_leftover_of_a_finished_landing_goes_at_a_later_launch() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        for step in CLEANUP_STEPS {
+            let tmp = crate::test_tmp::tempdir().unwrap();
+            let root = landed_then_died_at(tmp.path(), step);
+            let old_db = root.join(LANDING_ASIDE).join("messages.db");
+            let scanner = old_db.exists().then(|| {
+                std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&old_db).unwrap()
+            });
+            assert!(has_pending_link().is_ok());
+            assert_eq!(pair_in_root().as_deref(), Ok("new"), "held after {step}");
+            if scanner.is_some() {
+                assert!(root.join(LANDED).exists(), "the mark went before the held file, after {step}");
+                let source = tmp.path().join("new");
+                let zip = zip_of(&[
+                    ("identity.key", &std::fs::read(source.join("identity.key")).unwrap()),
+                    ("messages.db", &std::fs::read(source.join("messages.db")).unwrap()),
+                ]);
+                assert!(import_snapshot_bytes(&zip).is_err(), "a landing started over a held leftover");
+                assert_eq!(pair_in_root().as_deref(), Ok("new"));
+            }
+            drop(scanner);
+            assert!(has_pending_link().is_ok());
+            assert_eq!(pair_in_root().as_deref(), Ok("new"), "released after {step}");
+            assert!(no_landing_left(&root).is_empty(), "after {step}: {:?}", no_landing_left(&root));
+        }
+    }
+
+    /// A landing whose mark failed is undone with the mark: nothing calls the old set
+    /// replaced.
+    #[test]
+    fn a_landing_whose_mark_failed_leaves_no_mark() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        identity_in(&tmp.path().join("source"), 0x99, "linked");
+        let source = tmp.path().join("source");
+        let zip = zip_of(&[
+            ("identity.key", &std::fs::read(source.join("identity.key")).unwrap()),
+            ("messages.db", &std::fs::read(source.join("messages.db")).unwrap()),
+        ]);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x9a, "throwaway");
+        *FAIL_COMMIT_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(LANDED);
+        let landed = import_snapshot_bytes(&zip);
+        *FAIL_COMMIT_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        assert!(landed.is_err());
+        assert!(no_landing_left(&root).is_empty(), "{:?}", no_landing_left(&root));
+        assert_eq!(pair_in_root().as_deref(), Ok("throwaway"));
+    }
+
+    /// A wipe the next launch finishes owns the root: no landing starts in it and
+    /// nothing a landing left is put back into it.
+    #[test]
+    fn a_pending_wipe_takes_a_landings_leftovers_and_starts_none() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        identity_in(&tmp.path().join("source"), 0x9b, "linked");
+        let source = tmp.path().join("source");
+        let zip = zip_of(&[
+            ("identity.key", &std::fs::read(source.join("identity.key")).unwrap()),
+            ("messages.db", &std::fs::read(source.join("messages.db")).unwrap()),
+        ]);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x9c, "cancelled link");
+        std::fs::write(root.join(PENDING_WIPE_MARKER), b"1").unwrap();
+        assert_eq!(import_snapshot_bytes(&zip), Err(IDENTITY_NOT_READY.to_string()));
+        assert_eq!(pair_in_root().as_deref(), Ok("cancelled link"), "a landing ran over a pending wipe");
+
+        // A landing cut short mid-commit, and then a wipe that took the root's files.
+        let aside = root.join(LANDING_ASIDE);
+        std::fs::create_dir_all(&aside).unwrap();
+        for name in ["identity.key", "messages.db"] {
+            std::fs::rename(root.join(name), aside.join(name)).unwrap();
+        }
+        std::fs::write(aside.join(ASIDE_MOVED), b"").unwrap();
+        let _ = has_pending_link();
+        for name in ["identity.key", "messages.db"] {
+            assert!(!root.join(name).exists(), "{name} was put back into a root being wiped");
+        }
+        perform_pending_wipe().unwrap();
+        assert!(!has_pending_wipe().unwrap());
+        assert!(no_landing_left(&root).is_empty(), "{:?}", no_landing_left(&root));
+    }
+
+    /// A boot wipe keeps its marker while a landing's leftover is held.
+    #[cfg(windows)]
+    #[test]
+    fn a_boot_wipe_keeps_its_marker_while_a_landings_leftover_is_held() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = landed_then_died_at(tmp.path(), "content");
+        let scanner = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(root.join(LANDING_ASIDE).join("messages.db"))
+            .unwrap();
+        stash_pending_wipe().unwrap();
+        assert!(!perform_pending_wipe().unwrap());
+        assert!(has_pending_wipe().unwrap(), "the marker went while the leftover was held");
+        drop(scanner);
+        perform_pending_wipe().unwrap();
+        assert!(!has_pending_wipe().unwrap());
+        assert!(no_landing_left(&root).is_empty(), "{:?}", no_landing_left(&root));
+    }
+
+    /// While a wipe is pending, what a person sees is the very refusal a landing
+    /// gives, which names no wipe.
+    #[test]
+    fn a_pending_wipe_refuses_in_the_words_a_landing_uses() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let landing = {
+            let _landing = LandingFlag::raise();
+            crate::identity::load_or_create_identity().err()
+        };
+        stash_pending_wipe().unwrap();
+        let wiping = crate::identity::load_or_create_identity().err();
+        assert!(!tmp.path().join("identity.key").exists(), "a key was minted while a wipe was pending");
+        assert_eq!(wiping, landing);
+        assert_eq!(wiping.as_deref(), Some(IDENTITY_NOT_READY));
+        assert!(!IDENTITY_NOT_READY.to_lowercase().contains("wipe"));
+    }
+
+    /// A new link's stash starts its tries over even when the earlier count sits there.
+    #[test]
+    fn a_new_link_stash_clears_the_spent_tries() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        std::fs::write(tmp.path().join("pending_link.tries"), (LINK_LANDING_TRIES - 1).to_string()).unwrap();
+        stash_pending_link(b"blob", "code", b"device").unwrap();
+        assert!(!spend_link_try(), "a new link inherited an earlier one's spent tries");
     }
 }

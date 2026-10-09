@@ -3791,7 +3791,7 @@ async fn run_event_loop(
                             hollow_log!("[HOLLOW-SECURITY] {peer_id} joined {room} as a master id its roster does not count: not a device");
                             continue;
                         }
-                        ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
+                        let arrived_here = ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
 
                         // A holder we could not reach earlier just turned up:
                         // ask it for anything still pending on the asset rail.
@@ -4031,6 +4031,24 @@ async fn run_event_loop(
                                     }
                                 }
 
+                                // A peer in OUR OWN inbox room is our device only when our roster
+                                // says so: a friend-request sender joins our inbox to deliver, and a
+                                // device holding just the master key is nobody's member. Not `is_new`
+                                // alone: a returning sibling is already in `synced_peers` when our own
+                                // DM room saw it first, and it is the one that missed our servers. A
+                                // re-join of a sibling still listed here is no return.
+                                let own_inbox = format!("inbox:{}", local_peer_str);
+                                if room == own_inbox && peer_id != device_peer_id && (is_new || arrived_here) {
+                                    if super::resolver::same_identity(&peer_id, &local_peer_str) {
+                                        on_verified_sibling(
+                                            &ws_cmd_tx, &ws_room_peers, &master_keypair, &local_peer_str, &server_states,
+                                            is_invisible, &db_path, &db_passphrase, &peer_id, call_book.own(),
+                                        );
+                                    } else if is_new {
+                                        offer_roster(&ws_cmd_tx, &ws_room_peers, &local_peer_str, &peer_id, &db_path, &db_passphrase);
+                                    }
+                                }
+
                                 if is_new {
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers, &server_states,
@@ -4048,21 +4066,6 @@ async fn run_event_loop(
                                         file_handler::advertise_auto_dl_pref_to_peer(
                                             &ws_cmd_tx, &local_peer_str, &peer_id,
                                         );
-                                    }
-
-                                    // A peer in OUR OWN inbox room is our device only when our roster
-                                    // says so: a friend-request sender joins our inbox to deliver, and a
-                                    // device holding just the master key is nobody's member.
-                                    let own_inbox = format!("inbox:{}", local_peer_str);
-                                    if room == own_inbox && peer_id != device_peer_id {
-                                        if super::resolver::same_identity(&peer_id, &local_peer_str) {
-                                            on_verified_sibling(
-                                                &ws_cmd_tx, &ws_room_peers, &master_keypair, &local_peer_str, &server_states,
-                                                is_invisible, &db_path, &db_passphrase, &peer_id, call_book.own(),
-                                            );
-                                        } else {
-                                            offer_roster(&ws_cmd_tx, &ws_room_peers, &local_peer_str, &peer_id, &db_path, &db_passphrase);
-                                        }
                                     }
 
                                     // Olm session + queued-message drain. Shared verbatim with
@@ -4393,6 +4396,10 @@ async fn run_event_loop(
                         let vanished: Vec<String> = ws_room_peers.get(&room)
                             .map(|old| old.difference(&room_set).cloned().collect())
                             .unwrap_or_default();
+                        let arrived: std::collections::HashSet<String> = match ws_room_peers.get(&room) {
+                            Some(old) => room_set.difference(old).cloned().collect(),
+                            None => room_set.clone(),
+                        };
 
                         // Media-forwarder control-plane room: presence bookkeeping still runs,
                         // because the embedded engine's tolerance depends on it, but the discovery
@@ -4511,9 +4518,7 @@ async fn run_event_loop(
                             if p.parked && now - p.last_deposited_at >= super::types::REDEPOSIT_INTERVAL_MS {
                                 p.last_deposited_at = now;
                                 sync_handler::deposit_parked_join(&ws_cmd_tx, &room, &device_peer_id, p);
-                                crdt_store.upsert_pending_join(
-                                    sync_handler::pending_join_row(&room, p, "pending", ""),
-                                );
+                                sync_handler::save_pending_join(&crdt_store, &room, p, "pending", "");
                             }
                         }
 
@@ -4578,6 +4583,31 @@ async fn run_event_loop(
                                 // Trigger CRDT sync for existing room members (RoomMembers fires
                                 // on join with all current members, before individual PeerJoined).
                                 let is_new = synced_peers.insert(pid_str.clone());
+
+                                // Multi-device sibling convergence on the RECONNECTING side. RoomMembers
+                                // fires on US and lists peers already there, so PeerJoined never fires for
+                                // that sibling on our side. This is the directional half a fresh mnemonic
+                                // link needs: the new EMPTY device joins last, learns of the populated
+                                // sibling here, and is the side that must PULL the snapshot. Membership in
+                                // `inbox:{master}` is not proof: only a member of our roster converges.
+                                // `is_new` alone misses a sibling first met in another room (our own
+                                // DM room joins first), so a sibling new to this inbox listing counts too.
+                                {
+                                    let own_inbox = format!("inbox:{}", local_peer_str);
+                                    if room == own_inbox && pid_str.as_str() != device_peer_id
+                                        && (is_new || arrived.contains(pid_str))
+                                    {
+                                        if super::resolver::same_identity(pid_str, &local_peer_str) {
+                                            on_verified_sibling(
+                                                &ws_cmd_tx, &ws_room_peers, &master_keypair, &local_peer_str, &server_states,
+                                                is_invisible, &db_path, &db_passphrase, pid_str, call_book.own(),
+                                            );
+                                        } else if is_new {
+                                            offer_roster(&ws_cmd_tx, &ws_room_peers, &local_peer_str, pid_str, &db_path, &db_passphrase);
+                                        }
+                                    }
+                                }
+
                                 if is_new {
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers, &server_states,
@@ -4699,26 +4729,6 @@ async fn run_event_loop(
                                     }
 
                                     // The friend request / removal / accept drains run OUTSIDE this guard; see below.
-
-                                    // Multi-device sibling convergence on the RECONNECTING side. RoomMembers
-                                    // fires on US and lists peers already there, so PeerJoined never fires for
-                                    // that sibling on our side. This is the directional half a fresh mnemonic
-                                    // link needs: the new EMPTY device joins last, learns of the populated
-                                    // sibling here, and is the side that must PULL the snapshot. Membership in
-                                    // `inbox:{master}` is not proof: only a member of our roster converges.
-                                    {
-                                        let own_inbox = format!("inbox:{}", local_peer_str);
-                                        if room == own_inbox && pid_str.as_str() != device_peer_id {
-                                            if super::resolver::same_identity(pid_str, &local_peer_str) {
-                                                on_verified_sibling(
-                                                    &ws_cmd_tx, &ws_room_peers, &master_keypair, &local_peer_str, &server_states,
-                                                    is_invisible, &db_path, &db_passphrase, pid_str, call_book.own(),
-                                                );
-                                            } else {
-                                                offer_roster(&ws_cmd_tx, &ws_room_peers, &local_peer_str, pid_str, &db_path, &db_passphrase);
-                                            }
-                                        }
-                                    }
 
                                     // Olm key exchange, pending_messages drain and DM sync. RoomMembers fires
                                     // on the JOINING peer (us) while PeerJoined fires on the EXISTING peer
@@ -6999,17 +7009,27 @@ async fn apply_remote_crdt_op(
     server_id: String,
     op_json: String,
 ) {
-    Box::pin(apply_remote_crdt_op_inner(
+    let sid = server_id.clone();
+    let may_take_our_seat = Box::pin(apply_remote_crdt_op_inner(
         server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
         mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
-        voice_channel_participants, voice_channel_gossip_mode,
-        pending_server_joins, bundle_keypair,
-        db_path, db_passphrase, local_peer_str, device_peer_id, peer_str,
+        pending_server_joins, db_path, db_passphrase, local_peer_str, peer_str,
         server_id, op_json,
     ))
-    .await
+    .await;
+    // Out here, not in the inner: the leave serializes a whole carried HavenMessage,
+    // and on top of the inner's frame that overflowed the worker stack (0xc00000fd).
+    if may_take_our_seat {
+        voice_handler::auto_leave_invisible_voice_channels(
+            mls, ws_cmd_tx, ws_room_peers, server_states,
+            bundle_keypair, crypto_store,
+            voice_channel_participants, voice_channel_gossip_mode,
+            gossip_overlays, local_peer_str, device_peer_id, &sid, event_tx,
+        ).await;
+    }
 }
 
+/// Answers whether the op may have taken our own seat in one of the server's voice calls.
 #[allow(clippy::too_many_arguments)]
 async fn apply_remote_crdt_op_inner(
     server_states: &mut HashMap<String, ServerState>,
@@ -7021,24 +7041,20 @@ async fn apply_remote_crdt_op_inner(
     crypto_store: &CryptoStore,
     pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
     pending_mls_removals: &mut HashMap<String, Vec<String>>,
-    voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
-    voice_channel_gossip_mode: &mut HashMap<String, bool>,
     pending_server_joins: &HashMap<String, PendingJoin>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     db_path: &str,
     db_passphrase: &str,
     local_peer_str: &str,
-    device_peer_id: &str,
     peer_str: &str,
     server_id: String,
     op_json: String,
-) {
+) -> bool {
     
 
     // Room gating: only accept ops for servers we're a member of.
     if !server_states.contains_key(&server_id) {
         hollow_log!("[HOLLOW-CRDT] Ignoring CrdtOpBroadcast for unknown server {server_id}");
-        return;
+        return false;
     }
 
     if let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) {
@@ -7303,25 +7319,15 @@ async fn apply_remote_crdt_op_inner(
                         state, &server_id, local_peer_str, only.as_deref(),
                     );
                 }
-                // If this op revoked OUR access to a voice channel we're in,
-                // drop the call (the subgroup removal above already rotates the
-                // SFrame key for the remaining participants).
-                voice_handler::auto_leave_invisible_voice_channels(
-                    mls, ws_cmd_tx, ws_room_peers, server_states,
-                    bundle_keypair, crypto_store,
-                    voice_channel_participants, voice_channel_gossip_mode,
-                    gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
-                ).await;
-            } else if matches!(&op.payload, CrdtPayload::ServerDeleted { .. }) {
-                voice_handler::auto_leave_invisible_voice_channels(
-                    mls, ws_cmd_tx, ws_room_peers, server_states,
-                    bundle_keypair, crypto_store,
-                    voice_channel_participants, voice_channel_gossip_mode,
-                    gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
-                ).await;
+                // If this op revoked OUR access to a voice channel we're in, the
+                // caller drops the call (the subgroup removal above already rotates
+                // the SFrame key for the remaining participants).
+                return true;
             }
+            return matches!(&op.payload, CrdtPayload::ServerDeleted { .. });
         }
     }
+    false
 }
 
 /// Ask the member device whose frame in `group_key` we could not read for the channels
@@ -9919,6 +9925,14 @@ async fn handle_incoming_request(
                                 name: server_name,
                             }).await;
 
+                            // Our other devices learn of a server we joined as of one we made.
+                            // One announced to us went to all of them already.
+                            if !completed.from_sibling {
+                                sync_handler::announce_server_to_own_devices(
+                                    ws_cmd_tx, local_peer_str, device_peer_id, &server_id, state,
+                                );
+                            }
+
                             // Backfill profiles of OFFLINE members from the
                             // responder's cache. Online members are covered by the
                             // per-peer ProfileRequest on sync, but during a pending
@@ -10964,13 +10978,14 @@ async fn handle_incoming_request(
             if pending_server_joins.contains_key(&server_id) {
                 return;
             }
-            // A server we hold only needs the list refresh `ServerJoined` drives in Dart
-            // (a ServerUpdated nudge proved unreliable); presence sync converges its ops.
-            // A pending join here would let any member's snapshot replace our state. A
-            // tombstoned shell reconciles through the CRDT path, never a re-join.
+            // A server we hold needs at most the quiet list refresh `ServerCreated` drives in
+            // Dart (a ServerUpdated nudge proved unreliable); `ServerJoined` would switch to
+            // it and toast, for every server, each time the announce repeats. Presence sync
+            // converges its ops. A pending join here would let any member's snapshot replace
+            // our state. A tombstoned shell reconciles through the CRDT path, never a re-join.
             if let Some(state) = server_states.get(&server_id) {
                 if !state.is_deleted() {
-                    let _ = event_tx.send(NetworkEvent::ServerJoined {
+                    let _ = event_tx.send(NetworkEvent::ServerCreated {
                         server_id: server_id.clone(),
                         name: state.name().to_string(),
                     }).await;
@@ -10996,6 +11011,7 @@ async fn handle_incoming_request(
                 device_list: super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase),
                 join_key,
                 reply_secret: super::join_lane::ReplySecret::new(),
+                from_sibling: true,
                 ..Default::default()
             };
             sync_handler::request_join_lock(ws_cmd_tx, &server_id, &mut pending);

@@ -1110,3 +1110,19 @@ DM stream; received = the DATABASE, where every delivery path ends).
   outcome (B's own frames and the newest DMs `offline_buffer` keeps, `--optin` for 500).
   `--restart-at s` restarts the relay mid-window through a `systemd-run --user` fd store, so the
   snapshot really moves between processes.
+
+## Team wave lessons (session 42, 2026-10-08/09)
+
+- `fleet.ps1` WITHOUT `-Build` reuses the copies already staged in `build\fleet\<letter>`: after any
+  rebuild, restage and prove the staged `hollow_core.dll` / `kernel_blob.bin` are the new build (a
+  builder's "the fix does not work" verdict came from a stale staged build).
+- `fleet.ps1 -Build` builds through `scripts\flutter_win.ps1` (plain `flutter build` picks Strawberry's
+  cmake in a fresh worktree and the webcrypto hook fails).
+- A freshly linked device shows the AR-34 "Set a lock on this device" offer; `Close-LockOffer` in
+  `fleet_lib.ps1` waits for it (bounded) and taps "Not now"; every linking script calls it.
+- `scripts\fleet_t1_sibling_server.ps1` (g,h,i): server created while the sibling device is away,
+  back with device 1 online and OFFLINE, plus gate F (no "Joined" toast on a return).
+- A worktree fleet build is ~25 GB (`build\windows\x64\plugins` = a cold hollow_core build): two at
+  once at most on D:. Speed plan: memory project_fleet_speed_plan / tmp7.txt.
+- `<name>-refusals.txt` baseline lines: KeyBundle glare deferring to their PreKey, a held MLS commit
+  overtaken, and after a link a `new_device` alert. Anything else is a failure.

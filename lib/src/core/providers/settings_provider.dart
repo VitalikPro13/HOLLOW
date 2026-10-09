@@ -442,16 +442,20 @@ class VoiceEnhanceDynamicNotifier extends AsyncNotifier<bool> {
 /// AI noise suppression: removes keyboard/fan/room noise from the outgoing mic
 /// at the HEAD of the capture chain (post-AEC). While ON, WebRTC's legacy NS is
 /// disabled in the capture constraints (double suppression = artifacts) and the
-/// services fall back to it when the engine can't run. Default OFF.
+/// services fall back to it when the engine can't run.
 final noiseSuppressAiProvider =
     AsyncNotifierProvider<NoiseSuppressAiNotifier, bool>(
         NoiseSuppressAiNotifier.new);
+
+/// On for everyone who never chose: the enhancement chain's speech gate reads RNNoise's
+/// voice probability, and without it the upward boost lifts fans and breath.
+const bool kNoiseSuppressAiDefault = true;
 
 class NoiseSuppressAiNotifier extends AsyncNotifier<bool> {
   @override
   Future<bool> build() async {
     final val = await storage_api.loadSetting(key: 'noise_suppress_ai');
-    if (val == null || val.isEmpty) return false;
+    if (val == null || val.isEmpty) return kNoiseSuppressAiDefault;
     return val == 'true';
   }
 

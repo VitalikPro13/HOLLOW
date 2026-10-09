@@ -11192,15 +11192,11 @@ async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
         "reconnected sibling C must decrypt a channel message in the re-announced server"
     );
 
-    // --- THE UI-REFRESH GUARD (the actual symptom): C ALREADY HOLDS the server
-    // now. A second reconnect re-announces it; the handler must RUN THE FULL JOIN
-    // FLOW again (not a weak ServerUpdated nudge that proved unreliable), which
-    // ends in NetworkEvent::ServerJoined → Dart `onServerCreated` → the server is
-    // UNCONDITIONALLY (re)inserted into the list. This is the "MLS joined but UI
-    // shows 3 not 4" bug: the crypto/DB onboard had succeeded; the list just never
-    // refreshed. ServerJoined is the only event observed to refresh it reliably
-    // (it's the same event a live both-online create fires), so an already-held
-    // re-announce must produce it too.
+    // C ALREADY HOLDS the server and a leaf in it now. A second reconnect shows the
+    // same presence as a phone brought back on screen: B announces nothing C holds a
+    // leaf in, and C never replays ServerJoined (a server switch and a "Joined" toast
+    // in Dart). A held server announced anyway gets the quiet `ServerCreated` list
+    // refresh (`authz_a_sibling_announce_for_a_held_server_starts_no_join`).
     drain_events(&mut c);
     relay.set_online(&c.device_id, false);
     sleep_ms(300).await;
@@ -11214,12 +11210,8 @@ async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
         )
     })
     .await;
-    assert!(
-        c_rejoined,
-        "an already-held server re-announced on reconnect must re-run the join flow \
-         and emit ServerJoined (→ onServerCreated → list refresh) — NOT silently no-op, \
-         else the UI shows a stale count"
-    );
+    assert!(!c_rejoined, "a reconnect must not replay ServerJoined for a server C already holds");
+    assert!(c.servers().contains(&server_id), "C still lists the server, got {:?}", c.servers());
 }
 
 // MANUAL state sync ("Sync from this device"), the deterministic escape hatch: the
@@ -11266,13 +11258,17 @@ async fn manual_state_sync_pulls_servers_from_source_device() {
         .await
         .unwrap();
 
+    // C may hold it already from B's announce on its return: then the manual sync
+    // refreshes the list quietly (ServerCreated) instead of joining again.
     let c_synced = wait_event(&mut c, std::time::Duration::from_secs(12), |ev| {
-        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        matches!(ev,
+            NetworkEvent::ServerJoined { server_id: sid, .. }
+            | NetworkEvent::ServerCreated { server_id: sid, .. } if *sid == server_id)
     })
     .await;
     assert!(
         c_synced,
-        "manual state sync must make C onboard the server held by source device B (ServerJoined)"
+        "manual state sync must make C onboard or refresh the server held by source device B"
     );
     sleep_ms(1000).await;
     assert!(
@@ -14924,11 +14920,10 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
     sleep_ms(300).await;
     drain_events(&mut c);
     relay.set_online(&c.device_id, true);
-    let c_onboarded = wait_event(&mut c, std::time::Duration::from_secs(12), |ev| {
-        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
-    })
-    .await;
-    assert!(c_onboarded, "sibling C must onboard the joined server via re-announce");
+    // B's join completion already announced it to C; the bounce re-announces only
+    // what C holds no leaf in.
+    let c_onboarded = wait_until(12, async || c.servers().contains(&server_id)).await;
+    assert!(c_onboarded, "sibling C must onboard the server B joined");
     sleep_ms(3000).await;
     assert!(
         c.servers().contains(&server_id),
@@ -27284,7 +27279,13 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-10-08: the AR-30 tests added absence proofs, an Olm frame that must not leave
     // while its session save is held and past the save wait, a pre-fix save that must
     // land first, and one settle whose only signal is a running node's DB (13.3 s).
-    const BUDGET_MS: u64 = 776_600;
+    // 2026-10-08: the t1 sibling-return tests added four spawn staggers, three absence
+    // proofs and the relay buffer landing before it lapses (12.0 s).
+    // 2026-10-08: the t1 review regressions (a left server's late announce, a completed
+    // sibling join echoing back) added two spawn staggers (3.0 s, total 791.5 s).
+    // 2026-10-09: a listed sibling's re-join announcing nothing early is an absence
+    // proof (2.0 s, total 793.5 s).
+    const BUDGET_MS: u64 = 793_500;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -37510,7 +37511,7 @@ async fn c24_the_sibling_lane_rides_olm() {
         .await
         .unwrap();
     let refreshed = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
-        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        matches!(ev, NetworkEvent::ServerCreated { server_id: sid, .. } if *sid == server_id)
     })
     .await;
     assert!(refreshed, "the manual state sync answers over the Olm lane");
@@ -37802,11 +37803,19 @@ async fn authz_a_sibling_announce_for_a_held_server_starts_no_join() {
         .send(NodeCommand::RequestStateSync { source_device_id: b.device_id.clone() })
         .await
         .unwrap();
-    let refreshed = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
-        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    // One event per announce: the quiet refresh, or the server switch and toast of
+    // `ServerJoined`, which a held server must never replay.
+    let mut switched = false;
+    let refreshed = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| match ev {
+        NetworkEvent::ServerCreated { server_id: sid, .. } => *sid == server_id,
+        NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id => {
+            switched = true;
+            true
+        }
+        _ => false,
     })
     .await;
-    assert!(refreshed, "the second announce still refreshes C's list");
+    assert!(refreshed && !switched, "the second announce refreshes C's list quietly (switched to it: {switched})");
     assert!(
         frames_of_type(&relay, &c.device_id, "join_sealed").is_empty(),
         "HOL-SEC-056: an announce for a server C holds started a join",
@@ -44336,4 +44345,731 @@ async fn suspended_app_takes_its_push_fetch_copy(a_tag: u8, b_tag: u8, session_e
     assert!(stale_session_errors(&events).is_empty(), "{:?}", stale_session_errors(&events));
     let keys = olm_keys_used(&relay, &b.device_id, &a);
     assert!(reused_keys(&keys).is_empty(), "a message key went out twice: {:?}", reused_keys(&keys));
+}
+
+// t1-sibling
+
+/// How a device leaves while the server is made.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum T1Away {
+    /// The socket closes, presence leaves at once, and the session's grace runs out: a
+    /// phone that was off for longer than two minutes.
+    Expired,
+    /// The socket dies and nobody is told: its siblings keep it in `synced_peers`.
+    Silent,
+}
+
+fn t1_leave(relay: &MockRelay, dev: &str, away: T1Away) {
+    match away {
+        T1Away::Expired => {
+            relay.suspend(dev);
+            relay.expire_session(dev);
+        }
+        T1Away::Silent => relay.drop_socket_silently(dev),
+    }
+}
+
+fn t1_return(relay: &MockRelay, dev: &str, away: T1Away) {
+    match away {
+        T1Away::Expired => relay.resume(dev),
+        T1Away::Silent => relay.set_online(dev, true),
+    }
+}
+
+async fn t1_join_and_wait(node: &mut TestNode, server_id: &str) {
+    node.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.to_string(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(server_id),
+        })
+        .await
+        .unwrap();
+    let joined = wait_event(node, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if sid == server_id)
+    })
+    .await;
+    assert!(joined, "{} should join {server_id}", node.device_id);
+}
+
+/// A server made (`created`) or joined on device 1 of an identity while device 2 is away
+/// reaches device 2 when it comes back, device 1 online or not, with another member
+/// online throughout: device 2 lists it, holds an MLS leaf and reads the channel.
+/// `lapse`: what the relay held for device 2 is gone by then. `late`: device 2 comes back
+/// long after the live-signal window, so only what may arrive late reaches it.
+#[allow(clippy::await_holding_lock)]
+async fn t1_sibling_back_gets_the_server(tags: [u8; 4], created: bool, d1_online: bool, away: T1Away, lapse: bool, late: bool) {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    let [m_tag, d1_tag, d2_tag, x_tag] = tags;
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    super::resolver::seed_self(&id(m_tag), &[id(d1_tag), id(d2_tag)]);
+
+    let mut d1 = spawn_node_on(&relay, m_tag, d1_tag).await;
+    // Spawn stagger (see `session_server_pair`).
+    sleep_ms(1500).await;
+    let mut d2 = spawn_node_on(&relay, m_tag, d2_tag).await;
+    let mut x = spawn_node_on(&relay, x_tag, x_tag).await;
+    expect_siblings_ready(&relay, &d1, &d2, 15).await;
+
+    t1_leave(&relay, &d2.device_id, away);
+
+    let server_id = if created {
+        let sid = create_server_and_wait(&mut d1, "Made while away").await;
+        t1_join_and_wait(&mut x, &sid).await;
+        sid
+    } else {
+        let sid = create_server_and_wait(&mut x, "Joined while away").await;
+        t1_join_and_wait(&mut d1, &sid).await;
+        sid
+    };
+    expect_mls_leaf(&x, &server_id, &d1.device_id, 20).await;
+    expect_mls_leaf(&d1, &server_id, &x.device_id, 20).await;
+    assert!(!d2.servers().contains(&server_id), "precondition: device 2 was away for it");
+
+    if !d1_online {
+        relay.suspend(&d1.device_id);
+    }
+    if lapse {
+        relay.expire_mailbox(&d2.device_id);
+    }
+    let _clock = late.then(|| {
+        super::frame_auth::clock_ahead_for_test(2 * super::frame_auth::LIVE_SKEW_MS)
+    });
+
+    drain_events(&mut d2);
+    t1_return(&relay, &d2.device_id, away);
+    let back = wait_event(&mut d2, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(back, "device 2 back from away must get the server (ServerJoined)");
+    assert!(d2.servers().contains(&server_id), "device 2 lists the server, got {:?}", d2.servers());
+    expect_mls_leaf(&x, &server_id, &d2.device_id, 25).await;
+    expect_mls_leaf(&d2, &server_id, &x.device_id, 25).await;
+
+    drain_events(&mut d2);
+    x.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general_channel_of(&server_id),
+            text: "t1 welcome back".to_string(),
+            message_id: "t1-sibling-back-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let read = wait_event(&mut d2, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "t1 welcome back")
+    })
+    .await;
+    assert!(read, "device 2 must read the channel of the server it got back");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t1_sibling_created_while_away_reaches_it_device_one_online() {
+    t1_sibling_back_gets_the_server([60, 61, 62, 63], true, true, T1Away::Expired, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t1_sibling_created_while_away_reaches_it_device_one_offline() {
+    t1_sibling_back_gets_the_server([64, 65, 66, 67], true, false, T1Away::Expired, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t1_sibling_joined_while_away_reaches_it_device_one_online() {
+    t1_sibling_back_gets_the_server([68, 69, 70, 71], false, true, T1Away::Expired, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t1_sibling_joined_while_away_reaches_it_device_one_offline() {
+    t1_sibling_back_gets_the_server([72, 73, 74, 75], false, false, T1Away::Expired, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t1_sibling_created_while_silently_gone_reaches_it_device_one_online() {
+    t1_sibling_back_gets_the_server([76, 77, 78, 79], true, true, T1Away::Silent, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t1_sibling_joined_while_silently_gone_reaches_it_device_one_online() {
+    t1_sibling_back_gets_the_server([80, 81, 82, 83], false, true, T1Away::Silent, false, false).await;
+}
+
+/// The announce the relay holds for an absent device can be stale by the time it comes
+/// back, here long after: a server our other device joined and then left must not come
+/// back with it, and running its join flow must not re-admit our identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t1_sibling_stale_announce_after_a_leave_does_not_rejoin() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    let [m_tag, d1_tag, d2_tag, x_tag] = [84u8, 85, 86, 87];
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let m_master = id(m_tag);
+    super::resolver::seed_self(&m_master, &[id(d1_tag), id(d2_tag)]);
+
+    let mut d1 = spawn_node_on(&relay, m_tag, d1_tag).await;
+    // Spawn stagger (see `session_server_pair`).
+    sleep_ms(1500).await;
+    let d2 = spawn_node_on(&relay, m_tag, d2_tag).await;
+    let mut x = spawn_node_on(&relay, x_tag, x_tag).await;
+    expect_siblings_ready(&relay, &d1, &d2, 15).await;
+
+    t1_leave(&relay, &d2.device_id, T1Away::Expired);
+    let server_id = create_server_and_wait(&mut x, "Left while away").await;
+    t1_join_and_wait(&mut d1, &server_id).await;
+    expect_mls_leaf(&x, &server_id, &d1.device_id, 20).await;
+    expect_mls_leaf(&d1, &server_id, &x.device_id, 20).await;
+    let announced = wait_until(10, async || {
+        d1.carried_to(&d2.device_id).await.iter().any(|m| {
+            matches!(m, super::types::HavenMessage::SiblingServerAnnounce { server_id: sid, .. } if *sid == server_id)
+        })
+    })
+    .await;
+    assert!(announced, "precondition: device 1 announced the server to the absent device 2");
+
+    d1.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(30, async || !x.raw_crdt_member_keys(&server_id).contains(&m_master)).await,
+        "precondition: the member sees our identity leave"
+    );
+
+    let _clock = super::frame_auth::clock_ahead_for_test(2 * super::frame_auth::LIVE_SKEW_MS);
+    t1_return(&relay, &d2.device_id, T1Away::Expired);
+    assert!(
+        wait_until(15, async || relay.room_devices(&server_id).contains(&d2.device_id)).await,
+        "precondition: device 2 acted on the late announce and ran the join flow"
+    );
+    let back = wait_until(15, async || {
+        d2.servers().contains(&server_id) || x.raw_crdt_member_keys(&server_id).contains(&m_master)
+    })
+    .await;
+    assert!(
+        !back,
+        "a stale announce must not bring back a server we left: device 2 lists {:?}, members {:?}",
+        d2.servers(),
+        x.raw_crdt_member_keys(&server_id),
+    );
+}
+
+/// What the relay held for device 2 lapsed: device 1, still online, tells it again when
+/// it comes back, wherever the two meet first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t1_sibling_back_after_the_held_announce_lapsed_hears_it_from_device_one() {
+    t1_sibling_back_gets_the_server([88, 89, 90, 91], true, true, T1Away::Expired, true, false).await;
+}
+
+/// The device coming back holds a server the one already online lacks (what the relay
+/// held for it lapsed): the returning side announces it, wherever the two meet first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t1_sibling_returning_device_announces_its_own_servers() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    super::resolver::seed_self(&id(92), &[id(93), id(94)]);
+    let mut d1 = spawn_node_on(&relay, 92, 93).await;
+    // Spawn stagger (see `session_server_pair`).
+    sleep_ms(1500).await;
+    let mut d2 = spawn_node_on(&relay, 92, 94).await;
+    expect_siblings_ready(&relay, &d1, &d2, 15).await;
+
+    t1_leave(&relay, &d1.device_id, T1Away::Expired);
+    let server_id = create_server_and_wait(&mut d2, "Made on the other one").await;
+    let held = wait_until(10, async || {
+        d2.carried_to(&d1.device_id).await.iter().any(|m| {
+            matches!(m, super::types::HavenMessage::SiblingServerAnnounce { server_id: sid, .. } if *sid == server_id)
+        })
+    })
+    .await;
+    assert!(held, "precondition: device 2 announced the server to the absent device 1");
+    // The announce lands in the relay's buffer before that lapses; nothing to poll.
+    sleep_ms(500).await;
+    relay.expire_mailbox(&d1.device_id);
+
+    t1_leave(&relay, &d2.device_id, T1Away::Expired);
+    t1_return(&relay, &d1.device_id, T1Away::Expired);
+    // Absence proof: nothing reaches device 1 while device 2 is away too.
+    sleep_ms(2000).await;
+    assert!(!d1.servers().contains(&server_id), "precondition: device 1 came back to nothing");
+
+    drain_events(&mut d1);
+    t1_return(&relay, &d2.device_id, T1Away::Expired);
+    let got = wait_event(&mut d1, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(got, "device 2 coming back must announce its server to device 1 (ServerJoined)");
+    assert!(d1.servers().contains(&server_id), "device 1 lists the server, got {:?}", d1.servers());
+}
+
+/// A device our roster removed hears of no server we make or join afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t1_sibling_removed_device_is_not_announced_a_new_server() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    super::resolver::seed_self(&id(95), &[id(96), id(97)]);
+    let mut d1 = spawn_node_on(&relay, 95, 96).await;
+    // Spawn stagger (see `session_server_pair`).
+    sleep_ms(1500).await;
+    let d2 = spawn_node_on(&relay, 95, 97).await;
+    seed_device_list_into_db(&d1.db_path, &d1.passphrase, 95, &[96, 97]);
+    seed_device_list_into_db(&d2.db_path, &d2.passphrase, 95, &[96, 97]);
+    expect_siblings_ready(&relay, &d1, &d2, 15).await;
+
+    drain_events(&mut d1);
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: d2.device_id.clone() }).await.unwrap();
+    let updated = wait_event(&mut d1, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::DeviceListUpdated { .. })
+    })
+    .await;
+    assert!(updated, "precondition: device 1 removed device 2");
+
+    let server_id = create_server_and_wait(&mut d1, "After the removal").await;
+    // Absence proof: no announce leaves for the removed device.
+    sleep_ms(1500).await;
+    let told = d1.carried_to(&d2.device_id).await.into_iter().any(|m| {
+        matches!(m, super::types::HavenMessage::SiblingServerAnnounce { server_id: sid, .. } if sid == server_id)
+    });
+    assert!(!told, "a removed device must not be announced a server made after its removal");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t1_sibling_created_while_away_long_reaches_it_device_one_offline() {
+    t1_sibling_back_gets_the_server([98, 99, 100, 101], true, false, T1Away::Expired, false, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t1_sibling_joined_while_away_long_reaches_it_device_one_offline() {
+    t1_sibling_back_gets_the_server([102, 103, 104, 105], false, false, T1Away::Expired, false, true).await;
+}
+
+/// The announce waits in the relay's buffer for as long as the device is away, so the
+/// seal-time window of live signals must not judge it, carried or bare.
+#[test]
+fn t1_sibling_server_announce_may_arrive_late() {
+    let announce = super::types::HavenMessage::SiblingServerAnnounce {
+        server_id: "a".repeat(40),
+        owner: None,
+        join_key: None,
+    };
+    assert!(!announce.live_only(), "a bare announce is durable");
+    let carried: super::types::MessageEnvelope =
+        serde_json::from_str(&super::olm_lane::carried_json(&announce).expect("carried")).expect("carried envelope");
+    assert!(!carried.live_only(), "a carried announce is durable");
+}
+
+/// The resolver can still link a device it marks removed; the announce skips it there
+/// too, while a device that never connected is still told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t1_sibling_device_marked_removed_is_not_announced_even_while_linked() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (removed, absent) = (id(108), id(109));
+    super::resolver::seed_self(&id(106), &[id(107)]);
+    let mut d1 = spawn_node_on(&relay, 106, 107).await;
+    let inbox = format!("inbox:{}", id(106));
+    assert!(
+        wait_until(10, async || relay.room_devices(&inbox).contains(&d1.device_id)).await,
+        "precondition: device 1 started and joined its inbox"
+    );
+    // After start-up, whose roster fold relinks only the roster's members. The control
+    // below proves the links held at the announce: both devices are linked together.
+    super::resolver::seed_self(&id(106), &[id(107), removed.clone(), absent.clone()]);
+    super::resolver::mark_revoked(std::slice::from_ref(&removed));
+
+    let server_id = create_server_and_wait(&mut d1, "Linked but removed").await;
+    let announced = |m: &super::types::HavenMessage| {
+        matches!(m, super::types::HavenMessage::SiblingServerAnnounce { server_id: sid, .. } if *sid == server_id)
+    };
+    assert!(
+        wait_until(10, async || d1.carried_to(&absent).await.iter().any(announced)).await,
+        "a device that never connected is announced the server"
+    );
+    assert!(
+        !d1.carried_to(&removed).await.iter().any(announced),
+        "a device marked removed must not be announced the server"
+    );
+}
+
+/// A device resuming its session hears `members` for its inbox again, its sibling still
+/// listed: no return, so a server not yet joinable is not announced early.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t1_sibling_resume_listing_a_present_sibling_announces_nothing_early() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, c) = sibling_pair(&relay, 111, 112, 113).await;
+
+    relay.hold_lock_reads(&b.device_id);
+    b.cmd_tx.send(NodeCommand::CreateServer { name: "Resumed".into() }).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::ServerCreated { .. })).await,
+        "B creates the server",
+    );
+    assert!(wait_until(10, async || relay.held_lock_reads(&b.device_id) > 0).await, "B asks for the chain");
+
+    let mark = relay.log_mark();
+    relay.suspend(&b.device_id);
+    relay.resume(&b.device_id);
+    let inbox = format!("inbox:{}", b.master_id);
+    assert!(
+        wait_until(10, async || relay.room_devices(&inbox).contains(&b.device_id)).await,
+        "precondition: B resumed into its inbox",
+    );
+    // Absence proof: C reads no chain off a re-listing.
+    sleep_ms(2000).await;
+    let early_reads = relay.commands_since(&c.device_id, mark).iter().filter(|(kind, _, _)| *kind == "lock_get").count();
+    assert_eq!(early_reads, 0, "a resume re-listing C must not announce the lockless server to it");
+}
+
+// t1-review
+
+/// A device whose sibling-origin join completes must not bounce the announce back to
+/// the sibling that already holds the server: there the receiver emits `ServerJoined`,
+/// which Dart turns into a server switch and a "Joined" toast.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t1_review_completed_sibling_join_does_not_bounce_server_joined() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    let [m_tag, d1_tag, d2_tag, x_tag] = [180u8, 181, 182, 183];
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    super::resolver::seed_self(&id(m_tag), &[id(d1_tag), id(d2_tag)]);
+
+    let mut d1 = spawn_node_on(&relay, m_tag, d1_tag).await;
+    sleep_ms(1500).await;
+    let mut d2 = spawn_node_on(&relay, m_tag, d2_tag).await;
+    let mut x = spawn_node_on(&relay, x_tag, x_tag).await;
+    expect_siblings_ready(&relay, &d1, &d2, 15).await;
+
+    t1_leave(&relay, &d2.device_id, T1Away::Expired);
+    let server_id = create_server_and_wait(&mut x, "Bounce").await;
+    t1_join_and_wait(&mut d1, &server_id).await;
+    expect_mls_leaf(&x, &server_id, &d1.device_id, 20).await;
+
+    drain_events(&mut d1);
+    drain_events(&mut d2);
+    t1_return(&relay, &d2.device_id, T1Away::Expired);
+    let back = wait_event(&mut d2, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(back, "precondition: device 2 joined the server on its return");
+    let bounced = wait_event(&mut d1, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(!bounced, "device 1 already held the server: no ServerJoined (UI switch + toast) when device 2 completes");
+    // Long past the completion, which announces right after its ServerJoined.
+    expect_mls_leaf(&x, &server_id, &d2.device_id, 25).await;
+    let echoed = d2.carried_to(&d1.device_id).await.into_iter().any(|m| {
+        matches!(m, super::types::HavenMessage::SiblingServerAnnounce { server_id: sid, .. } if sid == server_id)
+    });
+    assert!(!echoed, "a join our other device announced is not announced back to it");
+}
+
+/// A late announce for a server our identity LEFT, now private: device 2 must not end up
+/// with a persisted join (a rejected tile that a restart restores as a parked join with a
+/// master-signed ask) the user never made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t1_review_stale_announce_for_a_left_server_leaves_no_join_behind() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    let [m_tag, d1_tag, d2_tag, x_tag] = [184u8, 185, 186, 187];
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let m_master = id(m_tag);
+    super::resolver::seed_self(&m_master, &[id(d1_tag), id(d2_tag)]);
+
+    let mut d1 = spawn_node_on(&relay, m_tag, d1_tag).await;
+    sleep_ms(1500).await;
+    let mut d2 = spawn_node_on(&relay, m_tag, d2_tag).await;
+    let mut x = spawn_node_on(&relay, x_tag, x_tag).await;
+    expect_siblings_ready(&relay, &d1, &d2, 15).await;
+
+    t1_leave(&relay, &d2.device_id, T1Away::Expired);
+    let server_id = create_server_and_wait(&mut x, "Left then closed").await;
+    t1_join_and_wait(&mut d1, &server_id).await;
+    expect_mls_leaf(&x, &server_id, &d1.device_id, 20).await;
+    let announced = wait_until(10, async || {
+        d1.carried_to(&d2.device_id).await.iter().any(|m| {
+            matches!(m, super::types::HavenMessage::SiblingServerAnnounce { server_id: sid, .. } if *sid == server_id)
+        })
+    })
+    .await;
+    assert!(announced, "precondition: device 1 announced the server to the absent device 2");
+
+    d1.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(30, async || !x.raw_crdt_member_keys(&server_id).contains(&m_master)).await,
+        "precondition: the member sees our identity leave"
+    );
+    x.cmd_tx.send(NodeCommand::UpdateServerSetting {
+        server_id: server_id.clone(), key: "is_private".into(), value: "true".into(),
+    }).await.unwrap();
+    assert!(
+        wait_until(10, async || x.live_server_state(&server_id).await.is_some_and(|s| s.is_private())).await,
+        "precondition: the server is private"
+    );
+
+    let _clock = super::frame_auth::clock_ahead_for_test(2 * super::frame_auth::LIVE_SKEW_MS);
+    drain_events(&mut d2);
+    t1_return(&relay, &d2.device_id, T1Away::Expired);
+    assert!(
+        wait_until(15, async || relay.room_devices(&server_id).contains(&d2.device_id)).await,
+        "precondition: device 2 acted on the late announce and ran the join flow"
+    );
+    let surfaced = wait_event(&mut d2, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev,
+            NetworkEvent::PendingJoinUpdated { server_id: sid, .. }
+            | NetworkEvent::TwitchJoinRejected { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    let row = crate::storage::MessageStore::open(&d2.db_path, &d2.passphrase)
+        .ok()
+        .and_then(|s| s.load_pending_joins().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.server_id == server_id)
+        .map(|r| (r.state, r.reason, r.requested_at));
+    assert!(
+        !surfaced && row.is_none(),
+        "a late announce for a server we left must leave no join behind: surfaced {surfaced}, row {row:?}"
+    );
+}
+
+/// A phone backgrounded and brought back (relay `inactive` then `active`, its socket up
+/// all along) hears its sibling's server announces again, and must not turn one for a
+/// server it already holds into `ServerJoined` (a server switch and a "Joined" toast in
+/// Dart): a quiet list refresh at most.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t1_review_phone_foreground_does_not_replay_server_joined() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, mut c) = sibling_pair(&relay, 188, 189, 190).await;
+
+    let server_id = create_server_and_wait(&mut b, "Foreground").await;
+    assert!(
+        wait_until(20, async || c.servers().contains(&server_id)).await,
+        "precondition: the sibling holds the server"
+    );
+    expect_mls_leaf(&b, &server_id, &c.device_id, 20).await;
+    drain_events(&mut c);
+
+    use super::types::HavenMessage;
+    let c_dev = c.device_id.clone();
+    let to_c = async |b: &TestNode| {
+        let carried = b.carried_to(&c_dev).await;
+        let announces = carried.iter().filter(|m| {
+            matches!(m, HavenMessage::SiblingServerAnnounce { server_id: sid, .. } if *sid == server_id)
+        }).count();
+        let kinds = carried.iter().filter(|m| matches!(m, HavenMessage::DeviceKind { .. })).count();
+        (announces, kinds)
+    };
+    let (announces_before, kinds_before) = to_c(&b).await;
+
+    relay.set_background(&c, true);
+    relay.set_background(&c, false);
+    assert!(
+        wait_until(10, async || {
+            let (announces, kinds) = to_c(&b).await;
+            announces > announces_before && kinds > kinds_before
+        })
+        .await,
+        "precondition: the sibling ran its convergence for the phone again, server announce included"
+    );
+    let replayed = wait_event(&mut c, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(!replayed, "a phone brought to the foreground must not get ServerJoined for a server it already holds");
+    assert!(c.servers().contains(&server_id), "the phone still lists the server");
+}
+
+// t1-sibling-3
+
+/// The announce for a server reaches only servers our identity is in: a shell kept
+/// after a leave, or a tombstone, would have the sibling re-add our identity.
+#[test]
+fn t1_sibling_announce_names_only_a_server_we_are_in() {
+    let _g = test_guard();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (master, here, there) = (id(200), id(201), id(202));
+    super::resolver::seed_self(&master, &[here.clone(), there.clone()]);
+    let announced = |state: &ServerState| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let counted = super::sync_handler::announce_server_to_own_devices(&tx, &master, &here, &state.server_id, state);
+        let mut sent = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, WsCommand::Carry { ref device, .. } if *device == there) {
+                sent += 1;
+            }
+        }
+        (counted, sent)
+    };
+
+    let ours = ServerState::new("ab".repeat(20), "Ours".into(), master.clone());
+    assert_eq!(announced(&ours), (1, 1), "control: a server we are in is announced to the other device");
+    let left = ServerState::new("cd".repeat(20), "Left".into(), id(203));
+    assert_eq!(announced(&left), (0, 0), "a server we are not in is never announced");
+    let mut deleted = ServerState::new("ef".repeat(20), "Deleted".into(), master.clone());
+    deleted.deleted = true;
+    assert_eq!(announced(&deleted), (0, 0), "a deleted server is never announced");
+}
+
+/// A join our other device announced signs no ask, however often it asks again: the
+/// user asked for nothing here, and an ask is what admits an identity.
+#[test]
+fn t1_sibling_announced_join_never_signs_an_ask() {
+    let master = NativeKeypair::from_secret_bytes(&seed_bytes(204));
+    let sid = "ab".repeat(20);
+    let mut announced = super::types::PendingJoin { from_sibling: true, ..Default::default() };
+    announced.ask_again(&sid, 1_700_000_000_000, &master);
+    assert!(announced.ask.is_none() && announced.requested_at == 0, "an announced join signed an ask");
+
+    let mut asked = super::types::PendingJoin::default();
+    asked.ask_again(&sid, 1_700_000_000_000, &master);
+    assert!(asked.ask.is_some(), "control: the user's own join signs its ask");
+}
+
+/// A join our other device announced keeps no row: boot would restore it as a parked
+/// join with a master-signed ask, and the strip would show a tile nobody asked for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t1_sibling_announced_join_keeps_no_row() {
+    let dir = crate::test_tmp::tempdir().expect("tmp");
+    let db = dir.path().join("t1-rows.db").to_string_lossy().to_string();
+    let store = CrdtStore::open(db, "t1-rows".into()).expect("crdt store");
+    let (announced_sid, asked_sid) = ("ab".repeat(20), "cd".repeat(20));
+
+    let announced = super::types::PendingJoin { from_sibling: true, requested_at: 5, ..Default::default() };
+    super::sync_handler::save_pending_join(&store, &announced_sid, &announced, "rejected", "server_private:x");
+    let asked = super::types::PendingJoin { requested_at: 6, ..Default::default() };
+    super::sync_handler::save_pending_join(&store, &asked_sid, &asked, "pending", "");
+    store.committed().await;
+
+    assert!(store.load_pending_join(asked_sid).await.is_some(), "control: the user's own join keeps its row");
+    assert!(store.load_pending_join(announced_sid).await.is_none(), "an announced join kept a row");
+}
+
+/// A test that moves the frame clock moves it for its own runtime only: a test running
+/// beside it on another runtime keeps the wall clock.
+#[tokio::test(flavor = "current_thread")]
+async fn t1_sibling_test_clock_moves_only_its_own_runtime() {
+    let wall = || {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    };
+    let hour = 3_600_000;
+    let _ahead = super::frame_auth::clock_ahead_for_test(hour);
+    assert!(super::frame_auth::now_ms() - wall() > hour / 2, "control: this runtime's clock moved");
+    let beside = std::thread::spawn(|| {
+        let other = tokio::runtime::Builder::new_current_thread().build().expect("runtime");
+        other.block_on(async { super::frame_auth::now_ms() })
+    })
+    .join()
+    .expect("thread");
+    assert!((beside - wall()).abs() < hour / 2, "another runtime read the moved clock");
+}
+
+// t1-sibling-4
+
+/// A sibling that holds its leaf in a server but lost the server from its list (in the
+/// group, missing in the UI) gets it back when it reconnects: the convergence announces
+/// every server we are in, whatever leaves the sibling holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t1_sibling_holding_a_leaf_but_missing_the_server_gets_it_back() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, c) = sibling_pair(&relay, 195, 196, 197).await;
+
+    let server_id = create_server_and_wait(&mut b, "Missing in the list").await;
+    assert!(
+        wait_until(20, async || c.servers().contains(&server_id)).await,
+        "precondition: the sibling holds the server"
+    );
+    expect_mls_leaf(&b, &server_id, &c.device_id, 20).await;
+
+    let sid = server_id.clone();
+    let c = restart_node_with(&relay, c, 195, 197, |db_path, pass| {
+        crate::storage::MessageStore::open(db_path, pass)
+            .expect("open the sibling's store")
+            .delete_server_state(&sid)
+            .expect("drop the server from the sibling's list");
+    })
+    .await;
+    assert!(
+        b.mls_members_checked(&server_id).await.is_some_and(|m| m.contains(&c.device_id)),
+        "precondition: the sibling still holds its leaf as device 1 sees the group"
+    );
+    assert!(
+        wait_until(20, async || c.servers().contains(&server_id)).await,
+        "the sibling that lost the server from its list gets it back on reconnect, got {:?}",
+        c.servers(),
+    );
+}
+
+/// A sibling still listed in our inbox that the relay reports joining again did not
+/// come back from anywhere: no convergence, so a server not yet joinable is not
+/// announced early.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t1_sibling_rejoin_of_a_listed_sibling_announces_nothing_early() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, c) = sibling_pair(&relay, 210, 211, 212).await;
+
+    relay.hold_lock_reads(&b.device_id);
+    b.cmd_tx.send(NodeCommand::CreateServer { name: "Rejoined".into() }).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::ServerCreated { .. })).await,
+        "B creates the server",
+    );
+    assert!(wait_until(10, async || relay.held_lock_reads(&b.device_id) > 0).await, "B asks for the chain");
+
+    let mark = relay.log_mark();
+    let inbox = format!("inbox:{}", b.master_id);
+    relay.inject_presence(&b.device_id, &inbox, &c.device_id);
+    // Absence proof: C reads no chain off a re-join it never left.
+    sleep_ms(2000).await;
+    let early_reads = relay.commands_since(&c.device_id, mark).iter().filter(|(kind, _, _)| *kind == "lock_get").count();
+    assert_eq!(early_reads, 0, "a re-join of a listed sibling must not announce the lockless server to it");
 }

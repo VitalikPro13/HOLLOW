@@ -200,11 +200,14 @@ pub(crate) fn load_or_create_identity() -> Result<IdentityData, String> {
             mnemonic: None,
         })
     } else {
-        // A destruction order can land mid-boot, after the wipe unlinked the key
-        // file: minting a fresh identity then leaves a live, unused key in a
-        // root the next launch is about to clear.
-        if crate::api::storage::has_pending_wipe().unwrap_or(false) {
-            return Err("A data wipe is pending. Restart Hollow to finish it.".into());
+        // A wipe the next launch finishes (a destruction order mid-boot, a database
+        // something held), or a link or restore between moving the old identity out
+        // and the new one in: a key minted now would sit beside a database it never
+        // opens, or in a root about to be cleared.
+        if crate::api::storage::has_pending_wipe().unwrap_or(false)
+            || crate::api::storage::landing_in_progress()
+        {
+            return Err(crate::api::storage::IDENTITY_NOT_READY.into());
         }
         generate_new_identity()
     }

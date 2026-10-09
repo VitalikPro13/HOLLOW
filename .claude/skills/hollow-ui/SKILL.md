@@ -1,6 +1,6 @@
 ---
 name: hollow-ui
-description: "Hollow's design language as a working checklist: type roles, surfaces, spacing and gap ramp, radius stops, the two label components (HollowBadge / HollowChip), the button-variant rule, motion and state layers, the forbidden list, and the screenshot proof step. Load BEFORE writing or editing any widget in lib/src/ui or lib/src/theme, before adding a dialog, chip, badge, button row, section header or empty state, and before any UI review. The full rule set is reports/reference/HOLLOW_DESIGN_LANGUAGE.md."
+description: "Hollow's design language as a working checklist: type roles, surfaces, spacing and gap ramp, radius stops, the two label components (HollowBadge / HollowChip), the button-variant rule, motion and state layers, the forbidden list, the visual QA checks for judging a screenshot, and the screenshot proof step. Load BEFORE writing or editing any widget in lib/src/ui or lib/src/theme, before adding a dialog, chip, badge, button row, section header or empty state, and before any UI review. The full rule set is reports/reference/HOLLOW_DESIGN_LANGUAGE.md."
 ---
 
 # hollow-ui
@@ -322,6 +322,48 @@ motion; never add another.
 
 ---
 
+## Visual QA: judging a screenshot
+
+What Vitalik has had to point out before, as checks on the rendered PNG. **Measure the picture,
+never the padding numbers in code** (he once measured 10 vs 20 px himself).
+
+- **Even:** facing gutters equal (a header or tab row's left and right); a glyph the same distance
+  from its top, right and bottom edges (an X never sits low); buttons in one row one height (a
+  filled and an outline never differ by a pixel); icons optically centred in their slot; a row's
+  hover or selection fill evenly padded, also beside a scrollbar gutter.
+- **Edges and seams:** chrome rows reach both dividers with no notch at a corner; a hover fill
+  reaches the corner it belongs to; scrollbars and their caps never touch panel edges or the
+  header and composer rules; no decorative gutter that reads as a hole; icon-only and dock controls
+  keep 8 px from the window's outer edge.
+- **Scrollbars** show only when something scrolls, and the track ends where the travel ends.
+- **Avatars:** a frame ring is never clipped by the status-dot stack (coloured specks) and sits
+  flush on the avatar edge.
+- **Fit:** a dialog is never taller than the screen (actions reachable on a short iPhone), never
+  runs up into the Dock header, and its close control stays reachable at any interface zoom; menus
+  and popovers flip or shift to stay on screen; names and chip labels ellipsize beside their
+  actions; every screen holds at text scale 1.0, 1.5 and 2.0.
+- **Narrow widths:** a side panel folds or drops, never squeezes; a panel never hides its own
+  dismiss control; a panel's button and the panel agree; a header sheds its non-controls first.
+  Phones are judged at 375 and 320 px wide, not only today's simulator sizes.
+- **Themes:** nothing vanishes on dark (ratings, black logos); light text that looks thin goes one
+  weight up, never a size up; notice bars are opaque, never a tint the wallpaper shows through.
+- **State:** a transient strip (typing, status) never reserves layout space, it floats over a
+  seam; a hover bar stays attached to its row through a scroll; an image reserves its size before
+  it decodes; every action shows busy, success or failure, never a silent wait; a failed load never
+  looks like "none yet"; status shows by exception, and nothing appears twice on one screen.
+- **Controls:** a show/hide toggle keeps one position in both states; a control that opens a panel
+  closes it when pressed again; a card or popup has one primary plus an icon strip, never a stack
+  of full-width buttons; a section's Save sits below every field it saves.
+- **Settings:** a hairline between big sections; a choice row says what the chosen option means; a
+  group that matters is its own section, not a tiny dense sub-header.
+- **Phone:** sheets keep a visible handle and a SafeArea bottom; a long press opens a bottom sheet;
+  touch targets 44 px or more whatever the painted size.
+- **How to look:** ONE image per screen, BEFORE left and AFTER right; judge subtle chrome at 1x as
+  well as zoomed; use adversarial fixtures (long and duplicate names, a populated search); desktop
+  at about 800, 1280 and 2500 px wide plus the phone, dark and light.
+
+---
+
 ## Before you say it is done
 
 1. **`flutter test test/design_language_guard_test.dart`** is green and no
@@ -333,8 +375,8 @@ motion; never add another.
    fixture peer (`-Onboard -Fresh`, then `-Scenario ... -Peers a`), never
    `ui_probe.ps1`'s default, which mirrors Vitalik's real identity. A scenario
    creates the server or channel it needs; a step that misses is driven by hand
-   with `-Live`, never shot empty. **Read your own PNGs**, and fix what looks
-   wrong before reporting. Verifying UI from source does not count. Desktop and mobile both.
+   with `-Live`, never shot empty. **Read your own PNGs** against the Visual QA
+   list above, and fix what looks wrong before reporting. Verifying UI from source does not count. Desktop and mobile both.
    For a component rather than a screen, add it to the design sheet and shoot
    that: `ui_probe.ps1 -Widget design-gallery` renders every primitive in every
    state, dark beside light, needing no data directory.

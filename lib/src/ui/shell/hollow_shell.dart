@@ -866,7 +866,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
         await storage_api.importPendingLink();
       }
     } catch (e) {
-      debugPrint('[HOLLOW] Pending link import failed: $e');
+      // Release builds print nothing, so the reason goes to hollow_debug.log.
+      unawaited(network_api
+          .logFromDart(message: '[HOLLOW-LINK] Pending link import failed: $e')
+          .catchError((_) {}));
     }
 
     final hasExisting = await storage_api.hasIdentity();
@@ -1205,18 +1208,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
       // launch's _bootstrap wipes before the node starts.
       if (wentBack == true) {
         await storage_api.stashPendingWipe();
-        try {
-          await network_api.notifyShutdown();
-          await Future.delayed(const Duration(milliseconds: 200));
-        } catch (_) {}
-        try {
-          if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-            await Process.start(Platform.resolvedExecutable, const [],
-                mode: ProcessStartMode.detached);
-            await Future.delayed(const Duration(milliseconds: 100));
-          }
-        } catch (_) {}
-        exit(0);
+        // The shared waiter: a copy spawned while this one runs is handed to
+        // this window and exits, and it would drop --portable.
+        await relaunchApp();
       }
     }
 

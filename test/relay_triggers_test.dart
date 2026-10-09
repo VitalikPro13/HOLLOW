@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/services/realtime_session_flag.dart';
 import 'package:hollow/src/core/services/relay_triggers.dart';
@@ -905,6 +906,27 @@ void main() {
         container.dispose();
       }
     });
+
+    // A phone showing a link code must stay visible: hidden, the relay
+    // withholds the joiner's arrival and the handshake is refused.
+    test('a link code shown or being answered', () {
+      const live = {
+        LinkPhase.showingCode,
+        LinkPhase.renewingCode,
+        LinkPhase.confirmPush,
+        LinkPhase.sending,
+      };
+      for (final phase in LinkPhase.values) {
+        final container = ProviderContainer(overrides: [
+          callProvider.overrideWith(_IdleCall.new),
+          overallConnectionProvider.overrideWithValue(OverallConnection.connected),
+          deviceLinkSyncProvider.overrideWith(() => _SeededLink(phase)),
+        ]);
+        expect(container.read(relayRealtimeProvider), live.contains(phase),
+            reason: '$phase');
+        container.dispose();
+      }
+    });
   });
 }
 
@@ -925,4 +947,15 @@ class _Lobby extends ConferenceNotifier {
 
   @override
   ConferenceState build() => ConferenceState(lobbyStatus: status);
+}
+
+class _SeededLink extends DeviceLinkSyncNotifier {
+  _SeededLink(this.phase);
+  final LinkPhase phase;
+
+  @override
+  DeviceLinkState build() {
+    super.build();
+    return DeviceLinkState(phase: phase);
+  }
 }

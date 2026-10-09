@@ -1057,6 +1057,7 @@ try {
         # ---- G6: b IS a now -------------------------------------------------
         Say '6/7 b comes back as a sibling of a'
         Wait-ForConnected b
+        if (-not (Close-LockOffer b)) { Add-Note "b's first start after the link never offered a lock" }
         Step b @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B_AFTER' }
         $masterB = $script:FleetVars['PEER_B_AFTER']
         if ($masterB -ne $masterA) {

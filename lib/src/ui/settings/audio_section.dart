@@ -361,7 +361,7 @@ class _AudioVideoSettingsViewState
     }
 
     final selectedInput = ref.read(audioInputDeviceProvider).valueOrNull;
-    final aiNs = ref.read(noiseSuppressAiProvider).valueOrNull ?? false;
+    final aiNs = ref.read(noiseSuppressAiProvider).valueOrNull ?? kNoiseSuppressAiDefault;
     final enhance = ref.read(voiceEnhanceProvider).valueOrNull ?? true;
     final dynMode = ref.read(voiceEnhanceDynamicProvider).valueOrNull ?? true;
 
@@ -523,7 +523,7 @@ class _AudioVideoSettingsViewState
     _micTestRecPath = outPath;
 
     // Offline-render through the real chain with the CURRENT knobs.
-    final aiNs = ref.read(noiseSuppressAiProvider).valueOrNull ?? false;
+    final aiNs = ref.read(noiseSuppressAiProvider).valueOrNull ?? kNoiseSuppressAiDefault;
     final engine = noiseSuppressEngineToNative(
         ref.read(noiseSuppressEngineProvider).valueOrNull ??
             kNoiseSuppressEngineRnnoise);
@@ -643,7 +643,7 @@ class _AudioVideoSettingsViewState
   Widget build(BuildContext context) {
     final touch = SettingsDensity.touchOf(context);
 
-    final aiNs = ref.watch(noiseSuppressAiProvider).valueOrNull ?? false;
+    final aiNs = ref.watch(noiseSuppressAiProvider).valueOrNull ?? kNoiseSuppressAiDefault;
     final enhance = ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
     final dynMode = ref.watch(voiceEnhanceDynamicProvider).valueOrNull ?? true;
     final autoLevel = enhance && dynMode;

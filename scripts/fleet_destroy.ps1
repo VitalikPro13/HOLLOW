@@ -680,6 +680,7 @@ function Invoke-DeviceLink($peer, $masterA) {
     }
 
     Wait-ForConnected $peer
+    if (-not (Close-LockOffer $peer)) { Add-Note "$peer's first start after the link never offered a lock" }
     Step $peer @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'LINKED_MASTER' }
     if ($script:FleetVars['LINKED_MASTER'] -ne $masterA) {
         throw "$peer's identity after the link is $($script:FleetVars['LINKED_MASTER']), a's master is $masterA"

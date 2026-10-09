@@ -37,6 +37,15 @@ enum DeviceLinkMode {
 /// open dialog re-renders into the confirm view on the phase change.
 bool deviceLinkDialogIsOpen = false;
 
+/// Shown in place of the code while the relay is away and a new one waits.
+const kRenewingCodeLine = 'Reconnecting to get a new code';
+
+/// Shown in place of the code until the relay is up for the first one.
+const kFirstCodeLine = 'Connecting to get a code';
+
+/// Shown in place of a code that ran out.
+const kExpiredCodeLine = 'This code expired.';
+
 // Tracks the transient placeholder so it is dismissed exactly once, when the
 // real link dialog is ready.
 bool _connectingDialogOpen = false;
@@ -140,8 +149,6 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
   /// The device whose request is being declined: the decline resets the
   /// provider at once, so the confirm view stays up until the answer is sent.
   String? _decliningPeer;
-  Timer? _countdownTimer;
-  int _countdown = 300;
 
   @override
   void initState() {
@@ -154,24 +161,10 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
       // code there spawns a second code on the other device.
       if (widget.mode == DeviceLinkMode.showCode &&
           ref.read(deviceLinkSyncProvider).phase == LinkPhase.idle) {
-        ref.read(deviceLinkSyncProvider.notifier).startShowingCode();
-        _startCountdown();
-      }
-    });
-  }
-
-  void _startCountdown() {
-    _countdown = 300;
-    _countdownTimer?.cancel();
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (!mounted) {
-        t.cancel();
-        return;
-      }
-      setState(() => _countdown--);
-      if (_countdown <= 0) {
-        t.cancel();
-        ref.read(deviceLinkSyncProvider.notifier).cancelShowingCode();
+        ref
+            .read(deviceLinkSyncProvider.notifier)
+            .startShowingCode()
+            .catchError((_) {});
       }
     });
   }
@@ -179,7 +172,6 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
   @override
   void dispose() {
     deviceLinkDialogIsOpen = false;
-    _countdownTimer?.cancel();
     _restartTimer?.cancel();
     _codeController.dispose();
     super.dispose();
@@ -188,7 +180,9 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
   void _close() {
     final notifier = ref.read(deviceLinkSyncProvider.notifier);
     final phase = ref.read(deviceLinkSyncProvider).phase;
-    if (phase == LinkPhase.showingCode) notifier.cancelShowingCode();
+    if (phase == LinkPhase.showingCode || phase == LinkPhase.renewingCode) {
+      notifier.cancelShowingCode().catchError((_) {});
+    }
     notifier.reset();
     // Pops true so the first-run link flow re-shows the Welcome dialog; other
     // callers ignore the result.
@@ -207,8 +201,9 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
     final state = ref.watch(deviceLinkSyncProvider);
     // The empty device is still on its first run, so its steps stay in
     // Welcome's frame; the populated device answers in ordinary dialogs.
-    if (widget.mode == DeviceLinkMode.enterCode)
+    if (widget.mode == DeviceLinkMode.enterCode) {
       return _receiver(hollow, state);
+    }
     final declining = _decliningPeer;
     if (declining != null) return _confirmPush(hollow, declining);
     return switch (state.phase) {
@@ -222,7 +217,10 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
       LinkPhase.sending => _sending(hollow),
       LinkPhase.pushDone => _pushDone(),
       LinkPhase.failed => _failed(state),
-      LinkPhase.showingCode || LinkPhase.idle => _showCode(hollow, state),
+      LinkPhase.showingCode ||
+      LinkPhase.renewingCode ||
+      LinkPhase.codeExpired ||
+      LinkPhase.idle => _showCode(hollow, state),
     };
   }
 
@@ -251,19 +249,38 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
     );
   }
 
-  Widget _showCode(HollowTheme hollow, DeviceLinkState state) {
-    final code = formatLinkCode(state.code ?? '·' * kLinkCodeLength);
-    return _phase(
-      title: 'Link a device',
-      subtitle:
-          'On your other (empty) device, choose "Link a device" and enter this code.',
+  // A code and its countdown show together or not at all: without a live claim
+  // there is only the line saying what happens next.
+  Widget _codeOrWait(HollowTheme hollow, DeviceLinkState state) {
+    final raw = state.code;
+    if (state.phase == LinkPhase.codeExpired) {
+      return Text(
+        kExpiredCodeLine,
+        textAlign: TextAlign.center,
+        style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+      );
+    }
+    if (state.phase != LinkPhase.showingCode || raw == null) {
+      return Center(
+        child: IntrinsicWidth(
+          child: _SpinnerLine(
+            line: state.codeLost ? kRenewingCodeLine : kFirstCodeLine,
+            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+          ),
+        ),
+      );
+    }
+    final code = formatLinkCode(raw).split('').join(' ');
+    final left = state.countdownSeconds;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // Read off this screen and typed on another, so it is large and spaced
         // rather than a copy field.
         Text(
-          code.split('').join(' '),
+          code,
           textAlign: TextAlign.center,
-          semanticsLabel: 'Link code ${code.split('').join(' ')}',
+          semanticsLabel: 'Link code $code',
           style: HollowTypography.display.copyWith(
             color: hollow.textPrimary,
             fontFeatures: const [FontFeature.tabularFigures()],
@@ -271,13 +288,25 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
         ),
         const SizedBox(height: HollowSpacing.xs),
         Text(
-          'Expires in ${_fmtCountdown(_countdown)}',
+          'Expires in ${_fmtCountdown(left)}',
           textAlign: TextAlign.center,
           style: HollowTypography.bodySmall.copyWith(
-            color: _countdown < 30 ? hollow.error : hollow.textSecondary,
+            color: left < 30 ? hollow.error : hollow.textSecondary,
             fontFeatures: const [FontFeature.tabularFigures()],
           ),
         ),
+      ],
+    );
+  }
+
+  Widget _showCode(HollowTheme hollow, DeviceLinkState state) {
+    final expired = state.phase == LinkPhase.codeExpired;
+    return _phase(
+      title: 'Link a device',
+      subtitle:
+          'On your other (empty) device, choose "Link a device" and enter this code.',
+      children: [
+        _codeOrWait(hollow, state),
         const SizedBox(height: HollowSpacing.lg),
         const HollowDialogText(
           'Type it only on a device you hold. Nobody from Hollow will ever ask '
@@ -287,6 +316,14 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
       ],
       actions: [
         HollowButton.ghost(onPressed: _close, child: const Text('Cancel')),
+        if (expired)
+          HollowButton.filled(
+            onPressed: () => ref
+                .read(deviceLinkSyncProvider.notifier)
+                .startShowingCode()
+                .catchError((_) {}),
+            child: const Text('New code'),
+          ),
       ],
     );
   }

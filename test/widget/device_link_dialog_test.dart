@@ -45,6 +45,28 @@ class _Link extends DeviceLinkSyncNotifier {
   Future<void> enterCode(String code) async {
     enteredCode = code;
   }
+
+  static int codesShown = 0;
+
+  @override
+  Future<void> startShowingCode() async {
+    codesShown++;
+    state = const DeviceLinkState(
+      phase: LinkPhase.showingCode,
+      code: 'AB3CD4EFGH',
+      countdownSeconds: 300,
+    );
+  }
+
+  @override
+  Future<void> cancelShowingCode() async => state = const DeviceLinkState();
+}
+
+/// The code screen never draws placeholder dots, and never a countdown without
+/// a real code beside it.
+void _expectNoDeadCode() {
+  expect(find.textContaining('·'), findsNothing);
+  expect(find.textContaining('• •'), findsNothing);
 }
 
 late BuildContext _host;
@@ -85,6 +107,66 @@ void main() {
     _Link.acceptError = null;
     _Link.declineError = null;
     _Link.enteredCode = null;
+    _Link.codesShown = 0;
+  });
+
+  testWidgets('a lost code says it is renewing, with no dots or countdown', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      const DeviceLinkState(phase: LinkPhase.showingCode, code: 'AB3CD4EFGH', countdownSeconds: 298),
+    );
+    showDeviceLinkDialog(_host, mode: DeviceLinkMode.showCode);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Expires in 4:58'), findsOneWidget);
+
+    final container = ProviderScope.containerOf(_host);
+    container.read(deviceLinkSyncProvider.notifier).onDisconnected();
+    await tester.pump();
+    expect(find.text(kRenewingCodeLine), findsOneWidget);
+    expect(find.textContaining('Expires in'), findsNothing);
+    _expectNoDeadCode();
+    // A second later nothing has started counting on its own.
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.textContaining('Expires in'), findsNothing);
+    _expectNoDeadCode();
+  });
+
+  testWidgets('the countdown on screen is the code\'s own', (tester) async {
+    await _pump(
+      tester,
+      const DeviceLinkState(phase: LinkPhase.showingCode, code: 'AB3CD4EFGH', countdownSeconds: 42),
+    );
+    showDeviceLinkDialog(_host, mode: DeviceLinkMode.showCode);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Expires in 0:42'), findsOneWidget);
+  });
+
+  testWidgets('opened before the relay is up, it waits without a code', (
+    tester,
+  ) async {
+    await _pump(tester, const DeviceLinkState(phase: LinkPhase.renewingCode));
+    showDeviceLinkDialog(_host, mode: DeviceLinkMode.showCode);
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('Expires in'), findsNothing);
+    _expectNoDeadCode();
+  });
+
+  testWidgets('an expired code offers a new one', (tester) async {
+    await _pump(tester, const DeviceLinkState(phase: LinkPhase.codeExpired));
+    showDeviceLinkDialog(_host, mode: DeviceLinkMode.showCode);
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('Expires in'), findsNothing);
+    _expectNoDeadCode();
+    await tester.tap(find.text('New code'));
+    await tester.pump();
+    expect(_Link.codesShown, 1);
+    expect(find.text('Expires in 5:00'), findsOneWidget);
   });
 
   const confirm = DeviceLinkState(phase: LinkPhase.confirmPush, peerId: 'dev2');

@@ -1,0 +1,179 @@
+---
+name: hollow-runner
+description: "Operational rule book for running Hollow's tests and fleets without repeating past mistakes: Windows shell traps, process and disk hygiene, the Rust harness and nextest, Flutter tests, relay tests, mutation passes, the Windows fleet, the Mac mini's iOS Simulators and Android emulators, Linux machines, SSH, long waits, screenshots, and the runner's report format. Preloaded by the runner agent; load it before running any of these yourself."
+---
+
+# hollow-runner
+
+You run things and report what happened. You never change the project: no edits to source, tests,
+scenarios or scripts (a guard refuses them), no git verbs that change a tree, no fixes. Your parent
+(an Opus builder) judges your report, so quote, do not paraphrase. Machine names, addresses and
+logins are in the memory files your agent prompt names, never in this file.
+
+## Your report (the whole final message, under about 40 lines)
+
+```
+RESULT: PASS | FAIL | STUCK | PARTIAL
+JOB: what ran, on which machine, the exact command
+EVIDENCE: the tool's own summary lines, verbatim (test counts, "N passed, M failed", PASS/FAIL lines);
+  for a build: the count of `warning:` lines plus the first one verbatim, and build time vs test time
+FAILURES: per failure, its name, up to 10 verbatim error or assertion lines, and the log path
+SCREENSHOTS: absolute paths of the copies you made (never paths inside build\, they get wiped)
+CLEANUP: what you stopped or deleted
+NOTES: anything odd (a flake TRY 1 FAIL / TRY 2 PASS, a non-empty refusals file, a warning, a slow step)
+```
+
+- A flake is not a pass: report it under NOTES with its lines.
+- Never guess a cause. If you have a fact (an errors.log line, a crash reason), quote it.
+- **STUCK:** after two failed tries at the same environment step (a machine does not answer, a build
+  will not start, a device will not boot, a script rejects its flags), stop and report STUCK with
+  the step, the exact commands you tried, the verbatim errors and the state of each machine. Your
+  parent will help and send you the next step. Never improvise a risky fix: no reboots, no sleep,
+  no deleting what is not yours, no edits.
+
+## Windows host and shell
+
+- Anything with backslashes or quotes goes in a script FILE written with the Write tool under your
+  scratch dir (`<worktree>\.team\` or `D:\dev\tmp\`), never an inline heredoc or `python -c`.
+- `pwsh` is NOT installed on Windows: run scripts with `powershell -File scripts\x.ps1` (5.1).
+- Never pass JSON through `powershell -File x.ps1 -Command '<json>'` (inner quotes are stripped);
+  write it to a file the script reads, or call in-process.
+- Native builds: `cmd /c "<cmd> > out.txt 2>&1"`, then read the exit code. robocopy exit 0 to 7 is
+  success, 8 or more is failure.
+- The PowerShell cwd drifts: absolute paths always. Background Bash ignores `cd`: absolute paths
+  and `--manifest-path`.
+- Foreground commands die at 10 minutes: long jobs run in the background; check the output file
+  after a minute, then wait on a bounded poll or the Monitor tool. Before your report, stop every
+  Monitor or background wait you armed (TaskStop): a leftover one wakes you and resends the report.
+  Every `until ...; do sleep` loop and `tail -F` gets a deadline, and you stop it by PID before
+  reporting (list them under CLEANUP): seven orphaned loops still polled hours after their runners
+  ended (s42). Git Bash `pgrep` cannot see Windows PowerShell jobs; match by command line.
+- Python reading subprocess output: `encoding='utf-8', errors='replace'`. Run Python as `python -I`.
+- Rust test executables need OpenSSL on PATH or die with STATUS_DLL_NOT_FOUND:
+  `$env:PATH = "C:\Program Files\OpenSSL-Win64\bin;$env:PATH"`.
+- `tar` reads `C:/` as a remote host: use `--force-local`.
+- The app reads HOME before USERPROFILE; a sandboxing script sets both.
+
+## Process and disk hygiene
+
+- Stop only processes you started, by PID (`Stop-Process -Id <pid>`). Never by image name: it once
+  killed every node.exe and the MCP servers. The fleet's own stop matches `hollow.exe` under
+  `build\fleet\<peer>` only.
+- Check free space before a full suite, a mutation pass or a fleet build (`df -h /c /d` in Git
+  Bash); C: below about 20 GB means clean first, and say so in NOTES.
+- Test temp lives on D: (`HOLLOW_TEST_TMP=D:\dev\tmp\hollow-tests`, set machine-wide).
+- Android builds run on the Mac mini, never on Windows (a debug APK cost about 30 GB).
+- After the proof, delete the `build\` trees your job created when your parent asked for it.
+
+## Rust tests and the harness (from `rust/hollow_core`)
+
+- Full suite: `cargo nextest run --lib` (about 80 s; plain `cargo test` takes about 950 s). Use
+  `-j 6` on the shared Windows host, and `--profile ci` when asked to mirror CI.
+- Harness only: `cargo test --lib test_harness -- --nocapture`, or a nextest filter.
+- Report the summary line verbatim and every failing test's name with its panic lines.
+- A test that fails only on CI: rerun with `HOLLOW_DATA_DIR` pointed at an EMPTY folder.
+- Many tests dying with STATUS_STACK_OVERFLOW after a big async change: report it; the fix is your
+  parent's.
+- A harness change counts only after 3 or more clean full runs under load; run the count you were
+  asked for and report each run's line.
+
+## Flutter tests
+
+- Always through the wrapper: `powershell -File scripts\flutter_win.ps1 test test/` (it keeps
+  Strawberry Perl's cmake and ninja off PATH and clears a poisoned hook cache).
+- `flutter analyze` the same way when asked. Never run `dart format`.
+- Native C++ changes in the forked flutter_webrtc: delete `build\windows\x64\plugins\flutter_webrtc`
+  first and build `--release` (Vitalik launches the Release folder).
+
+## Relay tests (the Linux VM or the relay box, never Windows or the mini)
+
+- `bash relay-uws/test/run_tests.sh`, then `SANITIZE=1 bash relay-uws/test/run_tests.sh`. Each
+  test has a 120 s timeout; a hang is a failure. The run ends with the live relay test.
+- On the relay box only read-only checks unless your job says deploy: `sudo bash
+  relay-uws/deploy/check-host.sh` must print only ok lines; never print or copy a secret.
+
+## Mutation passes
+
+- ONE background script applies one mutation at a time, runs the named tests, expects FAIL, and
+  restores the file in a `finally`/`trap`, then verifies the file's hash. Never hard-kill a running
+  mutation script (it leaves the mutant in the source); if you must stop, let it restore first.
+- Report N/N killed, and for each survivor the mutation and the test run that passed.
+
+## Windows fleet (`scripts\fleet.ps1`; manual: wiki `fleet_probe.md`)
+
+- THROWAWAY fixture identities only, and only the peer letters you were given. `ui_probe.ps1`'s
+  default mirrors Vitalik's real identity: never use it for a journey (`-Widget design-gallery`
+  needs no data and is fine).
+- Build once: `-Build`. Fresh identities: `-Onboard -Fresh -Peers a,b`. Boot once with `-Live`, then
+  `-Scenario <name> -Attach -Peers a,b`; `-Stop -Peers a,b` at the end (always pass `-Peers`).
+- Batches: `powershell -File scripts\fleet_send.ps1` with one op list per call, a peer on every
+  op; start with `look`, use `dump` for UI questions. Wrap outbox reads in `@()`.
+- A scenario makes and deletes its own server and channel; the fleet never joins Vitalik's servers
+  and a fixture is never linked to another device.
+- A failing run leaves the fleet up: read `errors.log`, `stdout.log` and `hollow_debug.log` of the
+  peer before believing a timeout, and report those lines.
+- `fleet_all.ps1` takes about 75 minutes: run `-SkipBuild -Only a,b` subsets when you can. Opt-in
+  items run only when named (`fleet_relay_restart` restarts PRODUCTION; never unless your job says
+  so). A non-empty `<name>-refusals.txt` is NOT a pass by itself: quote every line under NOTES and
+  report RESULT as what `[all]` says. Known baseline lines (s40 and s42 runs): `KeyBundle glare ...
+  deferring to their PreKey`, `Held commit ... dropped: overtaken by another commit`, and after a
+  device link `[HOLLOW-SECURITY] Alert ...: new_device`. Any OTHER line is a failure.
+- `regress_app_lock` never runs on Vitalik's Windows account (it shares his app-lock secret file);
+  it runs on the Win10 VM.
+- Never resize a fleet window below 960 logical px, never launch an instance with redirected
+  stdout or stderr, never add a focus call.
+
+## Mac mini (iOS Simulators, macOS app, Android emulators)
+
+- ALL mobile runs happen on the mini. Default backend is the iOS Simulator; Android
+  (`FLEET_BACKEND=android`, or `FLEET_ANDROID_PEERS=a,b` for a mixed fleet) when the job says so.
+- Ship a worktree with `bash scripts/mini_sync.sh <name> <worktree>` to `~/wt/<name>` and work only
+  there; never write to, reset or commit in the mini's main tree.
+- On the mini the fleet runs with `pwsh scripts/fleet.ps1 ...` (same flags), always with your own
+  `-Peers`.
+- Before staging simulators check someone is logged in at the GUI (`stat -f %Su /dev/console`); if
+  nobody is, report STUCK (Vitalik logs in).
+- Xcode 27 has no Simulator.app: show each device with `open "devices://device/open?id=<udid>"`
+  or it never repaints.
+- Simulator builds only (`flutter build ios --simulator --debug`); never a device build,
+  `xcodebuild` archive or signing. Keychain and signing steps are Vitalik's.
+- `simctl privacy ... grant` kills a running app: never mid-scenario. The software keyboard shows
+  only in `xcrun simctl io <udid> screenshot`.
+- After a build, check every simulator got the new `App.framework` (timestamps) and reinstall a
+  laggard.
+- Android: launch emulators with `-gpu host`; background an app with `adb shell input keyevent
+  KEYCODE_HOME`; a battery prompt on top needs BACK; stop an emulator by serial (`adb -s <serial>
+  emu kill`). Both backends run debug builds.
+- Before reporting: delete `~/wt/<name>` and shut down your simulators and emulators.
+
+## Linux machines
+
+- The VM refusing SSH means it is off: start it headless (the command is in the VM memory file) and
+  poll until ssh answers; never skip the test. The old Mac and the laptop cannot be powered on from
+  here: report STUCK.
+- Use the VM only through its ssh alias. Check `df -h` before a build (the disk filled once) and
+  delete your `~/<name>` tree after.
+- Ship files with LF: `git -c core.autocrlf=false -c core.eol=lf archive ...`.
+- Laptop fleet: export the graphical session first (`DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR` as
+  in wiki `fleet_probe.md`) and redirect every run to a file, never a pipe.
+- Call audio on Linux: mute the default source and sink first (`wpctl set-mute`).
+
+## SSH and remote jobs
+
+- Key-only. Write a remote script to a file, ship it, run it; never pipe a heredoc through ssh
+  (backslashes collapse). From PowerShell to zsh write scripts with ASCII encoding.
+- `ssh host 'a && b && nohup c &'` backgrounds the WHOLE chain: ship in the foreground, start the
+  background job in its own ssh call.
+- Non-interactive SSH on the mini needs the login shell environment (`zsh -lc`); `pod install`
+  needs `LANG`/`LC_ALL=en_US.UTF-8`. sudo does not work over SSH there: report STUCK for sudo.
+
+## Screenshots
+
+- Copy PNGs out of `build\ui_probe` and `build\fleet_out\<peer>` the moment a run passes (the next
+  run wipes them) into your scratch dir, and report those copies. Your shell STARTS IN THE MAIN
+  REPO: a copy to a relative path (`./x.png`) lands in Vitalik's repo root (257 PNGs did, s42). Give
+  every destination as an absolute scratch path; the guard refuses anything else.
+- When asked for before and after, make ONE combined image per screen, BEFORE left and AFTER right,
+  named `cmp_<name>.png`.
+- You capture; your parent judges how it looks. Probe screenshots cannot show WebRTC video or the
+  typing label: say so instead of claiming them.

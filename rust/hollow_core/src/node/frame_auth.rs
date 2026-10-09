@@ -68,10 +68,55 @@ pub(crate) enum Refusal {
 }
 
 pub(crate) fn now_ms() -> i64 {
-    std::time::SystemTime::now()
+    let wall = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    #[cfg(test)]
+    let wall = wall.saturating_add(test_clock_ahead_ms());
+    wall
+}
+
+/// How far tests have moved the frame clock, per tokio runtime: seals, carried stamps
+/// and the staleness judgement all read it, so a whole harness lives through a long
+/// absence while unit tests on other threads keep the wall clock.
+#[cfg(test)]
+static TEST_CLOCK_AHEAD: std::sync::Mutex<Vec<(tokio::runtime::Id, i64)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn test_clock_ahead_ms() -> i64 {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return 0 };
+    let id = runtime.id();
+    TEST_CLOCK_AHEAD
+        .lock()
+        .map(|moved| moved.iter().filter(|(rt, _)| *rt == id).map(|(_, ms)| ms).sum())
         .unwrap_or(0)
+}
+
+/// Moves the frame clock ahead for every node on the calling test's runtime until the
+/// guard drops. Call it from inside that runtime.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn clock_ahead_for_test(ms: i64) -> TestClockAhead {
+    let id = tokio::runtime::Handle::current().id();
+    if let Ok(mut moved) = TEST_CLOCK_AHEAD.lock() {
+        moved.push((id, ms));
+    }
+    TestClockAhead(id, ms)
+}
+
+#[cfg(test)]
+pub(crate) struct TestClockAhead(tokio::runtime::Id, i64);
+
+#[cfg(test)]
+impl Drop for TestClockAhead {
+    fn drop(&mut self) {
+        if let Ok(mut moved) = TEST_CLOCK_AHEAD.lock()
+            && let Some(at) = moved.iter().position(|entry| *entry == (self.0, self.1))
+        {
+            moved.remove(at);
+        }
+    }
 }
 
 fn signed_bytes(room: &str, route: &[u8], ts_ms: i64, nonce: &[u8; NONCE_LEN], body: &[u8]) -> Vec<u8> {

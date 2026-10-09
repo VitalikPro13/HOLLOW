@@ -16,6 +16,14 @@ enum LinkPhase {
   /// enter it. `code` is set; `countdownSeconds` ticks down from 300.
   showingCode,
 
+  /// (Populated device) The relay forgot our code (its session ended) or we
+  /// are not connected yet: a fresh code is claimed once the relay is back.
+  /// `code` is null and no countdown runs.
+  renewingCode,
+
+  /// (Populated device) The code ran out and was released. `code` is null.
+  codeExpired,
+
   /// (Populated device) An empty sibling requested data; awaiting the user's
   /// Confirm. `peerId` is the requesting device.
   confirmPush,
@@ -52,6 +60,9 @@ class DeviceLinkState {
   final String? code;
   final int countdownSeconds;
 
+  /// (renewingCode) A code was shown and lost, rather than none shown yet.
+  final bool codeLost;
+
   // Confirm-push side (populated device).
   final String? peerId;
   final int theirMsgCount;
@@ -76,6 +87,7 @@ class DeviceLinkState {
     this.phase = LinkPhase.idle,
     this.code,
     this.countdownSeconds = 0,
+    this.codeLost = false,
     this.peerId,
     this.theirMsgCount = 0,
     this.theirFriendCount = 0,
@@ -155,8 +167,12 @@ String aDeviceOfKind(String kind) => switch (kind) {
       _ => 'A device',
     };
 
+/// How long a shown code lives; the relay drops the claim after the same time.
+const kLinkCodeLifetimeSeconds = 300;
+
 class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
   Timer? _waitingTimer;
+  Timer? _codeTimer;
   bool _disposed = false;
 
   @override
@@ -165,11 +181,26 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
     ref.onDispose(() {
       _disposed = true;
       _waitingTimer?.cancel();
+      _codeTimer?.cancel();
     });
     listenSelf((previous, next) {
       if (next.phase != LinkPhase.waiting) _waitingTimer?.cancel();
+      if (next.phase != LinkPhase.showingCode) _codeTimer?.cancel();
+    });
+    // The node coming up counts as well as the relay event: a dialog opened
+    // during startup waits for either.
+    ref.listen<OverallConnection>(overallConnectionProvider, (_, next) {
+      if (next.isOnline) onRelayConnected();
     });
     return const DeviceLinkState();
+  }
+
+  /// The relay session is up (`RelayConnected`). A code lost with the old
+  /// session is renewed now; a resumed session kept its claim and its code.
+  void onRelayConnected() {
+    if (state.phase != LinkPhase.renewingCode) return;
+    if (!ref.read(overallConnectionProvider).isOnline) return;
+    startShowingCode().catchError((_) {});
   }
 
   bool _beginWaiting(DeviceLinkState next) {
@@ -195,18 +226,39 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
 
   /// (Populated device) Generate a link code, claim its rendezvous part and show
   /// it whole. The relay echoes `LinkCodeClaimed`, or `LinkCodeError` on a
-  /// collision, and we regenerate.
+  /// collision, and we regenerate. Offline, it waits for the relay first.
   Future<void> startShowingCode() async {
+    if (!ref.read(overallConnectionProvider).isOnline) {
+      state = const DeviceLinkState(phase: LinkPhase.renewingCode);
+      return;
+    }
     final code = _generateCode();
     state = DeviceLinkState(
       phase: LinkPhase.showingCode,
       code: code,
-      countdownSeconds: 300,
+      countdownSeconds: kLinkCodeLifetimeSeconds,
     );
+    _startCodeTimer();
     await network_api.claimLinkCode(
       rendezvous: code.substring(0, kLinkRendezvousLength),
       secret: code.substring(kLinkRendezvousLength),
     );
+  }
+
+  // The countdown lives with the code it belongs to, so a renewed code always
+  // restarts it and a lost one always stops it.
+  void _startCodeTimer() {
+    _codeTimer?.cancel();
+    _codeTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (state.phase != LinkPhase.showingCode) return;
+      final left = state.countdownSeconds - 1;
+      if (left > 0) {
+        state = state.copyWith(countdownSeconds: left);
+        return;
+      }
+      state = const DeviceLinkState(phase: LinkPhase.codeExpired);
+      network_api.releaseLinkCode().catchError((_) {});
+    });
   }
 
   /// (Populated device) Stop showing / cancel the code.
@@ -328,22 +380,18 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
     }
   }
 
+  /// The relay session ended (`RelayDisconnected`, never a suspension the
+  /// session survives), and with it the relay's claim on our code.
   void onDisconnected() {
-    if (state.phase == LinkPhase.idle) return;
-    // Keep a completed/failed terminal state visible.
-    if (state.phase == LinkPhase.done || state.phase == LinkPhase.failed) return;
-    // Do NOT tear down an in-flight transfer on a transient relay blip: the link
-    // handshake churns the connection, so a brief RelayDisconnected is expected
-    // mid-link and the populated device pushes regardless. Only the pre-transfer
-    // showingCode/confirmPush states, which depend on a live code claim, reset.
+    // An in-flight transfer goes on regardless: the link handshake churns the
+    // connection, so a brief drop is expected mid-link. Only the states that
+    // depend on a live code claim give the code up, for a fresh one.
     switch (state.phase) {
-      case LinkPhase.waiting:
-      case LinkPhase.receiving:
-      case LinkPhase.importing:
-      case LinkPhase.sending:
-        return;
+      case LinkPhase.showingCode:
+      case LinkPhase.confirmPush:
+        state = const DeviceLinkState(phase: LinkPhase.renewingCode, codeLost: true);
       default:
-        state = const DeviceLinkState();
+        return;
     }
   }
 }

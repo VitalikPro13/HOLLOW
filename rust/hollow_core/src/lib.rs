@@ -23,7 +23,9 @@ pub(crate) mod log {
     static STDERR: AtomicBool = AtomicBool::new(cfg!(debug_assertions));
 
     fn log_path() -> PathBuf {
-        if cfg!(target_os = "windows") {
+        // Tests log into their own data dir: beside the test binary, parallel test
+        // processes would share and erase one file.
+        if cfg!(target_os = "windows") && !cfg!(test) {
             return std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|d| d.join("hollow_debug.log")))
@@ -139,6 +141,11 @@ pub(crate) mod log {
     #[cfg(test)]
     pub(crate) fn is_open() -> bool {
         slot().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_path() -> Option<PathBuf> {
+        slot().as_ref().map(|open| open.path.clone())
     }
 
     #[cfg(test)]

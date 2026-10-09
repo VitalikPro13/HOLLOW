@@ -9,6 +9,7 @@ import '../../rust/api/network.dart' as network_api;
 import '../providers/call_provider.dart';
 import '../providers/conference_provider.dart';
 import '../providers/connection_status_provider.dart';
+import '../providers/device_link_sync_provider.dart';
 import '../providers/member_panel_provider.dart';
 import 'realtime_session_flag.dart';
 
@@ -96,8 +97,9 @@ class IosRelayBackgroundTask implements RelayBackgroundTask {
   }
 }
 
-/// A real-time session is live, a call is ringing in, or we wait in a meeting
-/// lobby: the relay socket stays up and the phone visible, in the background too.
+/// A real-time session is live, a call is ringing in, we wait in a meeting
+/// lobby or show a link code: the relay socket stays up and the phone visible,
+/// in the background too.
 final relayRealtimeProvider = Provider<bool>((ref) {
   void changed() => ref.invalidateSelf();
   RealtimeSessionFlag.live.addListener(changed);
@@ -108,7 +110,16 @@ final relayRealtimeProvider = Provider<bool>((ref) {
   final inLobby = ref.watch(conferenceProvider.select((s) =>
       s.lobbyStatus == ConferenceLobbyStatus.waiting ||
       s.lobbyStatus == ConferenceLobbyStatus.admitted));
-  return ringing || inLobby || RealtimeSessionFlag.isActive;
+  // A hidden presenter never hears the joiner arrive in the code's room, so it
+  // refuses the handshake.
+  final linking = ref.watch(deviceLinkSyncProvider.select((s) => switch (s.phase) {
+        LinkPhase.showingCode ||
+        LinkPhase.renewingCode ||
+        LinkPhase.confirmPush ||
+        LinkPhase.sending => true,
+        _ => false,
+      }));
+  return ringing || inLobby || linking || RealtimeSessionFlag.isActive;
 });
 
 /// Turns app foreground, window focus, network change and wake into

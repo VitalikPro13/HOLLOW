@@ -209,7 +209,17 @@ void main() {
 
       await shoot(
           'link_1_showcode',
-          const DeviceLinkState(phase: LinkPhase.showingCode, code: 'K7MPQ3'),
+          const DeviceLinkState(
+              phase: LinkPhase.showingCode,
+              code: 'K7MPQ3XR4T',
+              countdownSeconds: 298),
+          DeviceLinkMode.showCode);
+      await shoot(
+          'link_1b_renewing',
+          const DeviceLinkState(phase: LinkPhase.renewingCode, codeLost: true),
+          DeviceLinkMode.showCode);
+      await shoot('link_1c_expired',
+          const DeviceLinkState(phase: LinkPhase.codeExpired),
           DeviceLinkMode.showCode);
       await shoot('link_2_entercode_short', const DeviceLinkState(),
           DeviceLinkMode.enterCode, then: () async {

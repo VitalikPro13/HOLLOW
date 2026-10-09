@@ -342,7 +342,7 @@ class CallNotifier extends Notifier<CallState> {
     _voiceService!.enhanceDynamic =
         ref.read(voiceEnhanceDynamicProvider).valueOrNull ?? true;
     _voiceService!.noiseSuppressAi =
-        ref.read(noiseSuppressAiProvider).valueOrNull ?? false;
+        ref.read(noiseSuppressAiProvider).valueOrNull ?? kNoiseSuppressAiDefault;
     _voiceService!.noiseSuppressEngine = noiseSuppressEngineToNative(
         ref.read(noiseSuppressEngineProvider).valueOrNull ??
             kNoiseSuppressEngineRnnoise);

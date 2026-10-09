@@ -479,6 +479,9 @@ function Get-LinkCode($peer) {
 if (-not $SkipBuild) {
     Say 'building and staging a,b,c (pass -SkipBuild when you have just built)'
     Invoke-FleetScript @('-Build', '-Peers', 'a,b,c')
+} elseif (-not (Test-Path (Join-Path $script:FleetStageRoot 'b\hollow.exe'))) {
+    # Start-FreshFleet stages only a and c; b launches later from its own copy.
+    throw "b is not staged under $($script:FleetStageRoot). Run scripts\fleet.ps1 -Build -Peers a,b,c first, or drop -SkipBuild."
 }
 
 # b must reach the WELCOME dialog (the only way to the enter-code screen), so
@@ -567,6 +570,7 @@ try {
         Start-PeerProcess b $false
     }
     Wait-ForConnected b
+    if (-not (Close-LockOffer b)) { Add-Note "b's first start after the link never offered a lock" }
     Step b @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B_AFTER' }
     if ($script:FleetVars['PEER_B_AFTER'] -ne $masterA) {
         throw "b's identity after the link is $($script:FleetVars['PEER_B_AFTER']), a's master is $masterA"

@@ -854,11 +854,18 @@ pub(crate) struct PendingJoin {
     pub(crate) opened_at: i64,
     /// When a copy of this ask first went out: the coordinator window counts from it.
     pub(crate) first_sent_at: Option<std::time::Instant>,
+    /// Another device of ours told us of the server, possibly long ago: the user asked
+    /// nothing here, so this join never signs an ask, keeps a row or shows a refusal.
+    pub(crate) from_sibling: bool,
 }
 
 impl PendingJoin {
-    /// A new nonce for this join, and our master's ask signed over it.
+    /// A new nonce for this join, and our master's ask signed over it; a join another
+    /// device of ours announced keeps neither.
     pub(crate) fn ask_again(&mut self, server_id: &str, at: i64, master: &crate::identity::native_identity::NativeKeypair) {
+        if self.from_sibling {
+            return;
+        }
         self.requested_at = at;
         self.ask = Some(crate::crdt::operations::JoinAsk::sign(server_id, at, master));
     }
@@ -4077,6 +4084,9 @@ impl HavenMessage {
             | Self::PublicChannelSyncResponse { .. }
             | Self::ProfileCard { .. }
             | Self::RosterNotice { .. }
+            // An absent sibling hears it from the relay's buffer hours later. Late, it only starts
+            // a join members serve while our identity is a member; it carries no `JoinAsk`.
+            | Self::SiblingServerAnnounce { .. }
             | Self::ShareManifestResponse { .. } => false,
             Self::KeyRequest { .. }
             | Self::KeyBundle { .. }
@@ -4087,7 +4097,6 @@ impl HavenMessage {
             | Self::ChannelSyncRequest { .. }
             | Self::DmSyncRequest { .. }
             | Self::DmSiblingSyncRequest { .. }
-            | Self::SiblingServerAnnounce { .. }
             | Self::MlsKeyPackageRequest { .. }
             | Self::MlsEpochProbe { .. }
             | Self::ConferenceJoinRequest { .. }

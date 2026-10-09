@@ -669,6 +669,24 @@ function Start-FreshFleet($peers) {
     }
 }
 
+# A linked device's first start offers a lock, once (`protection_prompt.dart`),
+# and only after its roster gate and app lock clear, so it can land after the
+# peer reports Connected and cover whatever the script taps next. Answers
+# whether the offer showed; a dismiss that fails throws.
+function Close-LockOffer($peer, $timeoutSeconds = 45) {
+    $title = 'dialog > text:Set a lock on this device'
+    $seen = Send-FleetStep $peer ([pscustomobject]@{
+        op = 'wait_for'; target = $title; timeout_ms = $timeoutSeconds * 1000
+    }) ($timeoutSeconds + 60)
+    if (-not $seen.ok) { return $false }
+    $tap = Send-FleetStep $peer ([pscustomobject]@{ op = 'tap'; target = 'dialog > text:Not now'; index = 0 })
+    if (-not $tap.ok) { throw "[$peer] could not press Not now on the lock offer: $($tap.message)" }
+    $gone = Send-FleetStep $peer ([pscustomobject]@{ op = 'wait_for'; gone = $title; timeout_ms = 10000 })
+    if (-not $gone.ok) { throw "[$peer] the lock offer stayed up after Not now: $($gone.message)" }
+    Write-Host "[fleet] $peer offered a lock on its first start; dismissed with Not now" -ForegroundColor Green
+    return $true
+}
+
 function Write-FleetAnswer($peer, $answer, $indent = '       ') {
     $mark = if ($answer.ok) { 'ok  ' } else { 'FAIL' }
     $colour = if ($answer.ok) { 'DarkGray' } else { 'Red' }

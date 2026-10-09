@@ -1123,6 +1123,8 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_RelayConnected():
         ref.read(connectionStatusProvider.notifier).onRelayEvent(event);
+        // After the status, so the link flow reads the relay as up.
+        ref.read(deviceLinkSyncProvider.notifier).onRelayConnected();
         // A hangup we could not deliver while the relay was down: say it now.
         ref.read(callProvider.notifier).handleRelayReconnected();
 

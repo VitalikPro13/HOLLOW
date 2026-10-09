@@ -352,7 +352,8 @@ function Invoke-Build {
         return
     }
     Write-Step 'building the probe target as a standalone exe'
-    & flutter build windows --debug -t integration_test/ui_probe_test.dart
+    # Plain `flutter build` picks Strawberry's cmake in a fresh tree and the native-asset hook fails.
+    & powershell -NoProfile -File (Join-Path $PSScriptRoot 'flutter_win.ps1') build windows --debug -t integration_test/ui_probe_test.dart
     if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
 }
 

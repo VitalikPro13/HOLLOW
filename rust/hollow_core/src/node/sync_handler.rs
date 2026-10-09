@@ -1573,8 +1573,17 @@ pub(crate) async fn handle_delete_server(
 
 // ── 8. JoinServer ─────────────────────────────────────────────────────
 
+/// Keep the row of a join the user made. One another device of ours announced gets
+/// none: a row outlives this run, and boot turns it into a master-signed ask.
+pub(crate) fn save_pending_join(crdt_store: &CrdtStore, server_id: &str, pending: &PendingJoin, state: &str, reason: &str) {
+    if pending.from_sibling {
+        return;
+    }
+    crdt_store.upsert_pending_join(pending_join_row(server_id, pending, state, reason));
+}
+
 /// The persisted twin of a live [`PendingJoin`], for the CrdtStore actor.
-pub(crate) fn pending_join_row(
+fn pending_join_row(
     server_id: &str,
     pending: &PendingJoin,
     state: &str,
@@ -1720,6 +1729,11 @@ pub(crate) async fn handle_join_refused(
     reason: String,
 ) {
     let Some(pending) = pending_server_joins.get_mut(&server_id) else { return };
+    // Nobody asked: a dialog, toast or tile would be for a server the user may have left.
+    if pending.from_sibling {
+        hollow_log!("[HOLLOW-CRDT] Join for {server_id} that our other device announced refused: {reason}");
+        return;
+    }
     if is_interactive_reason(&reason) {
         // Once per ask: every member that reads it asks the same question.
         if !pending.asked {
@@ -1735,7 +1749,7 @@ pub(crate) async fn handle_join_refused(
     hollow_log!("[HOLLOW-CRDT] Join for {server_id} refused: {reason}; the ask stays open for a real admission");
     pending.refused = Some(reason.clone());
     let (state, _) = tile_state(pending);
-    crdt_store.upsert_pending_join(pending_join_row(&server_id, pending, state, &reason));
+    save_pending_join(crdt_store, &server_id, pending, state, &reason);
     // A join inside its LIVE window keeps today's surfaces: the user is standing in
     // front of the dialog they triggered. A PARKED one is answered hours later with
     // nobody watching, so the tile is the only surface and a toast would be noise.
@@ -1880,7 +1894,7 @@ pub(crate) async fn handle_join_server(
     // Persist BEFORE anything can go wrong: a crash inside the 15s live window
     // still leaves a row the boot path picks up, and a join that completes
     // deletes it.
-    crdt_store.upsert_pending_join(pending_join_row(&server_id, &pending, "pending", ""));
+    save_pending_join(crdt_store, &server_id, &pending, "pending", "");
 
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: server_id.clone(),
@@ -2039,7 +2053,7 @@ pub(crate) fn handle_join_lock_chain(
     if pending.parked && pending.last_deposited_at == 0 && deposit_parked_join(ws_cmd_tx, server_id, our_device, pending) {
         pending.last_deposited_at = super::types::now_ms();
         let (state, reason) = tile_state(pending);
-        crdt_store.upsert_pending_join(pending_join_row(server_id, pending, state, &reason));
+        save_pending_join(crdt_store, server_id, pending, state, &reason);
     }
     let Some(asked) = asked else { return Vec::new() };
     let (ready, waiting) = std::mem::take(&mut pending.held).into_iter().partition(|h| h.arrived_at <= asked);
@@ -2096,7 +2110,7 @@ pub(crate) fn reask_join(
         pending.last_deposited_at = super::types::now_ms();
     }
     let (state, reason) = tile_state(pending);
-    crdt_store.upsert_pending_join(pending_join_row(server_id, pending, state, &reason));
+    save_pending_join(crdt_store, server_id, pending, state, &reason);
 }
 
 /// A device came into the room of a server we are joining: ask it, or first read the
@@ -2203,22 +2217,44 @@ pub(crate) fn author_join_lock_op(
             super::olm_lane::NoSession::Queue,
         );
     }
-    // A new server's online siblings are in no room of it yet, so this is how they
-    // learn it exists; offline ones hear it on reconnect, via re-announce.
+    // A new server's siblings are in no room of it yet, so this is how they learn it
+    // exists.
     if first_lock && state.join_lock.has_lock() {
-        let sent = super::olm_lane::carry_to_own_siblings(
-            ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id,
-            &HavenMessage::SiblingServerAnnounce {
-                server_id: server_id.to_string(),
-                owner: state.anchor_owner(),
-                join_key: state.join_public_text(),
-            },
-            super::olm_lane::NoSession::Queue,
-        );
-        if sent > 0 {
-            hollow_log!("[HOLLOW-CRDT] Announced new server {server_id} to {sent} online sibling device(s)");
-        }
+        announce_server_to_own_devices(ws_cmd_tx, local_peer_str, local_device_id, server_id, state);
     }
+}
+
+/// Tell every other device our roster counts about a server we belong to, offline ones
+/// included: pinned to our inbox, an absent device gets it from the relay's buffer when
+/// it next joins, with neither this device nor any member online by then.
+pub(crate) fn announce_server_to_own_devices(
+    ws_cmd_tx: &WsCmdTx,
+    local_master: &str,
+    local_device: &str,
+    server_id: &str,
+    state: &ServerState,
+) -> usize {
+    // A shell kept after our leave would have the sibling re-add our identity.
+    if state.is_deleted() || !state.is_member(local_master) {
+        return 0;
+    }
+    let own_inbox = format!("inbox:{local_master}");
+    let announce = HavenMessage::SiblingServerAnnounce {
+        server_id: server_id.to_string(),
+        owner: state.anchor_owner(),
+        join_key: state.join_public_text(),
+    };
+    let devices: Vec<String> = super::resolver::devices_for(local_master)
+        .into_iter()
+        .filter(|d| d != local_device && !super::resolver::is_revoked(d))
+        .collect();
+    for device in &devices {
+        super::olm_lane::carry(ws_cmd_tx, device, Some(&own_inbox), &announce, super::olm_lane::NoSession::Queue);
+    }
+    if !devices.is_empty() {
+        hollow_log!("[HOLLOW-CRDT] Announced server {server_id} to {} sibling device(s), online or not", devices.len());
+    }
+    devices.len()
 }
 
 /// A sync answer to a join that completed a moment ago, from the door we verified:
@@ -3704,7 +3740,7 @@ pub(crate) async fn handle_check_pending_join_timeout(
     }
     // A refused join parks too, for a real admission, but its tile keeps the reason.
     let (state, reason) = tile_state(pending);
-    crdt_store.upsert_pending_join(pending_join_row(&server_id, pending, state, &reason));
+    save_pending_join(crdt_store, &server_id, pending, state, &reason);
     if pending.refused.is_none() {
         let _ = event_tx.send(NetworkEvent::ServerJoinParked {
             server_id,

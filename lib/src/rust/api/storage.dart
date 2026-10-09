@@ -7,8 +7,9 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `call_record_from_row`, `check_snapshot`, `decrypt_backup_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `land_snapshot`, `pending_link_blob_path`, `pending_link_code_path`, `pending_link_device_path`, `pending_wipe_marker_path`, `referenced_asset_hashes`, `scrubbed_db_copy`, `snapshot_landing`, `snapshot_leaf`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`, `transfer_temp`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CheckedSnapshot`
+// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `call_record_from_row`, `check_snapshot`, `commit_new_set`, `decrypt_backup_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `drop_pending_link`, `export_backup_bytes`, `get_peer_id`, `get_store`, `identity_set_gone`, `import_backup_bytes`, `import_snapshot_bytes`, `land_snapshot`, `land_stashed_link`, `landing_in_progress`, `note_store_refusal`, `pending_link_blob_path`, `pending_link_code_path`, `pending_link_device_path`, `pending_link_tries_path`, `pending_wipe_marker_path`, `place_content`, `present`, `raise`, `recover_interrupted_landing`, `referenced_asset_hashes`, `rename_when_free`, `roll_back_landing`, `scrubbed_db_copy`, `set_aside_old_set`, `snapshot_landing`, `snapshot_leaf`, `snapshot_state_summary`, `spend_link_try`, `stage_new_set`, `stash_pending_link`, `stored_file_to_ffi`, `transfer_temp`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CheckedSnapshot`, `LandingFlag`, `LinkImportFailure`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `drop`
 
 /// Open the encrypted message database, once at app start after the identity loads.
 Future<void> openMessageStore() =>
@@ -405,12 +406,16 @@ Future<void> importBackup({
 );
 
 /// True if a pending link blob is waiting to be imported on launch.
+///
+/// Dart asks this first at every launch, before anything reads the identity, so it
+/// also finishes or undoes a landing a crash cut short.
 Future<bool> hasPendingLink() =>
     RustLib.instance.api.crateApiStorageHasPendingLink();
 
 /// (Receiver, at launch BEFORE start_node) Import a stashed link blob through the same
 /// pipeline as a manual `.hollow` restore, then clean up the stash. After this the
-/// bootstrap proceeds as a normal restored-backup launch.
+/// bootstrap proceeds as a normal restored launch. A link that could not land leaves
+/// the throwaway identity whole and its stash for the next launch.
 Future<void> importPendingLink() =>
     RustLib.instance.api.crateApiStorageImportPendingLink();
 
@@ -429,7 +434,7 @@ Future<bool> hasPendingWipe() =>
 /// beside the dir. The same sweep as the wipe itself. Idempotent.
 ///
 /// True when it finished a destroy, which ends the profile (Dart's profile list then
-/// forgets it); false for a cancelled link's throwaway.
+/// forgets it); false for a cancelled link's throwaway, or while the wipe is unfinished.
 Future<bool> performPendingWipe() =>
     RustLib.instance.api.crateApiStoragePerformPendingWipe();
 
