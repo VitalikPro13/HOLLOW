@@ -79,6 +79,42 @@ release pipeline is the `release` skill.
 
 - Emoji font: NotoColorEmoji = an emoji-only subset (`scripts/subset_emoji_font.py`).
 
+## Debug builds: dependency optimization and the shared dev cache (session 43)
+
+- Debug builds optimize every DEPENDENCY (`[profile.dev.package."*"]` opt-level 2,
+  `debug = "line-tables-only"`): backtraces through deps keep file:line, a debugger shows no
+  variables there. hollow_core itself stays opt-level 0 with full debuginfo; release is
+  untouched.
+- `scripts\flutter_win.ps1` DEBUG builds (`build windows --debug`, `run`, `test`; so also
+  `fleet.ps1 -Build`) set `HOLLOW_CARGOKIT_SHARED_DIR` (default `D:\dev\cache\hollow-cargokit`,
+  or under `HOLLOW_DEV_CACHE`) and, once seeded, `FIREBASE_CPP_SDK_DIR`
+  (`D:\dev\cache\firebase_cpp_sdk_windows`). Release and profile builds REMOVE the variable,
+  `build_release.ps1` clears it too, and cargokit ignores it for them (`SharedBuildOptions.from`).
+  One debug tree on its own: `HOLLOW_CARGOKIT_SHARED_DIR=off`.
+- cargokit `shared_build.dart` keys every shared build by CONTENT (`computeBuildKey`: path
+  crates' files, lock, manifests, cargo configs on cargo's cwd path, toolchain, triple, flags,
+  build variables). A key cargo did not build last resets the path crates' fingerprints first:
+  cargo calls an OLDER tree fresh by mtime and would link another tree's code. A key built
+  before is served from `dll\<key>` with NO cargo run. `build.lock` serializes cargo across
+  trees, cached sets are immutable, readers hold `use.lock`, eviction keeps 3
+  (`HOLLOW_CARGOKIT_SHARED_KEEP`, each set ~1.8 GB with the static lib and PDB).
+- A NEW input to the Rust build outside a path crate's folder (a file `include_str!`'d from
+  elsewhere in non-test code, a variable a `build.rs` reads that `_keyEnv` misses) must join
+  `computeBuildKey`, or a cached DLL hides the change. Tests: `dart pub get --offline`, then
+  `dart run test/shared_build_test.dart` in `rust_builder/cargokit/build_tool` (`dart test`
+  cannot start on the pinned test package).
+- Shared builds pin MSBuild's per-project `VSTEL_MSBuildProjectFullPath` to one value: the
+  `cc` crate registers it as a build-script input, and a per-tree value rebuilt every C
+  dependency (SQLCipher, ring, aws-lc, libwebp) on each switch of trees. A Rust edit that is
+  slow only after ANOTHER tree built: `cargo build -v` names the variable
+  ("Dirty <crate>: the env variable X changed"); pin it the same way.
+- `fleet.ps1` Stage-Peer hashes the staged `hollow_core.dll` and `kernel_blob.bin` against the
+  build output and throws on a mismatch (a cached DLL can carry an older timestamp).
+- `scripts\dev_cache.ps1` shows the cache, `-Clear` drops the Rust part (refused while a build
+  holds the lock), `-SeedFirebase [-From]` copies an extracted SDK in once, `-SeedWorktree
+  <path>` gives a new worktree its gitignored configs and a warm nextest target with the
+  path-crate fingerprints reset.
+
 ## Tests and logs (session 34)
 
 - Rust test temp dirs ONLY via `crate::test_tmp::tempdir()` / `TestDir` (root

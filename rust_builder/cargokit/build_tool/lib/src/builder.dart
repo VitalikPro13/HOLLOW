@@ -135,10 +135,21 @@ class RustBuilder {
 
   String get _toolchain => _buildOptions?.toolchain.name ?? 'stable';
 
-  /// Returns the path of directory containing build artifacts.
-  Future<String> build() async {
+  String get toolchain => _toolchain;
+
+  List<String> get cargoFlags => List.unmodifiable(_buildOptions?.flags ?? []);
+
+  /// The variables this build adds on top of the process environment.
+  Future<Map<String, String>> cargoEnvironment() => _buildEnvironment();
+
+  /// Returns the path of directory containing build artifacts. [targetDir]
+  /// replaces the tree's own target directory (the shared debug build), and
+  /// [extraEnvironment] overrides variables cargo would inherit.
+  Future<String> build(
+      {String? targetDir, Map<String, String> extraEnvironment = const {}}) async {
     final extraArgs = _buildOptions?.flags ?? [];
     final manifestPath = path.join(environment.manifestDir, 'Cargo.toml');
+    final cargoTargetDir = targetDir ?? environment.targetTempDir;
     runCommand(
       'rustup',
       [
@@ -155,12 +166,12 @@ class RustBuilder {
         '--target',
         target.rust,
         '--target-dir',
-        environment.targetTempDir,
+        cargoTargetDir,
       ],
-      environment: await _buildEnvironment(),
+      environment: {...await _buildEnvironment(), ...extraEnvironment},
     );
     return path.join(
-      environment.targetTempDir,
+      cargoTargetDir,
       target.rust,
       environment.configuration.rustName,
     );

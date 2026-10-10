@@ -54,7 +54,7 @@
     { "peer": "a", "op": "tap", "target": "dialog > text:Use frame" },
     { "peer": "a", "op": "wait", "ms": 800 },
     { "peer": "a", "op": "tap", "target": "text:Save" },
-    { "peer": "a", "op": "wait", "ms": 2500 },
+    { "peer": "a", "op": "wait_for", "gone": "text:You have unsaved profile changes", "timeout_ms": 20000 },
     { "peer": "a", "op": "key", "value": "escape" },
     { "peer": "a", "op": "wait", "ms": 1200 },
     { "peer": "a", "op": "shot", "name": "frame-a-own" },
@@ -76,10 +76,10 @@
     { "peer": "a", "op": "tap", "target": "dialog > text:Use frame" },
     { "peer": "a", "op": "wait", "ms": 800 },
     { "peer": "a", "op": "tap", "target": "text:Save" },
-    { "peer": "a", "op": "wait", "ms": 2500 },
+    { "peer": "a", "op": "wait_for", "gone": "text:You have unsaved profile changes", "timeout_ms": 20000 },
     { "peer": "a", "op": "key", "value": "escape" },
 
-    { "peer": "b", "op": "wait", "ms": 6000 },
+    { "peer": "b", "op": "wait_for", "gone": "type:AvatarFrame", "timeout_ms": 90000 },
     { "peer": "b", "op": "expect_count", "target": "type:AvatarFrame", "value": 0 },
     { "peer": "b", "op": "shot", "name": "frame-b-cleared" }
   ],

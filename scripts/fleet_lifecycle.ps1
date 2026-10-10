@@ -268,7 +268,7 @@ function Invoke-LinuxLifecycle($peer, $proc, $op) {
             return "continued pid $($proc.Id)"
         }
     }
-    throw "$op is not supported on the Linux backend: no window control that leaves the person at the laptop alone has been built"
+    throw "$op is not supported on the $($script:FleetBackend) backend: no window control that leaves the person at the machine alone has been built"
 }
 
 # --------------------------------------------------------------------------
@@ -397,7 +397,7 @@ function Invoke-FleetHostOp($peer, $step) {
             $message = Invoke-AndroidLifecycle $peer $proc $op
         } elseif (Test-SimBackend $peer) {
             $message = Invoke-SimLifecycle $peer $proc $op
-        } elseif (Test-LinuxBackend) {
+        } elseif ((Test-LinuxBackend) -or (Test-MacBackend)) {
             $message = Invoke-LinuxLifecycle $peer $proc $op
         } else {
             $message = Invoke-WindowsLifecycle $peer $proc $op
@@ -426,7 +426,7 @@ function Restore-FleetPeer($peer) {
         if ($op -eq 'net_on' -and -not (Test-AndroidBackend $peer)) {
             if (-not (Test-FleetProxyUp)) { continue }
         }
-        if ($op -eq 'foreground' -and (Test-LinuxBackend)) { continue }
+        if ($op -eq 'foreground' -and ((Test-LinuxBackend) -or (Test-MacBackend))) { continue }
         $answer = Invoke-FleetHostOp $peer ([pscustomobject]@{ op = $op })
         if (-not $answer.ok) { $notes += "$op`: $($answer.message)" }
     }

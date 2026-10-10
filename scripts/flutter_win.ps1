@@ -11,6 +11,12 @@
 # the only one on the machine, so it rides in alone from a directory of its own.
 # The PATH change lives only in this process; the system PATH is untouched.
 # Memory: feedback_flutter_test_native_assets_cmake.
+#
+# DEBUG builds also share one Rust build and one Firebase C++ SDK across every
+# worktree, under the dev cache (HOLLOW_DEV_CACHE, else D:\dev\cache when D:\dev
+# exists; scripts\dev_cache.ps1 shows, seeds and clears it). Release and profile
+# builds never do: the variable is removed for them and cargokit ignores it
+# anyway. Set HOLLOW_CARGOKIT_SHARED_DIR=off to build a debug tree on its own.
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
@@ -43,6 +49,27 @@ foreach ($cache in $caches) {
 
 $clean = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notlike '*Strawberry*' }) -join ';'
 $env:PATH = "$vsCmake;$nasmDir;$clean"
+
+# `flutter build` defaults to release, `run` and `test` to debug.
+$mode = if ($args -contains '--release') { 'release' }
+        elseif ($args -contains '--profile') { 'profile' }
+        elseif ($args -contains '--debug') { 'debug' }
+        elseif ($args.Count -gt 0 -and $args[0] -eq 'build') { 'release' }
+        else { 'debug' }
+if ($mode -eq 'debug') {
+    $devCache = if ($env:HOLLOW_DEV_CACHE) { $env:HOLLOW_DEV_CACHE } elseif (Test-Path 'D:\dev') { 'D:\dev\cache' } else { $null }
+    if ($devCache) {
+        if (-not $env:HOLLOW_CARGOKIT_SHARED_DIR) { $env:HOLLOW_CARGOKIT_SHARED_DIR = Join-Path $devCache 'hollow-cargokit' }
+        $firebase = Join-Path $devCache 'firebase_cpp_sdk_windows'
+        if (-not $env:FIREBASE_CPP_SDK_DIR -and (Test-Path "$firebase\include\firebase\version.h")) {
+            $env:FIREBASE_CPP_SDK_DIR = $firebase
+        }
+    }
+    if ($env:HOLLOW_CARGOKIT_SHARED_DIR) { Write-Host "[flutter_win] debug build, shared Rust build: $env:HOLLOW_CARGOKIT_SHARED_DIR" }
+    if ($env:FIREBASE_CPP_SDK_DIR) { Write-Host "[flutter_win] Firebase C++ SDK: $env:FIREBASE_CPP_SDK_DIR" }
+} else {
+    Remove-Item Env:HOLLOW_CARGOKIT_SHARED_DIR -ErrorAction SilentlyContinue
+}
 
 & flutter @args
 exit $LASTEXITCODE

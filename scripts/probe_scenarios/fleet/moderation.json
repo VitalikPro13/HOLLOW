@@ -116,7 +116,7 @@
     { "peer": "b", "op": "tap", "target": "semantics:Create a server" },
     { "peer": "b", "op": "enter_text", "target": "hint:Invite link", "value": "${INVITE}" },
     { "peer": "b", "op": "tap", "target": "text:Join", "index": 0 },
-    { "peer": "b", "op": "wait", "ms": 30000 },
+    { "peer": "b", "op": "wait", "ms": 30000, "why": "Absence proof: a refused rejoin never ends the join, so there is no event to wait for." },
     { "peer": "b", "op": "shot", "name": "mod-06-banned-rejoin" },
     { "peer": "b", "op": "expect_count", "target": "channel:general", "value": 0 },
     { "peer": "a", "op": "expect_count", "target": "key:member:${PEER_B}", "value": 0 },

@@ -122,6 +122,9 @@ if (-not $Version) {
 }
 Write-Host "Hollow release pipeline - version $Version" -ForegroundColor Green
 
+# Release builds never use the shared debug Rust build (cargokit ignores it too).
+Remove-Item Env:HOLLOW_CARGOKIT_SHARED_DIR -ErrorAction SilentlyContinue
+
 # --- 1. Build ---
 if (-not $SkipBuild) {
     Step 1 'flutter build windows --release'

@@ -15,6 +15,7 @@ import 'package:hollow/src/core/providers/video_playback_provider.dart';
 import 'package:hollow/src/core/services/audio_probe_service.dart';
 import 'package:hollow/src/core/services/audio_transcode_service.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -23,6 +24,14 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_slider.dart';
+
+/// Logs to hollow_debug.log, so a play that fails is never silent; never fails
+/// the caller, in a widget test included.
+void _log(String msg) {
+  try {
+    network_api.logFromDart(message: msg).catchError((Object _) {});
+  } catch (_) {}
+}
 
 /// Renders an audio attachment inline in a message bubble.
 ///
@@ -184,13 +193,13 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
     try {
       playable = await AudioTranscodeService.ensurePlayable(path);
     } catch (e) {
-      debugPrint('[AudioBubble] prepare failed for $path: $e');
+      _log('[AudioBubble] prepare failed file=$_playKey: $e');
       playable = null;
     }
     if (!mounted) return;
     setState(() => _preparing = false);
     if (playable == null || !File(playable).existsSync()) {
-      debugPrint('[AudioBubble] transcode failed for $path');
+      _log('[AudioBubble] nothing playable file=$_playKey');
       if (mounted) {
         HollowToast.show(
           context,
@@ -209,10 +218,9 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
   Future<void> _playFrom(AudioPlayer player, String audioPath) async {
     try {
       await player.play(UrlSource(await AtRest.mediaUrlFor(audioPath)));
-      debugPrint('at_rest audio source=url');
       return;
     } catch (e) {
-      debugPrint('at_rest audio source=bytes-fallback reason=$e');
+      _log('[AudioBubble] loopback url refused, playing bytes: $e');
     }
     await player.play(BytesSource(await AtRest.read(audioPath)));
   }
@@ -248,7 +256,7 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
         });
       }
     } catch (e) {
-      debugPrint('[AudioBubble] play failed: $e');
+      _log('[AudioBubble] play failed file=$_playKey: $e');
       _disposePlayer();
     }
   }

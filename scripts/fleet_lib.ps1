@@ -12,7 +12,8 @@
 # Windows PowerShell 5.1: no pwsh-only syntax. The same files run under pwsh 7
 # on the Mac mini, where the backend is the iOS Simulator (see Test-SimBackend),
 # and under pwsh 7 on a Linux desktop, where bundle copies are driven the way
-# Windows drives exe copies (see Test-LinuxBackend).
+# Windows drives exe copies (see Test-LinuxBackend). FLEET_BACKEND picks the
+# Android emulators or the macOS desktop app instead.
 
 # pwsh 7.4+ turns a non-zero native exit code into a terminating error while
 # $ErrorActionPreference is Stop. Half of simctl's normal answers are non-zero
@@ -26,11 +27,20 @@ elseif ($IsLinux) { $script:FleetBackend = 'linux' }
 else { $script:FleetBackend = 'windows' }
 
 # FLEET_BACKEND=android drives Android emulators instead (Test-AndroidBackend),
-# for every script that loads this file, fleet_send.ps1 included.
+# FLEET_BACKEND=macos the macOS desktop app (Test-MacBackend), for every script
+# that loads this file, fleet_send.ps1 included.
 if ($env:FLEET_BACKEND) {
-    if ($env:FLEET_BACKEND -ne 'android') { throw "unknown FLEET_BACKEND '$($env:FLEET_BACKEND)' (known: android)" }
-    if (-not ($IsMacOS -or $IsLinux)) { throw 'the Android fleet backend runs under pwsh on macOS or Linux' }
-    $script:FleetBackend = 'android'
+    switch ($env:FLEET_BACKEND) {
+        'android' {
+            if (-not ($IsMacOS -or $IsLinux)) { throw 'the Android fleet backend runs under pwsh on macOS or Linux' }
+            $script:FleetBackend = 'android'
+        }
+        'macos' {
+            if (-not $IsMacOS) { throw 'the macOS desktop fleet backend runs under pwsh on macOS' }
+            $script:FleetBackend = 'macos'
+        }
+        default { throw "unknown FLEET_BACKEND '$($env:FLEET_BACKEND)' (known: android, macos)" }
+    }
 }
 
 # FLEET_ANDROID_PEERS=a,b (pwsh on macOS) mixes the two phone backends in one
@@ -64,18 +74,184 @@ function Test-SimBackend($peer) {
 function Test-LinuxBackend { return $script:FleetBackend -eq 'linux' }
 function Test-WindowsBackend { return $script:FleetBackend -eq 'windows' }
 
+# The macOS desktop backend: a clone of the probe's Hollow.app per peer under
+# build/fleet/<peer>, its binary run DIRECTLY with the peer's environment
+# (`open` would hand the launch to LaunchServices, which drops the environment
+# and forwards a second launch of the same bundle to the first).
+function Test-MacBackend { return $script:FleetBackend -eq 'macos' }
+
+# FLEET_LANE=1..9 gives a fleet its own copy of every per-peer place, so
+# fleet_all.ps1 can run several items at once with the same peer letters: the
+# staged exes and out dirs live under build\lanes\<n>, and through TEMP so do
+# the fixtures, the run dirs and the apps' own temp files. Unset (or 0) is the
+# usual layout. Windows only: the phone backends key their devices by letter.
+# macOS and Linux pwsh have no TEMP (only TMPDIR), and the launch ledger needs a
+# base there too: the mini shares this house's address and so the relay's cap.
+$script:FleetBaseTemp = if ($env:FLEET_BASE_TEMP) { $env:FLEET_BASE_TEMP } elseif ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+$script:FleetLaneRepo = Split-Path -Parent $PSScriptRoot
+function Get-FleetLaneLayout($lane) {
+    if (-not $lane -or "$lane" -eq '0') {
+        return [pscustomobject]@{
+            Stage = Join-Path $script:FleetLaneRepo 'build\fleet'
+            Out = Join-Path $script:FleetLaneRepo 'build\fleet_out'
+            Temp = $script:FleetBaseTemp
+        }
+    }
+    if ("$lane" -notmatch '^[1-9]$') { throw "FLEET_LANE must be a digit 0-9 (got '$lane')" }
+    $laneRoot = Join-Path $script:FleetLaneRepo "build\lanes\$lane"
+    return [pscustomobject]@{
+        Stage = Join-Path $laneRoot 'fleet'
+        Out = Join-Path $laneRoot 'fleet_out'
+        Temp = Join-Path $script:FleetBaseTemp "hollow_fleet_lanes\$lane"
+    }
+}
+if ($env:FLEET_LANE -and $env:FLEET_LANE -ne '0') {
+    if (-not (Test-WindowsBackend)) { throw 'FLEET_LANE (parallel fleets) runs on the Windows backend only' }
+    $laneLayout = Get-FleetLaneLayout $env:FLEET_LANE
+    $script:FleetStageRoot = $laneLayout.Stage
+    $script:FleetOutRoot = $laneLayout.Out
+    New-Item -ItemType Directory -Path $laneLayout.Temp -Force | Out-Null
+    # Children (fleet.ps1, the app itself) inherit these; FLEET_BASE_TEMP keeps
+    # a second load of this file from nesting the lane inside itself.
+    $env:FLEET_BASE_TEMP = $script:FleetBaseTemp
+    $env:TEMP = $laneLayout.Temp
+    $env:TMP = $laneLayout.Temp
+}
+
+# Waits until this machine has booked fewer than FLEET_LAUNCH_BUDGET (default 8)
+# instance launches in the last FLEET_LAUNCH_WINDOW_S (default 75) seconds, then
+# books one. The relay refuses an address's 11th new socket in a sliding minute,
+# and parallel lanes booting together would otherwise spend it for every device
+# behind the same address. The window is longer than the relay's because a
+# launch's socket opens up to ~15 s after it is booked. -NoWait books at once: an
+# app that relaunched itself (link import, destroy) has already gone ahead, and
+# the booking makes the next launches wait for it. The ledger is shared by every
+# lane and worktree through the base temp dir.
+function Wait-FleetLaunchSlot($peer, [switch]$NoWait) {
+    $budget = 8
+    if ($env:FLEET_LAUNCH_BUDGET) { $budget = [int]$env:FLEET_LAUNCH_BUDGET }
+    if ($budget -le 0) { return }
+    $windowMs = 75000
+    if ($env:FLEET_LAUNCH_WINDOW_S) { $windowMs = 1000 * [int]$env:FLEET_LAUNCH_WINDOW_S }
+    $ledger = Join-Path $script:FleetBaseTemp 'hollow_fleet_launches.txt'
+    $mutex = New-Object System.Threading.Mutex($false, 'Local\HollowFleetLaunchLedger')
+    $waitedMs = 0
+    try {
+        while ($true) {
+            try { [void]$mutex.WaitOne() } catch [System.Threading.AbandonedMutexException] { }
+            $pauseMs = 0
+            try {
+                $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                $recent = New-Object System.Collections.Generic.List[int64]
+                if (Test-Path $ledger) {
+                    $stamp = [int64]0
+                    foreach ($line in [System.IO.File]::ReadAllLines($ledger)) {
+                        if ([int64]::TryParse($line.Trim(), [ref]$stamp) -and ($now - $stamp) -lt $windowMs) { $recent.Add($stamp) }
+                    }
+                }
+                if ($NoWait -or $recent.Count -lt $budget) {
+                    $recent.Add($now)
+                    [System.IO.File]::WriteAllLines($ledger, [string[]]($recent | ForEach-Object { "$_" }))
+                } else {
+                    $oldest = ($recent | Measure-Object -Minimum).Minimum
+                    $pauseMs = [int]($windowMs - ($now - $oldest)) + 500
+                }
+            } finally { $mutex.ReleaseMutex() }
+            if ($pauseMs -le 0) { break }
+            if ($waitedMs -eq 0) {
+                Write-Host "[fleet] $peer waits up to $([int]($pauseMs / 1000)) s: $budget instances launched in the last $([int]($windowMs / 1000)) s" -ForegroundColor Yellow
+            }
+            $waitedMs += $pauseMs
+            Start-Sleep -Milliseconds $pauseMs
+        }
+    } finally { $mutex.Dispose() }
+    if ($waitedMs -gt 0) { Write-Host "[fleet] $peer launch slot after $([int]($waitedMs / 1000)) s" -ForegroundColor Yellow }
+}
+
 # Fixtures and run directories on Linux live under $HOME like on the Mac: a
 # reboot empties /tmp and would take the fixture identities with it.
 function Get-LinuxFleetHome { return (Join-Path $HOME 'hollow_fleet') }
 
-# Where `fleet.ps1 -Onboard` keeps each peer's fixture identity. Android peers
-# get their own root: peer a on an emulator and peer a in a simulator are two
-# different identities on the same Mac. Under $HOME on macOS and Linux, never
-# the temp dir, which macOS purges after three idle days.
+# Where `fleet.ps1 -Onboard` keeps each peer's fixture identity. Android and
+# macOS desktop peers get their own roots: peer a on an emulator, in a
+# simulator and as a desktop app are three different identities on one Mac.
+# Under $HOME on macOS and Linux, never the temp dir, which macOS purges after
+# three idle days.
 function Get-FixtureRoot($peer) {
     if (Test-WindowsBackend) { return Join-Path $env:TEMP 'hollow_fleet\fixtures' }
     if (Test-AndroidBackend $peer) { return Join-Path (Get-LinuxFleetHome) 'fixtures-android' }
+    if (Test-MacBackend) { return Join-Path (Get-LinuxFleetHome) 'fixtures-macos' }
     return Join-Path (Get-LinuxFleetHome) 'fixtures'
+}
+
+# --------------------------------------------------------------------------
+# The macOS desktop backend
+# --------------------------------------------------------------------------
+
+# Data directories while a peer runs; apart from the Linux backend's `run`.
+function Get-MacRunRoot { return Join-Path (Get-LinuxFleetHome) 'run-macos' }
+# Each instance's HOME, so nothing it saves lands in the person's own folders.
+function Get-MacHomeRoot { return Join-Path (Get-LinuxFleetHome) 'home-macos' }
+
+function Get-MacPeerBundle($peer) { return Join-Path (Join-Path $script:FleetStageRoot $peer) 'Hollow.app' }
+function Get-MacPeerBinary($peer) { return Join-Path (Get-MacPeerBundle $peer) 'Contents/MacOS/Hollow' }
+
+# Every running fleet instance of THIS tree (several agents' trees share the
+# mini), or only those of `$only` (peer letters) when given. Each comes back
+# with the peer it belongs to, read off its binary's path, so nothing launched
+# from anywhere else (the person's own Hollow.app) can ever match.
+function Get-MacFleetProcesses($only = @()) {
+    $prefix = $script:FleetStageRoot.TrimEnd('/') + '/'
+    $found = @()
+    foreach ($proc in @(Get-Process -Name 'Hollow' -ErrorAction SilentlyContinue)) {
+        $path = $null
+        try { $path = $proc.Path } catch { }
+        if (-not $path -or -not $path.StartsWith($prefix, [System.StringComparison]::Ordinal)) { continue }
+        $rest = $path.Substring($prefix.Length)
+        $peer = $rest.Split('/')[0]
+        if ($rest -ne "$peer/Hollow.app/Contents/MacOS/Hollow") { continue }
+        if (@($only).Count -gt 0 -and $peer -notin @($only)) { continue }
+        $found += [pscustomobject]@{ Id = $proc.Id; Peer = $peer; Process = $proc }
+    }
+    return $found
+}
+
+# Whether a staged bundle holds the same Dart program and Rust library as the
+# build: when there is no build to compare with, the stage is all there is.
+$script:MacStampFiles = @(
+    'Contents/Frameworks/App.framework/Resources/flutter_assets/kernel_blob.bin',
+    'Contents/Frameworks/hollow_core.framework/hollow_core'
+)
+function Test-MacStageCurrent($built, $staged) {
+    foreach ($relative in $script:MacStampFiles) {
+        $source = Join-Path $built $relative
+        if (-not (Test-Path $source)) { continue }
+        & cmp -s $source (Join-Path $staged $relative)
+        if ($LASTEXITCODE -ne 0) { return $false }
+    }
+    return $true
+}
+
+# Kills fleet instances by pid and waits until they are gone: until then the
+# peer's messages.db is open and a data directory reset or fixture copy races it.
+function Stop-MacFleetProcesses($running) {
+    foreach ($item in @($running)) { Stop-Process -Id $item.Id -Force -ErrorAction SilentlyContinue }
+    $deadline = (Get-Date).AddSeconds(30)
+    foreach ($item in @($running)) {
+        $left = [int]($deadline - (Get-Date)).TotalMilliseconds
+        if ($left -gt 0) { try { [void]$item.Process.WaitForExit($left) } catch { } }
+    }
+}
+
+# The newest macOS crash report of a fleet instance, when the system wrote one
+# in the last few minutes: a native death leaves its stack nowhere else.
+function Get-MacCrashReport {
+    $dir = Join-Path $HOME 'Library/Logs/DiagnosticReports'
+    if (-not (Test-Path $dir)) { return $null }
+    $since = (Get-Date).AddMinutes(-5)
+    return Get-ChildItem $dir -Filter 'Hollow*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -gt $since } |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
 }
 
 # The recovery phrase `fleet.ps1 -Onboard` saw for a peer's fixture identity.
@@ -448,6 +624,9 @@ function Get-PeerProcess($peer) {
         if (-not $running) { return $null }
         return [pscustomobject]@{ Id = $running; Serial = (Get-AndroidSerial $peer) }
     }
+    if (Test-MacBackend) {
+        return @(Get-MacFleetProcesses @($peer)) | ForEach-Object { $_.Process } | Select-Object -First 1
+    }
     $prefix = Join-Path $script:FleetStageRoot $peer
     return Get-Process -Name 'hollow' -ErrorAction SilentlyContinue |
         Where-Object {
@@ -504,6 +683,11 @@ function Get-CrashTail($peer) {
         # says its last words on stderr, which Start-Peer keeps per instance.
         $sources += @{ name = 'hollow_debug'; path = (Join-Path (Join-Path (Join-Path (Get-LinuxFleetHome) 'run') $peer) 'hollow_debug.log') }
         $sources += @{ name = 'native-stderr'; path = (Join-Path $outDir 'native-stderr.log') }
+    } elseif (Test-MacBackend) {
+        $sources += @{ name = 'hollow_debug'; path = (Join-Path (Join-Path (Get-MacRunRoot) $peer) 'hollow_debug.log') }
+        $sources += @{ name = 'native-stderr'; path = (Join-Path $outDir 'native-stderr.log') }
+        $report = Get-MacCrashReport
+        if ($report) { $lines += "--- crash report: $($report.FullName) ---" }
     } else {
         $sources += @{ name = 'hollow_debug'; path = (Join-Path (Join-Path $script:FleetStageRoot $peer) 'hollow_debug.log') }
     }

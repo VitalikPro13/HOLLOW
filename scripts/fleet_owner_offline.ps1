@@ -88,6 +88,7 @@ function Restart-Peer($peer) {
     $env:UI_PROBE_IDLE_MINUTES = '40'
     $env:UI_PROBE_SCENARIO_FILE = ''
     $env:UI_PROBE_STEPS = ''
+    Wait-FleetLaunchSlot $peer
     # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
     # Start-Process into inherit-handles mode and every instance then holds a
     # duplicate of this script's stdout pipe, so the script never returns.
@@ -245,12 +246,12 @@ if (-not $KeepServer) {
             $offlineDelete = $false
             $deadline = (Get-Date).AddSeconds(120)
             while ((Get-Date) -lt $deadline) {
-                Start-Sleep -Seconds 5
                 $answer = Send-FleetStep c ([pscustomobject]@{ op = 'capture'; from = 'provider'; key = 'servers'; as = 'C_SERVERS' }) 60
                 if ($answer.ok -and $answer.captured -and -not "$($answer.captured.C_SERVERS)".Contains($server)) {
                     $offlineDelete = $true
                     break
                 }
+                Start-Sleep -Seconds 5
             }
             if ($offlineDelete) { Say 'c, closed during the delete, lost the server on its return' 'Green' }
             else { Say "c, closed during the delete, still holds $server" 'Red' }

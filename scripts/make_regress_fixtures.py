@@ -10,6 +10,11 @@ regress_media.json sends four files over a DM:
   Voice message.ogg     3 s of a quiet tone as Opus in Ogg. The exact name is what
                         marks a voice note on the wire, so it must not change.
 
+places_after.json and places_before.json post one more, by name:
+
+  synth-session-stems.zip  40 MiB of random bytes under a zip name: a Share-backed
+                           server file. The scenarios address it by this name.
+
 The .bin files need only the standard library. The clip needs an ffmpeg with
 libx264 and the voice note one with libopus, looked up in this order: the FFMPEG
 environment variable, ffmpeg on PATH, C:/ffmpeg/bin/ffmpeg.exe, then the repo's
@@ -132,7 +137,8 @@ def main():
 
     write_random(OUT / "regress_gate_6mb.bin", 6 * MIB, seed=6)
     write_random(OUT / "regress_big_40mb.bin", 40 * MIB, seed=40)
-    print("wrote regress_gate_6mb.bin and regress_big_40mb.bin")
+    write_random(OUT / "synth-session-stems.zip", 40 * MIB, seed=41)
+    print("wrote regress_gate_6mb.bin, regress_big_40mb.bin and synth-session-stems.zip")
 
     how = make_clip(OUT / "regress_clip.mp4")
     if how:

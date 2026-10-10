@@ -199,8 +199,10 @@
     },
     {
       "peer": "a",
-      "op": "wait",
-      "ms": 4000
+      "op": "wait_for",
+      "provider": "dmUnreadCounts",
+      "matches": ":2[,}]",
+      "timeout_ms": 60000
     },
     {
       "peer": "a",
@@ -214,8 +216,9 @@
     },
     {
       "peer": "a",
-      "op": "wait",
-      "ms": 2500
+      "op": "wait_for",
+      "target": "semantics:New messages",
+      "timeout_ms": 15000
     },
     {
       "peer": "a",
@@ -241,7 +244,8 @@
     {
       "peer": "a",
       "op": "wait",
-      "ms": 3000
+      "ms": 3000,
+      "why": "Stability window: the line must still be drawn 3 s after it first appeared."
     },
     {
       "peer": "a",
@@ -278,7 +282,8 @@
     {
       "peer": "a",
       "op": "wait",
-      "ms": 2000
+      "ms": 2000,
+      "why": "Absence after a quiet return: the pane loads and marks the DM seen before a count of 0 means anything."
     },
     {
       "peer": "a",
@@ -534,8 +539,10 @@
     },
     {
       "peer": "a",
-      "op": "wait",
-      "ms": 6000
+      "op": "wait_for",
+      "provider": "dmUnreadCounts",
+      "matches": ":20[,}]",
+      "timeout_ms": 90000
     },
     {
       "peer": "a",
@@ -544,8 +551,9 @@
     },
     {
       "peer": "a",
-      "op": "wait",
-      "ms": 3000
+      "op": "wait_for",
+      "target": "tooltip:Jump to new messages",
+      "timeout_ms": 15000
     },
     {
       "peer": "a",
@@ -581,8 +589,9 @@
     },
     {
       "peer": "a",
-      "op": "wait",
-      "ms": 1500
+      "op": "wait_for",
+      "target": "semantics:New messages",
+      "timeout_ms": 15000
     },
     {
       "peer": "a",

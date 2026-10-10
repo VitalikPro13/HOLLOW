@@ -64,6 +64,12 @@ NOTES: anything odd (a flake TRY 1 FAIL / TRY 2 PASS, a non-empty refusals file,
 - Test temp lives on D: (`HOLLOW_TEST_TMP=D:\dev\tmp\hollow-tests`, set machine-wide).
 - Android builds run on the Mac mini, never on Windows (a debug APK cost about 30 GB).
 - After the proof, delete the `build\` trees your job created when your parent asked for it.
+- Debug builds through `scripts\flutter_win.ps1` (so `fleet.ps1 -Build` too) share ONE Rust
+  build and the Firebase C++ SDK under `D:\dev\cache`; a worktree's `build\` is then about 4 GB.
+  `powershell -File scripts\dev_cache.ps1` prints their sizes. Never delete `D:\dev\cache` to
+  free space unless your parent says so; `-Clear` is the way to empty the Rust part.
+- Never put `tail -F` or `Get-Content -Wait` on a measurement or results file: the writer's
+  append fails and the job dies. Read it with a plain read in a bounded poll.
 
 ## Rust tests and the harness (from `rust/hollow_core`)
 
@@ -112,12 +118,26 @@ NOTES: anything odd (a flake TRY 1 FAIL / TRY 2 PASS, a non-empty refusals file,
   and a fixture is never linked to another device.
 - A failing run leaves the fleet up: read `errors.log`, `stdout.log` and `hollow_debug.log` of the
   peer before believing a timeout, and report those lines.
-- `fleet_all.ps1` takes about 75 minutes: run `-SkipBuild -Only a,b` subsets when you can. Opt-in
+- `fleet_all.ps1` takes about 45 minutes in 3 lanes (90 serial): run `-SkipBuild -Only a,b` subsets when you can. Opt-in
   items run only when named (`fleet_relay_restart` restarts PRODUCTION; never unless your job says
   so). A non-empty `<name>-refusals.txt` is NOT a pass by itself: quote every line under NOTES and
-  report RESULT as what `[all]` says. Known baseline lines (s40 and s42 runs): `KeyBundle glare ...
-  deferring to their PreKey`, `Held commit ... dropped: overtaken by another commit`, and after a
-  device link `[HOLLOW-SECURITY] Alert ...: new_device`. Any OTHER line is a failure.
+  report RESULT as what `[all]` says. Known baseline lines (s40, s42 and s43 runs): `Held commit ...
+  dropped: overtaken by another commit`, after a device link `[HOLLOW-SECURITY] Alert ...: new_device`,
+  `DROPPED ... not in any WS room`, `REJECTED` channel backfill / `ChannelSyncRequest` lines from the
+  restricted-channel steps, moderation's ban lines, FileHeader `already complete`, and `Rate limited
+  WS peer ... asked again`. Any OTHER line is a failure. (`KeyBundle glare ... deferring` no longer
+  exists since s43: if it appears, the build is stale.)
+- Parallel: `fleet_all.ps1` runs 3 lanes by default (`-MaxParallel 1` = serial, up to 9;
+  `-DryRun` shows the schedule). Start it from the PowerShell tool with `run_in_background`
+  (`cmd /c "cd /d <tree> && powershell -NoProfile -File scripts\fleet_all.ps1 ... > <log> 2>&1 &
+  echo done > <exit file>"`); `%ERRORLEVEL%` in that line is always 0, so read `summary.md`. Lanes
+  live in `build\lanes\<n>` and `%TEMP%\hollow_fleet_lanes\<n>`; report the summary's
+  `relay refused` column (must be 0), its first lines (wall time, total) and the `launch slot
+  after` waits. Before a second try of fleet_all, copy `build\fleet_out\all` and the exit file
+  aside: the rerun overwrites the first try's logs, and the old exit file looks finished at once.
+  To drive one lane by hand set `$env:FLEET_LANE = '<n>'` in the shell
+  before `fleet.ps1` / `fleet_send.ps1`. Delete `build\lanes` when the job is done if your brief
+  says to clean up.
 - `regress_app_lock` never runs on Vitalik's Windows account (it shares his app-lock secret file);
   it runs on the Win10 VM.
 - Never resize a fleet window below 960 logical px, never launch an instance with redirected
@@ -144,6 +164,12 @@ NOTES: anything odd (a flake TRY 1 FAIL / TRY 2 PASS, a non-empty refusals file,
 - Android: launch emulators with `-gpu host`; background an app with `adb shell input keyevent
   KEYCODE_HOME`; a battery prompt on top needs BACK; stop an emulator by serial (`adb -s <serial>
   emu kill`). Both backends run debug builds.
+- macOS desktop fleet: `FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 ...` from
+  `~/wt/<name>` (same flags and scenarios as Windows, desktop onboarding), every run redirected to
+  a file. Needs a GUI login at the console (a locked screen is fine). `-Stop -Peers ...` kills only
+  that tree's peers by pid; check with `pgrep -fl "Hollow.app/Contents/MacOS/Hollow"`. Never
+  launch a peer with `open`, never touch `~/Library/Application Support/hollow` (the real data).
+  Shots are in `build/fleet_out/<peer>`; scp them off before the next run.
 - Before reporting: delete `~/wt/<name>` and shut down your simulators and emulators.
 
 ## Linux machines

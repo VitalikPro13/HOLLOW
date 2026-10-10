@@ -165,7 +165,7 @@
     { "peer": "a", "op": "key", "value": "enter" },
     { "peer": "a", "op": "wait_for", "target": "type:MessageRow > text:dm while blocked ${RUN}", "timeout_ms": 20000 },
     { "peer": "b", "op": "log", "message": "never shows up: a fixed wait, then expect_no_text (wait_for gone only proves a disappearance)" },
-    { "peer": "b", "op": "wait", "ms": 10000 },
+    { "peer": "b", "op": "wait", "ms": 10000, "why": "Absence proof: a blocked DM must never show up." },
     { "peer": "b", "op": "expect_no_text", "value": "dm while blocked ${RUN}" },
     { "peer": "b", "op": "shot", "name": "rs-06-blocked", "soft": true },
 

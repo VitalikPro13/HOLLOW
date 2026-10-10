@@ -87,6 +87,7 @@ function Restart-Peer($peer) {
     $env:UI_PROBE_IDLE_MINUTES = '40'
     $env:UI_PROBE_SCENARIO_FILE = ''
     $env:UI_PROBE_STEPS = ''
+    Wait-FleetLaunchSlot $peer
     $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
     Say "relaunched $peer (pid $($proc.Id)) on its EXISTING data dir"
 

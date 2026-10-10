@@ -139,6 +139,18 @@ function Invoke-SoftStep($peer, $step) {
     return $answer
 }
 
+# Waits until the observer's own presence view holds none of these ids (the
+# master once the roster is known, the bare device id before).
+# That view comes from the same room membership diff the observer's fan-out
+# targets do, so a send after it never goes to a stale view. The list shape is
+# required, so a missing provider can never pass for "offline".
+function Wait-SeesOffline($observer, $idVars, $timeoutSeconds = 30) {
+    $ids = @($idVars | ForEach-Object { $script:FleetVars[$_] } | Where-Object { $_ })
+    if ($ids.Count -ne @($idVars).Count) { throw "not every one of $($idVars -join ', ') was captured" }
+    $pattern = '^\[(?!.*({0})).*\]$' -f ($ids -join '|')
+    Step $observer @{ op = 'wait_for'; provider = 'online'; matches = $pattern; timeout_ms = $timeoutSeconds * 1000 }
+}
+
 function Wait-ForAnyTarget($peer, $targets, $timeoutSeconds, $sliceMs = 3000) {
     Write-Host ("  [{0}] wait_for ANY of: {1} (up to {2}s)" -f $peer, ($targets -join ' | '), $timeoutSeconds) -ForegroundColor DarkGray
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
@@ -193,6 +205,7 @@ function Restart-Peer($peer) {
     $env:UI_PROBE_IDLE_MINUTES = '40'
     $env:UI_PROBE_SCENARIO_FILE = ''
     $env:UI_PROBE_STEPS = ''
+    Wait-FleetLaunchSlot $peer
     # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
     # Start-Process into inherit-handles mode and every instance then holds a
     # duplicate of this script's stdout pipe, so the script never returns.
@@ -384,6 +397,7 @@ try {
     Wait-ForConnected b | Out-Null
     Step a @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_A' }
     Step b @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B' }
+    Step b @{ op = 'capture'; from = 'provider'; key = 'devicePeerId'; as = 'DEVICE_B' }
 
     # ---- G1: one server, one channel, a message each way -------------------
     Say '1/6 a creates the server, b joins, both talk in #general'
@@ -428,7 +442,7 @@ try {
     # The relay learns b is gone from the room membership diff, and a computes
     # its fan-out targets from that. Sending into a stale view is the classic
     # way to prove nothing at all.
-    Start-Sleep -Seconds 5
+    Wait-SeesOffline a @('PEER_B', 'DEVICE_B')
 
     Send-ChannelImage a $imgOne 'shot one ${RUN}'
     Step a @{ op = 'shot'; name = "cfc-$($script:FleetVars.RUN)-a-sent-one" }
@@ -466,10 +480,12 @@ try {
     # ---- G4: b returns to a relay with nobody behind it --------------------
     Say '4/6 b closes, a posts a second image and closes too'
     Stop-Peer b
-    Start-Sleep -Seconds 5
+    Wait-SeesOffline a @('PEER_B', 'DEVICE_B')
     Send-ChannelImage a $imgTwo 'shot two ${RUN}'
     Step a @{ op = 'shot'; name = "cfc-$($script:FleetVars.RUN)-a-sent-two" }
     Stop-Peer a
+    # Nobody is up to watch a go, so this stays a fixed gap: the relay drops a
+    # from the room before b comes back alone.
     Start-Sleep -Seconds 3
 
     Say '5/6 b returns ALONE - a caption row and a card with no bytes is correct here'
@@ -549,10 +565,12 @@ try {
     Start-Sleep -Seconds 8
 
     Stop-Peer b
-    Start-Sleep -Seconds 5
+    Wait-SeesOffline a @('PEER_B', 'DEVICE_B')
     Send-ChannelImage a $imgThree 'shot three ${RUN}'
     Step a @{ op = 'shot'; name = "cfc-$($script:FleetVars.RUN)-a-sent-three" }
     Stop-Peer a
+    # Nobody is up to watch a go, so this stays a fixed gap: the relay drops a
+    # from the room before b comes back alone.
     Start-Sleep -Seconds 3
 
     Say '8/8 b returns alone to the PUBLIC channel'

@@ -98,6 +98,23 @@
 #   FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b
 #   FLEET_BACKEND=android pwsh scripts/fleet_send.ps1 -Command '[{"peer":"a","op":"look"}]'
 #
+# ## The macOS desktop backend (FLEET_BACKEND=macos, pwsh on macOS)
+#
+# The desktop app on a Mac, driven the way Windows drives exe copies: the probe
+# target is built once (`flutter build macos --debug -t
+# integration_test/ui_probe_test.dart`) and cloned per peer to
+# build/fleet/<peer>/Hollow.app (APFS clones, no extra disk). Each peer's
+# binary is run directly, never through `open`, with its own HOLLOW_DATA_DIR
+# (~/hollow_fleet/run-macos/<peer>) and HOME (~/hollow_fleet/home-macos/<peer>);
+# fixtures live in ~/hollow_fleet/fixtures-macos. A GUI session must be logged
+# in at the console (`stat -f %Su /dev/console`); a locked screen is fine.
+# Stop kills only this tree's peers (and only -Peers), by pid.
+#
+#   FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Build -Peers a,b
+#   FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b
+#   FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario friend_dm -Peers a,b
+#   FLEET_BACKEND=macos pwsh scripts/fleet_send.ps1 -Command '[{"peer":"a","op":"look"}]'
+#
 # ## A mixed phone fleet (FLEET_ANDROID_PEERS, pwsh on macOS)
 #
 # The named peers run on Android emulators, every other peer in an iOS
@@ -177,6 +194,7 @@ $outRoot     = $script:FleetOutRoot
 # container or emulator (Get-PeerDataDir, Reset-PeerData).
 $runRoot = $null
 if (Test-LinuxBackend) { $runRoot = Join-Path (Get-LinuxFleetHome) 'run' }
+elseif (Test-MacBackend) { $runRoot = Get-MacRunRoot }
 elseif (Test-WindowsBackend) { $runRoot = Join-Path $env:TEMP 'hollow_fleet\run' }
 
 # What -Build leaves for a peer to be staged from.
@@ -184,6 +202,7 @@ function Get-BuildOutput($peer) {
     if (Test-SimBackend $peer) { return Join-Path (Join-Path (Join-Path $repoRoot 'build') 'ios') (Join-Path 'iphonesimulator' 'Runner.app') }
     if (Test-AndroidBackend $peer) { return Join-Path $repoRoot 'build/app/outputs/flutter-apk/app-debug.apk' }
     if (Test-LinuxBackend) { return Join-Path $repoRoot 'build/linux/x64/debug/bundle' }
+    if (Test-MacBackend) { return Join-Path $repoRoot 'build/macos/Build/Products/Debug/Hollow.app' }
     return Join-Path $repoRoot 'build\windows\x64\runner\Debug'
 }
 
@@ -198,7 +217,18 @@ function Write-Step($message, $colour = 'Cyan') {
 # may well be open while a fleet run happens - it has a different exe path and
 # a different data directory, so it does not conflict with anything here, and
 # killing it would be a rude surprise in the middle of a conversation.
-function Stop-Fleet {
+function Stop-Fleet($onlyPeers = @()) {
+    if (Test-MacBackend) {
+        # Several agents share the mini: only this tree's instances, and with
+        # -Peers only those, each killed by its pid.
+        $running = @(Get-MacFleetProcesses @($Peers -split '[,\s]+' | Where-Object { $_ }))
+        if ($running.Count -gt 0) {
+            Write-Step "stopping $($running.Count) fleet instance(s): pid $(($running | ForEach-Object { "$($_.Id) ($($_.Peer))" }) -join ', ')" 'Yellow'
+            Stop-MacFleetProcesses $running
+            Start-Sleep -Milliseconds 1200
+        }
+        return
+    }
     $sim = Test-SimBackend
     $android = (Test-AndroidBackend) -or (Test-MixedFleet)
     if ($sim -or $android) {
@@ -228,9 +258,14 @@ function Stop-Fleet {
         }
         return
     }
+    # A trailing separator, so a stage root never matches a sibling folder that
+    # merely starts with the same name; -Stop -Peers narrows it to those letters.
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    $prefixes = @($stageRoot.TrimEnd($sep) + $sep)
+    if (@($onlyPeers).Count -gt 0) { $prefixes = @($onlyPeers | ForEach-Object { (Join-Path $stageRoot $_) + $sep }) }
     $running = Get-Process -Name 'hollow' -ErrorAction SilentlyContinue |
         Where-Object {
-            try { $_.Path -and $_.Path.StartsWith($stageRoot, 'OrdinalIgnoreCase') }
+            try { $exe = $_.Path; $exe -and @($prefixes | Where-Object { $exe.StartsWith($_, 'OrdinalIgnoreCase') }).Count -gt 0 }
             catch { $false }
         }
     if ($running) {
@@ -250,7 +285,7 @@ function Stop-Fleet {
 }
 
 if ($Stop) {
-    Stop-Fleet
+    Stop-Fleet @($Peers -split '[,\s]+' | Where-Object { $_ })
     Stop-FleetProxy
     Write-Step 'fleet stopped'
     exit 0
@@ -345,6 +380,12 @@ function Invoke-Build {
         if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
     }
     if ($sim -or $android) { return }
+    if (Test-MacBackend) {
+        Write-Step 'building the probe target as a macOS app'
+        & flutter build macos --debug -t integration_test/ui_probe_test.dart
+        if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
+        return
+    }
     if (Test-LinuxBackend) {
         Write-Step 'building the probe target as a Linux bundle'
         & flutter build linux --debug -t integration_test/ui_probe_test.dart
@@ -355,6 +396,20 @@ function Invoke-Build {
     # Plain `flutter build` picks Strawberry's cmake in a fresh tree and the native-asset hook fails.
     & powershell -NoProfile -File (Join-Path $PSScriptRoot 'flutter_win.ps1') build windows --debug -t integration_test/ui_probe_test.dart
     if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
+    # The CMake copies these gitignored binaries only when the tree has them and
+    # merely warns otherwise, so a fresh worktree builds clean and then fails at
+    # runtime (voice notes never play: regress_media, session 43).
+    $out = Get-BuildOutput $peerList[0]
+    if (-not (Test-Path (Join-Path $out 'ffmpeg.exe'))) {
+        throw "the build has no ffmpeg.exe in $out, so voice notes cannot play and video thumbnails stay blank. Bring vendor\ffmpeg in with: powershell -File scripts\dev_cache.ps1 -SeedWorktree <this tree> -From <the main tree> (or run scripts\fetch_ffmpeg.ps1), then build again."
+    }
+    if (-not (Test-Path (Join-Path $out 'screen_audio_capturer.exe'))) {
+        # Every fleet share keeps the dialog's default, no audio, so none fails on it today.
+        $sharing = @(Get-ChildItem (Join-Path $PSScriptRoot 'probe_scenarios\fleet') -Filter *.json |
+            Where-Object { Select-String -Path $_.FullName -Pattern 'Share your screen' -SimpleMatch -Quiet } |
+            ForEach-Object { $_.BaseName })
+        Write-Step "WARNING: the build has no screen_audio_capturer.exe in $out. A screen share with audio stays silent; scenarios that share a screen: $($sharing -join ', '). Seed it with scripts\dev_cache.ps1 -SeedWorktree." 'Yellow'
+    }
 }
 
 # Whether a peer has a copy of the probe to launch: an exe folder here, an
@@ -371,7 +426,18 @@ function Test-PeerStaged($peer) {
         Start-AndroidDevice $peer
         return ("$(Invoke-Adb $peer 'shell' "pm path $($script:AndroidPackage)" 2>$null)" -match 'package:')
     }
-    $exe = if (Test-LinuxBackend) { 'hollow' } else { 'hollow.exe' }
+    if (Test-MacBackend) {
+        if (-not (Test-Path (Get-MacPeerBinary $peer))) { return $false }
+        # A run without -Build would otherwise drive the copy staged before the
+        # last build (session 42 lost a verdict to that). Restaging is a clone,
+        # under a second, so a stale copy is simply restaged.
+        if (-not (Test-MacStageCurrent (Get-BuildOutput $peer) (Get-MacPeerBundle $peer))) {
+            Write-Step "$peer's staged copy differs from the last build" 'Yellow'
+            return $false
+        }
+        return $true
+    }
+    $exe =if (Test-LinuxBackend) { 'hollow' } else { 'hollow.exe' }
     return (Test-Path (Join-Path (Join-Path $stageRoot $peer) $exe))
 }
 
@@ -399,6 +465,19 @@ function Stage-Peer($peer) {
     }
     $dest = Join-Path $stageRoot $peer
     Write-Step "staging $peer"
+    if (Test-MacBackend) {
+        # A bundle's files are mapped by the running copy: never replace them under it.
+        $running = @(Get-MacFleetProcesses @($peer))
+        if ($running.Count -gt 0) { Stop-MacFleetProcesses $running }
+        $bundle = Get-MacPeerBundle $peer
+        if (Test-Path $dest) { & rm -rf $dest }
+        New-Item -ItemType Directory -Path $dest -Force | Out-Null
+        # An APFS clone (cp -c): every peer's copy shares the build's blocks, so
+        # N peers cost no disk and a restage takes under a second.
+        & cp -cR $buildOutput $bundle
+        if ($LASTEXITCODE -ne 0) { throw "cloning $buildOutput -> $bundle failed with $LASTEXITCODE" }
+        return
+    }
     if (Test-LinuxBackend) {
         Copy-Mirror $buildOutput $dest
         return
@@ -410,9 +489,19 @@ function Stage-Peer($peer) {
     robocopy $buildOutput $dest /MIR /MT:16 /XF *.pdb *.lib *.exp /NFL /NDL /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "robocopy for $peer failed with $LASTEXITCODE" }
     $global:LASTEXITCODE = 0
+    # robocopy skips a file whose size and time match, and a build served from
+    # the shared Rust cache can bring back an older DLL, so prove the copy.
+    foreach ($rel in 'hollow_core.dll', 'data\flutter_assets\kernel_blob.bin') {
+        $src = Join-Path $buildOutput $rel
+        if (-not (Test-Path $src)) { continue }
+        $want = (Get-FileHash $src -Algorithm SHA256).Hash
+        $got = (Get-FileHash (Join-Path $dest $rel) -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+        if ($got -ne $want) { throw "staged $rel for $peer does not match the build output" }
+    }
 }
 
 if ($Build) {
+    if ($env:FLEET_LANE -and $env:FLEET_LANE -ne '0') { throw "-Build in lane $($env:FLEET_LANE): build in lane 0, fleet_all.ps1 stages the lanes from it" }
     Stop-Fleet
     Invoke-Build
     foreach ($peer in $peerList) { Stage-Peer $peer }
@@ -591,6 +680,7 @@ function Start-Peer($peer) {
         Write-Step "launched $peer (pid $launchedPid, emulator hollow-$peer $(Get-AndroidSerial $peer))"
         return
     }
+    Wait-FleetLaunchSlot $peer
     $dest = Join-Path $stageRoot $peer
     $data = Join-Path $runRoot $peer
     New-Item -ItemType Directory -Path $data -Force | Out-Null
@@ -606,6 +696,31 @@ function Start-Peer($peer) {
     $env:UI_PROBE_IDLE_MINUTES = "$IdleMinutes"
     $env:UI_PROBE_SCENARIO_FILE = ''
     $env:UI_PROBE_STEPS = ''
+
+    if (Test-MacBackend) {
+        # The binary itself, never `open` (Test-MacBackend), with stdio in
+        # files as on Linux: a pipe held by this process would outlive it.
+        # `-NSAppSleepDisabled YES` lands in NSUserDefaults' argument domain,
+        # for this process only: an instance nobody looks at must not be App
+        # Napped, or its timers and the relay keepalive slow to a crawl.
+        # HOME is the peer's own: Dart reads it for profiles.json, the
+        # recordings folder and Save as, which would otherwise be the person's.
+        $peerHome = Join-Path (Get-MacHomeRoot) $peer
+        New-Item -ItemType Directory -Path $peerHome -Force | Out-Null
+        $launcher = Join-Path $out 'launch.sh'
+        $lines = @(
+            '#!/bin/sh',
+            ('export HOME="{0}"' -f $peerHome),
+            ('exec "{0}" -NSAppSleepDisabled YES >"{1}" 2>"{2}" </dev/null' -f (Get-MacPeerBinary $peer),
+                (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
+        )
+        [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
+        & chmod +x $launcher
+        $proc = Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
+        $script:processes[$peer] = $proc
+        Write-Step "launched $peer (pid $($proc.Id)) data=$data"
+        return
+    }
 
     if (Test-LinuxBackend) {
         if (-not $env:DISPLAY) {
@@ -800,6 +915,9 @@ $onboardSteps = @(
     @{ op = 'enter_text'; target = 'hint:Enter a display name'; value = 'probe-${PEER}' },
     @{ op = 'wait_for'; target = 'text:You have unsaved profile changes'; timeout_ms = 10000 },
     @{ op = 'tap'; target = 'text:Save'; index = 0 },
+    # The bar leaves at the tap and nothing on screen marks the save landing;
+    # an Escape during it was lost once in 51 onboardings (session 43).
+    @{ op = 'wait_for'; gone = 'text:You have unsaved profile changes'; timeout_ms = 20000 },
     @{ op = 'wait'; ms = 2500 },
     @{ op = 'key'; value = 'escape' },
     @{ op = 'wait_for'; target = 'text:probe-${PEER}'; timeout_ms = 20000 },

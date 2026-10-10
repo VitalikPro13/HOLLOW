@@ -54,7 +54,7 @@
     { "peer": "b", "op": "wait_for", "target": "semantics:Leave the room", "timeout_ms": 30000 },
 
     { "peer": "a", "op": "log", "message": "15 s in the channel together: SFrame keys, ICE and the audio streams settle in the logs" },
-    { "peer": "all", "op": "wait", "ms": 15000 },
+    { "peer": "all", "op": "wait", "ms": 15000, "why": "Deliberate soak: SFrame keys, ICE and the audio streams settle in the logs." },
     { "peer": "all", "op": "shot", "name": "in_voice_channel" },
     { "peer": "all", "op": "dump", "name": "in_voice_channel" },
 

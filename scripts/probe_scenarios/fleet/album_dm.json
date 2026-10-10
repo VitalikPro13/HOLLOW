@@ -59,7 +59,7 @@
     { "peer": "a", "op": "key", "value": "enter" },
     { "peer": "b", "op": "wait_for", "target": "text:album two ${RUN}", "timeout_ms": 90000 },
 
-    { "peer": "all", "op": "wait", "ms": 20000 },
+    { "peer": "all", "op": "wait", "ms": 20000, "why": "The slow GIF's conversion, both transfers and the sender's reload end inside this; no one widget marks them all done, and the reorder bug only showed after the reload." },
     { "peer": "all", "op": "log", "message": "each album is ONE bubble with its caption still showing, after the sender's reload too" },
     { "peer": "all", "op": "expect_count", "target": "text:album one ${RUN}", "value": 1 },
     { "peer": "all", "op": "expect_count", "target": "text:album two ${RUN}", "value": 1 },

@@ -13,6 +13,7 @@ import 'crate_hash.dart';
 import 'options.dart';
 import 'precompile_binaries.dart';
 import 'rustup.dart';
+import 'shared_build.dart';
 import 'target.dart';
 
 class Artifact {
@@ -48,10 +49,20 @@ class ArtifactProvider {
   ArtifactProvider({
     required this.environment,
     required this.userOptions,
-  });
+    Map<String, String>? processEnvironment,
+    String? cargoWorkingDirectory,
+  })  : processEnvironment = processEnvironment ?? Platform.environment,
+        cargoWorkingDirectory =
+            cargoWorkingDirectory ?? Directory.current.path;
 
   final BuildEnvironment environment;
   final CargokitUserOptions userOptions;
+
+  /// The variables cargo inherits; tests pass their own.
+  final Map<String, String> processEnvironment;
+
+  /// Where cargo runs, so where it looks for `.cargo/config.toml`.
+  final String cargoWorkingDirectory;
 
   Future<Map<Target, List<Artifact>>> getArtifacts(List<Target> targets) async {
     final result = await _getPrecompiledArtifacts(targets);
@@ -64,11 +75,11 @@ class ArtifactProvider {
     }
 
     final rustup = Rustup();
+    final shared = SharedBuildOptions.from(
+        configuration: environment.configuration, env: processEnvironment);
     for (final target in targets) {
       final builder = RustBuilder(target: target, environment: environment);
       builder.prepare(rustup);
-      _log.info('Building ${environment.crateInfo.packageName} for $target');
-      final targetDir = await builder.build();
       // For local build accept both static and dynamic libraries.
       final artifactNames = <String>{
         ...getArtifactNames(
@@ -84,6 +95,23 @@ class ArtifactProvider {
           remote: false,
         )
       };
+      if (shared != null) {
+        _log.info('Building ${environment.crateInfo.packageName} for $target '
+            'in the shared target ${shared.targetDir}');
+        final sharedArtifacts = await SharedBuild(
+          options: shared,
+          environment: environment,
+          processEnvironment: processEnvironment,
+          cargoWorkingDirectory: cargoWorkingDirectory,
+        ).artifacts(
+            target: target, builder: builder, artifactNames: artifactNames);
+        if (sharedArtifacts != null) {
+          result[target] = sharedArtifacts;
+          continue;
+        }
+      }
+      _log.info('Building ${environment.crateInfo.packageName} for $target');
+      final targetDir = await builder.build();
       final artifacts = artifactNames
           .map((artifactName) => Artifact(
                 path: path.join(targetDir, artifactName),

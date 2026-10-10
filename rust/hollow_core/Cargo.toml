@@ -132,6 +132,15 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
 [profile.release]
 debug = "line-tables-only"
 
+# Debug builds optimize every DEPENDENCY: Olm, MLS, Ed25519/X25519, AES-GCM,
+# Argon2 and SQLCipher's C code at opt-level 0 slowed every harness test and
+# fleet app. hollow_core itself, the one workspace member, stays unoptimized
+# with full debuginfo for debugging. Dependencies keep file:line backtraces
+# but no variables. The per-crate entries below still win.
+[profile.dev.package."*"]
+opt-level = 2
+debug = "line-tables-only"
+
 [profile.dev.package.unsafe-libopus]
 opt-level = 3
 

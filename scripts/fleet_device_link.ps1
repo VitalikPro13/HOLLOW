@@ -316,6 +316,7 @@ function Start-PeerProcess($peer, $wipeData) {
     $env:UI_PROBE_IDLE_MINUTES = '40'
     $env:UI_PROBE_SCENARIO_FILE = ''
     $env:UI_PROBE_STEPS = ''
+    Wait-FleetLaunchSlot $peer
     # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
     # Start-Process into inherit-handles mode and every instance then holds a
     # duplicate of this script's stdout pipe, so the script never returns.
@@ -1040,7 +1041,7 @@ try {
         $newPid = 0
         while ((Get-Date) -lt $deadline) {
             $now = Get-PeerProcess b
-            if ($now -and $now.Id -ne $oldPid -and (Test-PeerLive b)) { $newPid = $now.Id; break }
+            if ($now -and $now.Id -ne $oldPid -and (Test-PeerLive b)) { $newPid = $now.Id; Wait-FleetLaunchSlot b -NoWait; break }
             Start-Sleep -Milliseconds 400
         }
         if ($newPid -gt 0) {
@@ -1221,17 +1222,23 @@ try {
         # while a sits in the DM. Neither may badge a: they are a's own posts.
         Open-Dm b 'probe-c'
         Send-Dm b 'dm b own ${RUN}'
-        Step a @{ op = 'wait'; ms = 6000 }
+        # Arrival first, or the zero below would pass for a post that never came;
+        # the short wait after it lets a badge counted on that arrival show.
+        $gotDm = Invoke-SoftStep a @{ op = 'wait_for'; provider = 'dms'; matches = 'dm b own ${RUN}'; timeout_ms = 60000 }
+        if (-not $gotDm.ok) { Add-Note "a never received its own DM sent from b" }
+        Step a @{ op = 'wait'; ms = 2000 }
         $ownDm = Wait-UnreadCount a 'dm' $masterC $isZero 1
         Step b @{ op = 'open_server'; name = $server }
         Step b @{ op = 'open_channel'; name = 'general' }
         Open-Dm a 'probe-c'
         Send-Channel b 'general' 'ch b own ${RUN}'
-        Step a @{ op = 'wait'; ms = 6000 }
+        $gotCh = Invoke-SoftStep a @{ op = 'wait_for'; provider = 'channelMessages'; matches = 'ch b own ${RUN}'; timeout_ms = 60000 }
+        if (-not $gotCh.ok) { Add-Note "a never received its own #general post sent from b" }
+        Step a @{ op = 'wait'; ms = 2000 }
         $ownCh = Wait-UnreadCount a 'ch' $chanKey $isZero 1
         if ($ownDm -ne 0) { Add-Note "a badged its own DM (sent from b) with $ownDm unread" }
         if ($ownCh -ne 0) { Add-Note "a badged its own #general post (sent from b) with $ownCh unread" }
-        Set-Gate 'G9a what b posts is never unread on a' $(if ($ownDm -eq 0 -and $ownCh -eq 0) { 'PASS' } else { 'FAIL' })
+        Set-Gate 'G9a what b posts is never unread on a' $(if ($gotDm.ok -and $gotCh.ok -and $ownDm -eq 0 -and $ownCh -eq 0) { 'PASS' } else { 'FAIL' })
 
         # G9b: c DMs while both a and b sit in #general; both badge; a opens
         # the DM; b's badge has to clear without b touching anything.
@@ -1282,6 +1289,8 @@ try {
         if ($offBadgeA -lt 1) { Add-Note "a never badged c's DM while b was offline (count $offBadgeA)" }
         Open-Dm a 'probe-c'
         Step a @{ op = 'wait_for'; target = 'text:dm c offline ${RUN}'; timeout_ms = 30000 }
+        # a's read mark has to leave for b's mailbox before b returns; nothing on
+        # a's screen shows that it went.
         Step a @{ op = 'wait'; ms = 2000 }
         Restart-Peer b
         Wait-ForConnected b

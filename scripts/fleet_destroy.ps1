@@ -204,6 +204,7 @@ function Start-PeerProcess($peer, $wipeData, $requireLive = $true) {
     $env:UI_PROBE_IDLE_MINUTES = '40'
     $env:UI_PROBE_SCENARIO_FILE = ''
     $env:UI_PROBE_STEPS = ''
+    Wait-FleetLaunchSlot $peer
     # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
     # Start-Process into inherit-handles mode and every instance then holds a
     # duplicate of this script's stdout pipe, so the script never returns.
@@ -298,7 +299,10 @@ function Wait-PeerRelaunch($peer, $oldPid, $timeoutSeconds) {
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         $now = Get-PeerProcess $peer
-        if ($now -and $now.Id -ne $oldPid -and (Test-PeerLive $peer)) { return [int]$now.Id }
+        if ($now -and $now.Id -ne $oldPid -and (Test-PeerLive $peer)) {
+            Wait-FleetLaunchSlot $peer -NoWait
+            return [int]$now.Id
+        }
         Start-Sleep -Milliseconds 400
     }
     return 0

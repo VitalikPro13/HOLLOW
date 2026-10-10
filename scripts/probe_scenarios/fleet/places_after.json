@@ -3,7 +3,7 @@
   "Archive, Share and Conferences after the redesign, on fresh throwaway peers (fleet.ps1 -Onboard -Fresh -Peers a,b first).",
   "a creates a server, posts and attaches a 40 MB file, then every Archive view, Share, and Conferences:",
   "rooms, menus, dialogs, a live meeting with the chat and people panels, the End confirm from the header and from the dock.",
-  "attach_file reads a 40 MB file from the session scratchpad; point it anywhere.",
+  "attach_file sends build/regress_fixtures/synth-session-stems.zip (40 MiB of random bytes, over the direct cap, so it rides a Share): run python scripts/make_regress_fixtures.py first.",
   "run: powershell -File scripts\fleet.ps1 -Scenario places_after -Peers a,b"
  ],
  "peers": [
@@ -19,9 +19,10 @@
    "timeout_ms": 120000
   },
   {
-   "peer": "all",
-   "op": "wait",
-   "ms": 2000
+    "peer": "all",
+    "op": "wait",
+    "ms": 2000,
+    "why": "The burst after connecting rebuilds panes and can swallow typed text (fleet_probe trap 8)."
   },
   {
    "peer": "a",
@@ -211,7 +212,7 @@
   {
    "peer": "a",
    "op": "attach_file",
-   "path": "C:/Users/Jabun/AppData/Local/Temp/claude/C--Users-Jabun-Documents-Coding-HOLLOW/0c889268-561a-4de8-95dc-0532b7667522/scratchpad/files/synth-session-stems.zip"
+   "path": "${REPO}/build/regress_fixtures/synth-session-stems.zip"
   },
   {
    "peer": "a",
@@ -238,9 +239,10 @@
    "soft": true
   },
   {
-   "peer": "a",
-   "op": "wait",
-   "ms": 6000
+    "peer": "a",
+    "op": "wait",
+    "ms": 6000,
+    "why": "The share send above is soft and may not happen; the archive shot only needs it given time."
   },
   {
    "peer": "a",
@@ -712,9 +714,10 @@
    "index": 0
   },
   {
-   "peer": "a",
-   "op": "wait",
-   "ms": 4000
+    "peer": "a",
+    "op": "wait_for",
+    "target": "semantics:Leave the meeting",
+    "timeout_ms": 30000
   },
   {
    "peer": "a",
@@ -819,9 +822,10 @@
    "index": 0
   },
   {
-   "peer": "a",
-   "op": "wait",
-   "ms": 4000
+    "peer": "a",
+    "op": "wait_for",
+    "target": "semantics:Leave the meeting",
+    "timeout_ms": 30000
   },
   {
    "peer": "a",

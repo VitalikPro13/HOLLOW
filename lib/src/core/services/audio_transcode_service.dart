@@ -5,6 +5,14 @@ import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/core/services/audio_probe_service.dart';
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
+
+/// Logs to hollow_debug.log; never fails the caller, in a widget test included.
+void _log(String msg) {
+  try {
+    network_api.logFromDart(message: msg).catchError((Object _) {});
+  } catch (_) {}
+}
 
 /// Windows' Media Foundation, which `audioplayers_windows` wraps, cannot decode
 /// Opus-in-Ogg, so those files are transcoded to a local PCM WAV cache via the
@@ -39,10 +47,16 @@ class AudioTranscodeService {
     final runner = debugRunner;
     final ffmpeg =
         runner != null ? 'ffmpeg' : VideoThumbnailService.findFfmpegBinary();
-    if (ffmpeg == null) return null;
+    if (ffmpeg == null) {
+      _log('[AudioTranscode] no ffmpeg next to the app, cannot play .$ext');
+      return null;
+    }
 
     final inputFile = File(inputPath);
-    if (!await inputFile.exists()) return null;
+    if (!await inputFile.exists()) {
+      _log('[AudioTranscode] source file is gone, cannot play .$ext');
+      return null;
+    }
 
     final stat = await inputFile.stat();
     final cachePath = await _cachePathFor(inputPath, stat.modified);
@@ -87,7 +101,7 @@ class AudioTranscodeService {
     }
 
     if (exitCode != 0 || wav.isEmpty) {
-      debugPrint('[AudioTranscode] ffmpeg exit=$exitCode stderr=$stderrText');
+      _log('[AudioTranscode] ffmpeg exit=$exitCode stderr=$stderrText');
       return null;
     }
 

@@ -210,6 +210,18 @@ function Invoke-SoftStep($peer, $step) {
     return $answer
 }
 
+# Waits until the observer's own presence view holds none of these ids (the
+# master once the roster is known, the bare device id before).
+# That view comes from the same room membership diff the observer's fan-out
+# targets do, so a send after it never goes to a stale view. The list shape is
+# required, so a missing provider can never pass for "offline".
+function Wait-SeesOffline($observer, $idVars, $timeoutSeconds = 30) {
+    $ids = @($idVars | ForEach-Object { $script:FleetVars[$_] } | Where-Object { $_ })
+    if ($ids.Count -ne @($idVars).Count) { throw "not every one of $($idVars -join ', ') was captured" }
+    $pattern = '^\[(?!.*({0})).*\]$' -f ($ids -join '|')
+    Step $observer @{ op = 'wait_for'; provider = 'online'; matches = $pattern; timeout_ms = $timeoutSeconds * 1000 }
+}
+
 function Wait-ForAnyTarget($peer, $targets, $timeoutSeconds, $sliceMs = 3000) {
     Write-Host ("  [{0}] wait_for ANY of: {1} (up to {2}s)" -f $peer, ($targets -join ' | '), $timeoutSeconds) -ForegroundColor DarkGray
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
@@ -263,6 +275,7 @@ function Restart-Peer($peer) {
     $env:UI_PROBE_IDLE_MINUTES = '40'
     $env:UI_PROBE_SCENARIO_FILE = ''
     $env:UI_PROBE_STEPS = ''
+    Wait-FleetLaunchSlot $peer
     # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
     # Start-Process into inherit-handles mode and every instance then holds a
     # duplicate of this script's stdout pipe, so the script never returns.
@@ -550,6 +563,7 @@ try {
     Wait-ForConnected b | Out-Null
     Step a @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_A' }
     Step b @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B' }
+    Step b @{ op = 'capture'; from = 'provider'; key = 'devicePeerId'; as = 'DEVICE_B' }
 
     # ---- G1: friends, and a DM each way ------------------------------------
     # The steps of probe_scenarios/fleet/friend_dm.json. The Friends dialog is
@@ -600,7 +614,7 @@ try {
     Stop-Peer b
     # The relay learns b is gone from the room membership diff, and a computes
     # its fan-out targets from that. Sending into a stale view proves nothing.
-    Start-Sleep -Seconds 5
+    Wait-SeesOffline a @('PEER_B', 'DEVICE_B')
 
     Send-DmFile a $fileOne 'file one ${RUN}'
     Step a @{ op = 'shot'; name = "fcs-$runTag-a-sent-one" }
@@ -611,6 +625,8 @@ try {
     Say "a holds file one at $($aCopyOne.Name)"
 
     Stop-Peer a
+    # Nobody is up to watch a go, so this stays a fixed gap: the relay drops a
+    # from the room, and a's file handles close, before b comes back alone.
     Start-Sleep -Seconds 3
 
     Restart-Peer b
@@ -703,7 +719,7 @@ try {
     # ---- G3: state 3 in a DM ------------------------------------------------
     Say '3/5 a attaches file two, then loses its own copy while it is closed'
     Stop-Peer b
-    Start-Sleep -Seconds 5
+    Wait-SeesOffline a @('PEER_B', 'DEVICE_B')
     Open-Dm a 'probe-b'
     Send-DmFile a $fileTwo 'file two ${RUN}'
     Step a @{ op = 'shot'; name = "fcs-$runTag-a-sent-two" }
@@ -716,6 +732,8 @@ try {
         throw "a sent file two but never wrote its own copy, so state 3 cannot be produced"
     }
     Stop-Peer a
+    # Nobody is up to watch a go, so this stays a fixed gap: the relay drops a
+    # from the room, and a's file handles close, before b comes back alone.
     Start-Sleep -Seconds 3
 
     # Deleting the ciphertext is how the holder loses it; the path is the one
@@ -792,7 +810,7 @@ try {
     Step b @{ op = 'wait_for'; target = 'text:hello from a ${RUN}'; timeout_ms = 120000 }
 
     Stop-Peer b
-    Start-Sleep -Seconds 5
+    Wait-SeesOffline a @('PEER_B', 'DEVICE_B')
     Send-ChannelFile a $fileThree 'file three ${RUN}'
     Step a @{ op = 'shot'; name = "fcs-$runTag-a-sent-three" }
     Write-ChannelRows a 'a after posting file three' | Out-Null
@@ -802,6 +820,8 @@ try {
         throw "a posted file three but kept no copy of it, so nothing can serve b later"
     }
     Stop-Peer a
+    # Nobody is up to watch a go, so this stays a fixed gap: the relay drops a
+    # from the room, and a's file handles close, before b comes back alone.
     Start-Sleep -Seconds 3
 
     Restart-Peer b

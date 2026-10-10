@@ -5,7 +5,7 @@
   "40 MB file (a Share-backed server file). Then every Archive tab, Share,",
   "and Conferences: empty, a room, the join dialog, a live meeting and its",
   "manage drawer. Cleanup ends the meeting and deletes the server.",
-  "attach_file reads a 40 MB file from the session scratchpad; point it anywhere.",
+  "attach_file sends build/regress_fixtures/synth-session-stems.zip (40 MiB of random bytes, over the direct cap, so it rides a Share): run python scripts/make_regress_fixtures.py first.",
   "run (after places_setup): powershell -File scripts\fleet.ps1 -Scenario places_before -Peers a,b -Attach"
  ],
  "peers": [
@@ -83,7 +83,7 @@
   {
    "peer": "a",
    "op": "attach_file",
-   "path": "C:/Users/Jabun/AppData/Local/Temp/claude/C--Users-Jabun-Documents-Coding-HOLLOW/0c889268-561a-4de8-95dc-0532b7667522/scratchpad/files/synth-session-stems.zip"
+   "path": "${REPO}/build/regress_fixtures/synth-session-stems.zip"
   },
   {
    "peer": "a",

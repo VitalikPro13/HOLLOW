@@ -178,6 +178,7 @@ function Start-PeerProcess($peer, $wipeData) {
     $env:UI_PROBE_IDLE_MINUTES = '40'
     $env:UI_PROBE_SCENARIO_FILE = ''
     $env:UI_PROBE_STEPS = ''
+    Wait-FleetLaunchSlot $peer
     # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
     # Start-Process into inherit-handles mode and the script never returns.
     $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
@@ -559,7 +560,7 @@ try {
     $newPid = 0
     while ((Get-Date) -lt $deadline) {
         $now = Get-PeerProcess b
-        if ($now -and $now.Id -ne $oldPid -and (Test-PeerLive b)) { $newPid = $now.Id; break }
+        if ($now -and $now.Id -ne $oldPid -and (Test-PeerLive b)) { $newPid = $now.Id; Wait-FleetLaunchSlot b -NoWait; break }
         Start-Sleep -Milliseconds 400
     }
     if ($newPid -gt 0) {
@@ -679,6 +680,8 @@ try {
     foreach ($round in 1..2) {
         foreach ($peer in @('a', 'b')) {
             Stop-Peer $peer
+            # The churn under test is a real drop: the relay ends the old socket's
+            # presence before the same device dials again.
             Start-Sleep -Seconds 3
             Restart-Peer $peer "h5-$round"
             Wait-ForConnected $peer

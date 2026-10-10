@@ -843,6 +843,95 @@ both `open_channel vc-test` and wait for `semantics:Disconnect`, 15 s together, 
 The connection gate is `wait_for provider:connection equals:connected`, not `text:Connected`,
 because an attached run may be sitting in a chat where that text is not on screen.
 
+## The macOS desktop backend: a second desktop fleet on the Mac mini (2026-10-09)
+
+`FLEET_BACKEND=macos` (pwsh on macOS) drives N copies of the desktop app on the M4 mini the way
+the Windows backend drives exe copies: same scenario files, same op vocabulary, same desktop
+onboarding, `fleet_send.ps1` and every script that loads `fleet_lib.ps1` follow it. It is a
+SECOND desktop fleet, not a replacement (see "What only Windows shows" below). Ship your tree
+with `bash scripts/mini_sync.sh <name> <worktree>` and run from `~/wt/<name>`:
+
+```
+FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Build -Peers a,b           # flutter build macos --debug -t integration_test/ui_probe_test.dart, clone per peer
+FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b  # desktop welcome flow, fixtures -> ~/hollow_fleet/fixtures-macos
+FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario friend_dm -Peers a,b
+FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Live -Peers a,b
+FLEET_BACKEND=macos pwsh scripts/fleet_send.ps1 -Command "$(cat /tmp/cmd.json)"
+FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Stop -Peers a,b
+```
+Redirect every run to a file (`> .team/x.log 2>&1`), as on Linux.
+
+**What differs, and only this:**
+
+- **One APFS clone of `Hollow.app` per peer** under `build/fleet/<peer>/Hollow.app` (`cp -cR`):
+  the clones share the build's blocks, so N peers cost no disk and a restage is under a second.
+  A run without `-Build` compares the staged `kernel_blob.bin` and `hollow_core` with the build
+  and restages a stale copy by itself (the session 42 "stale staged build" trap cannot happen
+  here).
+- **The binary is run directly**, `Hollow.app/Contents/MacOS/Hollow`, from a per-peer
+  `build/fleet_out/<peer>/launch.sh` that sets HOME and sends stdout/stderr to
+  `native-stdout.log` / `native-stderr.log` (never a pipe this process holds). NEVER `open`:
+  LaunchServices drops the environment and hands a second launch of the bundle to the first.
+  Launched directly, each copy is its own app (own ASN, `lsappinfo list`) and boots on its own
+  data dir; the probe never runs `main()`, so the Dart single-instance lock never runs either.
+- **Per-peer paths:** data `~/hollow_fleet/run-macos/<peer>` (the app log
+  `hollow_debug.log` is inside it), HOME `~/hollow_fleet/home-macos/<peer>`, fixtures
+  `~/hollow_fleet/fixtures-macos/<peer>`, apart from the iOS (`fixtures`) and Android
+  (`fixtures-android`) peers of the same letters. HOME is sandboxed because Dart reads it for
+  `profiles.json`, the recordings folder and Save as; the real
+  `~/Library/Application Support/hollow` is never touched (check its mtime after a run).
+- **Shared with the real app on the Mac, like on Windows:** the bundle id's NSUserDefaults
+  (`com.anonlisten.hollow`), its notification permission and its keychain items. `HOLLOW_DATA_DIR`
+  keeps identity protection off the keychain; no system prompt blocked a text scenario.
+- **`-Stop` kills by pid only this tree's instances** (binary path under its own `build/fleet`),
+  and with `-Peers` only those: several agents' trees share the mini.
+- **Liveness, crash tails, shots and the binding are the Windows ones:** files under
+  `build/fleet_out/<peer>`, screenshots painted inside the app (no Screen Recording grant
+  needed, `screencapture` over SSH fails), `Get-CrashTail` adds `hollow_debug.log`,
+  `native-stderr.log` and a fresh `~/Library/Logs/DiagnosticReports/Hollow*` report.
+- **Lifecycle ops:** `pause` / `resume` (`kill -STOP` / `-CONT`) and the proxy route, as on
+  Linux; `background` / `foreground` refuse.
+- **One tree, one backend per letter at a time:** `build/fleet_out/<peer>` is shared by every
+  backend of a tree, so a simulator `a` and a macOS `a` in the same `~/wt/<name>` cannot run
+  together; give them different letters.
+
+**Frames when nobody looks (checked first, each one bit a similar backend):** the window
+appears at 1280x800 (content 1280x768, the same desktop shell width as the Windows probe's
+1280x720), all peers on the same spot. A peer fully covered by another, and every peer while
+the mini's screen is LOCKED (`lsappinfo front` = loginwindow), kept producing frames: taps,
+looks and shots answered normally. Each instance is launched with `-NSAppSleepDisabled YES`
+(NSUserDefaults' argument domain, this process only) so App Nap never throttles an unseen
+peer's timers. A GUI session must still be logged in at the console (`stat -f %Su /dev/console`
+= jabun); after a reboot nobody is (untested here, treat it like the simulators: ask Vitalik to
+log in).
+
+**Measured on the M4 mini (2026-10-09, session 43):**
+
+| step | time |
+|---|---|
+| cold `flutter build macos --debug -t integration_test/ui_probe_test.dart` (fresh tree, pods included) | 5:16 |
+| warm `-Build -Peers a,b` (no change, incl. staging, boot and stop) | 40-57 s |
+| `-Onboard -Fresh -Peers a,b,c` | 91 s |
+| `-Live -Peers a,b` | 13 s |
+| `friend_dm` | 46 s wall, steps 0:32 |
+| `server_invite_message` | 56 s wall, steps 0:31 |
+| `moderation` (a, b, c) | 2:35 wall, steps 2:11 |
+
+A debug build tree is ~14 GB (`build/`); the peers' clones add nothing. An idle peer is ~520 MB
+RSS and ~15% of one core; three peers left the machine 86% memory-free and 67% CPU-idle, so six
+to eight peers fit.
+
+**What only the Windows fleet shows:** Windows-only bugs (the merged platform/UI thread behind
+s42's voice-leave freeze, the link import's file locking, Win32 window and focus code), Skia
+rendering (macOS runs Impeller), and the hand-written journeys that still launch `hollow.exe`
+themselves (`fleet_multidevice_dm_gap.ps1`, `fleet_friend_offline.ps1`, `fleet_pending_join.ps1`,
+`fleet_owner_offline.ps1`, ...): on this backend use the scenario JSONs and the scripts built
+on `Start-FreshFleet` / `fleet_send.ps1`. Media scenarios are untested here: the first call
+would meet the microphone and camera TCC prompts for `com.anonlisten.hollow`, which only
+Vitalik can answer at the screen, and the screen-share audio helper is not built by `-Build`
+(`scripts/build_screen_audio.sh`). Whether a peer launched while someone USES the mini's
+desktop comes to the front is untested (all proofs ran with the screen locked).
+
 ## The device-link journey (`fleet_device_link.ps1`, 2026-09-10)
 
 A populated master (a) hands its identity, friends, DMs and servers to an empty device (b) while a friend (c) supplies traffic. Gates: G1 friends, DMs and #general traffic; G2 a shows the code (Settings > Devices > Link a device); G3 b enters it and reaches "Linking this device"; G4 "Data sent" and "Device linked"; G5 the stash (`pending_link.hollow` + `pending_link.code`) and the relaunch; G6 b's identity equals a's master, server and history present, friend and DM rows present, two device rows on both; G7 live fan-out in all four directions; G9 (2026-09-11, issue #80) read state: a's own posts sent from b never badge a, a opening the DM or #general clears b's badge (polled from `dmUnreadCounts` / `channelUnreadCounts` in the dump, never from pixels), and b stopped while a reads comes back with the message backfilled AND already read. `-EdgeGates` runs the two refusals instead: offline (the welcome dialog's Advanced relay field typed with `relay.invalid`, override with `-DeadRelay`) and the 60 s unanswered timeout. Green on Windows 2026-09-10 (14 of 14, then 2 of 2); evidence under `build/fleet_out/kept/device_link_evidence/`.
@@ -1060,7 +1149,7 @@ host (other agents and SSH ride them).
 | pause / resume | `NtSuspendProcess` / `NtResumeProcess` on the peer's pid | `kill -STOP` / `-CONT` (sim pids are host pids) | `run-as ... kill -STOP` / `-CONT` |
 | net_off / net_on | zombie proxy route (needs the client's connect override) | zombie proxy route (same) | `svc wifi` + `svc data` disable / enable |
 
-Linux: pause/resume (`kill`) and the proxy route only; background/foreground refuse.
+Linux and the macOS desktop: pause/resume (`kill`) and the proxy route only; background/foreground refuse.
 
 - **Windows fleet windows are never shown.** The probe never runs `main()`, so the runner's
   window stays hidden (`IsWindowVisible` false) and `Process.MainWindowHandle` is 0; this is
@@ -1126,3 +1215,62 @@ DM stream; received = the DATABASE, where every delivery path ends).
   once at most on D:. Speed plan: memory project_fleet_speed_plan / tmp7.txt.
 - `<name>-refusals.txt` baseline lines: KeyBundle glare deferring to their PreKey, a held MLS commit
   overtaken, and after a link a `new_device` alert. Anything else is a failure.
+
+## Parallel fleet_all: lanes (session 43, 2026-10-09)
+
+`fleet_all.ps1 -MaxParallel 2..9` runs independent items at once; `-DryRun` prints the schedule
+(lanes, which items run alone, expected minutes from the session 43 serial run, the `min` column)
+and runs nothing. The default is 3 lanes (`-MaxParallel 1` = serial), never more lanes than units
+that can run side by side, so a short `-Only` stays on lane 0. Session 43 numbers, same build:
+serial 91.2 min, 3 lanes 43.8 and 46.1 min, 5 lanes 38.1 min (each including onboarding; the build
+is 1.2 min more from the shared Rust cache). CPU averaged 14 to 28 % and never passed 85 %; free RAM
+never dropped below 13 GB of 32.
+
+- **A lane is a namespace, not a set of letters.** `FLEET_LANE=<n>` (read by `fleet_lib.ps1`, so
+  every script and every child `fleet.ps1` follows it) moves the stage root to
+  `build\lanes\<n>\fleet`, the out root to `build\lanes\<n>\fleet_out`, and TEMP/TMP to
+  `%TEMP%\hollow_fleet_lanes\<n>`, which carries the fixtures, run dirs and the apps' own temp files.
+  Items keep their peer letters and display names (`probe-a`), so no scenario or journey changes to
+  run in a lane. Lane 0 (unset) is the usual layout. Windows only.
+- **Staging:** lanes 1-2 are robocopied from lane 0's staged peers (a-d) and hash-checked
+  (`hollow_core.dll`, `kernel_blob.bin`), so whatever lane 0's staging did runs in every lane. A
+  lane costs 1.35 GB on D: (4 x 0.34 GB) plus about 0.01 GB of temp on C:, and staging all lanes
+  takes about 6 s. Fixtures: every lane onboards fresh a,b,c at the start.
+- **Stops are per lane:** `fleet.ps1 -Stop` stops only its lane's stage root (the prefix check now
+  ends in a separator), and on Windows `-Stop -Peers a,b` stops only those letters.
+- **Alone items** (`alone = $true` in fleet_all's table: voice_channel, calls_after +
+  calls_after_vc, regress_media, regress_voice3, and the opt-in relay journeys) run on lane 0 after
+  the parallel part, with nothing else up. A `keepUp` item and the one that attaches to it are one
+  unit on one lane. The rest start longest first.
+- **Guard:** every item after the first starts only while CPU (three samples) is under `-CpuLimit`
+  (80) and `-MinFreeGB` (4) is free; an item over `-ItemTimeoutMinutes` (60) is killed by PID tree.
+- **The relay's 10 new sockets per sliding minute per address** is shared by every fleet lane, the
+  Mac mini and every device of Vitalik's behind the same address. `Wait-FleetLaunchSlot`
+  (fleet_lib) books each instance launch in `%TEMP%\hollow_fleet_launches.txt` under a named mutex
+  and waits while 8 bookings (`FLEET_LAUNCH_BUDGET`) fall in the last 75 s
+  (`FLEET_LAUNCH_WINDOW_S`), longer than the relay's minute because a socket opens seconds after
+  its launch is booked. An app that relaunches ITSELF (link import, destroy) is booked with
+  `-NoWait` the moment the journey sees its new pid (device_link, dm_gap, destroy), so the next
+  launches wait for it. Both gaps cost session 43's first 3-lane run 8 `rate_limit` refusals in
+  device_link. The summary's `relay refused` column counts `refused by the relay` lines per item;
+  it must stay 0. The ledger, not CPU, is what caps lanes: 5 lanes waited 76 times (26 lane-min)
+  at a CPU average of 19%.
+- **Global state a lane does NOT isolate:** the clipboard (no fleet_all item captures from it), the
+  app-lock secret file (`regress_app_lock` stays out), audio devices (why voice and calls run
+  alone).
+- Each item runs from a generated `build\fleet_out\all\run\<item>.cmd` (hidden, the lane in its
+  environment, output to the item's log as before); the summary adds lane, relay refusals and the
+  CPU at start, a first line with wall time against the sum of item minutes, a `total` line (build
+  + lane staging + onboarding + items) and how often the CPU/RAM guard held a lane back.
+- A fresh worktree has no generated fixtures: fleet_all runs `make_regress_fixtures.py` and
+  `make_album_fixtures.py` for the items that need them (album_dm failed on that in session 43).
+- Start a long fleet_all from the PowerShell tool's own background mode (`cmd /c "cd /d <tree> &&
+  powershell -File scripts\fleet_all.ps1 ... > log 2>&1 & echo done > exit.txt"`): Git Bash
+  mangles that quoting, a detached `Start-Process` was refused by the permission classifier, and
+  `%ERRORLEVEL%` in that line expands before the run, so read the result from `summary.md`.
+
+**Waits (item F).** A fixed `wait` that stands for a STATE is a `wait_for` on that state; a kept
+wait carries a `why` key in the scenario JSON (the probe ignores it) or a comment in a journey.
+Kept on purpose: absence proofs, stability windows, media settles before an evidence shot, the
+auto-download advert, idle timers. Presence after `Stop-Peer`: `Wait-SeesOffline` in the file
+journeys polls the observer's `online` provider for neither the master nor the device id.

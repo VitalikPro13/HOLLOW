@@ -8,7 +8,7 @@
  "peers": ["a", "b"],
  "steps": [
   {"peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000},
-  {"peer": "all", "op": "wait", "ms": 2000},
+  { "peer": "all", "op": "wait", "ms": 2000, "why": "The burst after connecting rebuilds panes and can swallow typed text (fleet_probe trap 8)." },
   {"peer": "a", "op": "tap", "target": "semantics:Create a server"},
   {"peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "ss-after"},
   {"peer": "a", "op": "tap", "target": "text:Create", "index": 0},
@@ -23,7 +23,7 @@
   {"peer": "b", "op": "tap", "target": "text:Join", "index": 0},
   {"peer": "b", "op": "wait_for", "target": "server:ss-after", "timeout_ms": 90000},
   {"peer": "b", "op": "open_server", "name": "ss-after"},
-  {"peer": "b", "op": "wait", "ms": 3000},
+  { "peer": "b", "op": "wait_for", "target": "channel:general", "timeout_ms": 30000 },
 
   {"peer": "a", "op": "open_server", "name": "ss-after"},
   {"peer": "a", "op": "wait", "ms": 1500},

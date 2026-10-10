@@ -35,7 +35,7 @@
 
     { "peer": "a", "op": "open_channel", "name": "general" },
     { "peer": "b", "op": "open_channel", "name": "general" },
-    { "peer": "all", "op": "wait", "ms": 6000 },
+    { "peer": "all", "op": "wait", "ms": 6000, "why": "Presence and profile cards settle in both member panels before the shots; no single count marks it." },
     { "peer": "all", "op": "hover_at", "x": 5, "y": 400 },
     { "peer": "all", "op": "shot", "name": "m-01-members" },
     { "peer": "a", "op": "dump", "name": "m-01-members" },
@@ -59,7 +59,8 @@
     { "peer": "b", "op": "open_channel", "name": "lounge" },
     { "peer": "b", "op": "wait_for", "target": "semantics:Leave the room", "timeout_ms": 30000 },
     { "peer": "b", "op": "open_channel", "name": "lounge" },
-    { "peer": "all", "op": "wait", "ms": 6000 },
+    { "peer": "a", "op": "wait_for", "target": "type:_VoiceParticipantRow", "count": 2, "timeout_ms": 30000 },
+    { "peer": "b", "op": "wait_for", "target": "type:_VoiceParticipantRow", "count": 2, "timeout_ms": 30000 },
     { "peer": "a", "op": "hover_at", "x": 5, "y": 400 },
     { "peer": "a", "op": "shot", "name": "v-01-default" },
 
