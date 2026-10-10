@@ -84,6 +84,11 @@
 #   pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b
 #   pwsh scripts/fleet.ps1 -Live -Peers a,b
 #
+# With nobody logged in at the screen (the build VM), FLEET_LINUX_HEADLESS=1
+# gives every instance its own headless GNOME Shell on Wayland instead:
+#
+#   FLEET_LINUX_HEADLESS=1 pwsh scripts/fleet.ps1 -Scenario friend_dm -Peers a,b
+#
 # ## The Android emulator backend (FLEET_BACKEND=android, pwsh on macOS/Linux)
 #
 # One emulator per peer (AVD hollow-<peer>, created on first use, serial
@@ -723,8 +728,12 @@ function Start-Peer($peer) {
     }
 
     if (Test-LinuxBackend) {
-        if (-not $env:DISPLAY) {
-            throw 'DISPLAY is not set. Export the graphical session DISPLAY and XAUTHORITY before launching the fleet (for example DISPLAY=:1 XAUTHORITY=/run/user/1000/gdm/Xauthority).'
+        $headless = Test-LinuxHeadless
+        if (-not $headless -and -not $env:DISPLAY) {
+            throw 'DISPLAY is not set. Export the graphical session DISPLAY and XAUTHORITY before launching the fleet (for example DISPLAY=:1 XAUTHORITY=/run/user/1000/gdm/Xauthority), or set FLEET_LINUX_HEADLESS=1 on a machine with no desktop session.'
+        }
+        if ($headless -and -not $env:XDG_RUNTIME_DIR) {
+            throw 'FLEET_LINUX_HEADLESS needs XDG_RUNTIME_DIR (an SSH login sets it): the compositor puts its Wayland socket there.'
         }
         # Own session bus per instance (Test-LinuxBackend). stdout and stderr
         # go to FILES through a launcher script, never through a pipe held by
@@ -736,16 +745,90 @@ function Start-Peer($peer) {
         # daemon inherits stdio too, and a pipe it keeps open holds every
         # caller of this script until the fleet stops.
         $launcher = Join-Path $out 'launch.sh'
-        $lines = @(
-            '#!/bin/sh',
-            ('exec dbus-run-session -- "{0}" >"{1}" 2>"{2}" </dev/null' -f (Join-Path $dest 'hollow'),
-                (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
-        )
+        $stdoutLog = Join-Path $out 'native-stdout.log'
+        $stderrLog = Join-Path $out 'native-stderr.log'
+        if ($headless) {
+            # One headless compositor per instance, on the instance's own bus,
+            # each with its own virtual monitor: windows sharing one output
+            # would cover each other, and a compositor may stop sending frame
+            # callbacks to a covered surface, which freezes the probe's pump.
+            # The app sees what a GNOME Wayland session gives it, WAYLAND_DISPLAY
+            # plus the compositor's own Xwayland as DISPLAY, and picks X11 itself
+            # (linux/runner/main.cc), as it does on every Ubuntu desktop.
+            # The app runs in the background so the compositor dies with it.
+            $display = "hollow-fleet-$peer"
+            $inner = Join-Path $out 'launch-inner.sh'
+            # Each shell gets its own config, data and cache homes: shells
+            # starting together on the user's shared ones hung at startup.
+            $shellHome = Join-Path $out 'compositor-home'
+            foreach ($sub in 'config', 'data', 'cache') { New-Item -ItemType Directory -Path (Join-Path $shellHome $sub) -Force | Out-Null }
+            # A shell whose Xwayland never answers holds the app before its
+            # first frame for good (one launch in a few, three at once), so
+            # the app starts only once the X server answers, on a new shell
+            # if need be. A SIGTERM'd headless shell can hang on its way out,
+            # and while it lives dbus-run-session keeps the bus and the next
+            # launch finds this peer's Wayland socket still locked: it is
+            # killed outright after five seconds.
+            $template = @'
+#!/bin/sh
+stop_shell() {
+    kill $shell 2>/dev/null
+    for i in $(seq 1 50); do kill -0 $shell 2>/dev/null || break; sleep 0.1; done
+    pkill -9 -P $shell 2>/dev/null
+    kill -9 $shell 2>/dev/null
+}
+for attempt in 1 2 3; do
+    XDG_CONFIG_HOME="@HOME@/config" XDG_DATA_HOME="@HOME@/data" XDG_CACHE_HOME="@HOME@/cache" \
+        gnome-shell --headless --wayland --wayland-display=@DISPLAY@ --virtual-monitor 1280x800 >>"@LOG@" 2>&1 &
+    shell=$!
+    xw=
+    for i in $(seq 1 300); do xw=$(pgrep -a -P $shell Xwayland); [ -n "$xw" ] && break; sleep 0.1; done
+    DISPLAY=$(echo "$xw" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^:[0-9]+$/) { print $i; exit }}')
+    XAUTHORITY=$(echo "$xw" | awk '{for (i = 1; i < NF; i++) if ($i == "-auth") { print $(i + 1); exit }}')
+    export DISPLAY XAUTHORITY WAYLAND_DISPLAY=@DISPLAY@
+    if [ -n "$xw" ]; then
+        command -v xdpyinfo >/dev/null || break
+        for i in $(seq 1 40); do timeout 2 xdpyinfo >/dev/null 2>&1 && break 2; sleep 0.5; done
+    fi
+    echo "headless compositor attempt $attempt: no answering Xwayland" >&2
+    stop_shell
+    shell=
+done
+[ -n "$shell" ] || exit 1
+"@APP@" &
+app=$!
+trap 'kill $app 2>/dev/null' TERM INT
+wait $app
+stop_shell
+exit 0
+'@
+            $innerText = $template.Replace('@HOME@', $shellHome).Replace('@DISPLAY@', $display).
+                Replace('@LOG@', (Join-Path $out 'compositor.log')).Replace('@APP@', (Join-Path $dest 'hollow'))
+            [System.IO.File]::WriteAllText($inner, $innerText.Replace("`r`n", "`n"))
+            & chmod +x $inner
+            # The bus offers no activatable services: GNOME Shell would start a
+            # desktop's worth per instance (evolution, goa, gvfs, portals), and
+            # the app needs none of them with its data directory overridden.
+            $busConf = Join-Path $out 'session-bus.conf'
+            $standard = [System.IO.File]::ReadAllText('/usr/share/dbus-1/session.conf')
+            [System.IO.File]::WriteAllText($busConf, ($standard -replace '<standard_session_servicedirs\s*/>', ''))
+            $lines = @(
+                '#!/bin/sh',
+                'unset DISPLAY WAYLAND_DISPLAY',
+                ('exec dbus-run-session --config-file="{0}" -- "{1}" >"{2}" 2>"{3}" </dev/null' -f $busConf, $inner, $stdoutLog, $stderrLog)
+            )
+        } else {
+            $lines = @(
+                '#!/bin/sh',
+                ('exec dbus-run-session -- "{0}" >"{1}" 2>"{2}" </dev/null' -f (Join-Path $dest 'hollow'), $stdoutLog, $stderrLog)
+            )
+        }
         [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
         & chmod +x $launcher
         $proc = Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
         $script:processes[$peer] = $proc
-        Write-Step "launched $peer (pid $($proc.Id), own session bus) data=$data"
+        $how = if ($headless) { 'own session bus, headless Wayland' } else { 'own session bus' }
+        Write-Step "launched $peer (pid $($proc.Id), $how) data=$data"
         return
     }
 

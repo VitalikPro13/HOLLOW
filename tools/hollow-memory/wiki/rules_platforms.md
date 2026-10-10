@@ -63,6 +63,9 @@ release pipeline is the `release` skill.
   Rust build does NOT fail `flutter build apk`: Gradle packages the STALE `.so`**;
   `build_release.ps1` scans the log for it. Rust TLS uses `webpki-roots`, NEVER
   `native-roots`. `feedback_android_platform`.
+- cargokit's Gradle plugin adds the emulator ABIs (x86, x64) to a DEBUG build only when the
+  build names no `--target-platform` (`plugin.gradle`); before session 44 it always did, so the
+  fleet's arm64 APK ran three Rust builds (a cold mini build: 19:36 for both phone apps).
 
 ## App icons
 

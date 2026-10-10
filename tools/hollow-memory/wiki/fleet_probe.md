@@ -787,6 +787,22 @@ holds and re-claims it); a phone's accept lost to a dead socket never came again
 replayed request is answered again). Nickname add, accept and Online both ways passed with
 both phones in the foreground before any fix.
 
+**Both roles, every phone scenario (session 44, 2026-10-10, main at 069a5baf = the 0.12.1 tree).**
+Split the letters so EVERY scenario is cross-platform: `FLEET_ANDROID_PEERS=a,d` (a,d Android, b,c
+iPhone) makes the two-peer scenarios Android-to-iPhone, the three-peer ones an Android owner with
+two iPhones, and `mobile_mixed_social`'s pairs a-c and b-d still cross; then `FLEET_ANDROID_PEERS=b,c`
+swaps every role. Each pass: fresh onboarding of a,b,c,d, `mobile_mixed_social`,
+`mobile_voice_kick`, then fresh a,b for each of `mobile_friend_dm`, `mobile_call`,
+`mobile_reply_deleted`, then `fleet_time_to_healthy.ps1 -Trip background` both ways. Pass 1
+13/13 in 22 min, pass 2 15/15 in 24 min, each item run by a plain zsh loop on the mini with its
+own log (shots copied off with `cp -RL` after every item: a simulator's out dir is a symlink).
+`mobile_call` was the first call between an emulator and a simulator: "Voice connected" on both,
+both directions. Time to healthy (targets 1.5 s / 3 s): a 5 s trip never suspends (the suspend
+waits 10 s), connected p50 0.4-0.65 s, round trip 0.68-0.84 s; a 20 s trip
+(`-AwaySeconds 20`) goes `reconnecting>connected` every time, iPhone p50 0.94 s / 1.19 s, Android
+p50 1.04 s / 1.35 s. Build: cold both apps 19:36 (three Android Rust builds, since fixed in
+cargokit: wiki `rules_platforms`), the role swap rebuild with new AVD and simulator 4:16.
+
 ## The Linux backend: the same fleet on Vitalik's laptop (2026-09-09)
 
 `fleet_lib.ps1` picks `linux` from `$IsLinux`; the machine is the real Ubuntu laptop
@@ -842,6 +858,47 @@ This is how the #72 root cause was found (memory `project_linux_call_audio_adm_i
 both `open_channel vc-test` and wait for `semantics:Disconnect`, 15 s together, leave, delete.
 The connection gate is `wait_for provider:connection equals:connected`, not `text:Connected`,
 because an attached run may be sitting in a chat where that text is not on screen.
+
+## Headless Linux on the build VM (`FLEET_LINUX_HEADLESS=1`, session 44, 2026-10-10)
+
+The Linux backend no longer needs the laptop or a logged-in desktop. On the VirtualBox VM
+(`ssh hollowvm`, nobody at the screen, gdm greeter only) every instance gets its OWN headless
+GNOME Shell (`gnome-shell --headless --wayland --virtual-monitor 1280x800`) inside its own
+`dbus-run-session`, and the app runs on that shell's Xwayland with `WAYLAND_DISPLAY` set too:
+exactly what a GNOME Wayland desktop gives it (the runner forces `GDK_BACKEND=x11` itself,
+`linux/runner/main.cc`, so on a real Ubuntu desktop Hollow is an Xwayland client as well).
+
+```
+export PATH=$HOME/.local/bin:$HOME/Documents/flutter/bin:$HOME/.cargo/bin:$PATH FLEET_LINUX_HEADLESS=1
+cd ~/Documents/HOLLOW
+pwsh -NoProfile -File scripts/fleet.ps1 -Build -Peers a,b,c          # 7:56 cold
+pwsh -NoProfile -File scripts/fleet.ps1 -Onboard -Fresh -Peers a,b,c # 108 s
+pwsh -NoProfile -File scripts/fleet.ps1 -Scenario friend_dm         # 55 s
+```
+Redirect to a file as on the laptop. Session 44 ran onboard, friend_dm, server_invite_message,
+unread_line, moderation, regress_channels, voice_channel, regress_social: 9/9 in 21 min, the
+refusal lines the same kinds the Windows fleet shows for those items. About 1 GB RAM per peer
+(app 630 MB, shell 270 MB, Xwayland 90 MB); the VM's 8 GB holds three.
+
+Each of these cost a run (the launcher, `build/fleet_out/<peer>/launch-inner.sh`, carries all):
+- **One shell per peer, never one shared shell**: windows sharing an output cover each other, and
+  a compositor may stop frame callbacks to a covered surface, which freezes the probe's pump.
+- **The bus has NO activatable services** (`session-bus.conf` = the standard one minus
+  `<standard_session_servicedirs/>`). With them, each shell starts a desktop's worth
+  (evolution, goa, gvfs monitors, portals, calendar server) and they outlived the peer.
+  Consequence: no Secret Service, portal or a11y bus; text, voice and moderation scenarios need
+  none (data dir overridden); `regress_app_lock` and anything needing the keyring do.
+- **Each shell has its own XDG config/data/cache homes** (`compositor-home/`): shells starting
+  together on the user's shared ones hung at startup.
+- **The app waits for an ANSWERING Xwayland** (`xdpyinfo`, 40 tries) and the shell is restarted
+  up to three times otherwise: one launch in a few left Xwayland half started (66 MB RSS against
+  90) and the app blocked before its first frame for good, with nothing in any log.
+- **A SIGTERM'd headless shell can hang on its way out**: it is SIGKILLed after 5 s with its
+  Xwayland, or `dbus-run-session` keeps the bus and the next launch of that peer dies on
+  "unable to lock lockfile .../hollow-fleet-<peer>.lock". The `/tmp/.X<n>-lock` files those kills
+  leave are harmless (mutter takes the next free display).
+- Cleaning up by hand: never `pkill -f <pattern>` inside an `ssh host '...'` command line, the
+  pattern matches that command's own shell and kills the SSH session; put the kills in a script.
 
 ## The macOS desktop backend: a second desktop fleet on the Mac mini (2026-10-09)
 

@@ -74,6 +74,12 @@ function Test-SimBackend($peer) {
 function Test-LinuxBackend { return $script:FleetBackend -eq 'linux' }
 function Test-WindowsBackend { return $script:FleetBackend -eq 'windows' }
 
+# FLEET_LINUX_HEADLESS=1 runs each Linux instance on its own headless GNOME
+# Shell (Wayland, a virtual monitor), for a machine nobody is logged in to at
+# the screen, such as the build VM. Without it the instances join the desktop
+# session that DISPLAY names.
+function Test-LinuxHeadless { return (Test-LinuxBackend) -and $env:FLEET_LINUX_HEADLESS -eq '1' }
+
 # The macOS desktop backend: a clone of the probe's Hollow.app per peer under
 # build/fleet/<peer>, its binary run DIRECTLY with the peer's environment
 # (`open` would hand the launch to LaunchServices, which drops the environment
