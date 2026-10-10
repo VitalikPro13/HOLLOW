@@ -320,7 +320,7 @@ The relay is a dumb pipe and **never acknowledges a direct message**: a successf
 
 ### 4.6 Glare Resolution (Multi-Device Aware)
 
-When two peers send each other a key bundle simultaneously ("glare"), a deterministic tiebreaker decides which side keeps its outbound session. The comparison is made between two peer IDs **of the same kind** (each side's own **device** ID against the remote **device** ID), because Olm sessions live on transport sockets, which are device-keyed. Comparing a resolved master ID against a device ID would not be antisymmetric and could deadlock both sides into deferring; the device-versus-device comparison is consistent and always resolves.
+When two peers send each other a key bundle simultaneously ("glare"), both may build an outbound session. A deterministic tiebreaker settles it when the first pre-key message arrives: the lower device keeps its session, the higher one switches to it, and the replaced session is retired (it still decrypts, but never encrypts). Neither side ever waits for the other, so a bundle that was dropped or never read cannot leave a pair without a session. The comparison is made between two peer IDs **of the same kind** (each side's own **device** ID against the remote **device** ID), because Olm sessions live on transport sockets, which are device-keyed. Comparing a resolved master ID against a device ID would not be antisymmetric; the device-versus-device comparison is consistent and always resolves.
 
 ---
 
@@ -1091,7 +1091,7 @@ A further direct frame type carries an Olm-encrypted file header with inlined, e
 - **Hard backpressure:** 64 MB per connection (uWebSockets built-in). Catches dead connections without interfering with legitimate traffic.
 - **Text frame cap:** 1 MB. Oversized text frames are silently dropped.
 - **Binary frame cap:** 64 MB (uWebSockets `maxPayloadLength`). Connections exceeding this are closed.
-- **DoS protection:** Ed25519 authentication (plus key revocation on a relay that enables access keys, §12.8). Only authenticated peers can send messages. Per-IP connection caps (simultaneous + new-per-minute) use the same /64-aggregated IPv6 keying.
+- **DoS protection:** Ed25519 authentication (plus key revocation on a relay that enables access keys, §12.8). Only authenticated peers can send messages. Per-IP connection caps (simultaneous + new-per-minute) use the same /64-aggregated IPv6 keying. An operator can exempt listed addresses (for example its own test machines) from the new-per-minute cap only, through a root-only setting; the simultaneous cap still applies, and the relay never logs the list.
 - **Room membership enforcement:** every routing handler verifies that the *sender* belongs to the room it addresses before forwarding, and rewrites the routing header to carry the authenticated peer ID, so a room code cannot be used as a capability to inject into or read from a room one has not joined. Non-members' frames are silently dropped. Peer discovery is likewise restricted to rooms the requester is in; otherwise a room code alone would yield a membership roster, which matters because DM room codes are a deterministic function of the two participants' identities.
 
 ### 12.6 TURN Credential Management

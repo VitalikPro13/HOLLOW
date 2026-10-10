@@ -1430,37 +1430,35 @@ impl MessageStore {
             .map_err(|e| format!("ROLLBACK failed: {e}"))
     }
 
-    /// Reconcile a synced or edited DM against an existing local row with the same
-    /// (peer_id, timestamp, is_mine=0) but a NULL or different message_id, which
-    /// happens when the original arrived by one path and its edit by another, so
-    /// mid-based dedup misses and a naive insert duplicates the row.
+    /// Land a verified synced DM on the local row of the same message stored without a
+    /// mid (a legacy or mid-less delivery), which mid dedup cannot match, instead of
+    /// inserting it twice.
     ///
-    /// A reconciled row adopts the canonical `message_id` and the new text in place.
+    /// Only a row with NO mid, in the item's conversation AND direction, qualifies: a row
+    /// with any mid is another message (a burst puts several in one millisecond), and the
+    /// direction keeps the row's author the item's signer, as `change_may_touch_row` asks.
+    /// The row becomes exactly the signed item, so it re-serves under that signature.
     /// Returns true when that happened, in which case the caller must NOT insert.
-    pub fn reconcile_dm_by_timestamp(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reconcile_dm_by_timestamp(
         &self,
         peer_id: &str,
-        message_id: &str,
+        is_mine: bool,
         new_text: &str,
         timestamp: i64,
         edited_at: Option<i64>,
         signature: Option<&str>,
         public_key: Option<&str>,
+        extras: &crate::node::crypto_handler::SignedExtras<'_>,
     ) -> Result<bool, String> {
-        // A different-mid row only qualifies when its TEXT differs (the edit-by-another-
-        // path case). A different-mid row with IDENTICAL text is a DISTINCT message from a
-        // same-millisecond burst, and grafting the incoming mid onto it merged two real
-        // messages into one row permanently: every later sync then saw the mid as existing
-        // and never re-inserted it.
+        let Some(message_id) = extras.mid else { return Ok(false) };
         let existing_id: Option<i64> = self
             .conn
             .query_row(
                 "SELECT id FROM messages
-                 WHERE peer_id = ?1 AND timestamp = ?2 AND is_mine = 0
-                   AND (message_id IS NULL
-                        OR (message_id != ?3 AND text != ?4))
+                 WHERE peer_id = ?1 AND timestamp = ?2 AND is_mine = ?3 AND message_id IS NULL
                  LIMIT 1",
-                params![peer_id, timestamp, message_id, new_text],
+                params![peer_id, timestamp, is_mine as i32],
                 |row| row.get(0),
             )
             .ok();
@@ -1469,16 +1467,22 @@ impl MessageStore {
             return Ok(false);
         };
 
-        let edit_ts = edited_at.unwrap_or(timestamp);
+        let order_us = extras.order_us.unwrap_or(timestamp.saturating_mul(1000));
+        crate::chat_clock::observe(order_us.max(timestamp.saturating_mul(1000)));
         self.conn
             .execute(
                 "UPDATE messages
                  SET message_id = ?1, text = ?2, edited_at = ?3,
                      signature = COALESCE(?4, signature),
                      public_key = COALESCE(?5, public_key),
-                     updated_at = ?3
-                 WHERE id = ?6",
-                params![message_id, new_text, edit_ts, signature, public_key, row_id],
+                     reply_to_mid = ?6, file_id = ?7, order_us = ?8, album_id = ?9,
+                     updated_at = ?10
+                 WHERE id = ?11",
+                params![
+                    message_id, new_text, edited_at, signature, public_key,
+                    extras.reply_to, extras.file_id, order_us, extras.album,
+                    edited_at.unwrap_or(timestamp), row_id,
+                ],
             )
             .map_err(|e| format!("Failed to reconcile DM row: {e}"))?;
         Ok(true)
@@ -7815,5 +7819,89 @@ mod tests {
         drop(store);
         let again = MessageStore::open(&path, &pass).unwrap();
         assert_eq!(stored_session(&again, "bob"), Some(("next".into(), 0, 1)), "a reopen keeps the migrated row");
+    }
+}
+
+#[cfg(test)]
+mod fs_review_tests {
+    use super::MessageStore;
+    use crate::node::crypto_handler::SignedExtras;
+
+    const TS: i64 = 1_791_548_513_366;
+
+    fn extras(mid: &str) -> SignedExtras<'_> {
+        SignedExtras { mid: Some(mid), reply_to: None, file_id: None, order_us: None, lp_digest: None, album: None }
+    }
+
+    fn store() -> MessageStore {
+        MessageStore::open(":memory:", &"ab".repeat(32)).expect("store")
+    }
+
+    /// fs-review: two distinct DMs from one sender in the same millisecond. A sync that
+    /// brings the second must insert it, never graft it onto the first's row.
+    #[test]
+    fn a_same_millisecond_dm_is_never_reconciled_onto_another_message() {
+        let store = store();
+        store
+            .insert("friend", "dm burst-1", false, TS, Some("sig1"), Some("pk"), Some("burst-1"), None, Some("file-1"), None, None)
+            .expect("first DM");
+        let merged = store
+            .reconcile_dm_by_timestamp("friend", false, "dm burst-2", TS, None, Some("sig2"), Some("pk"), &extras("burst-2"))
+            .expect("reconcile");
+        assert!(store.dm_message_exists("burst-1"), "the first DM was overwritten by a different message");
+        assert!(!merged, "a distinct same-millisecond DM was reconciled into another message's row");
+    }
+
+    /// fs-olm: the case reconcile exists for. A row stored without a mid takes the synced
+    /// copy of the same message, and becomes exactly the signed item.
+    #[test]
+    fn a_row_without_a_mid_takes_its_synced_copy_whole() {
+        let store = store();
+        store
+            .insert("friend", "hello", false, TS, Some("old-sig"), Some("pk"), None, Some("stale-reply"), Some("stale-file"), None, None)
+            .expect("legacy DM");
+        let item = SignedExtras {
+            mid: Some("m-1"),
+            reply_to: None,
+            file_id: Some("file-1"),
+            order_us: Some(TS * 1000 + 7),
+            lp_digest: None,
+            album: None,
+        };
+        let merged = store
+            .reconcile_dm_by_timestamp("friend", false, "hello", TS, None, Some("sig"), Some("pk"), &item)
+            .expect("reconcile");
+        assert!(merged, "the mid-less row must take its synced copy instead of a duplicate");
+        let rows = store.load_all_dm_messages("friend").expect("rows");
+        assert_eq!(rows.len(), 1, "one row for one message");
+        let row = &rows[0];
+        assert_eq!(row.message_id.as_deref(), Some("m-1"));
+        assert_eq!(row.signature.as_deref(), Some("sig"));
+        assert_eq!(row.reply_to_mid, None, "the row keeps nothing its new signature does not bind");
+        assert_eq!(row.file_id.as_deref(), Some("file-1"));
+        assert_eq!(row.order_us, Some(TS * 1000 + 7));
+        assert_eq!(row.edited_at, None, "an unedited item leaves the row unedited");
+    }
+
+    /// fs-olm: direction is part of the row's author. Our own synced message never lands
+    /// on a mid-less row the friend sent, nor theirs on ours.
+    #[test]
+    fn a_synced_dm_never_reconciles_onto_a_row_of_the_other_direction() {
+        let store = store();
+        store
+            .insert("friend", "theirs", false, TS, Some("sig-a"), Some("pk-a"), None, None, None, None, None)
+            .expect("their DM");
+        store
+            .insert("friend", "ours", true, TS + 1, Some("sig-b"), Some("pk-b"), None, None, None, None, None)
+            .expect("our DM");
+        let ours_onto_theirs = store
+            .reconcile_dm_by_timestamp("friend", true, "mine", TS, None, Some("sig"), Some("pk"), &extras("m-ours"))
+            .expect("reconcile");
+        let theirs_onto_ours = store
+            .reconcile_dm_by_timestamp("friend", false, "yours", TS + 1, None, Some("sig"), Some("pk"), &extras("m-theirs"))
+            .expect("reconcile");
+        assert!(!ours_onto_theirs && !theirs_onto_ours, "a reconcile crossed directions");
+        let texts: Vec<String> = store.load_all_dm_messages("friend").expect("rows").into_iter().map(|m| m.text).collect();
+        assert_eq!(texts, ["theirs", "ours"]);
     }
 }

@@ -693,8 +693,6 @@ async fn run_event_loop(
     // OLM_KEY_REQUEST_TIMEOUT are stale so the reconciliation sweep can resend: the
     // relay never ACKs, so a dropped frame must self-heal by retry.
     let mut key_request_in_flight: HashMap<String, std::time::Instant> = HashMap::new();
-    // Track peers we've sent a KeyBundle to (for glare detection at KeyBundle reception).
-    let mut key_bundle_sent_to: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Track the active room code so we can re-bootstrap after getting a relay circuit address.
     let mut active_room: Option<String> = None;
@@ -1464,7 +1462,7 @@ async fn run_event_loop(
                 let fwd_bridge: FwdBridge = std::marker::PhantomData;
                 Box::pin(handle_incoming_request(
                     &mut olm, &crypto_store, &crdt_store, &event_tx,
-                    &mut pending_messages, &mut frame_budget, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                    &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                     &mut server_states, &bundle_keypair,
                     &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                     &mut pending_server_joins,
@@ -3297,7 +3295,7 @@ async fn run_event_loop(
                             let fwd_bridge: FwdBridge = std::marker::PhantomData;
                             handle_incoming_request(
                                 &mut olm, &crypto_store, &crdt_store, &event_tx,
-                                &mut pending_messages, &mut frame_budget, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                                &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                                 &mut server_states, &bundle_keypair,
                                 &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                 &mut pending_server_joins,
@@ -3745,7 +3743,6 @@ async fn run_event_loop(
                         // answer re-send is re-armed with it (see `answer_resent`).
                         answer_resent.clear();
                         key_request_in_flight.clear();
-                        key_bundle_sent_to.clear();
                         mls_bootstrap_requested.clear();
                         // The grace waits for a Welcome that was in flight on the socket that just
                         // died. Dropping it with the throttle keeps the pair consistent: the new socket
@@ -4206,7 +4203,7 @@ async fn run_event_loop(
                                 // DURABLE DM room becomes mutually populated, re-issue a KeyRequest, bypassing
                                 // the in-flight freshness gate: a room transition is exactly the dropped-frame
                                 // event the 30s sweep was meant to catch, at sub-second latency. KeyRequest is
-                                // idempotent and the glare tiebreaker still arbitrates who creates the session.
+                                // idempotent and `open_prekey` settles a glare on the lower device's session.
                                 // `local_peer_str` is the master, so this is the pure f(masters) DM room, which
                                 // siblings, server members and guests never share: no key spam.
                                 // Gate on `!has_session` (NO session object), never `!has_confirmed_session`:
@@ -5016,7 +5013,7 @@ async fn run_event_loop(
                             let fwd_bridge: FwdBridge = std::marker::PhantomData;
                             handle_incoming_request(
                                 &mut olm, &crypto_store, &crdt_store, &event_tx,
-                                &mut pending_messages, &mut frame_budget, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                                &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                                 &mut server_states, &bundle_keypair,
                                 &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                 &mut pending_server_joins,
@@ -5530,7 +5527,7 @@ async fn run_event_loop(
                                         let synced = join_hold.sync_mark(&msg, &from, &server_states);
                                         handle_incoming_request(
                                             &mut olm, &crypto_store, &crdt_store, &event_tx,
-                                            &mut pending_messages, &mut frame_budget, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                                            &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                                             &mut server_states, &bundle_keypair,
                                             &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                             &mut pending_server_joins,
@@ -6021,7 +6018,7 @@ async fn run_event_loop(
                         }
                     }
                     // Accepted-friend masters, built once per sweep. BACKSTOP for the
-                    // friend-handshake Olm wedge: the side that DEFERRED on glare holds NO
+                    // friend-handshake Olm wedge: a side whose bundle was lost holds NO
                     // session object at all, and a freshly-friended peer is not a server member,
                     // so a wedged friend with no queued DM would otherwise never be swept.
                     // Master-keyed, so a sibling resolves to our own master and is excluded.
@@ -7534,7 +7531,6 @@ async fn handle_incoming_request(
     pending_messages: &mut HashMap<String, Vec<String>>,
     frame_budget: &mut super::frame_budget::FrameBudget,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
-    key_bundle_sent_to: &mut std::collections::HashSet<String>,
     server_states: &mut HashMap<String, ServerState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
@@ -7669,7 +7665,6 @@ async fn handle_incoming_request(
                 if minted {
                     persist_crypto_state(olm, crypto_store, peer_str);
                 }
-                key_bundle_sent_to.insert(peer_str.to_string());
                 send_message_to_peer(
                     ws_cmd_tx, ws_room_peers, peer_str,
                     signed_key_bundle(device_keypair, device_peer_id, peer_str, identity_key, otk),
@@ -7695,13 +7690,11 @@ async fn handle_incoming_request(
             match auth {
                 KeyExchangeAuth::Invalid => {
                     hollow_log!("[HOLLOW-SECURITY] REJECTED KeyBundle from {peer_str} — authentication FAILED (possible key substitution)");
-                    key_bundle_sent_to.remove(peer_str);
                     return;
                 }
                 KeyExchangeAuth::Unsigned => {
                     if REQUIRE_SIGNED_KEY_EXCHANGE {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED unsigned KeyBundle from {peer_str}");
-                        key_bundle_sent_to.remove(peer_str);
                         return;
                     }
                     hollow_log!("[HOLLOW-SECURITY] Unsigned KeyBundle from {peer_str} — accepted (pre-rollout client)");
@@ -7710,14 +7703,13 @@ async fn handle_incoming_request(
             }
             if key_exchange_device_unauthorized(peer_str) {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED KeyBundle from {peer_str} — device not in its master's signed device list");
-                key_bundle_sent_to.remove(peer_str);
                 return;
             }
 
             // SECURITY: the bundle is authenticated by now, so pin the Olm identity key
             // and surface a LATER change (a reinstall) instead of letting it pass
-            // silently. Done before the glare branching, so the fact is recorded even
-            // when this bundle loses the tiebreaker and builds no session.
+            // silently. Done first, so the fact is recorded even when this bundle builds
+            // no session.
             super::security_alerts::note_olm_identity_key(
                 event_tx, db_path, db_passphrase, master_peer_str,
                 &super::resolver::resolve(peer_str), peer_str, &identity_key,
@@ -7727,26 +7719,10 @@ async fn handle_incoming_request(
             // peer, and this bundle says the peer is waiting for one: it is replaced.
             if olm.has_confirmed_session(peer_str) || olm.has_fresh_outbound(peer_str, OLM_KEY_REQUEST_TIMEOUT) {
                 hollow_log!("[HOLLOW-CRYPTO] Already have session with {peer_str}, ignoring KeyBundle");
-                key_bundle_sent_to.remove(peer_str);
-            } else if key_bundle_sent_to.remove(peer_str) && device_peer_id > peer_str {
-                // Glare: we sent THEM a KeyBundle and they sent US one, so both sides would
-                // create outbound sessions and MAC-mismatch. The lower peer id creates the
-                // outbound session; we are higher, so we wait for their PreKey and create an
-                // inbound one instead.
-                //
-                // CRITICAL: compare DEVICE ids, not master. `peer_str` is the SENDER'S DEVICE
-                // id and the outbound Olm session lives on the SOCKET, so the tiebreaker must
-                // be device against device to stay antisymmetric. Comparing our MASTER with
-                // the peer's device is two unrelated strings, so BOTH peers can satisfy
-                // `local > peer` at once, both defer, and the pair deadlocks until the sweep.
-                //
-                // Do NOT clear key_request_in_flight here: if the low peer's PreKey is
-                // dropped, clearing it strands us sessionless with no retry. REFRESH the
-                // timestamp so the reconciliation sweep re-requests after the deferral window.
-                hollow_log!("[HOLLOW-CRYPTO] KeyBundle glare with {peer_str} — we're higher, deferring to their PreKey (sweep will retry if dropped)");
-                key_request_in_flight.insert(peer_str.to_string(), std::time::Instant::now());
             } else {
-                key_bundle_sent_to.remove(peer_str);
+                // Never deferred for glare, even when the peer may also be building one from
+                // our bundle: `open_prekey` keeps the LOWER device's session on both ends, while
+                // waiting here for the peer's PreKey wedged the pair whenever none was coming.
                 match olm.create_outbound_session(peer_str, &identity_key, &one_time_key) {
                     Ok(()) => {
                         hollow_log!("[HOLLOW-CRYPTO] Created outbound (unconfirmed) session with {peer_str} via KeyBundle");
@@ -8293,21 +8269,13 @@ async fn handle_incoming_request(
                                 msg.mid, msg.ts, msg.mine, msg.edited_at, already_exists, msg.t.len()
                             );
 
-                            // Reconcile against a row delivered via another path (an
-                            // offline fetch) that has a NULL or different mid. Without
-                            // this, an edited message inserts as a duplicate row.
-                            let reconciled = if !already_exists {
-                                if let Some(mid) = msg.mid.as_deref() {
-                                    store.reconcile_dm_by_timestamp(
-                                        &convo_peer, mid, &msg.t, msg.ts, msg.edited_at,
-                                        msg.sig.as_deref(), msg.pk.as_deref(),
-                                    ).unwrap_or(false)
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            };
+                            // The same message stored without a mid takes this copy
+                            // instead of a duplicate row; a row with a mid never does.
+                            let reconciled = !already_exists
+                                && store.reconcile_dm_by_timestamp(
+                                    &convo_peer, is_mine, &msg.t, msg.ts, msg.edited_at,
+                                    msg.sig.as_deref(), msg.pk.as_deref(), &extras,
+                                ).unwrap_or(false);
                             if reconciled {
                                 hollow_log!("[HOLLOW-SYNC] reconciled dm mid={:?} into existing row", msg.mid);
                                 if let Some(mid) = &msg.mid {
@@ -8531,20 +8499,12 @@ async fn handle_incoming_request(
                                 .map(|mid| store.dm_message_exists(mid))
                                 .unwrap_or(false);
 
-                            // Reconcile against a row delivered via another path with a
-                            // NULL/different mid (same guard as the friend batch).
-                            let reconciled = if !already_exists {
-                                if let Some(mid) = msg.mid.as_deref() {
-                                    store.reconcile_dm_by_timestamp(
-                                        &convo_peer, mid, &msg.t, msg.ts, msg.edited_at,
-                                        msg.sig.as_deref(), msg.pk.as_deref(),
-                                    ).unwrap_or(false)
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            };
+                            // Same rule as the friend batch: only a row without a mid.
+                            let reconciled = !already_exists
+                                && store.reconcile_dm_by_timestamp(
+                                    &convo_peer, msg.mine, &msg.t, msg.ts, msg.edited_at,
+                                    msg.sig.as_deref(), msg.pk.as_deref(), &extras,
+                                ).unwrap_or(false);
                             if reconciled {
                                 if let Some(mid) = &msg.mid {
                                     let _ = event_tx.send(NetworkEvent::DmMessageEdited {

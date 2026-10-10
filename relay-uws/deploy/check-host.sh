@@ -46,7 +46,7 @@ done
 
 echo "Secrets"
 for u in "${units[@]}"; do
-    if systemctl show -p Environment --value "$u" | grep -qE '(SECRET|TOKEN|PASSWORD|PRIVATE|LICENSE)[A-Z_]*='; then
+    if systemctl show -p Environment --value "$u" | grep -qE '(SECRET|TOKEN|PASSWORD|PRIVATE|LICENSE|CONN_RATE_EXEMPT)[A-Z_]*='; then
         bad "$u has a secret in Environment=, which any local account reads with systemctl show"
     else
         ok "$u keeps its secrets out of Environment="

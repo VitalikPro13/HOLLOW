@@ -742,6 +742,13 @@ Friend requests always ride the target's inbox as well as live sends (`social::h
 | A sibling's server announce | see §18 "A pending join from a sibling" (durable, `PendingJoin::from_sibling`, quiet `ServerCreated`) | t1-sibling, reviewed. |
 
 Open (tmp8.txt): `restore_identity_from_mnemonic` / `generate_new_identity` skip the pending-wipe + landing guard (a phrase restore after a held boot wipe lands beside the old DB); a different phrase over an existing DB; `scrubbed_db_copy` ignores a failed WAL checkpoint.
+
+## 33. Session 43 (2026-10-09): fleet speed wave fs
+
+| Write | Where | Gate |
+|---|---|---|
+| A synced DM landing on a stored row that has no mid | `MessageStore::reconcile_dm_by_timestamp` from DmSyncBatch and DmSiblingSyncBatch (`swarm.rs`), after the backfill signature and `change_may_touch_row` on the item's own mid | fs-olm: only a row with NO mid, in the item's conversation, at its timestamp AND in its direction; a row with any mid is another message and is never touched. Before, any same-millisecond row with another mid and other text qualified, so a burst merged two DMs into one row (one lost for good, the survivor keeping the other's `file_id`, `reply_to`, `order_us` and album under the new text and signature), a write `change_may_touch_row` never judged; an own item could also land on a received row. The direction keeps the row's author the item's signer (the DM rule of `change_may_touch_row`). The row becomes exactly the signed item (mid, text, signature, reply_to, file_id, order_us, album, edited_at), so it re-serves under that signature. Unit `a_same_millisecond_dm_is_never_reconciled_onto_another_message`, `a_row_without_a_mid_takes_its_synced_copy_whole`, `a_synced_dm_never_reconciles_onto_a_row_of_the_other_direction`; harness `a_burst_past_the_bucket_from_an_online_friend_is_asked_for_again`, `a_dm_stored_without_a_mid_takes_its_synced_copy_once` (both batches, both directions) |
+| An Olm session built from a KeyBundle | `swarm.rs` KeyBundle arm | Unchanged gates first (device signature, recipient, freshness, device in its master's signed list). The arm no longer defers for glare: the `key_bundle_sent_to` record went stale (a bundle that never left, never got read, or got used long ago) and made the higher device wait for a PreKey nobody sent. `OlmManager::open_prekey` is the one glare rule (the lower device keeps its session, the higher switches, replaced sessions retire). `olm_an_answered_bundle_is_no_glare_later`, `olm_a_bundle_the_peer_never_read_is_no_glare`, `olm_a_key_bundle_that_never_left_is_no_glare`, `olm_true_glare_converges_on_the_lower_devices_session` |
 ---
 
 ## Related

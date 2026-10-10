@@ -405,8 +405,9 @@ impl OlmManager {
     ///
     /// A new session replaces ours, except when ours is an unanswered outbound one and
     /// `local_device` is the lower id: both devices keyed each other at once, and both
-    /// keep the lower device's session, the side the KeyBundle tiebreak lets build one.
-    /// The new session is retired instead, so what the peer sent on it still reads.
+    /// keep the lower device's session. This is the ONE glare rule; the KeyBundle arm
+    /// never defers. The new session is retired instead, so what the peer sent on it
+    /// still reads.
     pub(crate) fn open_prekey(
         &mut self,
         peer_id: &str,

@@ -13029,14 +13029,13 @@ async fn showcase_board_replicates_preserves_and_clears() {
         (logo_hash.clone(), logo_bytes.clone()),
     ]);
     a.cmd_tx.send(send_update("hi", Some(board.clone()), Some(bundle.clone()))).await.unwrap();
-    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
-        matches!(ev, NetworkEvent::ProfileUpdated { .. })
-    })
-    .await;
-    assert!(got, "B must receive A's profile update");
-    sleep_ms(300).await;
-    let p = b.store().load_profile(&a_master).unwrap()
-        .expect("B must hold A's profile keyed by A's MASTER (device != master)");
+    // The stored row, never the first ProfileUpdated: a light announce can land before the blobs.
+    let stored = |b: &TestNode| b.store().load_profile(&a_master).ok().flatten();
+    assert!(
+        wait_until(8, async || stored(&b).is_some_and(|p| p.status == "hi" && p.showcase_assets.is_some())).await,
+        "B must receive A's profile update with its board",
+    );
+    let p = stored(&b).expect("B must hold A's profile keyed by A's MASTER (device != master)");
     assert_eq!(p.showcase_board, board, "enriched board JSON must replicate to B");
     assert_eq!(
         p.showcase_assets.as_deref(), Some(bundle.as_slice()),
@@ -13057,27 +13056,22 @@ async fn showcase_board_replicates_preserves_and_clears() {
     // STORED board, and B's COALESCE save preserves it either way. ---
     drain_events(&mut b);
     a.cmd_tx.send(send_update("status changed", None, None)).await.unwrap();
-    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
-        matches!(ev, NetworkEvent::ProfileUpdated { .. })
-    })
-    .await;
-    assert!(got, "B must receive A's second profile update");
-    sleep_ms(300).await;
-    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
-    assert_eq!(p.status, "status changed", "the non-board field must update");
+    assert!(
+        wait_until(8, async || stored(&b).is_some_and(|p| p.status == "status changed")).await,
+        "B must receive A's second profile update",
+    );
+    let p = stored(&b).expect("profile row");
     assert_eq!(p.showcase_board, board, "an update that didn't touch the board must NOT lose it");
     assert_eq!(p.showcase_assets.as_deref(), Some(bundle.as_slice()),
         "an update that didn't touch the assets must NOT lose them");
 
     drain_events(&mut b);
     a.cmd_tx.send(send_update("cleared", Some(String::new()), Some(Vec::new()))).await.unwrap();
-    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
-        matches!(ev, NetworkEvent::ProfileUpdated { .. })
-    })
-    .await;
-    assert!(got, "B must receive A's clear update");
-    sleep_ms(300).await;
-    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
+    assert!(
+        wait_until(8, async || stored(&b).is_some_and(|p| p.status == "cleared" && p.showcase_assets.is_none())).await,
+        "B must receive A's clear update",
+    );
+    let p = stored(&b).expect("profile row");
     assert_eq!(p.showcase_board, "", "an explicit empty board must clear on B");
     assert_eq!(p.showcase_assets, None, "an explicit empty bundle must clear on B");
 
@@ -33886,6 +33880,9 @@ async fn authz_a_friend_request_from_before_a_removal_never_returns() {
     let stamped_ahead = super::frame_auth::seal_at(
         &a_key, &inbox, &b.device_id, hour_ago, [12; 16], &request(super::frame_auth::now_ms()),
     );
+    // From the removal on, only injected frames speak for A: A's node never made it, so
+    // it still counts B a friend and would rightly accept B's new request.
+    relay.swallow_direct(&a.device_id, &b.device_id);
     relay.inject_direct(&room, &a.device_id, &b.device_id, removal());
     assert!(wait_until(10, async || !is_friend(&b, &a.master_id)).await, "A's removal lands");
 
@@ -35579,6 +35576,8 @@ async fn authz_a_member_back_from_away_admits_no_banned_identitys_live_ask() {
         .expect("seals");
     expect_relay_drained(&relay, &y, "back").await;
     let before = frames_addressed(&relay, &y.device_id, &m.device_id).len();
+    // Y may have admitted M's first join, before the ban: only admissions after the live ask count.
+    let y_admits_before = y_admissions_of(&relay, &y, &server_id, &m.master_id).await;
     relay.inject(&server_id, &m.device_id, &y.device_id, sealed);
     flush_frames(&relay, &mut y).await;
     expect_relay_drained(&relay, &y, "asked").await;
@@ -35592,12 +35591,21 @@ async fn authz_a_member_back_from_away_admits_no_banned_identitys_live_ask() {
     );
     flush_frames(&relay, &mut y).await;
     expect_relay_drained(&relay, &y, "synced").await;
-    assert!(!admitted_by(&y, &server_id, &m.master_id).await.contains(&y.master_id), "Y admitted M once it knew");
-    assert!(
-        !join_ring(&relay, &server_id).iter().any(|(from, msg)| from == &y.device_id
-            && matches!(msg, super::types::HavenMessage::ServerJoinResolved { joiner_master, admitted: true, .. } if *joiner_master == m.master_id)),
-        "Y published an admission of M",
-    );
+    let (ops, published) = y_admissions_of(&relay, &y, &server_id, &m.master_id).await;
+    assert_eq!(ops, y_admits_before.0, "Y admitted M once it knew");
+    assert_eq!(published, y_admits_before.1, "Y published an admission of M");
+}
+
+/// Y's admissions of `master`: MemberAdded ops it authored, and admitting resolutions it
+/// published to the join ring.
+async fn y_admissions_of(relay: &MockRelay, y: &TestNode, server_id: &str, master: &str) -> (usize, usize) {
+    let ops = admitted_by(y, server_id, master).await.iter().filter(|a| **a == y.master_id).count();
+    let published = join_ring(relay, server_id)
+        .iter()
+        .filter(|(from, msg)| from == &y.device_id
+            && matches!(msg, super::types::HavenMessage::ServerJoinResolved { joiner_master, admitted: true, .. } if joiner_master == master))
+        .count();
+    (ops, published)
 }
 
 /// `m`'s own live ask to join, sealed to `door` the way its modified client can: the lock
@@ -39843,7 +39851,12 @@ async fn authz_the_phrase_takes_the_identity_back_from_a_stolen_device() {
         "the friend follows the phrase: only the owner's device, got {:?}",
         f.known_devices(&o_master),
     );
-    assert_eq!(super::resolver::resolve(&t_dev), t_dev, "the thief's device is nobody's now");
+    // One resolver serves all three nodes here and each writes its own fold of O's
+    // roster into it, so the link can outlive F's stored roster by a moment.
+    assert!(
+        wait_until(10, async || super::resolver::resolve(&t_dev) == t_dev).await,
+        "the thief's device is nobody's now",
+    );
 
     // The friend's DM reaches the owner and not the thief.
     drain_events(&mut t);
@@ -45072,4 +45085,397 @@ async fn t1_sibling_rejoin_of_a_listed_sibling_announces_nothing_early() {
     sleep_ms(2000).await;
     let early_reads = relay.commands_since(&c.device_id, mark).iter().filter(|(kind, _, _)| *kind == "lock_get").count();
     assert_eq!(early_reads, 0, "a re-join of a listed sibling must not announce the lockless server to it");
+}
+
+// fs-tests
+
+/// A KeyBundle we could not route never left, so the peer's later bundle is no glare:
+/// deferring to a PreKey nobody will send wedges the pair until the reconciliation
+/// sweep. A joiner the relay still hides answers its members' KeyRequests this way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn olm_a_key_bundle_that_never_left_is_no_glare() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut q = spawn_node_with_friends(&relay, 230, 230, &[]).await;
+    // The glare rule defers only the HIGHER device, so P must sort below Q.
+    let p_key = (1..=255u8)
+        .map(|tag| NativeKeypair::from_secret_bytes(&seed_bytes(tag)))
+        .find(|k| k.peer_id() < q.device_id)
+        .expect("some tag sorts below Q");
+    let p_id = p_key.peer_id();
+    let inbox = format!("inbox:{}", q.master_id);
+    let mut p_olm = OlmManager::new();
+
+    // P asks from a room that shows Q nobody, so Q's answering bundle is dropped.
+    relay.set_recording(&q.device_id, true);
+    let keys_held = async |q: &TestNode| q.debug_snapshot().await.expect("snapshot").olm_one_time_keys;
+    flush_frames(&relay, &mut q).await;
+    let before = keys_held(&q).await;
+    let ask = super::crypto_handler::signed_key_request(&p_key, &p_id, &q.device_id);
+    relay.inject_direct(&inbox, &p_id, &q.device_id, serde_json::to_vec(&ask).unwrap());
+    flush_frames(&relay, &mut q).await;
+    assert_eq!(keys_held(&q).await, before + 1, "Q answers P's request with a bundle");
+    let bundles_to_p = relay.recorded_frames(&q.device_id).iter().filter(|f| {
+        matches!(
+            serde_json::from_slice::<super::types::HavenMessage>(super::frame_auth::unchecked_body(f)),
+            Ok(super::types::HavenMessage::KeyBundle { to: Some(t), .. }) if t == p_id
+        )
+    }).count();
+    assert_eq!(bundles_to_p, 0, "Q's bundle must have had no route to P");
+    assert_eq!(q.olm_status(&p_id).await, "absent");
+
+    // P answers a KeyRequest of Q's with its own bundle.
+    let otk = p_olm.generate_one_time_key();
+    let bundle = super::crypto_handler::signed_key_bundle(&p_key, &p_id, &q.device_id, p_olm.identity_key_base64(), otk);
+    relay.inject_direct(&inbox, &p_id, &q.device_id, serde_json::to_vec(&bundle).unwrap());
+    flush_frames(&relay, &mut q).await;
+    assert_eq!(q.olm_status(&p_id).await, "unconfirmed", "Q must build its session from P's bundle, not wait for P");
+}
+
+// fs-olm
+
+/// The (identity key, one-time key) of every KeyBundle `from` put on the wire for `to`.
+fn review_bundles_to(relay: &MockRelay, from: &str, to: &str) -> Vec<(String, String)> {
+    use super::types::HavenMessage;
+    relay
+        .recorded_frames(from)
+        .iter()
+        .filter_map(|f| match serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)) {
+            Ok(HavenMessage::KeyBundle { identity_key, one_time_key, to: Some(t), .. }) if t == to => {
+                Some((identity_key, one_time_key))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn review_key_requests_to(relay: &MockRelay, from: &str, to: &str) -> usize {
+    use super::types::HavenMessage;
+    relay
+        .recorded_frames(from)
+        .iter()
+        .filter(|f| {
+            matches!(
+                serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+                Ok(HavenMessage::KeyRequest { to: Some(t), .. }) if t == to
+            )
+        })
+        .count()
+}
+
+/// Q (higher id) and P, a lower single-device friend of Q's whose node is not running:
+/// Q sees P in their DM room and every frame Q sends is recorded.
+async fn review_pair(relay: &MockRelay, tag: u8) -> (TestNode, NativeKeypair, String, String) {
+    let q_id = NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let p_key = (1..=255u8)
+        .map(|t| NativeKeypair::from_secret_bytes(&seed_bytes(t)))
+        .find(|k| k.peer_id() < q_id)
+        .expect("some tag sorts below Q");
+    let p_id = p_key.peer_id();
+    relay.register_key(&p_key);
+    let mut q = spawn_node_with_friends(relay, tag, tag, &[&p_id]).await;
+    let room = super::types::dm_room_code(&q.master_id, &p_id);
+    // After Q's own joins settle, or their RoomMembers purge the injected presence.
+    flush_frames(relay, &mut q).await;
+    relay.inject_presence(&q.device_id, &room, &p_id);
+    flush_frames(relay, &mut q).await;
+    relay.set_recording(&q.device_id, true);
+    (q, p_key, p_id, room)
+}
+
+/// A bundle Q answered once, which P used (its PreKey built Q's inbound session), is no
+/// glare when P later answers a KeyRequest of Q's: Q re-keys after a frame it cannot
+/// read, and the record of the old bundle must not make Q wait for a PreKey P never sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn olm_an_answered_bundle_is_no_glare_later() {
+    use super::types::{HavenMessage, MessageEnvelope};
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut q, p_key, p_id, room) = review_pair(&relay, 233).await;
+    let mut p_olm = OlmManager::new();
+    super::crypto_handler::bind_olm_identity(&mut p_olm, &p_key);
+
+    // P asks; Q's bundle leaves on a route that shows P.
+    let ask = super::crypto_handler::signed_key_request(&p_key, &p_id, &q.device_id);
+    relay.inject_direct(&room, &p_id, &q.device_id, serde_json::to_vec(&ask).unwrap());
+    // The relay takes Q's commands on their own channel, after Q handled the frame.
+    assert!(
+        wait_until(10, async || !review_bundles_to(&relay, &q.device_id, &p_id).is_empty()).await,
+        "Q answers P's request with a bundle on the wire",
+    );
+    let bundles = review_bundles_to(&relay, &q.device_id, &p_id);
+    assert_eq!(bundles.len(), 1, "one bundle");
+    let (ik, otk) = bundles[0].clone();
+
+    // P builds its session from it and writes; Q holds the inbound half.
+    p_olm.create_outbound_session(&q.device_id, &ik, &otk).expect("outbound from Q's bundle");
+    let ack = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap();
+    let (mt, ct) = p_olm.encrypt(&q.device_id, ack.as_bytes()).expect("encrypt");
+    assert_eq!(mt, 0, "P's first message is a PreKey");
+    let prekey = super::crypto_handler::encrypted_frame(&p_olm, mt, &ct);
+    relay.inject_direct(&room, &p_id, &q.device_id, serde_json::to_vec(&prekey).unwrap());
+    assert!(
+        wait_until(10, async || q.olm_status(&p_id).await == "confirmed").await,
+        "Q must hold a confirmed session from P's PreKey, got {}",
+        q.olm_status(&p_id).await,
+    );
+
+    // A frame no session of Q's reads: Q retires its half and asks P for a key. The
+    // mock's RoomMembers refresh forgets an injected peer, so show P to Q again.
+    relay.inject_presence(&q.device_id, &room, &p_id);
+    flush_frames(&relay, &mut q).await;
+    let asked_before = review_key_requests_to(&relay, &q.device_id, &p_id);
+    let junk = HavenMessage::Encrypted {
+        message_type: 1,
+        body: OlmManager::encode_base64(&[7u8; 96]),
+        identity_key: None,
+        identity_sig: None,
+        identity_pk: None,
+    };
+    relay.inject_direct(&room, &p_id, &q.device_id, serde_json::to_vec(&junk).unwrap());
+    assert!(
+        wait_until(10, async || review_key_requests_to(&relay, &q.device_id, &p_id) > asked_before).await,
+        "Q must ask P for a key after a frame it cannot read",
+    );
+
+    // P answers the request the way a real node does: retire, fresh bundle.
+    let otk2 = p_olm.generate_one_time_key();
+    let bundle = super::crypto_handler::signed_key_bundle(
+        &p_key, &p_id, &q.device_id, p_olm.identity_key_base64(), otk2,
+    );
+    relay.inject_direct(&room, &p_id, &q.device_id, serde_json::to_vec(&bundle).unwrap());
+    flush_frames(&relay, &mut q).await;
+    assert_eq!(
+        q.olm_status(&p_id).await,
+        "unconfirmed",
+        "Q must build its session from the bundle it asked for: the bundle P used long ago is no glare",
+    );
+}
+
+/// `send_message_to_peer` returning true means the frame was queued, not that the peer
+/// read it. A bundle that left but that P never used is no glare either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn olm_a_bundle_the_peer_never_read_is_no_glare() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut q, p_key, p_id, room) = review_pair(&relay, 234).await;
+    let mut p_olm = OlmManager::new();
+    super::crypto_handler::bind_olm_identity(&mut p_olm, &p_key);
+
+    let ask = super::crypto_handler::signed_key_request(&p_key, &p_id, &q.device_id);
+    relay.inject_direct(&room, &p_id, &q.device_id, serde_json::to_vec(&ask).unwrap());
+    assert!(
+        wait_until(10, async || review_bundles_to(&relay, &q.device_id, &p_id).len() == 1).await,
+        "Q's bundle left on a route that shows P",
+    );
+
+    // P never read it (refused it, or it was lost past the relay) and answers Q.
+    let otk = p_olm.generate_one_time_key();
+    let bundle = super::crypto_handler::signed_key_bundle(&p_key, &p_id, &q.device_id, p_olm.identity_key_base64(), otk);
+    relay.inject_direct(&room, &p_id, &q.device_id, serde_json::to_vec(&bundle).unwrap());
+    flush_frames(&relay, &mut q).await;
+    assert_eq!(q.olm_status(&p_id).await, "unconfirmed", "Q must build its session from P's bundle, not wait for P");
+}
+
+/// True glare: both devices ask at once and each answers the other's request, so both
+/// build an outbound session from the other's bundle before either PreKey lands. The
+/// KeyBundle arm never defers, so `open_prekey` alone must settle the pair on the LOWER
+/// device's session: one session on both ends, the higher one's retired, every DM read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn olm_true_glare_converges_on_the_lower_devices_session() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (lo_tag, hi_tag) = if id(105) < id(106) { (105, 106) } else { (106, 105) };
+    let (lo_id, hi_id) = (id(lo_tag), id(hi_tag));
+
+    relay.hold_direct(&lo_id, &hi_id);
+    relay.hold_direct(&hi_id, &lo_id);
+    let mut lo = spawn_node_with_friends(&relay, lo_tag, lo_tag, &[&hi_id]).await;
+    let mut hi = spawn_node_with_friends(&relay, hi_tag, hi_tag, &[&lo_id]).await;
+    let held = |from: &str, to: &str, kind: &str| relay.held_kinds(from, to).iter().filter(|k| *k == kind).count();
+    assert!(
+        wait_until(10, async || held(&lo_id, &hi_id, "key_request") > 0 && held(&hi_id, &lo_id, "key_request") > 0).await,
+        "both devices must ask for a key",
+    );
+    for (from, to, mid) in [(&lo, &hi, "lo-early"), (&hi, &lo, "hi-early")] {
+        from.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: to.master_id.clone(),
+                text: format!("{mid}-text"),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Each reads the other's request, and both bundles cross on the wire.
+    relay.release_held_kind(&lo_id, &hi_id, "key_request");
+    relay.release_held_kind(&hi_id, &lo_id, "key_request");
+    assert!(
+        wait_until(10, async || held(&lo_id, &hi_id, "key_bundle") > 0 && held(&hi_id, &lo_id, "key_bundle") > 0).await,
+        "both devices must answer with a bundle: {:?} / {:?}",
+        relay.held_kinds(&lo_id, &hi_id), relay.held_kinds(&hi_id, &lo_id),
+    );
+    relay.release_held_kind(&lo_id, &hi_id, "key_bundle");
+    relay.release_held_kind(&hi_id, &lo_id, "key_bundle");
+    assert!(
+        wait_until(10, async || held(&lo_id, &hi_id, "encrypted") > 0 && held(&hi_id, &lo_id, "encrypted") > 0).await,
+        "both devices must build a session and send a PreKey: {:?} / {:?}",
+        relay.held_kinds(&lo_id, &hi_id), relay.held_kinds(&hi_id, &lo_id),
+    );
+    let lo_session = lo.olm_session_id(&hi_id).await.expect("the lower device built a session");
+    let hi_session = hi.olm_session_id(&lo_id).await.expect("the higher device built a session");
+    assert_ne!(lo_session, hi_session, "two sessions in play, or this was no glare");
+
+    relay.release_held(&lo_id, &hi_id);
+    relay.release_held(&hi_id, &lo_id);
+    expect_dm_pair_ready(&relay, &lo, &hi, 20).await;
+    let settled = wait_until(10, async || {
+        hi.olm_session_id(&lo_id).await.as_deref() == Some(lo_session.as_str())
+            && lo.olm_session_id(&hi_id).await.as_deref() == Some(lo_session.as_str())
+    })
+    .await;
+    assert!(settled, "both must encrypt on the lower device's session {lo_session}: lo {:?}, hi {:?}",
+        lo.olm_session_id(&hi_id).await, hi.olm_session_id(&lo_id).await);
+
+    for (from, to, mid) in [(&lo, &hi, "lo-late"), (&hi, &lo, "hi-late")] {
+        from.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: to.master_id.clone(),
+                text: format!("{mid}-text"),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    }
+    let mut lo_events = Vec::new();
+    let mut hi_events = Vec::new();
+    let all_read = wait_until(15, async || {
+        lo_events.extend(take_events(&mut lo));
+        hi_events.extend(take_events(&mut hi));
+        let got = |events: &[NetworkEvent], mid: &str| {
+            events.iter().any(|ev| matches!(ev, NetworkEvent::MessageReceived { message_id, is_own, .. }
+                if message_id == mid && !*is_own))
+        };
+        got(&hi_events, "lo-early") && got(&hi_events, "lo-late")
+            && got(&lo_events, "hi-early") && got(&lo_events, "hi-late")
+    })
+    .await;
+    assert!(all_read, "every DM must arrive: lo read {:?}, hi read {:?}",
+        lo.dm_thread(&hi.master_id), hi.dm_thread(&lo.master_id));
+    assert!(stale_session_errors(&lo_events).is_empty() && stale_session_errors(&hi_events).is_empty(),
+        "no message may fail to decrypt: lo {:?}, hi {:?}",
+        stale_session_errors(&lo_events), stale_session_errors(&hi_events));
+    assert_eq!(lo.olm_session_id(&hi_id).await.as_deref(), Some(lo_session.as_str()), "still the lower device's session");
+    assert_eq!(hi.olm_session_id(&lo_id).await.as_deref(), Some(lo_session.as_str()), "no second outbound left live");
+}
+
+/// A device holding DMs stored without a mid (a legacy row each way) gets their signed
+/// copies, one pair only the friend holds and one pair only its sibling holds: each copy
+/// lands on its own row, in its own direction, and no message is stored twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_dm_stored_without_a_mid_takes_its_synced_copy_once() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const F: u8 = 221;
+    const M: u8 = 222;
+    const D1: u8 = 223;
+    const D2: u8 = 224;
+    let f_master = NativeKeypair::from_secret_bytes(&seed_bytes(F)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let d1 = NativeKeypair::from_secret_bytes(&seed_bytes(D1)).peer_id();
+    let d2 = NativeKeypair::from_secret_bytes(&seed_bytes(D2)).peer_id();
+    super::resolver::seed_self(&m_master, &[d1.clone(), d2.clone()]);
+    super::resolver::update_many(&m_master, [d1.as_str(), d2.as_str()]);
+
+    let f = spawn_node_with_friends(&relay, F, F, &[&m_master]).await;
+    let n1 = spawn_node_full(&relay, M, D1, &[&f_master], Some(&[D1, D2])).await;
+    let n2 = spawn_node_full(&relay, M, D2, &[&f_master], Some(&[D1, D2])).await;
+    expect_dm_pair_ready(&relay, &f, &n1, 15).await;
+    expect_dm_pair_ready(&relay, &f, &n2, 15).await;
+
+    // (holder, mid, text, ours, minutes ago): the friend's pair, then the sibling's.
+    let min = 60 * 1000;
+    let now = super::types::now_ms();
+    let rows = [
+        ("friend", "legacy-f-theirs", "their first", false, now - 12 * min),
+        ("friend", "legacy-f-ours", "our first", true, now - 11 * min),
+        ("sibling", "legacy-s-theirs", "their second", false, now - 10 * min),
+        ("sibling", "legacy-s-ours", "our second", true, now - 9 * min),
+    ];
+    for (holder, mid, text, ours, ts) in rows {
+        let signer = if ours { M } else { F };
+        let recipient = if ours { &f_master } else { &m_master };
+        if holder == "friend" {
+            let convo = &m_master;
+            plant_signed_dm(&f, signer, recipient, convo, !ours, ts, mid, text);
+        } else {
+            plant_signed_dm(&n1, signer, recipient, &f_master, ours, ts, mid, text);
+        }
+        n2.store()
+            .insert(&f_master, text, ours, ts, Some("old-sig"), Some("old-pk"), None, None, None, None, None)
+            .expect("plant a mid-less row");
+    }
+    let thread = |n: &TestNode| -> Vec<(String, Option<String>)> {
+        n.store().load_all_dm_messages(&f_master).expect("rows").into_iter().map(|m| (m.text, m.message_id)).collect()
+    };
+
+    // The friend alone holds the first pair.
+    relay.set_online(&d1, false);
+    relay.set_online(&d2, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&d2)).await);
+    relay.set_online(&d2, true);
+    assert!(
+        wait_until(25, async || {
+            n2.store().dm_message_exists("legacy-f-theirs") && n2.store().dm_message_exists("legacy-f-ours")
+        })
+        .await,
+        "the friend's copies must land on the mid-less rows: {:?}", thread(&n2),
+    );
+
+    // The sibling alone holds the second pair.
+    relay.set_online(&f.device_id, false);
+    super::crypto_handler::reset_sibling_backfill_cooldown();
+    relay.set_online(&d1, true);
+    relay.set_online(&d2, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&d2)).await);
+    relay.set_online(&d2, true);
+    assert!(
+        wait_until(30, async || {
+            n2.store().dm_message_exists("legacy-s-theirs") && n2.store().dm_message_exists("legacy-s-ours")
+        })
+        .await,
+        "the sibling's copies must land on the mid-less rows: {:?}", thread(&n2),
+    );
+
+    let held = n2.store().load_all_dm_messages(&f_master).expect("rows");
+    let seen: Vec<(&str, bool, Option<&str>)> =
+        held.iter().map(|m| (m.text.as_str(), m.is_mine, m.message_id.as_deref())).collect();
+    let want: Vec<(&str, bool, Option<&str>)> = rows.iter().map(|r| (r.2, r.3, Some(r.1))).collect();
+    assert_eq!(seen, want, "each message once, on its own row and in its own direction");
+    drop(f);
+    drop(n1);
+    drop(n2);
 }

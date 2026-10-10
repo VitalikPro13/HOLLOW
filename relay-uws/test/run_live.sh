@@ -111,8 +111,14 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=relay.live.test \
 
 domain=relay.live.test
 fail=0
+# A third argument is HOLLOW_CONN_RATE_EXEMPT for that run, which runs only the rate cases.
 run_variant() {
-    local v=$1 port tries=0 log=$dir/relay_$v.log
+    local v=$1 name=${2:-$1} exempt=${3-} port tries=0 log=$dir/relay_${2:-$1}.log
+    local extra=() only=${RELAY_LIVE_ONLY-}
+    if [ -n "$exempt" ]; then
+        extra=(HOLLOW_CONN_RATE_EXEMPT="$exempt")
+        only=rate_exempt
+    fi
     while :; do
         if [ -n "$RELAY_LIVE_PORTS" ]; then
             port=$((${RELAY_LIVE_PORTS%-*} + RANDOM % (${RELAY_LIVE_PORTS#*-} - ${RELAY_LIVE_PORTS%-*} + 1)))
@@ -121,9 +127,9 @@ run_variant() {
         fi
         # Never under a systemd fd store, never near the real push sidecar's token.
         env -u NOTIFY_SOCKET -u LISTEN_PID -u LISTEN_FDS -u LISTEN_FDNAMES -u HOLLOW_PUSH_TOKEN \
-            TURN_SECRET=live-test "$dir/relay_$v" --port "$port" --domain "$domain" \
+            -u HOLLOW_CONN_RATE_EXEMPT "${extra[@]}" TURN_SECRET=live-test "$dir/relay_$v" --port "$port" --domain "$domain" \
             --cert-file "$dir/cert.pem" --key-file "$dir/key.pem" \
-            --keys-file "$dir/no-keys.json" --reports-file "$dir/reports_$v.json" > "$log" 2>&1 &
+            --keys-file "$dir/no-keys.json" --reports-file "$dir/reports_$name.json" > "$log" 2>&1 &
         relay_pid=$!
         for _ in $(seq 100); do
             grep -q "Listening on port" "$log" && break
@@ -136,7 +142,7 @@ run_variant() {
         relay_pid=
         tries=$((tries + 1))
         if [ $tries -ge 5 ]; then
-            echo "FAIL test_relay_live/$v (the relay never listened)"
+            echo "FAIL test_relay_live/$name (the relay never listened)"
             tail -20 "$log"
             fail=1
             return
@@ -145,7 +151,8 @@ run_variant() {
 
     # The client's last case sends the relay SIGTERM itself (the drain hint); its pid
     # also lets a probe read the relay's memory. Under ASan the run takes about 96 s.
-    RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" "$v" > "$dir/client_$v.log" 2>&1
+    RELAY_LIVE_ONLY=$only RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" "$v" \
+        > "$dir/client_$name.log" 2>&1
     local rc=$?
     # A relay that does not exit on SIGTERM is down until systemd kills it.
     kill -TERM "$relay_pid" 2> /dev/null
@@ -162,21 +169,32 @@ run_variant() {
     local relay_rc=$?
     relay_pid=
 
+    # The list is announced by its counts alone, and only when it is set.
+    local said=ok
+    if [ -n "$exempt" ]; then
+        grep -qxF "[config] New-connection rate exemption: 1 address block(s), 2 entry(s) ignored" "$log" ||
+            said="no count line"
+        ! grep -qF "127.0.241" "$log" || said="the log names an address"
+    elif grep -qF "rate exemption" "$log"; then
+        said="an exemption line without a list"
+    fi
     local checks
-    checks=$(grep -c '  ok' "$dir/client_$v.log")
-    if [ $rc = 0 ] && [ $exited = 1 ] && [ $relay_rc = 0 ] &&
+    checks=$(grep -c '  ok' "$dir/client_$name.log")
+    if [ $rc = 0 ] && [ $exited = 1 ] && [ $relay_rc = 0 ] && [ "$said" = ok ] &&
         ! grep -qE "AddressSanitizer|LeakSanitizer|runtime error:" "$log"; then
-        echo "pass test_relay_live/$v ($checks checks)"
+        echo "pass test_relay_live/$name ($checks checks)"
         return
     fi
     if [ $rc = 124 ]; then
-        echo "FAIL test_relay_live/$v (hung, killed after 120 s)"
+        echo "FAIL test_relay_live/$name (hung, killed after 120 s)"
     elif [ $exited = 0 ]; then
-        echo "FAIL test_relay_live/$v (the relay ignored SIGTERM)"
+        echo "FAIL test_relay_live/$name (the relay ignored SIGTERM)"
+    elif [ "$said" != ok ]; then
+        echo "FAIL test_relay_live/$name (startup log: $said)"
     else
-        echo "FAIL test_relay_live/$v (client $rc, relay $relay_rc)"
+        echo "FAIL test_relay_live/$name (client $rc, relay $relay_rc)"
     fi
-    grep -v '  ok' "$dir/client_$v.log" | head -30
+    grep -v '  ok' "$dir/client_$name.log" | head -30
     grep -E -A12 "AddressSanitizer|LeakSanitizer|runtime error:" "$log" | head -40
     fail=1
 }
@@ -184,4 +202,6 @@ run_variant() {
 for v in $variants; do
     run_variant "$v"
 done
+# The exemption list: a v4 address written v4-mapped, beside two entries it ignores.
+run_variant "${variants%% *}" exempt "::ffff:127.0.241.3, not-an-address,127.0.241"
 exit $fail

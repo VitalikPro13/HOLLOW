@@ -3781,6 +3781,61 @@ static void test_bounds_drain() {
     check("a socket without a session is told nothing", count(*b, typed("reconnect")) == 0);
 }
 
+// --- New-connection rate (MAX_NEW_CONNS_PER_MIN_PER_IP) and HOLLOW_CONN_RATE_EXEMPT ---
+//
+// run_live.sh starts one more relay listing RATE_EXEMPT_SOURCE (127.0.241.3, written
+// v4-mapped) and runs RELAY_LIVE_ONLY=rate_exempt against it.
+static constexpr int RATE_EXEMPT_SOURCE = 60001;
+static constexpr int RATE_PLAIN_SOURCE = 60002;
+
+// A socket the relay lets in (it answers auth_hello), closed cleanly so its slot is back.
+static bool let_in_and_closed() {
+    auto p = open_socket(Ident());
+    p->send({{"type", "auth_hello"}});
+    const bool in = next_json(*p, typed("auth_challenge")).has_value();
+    return p->ws.close_clean() && in;
+}
+
+static bool refused_for_rate() {
+    auto p = open_socket(Ident());
+    p->send({{"type", "auth_hello"}});
+    return closed_by_relay(*p) && p->ws.close_code == 1008 && p->ws.close_reason == "rate_limit";
+}
+
+// A socket the relay let in, held open. The relay forgets an address's rate window
+// once it holds no socket, so each case keeps one.
+static std::unique_ptr<Peer> held_open() {
+    auto p = open_socket(Ident());
+    p->send({{"type", "auth_hello"}});
+    if (!next_json(*p, typed("auth_challenge"))) check("(a held socket is let in)", false);
+    return p;
+}
+
+static void test_rate_limit() {
+    printf("rate: an address opens ten new sockets a minute\n");
+    PinnedSource pin(RATE_PLAIN_SOURCE);
+    auto first = held_open();
+    bool all_in = true;
+    for (int i = 0; i < 9; i++) all_in = let_in_and_closed() && all_in;
+    check("an address opens ten sockets in a minute", all_in);
+    check("the eleventh is refused with rate_limit", refused_for_rate());
+}
+
+static void test_rate_exempt() {
+    printf("rate: a listed address skips the rate and only the rate\n");
+    {
+        PinnedSource pin(RATE_EXEMPT_SOURCE);
+        std::vector<std::unique_ptr<Peer>> held;
+        held.push_back(held_open());
+        bool all_in = true;
+        for (int i = 0; i < 14; i++) all_in = let_in_and_closed() && all_in;
+        check("a listed address opens more than ten sockets in a minute", all_in);
+        held.push_back(held_open());
+        held.push_back(held_open());
+        check("and still no more at once than any address", refused_at_open(Ident()));
+    }
+    test_rate_limit();
+}
 
 int main(int argc, char** argv) {
     if (argc != 4 || (std::string(argv[3]) != "on" && std::string(argv[3]) != "off")) {
@@ -3831,6 +3886,13 @@ int main(int argc, char** argv) {
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
     }
+    // =rate: the new-connection rate alone; =rate_exempt against the relay that lists one.
+    if (only && (std::string(only) == "rate" || std::string(only) == "rate_exempt")) {
+        if (std::string(only) == "rate") test_rate_limit(); else test_rate_exempt();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
     const std::string only_cases = only ? only : "";
     const bool probe_only = only_cases == "probe";
     const bool bounds_only = only_cases == "bounds" || probe_only;
@@ -3847,6 +3909,7 @@ int main(int argc, char** argv) {
         test_guests();
         test_fetch();
         test_door_rooms();
+        test_rate_limit();
     }
     if (!bounds_only) {
         test_session_logins();

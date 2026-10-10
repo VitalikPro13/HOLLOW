@@ -6,6 +6,7 @@
 #include "crypto.h"
 #include "device_list.h"
 #include "fwd_room.h"
+#include "ip_key.h"
 #include "kill_order.h"
 #include "roster_crypto.h"
 #include "validate.h"
@@ -39,41 +40,6 @@ static constexpr size_t CONNS_PER_IP = MAX_CONNS_PER_IP;
 // scan budget bounds the co-member pass for a peer sitting in many rooms.
 static constexpr size_t MAX_CHECK_PEERS_QUERY = 256;
 static constexpr size_t MAX_CHECK_PEERS_SCAN = 65536;
-
-// An address with the low bits of a v6 one cleared from byte `keep_bytes` on, and
-// `suffix` appended. IPv4 clients on the dual-stack [::] listener arrive
-// V4-MAPPED (uWS prints them as uncompressed v6 hex) and MUST be unmapped to
-// their dotted quad first, or every v4 client collapses into one "::" bucket.
-// Unparseable input falls back to the raw text (per-address).
-static std::string address_block(const std::string& ip, size_t keep_bytes, const char* suffix) {
-    if (ip.find(':') == std::string::npos) return ip;
-    struct in6_addr addr;
-    if (inet_pton(AF_INET6, ip.c_str(), &addr) != 1) return ip;
-    if (IN6_IS_ADDR_V4MAPPED(&addr)) {
-        struct in_addr v4;
-        std::memcpy(&v4, addr.s6_addr + 12, 4);
-        char buf4[INET_ADDRSTRLEN];
-        if (!inet_ntop(AF_INET, &v4, buf4, sizeof(buf4))) return ip;
-        return std::string(buf4);
-    }
-    std::memset(addr.s6_addr + keep_bytes, 0, 16 - keep_bytes);
-    char buf[INET6_ADDRSTRLEN];
-    if (!inet_ntop(AF_INET6, &addr, buf, sizeof(buf))) return ip;
-    return std::string(buf) + suffix;
-}
-
-// Key for per-IP limiting. IPv6 aggregates by /64: a single host typically owns
-// an entire /64, so per-address counting would be trivially bypassed.
-static std::string ip_limit_key(const std::string& ip) {
-    return address_block(ip, 8, "/64");
-}
-
-// The block fair shares are kept by (fair_share.h): a v4 address, or the /48 of
-// a v6 one, the block a single site is given. By /64, whoever holds one /48
-// would hold 65,536 shares.
-static std::string share_block(const std::string& ip) {
-    return address_block(ip, 6, "/48");
-}
 
 // The share a socket's writes are charged to: its address block hashed under the
 // current hour's key.
@@ -3684,7 +3650,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
         .maxBackpressure = 64 * 1024 * 1024,
         .sendPingsAutomatically = true,
 
-        .open = [&state](SSLWebSocket* ws) {
+        .open = [&state, &config](SSLWebSocket* ws) {
             auto* data = ws->getUserData();
 
             // Per-IP connection limiting (in-memory only, never logged)
@@ -3696,13 +3662,15 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             // A refused socket never took a slot, so its close must give none back:
             // `ip_key` is set only once the slot is taken, and an address holding no
             // slot keeps no entry. The rate check goes first, so a probe at the cap
-            // costs no look at the session table.
+            // costs no look at the session table. A listed address (HOLLOW_CONN_RATE_EXEMPT)
+            // skips the rate alone and keeps no window; the cap below holds for it too.
+            const bool rate_exempt = config.conn_rate_exempt.contains(ip);
             auto now = std::chrono::steady_clock::now();
             while (!ip_state.recent_connects.empty() &&
                    (now - ip_state.recent_connects.front()) > std::chrono::seconds(60)) {
                 ip_state.recent_connects.pop_front();
             }
-            if (ip_state.recent_connects.size() >= MAX_NEW_CONNS_PER_MIN_PER_IP) {
+            if (!rate_exempt && ip_state.recent_connects.size() >= MAX_NEW_CONNS_PER_MIN_PER_IP) {
                 if (ip_state.active_count == 0) state.ip_states.erase(ip);
                 ws->end(1008, "rate_limit");
                 return;
@@ -3717,7 +3685,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             }
 
             ip_state.active_count++;
-            ip_state.recent_connects.push_back(now);
+            if (!rate_exempt) ip_state.recent_connects.push_back(now);
             data->ip_key = ip;
 
             // 10-second auth timeout

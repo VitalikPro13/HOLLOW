@@ -370,7 +370,7 @@ Reads CLI flags sequentially. `TURN_SECRET` is loaded from the environment varia
 | `GUEST_IDLE_SECS` | 1800 | Guest idle timeout (30 min no binary activity) |
 | `GUEST_BINARY_PER_MIN` | 10 | Max 0x03 binary frames per minute for guests |
 
-### Per-IP keying: `ip_limit_key()` (ws_handler.cpp)
+### Per-IP keying: `ip_limit_key()` (`src/ip_key.h`, with `share_block`; unit-tested in `test_conn_rate_exempt`)
 
 ALL per-IP accounting (connection caps) keys through `ip_limit_key(getRemoteAddressAsText())`:
 - IPv4 → the dotted-quad address.
@@ -433,6 +433,10 @@ In-memory only — never logged, never persisted. Erased on close once `active_c
 |-------|------|-------------|
 | `active_count` | `uint32_t` | Currently open connections from this IP |
 | `recent_connects` | `deque<steady_clock::time_point>` | Sliding window of connection timestamps for rate limiting |
+
+Because the entry is erased at `active_count == 0`, the rate window only exists while the address holds a socket: open-close-open from an idle address is never rate-limited (live tests hold one socket for that reason).
+
+**Rate exemption (`HOLLOW_CONN_RATE_EXEMPT`, `src/conn_rate_exempt.h`, 2026-10-09):** an operator's own addresses, comma/space separated, read from the ENVIRONMENT only (root-only `EnvironmentFile`, never `Environment=` or a flag, never in the repo/memory/logs). Entries normalize through `ip_limit_key` (v4, v4-mapped -> its v4, v6 -> its /64, or `addr/64`); anything else is ignored and counted. A listed key skips ONLY the per-minute check in `.open` and keeps no window; `MAX_CONNS_PER_IP`/`admits`, fair share, auth, door rooms and every frame rule still apply. Startup prints only `[config] New-connection rate exemption: N address block(s), M entry(s) ignored`, and nothing when unset or empty; no per-connection line ever. No wire or snapshot change. Tests: `test_conn_rate_exempt` (parse + normalization) and `test_relay_live` `RELAY_LIVE_ONLY=rate|rate_exempt` (run_live.sh's third relay run, which also greps the log for the count line and for the absence of the address). Official box: Vitalik's address in `/etc/hollow-relay/relay.env`.
 
 ### PeerEntry (signaling registration)
 

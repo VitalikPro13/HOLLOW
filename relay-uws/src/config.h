@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "conn_rate_exempt.h"
 #include "session.h"
 
 struct Config {
@@ -24,6 +25,9 @@ struct Config {
     std::string forwarder_peer_id;
     // How long a session outlives its socket (--session-grace-secs, 30 to 600).
     int64_t session_grace_secs = session::DEFAULT_GRACE_SECS;
+    // HOLLOW_CONN_RATE_EXEMPT, read from the environment only: it names the operator's
+    // own addresses, so it belongs in the root-only environment file, never a flag.
+    conn_rate_exempt::List conn_rate_exempt;
 };
 
 // --session-grace-secs: a number outside 30..600 is held to the nearer end, and
@@ -65,6 +69,12 @@ inline Config parse_args(int argc, char** argv) {
 
     const char* turn_env = getenv("TURN_SECRET");
     if (turn_env) config.turn_secret = turn_env;
+    const char* exempt = getenv("HOLLOW_CONN_RATE_EXEMPT");
+    if (exempt && *exempt) {
+        config.conn_rate_exempt = conn_rate_exempt::parse(exempt);
+        fprintf(stderr, "[config] New-connection rate exemption: %zu address block(s), %zu entry(s) ignored\n",
+                config.conn_rate_exempt.keys.size(), config.conn_rate_exempt.ignored);
+    }
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];

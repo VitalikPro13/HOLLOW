@@ -20,8 +20,8 @@ ExecStart=/usr/local/bin/hollow-relay \
     --cert-file /etc/hollow-relay/fullchain.pem \
     --key-file /etc/hollow-relay/privkey.pem \
     --forwarder-peer-id 12D3KooWHtaftXh76r8hiwx6HzzSkKudx1rkjht1YYAjWSDjfeRH
-# TURN_SECRET and HOLLOW_PUSH_TOKEN, root-only (0600). Never Environment=: any
-# local account can read those through `systemctl show`.
+# TURN_SECRET, HOLLOW_PUSH_TOKEN and HOLLOW_CONN_RATE_EXEMPT, root-only (0600).
+# Never Environment=: any local account can read those through `systemctl show`.
 EnvironmentFile=/etc/hollow-relay/relay.env
 StateDirectory=hollow-relay
 StateDirectoryMode=0700

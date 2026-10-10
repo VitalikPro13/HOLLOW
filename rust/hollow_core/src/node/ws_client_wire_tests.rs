@@ -1119,14 +1119,15 @@ async fn the_drain_hint_waits_then_resumes() {
     let relay = FakeRelay::start(true).await;
     let mut c = spawn_client(&relay.url(), quick());
     c.wait_kind("Connected", T).await;
+    // The client counts the wait from when it reads the hint, which is after this.
+    let hinted = Instant::now();
     relay.tell(json!({ "type": "reconnect", "after_ms": 600 }));
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let hinted = Instant::now();
     relay.kill();
     c.wait_kind("Suspended", T).await;
     c.wait_kind("Resumed", T).await;
     let took = hinted.elapsed();
-    assert!(took >= Duration::from_millis(550), "waited for the hint: {took:?}");
+    assert!(took >= Duration::from_millis(600), "waited for the hint: {took:?}");
     assert!(took < Duration::from_millis(2000), "then resumed at once: {took:?}");
     assert_eq!(relay.conn_count(), 2, "one reconnect, after the wait");
 }

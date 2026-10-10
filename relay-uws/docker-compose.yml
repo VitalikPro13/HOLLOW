@@ -50,6 +50,7 @@ services:
       - "443:443"
     environment:
       - TURN_SECRET=${TURN_SECRET:-}
+      - HOLLOW_CONN_RATE_EXEMPT=${HOLLOW_CONN_RATE_EXEMPT:-}
     command:
       - --port
       - "443"

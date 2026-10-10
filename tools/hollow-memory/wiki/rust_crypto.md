@@ -357,7 +357,7 @@ The race scenario: Alice sends multiple messages before Bob responds. All are Pr
 
 When both peers simultaneously send `KeyRequest` and respond with `KeyBundle`, both create outbound sessions → incompatible ratchets → MAC tag mismatch on first decrypt. The test `test_dual_prekey_creates_incompatible_sessions` verifies this.
 
-The swarm code prevents this via **glare detection** using `key_bundle_sent_to: HashSet<String>`. When receiving a `KeyBundle` from a peer we also sent a `KeyBundle` to (tracked when we respond to their `KeyRequest`), the **higher peer ID** skips creating the outbound session and waits for the lower peer's PreKey/SessionAck to create an inbound session instead. This ensures exactly one side creates the outbound session. The `key_bundle_sent_to` set is cleared on WS disconnect alongside `key_request_in_flight`.
+`OlmManager::open_prekey` settles this alone: when both sides built outbound sessions, the LOWER device keeps its session, the higher one switches to it, and the replaced session retires (decrypt-only, capped by `RETIRED_KEPT`). The KeyBundle arm never defers. The old `key_bundle_sent_to` deferral was removed in s43 (2026-10-09): its record went stale whenever a bundle was dropped, never read, or used long ago, and wedged the higher device until the 30 s sweep. Tests: `olm_true_glare_converges_on_the_lower_devices_session`, `olm_an_answered_bundle_is_no_glare_later`, `olm_a_bundle_the_peer_never_read_is_no_glare`, `olm_a_key_bundle_that_never_left_is_no_glare`.
 
 ### Session Management
 
