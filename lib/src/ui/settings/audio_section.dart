@@ -37,6 +37,34 @@ import 'package:win32audio/win32audio.dart' as win32audio;
 
 /// Settings > Audio & Video: devices, the voice chain, the microphone test,
 /// push to talk and sounds.
+/// Turns the "Switch voice room?" question back on after "Don't ask again"
+/// (#106).
+class VoiceSwitchPromptRow extends ConsumerWidget {
+  const VoiceSwitchPromptRow({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return SettingsSwitchRow(
+      title: 'Ask before switching voice rooms',
+      subtitle: 'Asks first when joining another voice room would leave '
+          'people behind in the one you are in.',
+      value: ref.watch(askBeforeVoiceSwitchProvider).valueOrNull ??
+          kAskBeforeVoiceSwitchDefault,
+      onChanged: (v) => ref
+          .read(askBeforeVoiceSwitchProvider.notifier)
+          .setEnabled(v)
+          .catchError((Object e) {
+        if (!context.mounted) return;
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't save that setting. Try again."),
+            type: HollowToastType.error);
+      }),
+    );
+  }
+}
+
 class AudioVideoSettingsView extends ConsumerStatefulWidget {
   const AudioVideoSettingsView({super.key});
 
@@ -750,6 +778,10 @@ class _AudioVideoSettingsViewState
           ],
         ),
         if (_isDesktop) _buildTalkingSection(isPtt),
+        const SettingsSection(
+          title: 'Voice rooms',
+          children: [VoiceSwitchPromptRow()],
+        ),
         SettingsSection(
           title: 'Sounds',
           children: [

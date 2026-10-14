@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 
@@ -28,7 +29,8 @@ bool voiceSwitchLeavesPeople(
 
 /// Asks before a voice-room join that would leave people behind; true when the
 /// join should go ahead. Every surface that joins a voice room calls this
-/// first, desktop and phone, so switching asks in exactly one situation.
+/// first, desktop and phone, so switching asks in exactly one situation, and
+/// "Don't ask again" (#106) silences it everywhere until Settings turns it on.
 Future<bool> confirmVoiceRoomSwitch(
   BuildContext context,
   WidgetRef ref, {
@@ -46,6 +48,13 @@ Future<bool> confirmVoiceRoomSwitch(
   );
   if (!leaves) return true;
   final current = vc.currentChannelName;
+  // The opt-out saves after the caller may be gone; the container outlives it.
+  final container = ProviderScope.containerOf(context, listen: false);
+  final ask = await container
+      .read(askBeforeVoiceSwitchProvider.future)
+      .catchError((_) => kAskBeforeVoiceSwitchDefault);
+  if (!ask) return true;
+  if (!context.mounted) return false;
   return showHollowConfirm(
     context: context,
     title: 'Switch voice room?',
@@ -53,5 +62,9 @@ Future<bool> confirmVoiceRoomSwitch(
         ? "You'll leave your current voice room and join #$channelName."
         : "You'll leave #$current and join #$channelName.",
     confirmLabel: 'Switch',
+    optOutLabel: "Don't ask again",
+    onOptOut: () => container
+        .read(askBeforeVoiceSwitchProvider.notifier)
+        .setEnabled(false),
   );
 }

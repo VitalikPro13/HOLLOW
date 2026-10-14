@@ -270,13 +270,14 @@ File: `lib/src/ui/chat/chat_drop_zone.dart`. `StatefulWidget` wrapping any child
 File: `lib/src/ui/chat/chat_input_shortcuts.dart`. Contains the `handleChatInputKey()` function and supporting utilities.
 
 ### handleChatInputKey()
-Takes `KeyEvent`, `TextEditingController`, `FocusNode`, `onSend` callback, and optional `onPasteImage` callback. Handles only `KeyDownEvent` and `KeyRepeatEvent`.
+Takes `KeyEvent`, `TextEditingController`, `FocusNode`, `onSend` callback, and optional `onPasteImage` and `onEditLast` callbacks. Handles only `KeyDownEvent` and `KeyRepeatEvent`.
 
 | Shortcut | Action |
 |---|---|
 | Enter | Calls `onSend()` (send message) |
 | Shift+Enter | Inserts newline at cursor position |
-| Ctrl+V | Calls `_tryPasteImage()` then falls through to default paste (returns `ignored` so text paste still works) |
+| Ctrl+V | `_handlePasteKey`: ONE clipboard snapshot at key time (`pasteFromClipboard`, `ui/components/snapshot_paste.dart`); the image read (`_tryPasteImage`) starts only when the snapshot offers an image. Off Windows it returns `ignored` and the engine pastes (#101) |
+| Up (bare, empty composer) | `onEditLast`: edits the newest own editable message (`editNewestAction()` reusing the pane's `_editStartFor`); `ignored` when nothing is editable; the @mention/emote popups take Up first (#103) |
 | Ctrl+B | Wraps selection in `**bold**` |
 | Ctrl+I | Wraps selection in `*italic*` |
 | Ctrl+E | Wraps selection in `` `code` `` |
@@ -285,6 +286,12 @@ Takes `KeyEvent`, `TextEditingController`, `FocusNode`, `onSend` callback, and o
 
 ### _tryPasteImage()
 Async. Reads system clipboard via `super_clipboard` package. Checks for image formats in priority order: PNG, JPEG, GIF, BMP, WebP. If found, reads bytes, saves to a temp file as `clipboard_{timestamp}.{ext}`, and calls `onPasteImage(path, name)`.
+
+### Windows paste (#101)
+The engine's paste opens the Windows clipboard ONCE and fails ("Unable to open clipboard") if any other program holds it (clipboard history, clipboard managers, dictation apps like Handy that set the text, press Ctrl+V and restore). `HollowApp` installs `hollowAppActions()`: an overridable `PasteTextIntent` action (`SnapshotPasteTextAction`) for every field. It reads via Win32 FFI (`core/services/win32_clipboard.dart`, 3 opens 5 ms apart during the key event, then up to 1 s of 2 ms retries) and inserts through `userUpdateTextEditingValue` so formatters and `maxLength` still apply. The right-click menu's Paste still uses the engine read; Ctrl+Shift+V is not a paste key.
+
+### Composer focus on open (#105)
+Opening a conversation by hand on DESKTOP focuses its composer: `composer_focus_provider.dart` holds a request (scope + time, fresh 3 s) made by `openDmConversation`, the shell's `onPeerSelected`/`onChannelSelected` and home inbox channels; panes take it via the `ComposerFocusOnOpen` mixin. Phones never make one; a conversation that opens on its own never takes focus.
 
 ### copyImageToClipboard()
 Async. Reads image bytes from disk, determines format from extension, writes to system clipboard via `DataWriterItem`. Returns `true` on success. Used by the "Copy Image" action in message context menus.

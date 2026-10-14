@@ -439,6 +439,32 @@ class VoiceEnhanceDynamicNotifier extends AsyncNotifier<bool> {
   }
 }
 
+/// Whether joining a voice room asks first when it would leave people behind
+/// in ours (#106). Local to this device.
+final askBeforeVoiceSwitchProvider =
+    AsyncNotifierProvider<AskBeforeVoiceSwitchNotifier, bool>(
+        AskBeforeVoiceSwitchNotifier.new);
+
+const bool kAskBeforeVoiceSwitchDefault = true;
+
+class AskBeforeVoiceSwitchNotifier extends AsyncNotifier<bool> {
+  @override
+  Future<bool> build() async {
+    final val = await storage_api.loadSetting(key: 'voice_switch_ask');
+    if (val == null || val.isEmpty) return kAskBeforeVoiceSwitchDefault;
+    return val == 'true';
+  }
+
+  /// Rethrows on a persistence failure; call sites show it.
+  Future<void> setEnabled(bool enabled) async {
+    await storage_api.saveSetting(
+      key: 'voice_switch_ask',
+      value: enabled ? 'true' : 'false',
+    );
+    state = AsyncData(enabled);
+  }
+}
+
 /// AI noise suppression: removes keyboard/fan/room noise from the outgoing mic
 /// at the HEAD of the capture chain (post-AEC). While ON, WebRTC's legacy NS is
 /// disabled in the capture constraints (double suppression = artifacts) and the

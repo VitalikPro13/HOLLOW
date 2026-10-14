@@ -24,6 +24,8 @@ import 'package:hollow/src/core/providers/call_records_provider.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/composer_focus_provider.dart';
+import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -108,7 +110,14 @@ class ChatPane extends ConsumerStatefulWidget {
   ConsumerState<ChatPane> createState() => _ChatPaneState();
 }
 
-class _ChatPaneState extends ConsumerState<ChatPane> {
+class _ChatPaneState extends ConsumerState<ChatPane>
+    with ComposerFocusOnOpen<ChatPane> {
+  @override
+  String get composerScope => ComposerInsert.dmScope(widget.peerId);
+
+  @override
+  FocusNode get composerFocusNode => _focusNode;
+
   void _handleSplitToggle(WidgetRef ref) {
     final split = ref.read(splitViewProvider);
     if (split.isSplit) {
@@ -728,6 +737,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   @override
   Widget build(BuildContext context) {
+    watchComposerFocus();
     final hollow = HollowTheme.of(context);
     // Per-conversation select: the map is replaced wholesale on every insert,
     // so watching it rebuilds this pane for activity in any conversation.
@@ -1377,10 +1387,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           _editingMessageId != null && _editingMessageId == msg.messageId,
       onEditStart: _editStartFor(msg, revIndex),
       onEditSubmit: (newText) {
-        setState(() => _editingMessageId = null);
+        _endEdit();
         _submitEdit(msg.messageId!, newText);
       },
-      onEditCancel: () => setState(() => _editingMessageId = null),
+      onEditCancel: _endEdit,
       onDelete: _deleteFor(msg),
       onReply: _replyFor(msg),
       onReaction: msg.messageId != null
@@ -1516,6 +1526,29 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         );
       });
     };
+  }
+
+  /// Typing goes back to the composer once an edit ends, so a keyboard-only
+  /// edit (Up, change, Enter or Escape) ends where it began (#103).
+  void _endEdit() {
+    setState(() => _editingMessageId = null);
+    _focusNode.requestFocus();
+  }
+
+  /// Up in the empty composer (#103). Searches the whole conversation, so a
+  /// frozen view (scrolled up) is released when there is something to edit.
+  bool _editNewestOwn() {
+    final all = ref.read(chatProvider)[widget.peerId] ?? const <ChatMessage>[];
+    final frozen = _frozenLen;
+    _frozenLen = null;
+    final start = editNewestAction(_displayMessages(all), _editStartFor);
+    if (start == null) {
+      _frozenLen = frozen;
+      _displayMessages(all);
+      return false;
+    }
+    start();
+    return true;
   }
 
   VoidCallback? _deleteFor(ChatMessage msg) {
@@ -1807,6 +1840,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           event, _controller, _focusNode, _handleSend,
           onPasteImage: _stageClipboardImage,
           formatBindings: ref.read(appShortcutsProvider).valueOrNull,
+          onEditLast: _editNewestOwn,
         );
       },
       onAttach: _pickAndStageFile,

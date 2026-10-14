@@ -38,6 +38,37 @@ final linkPreviewsEnabledProvider =
     NotifierProvider<LinkPreviewsEnabledNotifier, bool>(
         LinkPreviewsEnabledNotifier.new);
 
+const _kShowPreviewsKey = 'link_previews_show';
+
+/// Whether message rows draw the preview cards attached to links (issue #102).
+///
+/// Display only and local to this device: off hides every card, received or
+/// our own, and keeps the stored preview, so on brings them back. Hollow link
+/// cards are app actions built from the text, not previews, and stay.
+class ShowLinkPreviewsNotifier extends Notifier<bool> {
+  @override
+  bool build() => true;
+
+  Future<void> loadCached() async {
+    try {
+      final saved = await storage_api.loadSetting(key: _kShowPreviewsKey);
+      if (saved == null || saved.isEmpty) return;
+      state = saved == '1';
+    } catch (_) {}
+  }
+
+  /// Rethrows on a persistence failure; call sites await + toast.
+  Future<void> setEnabled(bool enabled) async {
+    state = enabled;
+    await storage_api.saveSetting(
+        key: _kShowPreviewsKey, value: enabled ? '1' : '0');
+  }
+}
+
+final showLinkPreviewsProvider =
+    NotifierProvider<ShowLinkPreviewsNotifier, bool>(
+        ShowLinkPreviewsNotifier.new);
+
 /// Optional proxy for the social-post lookups (X, TikTok). Empty = direct,
 /// which is the default and what ships.
 ///

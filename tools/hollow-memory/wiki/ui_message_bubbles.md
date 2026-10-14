@@ -17,7 +17,7 @@ The only message row: DMs, channels, meetings, the guest view, the archive viewe
 
 **Name colour:** `nameColorFor(master, hollow)` (`core/color_utils.dart`): FNV-1a hash of the master id onto the hue circle minus 35 degrees either side of the CURRENT accent, tone raised to 7:1 on every dark surface / 5:1 on every light one. Your own name is `accentText`. No own-message strip any more (`OwnMessageMarker` and its test were deleted): the accent name is the mark.
 
-**Cozy (default):** 36 px avatar, `md` 12 gap (`kMessageIndent` 48), name `body` 600 (`bodyTouch` on a phone), time `monoSmall` + tabular figures at `textTertiary`. A grouped continuation (`showHeader == false`) keeps the avatar column empty and shows its time there only while the row is hovered (`_HoverTime` reads `HoverScope`). Padding is on the ramp: header row `xs` top, `xxs` bottom; continuations `xxs`; tiled seams drop to 0.
+**Cozy (default):** 36 px avatar, `md` 12 gap (`kMessageIndent` 48), name `body` 600 (`bodyTouch` on a phone), time `monoSmall` + tabular figures at `textTertiary`. A grouped continuation (`showHeader == false`) keeps the avatar column empty and shows its time there only while the row is hovered (`_HoverTime` reads `HoverScope`). Every gutter time (hover, compact rows, call records) is a `MessageTimeLabel`: one line, `FittedBox(scaleDown)`, so it shrinks at large text/UI scale instead of wrapping (#108); the compact time column grows with text scale. Padding is on the ramp: header row `xs` top, `xxs` bottom; continuations `xxs`; tiled seams drop to 0.
 
 **Compact** (`messageDisplayProvider == MessageDisplay.compact`, `core/providers/layout_provider.dart`, loaded in `_bootstrap`, set in Appearance on both platforms): one baseline-aligned row of time (40 wide, right-aligned mono), name (max 160, ellipsis) and the body column; every row repeats time and name; no avatars.
 
@@ -490,6 +490,8 @@ Tap-to-reveal spoiler text. State toggles `_revealed`:
 ## Link Preview Cards
 
 ### LinkPreviewCard
+
+Drawn by `MessageRow` only while `showLinkPreviewsProvider` is on ("Show link previews", Network settings, key `link_previews_show`, default ON, local to the device, #102): display only, the stored card stays, so turning it on brings cards back. `HollowLinkCard` (hollow:// invites and actions, built from the text) is NOT gated. "Previews for links I send" (`linkPreviewsEnabledProvider`) is the separate SENDER switch.
 
 **File:** `lib/src/ui/chat/link_preview_card.dart`
 **Class:** `LinkPreviewCard extends ConsumerStatefulWidget`

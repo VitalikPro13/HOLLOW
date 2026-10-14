@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/shell/window_chrome_insets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -121,6 +122,8 @@ Future<bool> showHollowConfirm({
   bool destructive = false,
   String cancelLabel = 'Cancel',
   Future<void> Function()? onConfirm,
+  String? optOutLabel,
+  Future<void> Function()? onOptOut,
 }) async {
   final confirmed = await showHollowDialog<bool>(
     context: context,
@@ -131,6 +134,8 @@ Future<bool> showHollowConfirm({
       cancelLabel: cancelLabel,
       destructive: destructive,
       onConfirm: onConfirm,
+      optOutLabel: optOutLabel,
+      onOptOut: onOptOut,
     ),
   );
   return confirmed ?? false;
@@ -143,6 +148,8 @@ class _HollowConfirmDialog extends StatefulWidget {
   final String cancelLabel;
   final bool destructive;
   final Future<void> Function()? onConfirm;
+  final String? optOutLabel;
+  final Future<void> Function()? onOptOut;
 
   const _HollowConfirmDialog({
     required this.title,
@@ -151,6 +158,8 @@ class _HollowConfirmDialog extends StatefulWidget {
     required this.cancelLabel,
     required this.destructive,
     required this.onConfirm,
+    required this.optOutLabel,
+    required this.onOptOut,
   });
 
   @override
@@ -159,15 +168,22 @@ class _HollowConfirmDialog extends StatefulWidget {
 
 class _HollowConfirmDialogState extends State<_HollowConfirmDialog>
     with HollowDialogAction {
+  bool _optOut = false;
+
   Future<void> _confirm() async {
     final action = widget.onConfirm;
-    if (action == null) {
+    final optOut = _optOut ? widget.onOptOut : null;
+    if (action == null && optOut == null) {
       Navigator.of(context).pop(true);
       return;
     }
-    if (await runDialogAction(action) && mounted) {
-      Navigator.of(context).pop(true);
-    }
+    // Opting out counts only with a confirm, and a failed save shows here
+    // rather than passing for done.
+    final done = await runDialogAction(() async {
+      await optOut?.call();
+      await action?.call();
+    });
+    if (done && mounted) Navigator.of(context).pop(true);
   }
 
   @override
@@ -183,9 +199,26 @@ class _HollowConfirmDialogState extends State<_HollowConfirmDialog>
             loading: actionRunning,
             child: Text(widget.confirmLabel),
           );
+    final optOutLabel = widget.optOutLabel;
     return HollowDialog(
       title: widget.title,
-      content: HollowDialogText(widget.message),
+      content: optOutLabel == null
+          ? HollowDialogText(widget.message)
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                HollowDialogText(widget.message),
+                const SizedBox(height: HollowSpacing.lg),
+                _OptOutRow(
+                  label: optOutLabel,
+                  value: _optOut,
+                  onChanged: actionRunning
+                      ? null
+                      : (v) => setState(() => _optOut = v),
+                ),
+              ],
+            ),
       busy: actionRunning,
       error: actionError,
       actions: [
@@ -810,6 +843,49 @@ class HollowDialogCloseButton extends StatelessWidget {
       label: 'Close',
       size: HollowDialogSurface.isCompact(context) ? 44 : 32,
       onPressed: onPressed ?? () => Navigator.of(context).maybePop(),
+    );
+  }
+}
+
+/// "Don't ask again" under a confirm's message. The label toggles too, so the
+/// whole line is the target.
+class _OptOutRow extends StatelessWidget {
+  final String label;
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+
+  const _OptOutRow({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final onChanged = this.onChanged;
+    return Row(
+      children: [
+        HollowToggle(value: value, onChanged: onChanged, semanticLabel: label),
+        const SizedBox(width: HollowSpacing.sm),
+        Flexible(
+          child: ExcludeSemantics(
+            child: MouseRegion(
+              cursor: onChanged == null
+                  ? MouseCursor.defer
+                  : SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: onChanged == null ? null : () => onChanged(!value),
+                child: Text(
+                  label,
+                  style:
+                      HollowTypography.label.copyWith(color: hollow.textPrimary),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

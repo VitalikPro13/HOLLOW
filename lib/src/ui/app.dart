@@ -16,6 +16,7 @@ import 'package:hollow/src/core/services/window_fullscreen.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
+import 'package:hollow/src/ui/components/snapshot_paste.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/mobile/mobile_incoming_call.dart';
 import 'package:hollow/src/ui/mobile/call_proximity_controller.dart';
@@ -73,6 +74,7 @@ class HollowApp extends ConsumerWidget {
       // Every desktop vertical scrollable gets a reserved scrollbar gutter
       // instead of a thumb painted over its last 10px (issue #54).
       scrollBehavior: const HollowScrollBehavior(),
+      actions: hollowAppActions(),
       home: const HollowShell(),
       navigatorObservers: [routesAboveHome],
       builder: (context, child) {

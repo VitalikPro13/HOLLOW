@@ -527,8 +527,44 @@ class GifAutoplayRow extends ConsumerWidget {
   }
 }
 
+/// Whether message rows draw link preview cards (issue #102). Reader side
+/// only: what this device sends is [LinkPreviewsRow].
+class ShowLinkPreviewsRow extends ConsumerStatefulWidget {
+  const ShowLinkPreviewsRow({super.key});
+
+  @override
+  ConsumerState<ShowLinkPreviewsRow> createState() =>
+      _ShowLinkPreviewsRowState();
+}
+
+class _ShowLinkPreviewsRowState extends ConsumerState<ShowLinkPreviewsRow> {
+  bool _busy = false;
+
+  Future<void> _setEnabled(bool enabled) async {
+    setState(() => _busy = true);
+    await _saveSetting(context,
+        ref.read(showLinkPreviewsProvider.notifier).setEnabled(enabled));
+    if (mounted) setState(() => _busy = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsSwitchRow(
+      title: 'Show link previews',
+      subtitle: 'Shows a card with the title and image under a link in chat. '
+          'Off leaves just the link, which still opens. Nothing is deleted, '
+          'so the cards come back when you turn this on again. Hollow '
+          'invites and other Hollow links keep their card.',
+      value: ref.watch(showLinkPreviewsProvider),
+      onChanged: (v) {
+        if (!_busy) _setEnabled(v);
+      },
+    );
+  }
+}
+
 /// Link previews (issue #45): whether this device fetches cards for links it
-/// sends. Cards other people attach show either way.
+/// sends. Whether it draws cards at all is [ShowLinkPreviewsRow].
 class LinkPreviewsRow extends ConsumerStatefulWidget {
   const LinkPreviewsRow({super.key});
 
@@ -570,7 +606,12 @@ class GifsAndPreviewsSection extends StatelessWidget {
   Widget build(BuildContext context) {
     return const SettingsSection(
       title: 'GIFs and link previews',
-      children: [GifRatingRow(), GifAutoplayRow(), LinkPreviewsRow()],
+      children: [
+        GifRatingRow(),
+        GifAutoplayRow(),
+        ShowLinkPreviewsRow(),
+        LinkPreviewsRow(),
+      ],
     );
   }
 }

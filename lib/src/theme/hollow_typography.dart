@@ -1,17 +1,31 @@
 import 'dart:io' show Platform;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'hollow_colors.dart';
 
-/// Emoji fallback for platforms whose system font is stale or absent: Windows
-/// 10 stops at Emoji ~12 and a bare Linux install may ship no colour emoji font
-/// at all, so both fall back to the bundled Noto Color Emoji. The primary font
-/// still wins every glyph it has, and null means the engine's own fallback.
-final List<String>? kEmojiFontFallback =
-    !kIsWeb && (Platform.isWindows || Platform.isLinux)
-        ? const ['NotoColorEmoji']
-        : null;
+/// Emoji fallback for Windows and Linux, whose system emoji font is stale or
+/// absent; the primary font still wins every glyph it has, and null means the
+/// engine's own fallback.
+final List<String>? kEmojiFontFallback = kIsWeb
+    ? null
+    : emojiFontFallbackFor(
+        windows: Platform.isWindows,
+        linux: Platform.isLinux,
+      );
+
+/// Noto is a bitmap font, and the Windows renderer shrinks its one large strike
+/// with visible jaggies; it cannot draw the vector COLRv1 build at all (#104).
+/// So Windows' own vector Segoe UI Emoji goes first, behind a flags-only Noto
+/// because Segoe draws a flag as two letters; Noto last catches what Segoe
+/// lacks, and a combined emoji newer than Windows 10's Segoe may split.
+@visibleForTesting
+List<String>? emojiFontFallbackFor({required bool windows, required bool linux}) {
+  if (windows) {
+    return const ['NotoColorEmojiFlags', 'Segoe UI Emoji', 'NotoColorEmoji'];
+  }
+  return linux ? const ['NotoColorEmoji'] : null;
+}
 
 /// Hollow typography: Onest for the interface, Geist Mono for the console
 /// voice (ids, hashes, versions), both bundled variable fonts so the app reads

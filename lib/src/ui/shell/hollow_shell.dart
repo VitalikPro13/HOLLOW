@@ -28,6 +28,8 @@ import 'package:hollow/src/core/providers/channel_navigation.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/composer_focus_provider.dart';
+import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/help_panel_provider.dart';
 import 'package:hollow/src/core/providers/hotkey_provider.dart';
@@ -976,6 +978,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Link previews (issue #45), pushed here rather than read lazily so the
     // first URL typed already honours them.
     await ref.read(linkPreviewsEnabledProvider.notifier).loadCached();
+    await ref.read(showLinkPreviewsProvider.notifier).loadCached();
     await ref.read(embedProxyUrlProvider.notifier).loadCached();
     // AFTER the source settings: saved GIFs store proxy-RELATIVE paths and
     // resolve against whatever source is active.
@@ -1422,6 +1425,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
         final lastMsg = ref.read(lastDmMessageProvider)[peerId];
         ref.read(unreadProvider.notifier).markDmSeen(peerId, lastMsg?.messageId);
         ref.read(mobileTabProvider.notifier).state = 1;
+        requestComposerFocus(ref.read, ComposerInsert.dmScope(peerId));
       },
       lastMessage: (peerId) => _lastMessage(peerId, lastMessages),
       formatTime: _formatTime,
@@ -1444,6 +1448,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
           ref.read(unreadProvider.notifier)
               .markChannelSeen(serverId, channelId, latestId);
           _subscribeActiveChannel(serverId, channelId);
+          requestComposerFocus(
+              ref.read, ComposerInsert.channelScope(serverId, channelId));
         }
         ref.read(mobileTabProvider.notifier).state = 1;
       },

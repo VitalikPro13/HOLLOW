@@ -984,8 +984,13 @@ class _EmojiCell extends StatelessWidget {
       child: Center(
         child: emote != null
             ? EmoteImage(name: emote.name, hash: emote.hash, size: 22)
-            : Text(emoji.char,
-                style: const TextStyle(fontSize: 21)), // design-ignore: emoji glyph at its cell size
+            // A combined emoji newer than the system font draws as its
+            // pieces (Windows 10, #104): they shrink to fit, never wrap.
+            : FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(emoji.char,
+                    style: const TextStyle(fontSize: 21)), // design-ignore: emoji glyph at its cell size
+              ),
       ),
     );
     if (onRemove == null) return cell;

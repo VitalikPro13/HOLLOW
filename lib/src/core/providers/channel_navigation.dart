@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/composer_focus_provider.dart';
+import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
@@ -10,8 +12,10 @@ import 'package:hollow/src/core/providers/shell_tab.dart';
 ///
 /// Takes the container, not a `WidgetRef`: the caller is often torn down by the
 /// very selection this makes, and the batch runs after the awaits.
+/// [focusComposer] when a person picked it by hand (#105).
 Future<void> openServerChannel(
-    ProviderContainer container, String serverId, String channelId) async {
+    ProviderContainer container, String serverId, String channelId,
+    {bool focusComposer = false}) async {
   final channels = await ChannelListNotifier.fetchChannels(serverId);
   final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
   final read = container.read;
@@ -26,4 +30,8 @@ Future<void> openServerChannel(
     ...read(lastChannelPerServerProvider),
     serverId: channelId,
   };
+  if (focusComposer) {
+    requestComposerFocus(
+        read, ComposerInsert.channelScope(serverId, channelId));
+  }
 }

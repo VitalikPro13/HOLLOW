@@ -21,6 +21,7 @@ import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/composer_focus_provider.dart';
 import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
@@ -110,7 +111,15 @@ class ChannelChatPane extends ConsumerStatefulWidget {
   ConsumerState<ChannelChatPane> createState() => _ChannelChatPaneState();
 }
 
-class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
+class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
+    with ComposerFocusOnOpen<ChannelChatPane> {
+  @override
+  String get composerScope =>
+      ComposerInsert.channelScope(widget.serverId, widget.channelId);
+
+  @override
+  FocusNode get composerFocusNode => _focusNode;
+
   void _handleSplitToggle() {
     final split = ref.read(splitViewProvider);
     if (split.isSplit) {
@@ -1343,6 +1352,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   @override
   Widget build(BuildContext context) {
+    watchComposerFocus();
     final hollow = HollowTheme.of(context);
     // Per-channel select: the map is replaced wholesale on every insert, so
     // watching it rebuilds this pane for activity in any channel.
@@ -1848,10 +1858,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           _editingMessageId != null && _editingMessageId == msg.messageId,
       onEditStart: _editStartFor(msg, revIndex),
       onEditSubmit: (newText) {
-        setState(() => _editingMessageId = null);
+        _endEdit();
         _submitEdit(msg.messageId!, newText);
       },
-      onEditCancel: () => setState(() => _editingMessageId = null),
+      onEditCancel: _endEdit,
       onDelete: _deleteFor(msg),
       onReply: _replyFor(msg),
       onReaction: !_isConference && msg.messageId != null
@@ -2008,6 +2018,30 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         );
       });
     };
+  }
+
+  /// Typing goes back to the composer once an edit ends, so a keyboard-only
+  /// edit (Up, change, Enter or Escape) ends where it began (#103).
+  void _endEdit() {
+    setState(() => _editingMessageId = null);
+    _focusNode.requestFocus();
+  }
+
+  /// Up in the empty composer (#103). Searches the whole channel, so a frozen
+  /// view (scrolled up) is released when there is something to edit.
+  bool _editNewestOwn() {
+    final all = ref.read(channelChatProvider)[_stateKey] ??
+        const <ChannelChatMessage>[];
+    final frozen = _frozenLen;
+    _frozenLen = null;
+    final start = editNewestAction(_displayMessages(all), _editStartFor);
+    if (start == null) {
+      _frozenLen = frozen;
+      _displayMessages(all);
+      return false;
+    }
+    start();
+    return true;
   }
 
   VoidCallback? _deleteFor(ChannelChatMessage msg) {
@@ -2474,6 +2508,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       event, _controller, _focusNode, _handleSend,
       onPasteImage: _stageClipboardImage,
       formatBindings: ref.read(appShortcutsProvider).valueOrNull,
+      onEditLast: _editNewestOwn,
     );
   }
 

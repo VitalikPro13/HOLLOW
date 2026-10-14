@@ -8,12 +8,14 @@ import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/ui/components/snapshot_paste.dart';
 
 /// Handles keyboard shortcuts for the chat input field.
 ///
 /// Send, newline and image paste are fixed; the formatting shortcuts are
 /// rebindable and [formatBindings] carries the live map, null meaning the
-/// defaults.
+/// defaults. [onEditLast] opens the edit of the newest message we can edit
+/// and says whether there was one (#103).
 KeyEventResult handleChatInputKey(
   KeyEvent event,
   TextEditingController controller,
@@ -21,9 +23,14 @@ KeyEventResult handleChatInputKey(
   VoidCallback onSend, {
   void Function(String path, String name)? onPasteImage,
   Map<AppShortcut, HotkeyBinding>? formatBindings,
+  bool Function()? onEditLast,
 }) {
   if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
     return KeyEventResult.ignored;
+  }
+
+  if (onEditLast != null && _isEditLastKey(event, controller)) {
+    return onEditLast() ? KeyEventResult.handled : KeyEventResult.ignored;
   }
 
   // AltGr registers as Ctrl+Alt on Windows, so a held Alt means a layout
@@ -37,16 +44,62 @@ KeyEventResult handleChatInputKey(
   }
 
   if (isCtrl && !isShift && event.logicalKey == LogicalKeyboardKey.keyV) {
-    if (onPasteImage != null) {
-      _tryPasteImage(onPasteImage);
-    }
-    // Ignored either way, so default text paste still works when the async
-    // handler finds no image.
-    return KeyEventResult.ignored;
+    return _handlePasteKey(focusNode, onPasteImage);
   }
 
   return _handleFormattingKey(
       event, controller, formatBindings ?? kAppShortcutDefaults);
+}
+
+/// A bare Up press in an empty composer, as in Discord and Slack. A draft,
+/// even a space, keeps Up for the caret; a held key opens the edit once.
+bool _isEditLastKey(KeyEvent event, TextEditingController controller) {
+  if (event is! KeyDownEvent ||
+      event.logicalKey != LogicalKeyboardKey.arrowUp ||
+      controller.text.isNotEmpty) {
+    return false;
+  }
+  final hk = HardwareKeyboard.instance;
+  return !hk.isShiftPressed &&
+      !hk.isControlPressed &&
+      !hk.isAltPressed &&
+      !hk.isMetaPressed;
+}
+
+/// The edit action of the newest row in [chronological] that [startFor]
+/// offers one for, or null when none can be edited. [startFor] receives the
+/// row's REVERSED index, the space the chat list scrolls in.
+VoidCallback? editNewestAction<T>(
+  List<T> chronological,
+  VoidCallback? Function(T row, int revIndex) startFor,
+) {
+  for (var i = chronological.length - 1; i >= 0; i--) {
+    final start = startFor(chronological[i], chronological.length - 1 - i);
+    if (start != null) return start;
+  }
+  return null;
+}
+
+/// Text and image come from ONE clipboard read (#101): an image read started
+/// on a text-only clipboard used to race the text read, and a dictation app
+/// restores the clipboard right after its Ctrl+V.
+KeyEventResult _handlePasteKey(
+  FocusNode focusNode,
+  void Function(String path, String name)? onPasteImage,
+) {
+  final state =
+      focusNode.context?.findAncestorStateOfType<EditableTextState>();
+  final onImage =
+      onPasteImage == null ? null : () => _tryPasteImage(onPasteImage);
+  if (state != null &&
+      pasteFromClipboard(state, SelectionChangedCause.keyboard,
+          onImage: onImage)) {
+    return KeyEventResult.handled;
+  }
+  onImage?.call();
+  // Ignored, so the engine's text paste still runs when the async image read
+  // finds nothing.
+  return KeyEventResult.ignored;
 }
 
 KeyEventResult _handleEnterKey(

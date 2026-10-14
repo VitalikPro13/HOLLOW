@@ -213,8 +213,14 @@ flutter:
     # Bundled emoji fallback (used on Windows/Linux only): Windows 10's
     # Segoe UI Emoji stops at Emoji ~12 and shows newer emoji as tofu
     # boxes; bare Linux installs may have no color emoji font at all.
-    # Wired up via kEmojiFontFallback in hollow_typography.dart —
-    # macOS/iOS/Android keep their native emoji fonts.
+    # Windows draws its own vector Segoe UI Emoji first and takes only
+    # flags (NotoColorEmojiFlags) and missing emoji from Noto (#104).
+    # Both files come from scripts/subset_emoji_font.py. Wired up via
+    # kEmojiFontFallback in hollow_typography.dart; macOS/iOS/Android keep
+    # their native emoji fonts.
     - family: NotoColorEmoji
       fonts:
         - asset: assets/fonts/NotoColorEmoji.ttf
+    - family: NotoColorEmojiFlags
+      fonts:
+        - asset: assets/fonts/NotoColorEmojiFlags.ttf

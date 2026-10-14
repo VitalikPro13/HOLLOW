@@ -269,7 +269,7 @@ When visible, surface background with top border (border suppressed when reply/s
 
 The `Focus` widget wrapping the text field has an `onKeyEvent` handler with two phases:
 
-1. **@mention overlay active**: Intercepts ArrowDown/ArrowUp/Enter/Tab/Escape for mention navigation (see @Mention section).
+1. **@mention overlay active**: Intercepts ArrowDown/ArrowUp/Enter/Tab/Escape for mention navigation (see @Mention section). Otherwise a bare Up in an empty composer edits the newest own message (`onEditLast`, wiki `ui_chat_dm` ChatInputShortcuts).
 2. **Default**: Falls through to `handleChatInputKey()` (from `chat_input_shortcuts.dart`) which handles Enter-to-send, Shift+Enter for newline, and Ctrl+V image paste (calls `_stageClipboardImage`).
 
 ## Sending Messages

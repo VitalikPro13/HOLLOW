@@ -373,11 +373,25 @@ class ProbeRunner {
     return 'zoom ${(value * 100).round()}%';
   }
 
+  /// The chat text size for this run only, like [_zoom]: messages and the
+  /// composer grow while the interface stays put.
+  Future<String> _chatText(Map<String, dynamic> step) async {
+    final c = container;
+    if (c == null) throw _ProbeFailure('chat_text needs the provider container');
+    final value = (step['value'] as num?)?.toDouble() ?? kChatTextScaleDefault;
+    c.read(chatTextScaleProvider.notifier).state = value;
+    await settle(frames: step['frames'] as int? ?? 20);
+    return 'chat text ${(value * 100).round()}%';
+  }
+
   Future<String> _dispatch(
       String op, Map<String, dynamic> step, Map<String, dynamic> extra) async {
     switch (op) {
       case 'zoom':
         return _zoom(step);
+
+      case 'chat_text':
+        return _chatText(step);
 
       case 'open_server':
         return _openServer('${step['name']}');

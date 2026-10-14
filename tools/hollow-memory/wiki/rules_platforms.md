@@ -80,7 +80,7 @@ release pipeline is the `release` skill.
 
 ## Fonts
 
-- Emoji font: NotoColorEmoji = an emoji-only subset (`scripts/subset_emoji_font.py`).
+- Emoji font: NotoColorEmoji = an emoji-only subset (`scripts/subset_emoji_font.py`). Each OS shows its OWN emoji (#104): Windows 10 and 11 fallback = `['NotoColorEmojiFlags', 'Segoe UI Emoji', 'NotoColorEmoji']` (Segoe has no flag images, so a 64-codepoint Noto flags subset goes first; Noto fills gaps); Linux = Noto alone; macOS/phones = native. Noto is a CBDT bitmap (one 109 ppem strike) and looks jagged when Windows shrinks it; Noto COLRv1 draws BLANK in Flutter's Windows engine. Newer ZWJ emoji Segoe lacks draw as pieces (accepted); the picker cell scales them down to stay one line. Memory `project_emoji_font_native_per_os`.
 
 ## Debug builds: dependency optimization and the shared dev cache (session 43)
 

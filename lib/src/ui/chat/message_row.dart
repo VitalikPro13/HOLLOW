@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/deleted_messages_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
+import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -39,8 +40,16 @@ const double kMessageAvatarSize = 36;
 /// Everything left of a message's text: the avatar column and its gap.
 const double kMessageIndent = kMessageAvatarSize + HollowSpacing.md;
 
-/// The compact display's time column, wide enough for `23:59` in mono.
+/// The compact display's time column at text scale 1, wide enough for `23:59`
+/// in mono; it grows with the text scale so every row's time stays readable.
 const double _kCompactTimeWidth = 40;
+
+double _compactTimeWidth(BuildContext context) {
+  final size = HollowTypography.monoSmall.fontSize!;
+  return _kCompactTimeWidth *
+      MediaQuery.textScalerOf(context).scale(size) /
+      size;
+}
 
 /// The compact display's widest name before it ellipsizes.
 const double _kCompactNameWidth = 160;
@@ -178,7 +187,7 @@ class MessageRow extends ConsumerWidget {
                 ]
               : null,
         ),
-      if (linkPreview != null)
+      if (linkPreview != null && ref.watch(showLinkPreviewsProvider))
         _attached(LinkPreviewCard(preview: linkPreview!, messageId: messageId)),
       for (final link in hollowLinks.take(3)) _attached(HollowLinkCard(link: link)),
       if (albumItems != null)
@@ -231,11 +240,7 @@ class MessageRow extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.baseline,
           textBaseline: TextBaseline.alphabetic,
           children: [
-            SizedBox(
-              width: _kCompactTimeWidth,
-              child: Text(time,
-                  textAlign: TextAlign.right, style: _timeStyle(hollow)),
-            ),
+            MessageTimeLabel(time, width: _compactTimeWidth(context)),
             const SizedBox(width: HollowSpacing.sm),
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: _kCompactNameWidth),
@@ -275,7 +280,7 @@ class MessageRow extends ConsumerWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SizedBox(width: kMessageAvatarSize, child: _HoverTime(time)),
+            _HoverTime(time),
             const SizedBox(width: HollowSpacing.md),
             Expanded(
               child: Column(
@@ -439,20 +444,45 @@ TextStyle _timeStyle(HollowTheme hollow) => HollowTypography.monoSmall.copyWith(
       fontFeatures: const [FontFeature.tabularFigures()],
     );
 
-/// A grouped continuation's time, shown only while its row is hovered.
+/// A grouped continuation's time in the avatar column, shown only while its
+/// row is hovered.
 class _HoverTime extends StatelessWidget {
   final String time;
   const _HoverTime(this.time);
 
   @override
   Widget build(BuildContext context) {
-    if (HoverScope.maybeOf(context) != true) return const SizedBox.shrink();
+    if (HoverScope.maybeOf(context) != true) {
+      return const SizedBox(width: kMessageAvatarSize);
+    }
     return Padding(
       padding: const EdgeInsets.only(top: HollowSpacing.xxs),
-      child: Text(
-        time,
-        textAlign: TextAlign.right,
-        style: _timeStyle(HollowTheme.of(context)),
+      child: MessageTimeLabel(time, width: kMessageAvatarSize),
+    );
+  }
+}
+
+/// A time in a fixed column, right-aligned on ONE line at any text or
+/// interface scale (#108): when it does not fit it shrinks, never wraps or
+/// spills into the message.
+class MessageTimeLabel extends StatelessWidget {
+  final String time;
+  final double width;
+  const MessageTimeLabel(this.time, {super.key, required this.width});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: width,
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        alignment: AlignmentDirectional.centerEnd,
+        child: Text(
+          time,
+          maxLines: 1,
+          softWrap: false,
+          style: _timeStyle(HollowTheme.of(context)),
+        ),
       ),
     );
   }
@@ -508,12 +538,8 @@ class CallRecordRow extends ConsumerWidget {
           child: compact
               ? Row(
                   children: [
-                    SizedBox(
-                      width: _kCompactTimeWidth,
-                      child: Text(time,
-                          textAlign: TextAlign.right,
-                          style: _timeStyle(hollow)),
-                    ),
+                    MessageTimeLabel(time,
+                        width: _compactTimeWidth(context)),
                     const SizedBox(width: HollowSpacing.sm),
                     icon,
                     const SizedBox(width: HollowSpacing.xs),

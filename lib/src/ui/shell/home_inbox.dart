@@ -1174,6 +1174,7 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
       ProviderScope.containerOf(context, listen: false),
       c.serverId!,
       c.channelId!,
+      focusComposer: true,
     ).catchError((_) {});
   }
 }
