@@ -62,6 +62,7 @@ import 'package:hollow/src/core/services/push_notification_service.dart'
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/providers/overlay_runtime_provider.dart';
 import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
@@ -2033,6 +2034,13 @@ class EventStreamNotifier extends Notifier<bool> {
             ref.read(guestSelectedChannelProvider.notifier).state = null;
           }
         }
+
+      case NetworkEvent_OverlayLookReceived() ||
+            NetworkEvent_OverlayPersonRemoved() ||
+            NetworkEvent_OverlayFieldChanged() ||
+            NetworkEvent_OverlayPortChanged() ||
+            NetworkEvent_OverlayStreamsChanged():
+        applyOverlayEvent(ref.read, event);
 
     }
     } catch (e, st) {

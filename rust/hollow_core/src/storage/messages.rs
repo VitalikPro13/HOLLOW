@@ -275,6 +275,23 @@ pub(crate) fn ddl(conn: &Connection, what: &str, sql: &str) -> Result<(), String
         .map_err(|e| format!("Failed to create {what}: {e}"))
 }
 
+/// `app_settings` key of the next stream overlay slot to hand out.
+const OVERLAY_NEXT_SLOT_SETTING: &str = "overlay_next_slot";
+
+/// One person on this device's stream overlay (`overlay_people`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlayPersonRow {
+    pub master: String,
+    pub slot: i64,
+    pub added_at: i64,
+    /// Our own picks for them, a local look (`overlay_look::normalize_local`).
+    pub local_look: Option<String>,
+    /// The look they shared with us.
+    pub their_look: Option<String>,
+    /// The field stamp `their_look` answers; 0 = none fetched.
+    pub held_stamp: i64,
+}
+
 /// Run one idempotent migration statement in its own batch, ignoring the "already
 /// exists" error a re-run produces. Never batch several: the first already-applied
 /// statement would abort the rest.
@@ -507,9 +524,18 @@ pub fn guest_store_path(name: &str) -> String {
     format!("file:hollow-guest-{name}?mode=memory&cache=shared")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Opens made on this thread, so a test can prove an event-loop handler left the
+    /// store to a blocking thread.
+    pub(crate) static OPENS_ON_THIS_THREAD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 impl MessageStore {
     /// Open (or create) an encrypted database at `path` using `passphrase`.
     pub fn open(path: &str, passphrase: &str) -> Result<Self, String> {
+        #[cfg(test)]
+        OPENS_ON_THIS_THREAD.with(|n| n.set(n.get() + 1));
         let conn =
             Connection::open(path).map_err(|e| format!("Failed to open database: {e}"))?;
 
@@ -967,6 +993,21 @@ impl MessageStore {
         // `support_creds` requires a valid signature from every master, so there is no
         // baseline left to learn. The column stays so existing databases open unchanged.
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN support_creds_signed INTEGER NOT NULL DEFAULT 0;");
+        // -- Stream overlay (#97): the signed `stream_overlay` field as received ("" =
+        // absent) and its own stamp, outside the profile signature.
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN stream_overlay TEXT NOT NULL DEFAULT '';");
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN stream_overlay_at INTEGER NOT NULL DEFAULT 0;");
+        // The people this device shows on its stream overlay. LOCAL to this device and
+        // profile: no sync reads it. `slot` is the stable number OBS links use.
+        ddl(conn, "overlay_people table",
+            "CREATE TABLE IF NOT EXISTS overlay_people (
+                master      TEXT PRIMARY KEY,
+                slot        INTEGER NOT NULL,
+                added_at    INTEGER NOT NULL,
+                local_look  TEXT,
+                their_look  TEXT,
+                held_stamp  INTEGER NOT NULL DEFAULT 0
+            )")?;
         // The avatar thumbnail a pending request's sealed card carried. Never in
         // `user_profiles.avatar`, whose bytes must hash to the signed avatar hash.
         migrate(conn, "ALTER TABLE friends ADD COLUMN card_thumb BLOB;");
@@ -977,6 +1018,16 @@ impl MessageStore {
         // Asset rail: emote_blobs generalizes to every content-addressed kind. The kind
         // is LOCAL bookkeeping for caps and eviction and never rides the wire.
         migrate(conn, "ALTER TABLE emote_blobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'emote';");
+
+        // Stream overlay images (#97) live apart from the asset rail, so an overlay
+        // write never claims a hash the rail serves and the rail never sees one.
+        ddl(conn, "overlay_blobs table",
+            "CREATE TABLE IF NOT EXISTS overlay_blobs (
+                hash     TEXT PRIMARY KEY,
+                bytes    BLOB NOT NULL,
+                animated INTEGER NOT NULL DEFAULT 0,
+                added_at INTEGER NOT NULL DEFAULT 0
+            )")?;
 
         // One row per DM call this device took part in, written by each side when the
         // call ends. LOCAL ONLY: its own table, so no sync, backfill, digest, unread
@@ -3523,6 +3574,134 @@ impl MessageStore {
         Ok(set > 0)
     }
 
+    // ── Stream overlay (#97) ──────────────────────────────────────
+
+    /// The signed `stream_overlay` field held for `master` (stored JSON) and its stamp;
+    /// `None` when we hold none.
+    pub fn load_stream_overlay(&self, master: &str) -> Result<Option<(String, i64)>, String> {
+        let row = self.conn.query_row(
+            "SELECT stream_overlay, stream_overlay_at FROM user_profiles WHERE peer_id = ?1",
+            params![master],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        );
+        match row {
+            Ok((json, at)) if !json.is_empty() => Ok(Some((json, at))),
+            Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Failed to read stream overlay field: {e}")),
+        }
+    }
+
+    /// Keep `field_json` for `master` only when `at` is newer than the stamp we hold:
+    /// an older field never replaces a newer one. `create` makes the profile row when
+    /// there is none (our own identity only). Returns whether it was written.
+    pub fn save_stream_overlay(&self, master: &str, field_json: &str, at: i64, create: bool) -> Result<bool, String> {
+        let sql = if create {
+            "INSERT INTO user_profiles (peer_id, stream_overlay, stream_overlay_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(peer_id) DO UPDATE SET
+                stream_overlay = excluded.stream_overlay,
+                stream_overlay_at = excluded.stream_overlay_at
+             WHERE excluded.stream_overlay_at > user_profiles.stream_overlay_at"
+        } else {
+            "UPDATE user_profiles SET stream_overlay = ?2, stream_overlay_at = ?3
+             WHERE peer_id = ?1 AND stream_overlay_at < ?3"
+        };
+        self.conn
+            .execute(sql, params![master, field_json, at])
+            .map(|n| n > 0)
+            .map_err(|e| format!("Failed to save stream overlay field: {e}"))
+    }
+
+    fn overlay_person_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OverlayPersonRow> {
+        Ok(OverlayPersonRow {
+            master: row.get(0)?,
+            slot: row.get(1)?,
+            added_at: row.get(2)?,
+            local_look: row.get(3)?,
+            their_look: row.get(4)?,
+            held_stamp: row.get(5)?,
+        })
+    }
+
+    /// Every person on this device's overlay, by slot.
+    pub fn overlay_people(&self) -> Result<Vec<OverlayPersonRow>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT master, slot, added_at, local_look, their_look, held_stamp FROM overlay_people ORDER BY slot")
+            .map_err(|e| format!("Failed to prepare overlay people: {e}"))?;
+        let rows = stmt
+            .query_map([], Self::overlay_person_row)
+            .map_err(|e| format!("Failed to list overlay people: {e}"))?;
+        collect_rows(rows, "overlay person")
+    }
+
+    pub fn overlay_person(&self, master: &str) -> Result<Option<OverlayPersonRow>, String> {
+        match self.conn.query_row(
+            "SELECT master, slot, added_at, local_look, their_look, held_stamp FROM overlay_people WHERE master = ?1",
+            params![master],
+            Self::overlay_person_row,
+        ) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Failed to read overlay person: {e}")),
+        }
+    }
+
+    /// Add `master` with the next slot, or return the slot it already has. A slot is
+    /// never handed out twice, so an old OBS link never shows somebody else.
+    pub fn overlay_add_person(&self, master: &str, now_ms: i64) -> Result<i64, String> {
+        if let Some(row) = self.overlay_person(master)? {
+            return Ok(row.slot);
+        }
+        let highest: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(slot), 0) FROM overlay_people", [], |row| row.get(0))
+            .map_err(|e| format!("Failed to read overlay slots: {e}"))?;
+        let counter = self
+            .load_setting(OVERLAY_NEXT_SLOT_SETTING)?
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(1);
+        let slot = counter.max(highest + 1).max(1);
+        self.conn
+            .execute(
+                "INSERT INTO overlay_people (master, slot, added_at) VALUES (?1, ?2, ?3)",
+                params![master, slot, now_ms],
+            )
+            .map_err(|e| format!("Failed to add overlay person: {e}"))?;
+        self.save_setting(OVERLAY_NEXT_SLOT_SETTING, &(slot + 1).to_string())?;
+        Ok(slot)
+    }
+
+    /// Remove `master` and everything kept for them; returns the row it removed.
+    pub fn overlay_remove_person(&self, master: &str) -> Result<Option<OverlayPersonRow>, String> {
+        let row = self.overlay_person(master)?;
+        if row.is_some() {
+            self.conn
+                .execute("DELETE FROM overlay_people WHERE master = ?1", params![master])
+                .map_err(|e| format!("Failed to remove overlay person: {e}"))?;
+        }
+        Ok(row)
+    }
+
+    /// Our own picks for `master` (`None` clears them). Returns whether a row changed.
+    pub fn overlay_set_local_look(&self, master: &str, look: Option<&str>) -> Result<bool, String> {
+        self.conn
+            .execute("UPDATE overlay_people SET local_look = ?2 WHERE master = ?1", params![master, look])
+            .map(|n| n > 0)
+            .map_err(|e| format!("Failed to save overlay picks: {e}"))
+    }
+
+    /// The look `master` shared with us (`None` deletes it) and the field stamp it
+    /// answers. Returns whether a row changed.
+    pub fn overlay_set_their_look(&self, master: &str, look: Option<&str>, held_stamp: i64) -> Result<bool, String> {
+        self.conn
+            .execute(
+                "UPDATE overlay_people SET their_look = ?2, held_stamp = ?3 WHERE master = ?1",
+                params![master, look, held_stamp],
+            )
+            .map(|n| n > 0)
+            .map_err(|e| format!("Failed to save overlay look: {e}"))
+    }
+
     /// Load a profile for a specific peer.
     pub fn load_profile(&self, peer_id: &str) -> Result<Option<StoredProfile>, String> {
         let mut stmt = self
@@ -5282,6 +5461,90 @@ impl MessageStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(format!("Failed to read emote blob: {e}")),
         }
+    }
+
+    /// The kind a rail blob is stored as, without reading its bytes.
+    pub fn asset_blob_kind(&self, hash: &str) -> Result<Option<String>, String> {
+        match self.conn.query_row(
+            "SELECT kind FROM emote_blobs WHERE hash = ?1",
+            params![hash],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(kind) => Ok(Some(kind)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Failed to read asset blob kind: {e}")),
+        }
+    }
+
+    /// A rail blob and the kind it was stored as.
+    pub fn load_asset_blob(&self, hash: &str) -> Result<Option<(Vec<u8>, String)>, String> {
+        match self.conn.query_row(
+            "SELECT bytes, kind FROM emote_blobs WHERE hash = ?1",
+            params![hash],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
+        ) {
+            Ok(found) => Ok(Some(found)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Failed to read asset blob: {e}")),
+        }
+    }
+
+    /// Keep a stream overlay image (`overlay_blobs`, never the rail). Returns whether
+    /// it was new.
+    pub fn save_overlay_blob(&self, hash: &str, bytes: &[u8], animated: bool) -> Result<bool, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO overlay_blobs (hash, bytes, animated, added_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(hash) DO NOTHING",
+                params![hash, bytes, animated as i64, now],
+            )
+            .map(|n| n > 0)
+            .map_err(|e| format!("Failed to save overlay image: {e}"))
+    }
+
+    pub fn load_overlay_blob(&self, hash: &str) -> Result<Option<Vec<u8>>, String> {
+        match self.conn.query_row("SELECT bytes FROM overlay_blobs WHERE hash = ?1", params![hash], |row| {
+            row.get::<_, Vec<u8>>(0)
+        }) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Failed to read overlay image: {e}")),
+        }
+    }
+
+    pub fn has_overlay_blob(&self, hash: &str) -> Result<bool, String> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM overlay_blobs WHERE hash = ?1", params![hash], |row| row.get::<_, i64>(0))
+            .map(|n| n > 0)
+            .map_err(|e| format!("Failed to check overlay image: {e}"))
+    }
+
+    /// Every overlay image held, with when it was stored.
+    pub fn overlay_blob_stamps(&self) -> Result<Vec<(String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT hash, added_at FROM overlay_blobs")
+            .map_err(|e| format!("Failed to prepare overlay images: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|e| format!("Failed to list overlay images: {e}"))?;
+        collect_rows(rows, "overlay image")
+    }
+
+    pub fn delete_overlay_blob(&self, hash: &str) -> Result<bool, String> {
+        self.conn
+            .execute("DELETE FROM overlay_blobs WHERE hash = ?1", params![hash])
+            .map(|n| n > 0)
+            .map_err(|e| format!("Failed to delete overlay image: {e}"))
+    }
+
+    /// The file this store reads, as SQLite names it ("" in memory).
+    pub fn db_file(&self) -> String {
+        self.conn.path().unwrap_or_default().to_string()
     }
 
     pub fn has_emote_blob(&self, hash: &str) -> Result<bool, String> {
@@ -7085,6 +7348,83 @@ mod tests {
             connected_at: Some(started + 2_000),
             ended_at: started + 242_000,
         }
+    }
+
+    /// #97: the overlay columns and table arrive by additive migration, so a database
+    /// from before them opens with every row intact and the field absent.
+    #[test]
+    fn an_existing_database_takes_the_overlay_schema() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let key = "ab".repeat(32);
+        let old = tmp.path().join("old.db").to_string_lossy().into_owned();
+        {
+            let store = MessageStore::open(&old, &key).unwrap();
+            assert!(store.save_profile_card("friend", "Fern", 10, "", None).unwrap());
+            // Back to the shape a pre-overlay build left on disk.
+            store.conn.execute_batch(
+                "ALTER TABLE user_profiles DROP COLUMN stream_overlay;
+                 ALTER TABLE user_profiles DROP COLUMN stream_overlay_at;
+                 DROP TABLE overlay_people;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            ).unwrap();
+        }
+        // A copy at a new path is a database this process has never migrated.
+        let copy = tmp.path().join("copy.db").to_string_lossy().into_owned();
+        std::fs::copy(&old, &copy).unwrap();
+        let store = MessageStore::open(&copy, &key).unwrap();
+        assert_eq!(store.load_profile("friend").unwrap().map(|p| p.display_name).as_deref(), Some("Fern"));
+        assert_eq!(store.load_stream_overlay("friend").unwrap(), None, "absent until a field arrives");
+        assert!(store.save_stream_overlay("friend", "{}", 5, false).unwrap());
+        assert_eq!(store.load_stream_overlay("friend").unwrap(), Some(("{}".to_string(), 5)));
+        assert_eq!(store.overlay_add_person("friend", 1).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_stream_overlay_field_is_newest_wins_and_needs_a_row_unless_ours() {
+        let store = mem_store();
+        assert!(!store.save_stream_overlay("stranger", "{\"v\":1}", 5, false).unwrap(), "no row, nothing kept");
+        assert_eq!(store.load_stream_overlay("stranger").unwrap(), None);
+        assert!(store.save_stream_overlay("me", "a", 5, true).unwrap(), "our own row is made");
+        store.save_profile_card("pal", "Pal", 1, "", None).unwrap();
+        assert!(store.save_stream_overlay("pal", "new", 9, false).unwrap());
+        assert!(!store.save_stream_overlay("pal", "old", 8, false).unwrap(), "older never replaces newer");
+        assert!(!store.save_stream_overlay("pal", "same", 9, false).unwrap(), "an equal stamp changes nothing");
+        assert!(!store.save_stream_overlay("me", "old", 4, true).unwrap());
+        assert_eq!(store.load_stream_overlay("pal").unwrap(), Some(("new".to_string(), 9)));
+        assert_eq!(store.load_stream_overlay("me").unwrap(), Some(("a".to_string(), 5)));
+    }
+
+    #[test]
+    fn overlay_slots_are_stable_and_never_reused() {
+        let store = mem_store();
+        assert_eq!(store.overlay_add_person("a", 1).unwrap(), 1);
+        assert_eq!(store.overlay_add_person("b", 2).unwrap(), 2);
+        assert_eq!(store.overlay_add_person("a", 3).unwrap(), 1, "adding again keeps the slot");
+        assert!(store.overlay_remove_person("b").unwrap().is_some());
+        assert!(store.overlay_remove_person("b").unwrap().is_none());
+        assert_eq!(store.overlay_add_person("c", 4).unwrap(), 3, "a freed slot is not handed to someone else");
+        assert!(store.overlay_set_local_look("a", Some("{}")).unwrap());
+        assert!(store.overlay_set_their_look("a", Some("{\"v\":1}"), 7).unwrap());
+        let a = store.overlay_person("a").unwrap().unwrap();
+        assert_eq!((a.local_look.as_deref(), a.their_look.as_deref(), a.held_stamp), (Some("{}"), Some("{\"v\":1}"), 7));
+        assert!(!store.overlay_set_local_look("zz", Some("{}")).unwrap(), "no row for a person never added");
+        assert_eq!(store.overlay_people().unwrap().iter().map(|p| p.slot).collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    /// Overlay images and rail blobs never share a row: the same bytes held as both
+    /// are two rows, and deleting one leaves the other.
+    #[test]
+    fn overlay_images_live_apart_from_the_rail() {
+        let store = mem_store();
+        assert!(store.save_overlay_blob("h", b"x", false).unwrap());
+        assert!(!store.save_overlay_blob("h", b"x", false).unwrap(), "already held");
+        assert!(!store.has_emote_blob("h").unwrap(), "the rail never sees an overlay image");
+        store.save_asset_blob("h", b"x", false, "emote").unwrap();
+        assert_eq!(store.asset_blob_kind("h").unwrap().as_deref(), Some("emote"), "the rail stores its own copy");
+        assert!(store.delete_overlay_blob("h").unwrap());
+        assert!(store.has_emote_blob("h").unwrap(), "deleting the overlay image leaves the emote");
+        assert!(!store.has_overlay_blob("h").unwrap());
+        assert_eq!(store.load_overlay_blob("h").unwrap(), None);
     }
 
     /// D6: a guest's store is shared memory: every open sees the same rows while one

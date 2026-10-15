@@ -17,6 +17,10 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/overlay_mic_provider.dart';
+import 'package:hollow/src/core/providers/speaking_provider.dart';
+import 'package:hollow/src/core/providers/voice_level_provider.dart';
+import 'package:hollow/src/core/providers/overlay_settings_provider.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -437,6 +441,52 @@ class ProbeDump {
     // for its exit, so "Accept gone" cannot say a ring stopped.
     final call = read(callProvider);
     if (call != null) out['callStatus'] = call.status.name;
+    final listening = read(overlayMicProvider);
+    if (listening != null) {
+      out['overlayMic'] = !listening.on
+          ? 'off'
+          : listening.listening
+              ? 'listening'
+              : 'paused';
+    }
+    // The voice room's speaking cues: our own ring and how many others talk.
+    final selfTalking = read(vcLocalSpeakingProvider);
+    if (selfTalking != null) out['vcLocalSpeaking'] = selfTalking;
+    final othersTalking = read(vcSpeakingProvider);
+    if (othersTalking != null) out['vcSpeakingCount'] = othersTalking.length;
+    final selfLevel = read(vcLocalLevelProvider);
+    if (selfLevel != null) out['vcLocalLevel'] = selfLevel.toStringAsFixed(3);
+    final othersLevels = read(vcLevelsProvider);
+    if (othersLevels != null) out['vcLevelsCount'] = othersLevels.length;
+    // The OBS overlay: `overlayServer` is the one word `wait_for` matches;
+    // `overlay` carries the links a runner curls on this machine.
+    final overlay = read(overlayServerProvider);
+    if (overlay != null) {
+      final s = overlay.status;
+      out['overlayServer'] = s.running ? 'running' : 'off';
+      out['overlay'] = {
+        'enabled': s.enabled,
+        'running': s.running,
+        'port': s.port,
+        'portChanged': s.portChanged,
+        'openStreams': s.openStreams,
+        'room': overlay.links?.room,
+        'me': overlay.links?.me,
+        'personBase': overlay.links?.personBase,
+      };
+    }
+    final overlayPeople = read(overlayPeopleProvider)?.valueOrNull;
+    if (overlayPeople != null) {
+      out['overlayPeople'] = [
+        for (final p in overlayPeople)
+          {
+            'master': p.master,
+            'slot': p.slot,
+            'field': p.field,
+            'source': p.source.name,
+          },
+      ];
+    }
     final elsewhere = read(siblingCallProvider);
     if (elsewhere != null) {
       out['callElsewhere'] = elsewhere.values.firstOrNull?.kind ?? '';

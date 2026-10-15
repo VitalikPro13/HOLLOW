@@ -182,6 +182,9 @@ NOTES: anything odd (a flake TRY 1 FAIL / TRY 2 PASS, a non-empty refusals file,
   here: report STUCK.
 - Use the VM only through its ssh alias. Check `df -h` before a build (the disk filled once) and
   delete your `~/<name>` tree after.
+- When your job is done with the VM, shut it down (`VBoxManage controlvm Ubuntu24 acpipowerbutton`,
+  then `VBoxManage list runningvms` shows it gone) unless your parent said another job still needs
+  it; say so in your digest. A forgotten VM drains the host's CPU and RAM.
 - Ship files with LF: `git -c core.autocrlf=false -c core.eol=lf archive ...`.
 - Laptop fleet: export the graphical session first (`DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR` as
   in wiki `fleet_probe.md`) and redirect every run to a file, never a pipe.

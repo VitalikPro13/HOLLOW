@@ -43,6 +43,7 @@ import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/showcase_editor.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
+import 'package:hollow/src/ui/settings/stream_overlay/overlay_tick.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -560,7 +561,7 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
         localOffset: Offset(box.size.width, box.size.height),
       ),
       alignEnd: true,
-      builder: (_, _) => [
+      builder: (_, menuRef) => [
         HollowMenuItem(
           icon: isVerified ? LucideIcons.shieldCheck : LucideIcons.fingerprint,
           label: isVerified ? 'View safety number' : 'Verify contact',
@@ -571,6 +572,13 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
           icon: LucideIcons.copy,
           label: 'Copy user ID',
           onTap: () => _copyUserId(master),
+        ),
+        ?overlayTickMenuItem(
+          context: context,
+          menuRef: menuRef,
+          ref: ref,
+          peerId: master,
+          name: _name,
         ),
         const HollowMenuDivider(),
         ..._dangerItems(master, isBlocked),
@@ -609,6 +617,7 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
     final isBlocked = ref.read(blockedUsersProvider).contains(master);
     final canManage = _canManageMember();
     final name = _name;
+    final tick = overlayTickState(ref.read, master);
     showHollowSheet(
       context: context,
       builder: (sheetContext) {
@@ -652,6 +661,14 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
                 label: 'Copy user ID',
                 onTap: () => run(() => _copyUserId(master)),
               ),
+              if (tick.show)
+                _SheetRow(
+                  icon: LucideIcons.cast,
+                  label: kOverlayTickLabel,
+                  checked: tick.added,
+                  onTap: () => run(() => toggleOverlayPerson(context, ref,
+                      peerId: master, name: name)),
+                ),
               const HollowDivider(),
               _SheetRow(
                 icon: LucideIcons.ban,
@@ -814,11 +831,15 @@ class _SheetRow extends StatelessWidget {
   final VoidCallback onTap;
   final bool danger;
 
+  /// A toggle row's state, as a check on the trailing edge.
+  final bool? checked;
+
   const _SheetRow({
     required this.icon,
     required this.label,
     required this.onTap,
     this.danger = false,
+    this.checked,
   });
 
   @override
@@ -828,7 +849,7 @@ class _SheetRow extends StatelessWidget {
     return HollowPressable(
       onTap: onTap,
       subtle: true,
-      semanticLabel: label,
+      semanticLabel: checked == null ? label : '$label, ${checked! ? 'on' : 'off'}',
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
       child: SizedBox(
         height: 56,
@@ -849,6 +870,8 @@ class _SheetRow extends StatelessWidget {
                 ),
               ),
             ),
+            if (checked == true)
+              Icon(LucideIcons.check, size: 20, color: hollow.accentText),
           ],
         ),
       ),

@@ -1054,8 +1054,21 @@ pub(crate) fn broadcast_card(
     let avatar = super::profile_card::own_avatar(&card.master, db_path, db_passphrase)
         .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
         .unwrap_or_default();
+    broadcast_built_card(mls_mgr, crypto_store, ws_cmd_tx, conf_id, &card, &avatar);
+}
+
+/// [`broadcast_card`] with the card and its avatar (base64) already read, for a
+/// caller that read them off the event loop.
+pub(crate) fn broadcast_built_card(
+    mls_mgr: &mut MlsManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    conf_id: &str,
+    card: &super::types::SignedCard,
+    avatar_b64: &str,
+) {
     let members: HashSet<String> = mls_mgr.group_members(&conf_server_id(conf_id)).into_iter().collect();
-    let line = serde_json::json!({ "card": &card, "avatar": avatar }).to_string();
+    let line = serde_json::json!({ "card": card, "avatar": avatar_b64 }).to_string();
     if send_group_line(mls_mgr, crypto_store, ws_cmd_tx, conf_id, &line)
         && let Ok(mut guard) = CARD_AUDIENCE.lock()
     {

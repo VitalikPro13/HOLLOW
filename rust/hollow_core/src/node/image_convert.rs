@@ -1199,6 +1199,97 @@ mod tests {
         assert!(is_animated_webp(&icon), "and must stay animated");
     }
 
+    // ── Stream overlay images ───────────────────────────────────────────
+
+    #[test]
+    fn an_overlay_image_keeps_its_aspect_and_is_never_enlarged() {
+        let (tall, w, h, animated) = process_overlay_image(&make_test_png(300, 900)).expect("tall still");
+        assert!(!animated);
+        assert_eq!((w, h), (170, OVERLAY_DIM), "the longest side comes down to the ceiling");
+        assert_eq!(get_image_dimensions(&tall).unwrap(), (w, h));
+        assert!(tall.len() <= MAX_OVERLAY_IMAGE_BYTES);
+
+        let (_, w, h, _) = process_overlay_image(&make_test_png(120, 80)).expect("small still");
+        assert_eq!((w, h), (120, 80), "a small source is never upscaled");
+    }
+
+    #[test]
+    fn an_overlay_animation_stays_animated_from_gif_and_apng() {
+        for (what, src) in [("gif", make_test_gif(700, 350)), ("apng", make_test_apng(200, 400, 0.0))] {
+            let (webp, w, h, animated) = process_overlay_image(&src).unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert!(animated, "{what} must stay animated");
+            assert!(is_animated_webp(&webp), "{what}");
+            assert!(w.max(h) <= OVERLAY_DIM, "{what}: {w}x{h}");
+            assert_eq!(get_image_dimensions(&webp).unwrap(), (w, h));
+        }
+        let (_, w, h, _) = process_overlay_image(&make_test_gif(700, 350)).unwrap();
+        assert_eq!((w, h), (OVERLAY_DIM, 256));
+    }
+
+    #[test]
+    fn an_overlay_animation_over_the_decoded_budget_is_refused_with_advice() {
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame, Rgba, RgbaImage};
+        let mut buf = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut buf);
+            for i in 0..140u32 {
+                let img = RgbaImage::from_pixel(512, 512, Rgba([(i % 256) as u8, 0, 0, 255]));
+                encoder.encode_frame(Frame::from_parts(img, 0, 0, Delay::from_numer_denom_ms(50, 1))).unwrap();
+            }
+        }
+        let err = process_overlay_image(&buf).expect_err("140 frames at 512x512 is over the budget");
+        assert!(err.contains("fits at 512x512"), "{err}");
+    }
+
+    /// An animated container naming `frames` ANMF chunks on a `side` square canvas.
+    fn anmf_container(side: u32, frames: usize) -> Vec<u8> {
+        let s1 = side - 1;
+        let mut body = b"WEBPVP8X".to_vec();
+        body.extend_from_slice(&10u32.to_le_bytes());
+        body.extend_from_slice(&[0x02, 0, 0, 0, s1 as u8, (s1 >> 8) as u8, 0, s1 as u8, (s1 >> 8) as u8, 0]);
+        for _ in 0..frames {
+            body.extend_from_slice(b"ANMF");
+            body.extend_from_slice(&17u32.to_le_bytes());
+            body.extend_from_slice(&[7u8; 18]); // 17 bytes and the pad byte
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// An image from an answer is held to the authoring budget before it is stored:
+    /// the frames a decoder would hold at the canvas size, read from the container.
+    #[test]
+    fn a_received_overlay_animation_is_held_to_the_authoring_budget() {
+        let (ours, ..) = process_overlay_image(&make_test_gif(300, 200)).unwrap();
+        assert!(received_overlay_image_fits(&ours), "CONTROL: what we author fits");
+        let at_budget = MAX_OVERLAY_DECODED_BYTES / (512 * 512 * 4);
+        assert!(received_overlay_image_fits(&anmf_container(512, at_budget)), "CONTROL: at the budget");
+        assert!(!received_overlay_image_fits(&anmf_container(512, at_budget + 1)), "one frame over the budget");
+        assert!(received_overlay_image_fits(&anmf_container(64, at_budget + 1)), "a smaller canvas holds more frames");
+        assert!(!received_overlay_image_fits(&anmf_container(513, 1)), "a canvas over the ceiling");
+        assert!(!received_overlay_image_fits(&anmf_container(64, 0)), "an animation without frames");
+        let mut cut = anmf_container(64, 3);
+        cut.truncate(cut.len() - 5);
+        assert!(!received_overlay_image_fits(&cut), "a container shorter than its RIFF size");
+        let mut overrun = anmf_container(64, 3);
+        let at = overrun.len() - 22;
+        overrun[at..at + 4].copy_from_slice(&9999u32.to_le_bytes());
+        assert!(!received_overlay_image_fits(&overrun), "a chunk running past the body");
+        let mut big = anmf_container(64, 1);
+        big.resize(MAX_OVERLAY_IMAGE_BYTES + 1, 0);
+        assert!(!received_overlay_image_fits(&big), "over the size cap");
+        assert!(!received_overlay_image_fits(b"GIF89a not a webp at all"), "not a WebP");
+    }
+
+    #[test]
+    fn an_overlay_source_that_is_not_an_image_is_refused() {
+        assert!(process_overlay_image(b"not an image at all").is_err());
+        assert!(process_overlay_image(&vec![0u8; MAX_PROFILE_SOURCE_BYTES + 1]).is_err());
+    }
+
     // ── Animated profile media (avatar + banner on the asset rail) ──────
 
     /// The wire cap and the authoring limit are the SAME number by construction;
@@ -2416,6 +2507,119 @@ fn process_profile_anim(
     Err(format!(
         "Animated {label} is too large after conversion (over {} MB)",
         MAX_PROFILE_ANIM_BYTES / (1024 * 1024)
+    ))
+}
+
+/// Longest side of a stream overlay image: a ceiling, never a target.
+pub const OVERLAY_DIM: u32 = 512;
+
+/// Largest stream overlay image we produce, and the most we take from an answer:
+/// one number, so the two cannot drift apart.
+pub const MAX_OVERLAY_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Decoded-RGBA budget for one overlay animation (`frames x w x h x 4`), what OBS
+/// holds while it plays. Refused with advice, never decimated.
+const MAX_OVERLAY_DECODED_BYTES: usize = 128 * 1024 * 1024;
+
+/// Whether an overlay image someone sent us stays within what we author: a WebP of
+/// at most [`MAX_OVERLAY_IMAGE_BYTES`], its canvas within [`OVERLAY_DIM`], and its
+/// frames at that canvas within [`MAX_OVERLAY_DECODED_BYTES`]. Read from the
+/// container alone, before anything decodes it.
+pub(crate) fn received_overlay_image_fits(data: &[u8]) -> bool {
+    if data.len() > MAX_OVERLAY_IMAGE_BYTES {
+        return false;
+    }
+    let Some((w, h)) = webp_header_dimensions(data) else { return false };
+    if w == 0 || h == 0 || w.max(h) > OVERLAY_DIM {
+        return false;
+    }
+    let frames = if is_animated_webp(data) {
+        match webp_anmf_count(data) {
+            Some(n) if n > 0 => n,
+            _ => return false,
+        }
+    } else {
+        1
+    };
+    frames.saturating_mul(w as usize * h as usize * 4) <= MAX_OVERLAY_DECODED_BYTES
+}
+
+/// The animation frames (`ANMF` chunks) of a WebP container; `None` when a chunk
+/// runs past the RIFF body, since a decoder would read that tail differently.
+fn webp_anmf_count(data: &[u8]) -> Option<usize> {
+    let body = u32::from_le_bytes(data.get(4..8)?.try_into().ok()?) as usize;
+    let end = body.checked_add(8)?;
+    if end > data.len() {
+        return None;
+    }
+    let (mut at, mut frames) = (12usize, 0usize);
+    while at + 8 <= end {
+        let size = u32::from_le_bytes(data[at + 4..at + 8].try_into().ok()?) as usize;
+        let chunk_end = (at + 8).checked_add(size)?;
+        if chunk_end > end {
+            return None;
+        }
+        if &data[at..at + 4] == b"ANMF" {
+            frames += 1;
+        }
+        at = chunk_end + (size & 1);
+    }
+    Some(frames)
+}
+
+/// Process a picked image (PNG, JPEG, GIF, WebP, APNG) into a stream overlay look
+/// image: any aspect ratio (PNGtuber art is often tall), the longest side capped at
+/// [`OVERLAY_DIM`] and never enlarged, at most [`MAX_OVERLAY_IMAGE_BYTES`].
+///
+/// Returns `(webp, width, height, animated)`. A one-frame animation becomes a still.
+pub fn process_overlay_image(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), String> {
+    if data.len() > MAX_PROFILE_SOURCE_BYTES {
+        return Err("That image file is too big to convert (16MB max)".into());
+    }
+    let frames = if is_animated_image(data) {
+        decode_animation_frames(data)?
+    } else {
+        let img = load_bounded(data).map_err(|e| format!("Failed to decode image: {e}"))?;
+        vec![(img.to_rgba8(), 100)]
+    };
+    let (w, h) = (frames[0].0.width(), frames[0].0.height());
+    if w == 0 || h == 0 {
+        return Err("Image has zero dimensions".into());
+    }
+    let (dw, dh) = fit_dims(w, h, OVERLAY_DIM);
+    if frames.len() == 1 {
+        let still = crop_resize_frames(&frames, (0, 0, w, h), dw, dh);
+        for quality in [90.0, 85.0, 80.0, 75.0] {
+            let webp = encode_lossy_webp_still(still[0].0.as_raw(), dw, dh, quality)?;
+            if webp.len() <= MAX_OVERLAY_IMAGE_BYTES {
+                return Ok((webp, dw, dh, false));
+            }
+        }
+        return Err("Image is too detailed to store (over 2 MB)".into());
+    }
+    let per_frame = dw as usize * dh as usize * 4;
+    let budget_frames = (MAX_OVERLAY_DECODED_BYTES / per_frame.max(1)).max(1);
+    if frames.len() > budget_frames {
+        let total_ms: i64 = frames.iter().map(|(_, ms)| *ms as i64).sum();
+        let fits_s = (total_ms * budget_frames as i64) / (frames.len() as i64 * 1000).max(1);
+        return Err(format!("Animation is too long: about {fits_s}s fits at {dw}x{dh}"));
+    }
+    let mut scaled: Vec<(image::RgbaImage, i32)> = Vec::new();
+    let mut scaled_dims = (0u32, 0u32);
+    for (ceiling, quality) in [(OVERLAY_DIM, 85.0), (OVERLAY_DIM, 80.0), (OVERLAY_DIM, 75.0), (OVERLAY_DIM * 3 / 4, 80.0)] {
+        let (sw, sh) = fit_dims(w, h, ceiling);
+        if scaled_dims != (sw, sh) {
+            scaled = crop_resize_frames(&frames, (0, 0, w, h), sw, sh);
+            scaled_dims = (sw, sh);
+        }
+        let webp = encode_animation_frames(&scaled, (sw, sh), quality)?;
+        if webp.len() <= MAX_OVERLAY_IMAGE_BYTES {
+            return Ok((webp, sw, sh, true));
+        }
+    }
+    Err(format!(
+        "Animation is too large after conversion (over {} MB)",
+        MAX_OVERLAY_IMAGE_BYTES / (1024 * 1024)
     ))
 }
 

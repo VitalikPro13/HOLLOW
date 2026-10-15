@@ -6,6 +6,8 @@ pub mod emotes;
 pub mod gifs;
 pub mod identity;
 pub mod network;
+pub mod overlay;
+pub mod overlay_server;
 pub mod recovery;
 pub mod roster;
 pub mod screen_audio;

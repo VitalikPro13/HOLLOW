@@ -29,7 +29,8 @@ pub(crate) fn own_card(master_keypair: &NativeKeypair, db_path: &str, db_passphr
     let (Some(sig), Some(pk)) = super::crypto_handler::sign_message(master_keypair, &pk, &payload) else {
         return None;
     };
-    Some(SignedCard { master, display_name: profile.display_name, avatar_hash, updated_at: profile.updated_at, sig, pk })
+    let stream_overlay = super::overlay::own_field(&store, &master).map(Box::new);
+    Some(SignedCard { master, display_name: profile.display_name, avatar_hash, updated_at: profile.updated_at, sig, pk, stream_overlay })
 }
 
 /// Our own avatar bytes, for a card pulled by someone who lacks them.
@@ -161,13 +162,15 @@ fn stored(card: &SignedCard) -> crate::storage::messages::StoredCard {
 /// card: a co-member's full profile stays what decides how we show them. `ceiling` is
 /// the frame's [`super::frame_auth::stamp_ceiling`].
 pub(crate) fn keep_card(card: &SignedCard, master: &str, ceiling: i64, db_path: &str, db_passphrase: &str) -> bool {
-    card.master == master
-        && card_holds(card)
-        && !super::social::profile_from_the_future(&card.master, card.updated_at, ceiling)
-        && crate::storage::MessageStore::open(db_path, db_passphrase)
-            .ok()
-            .and_then(|st| st.save_signed_card(&stored(card)).ok())
-            .unwrap_or(false)
+    if card.master != master
+        || !card_holds(card)
+        || super::social::profile_from_the_future(&card.master, card.updated_at, ceiling)
+    {
+        return false;
+    }
+    let Ok(st) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return false };
+    super::overlay::ingest_field(&st, &card.master, card.stream_overlay.as_deref(), ceiling, None);
+    st.save_signed_card(&stored(card)).unwrap_or(false)
 }
 
 /// For a guest, the signed card of each sender we have one for (our own we sign now),
@@ -186,7 +189,7 @@ pub(crate) fn cards_for_guest<'a>(
             None => match store.load_signed_card(sender) {
                 Some(c) => SignedCard {
                     master: c.master, display_name: c.display_name, avatar_hash: c.avatar_hash,
-                    updated_at: c.updated_at, sig: c.sig, pk: c.pk,
+                    updated_at: c.updated_at, sig: c.sig, pk: c.pk, stream_overlay: None,
                 },
                 None => continue,
             },
@@ -239,7 +242,10 @@ pub(crate) fn store_card(card: &SignedCard, avatar: Option<&[u8]>, ceiling: i64,
         .ok()
         .and_then(|st| {
             let _ = st.save_signed_card(&stored(card));
-            st.save_profile_card(&card.master, &card.display_name, card.updated_at, &card.avatar_hash, avatar).ok()
+            let written = st.save_profile_card(&card.master, &card.display_name, card.updated_at, &card.avatar_hash, avatar).ok();
+            // After the card, so a first card made the row the field lives on.
+            super::overlay::ingest_field(&st, &card.master, card.stream_overlay.as_deref(), ceiling, None);
+            written
         })
         .unwrap_or(false)
 }
@@ -264,7 +270,7 @@ mod tests {
         let (Some(sig), Some(pk)) = crate::node::crypto_handler::sign_message(owner, &pk, &payload) else {
             panic!("signing never fails");
         };
-        SignedCard { master, display_name: name.into(), avatar_hash: avatar_hash.into(), updated_at: 7, sig, pk }
+        SignedCard { master, display_name: name.into(), avatar_hash: avatar_hash.into(), updated_at: 7, sig, pk, stream_overlay: None }
     }
 
     /// D6: a guest shows a sender's name only as the sender's own card signs it, and a

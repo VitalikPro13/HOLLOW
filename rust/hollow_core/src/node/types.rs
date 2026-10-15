@@ -168,6 +168,29 @@ pub(crate) struct SignedCard {
     pub sig: String,
     #[serde(default)]
     pub pk: String,
+    /// The stream overlay field, signed on its own (`overlay::verify_field`), not by
+    /// the card: a meeting peer or pending friend sees only the card.
+    /// Boxed: a card rides inline in several message variants, and every swarm future
+    /// holding one grows with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_overlay: Option<Box<OverlayField>>,
+}
+
+/// The `stream_overlay` field (#97): `off`, `show` or `share:<look stamp>`, with its
+/// OWN master signature over (master, `at`, value), outside `hollow-profile2` and
+/// `hollow-card1` so every shipped profile and card signature still verifies.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct OverlayField {
+    #[serde(default)]
+    pub value: String,
+    /// When the field last changed (ms): the newest wins, never an older one.
+    #[serde(default)]
+    pub at: i64,
+    #[serde(default)]
+    pub sig: String,
+    /// The master public key (base64 protobuf); it must derive the master.
+    #[serde(default)]
+    pub pk: String,
 }
 
 /// A [`SignedCard`] and a thumbnail of its avatar, sealed to one friend-request target
@@ -647,6 +670,19 @@ pub(crate) enum NetworkEvent {
     PublicChannelListReceived { server_id: String, server_name: String, channels: Vec<PublicChannelEntryFfi>, server_avatar: Option<Vec<u8>>, server_banner_thumb: Option<Vec<u8>> },
     PublicChannelSyncReceived { server_id: String, channel_id: String, messages: Vec<GuestSyncMessageFfi>, has_more: bool, sender_profiles: Vec<SyncSenderProfileFfi> },
     PublicChannelConfigChanged { server_id: String, channel_id: String, is_public: bool, channel_name: String, category: Option<String> },
+    // -- Stream overlay (#97) --
+    /// A look for `master` arrived (theirs, or ours from a sibling): reload it.
+    OverlayLookReceived { master: String },
+    /// `master` turned "Let others show me" off: they left our overlay and everything
+    /// we held for them is gone.
+    OverlayPersonRemoved { master: String },
+    /// `master`'s stream overlay field changed (ours too, from a sibling).
+    OverlayFieldChanged { master: String },
+    // -- Stream overlay server (#97) --
+    /// The saved port was busy, so the overlay moved and every OBS link changed.
+    OverlayPortChanged { port: u16 },
+    /// How many overlay pages hold an event stream open right now.
+    OverlayStreamsChanged { open: u32 },
 }
 
 /// Lightweight ShareEntry for streaming lists to Dart; the persisted row is
@@ -1394,6 +1430,14 @@ pub(crate) enum NodeCommand {
     /// Absent in release builds.
     #[cfg(test)]
     TestAgeHeldCommits { by: std::time::Duration },
+    // -- Stream overlay (#97) --
+    /// Re-sign our `stream_overlay` field for the two toggles and announce it.
+    OverlaySetFlags { allow: bool, share: bool, reply: tokio::sync::oneshot::Sender<Result<(), String>> },
+    /// Save our own look (normalized, newer stamp), re-sign the field, announce it.
+    /// Replies with the canonical look.
+    OverlaySetOwnLook { look_json: String, reply: tokio::sync::oneshot::Sender<Result<String, String>> },
+    /// The people list or a field changed outside the node: look again at whom to ask.
+    OverlayRefresh,
 }
 
 impl NodeCommand {
@@ -1569,6 +1613,9 @@ impl NodeCommand {
             Self::TestEnvelope { .. } => "TestEnvelope",
             #[cfg(test)]
             Self::TestAgeHeldCommits { .. } => "TestAgeHeldCommits",
+            Self::OverlaySetFlags { .. } => "OverlaySetFlags",
+            Self::OverlaySetOwnLook { .. } => "OverlaySetOwnLook",
+            Self::OverlayRefresh => "OverlayRefresh",
         }
     }
 }
@@ -2174,6 +2221,10 @@ pub(crate) enum HavenMessage {
         /// sender's public posts (D6).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         card: Option<Box<SignedCard>>,
+        /// The stream overlay field. Absent (an older client) = `show`; a field that
+        /// fails its own signature is absent and what we stored is kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_overlay: Option<Box<OverlayField>>,
     },
 
     // -- Friends --
@@ -2869,6 +2920,27 @@ pub(crate) enum HavenMessage {
         /// every asked hash lands here; older clients simply stay silent on a miss.
         #[serde(default)]
         missing: Vec<String>,
+    },
+
+    /// Ask for the sender's stream overlay look (#97). `held` names the images of it
+    /// the asker already holds, so the answer leaves them out.
+    #[serde(rename = "overlay_look_ask")]
+    OverlayLookAsk {
+        #[serde(default)]
+        held: Vec<String>,
+    },
+
+    /// The answer to an [`HavenMessage::OverlayLookAsk`]: `status` is `off`, `show` or
+    /// `share`; only `share` carries the look and the images the asker lacks (as many
+    /// as fit one answer; the asker asks again for the rest).
+    #[serde(rename = "overlay_look_answer")]
+    OverlayLookAnswer {
+        #[serde(default)]
+        status: String,
+        #[serde(default)]
+        look_json: String,
+        #[serde(default)]
+        bundle_json: String,
     },
 
     /// Ask an online peer to relay a third (offline) peer's profile.
@@ -3625,6 +3697,9 @@ pub(crate) enum MessageEnvelope {
         /// The sender's signed card; see `HavenMessage::ProfileUpdate`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         card: Option<Box<SignedCard>>,
+        /// The stream overlay field; see `HavenMessage::ProfileUpdate`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_overlay: Option<Box<OverlayField>>,
     },
 
     /// Lightweight encrypted ping sent after creating an inbound session.
@@ -4198,6 +4273,8 @@ impl HavenMessage {
             | Self::ProfileRequest
             | Self::EmoteRequest { .. }
             | Self::EmoteAssets { .. }
+            | Self::OverlayLookAsk { .. }
+            | Self::OverlayLookAnswer { .. }
             | Self::ProfileRequestFor { .. }
             | Self::ProfileRelay { .. }
             | Self::VoiceChannelJoin { .. }
@@ -4265,6 +4342,8 @@ impl HavenMessage {
             | Self::PublicFileHeader { .. }
             | Self::EmoteRequest { .. }
             | Self::EmoteAssets { .. }
+            | Self::OverlayLookAsk { .. }
+            | Self::OverlayLookAnswer { .. }
             | Self::ProfileUpdate { .. }
             | Self::ProfileRequest
             | Self::ProfileRequestFor { .. }

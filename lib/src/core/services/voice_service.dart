@@ -10,7 +10,9 @@ import '../call_setup_trace.dart';
 import 'frame_cryptor_service.dart';
 import 'ice_repair.dart';
 import 'ice_route_probe.dart';
+import '../providers/voice_level_provider.dart';
 import 'local_speaking_detector.dart';
+import 'overlay_mic.dart';
 import 'pending_ice_queue.dart';
 import 'remote_track_volume.dart';
 import 'video_quality_ladder.dart';
@@ -122,6 +124,16 @@ class VoiceService {
   bool get isLocalSpeaking => _localSpeaking;
   bool get isRemoteSpeaking => _remoteSpeaking;
   void Function(bool localSpeaking, bool remoteSpeaking)? onSpeakingChanged;
+
+  /// Voice levels 0..1 on every poll: ours from the capture meter, the peer's
+  /// from inbound-rtp. 0 and 0 once the poll stops.
+  void Function(double local, double remote)? onLevels;
+
+  /// The level poll's period; [setPollInterval] changes it mid-call.
+  Duration pollInterval = kVoicePollNormal;
+
+  /// Whether the provider still has a call; null = assume yes.
+  bool Function()? isCallLive;
 
   VoiceService({required this.localPeerId, Map<String, dynamic>? iceServers, String relayDomain = 'relay.anonlisten.com'})
       : iceServers = iceServers ?? _defaultIceServers(domain: relayDomain);
@@ -1071,9 +1083,16 @@ class VoiceService {
 
   void startVad() {
     _vadTimer?.cancel();
-    _vadTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+    _vadTimer = Timer.periodic(pollInterval, (_) {
       _pollVad();
     });
+  }
+
+  /// Faster while an OBS page streams; a running poll restarts on the new beat.
+  void setPollInterval(Duration interval) {
+    if (interval == pollInterval) return;
+    pollInterval = interval;
+    if (_vadTimer != null) startVad();
   }
 
   void stopVad() {
@@ -1081,6 +1100,7 @@ class VoiceService {
     _vadTimer = null;
     _prevEnergy.clear();
     _localSpeakingDetector.reset();
+    onLevels?.call(0.0, 0.0);
     if (_localSpeaking || _remoteSpeaking) {
       _localSpeaking = false;
       _remoteSpeaking = false;
@@ -1123,6 +1143,7 @@ class VoiceService {
     // LOCAL: the native capture meter, never getStats. See
     // [LocalSpeakingDetector] for why. Muting is handled inside it.
     bool newLocal = await _localSpeakingDetector.poll(muted: _isMuted);
+    var remoteLevel = 0.0;
 
     try {
       final stats = await _pc!.getStats();
@@ -1132,6 +1153,8 @@ class VoiceService {
         if (report.type == 'inbound-rtp' &&
             report.values['kind'] == 'audio') {
           newRemote = _detectSpeech(report.values, 'in-remote');
+          remoteLevel =
+              levelFromAudioLevel(report.values['audioLevel'] as num?);
         }
         // Fallback for a plugin build without the capture meter: the old
         // getStats guess beats an indicator that never lights.
@@ -1146,6 +1169,13 @@ class VoiceService {
     } catch (_) {}
 
     if (_isMuted) newLocal = false;
+
+    // A poll that outlived its call reports nothing: stopVad already zeroed.
+    if (_pc != null) {
+      onLevels?.call(
+          _isMuted ? 0.0 : levelFromDb(_localSpeakingDetector.levelDb),
+          remoteLevel);
+    }
 
     if (newLocal != _localSpeaking || newRemote != _remoteSpeaking) {
       _localSpeaking = newLocal;
@@ -1658,6 +1688,13 @@ class VoiceService {
       'audio': audioConstraints,
       'video': false,
     };
+
+    // Listening for the overlay gives the mic back before the call opens it.
+    await overlayMic.yieldToCall(OverlayMicHold.dmCall);
+    // A call that ended meanwhile already ran its release; nobody else will.
+    if (!(isCallLive?.call() ?? true)) {
+      overlayMic.release(OverlayMicHold.dmCall);
+    }
 
     try {
       _localStream = await navigator.mediaDevices.getUserMedia(constraints);

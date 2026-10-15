@@ -9,6 +9,8 @@ import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:record/record.dart' as rec;
 
 import 'package:hollow/src/core/services/linux_pulse_capture.dart';
+import 'package:hollow/src/core/services/mic_level_capture.dart';
+import 'package:hollow/src/core/services/overlay_mic.dart';
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
 
 /// Fixed encoding profile for voice messages: Opus in an Ogg container,
@@ -32,7 +34,10 @@ class VoiceMessageRecorder {
 
   static bool get _isMobile => Platform.isAndroid || Platform.isIOS;
 
-  final rec.AudioRecorder _recorder = rec.AudioRecorder();
+  // From the shared pool: on Windows a disposed `record` recorder can crash
+  // the app (PluginRecorders).
+  rec.AudioRecorder? _pooled;
+  rec.AudioRecorder get _recorder => _pooled ??= pluginRecorders.take();
 
   final _ampController = StreamController<double>.broadcast();
   final _elapsedController = StreamController<Duration>.broadcast();
@@ -59,19 +64,26 @@ class VoiceMessageRecorder {
   /// [RecorderFfmpegMissingException] when the bundled ffmpeg cannot be found
   /// on desktop.
   Future<void> start({String? preferredDeviceId}) async {
-    // Linux never touches the `record` plugin, whose capture shells out to
-    // `parecord`, absent on PipeWire, and has no mic permission prompt:
-    // capture goes through libpulse-simple instead.
-    if (!Platform.isLinux && !await _recorder.hasPermission()) {
-      throw const RecorderPermissionException();
-    }
+    // Listening for the stream overlay gives the mic back for the note.
+    await overlayMic.yieldToCall(OverlayMicHold.voiceMessage);
+    try {
+      // Linux never touches the `record` plugin, whose capture shells out to
+      // `parecord`, absent on PipeWire, and has no mic permission prompt:
+      // capture goes through libpulse-simple instead.
+      if (!Platform.isLinux && !await _recorder.hasPermission()) {
+        throw const RecorderPermissionException();
+      }
 
-    _outPath = await _buildTempPath();
+      _outPath = await _buildTempPath();
 
-    if (_isMobile) {
-      await _startMobile(preferredDeviceId: preferredDeviceId);
-    } else {
-      await _startDesktop(preferredDeviceId: preferredDeviceId);
+      if (_isMobile) {
+        await _startMobile(preferredDeviceId: preferredDeviceId);
+      } else {
+        await _startDesktop(preferredDeviceId: preferredDeviceId);
+      }
+    } catch (_) {
+      overlayMic.release(OverlayMicHold.voiceMessage);
+      rethrow;
     }
   }
 
@@ -309,7 +321,9 @@ class VoiceMessageRecorder {
         _ffmpeg = null;
       }
     }
-    await _recorder.dispose();
+    final recorder = _pooled;
+    _pooled = null;
+    if (recorder != null) await pluginRecorders.release(recorder);
     await _ampController.close();
     await _elapsedController.close();
   }
@@ -335,6 +349,7 @@ class VoiceMessageRecorder {
         await _recorder.stop();
       } catch (_) {}
     }
+    overlayMic.release(OverlayMicHold.voiceMessage);
   }
 
   static Future<String> _buildTempPath() async {

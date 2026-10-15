@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
@@ -15,7 +14,8 @@ import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
-import 'package:hollow/src/core/services/linux_pulse_capture.dart';
+import 'package:hollow/src/core/services/mic_level_capture.dart';
+import 'package:hollow/src/core/services/overlay_mic.dart';
 import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -32,7 +32,6 @@ import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
 import 'package:hollow/src/ui/settings/keybind_capture_field.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:record/record.dart' as rec;
 import 'package:win32audio/win32audio.dart' as win32audio;
 
 /// Settings > Audio & Video: devices, the voice chain, the microphone test,
@@ -99,11 +98,9 @@ class _AudioVideoSettingsViewState
   bool _cameraListFailed = false;
   bool _micTesting = false;
   AudioPlayer? _ringtonePreview;
-  rec.AudioRecorder? _micRecorder;
-  LinuxPulseCapture? _micPulse;
-  StreamSubscription<Uint8List>? _micChunkSub;
+  MicLevelCapture? _micCapture;
   BytesBuilder? _micPcmBuf;
-  static const int _micRecRate = 48000;
+  static const int _micRecRate = MicLevelCapture.sampleRate;
   String? _micTestRawPath;
   String? _micTestRecPath;
   bool _micRendering = false;
@@ -398,49 +395,20 @@ class _AudioVideoSettingsViewState
       _micPcmBuf = buf;
       _micTestPeakDb = -100.0;
 
-      Stream<Uint8List> chunks;
-      if (Platform.isLinux) {
-        // Linux NEVER via `record` (needs parecord, absent on PipeWire).
-        final pulse = await LinuxPulseCapture.start(
-          device: (selectedInput != null && selectedInput.isNotEmpty)
-              ? selectedInput
-              : null,
-          sampleRate: _micRecRate,
-          channels: 1,
-        );
-        _micPulse = pulse;
-        chunks = pulse.chunks;
-      } else {
-        final recorder = rec.AudioRecorder();
-        _micRecorder = recorder;
-        try {
-          chunks = await recorder.startStream(rec.RecordConfig(
-            encoder: rec.AudioEncoder.pcm16bits,
-            numChannels: 1,
-            sampleRate: _micRecRate,
-            device: (selectedInput != null && selectedInput.isNotEmpty)
-                ? rec.InputDevice(id: selectedInput, label: '')
-                : null,
-          ));
-        } catch (e) {
-          // The stored id may come from a different enumerator than `record`'s,
-          // so fall back to the system default and log it.
-          _micLog('startStream with device failed ($e) — retrying default');
-          chunks = await recorder.startStream(const rec.RecordConfig(
-            encoder: rec.AudioEncoder.pcm16bits,
-            numChannels: 1,
-            sampleRate: _micRecRate,
-          ));
-        }
-      }
-
-      _micChunkSub = chunks.listen((chunk) {
-        buf.add(chunk);
-        // Peak feeds the log line only; there is no on-screen meter, because it
-        // never tracked the record-package chunks reliably.
-        final level = _levelFromPcm16(chunk);
-        if (level.db > _micTestPeakDb) _micTestPeakDb = level.db;
-      });
+      // Listening for the overlay pauses while the test holds the mic.
+      await overlayMic.yieldToCall(OverlayMicHold.micTest);
+      final capture = MicLevelCapture();
+      _micCapture = capture;
+      await capture.start(
+        deviceId: selectedInput,
+        log: _micLog,
+        onChunk: (chunk, db) {
+          buf.add(chunk);
+          // Peak feeds the log line only; there is no on-screen meter, because
+          // it never tracked the record-package chunks reliably.
+          if (db > _micTestPeakDb) _micTestPeakDb = db;
+        },
+      );
 
       _micLog('start: input=${selectedInput ?? "default"} aiNs=$aiNs '
           'enhance=$enhance dyn=$dynMode rawRate=$_micRecRate');
@@ -463,23 +431,6 @@ class _AudioVideoSettingsViewState
               fallback: "Couldn't use the microphone. Check it and try again."),
           type: HollowToastType.error);
     }
-  }
-
-  /// RMS of a PCM16LE chunk as (dBFS, 0..1 bar) over a -60..0 mapping.
-  static ({double db, double bar}) _levelFromPcm16(Uint8List chunk) {
-    final samples =
-        Int16List.view(chunk.buffer, chunk.offsetInBytes, chunk.length >> 1);
-    if (samples.isEmpty) return (db: -100.0, bar: 0.0);
-    double sumSq = 0;
-    for (final s in samples) {
-      sumSq += s.toDouble() * s.toDouble();
-    }
-    final rms = math.sqrt(sumSq / samples.length);
-    final db =
-        rms <= 1 ? -100.0 : 20.0 * math.log(rms / 32768.0) / math.ln10;
-    const minDb = -60.0;
-    final clamped = db.clamp(minDb, 0.0);
-    return (db: db, bar: (clamped - minDb) / (0.0 - minDb));
   }
 
   /// Canonical 44-byte-header mono 16-bit WAV wrapper around raw PCM16LE.
@@ -636,25 +587,10 @@ class _AudioVideoSettingsViewState
   Future<void> _stopMicCapture() async {
     _micTestCapTimer?.cancel();
     _micTestCapTimer = null;
-    await _micChunkSub?.cancel();
-    _micChunkSub = null;
-    final recorder = _micRecorder;
-    _micRecorder = null;
-    if (recorder != null) {
-      try {
-        await recorder.stop();
-      } catch (_) {}
-      try {
-        await recorder.dispose();
-      } catch (_) {}
-    }
-    final pulse = _micPulse;
-    _micPulse = null;
-    if (pulse != null) {
-      try {
-        await pulse.stop();
-      } catch (_) {}
-    }
+    final capture = _micCapture;
+    _micCapture = null;
+    await capture?.stop();
+    overlayMic.release(OverlayMicHold.micTest);
     if (mounted) {
       setState(() => _micTesting = false);
     } else {

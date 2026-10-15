@@ -112,7 +112,8 @@ in YOUR context costs far more than in a runner's.
   end your turn while one runs. Your final message IS the report (subagents cannot write report
   files).
 - Before reporting, clean up: your build trees on the VM and the mini, your simulators and
-  emulators, your fleet peers, and `build/` after the fleet proof. Nothing of yours keeps running.
+  emulators, your fleet peers, and `build/` after the fleet proof, and shut the Linux VM down if
+  you or your runners started it and nobody else needs it. Nothing of yours keeps running.
 - Sections: 1) done vs. scope, 2) files changed, 3) tests added with RED then GREEN, 4) mutation
   results, 5) suite results with counts, 6) platform proof (what ran where, evidence paths),
   7) requests for files you do not own (exact file and change), 8) what is left, risks, questions

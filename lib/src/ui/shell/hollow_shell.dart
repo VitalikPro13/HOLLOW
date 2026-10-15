@@ -9,6 +9,9 @@ import 'package:hollow/src/core/services/android_version.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
+import 'package:hollow/src/core/services/overlay_publisher.dart';
+import 'package:hollow/src/core/providers/overlay_settings_provider.dart';
+import 'package:hollow/src/ui/settings/stream_overlay/overlay_port_toast.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/services/deep_link_service.dart';
@@ -1134,6 +1137,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Peer media forwarding, on the same timing and pushed into the node right
     // after it starts.
     await ref.read(peerForwardingProvider.notifier).load();
+    // Stream overlay layout and listening sensitivity (#97), same reason.
+    await ref.read(overlayLayoutProvider.notifier).load();
+    await ref.read(overlayListenSettingsProvider.notifier).load();
 
     // The lists are populated from the local DB, so the network phase can run
     // behind an already-visible shell.
@@ -1197,6 +1203,13 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     // The node starts with forwarding OFF, so the loaded setting is mirrored in.
     ref.read(peerForwardingProvider.notifier).pushToNode();
+
+    // The OBS overlay comes back only now, past the launch unlock; it serves
+    // nothing while App Lock is up (#97).
+    if (overlayServerSupported()) {
+      ref.read(overlayPublisherProvider);
+      await ref.read(overlayServerProvider.notifier).restore();
+    }
 
     // Rust already loaded this at node startup; this is only for the Dart UI's
     // toggle.
@@ -1682,6 +1695,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (!Platform.isAndroid && !Platform.isIOS) {
       ref.watch(hotkeyControllerProvider);
     }
+    listenOverlayPortChanged(ref, context);
 
     // Annotation mode hides the shell so the apps underneath show through the
     // transparent window; the drawing surface is an OverlayEntry in the root

@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/download_icon_button.dart';
+import 'package:hollow/src/ui/components/overlay_mic_indicator.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
@@ -85,6 +86,14 @@ class UserBar extends ConsumerWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // Its own line, at the bar's leading edge: the sidebar is too narrow
+        // to fit it beside the name.
+        const Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: OverlayMicIndicator(
+              padding: EdgeInsets.fromLTRB(HollowSpacing.md, HollowSpacing.sm,
+                  HollowSpacing.md, HollowSpacing.sm)),
+        ),
         if (roomBudget.usage > 0.5)
           _RoomBudgetBar(budget: roomBudget),
         Container(

@@ -22,6 +22,7 @@ extension SettingsCategoryMeta on SettingsCategory {
         SettingsCategory.accessibility => 'Accessibility',
         SettingsCategory.notifications => 'Notifications',
         SettingsCategory.audio => 'Audio & video',
+        SettingsCategory.streamOverlay => 'Stream overlay',
         SettingsCategory.shortcuts => 'Shortcuts',
         SettingsCategory.network => 'Network',
         SettingsCategory.storage => 'Files & storage',
@@ -36,6 +37,7 @@ extension SettingsCategoryMeta on SettingsCategory {
         SettingsCategory.accessibility => LucideIcons.accessibility,
         SettingsCategory.notifications => LucideIcons.bell,
         SettingsCategory.audio => LucideIcons.mic,
+        SettingsCategory.streamOverlay => LucideIcons.cast,
         SettingsCategory.shortcuts => LucideIcons.keyboard,
         SettingsCategory.network => LucideIcons.globe,
         SettingsCategory.storage => LucideIcons.hardDrive,
@@ -52,6 +54,7 @@ extension SettingsCategoryMeta on SettingsCategory {
         SettingsCategory.accessibility ||
         SettingsCategory.notifications ||
         SettingsCategory.audio ||
+        SettingsCategory.streamOverlay ||
         SettingsCategory.shortcuts =>
           SettingsGroup.app,
         SettingsCategory.network ||
@@ -136,6 +139,13 @@ const List<SettingsSearchEntry> kSettingsSearchIndex = [
   SettingsSearchEntry('Ask before switching voice rooms', SettingsCategory.audio, 'switch voice room prompt confirm leave'),
   SettingsSearchEntry('Ringtone', SettingsCategory.audio, 'call sound'),
   SettingsSearchEntry('Sound effects', SettingsCategory.audio, 'sounds volume'),
+  SettingsSearchEntry('Let others show me on their stream overlay', SettingsCategory.streamOverlay, 'stream overlay obs privacy streamer'),
+  SettingsSearchEntry('Share my overlay images', SettingsCategory.streamOverlay, 'stream overlay obs images look'),
+  SettingsSearchEntry('My overlay look', SettingsCategory.streamOverlay, 'pngtuber reactive image talking idle blink bounce effects'),
+  SettingsSearchEntry('People on my overlay', SettingsCategory.streamOverlay, 'stream overlay obs people added'),
+  SettingsSearchEntry('Run the overlay for OBS', SettingsCategory.streamOverlay, 'obs browser source link stream'),
+  SettingsSearchEntry('Listen to my mic now', SettingsCategory.streamOverlay, 'overlay mic sensitivity solo stream'),
+  SettingsSearchEntry('Customise with CSS in OBS', SettingsCategory.streamOverlay, 'css style obs custom'),
   SettingsSearchEntry('Keyboard shortcuts', SettingsCategory.shortcuts, 'keys hotkeys keybind'),
   SettingsSearchEntry('Relay', SettingsCategory.network, 'server domain self-host switch'),
   SettingsSearchEntry('Relay health', SettingsCategory.network, 'load bandwidth ram status'),

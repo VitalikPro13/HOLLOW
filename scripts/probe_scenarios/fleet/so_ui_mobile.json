@@ -1,0 +1,44 @@
+{
+  "_": [
+    "Settings > Stream overlay on a phone (#97): sections 1 to 3 only, the look editor at touch",
+    "density with the initials fallback, the preview's buttons, dark and light. One peer.",
+    "run (mini): pwsh scripts/fleet.ps1 -Scenario so_ui_mobile -Peers c"
+  ],
+  "peers": ["c"],
+  "steps": [
+    { "peer": "c", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "c", "op": "tap", "target": "semantics:Settings", "index": 0 },
+    { "peer": "c", "op": "wait", "ms": 1000 },
+    { "peer": "c", "op": "reveal", "target": "text:Stream overlay", "index": 0 },
+    { "peer": "c", "op": "tap", "target": "text:Stream overlay", "index": 0 },
+    { "peer": "c", "op": "wait", "ms": 1500 },
+    { "peer": "c", "op": "shot", "name": "som-01-top-dark" },
+    { "peer": "c", "op": "reveal", "target": "text:Deafened", "index": 1 },
+    { "peer": "c", "op": "wait", "ms": 600 },
+    { "peer": "c", "op": "shot", "name": "som-02a-slots-dark" },
+    { "peer": "c", "op": "reveal", "target": "semantics:Preview Talk. Hold to keep it going", "index": 0 },
+    { "peer": "c", "op": "wait", "ms": 600 },
+    { "peer": "c", "op": "tap", "target": "semantics:Preview Talk. Hold to keep it going", "index": 0, "frames": 2 },
+    { "peer": "c", "op": "shot", "name": "som-02b-talk-dark" },
+    { "peer": "c", "op": "wait", "ms": 2000 },
+    { "peer": "c", "op": "reveal", "target": "text:Talking effect", "index": 0 },
+    { "peer": "c", "op": "wait", "ms": 600 },
+    { "peer": "c", "op": "shot", "name": "som-02-editor-dark" },
+    { "peer": "c", "op": "reveal", "target": "text:Shadow", "index": 0 },
+    { "peer": "c", "op": "wait", "ms": 600 },
+    { "peer": "c", "op": "shot", "name": "som-04-effects-dark" },
+    { "peer": "c", "op": "reveal", "target": "text:People on my overlay", "index": 0 },
+    { "peer": "c", "op": "wait", "ms": 600 },
+    { "peer": "c", "op": "shot", "name": "som-05-people-dark" },
+    { "peer": "c", "op": "theme", "value": "light" },
+    { "peer": "c", "op": "wait", "ms": 800 },
+    { "peer": "c", "op": "shot", "name": "som-06-people-light" },
+    { "peer": "c", "op": "reveal", "target": "text:Who can show me", "index": 0 },
+    { "peer": "c", "op": "wait", "ms": 600 },
+    { "peer": "c", "op": "shot", "name": "som-07-top-light" },
+    { "peer": "c", "op": "theme", "value": "dark" }
+  ],
+  "cleanup": [
+    { "peer": "c", "op": "theme", "value": "dark" }
+  ]
+}

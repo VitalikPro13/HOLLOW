@@ -10,6 +10,7 @@ enum SettingsCategory {
   accessibility,
   notifications,
   audio,
+  streamOverlay,
   shortcuts,
   network,
   storage,

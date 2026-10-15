@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/ice_repair.dart';
@@ -12,7 +13,10 @@ import 'package:hollow/src/core/services/link_resilience.dart';
 import 'package:hollow/src/core/services/link_watchdog.dart';
 import 'package:hollow/src/core/services/video_quality_ladder.dart';
 import 'package:hollow/src/core/services/remote_track_volume.dart';
+import 'package:hollow/src/core/services/local_meter_loopback.dart';
 import 'package:hollow/src/core/services/local_speaking_detector.dart';
+import 'package:hollow/src/core/services/overlay_mic.dart';
+import 'package:hollow/src/core/providers/voice_level_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 
 void _vcLog(String msg) {
@@ -101,6 +105,16 @@ class VoiceChannelService {
   /// speaking, and whether WE are.
   void Function(Set<String> speakingPeers, bool localSpeaking)?
       onSpeakingChanged;
+
+  /// Voice levels 0..1 on every poll: remote peers by DEVICE id from
+  /// inbound-rtp, ours from the capture meter. Empty and 0 once it stops.
+  void Function(Map<String, double> remote, double local)? onLevels;
+
+  /// Remote levels read by the current poll, by peer.
+  final Map<String, double> _remoteLevels = {};
+
+  /// The level poll's period; [setPollInterval] changes it mid-call.
+  Duration pollInterval = kVoicePollNormal;
 
   /// Gossip mode: if true, only connect to gossipNeighbors (not all participants).
   bool gossipMode = false;
@@ -207,7 +221,8 @@ class VoiceChannelService {
   VoiceChannelService({
     required this.localPeerId,
     required this.iceServers,
-  });
+    @visibleForTesting AloneMeterKeeper<MediaStream, Object>? aloneMeter,
+  }) : _aloneMeter = aloneMeter ?? _newAloneMeter();
 
   bool get isActive => _serverId != null;
 
@@ -226,6 +241,12 @@ class VoiceChannelService {
   Future<void> startAudio(String serverId, String channelId) async {
     _serverId = serverId;
     _channelId = channelId;
+    _aloneMeterOff = false;
+    // Keeps a pending completer: a leg built before this call already waits
+    // on it (the peer's offer can beat our own join here).
+    final micSettled = _localAudioSettled.isCompleted
+        ? (_localAudioSettled = Completer<void>())
+        : _localAudioSettled;
 
     frameCryptor = FrameCryptorService();
     await frameCryptor!.init(sharedKey: true);
@@ -260,6 +281,16 @@ class VoiceChannelService {
       _vcLog('[HOLLOW-VC] Requesting input device: $preferredAudioInputDeviceId');
     }
 
+    // Listening for the overlay gives the mic back before the call opens it.
+    // Legs built meanwhile already wait on [micSettled], which completes only
+    // once our own getUserMedia below has settled; a failed handover must
+    // not leave it pending.
+    try {
+      await overlayMic.yieldToCall(OverlayMicHold.voiceChannel);
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] Overlay listening handover failed: $e');
+    }
+
     try {
       _localAudioStream = await navigator.mediaDevices.getUserMedia({
         'audio': audioConstraints,
@@ -268,6 +299,12 @@ class VoiceChannelService {
       _capturedAudioInputDeviceId = preferredAudioInputDeviceId;
       final tracks = _localAudioStream!.getAudioTracks();
       _vcLog('[HOLLOW-VC] Got local audio, tracks=${tracks.length}');
+      // A join muted before the mic opened starts with its track off.
+      if (_isMuted) {
+        for (final track in tracks) {
+          track.enabled = false;
+        }
+      }
 
       // Mic gain rides the native post-APM capture processor (makeup gain
       // plus a -3 dBFS limiter). Process-global, so always set it; at 1.0 it
@@ -290,6 +327,7 @@ class VoiceChannelService {
       _vcLog('[HOLLOW-VC] Failed to capture audio: $e');
       // Proceed without audio — user can still hear others.
     }
+    if (!micSettled.isCompleted) micSettled.complete();
 
     if (preferredAudioOutputDeviceId != null) {
       try {
@@ -298,6 +336,24 @@ class VoiceChannelService {
     }
 
     _startVadTimer();
+    unawaited(_reconcileAloneMeter());
+  }
+
+  /// Completes once [startAudio] holds its microphone or gave up on it.
+  Completer<void> _localAudioSettled = Completer<void>();
+
+  /// A leg built before the microphone is open carries no sender, so our
+  /// voice never reaches that peer and our capture never runs (a joiner's
+  /// answer can beat its own getUserMedia). Waits AFTER the leg exists, so
+  /// its early ICE candidates queue on it.
+  /// Bounded: a capture stuck behind an OS prompt must not hold the leg.
+  Future<bool> _awaitLocalAudio(String peerId, RTCPeerConnection pc) async {
+    final settled = _localAudioSettled;
+    if (!settled.isCompleted) {
+      await settled.future
+          .timeout(const Duration(seconds: 5), onTimeout: () {});
+    }
+    return identical(_peerConnections[peerId], pc);
   }
 
   /// Initiate WebRTC connection to a peer who is already in the channel.
@@ -308,6 +364,7 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Creating offer for peer $peerId');
     final pc = await _createPeerConnection(peerId);
     try {
+      if (!await _awaitLocalAudio(peerId, pc)) return;
       _addLocalAudioTracks(pc);
 
       await _enableSframeSender(peerId, pc);
@@ -384,6 +441,7 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Received SDP offer from $peerId');
     final pc = await _createPeerConnection(peerId);
     try {
+      if (!await _awaitLocalAudio(peerId, pc)) return;
       _addLocalAudioTracks(pc);
 
       await _enableSframeSender(peerId, pc);
@@ -534,6 +592,7 @@ class VoiceChannelService {
     onLinkHealth?.call(peerId, const LinkHealthSnapshot());
     final pc = _peerConnections.remove(peerId);
     if (pc != null) {
+      unawaited(_reconcileAloneMeter());
       _vcLog('[HOLLOW-VC] Closing connection to $peerId');
       await pc.close();
       await pc.dispose();
@@ -773,6 +832,11 @@ class VoiceChannelService {
   Future<void> closeAll() async {
     _vcLog('[HOLLOW-VC] Closing all connections');
     _stopVadTimer();
+    // Before the mic stream is stopped below: the loopback sends its track.
+    _aloneMeterOff = true;
+    await _aloneMeter.shutdown();
+    if (!_localAudioSettled.isCompleted) _localAudioSettled.complete();
+    _localAudioSettled = Completer<void>();
     _connecting.clear();
     for (final t in _legRedial.values) {
       t.cancel();
@@ -846,11 +910,13 @@ class VoiceChannelService {
     // room bleed and bury the voice on unmute, since the APM keeps
     // processing real mic input while the track is disabled.
     Helper.setCaptureMuted(muted).catchError((_) {});
+    // Kept before the mic opens too, so a muted join never records.
+    _isMuted = muted;
+    unawaited(_reconcileAloneMeter());
     if (_localAudioStream == null) {
-      _vcLog('[HOLLOW-VC] setMuted($muted) skipped — no local stream yet');
+      _vcLog('[HOLLOW-VC] setMuted($muted) recorded, no local stream yet');
       return;
     }
-    _isMuted = muted;
     for (final track in _localAudioStream!.getAudioTracks()) {
       track.enabled = !_isMuted;
     }
@@ -1283,6 +1349,8 @@ class VoiceChannelService {
     } catch (_) {}
 
     await _swapAudioSendersToTrack(newTrack, newStream);
+    // Moves the loopback onto the new track before the old one is stopped.
+    await _reconcileAloneMeter();
 
     if (oldStream != null) {
       await _disposeReplacedMicStream(oldStream);
@@ -1652,22 +1720,78 @@ class VoiceChannelService {
 
   void _startVadTimer() {
     _vadTimer?.cancel();
-    _vadTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+    _vadTimer = Timer.periodic(pollInterval, (_) {
       _pollAudioLevels();
     });
+  }
+
+  /// Faster while an OBS page streams; a running poll restarts on the new beat.
+  void setPollInterval(Duration interval) {
+    if (interval == pollInterval) return;
+    pollInterval = interval;
+    if (_vadTimer != null) _startVadTimer();
   }
 
   void _stopVadTimer() {
     _vadTimer?.cancel();
     _vadTimer = null;
+    _remoteLevels.clear();
+    onLevels?.call(const {}, 0.0);
+  }
+
+  /// Hands this poll's levels on. Peers whose leg closed drop out.
+  void _emitLevels() {
+    if (_vadTimer == null) return;
+    _remoteLevels.removeWhere((peer, _) => !_peerConnections.containsKey(peer));
+    onLevels?.call(Map.of(_remoteLevels),
+        _isMuted ? 0.0 : levelFromDb(_localSpeakingDetector.levelDb));
+  }
+
+  /// Our capture runs only while a connected leg carries our microphone
+  /// (see [LocalMeterLoopback]); alone, the loopback carries it instead so
+  /// the self ring and the stream overlay keep reading our voice. Desktop
+  /// only: phones keep their audio session untouched. Muted = mic off: a
+  /// muted user alone in a room is not recorded (Vitalik, 2026-10-15).
+  final AloneMeterKeeper<MediaStream, Object> _aloneMeter;
+
+  static AloneMeterKeeper<MediaStream, LocalMeterLoopback> _newAloneMeter() =>
+      AloneMeterKeeper<MediaStream, LocalMeterLoopback>(
+        start: (stream) =>
+            LocalMeterLoopback.open(stream.getAudioTracks().first, stream,
+                log: _vcLog),
+        stop: (loop) => loop.close(),
+        log: _vcLog,
+      );
+
+  static final bool _meterLoopbackPlatform =
+      Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+
+  /// A leg that reached connected keeps its send stream through a held
+  /// `disconnected`, so it still carries our capture.
+  bool _legCarriesCapture(RTCPeerConnection pc) {
+    final s = pc.connectionState;
+    return s == RTCPeerConnectionState.RTCPeerConnectionStateConnected ||
+        s == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected;
+  }
+
+  bool _aloneMeterOff = true;
+
+  Future<void> _reconcileAloneMeter() {
+    if (!_meterLoopbackPlatform) return Future.value();
+    final stream = _localAudioStream;
+    final hasTrack = stream != null && stream.getAudioTracks().isNotEmpty;
+    return _aloneMeter.update(
+      source: !_aloneMeterOff && !_isMuted && hasTrack ? stream : null,
+      alone: !_peerConnections.values.any(_legCarriesCapture),
+    );
   }
 
   Future<void> _pollAudioLevels() async {
     final newSpeaking = <String>{};
 
-    // LOCAL: the native capture meter, one process-global read needing no
-    // peer connection, so it also lights up while you are alone in the
-    // channel. See [LocalSpeakingDetector] for why not getStats.
+    // LOCAL: the native capture meter, one process-global read; alone in
+    // the channel the meter loopback keeps the capture running (see
+    // [_aloneMeter]). See [LocalSpeakingDetector] for why not getStats.
     //
     // Reported as its OWN flag rather than as our peer id inside the set,
     // mirroring the 1:1 path: the set is keyed by ROUTABLE device ids and
@@ -1698,6 +1822,7 @@ class VoiceChannelService {
         ..addAll(newSpeaking);
       onSpeakingChanged?.call(Set.of(_speakingPeers), _localSpeaking);
     }
+    _emitLevels();
   }
 
   /// One-shot diagnostic, twin of the one in `voice_service.dart`. Logged
@@ -1756,6 +1881,8 @@ class VoiceChannelService {
         switch (report.type) {
           case 'inbound-rtp':
             remote = _detectSpeech(report.values, 'in-$peerId');
+            _remoteLevels[peerId] =
+                levelFromAudioLevel(report.values['audioLevel'] as num?);
             // Local: media-source carries audioLevel on Android,
             // outbound-rtp on desktop. Take either, keeping SEPARATE energy
             // keys so one's totalAudioEnergy fallback cannot consume the
@@ -1841,6 +1968,7 @@ class VoiceChannelService {
   void _onPeerConnectionState(
       String peerId, RTCPeerConnection pc, RTCPeerConnectionState state) {
     _vcLog('[HOLLOW-VC] Connection state with $peerId: $state');
+    unawaited(_reconcileAloneMeter());
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       onPeerConnected?.call(peerId);
       _logIceRoute(peerId, pc);

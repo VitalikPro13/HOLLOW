@@ -23,6 +23,7 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
+import 'package:hollow/src/core/providers/voice_level_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -33,6 +34,7 @@ import 'package:hollow/src/core/services/ice_repair.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
 import 'package:hollow/src/core/services/link_watchdog.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
+import 'package:hollow/src/core/services/overlay_mic.dart';
 import 'package:hollow/src/core/services/realtime_session_flag.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/share_audio_level.dart';
@@ -355,6 +357,8 @@ class CallNotifier extends Notifier<CallState> {
   @override
   CallState build() {
     ref.listen(siblingCallProvider, (_, _) => _onSiblingCall());
+    ref.listen<Duration>(voicePollIntervalProvider,
+        (_, next) => _voiceService?.setPollInterval(next));
     return const CallState();
   }
 
@@ -390,6 +394,7 @@ class CallNotifier extends Notifier<CallState> {
   }
 
   void _wireCallbacks() {
+    _voiceService!.isCallLive = () => state.status != CallStatus.idle;
     // SFrame heal-lite: on sustained cryptor failure the service rebinds its
     // receiver and pings us to re-apply the static call key.
     _voiceService!.onSframeHealNeeded = () {
@@ -448,6 +453,11 @@ class CallNotifier extends Notifier<CallState> {
           // Sidechain: anyone talking pulls received share audio down.
           ShareAudioLevel.setSpeaking(localSpeaking || remoteSpeaking);
         };
+        // Levels ride their own provider: no speaking-cue widget rebuilds per tick.
+        _voiceService!.onLevels = (local, remote) => ref
+            .read(callLevelProvider.notifier)
+            .set(local: local, remote: remote);
+        _voiceService!.pollInterval = ref.read(voicePollIntervalProvider);
         _voiceService!.startVad();
 
         {
@@ -1008,6 +1018,19 @@ class CallNotifier extends Notifier<CallState> {
         await _cleanup();
       }
     });
+
+    // The call will open the mic once they answer; listening stops now.
+    await _yieldOverlayMic();
+  }
+
+  /// Stops listening for the overlay and waits for the mic to be free. Every
+  /// way out of a call ends in `_cleanup`, which hands it back; a call that
+  /// already ended while this waited hands it back here.
+  Future<void> _yieldOverlayMic() async {
+    await overlayMic.yieldToCall(OverlayMicHold.dmCall);
+    if (state.status == CallStatus.idle) {
+      overlayMic.release(OverlayMicHold.dmCall);
+    }
   }
 
   /// Accept an incoming call.
@@ -1030,6 +1053,7 @@ class CallNotifier extends Notifier<CallState> {
 
     // Leave any voice channel before the call media comes up (issue #49).
     await _leaveVoiceChannelIfActive();
+    await _yieldOverlayMic();
     // The caller may have hung up while the channel tore down.
     if (state.status != CallStatus.connecting || state.callId != callId) {
       return;
@@ -2482,7 +2506,10 @@ class CallNotifier extends Notifier<CallState> {
       unawaited(Helper.setSpeakerphoneOn(false).catchError((_) {}));
       ref.read(audioRouteProvider.notifier).reset();
     }
+    ref.read(callLevelProvider.notifier).reset();
     state = const CallState();
+    // The call's media is gone: listening for the overlay may resume.
+    overlayMic.release(OverlayMicHold.dmCall);
   }
 
   /// Whether share audio arriving from [peerId] may play (HOL-SEC-058): only the

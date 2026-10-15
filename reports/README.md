@@ -14,7 +14,6 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 |---|---|---|
 | `planned/relay-and-sync/MULTI_RELAY_CLIENT_PLAN.md` | relay-and-sync | One client holding sockets to several relays, servers and friendships bound to the relay they live on, no relay-to-relay protocol. Designed 2026-09-12. |
 | `planned/relay-and-sync/STORAGE_NODES_PLAN.md` | relay-and-sync | Always-on storage nodes that members bring: a Worker in front of a volunteer's own R2 bucket with an enforced quota and zero-bill guards, or a self-hosted blob service beside a relay or on a NAS; server pools and personal nodes, one protocol. Designed 2026-09-17. |
-| `planned/voice-and-media/STREAM_OVERLAY_PLAN.md` | voice-and-media | Issue #97: a reactive voice-room overlay for OBS served on 127.0.0.1, per-state looks set by each person, shared only on request to friends and people in the same voice room, three toggles. Designed 2026-10-10. |
 | `planned/security/SECURITY_AUDIT_PLAN.md` | security | How professional audits of encrypted messengers are run, the method Hollow adopts (claims, threat model, authorisation matrix, hostile harness, variant analysis), the program, and the identity authority design. Its working files live in `planned/security/audit/`. Started 2026-09-26. |
 
 ## Shipped
@@ -37,6 +36,7 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 | `shipped/performance/PERFORMANCE_REPORT.md` | performance | Windows GPU and CPU optimisation pass, May 2026. |
 | `shipped/performance/backend_report.md` | performance | Rust backend hot-path audit, May 2026 (the `MessageStore::open` finding). |
 | `shipped/performance/PERFORMANCE_AUDIT_2026_07.md` | performance | July 2026 audit and the same-day fix pass, with the deviations recorded. |
+| `shipped/voice-and-media/STREAM_OVERLAY_PLAN.md` | voice-and-media | Issue #97: a reactive voice-room overlay for OBS served on 127.0.0.1, per-state looks set by each person, shared only on request to friends and people in the same voice room. Designed 2026-10-10, built 2026-10-15. |
 | `shipped/voice-and-media/MEDIA_FORWARDING_PLAN.md` | voice-and-media | Resolution capping, originator attribution, SFrame packet forwarders; phase 3 built 2026-08-08. |
 | `shipped/voice-and-media/FLUTTER_WEBRTC_152_REBASE_SPEC.md` | voice-and-media | The fork rebase from 1.4.1 to 1.5.2 and the three adopt-upstream decisions. |
 | `shipped/voice-and-media/CONFERENCES_PLAN.md` | voice-and-media | Zoom-style rooms with a waiting room; admission is the MLS add. |

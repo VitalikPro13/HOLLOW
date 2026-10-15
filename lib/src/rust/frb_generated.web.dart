@@ -14,6 +14,8 @@ import 'api/emotes.dart';
 import 'api/gifs.dart';
 import 'api/identity.dart';
 import 'api/network.dart';
+import 'api/overlay.dart';
+import 'api/overlay_server.dart';
 import 'api/recovery.dart';
 import 'api/roster.dart';
 import 'api/screen_audio.dart';
@@ -342,6 +344,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MutedMemberFfi> dco_decode_list_muted_member_ffi(dynamic raw);
 
   @protected
+  List<OverlayPersonFfi> dco_decode_list_overlay_person_ffi(dynamic raw);
+
+  @protected
   List<OwnSupportCred> dco_decode_list_own_support_cred(dynamic raw);
 
   @protected
@@ -521,6 +526,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ShowcaseAsset>? dco_decode_opt_list_showcase_asset(dynamic raw);
+
+  @protected
+  OverlayImageFfi dco_decode_overlay_image_ffi(dynamic raw);
+
+  @protected
+  OverlayLinksFfi dco_decode_overlay_links_ffi(dynamic raw);
+
+  @protected
+  OverlayPersonFfi dco_decode_overlay_person_ffi(dynamic raw);
+
+  @protected
+  OverlayServerStatusFfi dco_decode_overlay_server_status_ffi(dynamic raw);
+
+  @protected
+  OverlaySettingsFfi dco_decode_overlay_settings_ffi(dynamic raw);
 
   @protected
   OwnSupportCred dco_decode_own_support_cred(dynamic raw);
@@ -1081,6 +1101,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<OverlayPersonFfi> sse_decode_list_overlay_person_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<OwnSupportCred> sse_decode_list_own_support_cred(
     SseDeserializer deserializer,
   );
@@ -1318,6 +1343,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ShowcaseAsset>? sse_decode_opt_list_showcase_asset(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  OverlayImageFfi sse_decode_overlay_image_ffi(SseDeserializer deserializer);
+
+  @protected
+  OverlayLinksFfi sse_decode_overlay_links_ffi(SseDeserializer deserializer);
+
+  @protected
+  OverlayPersonFfi sse_decode_overlay_person_ffi(SseDeserializer deserializer);
+
+  @protected
+  OverlayServerStatusFfi sse_decode_overlay_server_status_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  OverlaySettingsFfi sse_decode_overlay_settings_ffi(
     SseDeserializer deserializer,
   );
 
@@ -2035,6 +2079,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_overlay_person_ffi(
+    List<OverlayPersonFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_own_support_cred(
     List<OwnSupportCred> self,
     SseSerializer serializer,
@@ -2346,6 +2396,36 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_list_showcase_asset(
     List<ShowcaseAsset>? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_overlay_image_ffi(
+    OverlayImageFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_overlay_links_ffi(
+    OverlayLinksFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_overlay_person_ffi(
+    OverlayPersonFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_overlay_server_status_ffi(
+    OverlayServerStatusFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_overlay_settings_ffi(
+    OverlaySettingsFfi self,
     SseSerializer serializer,
   );
 

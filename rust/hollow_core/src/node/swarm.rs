@@ -781,6 +781,9 @@ async fn run_event_loop(
     let mut pending_file_asks: std::collections::HashMap<String, file_asks::PendingFileAsk> =
         std::collections::HashMap::new();
 
+    // Stream overlay looks we are pulling and whom we asked (node/overlay.rs).
+    let mut overlay_book = super::overlay::OverlayBook::new();
+
     // Guest public-file downloads: file_id -> (server_id, asked device, requested-at). The receipt
     // cap for plaintext `PublicFileHeader`s, mirroring `pending_asset_asks`: an
     // unsolicited header would register a decrypt key and let a stranger stream
@@ -1431,6 +1434,10 @@ async fn run_event_loop(
         tokio::time::interval(Duration::from_secs(emotes::ASSET_RETRY_SECS));
     asset_retry_timer.tick().await; // consume immediate first tick
 
+    // Stream overlay asks: in-memory unless a field or the people list changed.
+    let mut overlay_timer = tokio::time::interval(Duration::from_millis(if cfg!(test) { 300 } else { 2000 }));
+    overlay_timer.tick().await; // consume immediate first tick
+
     // Temporary channel-grant expiry sweep. The predicate is lazy (an expired grant
     // already reads as denied); this timer drives the CONSEQUENCES: MLS subgroup
     // leaf removal (coordinator-gated, idempotent), voice eviction, and a
@@ -1536,6 +1543,7 @@ async fn run_event_loop(
                     &mut pending_friend_removals,
                     &mut answer_resent,
                     &mut pending_asset_asks,
+                    &mut overlay_book,
                     &mut pending_file_asks,
                     &pending_ws_transfers,
                     &mut pending_public_file_requests,
@@ -2034,6 +2042,12 @@ async fn run_event_loop(
                             server_id, CrdtPayload::StickerRemoved { hash },
                             &crypto_store, &crdt_store,
                         ).await { continue; }
+                    }
+
+                    cmd @ (NodeCommand::OverlaySetFlags { .. } | NodeCommand::OverlaySetOwnLook { .. } | NodeCommand::OverlayRefresh) => {
+                        super::overlay::handle_command(
+                            Box::new(cmd), &mut overlay_book, &master_keypair, &db_path, &db_passphrase,
+                        ).await;
                     }
 
                     NodeCommand::RequestEmotes { hashes, kind, server_id, peer_hint } => {
@@ -2595,7 +2609,7 @@ async fn run_event_loop(
                         social::handle_block_changed(
                             &ws_cmd_tx, &mut pending_messages, &local_peer_str, &master, blocked,
                             &db_path, &db_passphrase,
-                        );
+                        ).await;
                         let (m, db, pass) = (super::resolver::resolve(&master), db_path.clone(), db_passphrase.clone());
                         if let Ok(Some(entry)) = tokio::task::spawn_blocking(move || social::own_block_entry(&m, &db, &pass)).await {
                             social::share_block_with_siblings(&ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id, entry);
@@ -3373,6 +3387,7 @@ async fn run_event_loop(
                                 &mut pending_friend_removals,
                                 &mut answer_resent,
                                 &mut pending_asset_asks,
+                                &mut overlay_book,
                                 &mut pending_file_asks,
                                 &pending_ws_transfers,
                                 &mut pending_public_file_requests,
@@ -3772,6 +3787,7 @@ async fn run_event_loop(
                         // who was asked over the dead connection is dropped,
                         // because a new socket means a fresh set of holders.
                         emotes::reset_asked_on_disconnect(&mut pending_asset_asks);
+                        overlay_book.reset_on_disconnect();
                         // File pulls outlive the socket for the same reason:
                         // the queued Download waits for its holder, and only
                         // what the dead connection told us is dropped.
@@ -5103,6 +5119,7 @@ async fn run_event_loop(
                                 &mut pending_friend_removals,
                                 &mut answer_resent,
                                 &mut pending_asset_asks,
+                                &mut overlay_book,
                                 &mut pending_file_asks,
                                 &pending_ws_transfers,
                                 &mut pending_public_file_requests,
@@ -5617,6 +5634,7 @@ async fn run_event_loop(
                                             &mut pending_friend_removals,
                                             &mut answer_resent,
                                             &mut pending_asset_asks,
+                                            &mut overlay_book,
                                             &mut pending_file_asks,
                                             &pending_ws_transfers,
                                             &mut pending_public_file_requests,
@@ -6672,6 +6690,24 @@ async fn run_event_loop(
             // Asset-rail retry sweep. Cheap by construction: an empty pending
             // table returns before it touches SQLCipher, and a non-empty one
             // opens the store at most once for the whole tick.
+            _ = overlay_timer.tick() => {
+                arm_started = Some(("timer", "overlay", std::time::Instant::now()));
+                super::overlay::on_timer(&mut overlay_book, mls.as_mut(), super::overlay::TimerCtx {
+                    event_tx: &event_tx,
+                    ws_cmd_tx: &ws_cmd_tx,
+                    ws_room_peers: &ws_room_peers,
+                    voice_channel_participants: &voice_channel_participants,
+                    server_states: &server_states,
+                    crypto_store: &crypto_store,
+                    master_keypair: &master_keypair,
+                    local_master: &local_peer_str,
+                    device_peer_id: &device_peer_id,
+                    is_invisible,
+                    db_path: &db_path,
+                    db_passphrase: &db_passphrase,
+                }).await;
+            }
+
             _ = asset_retry_timer.tick() => {
                 arm_started = Some(("timer", "asset_retry", std::time::Instant::now()));
                 emotes::retry_stale_asks(
@@ -7596,7 +7632,10 @@ async fn after_welcome_joined(
 }
 
 
-/// Handle an incoming request from a peer.
+/// Handle an incoming request from a peer. Boxed: four call sites in `run_event_loop`
+/// would each hold the body's future, the union of every arm, in a debug poll frame
+/// that sits near the worker stack.
+#[allow(clippy::too_many_arguments)]
 async fn handle_incoming_request(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
@@ -7658,6 +7697,104 @@ async fn handle_incoming_request(
     pending_friend_removals: &mut std::collections::HashSet<String>,
     answer_resent: &mut std::collections::HashSet<String>,
     pending_asset_asks: &mut HashMap<String, emotes::PendingAsk>,
+    overlay_book: &mut super::overlay::OverlayBook,
+    pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
+    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
+    pending_public_file_requests: &mut HashMap<String, (String, String, std::time::Instant)>,
+    requested_file_receipts: &mut HashMap<String, std::time::Instant>,
+    declined_file_ids: &mut std::collections::HashSet<String>,
+    peer_auto_dl: &mut HashMap<String, u32>,
+    fwd_bridge: FwdBridge<'_>,
+    request: HavenMessage,
+    // When the sender sealed the frame: what carried signals are judged fresh by.
+    frame_ts_ms: i64,
+    // A `MessageEnvelope::Carried` decrypted here and when it was written, for the
+    // caller to dispatch next.
+    carried_out: &mut Option<(Box<HavenMessage>, i64)>,
+) {
+    Box::pin(handle_incoming_request_inner(
+        olm, crypto_store, crdt_store, event_tx, pending_messages, frame_budget, key_request_in_flight,
+        server_states, bundle_keypair, master_keypair, device_keypair, master_peer_str, device_peer_id,
+        pending_server_joins, join_request_seen, join_resolutions, awaiting_mls_after_parked_join,
+        crdt_store_actor, pending_sync_requests, mls, mls_bootstrap_requested, mls_welcome_grace,
+        relay_catchup_done, pending_file_streams, pending_shard_streams, early_file_streams,
+        pending_link_snapshots, vault_shard_asks, link, decrypt_fail_cooldown, pending_mls_key_packages,
+        pending_mls_removals, mls_epoch_hint_cooldown, ws_cmd_tx, ws_room_peers, webrtc_peers, share_registry,
+        pending_webrtc_sends, channel_sync_sent, slow_mode_clock, gossip_overlays, voice_channel_participants,
+        voice_channel_gossip_mode, call_book, conference_host, vc_signal_rate_tokens, mls_dirty, guest_rooms,
+        subscribed_channels, db_path, db_passphrase, local_peer_str, peer_str, is_invisible,
+        pending_friend_accepts, pending_friend_requests, pending_friend_removals, answer_resent,
+        pending_asset_asks, overlay_book, pending_file_asks, pending_ws_transfers,
+        pending_public_file_requests, requested_file_receipts, declined_file_ids, peer_auto_dl, fwd_bridge,
+        request, frame_ts_ms, carried_out,
+    ))
+    .await
+}
+
+/// The body of [`handle_incoming_request`].
+#[allow(clippy::too_many_arguments)]
+async fn handle_incoming_request_inner(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    crdt_store: &super::crdt_store::CrdtStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    frame_budget: &mut super::frame_budget::FrameBudget,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    server_states: &mut HashMap<String, ServerState>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    // THIS device's keypair — signs the Olm key exchange (Fix A/B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    master_peer_str: &str,
+    device_peer_id: &str,
+    pending_server_joins: &mut HashMap<String, PendingJoin>,
+    join_request_seen: &mut HashMap<String, std::time::Instant>,
+    join_resolutions: &mut HashMap<String, i64>,
+    awaiting_mls_after_parked_join: &mut std::collections::HashSet<String>,
+    crdt_store_actor: &super::crdt_store::CrdtStore,
+    pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
+    mls: &mut Option<MlsManager>,
+    mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    mls_welcome_grace: &mut HashMap<String, std::time::Instant>,
+    relay_catchup_done: &mut std::collections::HashSet<(String, String)>,
+    pending_file_streams: &mut HashMap<String, PendingFileStream>,
+    pending_shard_streams: &mut HashMap<String, PendingShardStream>,
+    early_file_streams: &mut HashMap<String, EarlyStream>,
+    pending_link_snapshots: &mut HashMap<String, file_handler::LinkSnapshotState>,
+    vault_shard_asks: &mut vault_ops::ShardAsks,
+    link: &mut link_handler::LinkState,
+    decrypt_fail_cooldown: &mut HashMap<String, std::time::Instant>,
+    pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+    mls_epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    share_registry: &super::share_handler::ShareRegistry,
+    pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
+    channel_sync_sent: &mut HashMap<String, std::time::Instant>,
+    slow_mode_clock: &mut message_ops::SlowModeClock,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
+    voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    call_book: &mut super::call_book::CallBook,
+    conference_host: &mut HashMap<String, super::conference::ConferenceHostState>,
+    vc_signal_rate_tokens: &mut HashMap<String, (u32, std::time::Instant)>,
+    mls_dirty: &mut bool,
+    guest_rooms: &super::guest_view::GuestView,
+    subscribed_channels: &HashMap<String, Vec<String>>,
+    db_path: &str,
+    db_passphrase: &str,
+    local_peer_str: &str,
+    peer_str: &str,
+    is_invisible: bool,
+    pending_friend_accepts: &mut HashMap<String, i64>,
+    pending_friend_requests: &mut HashMap<String, i64>,
+    pending_friend_removals: &mut std::collections::HashSet<String>,
+    answer_resent: &mut std::collections::HashSet<String>,
+    pending_asset_asks: &mut HashMap<String, emotes::PendingAsk>,
+    overlay_book: &mut super::overlay::OverlayBook,
     pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
     pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     pending_public_file_requests: &mut HashMap<String, (String, String, std::time::Instant)>,
@@ -11376,7 +11513,7 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk, card } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk, card, stream_overlay } => {
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
@@ -11392,7 +11529,7 @@ async fn handle_incoming_request(
                                     device_list, avatar_hash, banner_hash, showcase_board,
                                     showcase_assets_b64, showcase_assets_hash, avatar_frame,
                                     avatar_anim, banner_anim, support_creds,
-                                    support_creds_sig, profile_sig, profile_pk,
+                                    support_creds_sig, profile_sig, profile_pk, stream_overlay,
                                     super::frame_auth::stamp_ceiling(frame_ts_ms),
                                     db_path, db_passphrase,
                                 ).await;
@@ -12673,7 +12810,7 @@ async fn handle_incoming_request(
                 } else {
                     super::blocklist::unblock(master);
                 }
-                social::handle_block_changed(ws_cmd_tx, pending_messages, local_peer_str, master, *blocked, db_path, db_passphrase);
+                social::handle_block_changed(ws_cmd_tx, pending_messages, local_peer_str, master, *blocked, db_path, db_passphrase).await;
             }
             if !blocks_changed.is_empty() {
                 let _ = event_tx.send(NetworkEvent::BlockListChanged).await;
@@ -13498,7 +13635,7 @@ async fn handle_incoming_request(
             peer_auto_dl.insert(peer_str.to_string(), mb);
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk, card } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk, card, stream_overlay } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {
@@ -13688,6 +13825,7 @@ async fn handle_incoming_request(
                 social::sanitize_incoming_anim(banner_anim.as_deref()),
                 support_creds.as_deref(),
                 support_creds_sig.as_deref(),
+                stream_overlay.as_deref(),
                 super::frame_auth::stamp_ceiling(frame_ts_ms),
                 db_path, db_passphrase,
             );
@@ -14257,6 +14395,13 @@ async fn handle_incoming_request(
                 ws_cmd_tx, ws_room_peers, event_tx, pending_asset_asks,
                 peer_str, bundle_json, missing, local_peer_str,
                 db_path, db_passphrase,
+            ).await;
+        }
+
+        msg @ (HavenMessage::OverlayLookAsk { .. } | HavenMessage::OverlayLookAnswer { .. }) => {
+            super::overlay::handle_envelope(
+                Box::new(msg), overlay_book, ws_cmd_tx, event_tx, peer_str, local_peer_str, device_peer_id,
+                voice_channel_participants, call_book, db_path, db_passphrase,
             ).await;
         }
 

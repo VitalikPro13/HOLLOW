@@ -2492,6 +2492,22 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String channelName,
     String? category,
   }) = NetworkEvent_PublicChannelConfigChanged;
+
+  /// A look for `master` arrived (theirs, or ours from another of our devices).
+  const factory NetworkEvent.overlayLookReceived({required String master}) =
+      NetworkEvent_OverlayLookReceived;
+
+  /// `master` turned "Let others show me" off and left our overlay.
+  const factory NetworkEvent.overlayPersonRemoved({required String master}) =
+      NetworkEvent_OverlayPersonRemoved;
+
+  /// `master`'s stream overlay field changed.
+  const factory NetworkEvent.overlayFieldChanged({required String master}) =
+      NetworkEvent_OverlayFieldChanged;
+  const factory NetworkEvent.overlayPortChanged({required int port}) =
+      NetworkEvent_OverlayPortChanged;
+  const factory NetworkEvent.overlayStreamsChanged({required int open}) =
+      NetworkEvent_OverlayStreamsChanged;
 }
 
 /// A piece of imported shop art and who made it.

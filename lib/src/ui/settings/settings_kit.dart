@@ -249,6 +249,13 @@ class SettingsRow extends StatelessWidget {
   /// The title in the console voice, for a thing the protocol names (a relay).
   final bool monoTitle;
 
+  /// The title's colour when it names a person in their name colour.
+  final Color? titleColor;
+
+  /// Pins [trailing] beside the title instead of centring it, so a control
+  /// whose explanation changes length never moves.
+  final bool trailingTop;
+
   const SettingsRow({
     super.key,
     required this.title,
@@ -260,6 +267,8 @@ class SettingsRow extends StatelessWidget {
     this.enabled = true,
     this.titleTrailing,
     this.monoTitle = false,
+    this.titleColor,
+    this.trailingTop = false,
   });
 
   @override
@@ -271,7 +280,10 @@ class SettingsRow extends StatelessWidget {
             : touch
                 ? HollowTypography.bodyTouch
                 : HollowTypography.body)
-        .copyWith(color: enabled ? hollow.textPrimary : hollow.textSecondary);
+        .copyWith(
+            color: !enabled
+                ? hollow.textSecondary
+                : (titleColor ?? hollow.textPrimary));
     final sub = subtitleWidget ??
         (subtitle == null
             ? null
@@ -327,6 +339,9 @@ class SettingsRow extends StatelessWidget {
                 ],
               )
             : Row(
+                crossAxisAlignment: trailingTop
+                    ? CrossAxisAlignment.start
+                    : CrossAxisAlignment.center,
                 children: [
                   if (leading != null) ...[
                     leading!,
@@ -353,12 +368,20 @@ class SettingsSwitchRow extends StatelessWidget {
   /// Null disables the switch.
   final ValueChanged<bool>? onChanged;
 
+  /// Beside the title, as on [SettingsRow].
+  final Widget? titleTrailing;
+
+  /// As on [SettingsRow].
+  final bool trailingTop;
+
   const SettingsSwitchRow({
     super.key,
     required this.title,
     this.subtitle,
     required this.value,
     required this.onChanged,
+    this.titleTrailing,
+    this.trailingTop = false,
   });
 
   @override
@@ -367,6 +390,8 @@ class SettingsSwitchRow extends StatelessWidget {
       title: title,
       subtitle: subtitle,
       enabled: onChanged != null,
+      titleTrailing: titleTrailing,
+      trailingTop: trailingTop,
       trailing: HollowToggle(
         value: value,
         onChanged: onChanged,
@@ -386,6 +411,9 @@ class SettingsChoiceRow<T> extends StatelessWidget {
   /// Null disables the chips.
   final ValueChanged<T>? onChanged;
 
+  /// Beside the title, as on [SettingsRow].
+  final Widget? titleTrailing;
+
   const SettingsChoiceRow({
     super.key,
     required this.title,
@@ -393,6 +421,7 @@ class SettingsChoiceRow<T> extends StatelessWidget {
     required this.value,
     required this.options,
     required this.onChanged,
+    this.titleTrailing,
   });
 
   @override
@@ -402,6 +431,7 @@ class SettingsChoiceRow<T> extends StatelessWidget {
       subtitle: subtitle,
       wideTrailing: true,
       enabled: onChanged != null,
+      titleTrailing: titleTrailing,
       trailing: Wrap(
         spacing: HollowSpacing.sm,
         runSpacing: HollowSpacing.sm,
@@ -436,6 +466,9 @@ class SettingsSliderRow extends StatelessWidget {
   final ValueChanged<double>? onChangeEnd;
   final double sliderWidth;
 
+  /// Beside the title, as on [SettingsRow].
+  final Widget? titleTrailing;
+
   const SettingsSliderRow({
     super.key,
     required this.title,
@@ -449,6 +482,7 @@ class SettingsSliderRow extends StatelessWidget {
     this.onChangeStart,
     this.onChangeEnd,
     this.sliderWidth = 200,
+    this.titleTrailing,
   });
 
   @override
@@ -481,6 +515,7 @@ class SettingsSliderRow extends StatelessWidget {
       subtitle: subtitle,
       enabled: onChanged != null,
       wideTrailing: true,
+      titleTrailing: titleTrailing,
       trailing: touch
           ? Row(children: [Expanded(child: slider), readout])
           : Row(

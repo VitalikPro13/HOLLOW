@@ -394,6 +394,16 @@ pub fn ffz_import_emote(image_url: String) -> Result<ProcessedEmote, String> {
 mod tests {
     use super::*;
 
+    /// Dart cannot open a generic rail pull of stream overlay images: the rail has no
+    /// such kind, they move only through the gated overlay answer.
+    #[test]
+    fn the_generic_pull_refuses_the_overlay_kind() {
+        let hashes = || vec!["a".repeat(64)];
+        assert_eq!(request_assets(hashes(), "overlay".into(), None, None), Err("Unknown asset kind: overlay".into()));
+        let emote = request_assets(hashes(), "emote".into(), None, None);
+        assert!(!emote.is_err_and(|e| e.starts_with("Unknown asset kind")), "CONTROL: the emote kind is known");
+    }
+
     #[test]
     fn emote_token_shape() {
         let h = "a".repeat(64);

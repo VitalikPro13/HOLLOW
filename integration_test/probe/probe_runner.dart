@@ -19,6 +19,10 @@ import 'package:hollow/src/core/providers/theme_provider.dart'
 import 'package:hollow/src/core/services/attachment_export.dart'
     show exportAttachmentTo;
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
+import 'package:hollow/src/core/providers/overlay_mic_provider.dart';
+import 'package:hollow/src/core/providers/overlay_runtime_provider.dart';
+import 'package:hollow/src/core/providers/overlay_settings_provider.dart';
+import 'package:hollow/src/core/models/overlay_look.dart';
 import 'package:hollow/src/core/services/image_pick.dart';
 import 'package:hollow/src/core/services/window_fullscreen.dart'
     show fullscreenProvider;
@@ -82,6 +86,10 @@ import 'probe_targets.dart';
 /// | `focus_state` | | who owns the keyboard, in Flutter and in Win32 |
 /// | `expect_window_same` | `name` | fails unless the window matches a snapshot |
 /// | `zoom` | `value` (1.5 = 150%) | sets the interface zoom, not saved |
+/// | `overlay_listen` | `value` (`on`, `off`) | listening for the stream overlay |
+/// | `overlay_server` | `value` (`on`, `off`) | the OBS overlay server; links in the dump |
+/// | `overlay_look` | `value` (`set`, `clear`), `images`, `effects` | our own look from fixture files |
+/// | `overlay_person` | `value` (`add`, `remove`), `master` | a person on our overlay |
 /// | `log` | `message` | a note in the results |
 /// | `quit` | | ends a live session |
 ///
@@ -362,6 +370,82 @@ class ProbeRunner {
     return 'theme ${light ? 'light' : 'dark'}';
   }
 
+  /// "Listen to my mic now" without the Settings tab: `on` starts the overlay
+  /// server when it is off, then listening. The dump's `overlayMic` key says
+  /// off, paused or listening.
+  Future<String> _overlayListen(Map<String, dynamic> step) async {
+    final c = container;
+    if (c == null) throw _ProbeFailure('overlay_listen needs the provider container');
+    if (step['value'] == 'on') {
+      if (!c.read(overlayServerRunningProvider)) {
+        await c.read(overlayServerProvider.notifier).setEnabled(true);
+      }
+      await c.read(overlayMicProvider.notifier).turnOn();
+    } else {
+      await c.read(overlayMicProvider.notifier).turnOff();
+    }
+    await settle(frames: step['frames'] as int? ?? 10);
+    final s = c.read(overlayMicProvider);
+    return 'overlay mic on=${s.on} listening=${s.listening}';
+  }
+
+  /// "Run the overlay for OBS". The answer and the dump's `overlay` key carry
+  /// the links, so a runner can curl `/events` on this machine.
+  Future<String> _overlayServer(Map<String, dynamic> step) async {
+    final c = container;
+    if (c == null) throw _ProbeFailure('overlay_server needs the provider container');
+    final on = step['value'] == 'on';
+    await c.read(overlayServerProvider.notifier).setEnabled(on);
+    await settle(frames: step['frames'] as int? ?? 10);
+    final s = c.read(overlayServerProvider);
+    return 'overlay server running=${s.status.running} port=${s.status.port} '
+        'room=${s.links?.room ?? '-'}';
+  }
+
+  /// Our own look: `set` processes each `images` entry (state name -> file
+  /// path) and saves them with optional `effects` (manifest keys); `clear`
+  /// saves an empty look.
+  Future<String> _overlayLook(Map<String, dynamic> step) async {
+    final c = container;
+    if (c == null) throw _ProbeFailure('overlay_look needs the provider container');
+    final own = c.read(overlayOwnProvider.notifier);
+    var look = OverlayLook.empty();
+    if (step['value'] != 'clear') {
+      final images = (step['images'] as Map?)?.cast<String, dynamic>() ?? {};
+      for (final e in images.entries) {
+        final state = OverlayLookState.values.where((s) => s.name == e.key);
+        if (state.isEmpty) throw _ProbeFailure('overlay_look: no state ${e.key}');
+        final img = await own.processImage(e.value as String);
+        look = look.withState(state.first, img.hash);
+      }
+      final effects = (step['effects'] as Map?)?.cast<String, dynamic>();
+      if (effects != null) {
+        look = look.copyWith(effects: OverlayEffects.fromMap(effects));
+      }
+    }
+    final saved = await own.saveLook(look);
+    await settle(frames: step['frames'] as int? ?? 10);
+    return 'overlay look stamp=${saved.stamp} images=${saved.hashes.length}';
+  }
+
+  /// Adds or removes a person by `master` (a captured peer id).
+  Future<String> _overlayPerson(Map<String, dynamic> step) async {
+    final c = container;
+    if (c == null) throw _ProbeFailure('overlay_person needs the provider container');
+    final master = step['master'] as String?;
+    if (master == null || master.isEmpty) {
+      throw _ProbeFailure('overlay_person needs a master');
+    }
+    final people = c.read(overlayPeopleProvider.notifier);
+    if (step['value'] == 'remove') {
+      final removed = await people.remove(master);
+      return 'overlay person removed=$removed';
+    }
+    final slot = await people.add(master);
+    await settle(frames: step['frames'] as int? ?? 10);
+    return 'overlay person slot=$slot';
+  }
+
   /// The interface zoom for this run only: the state, never the saved setting,
   /// so a probe cannot leave a fixture zoomed.
   Future<String> _zoom(Map<String, dynamic> step) async {
@@ -387,6 +471,18 @@ class ProbeRunner {
   Future<String> _dispatch(
       String op, Map<String, dynamic> step, Map<String, dynamic> extra) async {
     switch (op) {
+      case 'overlay_listen':
+        return _overlayListen(step);
+
+      case 'overlay_server':
+        return _overlayServer(step);
+
+      case 'overlay_look':
+        return _overlayLook(step);
+
+      case 'overlay_person':
+        return _overlayPerson(step);
+
       case 'zoom':
         return _zoom(step);
 

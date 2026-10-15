@@ -35,6 +35,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart' show dmCallPeerName;
 import 'package:hollow/src/ui/components/connection_visual.dart';
 import 'package:hollow/src/ui/components/download_icon_button.dart';
+import 'package:hollow/src/ui/components/overlay_mic_indicator.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_count_badge.dart';
@@ -143,6 +144,8 @@ class BottomBar extends ConsumerWidget {
                 const SizedBox(width: HollowSpacing.sm),
                 _Places(location: location, fold: fold),
                 const _DockDivider(),
+                const OverlayMicIndicator(
+                    padding: EdgeInsets.only(right: HollowSpacing.sm)),
                 const DownloadIconButton(),
                 const SizedBox(width: HollowSpacing.xs),
                 const _HelpButton(),

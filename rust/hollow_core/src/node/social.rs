@@ -505,7 +505,8 @@ pub(crate) fn leave_dm_room(
 
 /// Act on a block or unblock of `master` the FFI just stored: leave the DM room and
 /// drop the DMs still waiting to be resent, or rejoin a room the row holds again.
-pub(crate) fn handle_block_changed(
+/// The friend row is read on a blocking thread, never on the event loop.
+pub(crate) async fn handle_block_changed(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     local_master: &str,
@@ -520,10 +521,15 @@ pub(crate) fn handle_block_changed(
         super::message_ops::drop_blocked_queues(pending_messages);
         return;
     }
-    let holds = crate::storage::MessageStore::open(db_path, db_passphrase)
-        .ok()
-        .and_then(|st| st.get_friend_row(&master).ok().flatten())
-        .is_some_and(|(status, direction, _)| holds_dm_room(&master, &status, &direction));
+    let (m, db, pass) = (master.clone(), db_path.to_string(), db_passphrase.to_string());
+    let holds = tokio::task::spawn_blocking(move || {
+        crate::storage::MessageStore::open(&db, &pass)
+            .ok()
+            .and_then(|st| st.get_friend_row(&m).ok().flatten())
+            .is_some_and(|(status, direction, _)| holds_dm_room(&m, &status, &direction))
+    })
+    .await
+    .unwrap_or(false);
     if holds && !super::resolver::same_identity(local_master, &master) {
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
             room_code: dm_room_code(local_master, &master),
@@ -596,6 +602,7 @@ pub(crate) fn take_sibling_blocks(
         if blocked {
             if blocked_since.is_none() && at > store.block_lifted_at(&master) && store.block_peer_at(&master, at).is_ok() {
                 hollow_log!("[HOLLOW-MULTIDEV] Blocked {master}, as our other device did");
+                super::overlay::forget_blocked(&store, &master);
                 changed.push((master, true));
             }
         } else if blocked_since.is_none_or(|since| since < at) && store.unblock_peer_at(&master, at).is_ok() && blocked_since.is_some() {
@@ -1401,6 +1408,9 @@ pub(crate) async fn handle_update_profile(
 
     // Our card rides along, so a co-member can show a guest who wrote our public posts.
     let card = super::profile_card::own_card(master_keypair, db_path, db_passphrase);
+    let stream_overlay = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|st| super::overlay::own_field(&st, local_peer_str));
     // Over MLS to each server we share, then over Olm to everyone MLS did not reach.
     let envelope = MessageEnvelope::ProfileUpdate {
         display_name: display_name.clone(),
@@ -1425,6 +1435,7 @@ pub(crate) async fn handle_update_profile(
         profile_sig: profile_sig.clone(),
         profile_pk: profile_pk.clone(),
         card: card.clone().map(Box::new),
+        stream_overlay: stream_overlay.clone().map(Box::new),
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
     for sid in server_states.keys() {
@@ -1471,6 +1482,7 @@ pub(crate) async fn handle_update_profile(
         profile_sig,
         profile_pk,
         card: card.clone().map(Box::new),
+        stream_overlay: stream_overlay.map(Box::new),
     };
     // The whole update to our own devices, friends and co-members, the card to either
     // side of a pending friend request, nothing to anyone else.
@@ -1596,6 +1608,8 @@ pub(crate) fn save_incoming_profile(
     support_creds: Option<&str>,
     // The MASTER's signature over that raw field. See [`gated_support_creds`].
     support_creds_sig: Option<&str>,
+    // The stream overlay field, signed on its own; see [`super::overlay::ingest_field`].
+    stream_overlay: Option<&super::types::OverlayField>,
     // The frame's [`super::frame_auth::stamp_ceiling`].
     ceiling: i64,
     db_path: &str,
@@ -1615,6 +1629,9 @@ pub(crate) fn save_incoming_profile(
     let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
         return (master, false);
     };
+    // Before the empty-profile guard: the field stands on its own signature, and a
+    // profile-less sibling's toggles are still ours.
+    let field_kept = super::overlay::ingest_field(&db, &master, stream_overlay, ceiling, Some(sender_peer_id));
     // Don't blank a populated identity profile with an empty one from a
     // profile-less sibling device.
     if display_name.trim().is_empty() {
@@ -1656,7 +1673,13 @@ pub(crate) fn save_incoming_profile(
     ) {
         // A profile older than the stored one is not saved, and nothing downstream
         // (the member display names) may act on it as if it were (N2).
-        Ok(written) => (master, written),
+        Ok(written) => {
+            // A first profile made the row the field lives on.
+            if written && !field_kept {
+                super::overlay::ingest_field(&db, &master, stream_overlay, ceiling, Some(sender_peer_id));
+            }
+            (master, written)
+        }
         Err(e) => {
             hollow_log!("[HOLLOW-PROFILE] Failed to save incoming profile for {master}: {e}");
             (master, false)
@@ -1863,18 +1886,35 @@ pub(crate) fn profile_audience(
     db_path: &str,
     db_passphrase: &str,
 ) -> Audience {
-    if super::resolver::is_revoked(peer) {
-        return Audience::None;
-    }
-    if super::voice_handler::data_channel_peer_allowed(server_states, local_master, peer, db_path, db_passphrase) {
-        return Audience::Full;
-    }
-    let pending = !super::blocklist::is_blocked(peer)
-        && crate::storage::MessageStore::open(db_path, db_passphrase)
+    profile_audience_known(server_states, local_master, peer).unwrap_or_else(|| {
+        let status = crate::storage::MessageStore::open(db_path, db_passphrase)
             .ok()
-            .and_then(|st| st.get_friend_status(&super::resolver::resolve(peer)).ok().flatten())
-            .is_some_and(|status| status == "pending");
-    if pending { Audience::Card } else { Audience::None }
+            .and_then(|st| st.get_friend_status(&super::resolver::resolve(peer)).ok().flatten());
+        audience_by_friend_status(status.as_deref())
+    })
+}
+
+/// [`profile_audience`] as far as the in-memory state decides it; `None` when only
+/// the friend row can tell.
+pub(crate) fn profile_audience_known(
+    server_states: &HashMap<String, ServerState>,
+    local_master: &str,
+    peer: &str,
+) -> Option<Audience> {
+    if super::resolver::is_revoked(peer) {
+        return Some(Audience::None);
+    }
+    super::voice_handler::data_channel_peer_known(server_states, local_master, peer)
+        .map(|allowed| if allowed { Audience::Full } else { Audience::None })
+}
+
+/// The audience the friend row gives a peer the in-memory state could not place.
+pub(crate) fn audience_by_friend_status(status: Option<&str>) -> Audience {
+    match status {
+        Some("accepted") => Audience::Full,
+        Some("pending") => Audience::Card,
+        _ => Audience::None,
+    }
 }
 
 /// Send our own profile to a specific peer, as much of it as that peer may see.
@@ -2181,6 +2221,7 @@ pub(crate) fn own_profile_update(
         profile_sig,
         profile_pk,
         card: super::profile_card::own_card(master_keypair, db_path, db_passphrase).map(Box::new),
+        stream_overlay: super::overlay::own_field(&store, local_master).map(Box::new),
     })
 }
 
@@ -2309,6 +2350,7 @@ pub(crate) async fn handle_envelope_profile_update(
     support_creds_sig: Option<String>,
     profile_sig: Option<String>,
     profile_pk: Option<String>,
+    stream_overlay: Option<Box<super::types::OverlayField>>,
     ceiling: i64,
     db_path: &str,
     db_passphrase: &str,
@@ -2392,6 +2434,7 @@ pub(crate) async fn handle_envelope_profile_update(
         sanitize_incoming_anim(banner_anim.as_deref()),
         support_creds.as_deref(),
         support_creds_sig.as_deref(),
+        stream_overlay.as_deref(),
         ceiling,
         db_path, db_passphrase,
     );
@@ -2878,7 +2921,7 @@ mod tests {
         let save = |updated_at: i64, avatar: Option<&[u8]>| {
             save_incoming_profile(
                 &master, "Anon", "", "", updated_at, avatar, None, "", None, None, Some(proof),
-                None, None, None, None, None, i64::MAX, &db, &pass,
+                None, None, None, None, None, None, i64::MAX, &db, &pass,
             )
             .1
         };
@@ -2892,7 +2935,7 @@ mod tests {
         // Every blob is signed by hash, the banner included (N1 since 0.12).
         assert!(save_incoming_profile(
             &master, "Anon", "", "", 9 * 86_400_000, None, Some(&forged), "", None, None, Some(proof),
-            None, None, None, None, None, i64::MAX, &db, &pass,
+            None, None, None, None, None, None, i64::MAX, &db, &pass,
         ).1);
         assert_eq!(stored_banner(), None, "a banner that misses its signed hash was stored");
 
@@ -2982,7 +3025,7 @@ mod tests {
             let (_, saved) = save_incoming_profile(
                 &self.master_id, "Anon", "", "", updated_at,
                 None, None, "", None, None, Some(proof), None, None, None,
-                creds, creds_sig, i64::MAX, &self.db, &self.pass,
+                creds, creds_sig, None, i64::MAX, &self.db, &self.pass,
             );
             saved
         }
@@ -3105,10 +3148,37 @@ mod tests {
         assert_eq!(sanitize_incoming_frame(Some("b:999")), None);
     }
 
+    /// Lifting a block rejoins the DM room the friend row holds, and reads that row
+    /// off the event loop's thread (a fresh store open is a schema parse under a lock).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_unblock_rejoins_the_dm_room_reading_the_row_off_the_loop() {
+        use crate::node::ws_client::WsCommand;
+        use crate::storage::messages::OPENS_ON_THIS_THREAD;
+        let _g = crate::node::resolver::test_lock();
+        let (me, friend) = (
+            NativeKeypair::from_secret_bytes(&[66; 32]).peer_id(),
+            NativeKeypair::from_secret_bytes(&[67; 32]).peer_id(),
+        );
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("unblock_rejoin.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        crate::storage::MessageStore::open(&db, &pass).unwrap().save_friend(&friend, "accepted", "outgoing", 1).unwrap();
+        let mut queued = std::collections::HashMap::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let before = OPENS_ON_THIS_THREAD.with(|n| n.get());
+        super::handle_block_changed(&tx, &mut queued, &me, &friend, false, &db, &pass).await;
+        assert_eq!(OPENS_ON_THIS_THREAD.with(|n| n.get()), before, "the unblock opened the store on the event loop");
+        let joined = matches!(rx.try_recv(), Ok(WsCommand::JoinRoom { room_code }) if room_code == crate::node::types::dm_room_code(&me, &friend));
+        assert!(joined, "an unblock did not rejoin the DM room the friend row holds");
+    }
+
     /// A block leaves the DM room and drops what waits for the blocked identity in
     /// the resend queue at once, not only when its device next shows up.
-    #[test]
-    fn a_block_leaves_the_dm_room_and_empties_the_resend_queue() {
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_block_leaves_the_dm_room_and_empties_the_resend_queue() {
         use crate::node::ws_client::WsCommand;
         let _g = crate::node::resolver::test_lock();
         let (me, blocked, kept) = (
@@ -3120,7 +3190,7 @@ mod tests {
             [(blocked.clone(), vec!["dm".to_string()]), (kept.clone(), vec!["dm".to_string()])].into();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         crate::node::blocklist::block(&blocked);
-        super::handle_block_changed(&tx, &mut queued, &me, &blocked, true, "", "");
+        super::handle_block_changed(&tx, &mut queued, &me, &blocked, true, "", "").await;
         crate::node::blocklist::unblock(&blocked);
         assert!(!queued.contains_key(&blocked), "the blocked identity's queue survived the block");
         assert!(queued.contains_key(&kept), "another friend's queue went with it");
@@ -3148,7 +3218,7 @@ mod tests {
         let pk = base64::engine::general_purpose::STANDARD.encode(target.public_key_protobuf());
         let (Some(sig), Some(pk)) = crate::node::crypto_handler::sign_message(&target, &pk, &payload) else { panic!("signs") };
         let card = crate::node::types::SignedCard {
-            master: target.peer_id(), display_name: "Target".into(), avatar_hash: String::new(), updated_at: 7, sig, pk,
+            master: target.peer_id(), display_name: "Target".into(), avatar_hash: String::new(), updated_at: 7, sig, pk, stream_overlay: None,
         };
         let seal = |at: i64| crate::node::profile_card::seal_for(&card, None, &me.peer_id(), at).unwrap();
         let name = || store.load_profile(&target.peer_id()).ok().flatten().map(|p| p.display_name);
@@ -3194,7 +3264,7 @@ mod tests {
         let pk = base64::engine::general_purpose::STANDARD.encode(target.public_key_protobuf());
         let (Some(sig), Some(pk)) = crate::node::crypto_handler::sign_message(&target, &pk, &payload) else { panic!("signs") };
         let card = crate::node::types::SignedCard {
-            master: target.peer_id(), display_name: "Target".into(), avatar_hash: hash, updated_at: 7, sig, pk,
+            master: target.peer_id(), display_name: "Target".into(), avatar_hash: hash, updated_at: 7, sig, pk, stream_overlay: None,
         };
         let thumb = crate::node::image_convert::encode_card_thumb(&face).unwrap();
         let seal = |at: i64| crate::node::profile_card::seal_for(&card, Some(&thumb), &me.peer_id(), at).unwrap();
@@ -3386,7 +3456,7 @@ mod tests {
             let proof = crate::storage::ProfileProof { sig: &sig, pk: &pk, avatar_hash: "", banner_hash: "", assets_hash: "" };
             save_incoming_profile(
                 &id, "Anon", "", "", updated_at, None, None, "", None, None, Some(proof),
-                None, None, None, None, None, ceiling, &db, &pass,
+                None, None, None, None, None, None, ceiling, &db, &pass,
             )
             .1
         };
@@ -3397,7 +3467,7 @@ mod tests {
             let payload = crate::node::crypto_handler::card_signing_payload(&id, updated_at, "Card", "");
             let pk = base64::engine::general_purpose::STANDARD.encode(owner.public_key_protobuf());
             let (Some(sig), Some(pk)) = crate::node::crypto_handler::sign_message(&owner, &pk, &payload) else { panic!("signs") };
-            crate::node::types::SignedCard { master: id.clone(), display_name: "Card".into(), avatar_hash: String::new(), updated_at, sig, pk }
+            crate::node::types::SignedCard { master: id.clone(), display_name: "Card".into(), avatar_hash: String::new(), updated_at, sig, pk, stream_overlay: None }
         };
         let ahead = card(ceiling + 2);
         assert!(crate::node::profile_card::card_holds(&ahead), "precondition: the card is genuinely signed");

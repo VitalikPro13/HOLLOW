@@ -402,6 +402,7 @@ fn destroy_with(root: &Path, outside: &Outside) -> Result<(), String> {
     drop(key_writes);
     crate::identity::encryption::clear_session_key();
     crate::node::at_rest::forget_stores();
+    crate::node::overlay_server::stop_for_wipe();
     // The log goes with the identity, before anything else can add a line to it.
     crate::log::erase();
 

@@ -31,6 +31,7 @@ import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
 import 'package:hollow/src/ui/settings/moderation_dialogs.dart';
+import 'package:hollow/src/ui/settings/stream_overlay/overlay_tick.dart';
 import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -237,6 +238,15 @@ List<HollowMenuEntry> userMenuEntries({
       label: isVerified ? 'Safety number' : 'Verify contact',
       onTap: () => showVerifyContactDialog(context, peerId: master),
     ));
+    if (surface == UserMenuSurface.voice) {
+      final tick = overlayTickMenuItem(
+          context: context,
+          menuRef: menuRef,
+          ref: ref,
+          peerId: master,
+          name: name);
+      if (tick != null) entries.add(tick);
+    }
 
     entries.addAll(_moderationEntries(
       context: context,

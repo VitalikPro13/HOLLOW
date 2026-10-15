@@ -51,7 +51,8 @@ pub(crate) fn handle_webrtc_peer_disconnected(
 /// device, an accepted friend, or someone we share a server with. Its ICE
 /// candidates carry our addresses, so a stranger who merely got into a room with
 /// us (our inbox is open to anyone) never gets one (J1). Share links keep their
-/// own lane and are not gated here.
+/// own lane and are not gated here. The event loop uses the `_off_loop` form.
+#[cfg(test)]
 pub(crate) fn data_channel_peer_allowed(
     server_states: &HashMap<String, ServerState>,
     local_master: &str,
@@ -83,7 +84,7 @@ pub(crate) async fn data_channel_peer_allowed_off_loop(
 }
 
 /// The answer the in-memory state gives, `None` when only the friend row can tell.
-fn data_channel_peer_known(
+pub(crate) fn data_channel_peer_known(
     server_states: &HashMap<String, ServerState>,
     local_master: &str,
     peer: &str,

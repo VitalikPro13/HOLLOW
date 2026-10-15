@@ -1,6 +1,6 @@
 # Stream Overlay: your voice room in OBS, purely local
 
-**Status:** PLANNED. Design agreed 2026-10-10 (Vitalik + Claude session). Nothing built.
+**Status:** SHIPPED in code 2026-10-15 (wave `so`, local commit after `59384ff7`, tested by Vitalik in OBS with a real mic). Design agreed 2026-10-10, extended 2026-10-15 (section 15). Section 16 = the team seams. As built differs in places (the review rounds): overlay images live in their own `overlay_blobs` table (no `AssetKind::Overlay`), the server starts locked, a share answer counts only while the field says share, settings save instantly. Wiki `stream_overlay` describes the code as it is.
 **Owner:** Vitalik (architect).
 **Issue:** #97, "[Feature suggestion] stream reactive overlay".
 **Read before building:** wiki `rules_media_calls.md` (speaking state, calls), `rules_ui_flutter.md` plus the `hollow-ui` skill (the Settings tab, the profile tick), `rules_files_assets.md` (image processing, the asset rail), `rules_platforms.md` (desktop-only server), and `security_write_gates.md` (every new ingest path gets a row).
@@ -16,7 +16,8 @@ Streamers want what Discord users get from "reactive images" (fugi's tool on top
 Hollow does it purely locally:
 
 - The streamer's app already knows who is in the voice room, who is talking, and who is muted or deafened. It serves a small page on `127.0.0.1`, and OBS loads that page as a browser source. Nothing touches the relay, nothing is public, there are no shareable links.
-- Everyone can set their own **look** in Settings: an image or animation for each state (idle, talking, muted, deafened) plus effects.
+- Everyone can set their own **look** in Settings: an image or animation for each state (idle, talking, muted, deafened, plus an optional blink and an optional loud image) plus effects, in a look editor that matches Reactive and goes further (section 15).
+- A webcam for other apps comes from OBS's own Virtual Camera pointed at the "just me" page; Hollow builds no virtual camera of its own (section 15).
 - A streamer adds a person to their overlay with a tick on that person's profile. Only then does that person's look travel, only if that person allows it, and only to friends or to people currently in a voice room with them.
 - A streamer can also pick their own images for anyone they added, kept on their own machine.
 - Outside any call, a "Listen to my mic now" button lets the "just me" view react to your voice, for a solo streamer with no camera. A call takes the mic over from it.
@@ -69,7 +70,7 @@ A new `SettingsCategory.streamOverlay` in the App group (Lucide icon, for exampl
 1. **Privacy.** "Let others show me on their stream overlay" and "Share my overlay images". The second greys out with its reason while the first is off.
 2. **My overlay look.** Four state slots with a live animated preview, effect choices (section 4), and a press-and-hold "Talk" button to preview the talking state. While you are in a voice room the preview follows your real mic.
 3. **People on my overlay.** One row per person you ticked: avatar, name in `nameColorFor(MASTER)`, a source chip (their images, my picks, avatar), your own per-state picks and effect overrides, Remove.
-4. **OBS** (desktop only). "Run the overlay for OBS", link rows with Copy buttons (whole room, just me, each person), the port and the port-changed warning, Reset link, layout options (section 8), the "Listen to my mic now" button with its sensitivity slider and live meter (section 7a), and "When I'm not in a call and not listening: show my idle look / show nothing".
+4. **OBS** (desktop only). "Run the overlay for OBS", link rows with Copy buttons (whole room, just me, each person), the port and the port-changed warning, Reset link, layout options (section 8), the "Listen to my mic now" button with its sensitivity slider and live meter (section 7a), and "When I'm not in a call and not listening: show my idle look / show nothing", and the OBS Virtual Camera help line (decision 13).
 
 Phones get sections 1 to 3: a phone user appears on a desktop streamer's overlay and sets their look there. Section 4 is hidden on phones (there is no OBS to point at it).
 
@@ -95,7 +96,7 @@ A **look** is one image per state plus effects.
 
 **Processing** (new `image_convert::process_overlay_image`): decode through `load_bounded`; decide animation from the bytes (`is_animated_image`, never a GIF8 or extension check); encode through `node/webp_anim.rs` (`encode_still` for stills, method 4); any aspect ratio, since PNGtuber art is often tall; longest side capped (proposal 512), never upscaled; at most 2 MB per image; a decoded-bytes guard that refuses with a clear message rather than decimating, like `MAX_PROFILE_DECODED_BYTES`. Inputs: PNG, JPEG, GIF, WebP, APNG.
 
-**Storage:** rail blobs in `emote_blobs` under a new `AssetKind::Overlay`: `recv_cap` 2 MB, equal to the authoring limit and pinned by a test like `Profile`; `max_request_hashes` 4, so four states at 2 MB fill `MAX_BUNDLE_REPLY_BYTES` exactly. `referenced_asset_hashes` (`api/storage.rs:1214`) pins your own look, the looks you fetched for people you ticked, and your local picks. Removing a person deletes theirs.
+**Storage:** rail blobs in `emote_blobs` under a new `AssetKind::Overlay`: `recv_cap` 2 MB, equal to the authoring limit and pinned by a test like `Profile`; `max_request_hashes` 6 (six states since 2026-10-15); six images at 2 MB exceed `MAX_BUNDLE_REPLY_BYTES` (8 MiB), so an answer carries what fits and the asker re-asks with the grown `held` set (section 15). `referenced_asset_hashes` (`api/storage.rs:1214`) pins your own look, the looks you fetched for people you ticked, and your local picks. Removing a person deletes theirs.
 
 **Look manifest** (`look_json`): `{ v: 1, stamp, states: { idle, talking, muted, deafened }, effects: { ... } }`. State values are a 64-hex hash or `""`. Effects come from closed enums, numbers are clamped, unknown keys are ignored (an older client tolerates a newer look), and the whole body is size-bounded and shape-checked before use.
 
@@ -209,7 +210,7 @@ Plain HTML, CSS and a small script, no framework, no request to anything but our
 
 - **Layout:** row, column or grid; alignment; image size; gap; names on or off, drawn in the name colour.
 - **Filters:** "Only show people who are talking" (fugi has it, streamers use it), "Only people I added".
-- **Effects** in CSS only (transform, opacity, filter), so OBS's browser renders them cheaply.
+- **Effects** in CSS only (transform, opacity, filter), so OBS's browser renders them cheaply. The page also draws blink, loud, `scale_with_voice`, mirror, shadow and the name tag styles of section 15, from the snapshot and live feed of section 16.4.
 - **Restyling:** stable class names and data attributes (`.person`, `[data-state="talking"]`, `[data-self]`) so OBS's own Custom CSS box can restyle everything. Settings lists the hooks under "Customise with CSS in OBS".
 
 ---
@@ -274,7 +275,7 @@ It is one feature, but the work has an order:
 
 ## 13. Open questions
 
-None as of 2026-10-10. Both earlier questions were answered the same day: who appears (decision 10) and listening outside a call (decision 11, section 7a).
+None as of 2026-10-15. Answered: who appears (decision 10), listening outside a call (decision 11, section 7a), and the four reporter items of 2026-10-15 (section 15).
 
 ---
 
@@ -286,3 +287,92 @@ None as of 2026-10-10. Both earlier questions were answered the same day: who ap
 - No overlay server on phones (no OBS there); phones still set their look and toggles.
 - No audio, chat or video on the overlay.
 - No passing on another person's look.
+- No server-owner override of anyone's look (decision 12).
+- No virtual camera of our own (decision 13).
+- Nothing in the Hollow Shop (decision 15).
+
+---
+
+## 15. Decisions of 2026-10-15 (Vitalik, after re-reading #97)
+
+12. **No server-owner override.** A streamer who wants someone to look different picks images for that person locally (section 3, "People on my overlay"). Nothing about looks rides the CRDT.
+13. **No virtual camera of our own.** No Dart, Flutter or Rust library creates one; pyvirtualcam itself borrows OBS's camera on Windows and macOS and v4l2loopback on Linux; Windows' own API (`MFCreateVirtualCamera`) needs Windows 11 plus an HKLM COM registration, macOS a camera system extension, Linux a root kernel module that a flatpak cannot load. The OBS section of Settings explains the route instead: add the "just me" link as a browser source, press Start Virtual Camera in OBS, pick "OBS Virtual Camera" in any app (Hollow included). Draft copy: "Want your look as a webcam in other apps? In OBS, add the Just me link as a browser source and press Start Virtual Camera. Then pick OBS Virtual Camera as your camera anywhere, Hollow included."
+14. **A look editor that matches Reactive and goes further.** Everything in section 4, plus:
+    - **Blink:** an optional `blink` image shown for 150 ms at a random moment every `blink_every_s` seconds (2 to 12, default 5, jittered by up to 40%) while idle only.
+    - **Loud:** an optional `loud` image shown instead of `talking` while the voice level is at or above `loud_threshold` (0.50 to 0.95, default 0.75), with the same hold time on the way down.
+    - **Bounce that follows loudness:** `scale_with_voice` makes the talking effect's size follow the level (bounce height, shake distance, pop scale, glow radius).
+    - **Mirror** (flip horizontally), **shadow** (none, soft, outline in the name colour), and the streamer's **name tag** style (none, plain, pill).
+    - The editor previews every state live, animated with the same effects the page draws, with press-and-hold "Talk" and "Loud" buttons, a blink preview, and the real mic while in a voice room or listening.
+    These need a voice LEVEL next to the talking flag, normalised as in section 16.4. No new detection: the call meter, getStats and the listening capture already measure it.
+15. **No Hollow Shop work** of any kind in this build.
+
+## 16. Team seams (wave `so`)
+
+### 16.1 Tracks
+
+| Track | Agent | Scope | Phase |
+|---|---|---|---|
+| so-core | builder-secure | sections 5 and 6, the look manifest, `AssetKind::Overlay` + processing, the generic-rail exclusion, the people list, `api/overlay.rs`, its events, harness tests | wave 1 |
+| so-server | builder-secure | section 7 server, the embedded page (sections 8 and 15), `api/overlay_server.rs`, its events, wipe and lock hooks | wave 1 |
+| so-listen | builder | section 7a (`MicLevelCapture`, the call handover gate, restart, mic test pause, user bar indicator), voice LEVEL providers, the 100 ms poll while a stream is open; phase 2: the snapshot publisher | wave 1, phase 2 after the merge |
+| so-alone | builder | section 10 diagnosis and fix | wave 1 |
+| so-ui | builder | section 3 Settings (desktop + mobile), the look editor (section 15), people list, profile tick, voice row menu, events in `event_provider` | wave 2, after the FFI merge |
+| reviewer | reviewer | so-core and so-server (gates, field signature, server), then the merged tree | after each |
+
+### 16.2 The look manifest (`look_json`, Rust is the authoritative parser)
+
+```json
+{ "v": 1, "stamp": 1760000000000,
+  "states": { "idle": "<64-hex or empty>", "talking": "", "muted": "", "deafened": "", "blink": "", "loud": "" },
+  "effects": { "talking": "bounce", "scale_with_voice": true, "idle": "none", "transition": "crossfade",
+               "hold_ms": 250, "blink_every_s": 5, "loud_threshold": 0.75, "mirror": false, "shadow": "none" } }
+```
+
+- Enums: `talking` none|bounce|shake|pop|glow; `idle` none|dim|grayscale; `transition` instant|crossfade; `shadow` none|soft|outline. An unknown enum value becomes the default; numbers are clamped (`hold_ms` 0..600, `blink_every_s` 2..12, `loud_threshold` 0.50..0.95); unknown keys are dropped; the body is at most 4 KiB; a state that is not 64 lowercase hex or empty is refused. `overlay_look::normalize` returns the canonical JSON every other layer reads.
+- **A LOCAL look** (the streamer's picks and overrides for one person) has the same shape, but an empty state and an ABSENT effect key mean "not overridden". The EFFECTIVE look of a person = their shared look (if held) with the local picks laid over it, state by state and key by key. Rust computes it (`overlay_look::effective`); Dart never merges.
+
+### 16.3 FFI
+
+so-core, `api/overlay.rs`:
+- `overlay_process_image(path) -> OverlayImageFfi { hash, width, height, animated }` (stores the blob as kind `overlay`; pinned while a saved look or local pick names it; an unsaved draft may be collected by the next sweep, so the editor re-processes on save if it is gone).
+- `overlay_get_settings() -> OverlaySettingsFfi { allow, share, own_look_json }`, `overlay_set_flags(allow, share)`, `overlay_set_own_look(look_json) -> String` (normalised; bumps the stamp, re-signs the field, announces).
+- `overlay_people() -> Vec<OverlayPersonFfi { master, slot, field, their_look_json: Option<String>, local_look_json: Option<String>, effective_look_json: String }>`, `overlay_add_person(master)`, `overlay_remove_person(master)`, `overlay_set_local_look(master, look_json: Option<String>)`.
+- `overlay_field_of(master) -> String` ("off" | "show" | "share"; absent = "show").
+- `overlay_blob_bytes(hash) -> Option<Vec<u8>>` only if no existing call already serves rail blob bytes to Dart (reuse one if it does).
+- Events: `OverlayLookReceived { master }`, `OverlayPersonRemoved { master }` (their field turned `off`), `OverlayFieldChanged { master }`.
+- Slots: our own slot is 0; an added person keeps a stable slot from 1 up, saved with the person; Dart gives people in the room who are not added transient slots from 1000 up for the session.
+- The people list and local picks are LOCAL to this device and profile (a streamer runs OBS on one computer); the own look and the two flags are identity-wide (section 5).
+
+so-server, `api/overlay_server.rs`:
+- `overlay_server_set_enabled(enabled) -> OverlayServerStatusFfi`, `overlay_server_status() -> OverlayServerStatusFfi { running, port, port_changed, open_streams }`, `overlay_server_links() -> OverlayLinksFfi { room, me, person_base }` (a person link is `person_base + slot`), `overlay_server_reset_link()`.
+- `overlay_publish(snapshot_json)`, `overlay_publish_live(live_json)`, `overlay_server_set_locked(locked)`.
+- Events: `OverlayPortChanged { port }`, `OverlayStreamsChanged { open }`.
+- The wipe routine stops the server directly (no Dart round trip).
+
+### 16.4 Snapshot and live feed (Dart -> Rust -> page)
+
+```json
+{ "v": 1,
+  "layout": { "direction": "row", "align": "center", "size": 160, "gap": 12, "names": "pill",
+              "only_talking": false, "only_added": false, "self_when_inactive": "idle",
+              "defaults": { "talking": "bounce", "idle": "dim" } },
+  "people": [ { "slot": 0, "master": "<id>", "is_self": true, "in_room": true, "added": false,
+                "name": "...", "colour": "#rrggbb", "look": null } ] }
+```
+```json
+{ "people": [ { "slot": 0, "state": "talking", "level": 0.62 } ], "self_active": true }
+```
+
+- `layout.direction` row|column|grid, `align` start|center|end, `size` 48..512, `gap` 0..64, `names` none|plain|pill, `self_when_inactive` idle|hidden, `defaults` = effects (16.2) for people shown with a plain avatar. `look` is the EFFECTIVE look or null (avatar). `state` idle|talking|muted|deafened; the page derives loud and blink itself from `level` and the look.
+- Dart publishes the snapshot only on change (coalesced) and the live feed at most 20 per second, only while `open_streams > 0`.
+- Rust validates and PROJECTS before any byte reaches a page: drops `master`, maps it to an avatar URL (still or animated, Rust looks it up), turns each look hash it holds into `/<token>/img/<hash>` (an unknown hash becomes empty), clamps numbers, accepts only `#rrggbb` colours, cuts names to 64 characters. The image allowlist is exactly what the current projection names.
+- Views: `room` = people with `in_room` (self first), `me` = `is_self`, `p/<slot>` = that slot. The page applies `only_talking` and `only_added`. The page renders names with `textContent`, never `innerHTML` (names come from other people).
+- SSE events: `snapshot` (the projected view), `live`, `locked`, and a `: hb` comment every 15 s.
+- **Level** in 0..1 = `clamp((dBFS + 60) / 60, 0, 1)`. Local: the capture meter's dB (pre-chain). Remote: `20 * log10(audioLevel)` from `inbound-rtp`. Listening: the RMS dBFS of the PCM chunk. While `open_streams > 0` the voice channel and DM call level polls run every 100 ms instead of 200 ms.
+
+### 16.5 Order
+
+1. Wave 1 in parallel: so-core, so-server, so-listen phase 1, so-alone.
+2. Reviewer on so-core and so-server; fixes; the lead merges wave 1 into one base and runs FRB codegen.
+3. Wave 2 on the merged base: so-ui, so-listen phase 2 (the publisher).
+4. Merged-tree suites and fleet (runner), one hostile review of the merged interactions, then Vitalik's checklist with a real mic and OBS.

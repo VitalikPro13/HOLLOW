@@ -514,6 +514,16 @@ pub enum NetworkEvent {
     PublicChannelListReceived { server_id: String, server_name: String, channels: Vec<PublicChannelEntryFfi>, server_avatar: Option<Vec<u8>>, server_banner_thumb: Option<Vec<u8>> },
     PublicChannelSyncReceived { server_id: String, channel_id: String, messages: Vec<GuestSyncMessageFfi>, has_more: bool, sender_profiles: Vec<SyncSenderProfileFfi> },
     PublicChannelConfigChanged { server_id: String, channel_id: String, is_public: bool, channel_name: String, category: Option<String> },
+    // -- Stream overlay (#97) --
+    /// A look for `master` arrived (theirs, or ours from another of our devices).
+    OverlayLookReceived { master: String },
+    /// `master` turned "Let others show me" off and left our overlay.
+    OverlayPersonRemoved { master: String },
+    /// `master`'s stream overlay field changed.
+    OverlayFieldChanged { master: String },
+    // -- Stream overlay server (#97) --
+    OverlayPortChanged { port: u16 },
+    OverlayStreamsChanged { open: u32 },
 }
 
 /// FFI mirror of `node::types::ReadMarker`: one conversation's read pointer.
@@ -1444,6 +1454,11 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
                 server_id, channel_id, is_public, channel_name, category,
             }
         }
+        node::NetworkEvent::OverlayLookReceived { master } => NetworkEvent::OverlayLookReceived { master },
+        node::NetworkEvent::OverlayPersonRemoved { master } => NetworkEvent::OverlayPersonRemoved { master },
+        node::NetworkEvent::OverlayFieldChanged { master } => NetworkEvent::OverlayFieldChanged { master },
+        node::NetworkEvent::OverlayPortChanged { port } => NetworkEvent::OverlayPortChanged { port },
+        node::NetworkEvent::OverlayStreamsChanged { open } => NetworkEvent::OverlayStreamsChanged { open },
     }
 }
 
@@ -1634,6 +1649,7 @@ pub fn start_node() -> Result<String, String> {
         .unwrap_or_else(|| "relay.anonlisten.com".to_string());
 
     let (event_tx, event_rx) = mpsc::channel::<node::NetworkEvent>(100);
+    node::overlay_server::set_event_sink(event_tx.downgrade());
     let (cmd_tx, cmd_rx) = mpsc::channel::<node::NodeCommand>(100);
 
     let cmd_tx_clone = cmd_tx.clone();

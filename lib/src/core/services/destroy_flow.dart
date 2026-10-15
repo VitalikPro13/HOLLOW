@@ -8,6 +8,7 @@ import 'package:hollow/src/core/duress_result.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/desktop_notification_service.dart';
+import 'package:hollow/src/core/services/overlay_mic.dart';
 import 'package:hollow/src/core/services/push_hints_cache.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -21,6 +22,8 @@ export 'package:hollow/src/core/duress_result.dart';
 /// OS notification history and the push registration. Nothing here waits on
 /// the network, because the duress path wipes before the node ever starts.
 Future<void> clearLocalSecretsAfterDestroy() async {
+  // An open mic outside a call must not outlive the identity it served.
+  await overlayMic.turnOff().catchError((_) {});
   await CrashLog.erase();
   try {
     await AppLockService().clearAll();

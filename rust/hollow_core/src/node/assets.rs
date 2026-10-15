@@ -27,7 +27,7 @@ pub(crate) enum AssetKind {
 
 impl AssetKind {
     /// The `emote_blobs.kind` column value.
-    pub(crate) fn db_kind(self) -> &'static str {
+    pub(crate) const fn db_kind(self) -> &'static str {
         match self {
             AssetKind::Emote => "emote",
             AssetKind::Banner => "banner",
@@ -74,7 +74,7 @@ impl AssetKind {
     }
 
     /// Max hashes per outbound request of this kind: `hashes x recv_cap` stays
-    /// within [`MAX_BUNDLE_REPLY_BYTES`] for every kind.
+    /// within [`MAX_BUNDLE_REPLY_BYTES`].
     pub(crate) fn max_request_hashes(self) -> usize {
         match self {
             AssetKind::Emote => 20,
@@ -108,4 +108,39 @@ pub(crate) fn public_banner_thumb(
     let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
     let bytes = store.load_emote_blob(&hash).ok().flatten()?;
     super::image_convert::process_server_banner_thumb(&bytes).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn png(w: u32, h: u32, shade: u8) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([shade, 90, 30, 255]));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    }
+
+    /// A server banner hash naming a stream overlay image we hold shows a guest
+    /// nothing: the image is someone's look, never public.
+    #[test]
+    fn a_banner_thumb_never_shows_an_overlay_image() {
+        use sha2::{Digest, Sha256};
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("banner.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let state_naming = |hash: &str| {
+            let mut state = crate::crdt::server_state::ServerState::new("s".into(), "S".into(), "me".into());
+            let hlc = crate::crdt::hlc::HlcTimestamp { physical_ms: 1, counter: 0, actor: "me".into() };
+            state.settings.insert("server_banner".into(), crate::crdt::admin_lww::AdminLwwReg::new(hash.to_string(), hlc, 0));
+            state
+        };
+        let (look, banner) = (png(600, 200, 10), png(600, 200, 200));
+        let (look_hash, banner_hash) = (hex::encode(Sha256::digest(&look)), hex::encode(Sha256::digest(&banner)));
+        store.save_overlay_blob(&look_hash, &look, false).unwrap();
+        store.save_asset_blob(&banner_hash, &banner, false, AssetKind::Banner.db_kind()).unwrap();
+        assert!(public_banner_thumb(&state_naming(&banner_hash), &db, &pass).is_some(), "CONTROL: a banner gets its thumb");
+        assert!(public_banner_thumb(&state_naming(&look_hash), &db, &pass).is_none(), "an overlay image became a guest thumb");
+    }
 }

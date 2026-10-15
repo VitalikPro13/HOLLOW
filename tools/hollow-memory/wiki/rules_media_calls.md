@@ -100,6 +100,22 @@ whitelist) stay in CLAUDE.md.
   `AudioRoutes.preferLoudRoute()`, NEVER a raw `.speaker` override (it outranks
   headphones and moves capture to the built-in mic); check availableInputs.
   `feedback_mobile_call_audio_route`.
+- `record` on Windows: NEVER `AudioRecorder.dispose()`. record_windows 1.0.7 deletes a Recorder
+  Media Foundation still references (async source-reader callback), and an RTWorkQ worker later
+  frees it: OLEAUT32 0xc0000005 at +0x9c709, timed by a PeerConnection start (6/28 loops).
+  Every recorder comes from `pluginRecorders` (`mic_level_capture.dart`, stopped and kept on
+  Windows); `so_crash_guard_test` scans for a stray `AudioRecorder()` or `dispose(`. Wiki
+  `stream_overlay`, `project_stream_overlay`.
+- Every path that opens the mic (DM call start/accept, `_captureLocalAudio`, voice channel/meeting
+  `startAudio`, voice notes, the mic test) awaits `overlayMic.yieldToCall(hold)` first and
+  releases the hold when it ends; the yield is bounded (2.5 s, then the call goes ahead). A new
+  mic-opening path adds both. Wiki `stream_overlay`.
+- Alone in a voice channel libwebrtc records NOTHING (no send stream) and the meter FREEZES at
+  its last value when the last peer leaves: `AloneMeterKeeper` runs a local loopback PC pair
+  (zero ICE, receiver volume 0) only while UNMUTED and no leg carries our mic; the detector
+  treats an unchanged reading as frozen. A joiner awaits its own mic (`_awaitLocalAudio`, 5 s)
+  before answering an offer, else that leg has no audio sender. Muting with peers present keeps
+  the track (disabled) and Windows releases the device ~3 s later on its own.
 
 ## Linux audio and calls
 

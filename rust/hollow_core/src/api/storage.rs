@@ -714,6 +714,7 @@ pub fn block_peer(peer_id: String) -> Result<(), String> {
         let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
         let ms = guard.as_ref().ok_or("Message store is not open")?;
         ms.block_peer(&master)?;
+        crate::node::overlay::forget_blocked(ms, &master);
     }
     crate::node::blocklist::block(&master);
     // A node that is not running has no room to leave, and its next start joins none.
@@ -1298,6 +1299,8 @@ pub fn clear_unreferenced_asset_blobs() -> Result<u64, String> {
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
     let keep = referenced_asset_hashes(ms);
+    // Stream overlay images keep their own table; only those no look names go.
+    crate::node::overlay::sweep_images(ms, crate::node::frame_auth::now_ms());
     ms.clear_asset_blobs_except(&keep)
 }
 

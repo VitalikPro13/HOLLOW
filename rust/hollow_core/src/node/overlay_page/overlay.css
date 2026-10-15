@@ -1,0 +1,210 @@
+/* Hollow stream overlay. Stable hooks for OBS Custom CSS: .overlay, .person,
+   [data-state], [data-self], [data-added], [data-loud], [data-blink], [data-slot],
+   .stage, .frame, .initials, .badge, .name. */
+
+@property --amp {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 1;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+body {
+  font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+
+.overlay {
+  --size: 160px;
+  --gap: 12px;
+  box-sizing: border-box;
+  width: 100vw;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap);
+  /* Room for bounce, pop and glow at the edges. */
+  padding: calc(var(--size) * 0.12);
+  justify-content: center;
+  align-items: flex-start;
+}
+.overlay[data-align="start"] { justify-content: flex-start; }
+.overlay[data-align="end"] { justify-content: flex-end; }
+
+.overlay[data-direction="column"] {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  align-items: center;
+}
+.overlay[data-direction="column"][data-align="start"] { align-items: flex-start; }
+.overlay[data-direction="column"][data-align="end"] { align-items: flex-end; }
+
+.overlay[data-direction="grid"] {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, var(--size));
+}
+
+.person {
+  --c: #a1a1aa;
+  --on-c: #111111;
+  --amp: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: var(--size);
+  transition: --amp 90ms linear;
+}
+.person[data-hidden] { display: none; }
+
+.stage {
+  position: relative;
+  width: var(--size);
+  height: var(--size);
+  transform-origin: 50% 100%;
+  transition: transform 90ms ease-out, filter 120ms linear;
+}
+.look, .frame {
+  position: absolute;
+  inset: 0;
+}
+.frame { transition: filter 120ms linear; }
+
+.frame img.layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.frame img.layer.on { opacity: 1; }
+.person[data-transition="crossfade"] .frame img.layer { transition: opacity 120ms linear; }
+.person[data-mirror] .frame img.layer { transform: scaleX(-1); }
+
+/* The circle belongs to the avatar layer itself, so an avatar fading in or out
+   keeps it whatever the image on the other side of the fade is. */
+.frame img.layer.avatar {
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.initials {
+  display: flex;
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--c);
+  color: var(--on-c);
+  font-weight: 700;
+  font-size: calc(var(--size) * 0.36);
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  opacity: 0;
+}
+.person[data-kind="initials"] .initials { opacity: 1; }
+.person[data-transition="crossfade"] .initials { transition: opacity 120ms linear; }
+
+/* Talking effects; --amp follows the voice level when scale_with_voice is on. */
+.person[data-state="talking"][data-talking-effect="bounce"] .stage {
+  animation: hollow-bounce 420ms ease-in-out infinite alternate;
+}
+@keyframes hollow-bounce {
+  from { transform: translateY(0); }
+  to { transform: translateY(calc(var(--size) * -0.07 * var(--amp))); }
+}
+.person[data-state="talking"][data-talking-effect="shake"] .stage {
+  animation: hollow-shake 140ms linear infinite;
+}
+@keyframes hollow-shake {
+  0%, 100% { transform: translateX(0) rotate(0); }
+  25% { transform: translateX(calc(var(--size) * -0.025 * var(--amp))) rotate(-1.5deg); }
+  75% { transform: translateX(calc(var(--size) * 0.025 * var(--amp))) rotate(1.5deg); }
+}
+.person[data-state="talking"][data-talking-effect="pop"] .stage {
+  transform: scale(calc(1 + 0.08 * var(--amp)));
+}
+.person[data-state="talking"][data-talking-effect="glow"] .stage {
+  filter: drop-shadow(0 0 calc(var(--size) * 0.05 * var(--amp)) var(--c))
+          drop-shadow(0 0 calc(var(--size) * 0.02 * var(--amp)) var(--c));
+}
+
+.person[data-shadow="soft"] .look {
+  filter: drop-shadow(0 calc(var(--size) * 0.03) calc(var(--size) * 0.05) rgba(0, 0, 0, 0.55));
+}
+.person[data-shadow="outline"] .look {
+  filter: drop-shadow(2px 0 0 var(--c)) drop-shadow(-2px 0 0 var(--c))
+          drop-shadow(0 2px 0 var(--c)) drop-shadow(0 -2px 0 var(--c));
+}
+
+/* Idle effects, and the dimmed idle image that stands in for a missing state. */
+.person[data-state="idle"][data-idle-effect="dim"] .frame { filter: brightness(0.6); }
+.person[data-state="idle"][data-idle-effect="grayscale"] .frame { filter: grayscale(1); }
+.person[data-fallback] .frame { filter: brightness(0.5); }
+
+.badge {
+  display: none;
+  position: absolute;
+  right: 2%;
+  bottom: 2%;
+  width: calc(var(--size) * 0.28);
+  height: calc(var(--size) * 0.28);
+  border-radius: 50%;
+  background: #e5484d;
+  box-shadow: 0 0 0 calc(var(--size) * 0.02) rgba(0, 0, 0, 0.55);
+  align-items: center;
+  justify-content: center;
+}
+.badge svg {
+  display: none;
+  width: 62%;
+  height: 62%;
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.person[data-badge] .badge { display: flex; }
+.person[data-badge="muted"] .badge svg.mic,
+.person[data-badge="deafened"] .badge svg.ears { display: block; }
+
+.name {
+  margin-top: calc(var(--size) * 0.06);
+  max-width: calc(var(--size) + var(--gap));
+  box-sizing: border-box;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 700;
+  font-size: clamp(12px, calc(var(--size) * 0.12), 28px);
+  line-height: 1.3;
+}
+.overlay[data-names="none"] .name { display: none; }
+/* A plain name has no backing, so an outline in the name colour's contrast colour
+   (dark for light names, white for dark ones) keeps it readable over any stream.
+   The padding keeps the outline clear of the ellipsis clip. */
+.overlay[data-names="plain"] .name {
+  --o: 0.09em;
+  padding: 0.1em 0.15em;
+  color: var(--c);
+  text-shadow:
+    calc(-1 * var(--o)) calc(-1 * var(--o)) 0 var(--on-c), 0 calc(-1 * var(--o)) 0 var(--on-c),
+    var(--o) calc(-1 * var(--o)) 0 var(--on-c), var(--o) 0 0 var(--on-c),
+    var(--o) var(--o) 0 var(--on-c), 0 var(--o) 0 var(--on-c),
+    calc(-1 * var(--o)) var(--o) 0 var(--on-c), calc(-1 * var(--o)) 0 0 var(--on-c),
+    0 0.12em 0.3em rgba(0, 0, 0, 0.6);
+}
+.overlay[data-names="pill"] .name {
+  background: var(--c);
+  color: var(--on-c);
+  padding: 0.12em 0.75em;
+  border-radius: 999px;
+}

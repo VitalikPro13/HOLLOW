@@ -24,8 +24,19 @@ class LocalSpeakingDetector {
   /// -100, so a plugin predating `getCaptureLevel` is not read as a quiet mic.
   static const double _noMeterDb = -99.0;
 
+  LocalSpeakingDetector({Future<Map<String, dynamic>> Function()? read})
+      : _read = read ?? Helper.getCaptureLevel;
+
+  final Future<Map<String, dynamic>> Function() _read;
+
   bool _speaking = false;
   bool _sawMeter = false;
+  double? _levelDb;
+  double? _lastRawDb;
+
+  /// Our capture level in dBFS from the last live reading, measured before
+  /// the voice chain; null while muted or while no live meter reads.
+  double? get levelDb => _levelDb;
 
   /// True once the native meter has produced a real reading. Until then
   /// callers should assume nothing: the plugin may be an older build.
@@ -37,20 +48,36 @@ class LocalSpeakingDetector {
   Future<bool> poll({required bool muted}) async {
     if (muted) {
       _speaking = false;
+      _levelDb = null;
+      _lastRawDb = null;
       return false;
     }
     final Map<String, dynamic> level;
     try {
-      level = await Helper.getCaptureLevel();
+      level = await _read();
     } catch (_) {
       return _speaking;
     }
     final levelDb = (level['levelDb'] as num?)?.toDouble();
+    final previous = _lastRawDb;
+    _lastRawDb = levelDb;
     if (levelDb == null || levelDb <= _noMeterDb) {
       // No meter yet: hold the last state rather than asserting silence.
+      _levelDb = null;
       return _speaking;
     }
+    // The native peak-hold moves on every 10 ms frame it processes, so a
+    // reading equal to the previous poll's is a FROZEN meter: the capture
+    // stopped (alone in a room, the last peer just left) and the value is
+    // whatever it was then, possibly mid-word. The first reading of a session
+    // is unproven for the same reason: the meter is process-global.
+    if (previous == null || levelDb == previous) {
+      _speaking = false;
+      _levelDb = null;
+      return false;
+    }
     _sawMeter = true;
+    _levelDb = levelDb;
 
     // Prefer the denoiser's VAD: it beats a level threshold on steady noise.
     final vad = (level['vad'] as num?)?.toDouble() ?? -1.0;
@@ -62,5 +89,7 @@ class LocalSpeakingDetector {
 
   void reset() {
     _speaking = false;
+    _levelDb = null;
+    _lastRawDb = null;
   }
 }

@@ -22534,6 +22534,7 @@ async fn friend_request_carries_a_sealed_card() {
         updated_at: 1_700_000_000_000,
         sig: signed("Real Name"),
         pk: pk.clone(),
+        stream_overlay: None,
     };
     let inbox = format!("inbox:{b_master}");
     let requested_at = 1_700_000_000_001;
@@ -27289,7 +27290,12 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-10-15: md-mls-2 proves a spent catch-up asks nothing while a commit is held
     // or from a member we would not ask, and an add vouched late costs no repair where
     // the group did not move (6.0 s, total 812.1 s).
-    const BUDGET_MS: u64 = 812_100;
+    // 2026-10-15: so-core (stream overlay) added one spawn stagger in its friend-pair
+    // helper and three absence proofs, overlay asks that must get no answer (5.7 s,
+    // total 817.8 s).
+    // 2026-10-15: so-core-fix proves five overlay toggles send no late announce per
+    // toggle after the coalesced one (1.5 s, total 819.3 s).
+    const BUDGET_MS: u64 = 819_300;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -27874,6 +27880,7 @@ fn crafted_announce(
         profile_sig,
         profile_pk,
         card: None,
+        stream_overlay: None,
     }
 }
 
@@ -32384,7 +32391,7 @@ async fn join_lock_the_card_rides_inside_the_request() {
     let payload = super::crypto_handler::card_signing_payload(&other.peer_id(), 7, "Not Jo", "");
     let pk = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, other.public_key_protobuf());
     let (Some(sig), Some(pk)) = super::crypto_handler::sign_message(&other, &pk, &payload) else { panic!("signs") };
-    let foreign = super::types::SignedCard { master: other.peer_id(), display_name: "Not Jo".into(), avatar_hash: String::new(), updated_at: 7, sig, pk };
+    let foreign = super::types::SignedCard { master: other.peer_id(), display_name: "Not Jo".into(), avatar_hash: String::new(), updated_at: 7, sig, pk, stream_overlay: None };
     let list = legacy_roster(207, &[207], None);
     let forged = sealed_to_members(&relay, &server_id, &j.device_id, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, requested_at: 5,
@@ -32973,7 +32980,7 @@ async fn authz_a_guest_shows_an_author_only_by_its_own_card() {
     let pk = base64::engine::general_purpose::STANDARD.encode(m.master_kp.public_key_protobuf());
     let (Some(sig), Some(pk)) = super::crypto_handler::sign_message(&m.master_kp, &pk, &payload) else { panic!("signs") };
     let forged = super::types::SignedCard {
-        master: o.master_id.clone(), display_name: "Not Owen".into(), avatar_hash: String::new(), updated_at: 99, sig, pk,
+        master: o.master_id.clone(), display_name: "Not Owen".into(), avatar_hash: String::new(), updated_at: 99, sig, pk, stream_overlay: None,
     };
     let answer = super::types::HavenMessage::PublicChannelSyncResponse {
         server_id: server_id.clone(),
@@ -34448,6 +34455,7 @@ async fn authz_a_card_or_a_relayed_profile_speaks_only_for_its_owner() {
         updated_at: t,
         sig: super::crypto_handler::sign_message(&x, &pk_of(&x), &card_payload).0.unwrap(),
         pk: pk_of(&x),
+        stream_overlay: None,
     };
     assert!(super::profile_card::card_holds(&card), "precondition: the card is genuine");
     carry_as(&c, &b, super::types::HavenMessage::ProfileCard { card, avatar_b64: String::new(), device_list: None }).await;
@@ -34602,7 +34610,7 @@ async fn a_meeting_card_claiming_another_master_is_not_stored() {
     let payload = super::crypto_handler::card_signing_payload(&x_id, 5, "Xavier", "");
     let pk = base64::engine::general_purpose::STANDARD.encode(x.public_key_protobuf());
     let (Some(sig), Some(pk)) = super::crypto_handler::sign_message(&x, &pk, &payload) else { panic!("signing") };
-    let x_card = super::types::SignedCard { master: x_id.clone(), display_name: "Xavier".into(), avatar_hash: String::new(), updated_at: 5, sig, pk };
+    let x_card = super::types::SignedCard { master: x_id.clone(), display_name: "Xavier".into(), avatar_hash: String::new(), updated_at: 5, sig, pk, stream_overlay: None };
     assert!(super::profile_card::card_holds(&x_card), "the card itself is genuine");
 
     let line = serde_json::json!({ "card": x_card, "avatar": "" }).to_string();
@@ -47981,4 +47989,745 @@ async fn an_add_vouched_after_the_bound_costs_no_repair_where_the_group_did_not_
     assert_eq!(r.mls_epoch(&server_id).await, Some(epoch_before), "the owner took the commit after all");
     assert!(md_mls_held(&h).await.1.is_empty(), "the lapsed add outlived the probe it called for");
     drop((r, h, m1, m2));
+}
+
+// so-core
+// The stream overlay (#97): a look moves only on an ask we made, only from its owner,
+// and only to our own device, a friend or someone seated in a voice room with us; the
+// `stream_overlay` field stands on its own master signature, newest wins.
+
+/// A real overlay image, `w` x `h` in one shade, as `overlay_process_image` makes it.
+fn so_image(w: u32, h: u32, shade: u8) -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(w, h, image::Rgba([shade, 40, 180, 255]));
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    super::image_convert::process_overlay_image(&png).expect("an overlay image").0
+}
+
+/// `len` bytes whose WebP header names a `w` x `h` canvas: what the receive checks
+/// read, at any size a test needs.
+fn so_padded_webp(len: usize, w: u32, h: u32, fill: u8) -> Vec<u8> {
+    let (w1, h1) = (w - 1, h - 1);
+    let mut b = Vec::with_capacity(len);
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&((len - 8) as u32).to_le_bytes());
+    b.extend_from_slice(b"WEBPVP8X");
+    b.extend_from_slice(&10u32.to_le_bytes());
+    b.extend_from_slice(&[0, 0, 0, 0]);
+    b.extend_from_slice(&[w1 as u8, (w1 >> 8) as u8, (w1 >> 16) as u8]);
+    b.extend_from_slice(&[h1 as u8, (h1 >> 8) as u8, (h1 >> 16) as u8]);
+    b.resize(len, fill);
+    b
+}
+
+fn so_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Two friends, each on a device of its own, with a live Olm session and both in
+/// their DM room.
+async fn so_friends(relay: &MockRelay, a: (u8, u8), b: (u8, u8)) -> (TestNode, TestNode) {
+    let a_master = tag_kp(a.0).peer_id();
+    let b_master = tag_kp(b.0).peer_id();
+    let first = spawn_node_with_friends(relay, a.0, a.1, &[&b_master]).await;
+    sleep_ms(1200).await; // Spawn stagger against the symmetric KeyBundle glare (counted in BUDGET_MS).
+    let second = spawn_node_with_friends(relay, b.0, b.1, &[&a_master]).await;
+    expect_dm_pair_ready(relay, &first, &second, 20).await;
+    (first, second)
+}
+
+/// The two toggles, set as Settings sets them.
+async fn so_flags(node: &TestNode, allow: bool, share: bool) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    node.cmd_tx.send(NodeCommand::OverlaySetFlags { allow, share, reply: tx }).await.unwrap();
+    rx.await.expect("the node answers").expect("the flags are set");
+}
+
+/// Save `look_json` as `node`'s own look; returns it canonical.
+async fn so_own_look(node: &TestNode, look_json: &str) -> String {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    node.cmd_tx.send(NodeCommand::OverlaySetOwnLook { look_json: look_json.to_string(), reply: tx }).await.unwrap();
+    rx.await.expect("the node answers").expect("the look is saved")
+}
+
+/// `node` stores `images` and shares a look naming them state by state, with
+/// `effects`; returns the canonical look and the image hashes in order.
+async fn so_share_look(node: &TestNode, images: &[(&str, Vec<u8>)], effects: &str) -> (String, Vec<String>) {
+    let mut hashes = Vec::new();
+    let mut states = Vec::new();
+    for (state, bytes) in images {
+        let hash = super::overlay::store_own_image(&node.store(), bytes, false).expect("stores the image");
+        states.push(format!("\"{state}\":\"{hash}\""));
+        hashes.push(hash);
+    }
+    let look = so_own_look(node, &format!("{{\"states\":{{{}}},\"effects\":{effects}}}", states.join(","))).await;
+    so_flags(node, true, true).await;
+    (look, hashes)
+}
+
+/// Every overlay answer `node` aimed at `device`: (status, look, bundle).
+async fn so_answers_to(node: &TestNode, device: &str) -> Vec<(String, String, String)> {
+    node.carried_to(device)
+        .await
+        .into_iter()
+        .filter_map(|m| match m {
+            super::types::HavenMessage::OverlayLookAnswer { status, look_json, bundle_json } => Some((status, look_json, bundle_json)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn so_ask(from: &TestNode, to: &TestNode) {
+    carry_as(from, to, super::types::HavenMessage::OverlayLookAsk { held: Vec::new() }).await;
+}
+
+/// `streamer` ticks `master` on their profile.
+async fn so_add(streamer: &TestNode, master: &str) -> i64 {
+    let slot = super::overlay::add_person(&streamer.store(), &streamer.master_id, master, super::frame_auth::now_ms())
+        .expect("the person may be added");
+    streamer.cmd_tx.send(NodeCommand::OverlayRefresh).await.unwrap();
+    slot
+}
+
+fn so_field(node: &TestNode, master: &str) -> super::overlay::FieldValue {
+    super::overlay::field_of(&node.store(), master)
+}
+
+fn so_holds(node: &TestNode, hash: &str) -> bool {
+    so_holds_at(&node.db_path, &node.passphrase, hash)
+}
+
+/// [`so_holds`] for a node an event wait has borrowed.
+fn so_holds_at(db: &str, pass: &str, hash: &str) -> bool {
+    crate::storage::MessageStore::open(db, pass).is_ok_and(|st| st.has_overlay_blob(hash).unwrap_or(false))
+}
+
+fn so_person(node: &TestNode, master: &str) -> Option<super::overlay::PersonView> {
+    super::overlay::people(&node.store()).into_iter().find(|p| p.master == master)
+}
+
+async fn so_look_received(node: &mut TestNode, master: &str, secs: u64) -> bool {
+    wait_event(node, std::time::Duration::from_secs(secs), |ev| {
+        matches!(ev, NetworkEvent::OverlayLookReceived { master: m } if m == master)
+    })
+    .await
+}
+
+/// A voice channel on `server_id`, made by its owner.
+async fn so_voice_channel(owner: &mut TestNode, server_id: &str) -> String {
+    owner
+        .cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.to_string(),
+            channel_id: crate::node::new_channel_id(server_id),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice = None;
+    let made = wait_event(owner, std::time::Duration::from_secs(5), |ev| match ev {
+        NetworkEvent::ChannelAdded { channel_id, channel_type, .. } if channel_type == "voice" => {
+            voice = Some(channel_id.clone());
+            true
+        }
+        _ => false,
+    })
+    .await;
+    assert!(made, "the owner makes a voice channel");
+    voice.expect("its id")
+}
+
+/// `node` takes a seat in `channel`, and `watcher` sees it.
+async fn so_seat(node: &TestNode, watcher: &mut TestNode, server_id: &str, channel: &str, join: bool) {
+    let (server_id, channel_id) = (server_id.to_string(), channel.to_string());
+    let cmd = if join {
+        NodeCommand::VoiceChannelJoin { server_id: server_id.clone(), channel_id: channel_id.clone() }
+    } else {
+        NodeCommand::VoiceChannelLeave { server_id: server_id.clone(), channel_id: channel_id.clone() }
+    };
+    node.cmd_tx.send(cmd).await.unwrap();
+    let seen = wait_event(watcher, std::time::Duration::from_secs(10), |ev| match ev {
+        NetworkEvent::VoiceChannelJoined { channel_id: c, is_self: false, .. } if join => *c == channel_id,
+        NetworkEvent::VoiceChannelLeft { channel_id: c, is_self: false, .. } if !join => *c == channel_id,
+        _ => false,
+    })
+    .await;
+    assert!(seen, "{} sees {} {}", watcher.device_id, node.device_id, if join { "sit down" } else { "leave" });
+}
+
+/// A friend's ask is answered with the look; a co-member outside our voice room hears
+/// nothing, is answered once seated with us, and hears nothing again after leaving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_look_answered_only_to_friends_or_people_in_the_room() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut a, f) = so_friends(&relay, (171, 172), (173, 174)).await;
+    let mut x = spawn_node_on(&relay, 175, 176).await;
+    let server_id = create_server_and_wait(&mut a, "Overlay Room").await;
+    let voice = so_voice_channel(&mut a, &server_id).await;
+    join_as_members(&relay, &server_id, &mut [&mut x]).await;
+    expect_olm_confirmed(&a, &x, 20).await;
+    assert!(
+        wait_until(15, async || x.live_server_state(&server_id).await.is_some_and(|s| s.channels.contains_key(&voice))).await,
+        "the co-member holds the voice channel",
+    );
+    let (look, hashes) = so_share_look(&a, &[("idle", so_image(64, 96, 11))], "{\"talking\":\"pop\"}").await;
+
+    so_ask(&f, &a).await;
+    assert!(
+        wait_until(10, async || {
+            so_answers_to(&a, &f.device_id).await.iter().any(|(s, l, b)| s == "share" && *l == look && b.contains(&hashes[0]))
+        })
+        .await,
+        "a friend's ask is answered with the look and its image",
+    );
+
+    so_ask(&x, &a).await;
+    sleep_ms(1500).await; // ABSENCE: a co-member outside our voice room gets silence
+    assert!(so_answers_to(&a, &x.device_id).await.is_empty(), "a co-member who is not seated with us was answered");
+
+    so_seat(&x, &mut a, &server_id, &voice, true).await;
+    so_seat(&a, &mut x, &server_id, &voice, true).await;
+    so_ask(&x, &a).await;
+    assert!(
+        wait_until(10, async || so_answers_to(&a, &x.device_id).await.iter().any(|(s, l, _)| s == "share" && *l == look)).await,
+        "someone seated in our voice channel is answered",
+    );
+
+    so_seat(&x, &mut a, &server_id, &voice, false).await;
+    let answered = so_answers_to(&a, &x.device_id).await.len();
+    so_ask(&x, &a).await;
+    sleep_ms(1500).await; // ABSENCE: the same person after leaving gets silence again
+    assert_eq!(so_answers_to(&a, &x.device_id).await.len(), answered, "someone who left our voice channel was answered");
+    drop((a, f, x));
+}
+
+/// `show` and `off` answers carry nothing. A streamer drops a look it fetched when
+/// the owner stops sharing, and takes the owner off its overlay, with its own picks
+/// for them, when the owner turns "Let others show me" off. The effective look Dart
+/// reads lays the streamer's picks over the shared look.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_off_hides_and_share_off_sends_no_images() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut s, a) = so_friends(&relay, (177, 178), (179, 180)).await;
+    let a_master = a.master_id.clone();
+    let (look, hashes) = so_share_look(&a, &[("idle", so_image(48, 96, 21))], "{\"talking\":\"pop\"}").await;
+    let stamp = super::overlay_look::stamp(&look);
+    assert!(
+        wait_until(10, async || so_field(&s, &a_master) == super::overlay::FieldValue::Share(stamp)).await,
+        "the streamer learns the field from the profile",
+    );
+    let pick = super::overlay::store_own_image(&s.store(), &so_image(32, 32, 22), false).unwrap();
+    assert!(so_add(&s, &a_master).await >= 1, "an added person gets a slot from 1");
+    super::overlay::set_local_look(&s.store(), &a_master, Some(&format!(r#"{{"states":{{"talking":"{pick}"}},"effects":{{"mirror":true}}}}"#)))
+        .unwrap();
+    assert!(so_look_received(&mut s, &a_master, 15).await, "the streamer fetches the shared look");
+    let person = so_person(&s, &a_master).expect("on the overlay");
+    assert_eq!((person.field.as_str(), person.their_look.as_deref()), ("share", Some(look.as_str())));
+    assert!(so_holds(&s, &hashes[0]), "with its image");
+    // What Dart draws: their idle image and talking effect, our talking image and mirror.
+    let effective: serde_json::Value = serde_json::from_str(&person.effective_look).unwrap();
+    assert_eq!(effective["states"]["idle"], serde_json::json!(hashes[0]));
+    assert_eq!(effective["states"]["talking"], serde_json::json!(pick));
+    assert_eq!(effective["effects"]["talking"], serde_json::json!("pop"));
+    assert_eq!(effective["effects"]["mirror"], serde_json::json!(true));
+
+    // Sharing off: the look we fetched goes, the person and our picks stay.
+    drain_events(&mut s);
+    so_flags(&a, true, false).await;
+    assert!(
+        wait_event(&mut s, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::OverlayFieldChanged { master } if *master == a_master)).await,
+        "the streamer hears the field change",
+    );
+    let person = so_person(&s, &a_master).expect("still on the overlay");
+    assert_eq!((person.field.as_str(), person.their_look.as_deref()), ("show", None));
+    assert!(!so_holds(&s, &hashes[0]), "the fetched image was kept after sharing stopped");
+    assert!(so_holds(&s, &pick), "our own pick stays while they may still be shown");
+    so_ask(&s, &a).await;
+    assert!(
+        wait_until(10, async || so_answers_to(&a, &s.device_id).await.iter().any(|(st, ..)| st == "show")).await,
+        "a show answer comes back",
+    );
+    for (st, l, b) in so_answers_to(&a, &s.device_id).await.iter().filter(|(st, ..)| st == "show") {
+        assert!(l.is_empty() && b.is_empty(), "a {st} answer carried a look or images");
+    }
+
+    // "Let others show me" off: the person leaves the overlay with everything of theirs.
+    so_flags(&a, false, false).await;
+    assert!(
+        wait_event(&mut s, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::OverlayPersonRemoved { master } if *master == a_master)).await,
+        "the streamer takes them off its overlay",
+    );
+    assert!(so_person(&s, &a_master).is_none());
+    assert!(!so_holds(&s, &pick), "our picks for them were kept after they turned showing off");
+    assert!(
+        super::overlay::add_person(&s.store(), &s.master_id, &a_master, super::frame_auth::now_ms()).is_err(),
+        "nobody may add someone whose field is off",
+    );
+    so_ask(&s, &a).await;
+    assert!(
+        wait_until(10, async || so_answers_to(&a, &s.device_id).await.iter().any(|(st, ..)| st == "off")).await,
+        "an off answer comes back",
+    );
+    for (st, l, b) in so_answers_to(&a, &s.device_id).await.iter().filter(|(st, ..)| st == "off") {
+        assert!(l.is_empty() && b.is_empty(), "an {st} answer carried a look or images");
+    }
+    drop((s, a));
+}
+
+/// An answer to an ask we never made is dropped whole, even for someone on our
+/// overlay; the answer to our own ask lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_answer_nobody_asked_for_is_dropped() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut s, a) = so_friends(&relay, (181, 182), (183, 184)).await;
+    let a_master = a.master_id.clone();
+    // A shares nothing yet, so S has nothing to ask A for.
+    so_add(&s, &a_master).await;
+    let pushed = so_image(40, 40, 31);
+    let pushed_hash = so_hash(&pushed);
+    let pushed_look = super::overlay_look::normalize(&format!(r#"{{"stamp":5,"states":{{"idle":"{pushed_hash}"}}}}"#)).unwrap();
+    let bundle = String::from_utf8(crate::api::showcase::encode_asset_bundle(&[(pushed_hash.clone(), pushed)])).unwrap();
+    drain_events(&mut s);
+    carry_as(&a, &s, super::types::HavenMessage::OverlayLookAnswer { status: "share".into(), look_json: pushed_look, bundle_json: bundle }).await;
+    // A barrier behind it on the same session: once the status lands, the answer was judged.
+    carry_as(&a, &s, crafted_announce(&a, super::frame_auth::now_ms(), "after the push", None, None)).await;
+    assert!(
+        wait_until(10, async || s.store().load_profile(&a_master).ok().flatten().is_some_and(|p| p.status == "after the push")).await,
+        "the barrier lands",
+    );
+    let mut heard = false;
+    while let Ok(ev) = s.event_rx.try_recv() {
+        heard |= matches!(ev, NetworkEvent::OverlayLookReceived { .. });
+    }
+    assert!(!heard, "an unasked answer reached the UI");
+    assert!(!so_holds(&s, &pushed_hash), "an unasked answer stored an image");
+    assert_eq!(so_person(&s, &a_master).and_then(|p| p.their_look), None, "an unasked answer stored a look");
+
+    // CONTROL: A shares now, S asks, and that answer lands.
+    let (look, hashes) = so_share_look(&a, &[("idle", so_image(56, 40, 200))], "{}").await;
+    assert_ne!(hashes[0], pushed_hash, "precondition: two different images");
+    assert!(so_look_received(&mut s, &a_master, 15).await, "the answer to our own ask lands");
+    assert_eq!(so_person(&s, &a_master).and_then(|p| p.their_look).as_deref(), Some(look.as_str()));
+    assert!(so_holds(&s, &hashes[0]) && !so_holds(&s, &pushed_hash));
+    drop((s, a));
+}
+
+/// The generic asset responder answers `missing` for overlay images, a look we
+/// fetched and our own alike, while it still serves an emote it holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_blobs_are_never_served_by_the_generic_rail() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut s, a) = so_friends(&relay, (185, 186), (187, 188)).await;
+    let a_master = a.master_id.clone();
+    let (_, theirs) = so_share_look(&a, &[("idle", so_image(40, 40, 41))], "{}").await;
+    so_add(&s, &a_master).await;
+    assert!(so_look_received(&mut s, &a_master, 15).await, "the streamer fetches the look");
+    assert!(so_holds(&s, &theirs[0]));
+    let (_, ours) = so_share_look(&s, &[("idle", so_image(40, 40, 42))], "{}").await;
+    let emote = so_image(24, 24, 43);
+    let emote_hash = so_hash(&emote);
+    s.store().save_asset_blob(&emote_hash, &emote, false, "emote").unwrap();
+
+    carry_as(&a, &s, super::types::HavenMessage::EmoteRequest { hashes: vec![theirs[0].clone(), ours[0].clone(), emote_hash.clone()] }).await;
+    let reply = || async {
+        s.carried_to(&a.device_id).await.into_iter().find_map(|m| match m {
+            super::types::HavenMessage::EmoteAssets { bundle_json, missing } => Some((bundle_json, missing)),
+            _ => None,
+        })
+    };
+    assert!(wait_until(10, async || reply().await.is_some()).await, "the rail answers");
+    let (bundle, missing) = reply().await.unwrap();
+    assert!(bundle.contains(&emote_hash), "CONTROL: an emote we hold is served");
+    assert!(!bundle.contains(&theirs[0]) && !bundle.contains(&ours[0]), "an overlay image rode the generic rail");
+    assert!(missing.contains(&theirs[0]) && missing.contains(&ours[0]), "overlay images are named missing: {missing:?}");
+    drop((s, a));
+}
+
+/// The field counts only under its owner's own signature over the value and its
+/// stamp: unsigned, signed by someone else, changed after signing, stamped past its
+/// frame, or older than the one we hold, it changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_field_needs_its_own_signature_and_newest_wins() {
+    use super::overlay::{sign_field, FieldValue};
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (s, a) = so_friends(&relay, (189, 190), (191, 192)).await;
+    let a_master = a.master_id.clone();
+    let mallory = tag_kp(193);
+    let t0 = super::frame_auth::now_ms();
+    let mut step = 0i64;
+    // A's own announce, every profile field signed, with `field` as the overlay field;
+    // its status is the barrier that says the frame was judged.
+    let mut announce = async |field: super::types::OverlayField| {
+        step += 1;
+        let status = format!("step {step}");
+        let mut msg = crafted_announce(&a, t0 + step, &status, None, None);
+        if let super::types::HavenMessage::ProfileUpdate { stream_overlay, .. } = &mut msg {
+            *stream_overlay = Some(Box::new(field));
+        }
+        carry_as(&a, &s, msg).await;
+        assert!(
+            wait_until(10, async || s.store().load_profile(&a_master).ok().flatten().is_some_and(|p| p.status == status)).await,
+            "{status} lands",
+        );
+    };
+    let held = || s.store().load_stream_overlay(&a_master).unwrap();
+
+    let genuine = sign_field(&a.master_kp, FieldValue::Share(5), t0);
+    announce(super::types::OverlayField { sig: String::new(), ..genuine.clone() }).await;
+    assert_eq!(held(), None, "an unsigned field was kept");
+    announce(sign_field(&mallory, FieldValue::Off, t0)).await;
+    assert_eq!(held(), None, "a field signed by somebody else was kept");
+    announce(super::overlay::sign_field_for(&mallory, &a_master, FieldValue::Off, t0)).await;
+    assert_eq!(held(), None, "a field in A's name under somebody else's key was kept");
+    announce(super::types::OverlayField { value: "off".into(), ..genuine.clone() }).await;
+    assert_eq!(held(), None, "a value the signature does not cover was kept");
+    announce(sign_field(&a.master_kp, FieldValue::Off, t0 + 3_600_000)).await;
+    assert_eq!(held(), None, "a field stamped past its frame was kept");
+    assert_eq!(so_field(&s, &a_master), FieldValue::Show, "absent reads as show");
+
+    // CONTROL: the genuine field lands, then a newer off.
+    announce(genuine.clone()).await;
+    assert_eq!(so_field(&s, &a_master), FieldValue::Share(5));
+    announce(sign_field(&a.master_kp, FieldValue::Off, t0 + 10)).await;
+    assert_eq!(so_field(&s, &a_master), FieldValue::Off);
+    // A replayed older share never undoes the off.
+    announce(genuine).await;
+    assert_eq!(so_field(&s, &a_master), FieldValue::Off, "a replayed older share undid an off");
+    drop((s, a));
+}
+
+/// A bare master id (G1) and a blocked friend get silence; the same friend unblocked
+/// is answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_ask_from_bare_master_or_blocked_is_silent() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let _block_guard = BlocklistClearGuard;
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, f) = so_friends(&relay, (194, 195), (196, 197)).await;
+    let f_master = f.master_id.clone();
+    assert!(
+        wait_until(20, async || a.known_devices(&f_master) == vec![f.device_id.clone()]).await,
+        "A holds F's roster first",
+    );
+    let (look, _) = so_share_look(&a, &[("idle", so_image(40, 40, 51))], "{}").await;
+
+    // A thief with F's master key logs in as the bare master id and asks.
+    let stolen = super::roster_book::load(&f.store(), &f_master).expect("F holds its roster");
+    let t = spawn_node_seeded(&relay, 196, 196, &[&a.master_id], Some(stolen)).await;
+    assert_eq!(t.device_id, f_master, "the thief is logged in as the master id itself");
+    so_ask(&t, &a).await;
+
+    // F, blocked: the gate reads the block list. The DM room stays open here (only the
+    // block list moves), so the ask reaches the gate rather than dying in transit.
+    super::blocklist::block(&f_master);
+    so_ask(&f, &a).await;
+    sleep_ms(1500).await; // ABSENCE: neither ask has a reply to poll for
+    assert!(so_answers_to(&a, &f_master).await.is_empty(), "the bare master id was answered");
+    assert!(so_answers_to(&a, &f.device_id).await.is_empty(), "a blocked friend was answered");
+
+    // CONTROL: unblocked, the same ask is answered.
+    super::blocklist::unblock(&f_master);
+    so_ask(&f, &a).await;
+    assert!(
+        wait_until(10, async || so_answers_to(&a, &f.device_id).await.iter().any(|(s, l, _)| s == "share" && *l == look)).await,
+        "an unblocked friend is answered",
+    );
+    drop((a, f, t));
+}
+
+/// The size cap on an answered image is the one of the kind WE recorded, whatever
+/// the answer holds: an image over it is dropped and one under it in the same
+/// answer lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_answer_capped_by_the_kind_we_recorded() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut s, a) = so_friends(&relay, (198, 199), (200, 201)).await;
+    let a_master = a.master_id.clone();
+    let cap = super::image_convert::MAX_OVERLAY_IMAGE_BYTES;
+    let fits = so_padded_webp(cap - 64, 300, 300, 0x31);
+    let over = so_padded_webp(cap + 1, 300, 300, 0x32);
+    let (fits_hash, over_hash) = (so_hash(&fits), so_hash(&over));
+    // A's look names two images A does not hold, so A's own answers carry none and
+    // S keeps asking A's device.
+    let look = so_own_look(&a, &format!(r#"{{"states":{{"idle":"{fits_hash}","talking":"{over_hash}"}}}}"#)).await;
+    so_flags(&a, true, true).await;
+    so_add(&s, &a_master).await;
+    assert!(so_look_received(&mut s, &a_master, 15).await, "S holds A's look, its images still missing");
+
+    let bundle = String::from_utf8(crate::api::showcase::encode_asset_bundle(&[(fits_hash.clone(), fits), (over_hash.clone(), over)])).unwrap();
+    drain_events(&mut s);
+    carry_as(&a, &s, super::types::HavenMessage::OverlayLookAnswer { status: "share".into(), look_json: look, bundle_json: bundle }).await;
+    // A's own answers store nothing new, so the next look event is this answer's.
+    assert!(so_look_received(&mut s, &a_master, 15).await, "the answer is taken");
+    assert!(so_holds(&s, &fits_hash), "CONTROL: an image within the cap lands");
+    assert!(!so_holds(&s, &over_hash), "an image over the overlay cap was stored");
+    drop((s, a));
+}
+
+/// Our look reaches our other device whenever its stamp moves, whatever the share
+/// toggle says: siblings are always entitled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_look_reaches_own_sibling_on_stamp_change() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const M: u8 = 202;
+    let roster = protected_roster(M, &[203, 204], super::roster_book::now_ms() - 60_000);
+    let a1 = spawn_node_seeded(&relay, M, 203, &[], Some(roster.clone())).await;
+    let mut a2 = spawn_node_seeded(&relay, M, 204, &[], Some(roster)).await;
+    expect_siblings_ready(&relay, &a1, &a2, 30).await;
+    let master = a1.master_id.clone();
+    let (db2, pass2) = (a2.db_path.clone(), a2.passphrase.clone());
+    let own_look_at = |db: &str, pass: &str| crate::storage::MessageStore::open(db, pass).ok().and_then(|st| super::overlay::own_look(&st));
+    let (look, hashes) = so_share_look(&a1, &[("idle", so_image(64, 64, 61))], "{\"talking\":\"shake\"}").await;
+    let took = wait_event(&mut a2, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::OverlayLookReceived { master: m } if *m == master)
+            && own_look_at(&db2, &pass2).as_deref() == Some(look.as_str())
+    })
+    .await;
+    assert!(took, "the sibling takes our look");
+    assert!(so_holds(&a2, &hashes[0]), "with its image");
+    assert_eq!(super::overlay::own_flags(&a2.store(), &master), (true, true), "and our toggles");
+
+    // Sharing off, then an edit: the sibling still gets the newer look.
+    so_flags(&a1, true, false).await;
+    drain_events(&mut a2);
+    let edited = so_own_look(&a1, &format!(r#"{{"states":{{"idle":"{}"}},"effects":{{"talking":"glow"}}}}"#, hashes[0])).await;
+    assert!(super::overlay_look::stamp(&edited) > super::overlay_look::stamp(&look));
+    let took = wait_event(&mut a2, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::OverlayLookReceived { master: m } if *m == master)
+            && own_look_at(&db2, &pass2).as_deref() == Some(edited.as_str())
+    })
+    .await;
+    assert!(took, "the sibling takes the newer look");
+    assert_eq!(super::overlay::own_flags(&a2.store(), &master), (true, false), "and the toggle");
+    drop((a1, a2));
+}
+
+/// Six images at the overlay cap outgrow one answer: the look arrives over several,
+/// the asker naming what it already holds each time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_look_pages_over_several_answers() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut s, a) = so_friends(&relay, (205, 206), (207, 208)).await;
+    let a_master = a.master_id.clone();
+    let size = super::image_convert::MAX_OVERLAY_IMAGE_BYTES - 4096;
+    let images: Vec<(&str, Vec<u8>)> = super::overlay_look::STATES
+        .iter()
+        .enumerate()
+        .map(|(i, state)| (*state, so_padded_webp(size, 512, 512, 0x40 + i as u8)))
+        .collect();
+    assert!(images.len() * size > super::assets::MAX_BUNDLE_REPLY_BYTES, "precondition: one answer cannot hold the look");
+    let (_, hashes) = so_share_look(&a, &images, "{}").await;
+    so_add(&s, &a_master).await;
+    let (db, pass) = (s.db_path.clone(), s.passphrase.clone());
+    let complete = wait_event(&mut s, std::time::Duration::from_secs(60), |ev| {
+        matches!(ev, NetworkEvent::OverlayLookReceived { master } if *master == a_master)
+            && hashes.iter().all(|h| so_holds_at(&db, &pass, h))
+    })
+    .await;
+    assert!(complete, "every image of the look arrives");
+    let answers = so_answers_to(&a, &s.device_id).await;
+    assert!(answers.len() >= 2, "the look came in one answer: {}", answers.len());
+    for (_, _, bundle) in &answers {
+        let images = crate::api::showcase::decode_asset_bundle(bundle.as_bytes());
+        let bytes: usize = images.iter().map(|(_, b)| b.len()).sum();
+        assert!(bytes <= super::assets::MAX_BUNDLE_REPLY_BYTES, "an answer outgrew its budget: {bytes}");
+    }
+    let person = so_person(&s, &a_master).expect("on the overlay");
+    assert_eq!(person.their_look.map(|l| super::overlay_look::hashes(&l)), Some(hashes));
+    drop((s, a));
+}
+
+/// A meeting peer sees only our card, so the field rides the card: a stranger in our
+/// meeting learns that we turned showing off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn overlay_field_reaches_a_meeting_peer_through_the_card() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 209, 210).await;
+    let mut bee = spawn_node_on(&relay, 211, 212).await;
+    host.cmd_tx.send(profile_named("Hosty Name", "host private")).await.unwrap();
+    bee.cmd_tx.send(profile_named("Bee Name", "bee private")).await.unwrap();
+    assert!(
+        wait_until(10, async || {
+            host.store().load_profile(&host.master_id).ok().flatten().is_some()
+                && bee.store().load_profile(&bee.master_id).ok().flatten().is_some()
+        })
+        .await
+    );
+    let conf_id = super::conference::derive_conf_id(&host.master_id, "overlay-cards");
+    host.cmd_tx
+        .send(NodeCommand::ConferenceStart {
+            conf_id: conf_id.clone(),
+            nonce: "overlay-cards".to_string(),
+            link_key: MEETING_LINK_KEY.to_string(),
+            waiting_room: true,
+            code_key: None,
+            host_display_name: "Hosty Name".to_string(),
+            host_avatar_hash: String::new(),
+        })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || relay.room_devices(&super::conference::conf_server_id(&conf_id)).contains(&host.device_id)).await);
+    bee.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: conf_id.clone(),
+            link_key: MEETING_LINK_KEY.to_string(),
+            display_name: "Bee Name".to_string(),
+            avatar_hash: String::new(),
+            code_key: None,
+        })
+        .await
+        .unwrap();
+    let bee_dev = bee.device_id.clone();
+    assert!(
+        wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { peer_id, .. } if *peer_id == bee_dev)
+        })
+        .await,
+        "the host sees Bee knock",
+    );
+    host.cmd_tx.send(NodeCommand::ConferenceAdmit { conf_id: conf_id.clone(), peer_id: bee.device_id.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut bee, std::time::Duration::from_secs(8), |ev| matches!(ev, NetworkEvent::ConferenceAdmitted { .. })).await,
+        "Bee is admitted",
+    );
+    let host_master = host.master_id.clone();
+    assert!(
+        wait_until(10, async || bee.store().load_profile(&host_master).ok().flatten().is_some_and(|p| p.display_name == "Hosty Name")).await,
+        "Bee holds the host's card",
+    );
+    assert_eq!(so_field(&bee, &host_master), super::overlay::FieldValue::Show, "no field yet reads as show");
+    assert_eq!(
+        bee.store().load_profile(&host_master).unwrap().unwrap().status,
+        "",
+        "precondition: Bee sees the card only, never the full profile",
+    );
+
+    drain_events(&mut bee);
+    so_flags(&host, false, false).await;
+    assert!(
+        wait_event(&mut bee, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::OverlayFieldChanged { master } if *master == host_master)).await,
+        "Bee hears the field change",
+    );
+    assert_eq!(so_field(&bee, &host_master), super::overlay::FieldValue::Off, "the meeting peer holds the host's off");
+    drop((host, bee));
+}
+
+// so-core-fix
+// Overlay images in their own table, the block list on the overlay, and field
+// announces that coalesce and are built off the event loop.
+
+/// A block our other device makes takes the person off this device's overlay, with
+/// our picks and their images, and Dart hears it: the block lands on the blocking
+/// pool, outside the event loop's task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_a_siblings_block_takes_the_person_off_our_overlay() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let _block_guard = BlocklistClearGuard;
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const M: u8 = 211;
+    let roster = protected_roster(M, &[212, 213], super::roster_book::now_ms() - 60_000);
+    let a1 = spawn_node_seeded(&relay, M, 212, &[], Some(roster.clone())).await;
+    let mut a2 = spawn_node_seeded(&relay, M, 213, &[], Some(roster)).await;
+    expect_siblings_ready(&relay, &a1, &a2, 30).await;
+    let x = tag_kp(214).peer_id();
+    a2.store().save_profile_card(&x, "Xan", 1, "", None).unwrap();
+    so_add(&a2, &x).await;
+    let pick = super::overlay::store_own_image(&a2.store(), &so_image(32, 32, 71), false).unwrap();
+    super::overlay::set_local_look(&a2.store(), &x, Some(&format!(r#"{{"states":{{"idle":"{pick}"}}}}"#))).unwrap();
+    assert!(so_person(&a2, &x).is_some() && so_holds(&a2, &pick), "precondition: X on the sibling's overlay");
+    drain_events(&mut a2);
+
+    md_block(&a1, &x, true).await;
+    let heard = wait_event(&mut a2, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::OverlayPersonRemoved { master } if *master == x)
+    })
+    .await;
+    assert!(heard, "the sibling's overlay never heard the block");
+    assert!(so_person(&a2, &x).is_none(), "a blocked person stayed on the sibling's overlay");
+    assert!(!so_holds(&a2, &pick), "our picks for a blocked person stayed");
+    drop((a1, a2));
+}
+
+/// Five toggles in a row go out as one field announce (two at most, should the
+/// burst straddle a window), and the friend ends on the last value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn overlay_field_announces_coalesce() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, b) = so_friends(&relay, (215, 216), (217, 218)).await;
+    let a_master = a.master_id.clone();
+    let profiles_to_b = || async {
+        a.carried_to(&b.device_id)
+            .await
+            .iter()
+            .filter(|m| matches!(m, super::types::HavenMessage::ProfileUpdate { .. }))
+            .count()
+    };
+    let before = profiles_to_b().await;
+    let mut replies = Vec::new();
+    for (allow, share) in [(true, false), (true, true), (false, false), (true, false), (true, true)] {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        a.cmd_tx.send(NodeCommand::OverlaySetFlags { allow, share, reply: tx }).await.unwrap();
+        replies.push(rx);
+    }
+    for rx in replies {
+        rx.await.expect("the node answers").expect("the flags are set");
+    }
+    let final_field = so_field(&a, &a_master);
+    assert!(matches!(final_field, super::overlay::FieldValue::Share(_)), "precondition: {final_field:?}");
+    assert!(wait_until(15, async || so_field(&b, &a_master) == final_field).await, "the friend ends on our last field");
+    sleep_ms(1500).await; // ABSENCE: no late announce per toggle follows
+    let sent = profiles_to_b().await - before;
+    assert!((1..=2).contains(&sent), "{sent} profile announces for five toggles");
+    drop((a, b));
 }

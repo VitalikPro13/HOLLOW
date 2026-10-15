@@ -355,7 +355,13 @@ never the padding numbers in code** (he once measured 10 vs 20 px himself).
   closes it when pressed again; a card or popup has one primary plus an icon strip, never a stack
   of full-width buttons; a section's Save sits below every field it saves.
 - **Settings:** a hairline between big sections; a choice row says what the chosen option means; a
-  group that matters is its own section, not a tiny dense sub-header.
+  group that matters is its own section, not a tiny dense sub-header. A setting saves the moment it
+  changes (a slider on release, debounced): no Save/Undo pair on a Settings page, since no other
+  page has one; an editor dialog closes with a single "Done" (plus "Reset all" if it overrides).
+- **Lists never grow without bound:** no section gets one row per person or item that lives
+  elsewhere (per-person actions sit ON that person's row as an icon button); a list of people or
+  items shows the first few with "Show all (N)" and a filter once long. Shoot it with 1, 6 and 12
+  items before calling it done.
 - **Phone:** sheets keep a visible handle and a SafeArea bottom; a long press opens a bottom sheet;
   touch targets 44 px or more whatever the painted size.
 - **How to look:** ONE image per screen, BEFORE left and AFTER right; judge subtle chrome at 1x as

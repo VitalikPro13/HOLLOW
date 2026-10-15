@@ -23,6 +23,8 @@ import 'package:hollow/src/core/services/realtime_session_flag.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
+import 'package:hollow/src/core/providers/voice_level_provider.dart';
+import 'package:hollow/src/core/services/overlay_mic.dart';
 import 'package:hollow/src/core/services/audio_route.dart';
 import 'package:hollow/src/core/services/desktop_capture_support.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
@@ -523,6 +525,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     ref.listen<Map<String, dynamic>>(iceConfigProvider, (_, next) {
       _service?.iceServers = next;
     });
+    ref.listen<Duration>(voicePollIntervalProvider, (_, next) {
+      _service?.setPollInterval(next);
+    });
     return const VoiceChannelState();
   }
 
@@ -804,6 +809,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       // Sidechain: anyone talking pulls received share audio down.
       ShareAudioLevel.setSpeaking(speaking.isNotEmpty || localSpeaking);
     };
+    // Levels ride their own providers: no speaking-cue widget rebuilds per tick.
+    svc.pollInterval = ref.read(voicePollIntervalProvider);
+    svc.onLevels = (remote, local) {
+      ref.read(vcLevelsProvider.notifier).set(remote);
+      ref.read(vcLocalLevelProvider.notifier).set(local);
+    };
 
     // ICE repair, lever 1: the provider owns policy. Forced-relay users are
     // NEVER repaired, that routing is their deliberate choice.
@@ -916,6 +927,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Cryptor failure states drive recovery instead of playing garbage.
     svc.onSframeCryptorState = _onSframeCryptorState;
 
+    // Before the mic opens: a muted join opens its track off and never
+    // records while alone (the meter loopback runs only while unmuted).
+    _applyTxGate();
     await svc.startAudio(serverId, channelId);
 
     // The mic is live: if the channel went away while it opened, give it back.
@@ -1222,6 +1236,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         .catchError((Object e) => debugPrint('[HOLLOW-VC] call teardown error: $e'))
         .whenComplete(() {
       if (identical(_teardownInFlight, done.future)) _teardownInFlight = null;
+      // The mesh and its mic are closed: listening for the overlay may resume.
+      overlayMic.release(OverlayMicHold.voiceChannel);
       done.complete();
     }));
     return done.future;
@@ -1316,6 +1332,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Speaking state lives outside this state object — clear it with the rest.
     ref.read(vcSpeakingProvider.notifier).reset();
     ref.read(vcLocalSpeakingProvider.notifier).reset();
+    ref.read(vcLevelsProvider.notifier).reset();
+    ref.read(vcLocalLevelProvider.notifier).reset();
   }
 
   // Push-to-talk transmit gate (issue #38). PTT state lives OUTSIDE
