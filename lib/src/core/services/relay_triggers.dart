@@ -9,8 +9,8 @@ import '../../rust/api/network.dart' as network_api;
 import '../providers/call_provider.dart';
 import '../providers/conference_provider.dart';
 import '../providers/connection_status_provider.dart';
-import '../providers/device_link_sync_provider.dart';
 import '../providers/member_panel_provider.dart';
+import 'link_keep_alive.dart';
 import 'realtime_session_flag.dart';
 
 /// A window back in focus probes only after this long away: a shorter absence
@@ -112,13 +112,7 @@ final relayRealtimeProvider = Provider<bool>((ref) {
       s.lobbyStatus == ConferenceLobbyStatus.admitted));
   // A hidden presenter never hears the joiner arrive in the code's room, so it
   // refuses the handshake.
-  final linking = ref.watch(deviceLinkSyncProvider.select((s) => switch (s.phase) {
-        LinkPhase.showingCode ||
-        LinkPhase.renewingCode ||
-        LinkPhase.confirmPush ||
-        LinkPhase.sending => true,
-        _ => false,
-      }));
+  final linking = ref.watch(linkPresentingProvider);
   return ringing || inLobby || linking || RealtimeSessionFlag.isActive;
 });
 
@@ -429,12 +423,16 @@ class _Burst {
 }
 
 /// The app's one [RelayTriggers], started by the shell.
-final relayTriggersProvider = Provider<RelayTriggers>((ref) => wireRelayTriggers(
-    ref,
-    RelayTriggers(
-      phone: Platform.isAndroid || Platform.isIOS,
-      inCall: () => ref.read(relayRealtimeProvider),
-    )));
+final relayTriggersProvider = Provider<RelayTriggers>((ref) {
+  // Lives as long as the triggers: Android's half of keeping a presenter reachable.
+  ref.watch(linkKeepAliveProvider);
+  return wireRelayTriggers(
+      ref,
+      RelayTriggers(
+        phone: Platform.isAndroid || Platform.isIOS,
+        inCall: () => ref.read(relayRealtimeProvider),
+      ));
+});
 
 /// Feeds window focus, real-time sessions and the relay status to [triggers],
 /// starts it and ties it to [ref].

@@ -319,6 +319,37 @@ fn send_personal_emotes_to_sibling(
     count
 }
 
+/// One of our devices asked for a new key while we hold a session with it: it lost its
+/// sessions, and with them all we sent it on the old one (a repaired or restored
+/// database, a reinstall). Converge again; every send waits for the new session.
+/// False for anyone else: a friend's device re-keys here all the time, quietly.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reconverge_after_lost_session(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_peer_str: &str,
+    server_states: &HashMap<String, ServerState>,
+    is_invisible: bool,
+    db_path: &str,
+    db_passphrase: &str,
+    peer_id: &str,
+    own_call: Option<&CallPresence>,
+) -> bool {
+    if !super::resolver::same_identity(peer_id, local_peer_str)
+        || super::resolver::is_revoked(peer_id)
+        || super::resolver::is_bare_master(peer_id)
+    {
+        return false;
+    }
+    hollow_log!("[HOLLOW-MULTIDEV] Sibling {peer_id} lost its session: converging again on the new one");
+    on_verified_sibling(
+        ws_cmd_tx, ws_room_peers, master_keypair, local_peer_str,
+        server_states, is_invisible, db_path, db_passphrase, peer_id, own_call,
+    );
+    true
+}
+
 /// Run the sibling convergence for `peer_id`, one of our own devices: our roster names
 /// it a member (design ID-1). Holding the master key is not enough, and neither is
 /// bare `inbox:{our_master}` membership: a friend-request sender sits there too.
@@ -326,7 +357,7 @@ fn send_personal_emotes_to_sibling(
 /// Pushes our profile and friends and pulls theirs, requests a DM backfill, and
 /// re-announces our servers. Synchronous: none of these calls await.
 #[allow(clippy::too_many_arguments)]
-fn on_verified_sibling(
+pub(super) fn on_verified_sibling(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
@@ -338,7 +369,11 @@ fn on_verified_sibling(
     peer_id: &str,
     own_call: Option<&CallPresence>,
 ) {
-    if !super::resolver::same_identity(peer_id, local_peer_str) || super::resolver::is_revoked(peer_id) {
+    // `same_identity(M, M)` holds for a bare master id, which is no device (G1).
+    if !super::resolver::same_identity(peer_id, local_peer_str)
+        || super::resolver::is_revoked(peer_id)
+        || super::resolver::is_bare_master(peer_id)
+    {
         hollow_log!("[HOLLOW-ROSTER] {peer_id} is not one of this identity's devices: no sibling state");
         return;
     }
@@ -380,7 +415,7 @@ fn on_verified_sibling(
         if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
         super::olm_lane::carry(
             ws_cmd_tx, peer_id, Some(&own_inbox),
-            &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner(), join_key: st.join_public_text() },
+            &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner(), join_key: st.join_public_text(), fresh: false },
             super::olm_lane::NoSession::Queue,
         );
     }
@@ -2561,6 +2596,10 @@ async fn run_event_loop(
                             &ws_cmd_tx, &mut pending_messages, &local_peer_str, &master, blocked,
                             &db_path, &db_passphrase,
                         );
+                        let (m, db, pass) = (super::resolver::resolve(&master), db_path.clone(), db_passphrase.clone());
+                        if let Ok(Some(entry)) = tokio::task::spawn_blocking(move || social::own_block_entry(&m, &db, &pass)).await {
+                            social::share_block_with_siblings(&ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id, entry);
+                        }
                     }
 
                     NodeCommand::SendTypingIndicator { server_id, channel_id } => {
@@ -3465,6 +3504,13 @@ async fn run_event_loop(
                     }
 
                     #[cfg(test)]
+                    NodeCommand::TestAgeHeldCommits { by } => {
+                        if let Some(mls_mgr) = mls.as_mut() {
+                            mls_mgr.age_held_commits(by);
+                        }
+                    }
+
+                    #[cfg(test)]
                     NodeCommand::DebugSnapshot { reply } => {
                         let mut snap = super::types::DebugSnapshotReply::default();
                         if let Some(ref mls_mgr) = mls {
@@ -3477,6 +3523,7 @@ async fn run_event_loop(
                                     snap.mls_epoch_auth.insert(sid.clone(), auth);
                                 }
                             }
+                            (snap.mls_held_commits, snap.mls_lapsed_commits, snap.mls_held_welcomes) = mls_mgr.held_and_lapsed();
                         }
                         for peer in olm.session_peer_ids() {
                             let status = if olm.has_confirmed_session(&peer) {
@@ -4397,6 +4444,10 @@ async fn run_event_loop(
                             Some(old) => room_set.difference(old).cloned().collect(),
                             None => room_set.clone(),
                         };
+                        // Our own first listing of our inbox on this session, not a resume's.
+                        if room == format!("inbox:{local_peer_str}") && !ws_room_peers.contains_key(&room) {
+                            sync_handler::ask_absent_siblings(&ws_cmd_tx, &local_peer_str, &device_peer_id, &room_set);
+                        }
 
                         // Media-forwarder control-plane room: presence bookkeeping still runs,
                         // because the embedded engine's tolerance depends on it, but the discovery
@@ -5623,8 +5674,13 @@ async fn run_event_loop(
                             .collect();
                         for group_key in elapsed {
                             mls_welcome_grace.remove(&group_key);
-                            if mls_mgr.has_group(&group_key) {
-                                continue; // the Welcome landed after all
+                            match mls_mgr.seat(&group_key) {
+                                crate::crypto::Seat::Held => continue, // the Welcome landed after all
+                                crate::crypto::Seat::WelcomeWaits => {
+                                    mls_welcome_grace.insert(group_key, std::time::Instant::now());
+                                    continue;
+                                }
+                                crate::crypto::Seat::Missing => {}
                             }
                             let (sid, cid) = crate::crypto::split_group_key(&group_key);
                             let Some(state) = server_states.get(&sid) else { continue };
@@ -5663,7 +5719,7 @@ async fn run_event_loop(
                             !state.is_deleted()
                                 && !super::conference::is_conference_sid(sid)
                                 && state.members.contains_key(&local_peer_str)
-                                && !mls_mgr.has_group(sid)
+                                && mls_mgr.seat(sid) == crate::crypto::Seat::Missing
                                 && !pending_server_joins.contains_key(*sid)
                                 && !mls_welcome_grace.contains_key(*sid)
                                 && mls_bootstrap_requested.get(*sid).is_none_or(|t| t.elapsed() >= MLS_BOOTSTRAP_TIMEOUT)
@@ -5879,6 +5935,24 @@ async fn run_event_loop(
                             }
                             Some(Err(e)) => hollow_log!("[HOLLOW-MLS] Held commit for {group_key} failed to merge: {e}"),
                             Some(Ok(crate::crypto::Verdict::Hold(_))) | None => {}
+                        }
+                        // A commit we spent unmerged would pass now. Whether the group
+                        // moved past it is the responder's to show: only its catch-up,
+                        // failing on that spent key, asks for a repair.
+                        let lapsed_passes = mls_mgr.lapsed_commit_passes(&group_key, |facts| {
+                            super::mls_authority::judge_commit(
+                                &server_states, &server_id, channel_id.as_deref(), host.as_deref(), facts,
+                            )
+                        });
+                        if lapsed_passes
+                            && let Some(state) = server_states.get(&server_id)
+                            && crate::node::crypto_handler::send_epoch_probe(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers, state, &server_id,
+                                channel_id.as_deref(), &local_peer_str, &mut mls_epoch_hint_cooldown,
+                            )
+                        {
+                            hollow_log!("[HOLLOW-MLS] A commit for {group_key} we spent unmerged now passes; probed whether the group moved past it");
+                            mls_mgr.clear_lapsed(&group_key);
                         }
 
                         let requests = super::mls_authority::LeafRequests {
@@ -7651,7 +7725,8 @@ async fn handle_incoming_request(
                     olm, crypto_store, peer_str, &ack_json, event_tx, ws_cmd_tx, ws_room_peers,
                 ).await;
             } else {
-                if olm.has_session(peer_str) {
+                let lost_session = olm.has_session(peer_str);
+                if lost_session {
                     // Stop encrypting on our half so the session the peer builds from the
                     // new bundle is the one used; what it already sent still reads.
                     hollow_log!("[HOLLOW-CRYPTO] KeyRequest from {peer_str} while we hold a session — peer lost theirs, re-keying");
@@ -7669,6 +7744,12 @@ async fn handle_incoming_request(
                     ws_cmd_tx, ws_room_peers, peer_str,
                     signed_key_bundle(device_keypair, device_peer_id, peer_str, identity_key, otk),
                 );
+                if lost_session {
+                    reconverge_after_lost_session(
+                        ws_cmd_tx, ws_room_peers, master_keypair, local_peer_str, server_states,
+                        is_invisible, db_path, db_passphrase, peer_str, call_book.own(),
+                    );
+                }
             }
         }
 
@@ -9883,6 +9964,8 @@ async fn handle_incoming_request(
                             let _ = event_tx.send(NetworkEvent::ServerJoined {
                                 server_id: server_id.clone(),
                                 name: server_name,
+                                quiet: completed.quiet,
+                                from_sibling: completed.from_sibling,
                             }).await;
 
                             // Our other devices learn of a server we joined as of one we made.
@@ -10184,7 +10267,8 @@ async fn handle_incoming_request(
                     .then(|| base64::engine::general_purpose::STANDARD.decode(&avatar_b64).ok())
                     .flatten()
                     .filter(|b| b.len() <= super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES);
-                if super::profile_card::store_card(&card, avatar.as_deref(), db_path, db_passphrase) {
+                let ceiling = super::frame_auth::stamp_ceiling(frame_ts_ms);
+                if super::profile_card::store_card(&card, avatar.as_deref(), ceiling, db_path, db_passphrase) {
                     let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: card.master.clone() }).await;
                 }
             }
@@ -10922,7 +11006,7 @@ async fn handle_incoming_request(
                 }
             }
         }
-        HavenMessage::SiblingServerAnnounce { server_id, owner, join_key } => {
+        HavenMessage::SiblingServerAnnounce { server_id, owner, join_key, fresh } => {
             // Multi-device: one of OUR OWN devices created a server and is telling us
             // (its sibling) to onboard. SECURITY: only act on a SAME-IDENTITY sender —
             // a stranger can't pull us into a server this way.
@@ -10972,6 +11056,7 @@ async fn handle_incoming_request(
                 join_key,
                 reply_secret: super::join_lane::ReplySecret::new(),
                 from_sibling: true,
+                quiet: !fresh,
                 ..Default::default()
             };
             sync_handler::request_join_lock(ws_cmd_tx, &server_id, &mut pending);
@@ -11308,10 +11393,14 @@ async fn handle_incoming_request(
                                     showcase_assets_b64, showcase_assets_hash, avatar_frame,
                                     avatar_anim, banner_anim, support_creds,
                                     support_creds_sig, profile_sig, profile_pk,
+                                    super::frame_auth::stamp_ceiling(frame_ts_ms),
                                     db_path, db_passphrase,
                                 ).await;
                                 if let Some(card) = card {
-                                    super::profile_card::keep_card(&card, &super::resolver::resolve(&card_sender), db_path, db_passphrase);
+                                    super::profile_card::keep_card(
+                                        &card, &super::resolver::resolve(&card_sender),
+                                        super::frame_auth::stamp_ceiling(frame_ts_ms), db_path, db_passphrase,
+                                    );
                                 }
                                 // Step 7: enforce revocations learned via the MLS
                                 // server-member profile path too (Olm drop + single
@@ -11925,6 +12014,14 @@ async fn handle_incoming_request(
                             mls_welcome_grace.insert(group_key.clone(), crate::node::crypto_handler::welcome_grace_start(welcome_due));
                             break;
                         }
+                        crate::node::crypto_handler::CommitApplyOutcome::Spent => {
+                            crate::node::crypto_handler::repair_after_spent_catchup(
+                                mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, server_states,
+                                mls_bootstrap_requested, &server_id, cu_channel_id.as_deref(), peer_str,
+                                local_peer_str,
+                            );
+                            break;
+                        }
                         crate::node::crypto_handler::CommitApplyOutcome::NoGroup
                         | crate::node::crypto_handler::CommitApplyOutcome::Held
                         | crate::node::crypto_handler::CommitApplyOutcome::Refused
@@ -12171,7 +12268,8 @@ async fn handle_incoming_request(
                 super::profile_card::open_from(sealed, master_peer_str, &req_master_early, requested_at)
             }) {
                 request_thumb = Some(opened.thumb);
-                if super::profile_card::store_card(&opened.card, None, db_path, db_passphrase) {
+                let ceiling = super::frame_auth::stamp_ceiling(frame_ts_ms);
+                if super::profile_card::store_card(&opened.card, None, ceiling, db_path, db_passphrase) {
                     let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: opened.card.master }).await;
                 }
             }
@@ -12477,11 +12575,21 @@ async fn handle_incoming_request(
             let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
             // A removal sealed before this friendship began belongs to an earlier one,
             // held back or replayed by the relay.
-            if let Ok(Some((_, _, since))) = store.get_friend_row(&master)
-                && frame_ts_ms + super::frame_auth::LIVE_SKEW_MS < since
-            {
-                hollow_log!("[HOLLOW-SECURITY] Ignored a removal from {peer_str} older than the friendship");
-                return;
+            if let Ok(Some((status, direction, since))) = store.get_friend_row(&master) {
+                if frame_ts_ms + super::frame_auth::LIVE_SKEW_MS < since {
+                    hollow_log!("[HOLLOW-SECURITY] Ignored a removal from {peer_str} older than the friendship");
+                    return;
+                }
+                // Our own request ends only by a removal sealed past the clock window
+                // after it. Inside it the two crossed: their side counts our request
+                // as newer (`older_than_removal`) and may accept it, which lands only
+                // on the row we keep here.
+                if status == "pending" && direction == "outgoing"
+                    && frame_ts_ms <= since.saturating_add(super::frame_auth::LIVE_SKEW_MS)
+                {
+                    hollow_log!("[HOLLOW-FRIENDS] Kept our request to {master}: their removal crossed it");
+                    return;
+                }
             }
             hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str} (master {master})");
             social::note_removal(&store, &master, frame_ts_ms);
@@ -12513,7 +12621,10 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::FriendCard { requested_at, sealed_card } => {
-            social::take_friend_card(event_tx, local_peer_str, requested_at, &sealed_card, db_path, db_passphrase).await;
+            social::take_friend_card(
+                event_tx, local_peer_str, requested_at, &sealed_card,
+                super::frame_auth::stamp_ceiling(frame_ts_ms), db_path, db_passphrase,
+            ).await;
         }
 
         HavenMessage::IdentityDestroyed { destroy: order } => {
@@ -12524,7 +12635,7 @@ async fn handle_incoming_request(
             ).await;
         }
 
-        HavenMessage::FriendListSync { friends, removed } => {
+        HavenMessage::FriendListSync { friends, removed, blocks } => {
             // Multi-device (Phase 6): accept a friend-list backfill ONLY from our
             // own other device (verified-self), never one our roster removed. A
             // non-self sender trying this is an attempt to inject friends — drop it.
@@ -12549,8 +12660,27 @@ async fn handle_incoming_request(
                 social::leave_dm_room(ws_cmd_tx, local_peer_str, &master);
                 let _ = event_tx.send(NetworkEvent::FriendRemoved { peer_id: master }).await;
             }
+            // A block is the identity's, so every device of ours refuses the same people.
+            let blocks_changed = {
+                let (me, db, pass) = (local_peer_str.to_string(), db_path.to_string(), db_passphrase.to_string());
+                tokio::task::spawn_blocking(move || social::take_sibling_blocks(&blocks, ceiling, &me, &db, &pass))
+                    .await
+                    .unwrap_or_default()
+            };
+            for (master, blocked) in &blocks_changed {
+                if *blocked {
+                    super::blocklist::block(master);
+                } else {
+                    super::blocklist::unblock(master);
+                }
+                social::handle_block_changed(ws_cmd_tx, pending_messages, local_peer_str, master, *blocked, db_path, db_passphrase);
+            }
+            if !blocks_changed.is_empty() {
+                let _ = event_tx.send(NetworkEvent::BlockListChanged).await;
+            }
 
             let mut inserted: u32 = 0;
+            let mut backfilled: Vec<(String, String)> = Vec::new();
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 // Existing friends (any status), so a relationship we already track is
                 // never clobbered; a removed one is kept out by its tombstone below.
@@ -12580,7 +12710,7 @@ async fn handle_incoming_request(
                     let since = entry.requested_at.min(super::frame_auth::stamp_ceiling(frame_ts_ms));
                     // A sibling that missed our removal still lists the friendship it
                     // ended, whose stamp is frozen from before it; a re-add is newer.
-                    if social::older_than_removal(&store, &fmaster, since) {
+                    if social::ended_by_removal(&store, &fmaster, since) {
                         continue;
                     }
                     if store
@@ -12589,33 +12719,55 @@ async fn handle_incoming_request(
                     {
                         inserted += 1;
                     }
-                    // Join the friend's DM room so presence flows both ways and future
-                    // live messages arrive. Use the friend's MASTER so both sides compute
-                    // the same pure dm_room_code; a device-keyed room would diverge.
-                    let room = dm_room_code(local_peer_str, &fmaster);
-                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
-                        room_code: room.clone(),
-                    });
-                    // CRITICAL (presence collapse): announce ourselves to this
-                    // freshly-learned friend with our profile and MERGED device list.
-                    // Without it a substitute device joins the friend's DM room but the
-                    // friend never receives a ProfileUpdate carrying our device id, so
-                    // their resolver never maps our-device to master and shows the
-                    // identity OFFLINE when the original device quits.
-                    //
-                    // We just issued JoinRoom, so we are NOT in `ws_room_peers[room]` yet
-                    // and `send_own_profile_to_peer`'s room lookup would drop the send.
-                    // Target the KNOWN DM room directly: JoinRoom is processed before this
-                    // SendDirect on the same ordered connection.
-                    //
-                    // A freshly-imported device has no profile row: never gate on load_profile.
-                    if let Some(msg) = social::own_profile_update(
-                        master_keypair, local_peer_str, is_invisible, false, None,
-                        db_path, db_passphrase,
-                    ) {
-                        super::olm_lane::carry(ws_cmd_tx, &entry.peer_id, Some(&room), &msg, super::olm_lane::NoSession::Queue);
-                        hollow_log!("[HOLLOW-DEVICES] Announced self to backfilled friend {}", entry.peer_id);
-                    }
+                    backfilled.push((entry.peer_id.clone(), fmaster));
+                }
+            }
+
+            // Each friend's roster before their DM room: a device that lost its database
+            // must place the friend's devices before their first frame, or it refuses
+            // every row they sign (the friend's device resolves to itself).
+            for entry in &friends {
+                let Some(roster) = entry.roster.clone() else { continue };
+                let outcome = super::roster_book::ingest_friend_roster_from_sibling(
+                    event_tx, ws_cmd_tx, local_peer_str, device_peer_id, peer_str, roster, db_path, db_passphrase,
+                ).await;
+                enforce_device_revocations(
+                    &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                    local_peer_str, ws_room_peers, pending_mls_removals,
+                );
+            }
+
+            for (peer_id, fmaster) in &backfilled {
+                // A friend our identity blocks gets neither our presence nor our profile.
+                if !social::holds_dm_room(fmaster, "accepted", "") {
+                    continue;
+                }
+                // Join the friend's DM room so presence flows both ways and future
+                // live messages arrive. Use the friend's MASTER so both sides compute
+                // the same pure dm_room_code; a device-keyed room would diverge.
+                let room = dm_room_code(local_peer_str, fmaster);
+                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                    room_code: room.clone(),
+                });
+                // CRITICAL (presence collapse): announce ourselves to this
+                // freshly-learned friend with our profile and MERGED device list.
+                // Without it a substitute device joins the friend's DM room but the
+                // friend never receives a ProfileUpdate carrying our device id, so
+                // their resolver never maps our-device to master and shows the
+                // identity OFFLINE when the original device quits.
+                //
+                // We just issued JoinRoom, so we are NOT in `ws_room_peers[room]` yet
+                // and `send_own_profile_to_peer`'s room lookup would drop the send.
+                // Target the KNOWN DM room directly: JoinRoom is processed before this
+                // SendDirect on the same ordered connection.
+                //
+                // A freshly-imported device has no profile row: never gate on load_profile.
+                if let Some(msg) = social::own_profile_update(
+                    master_keypair, local_peer_str, is_invisible, false, None,
+                    db_path, db_passphrase,
+                ) {
+                    super::olm_lane::carry(ws_cmd_tx, peer_id, Some(&room), &msg, super::olm_lane::NoSession::Queue);
+                    hollow_log!("[HOLLOW-DEVICES] Announced self to backfilled friend {peer_id}");
                 }
             }
 
@@ -12757,8 +12909,9 @@ async fn handle_incoming_request(
         HavenMessage::SiblingStateSyncRequest => {
             // Multi-device MANUAL state sync: our OWN other device (the user tapped
             // "Sync from this device" on it, choosing US as the source) wants our
-            // full server + friend state. SECURITY: verified-self only.
-            if !super::resolver::same_identity(peer_str, local_peer_str) {
+            // full server + friend state. SECURITY: verified-self only, never a device
+            // our roster removed.
+            if !super::resolver::same_identity(peer_str, local_peer_str) || super::resolver::is_revoked(peer_str) {
                 hollow_log!(
                     "[HOLLOW-SYNC] Dropped SiblingStateSyncRequest from non-self peer {peer_str}"
                 );
@@ -12773,7 +12926,7 @@ async fn handle_incoming_request(
                 if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
                 super::olm_lane::carry(
                     ws_cmd_tx, peer_str, None,
-                    &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner(), join_key: st.join_public_text() },
+                    &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner(), join_key: st.join_public_text(), fresh: false },
                     super::olm_lane::NoSession::Queue,
                 );
                 announced += 1;
@@ -12785,6 +12938,13 @@ async fn handle_incoming_request(
             // 4) Where our reading stands, so the requester drops badges we cleared.
             let markers_sent = super::crypto_handler::send_read_markers_to_sibling(
                 ws_cmd_tx, peer_str, db_path, db_passphrase,
+            );
+            // 5) Our profile: an edit made while the requester was away reaches it only so
+            //    when it asks on its return.
+            social::send_own_profile_to_peer(
+                ws_cmd_tx, ws_room_peers, server_states,
+                local_peer_str, master_keypair, peer_str,
+                is_invisible, db_path, db_passphrase,
             );
             hollow_log!(
                 "[HOLLOW-SYNC] Manual state-sync from {peer_str}: announced {announced} server(s) + {friends_sent} friend list entr(ies) + {emotes_sent} personal emote row(s) + {markers_sent} read marker(s)"
@@ -13362,7 +13522,10 @@ async fn handle_incoming_request(
                 device_list, db_path, db_passphrase,
             ).await;
             if let Some(card) = &card {
-                super::profile_card::keep_card(card, &super::resolver::resolve(peer_str), db_path, db_passphrase);
+                super::profile_card::keep_card(
+                    card, &super::resolver::resolve(peer_str), super::frame_auth::stamp_ceiling(frame_ts_ms),
+                    db_path, db_passphrase,
+                );
             }
             let our_devices_grew = ingest_outcome.our_devices_grew;
             if ingest_outcome.asks_again {
@@ -13525,6 +13688,7 @@ async fn handle_incoming_request(
                 social::sanitize_incoming_anim(banner_anim.as_deref()),
                 support_creds.as_deref(),
                 support_creds_sig.as_deref(),
+                super::frame_auth::stamp_ceiling(frame_ts_ms),
                 db_path, db_passphrase,
             );
 
@@ -14049,7 +14213,8 @@ async fn handle_incoming_request(
                 .then(|| base64::engine::general_purpose::STANDARD.decode(&avatar_b64).ok())
                 .flatten()
                 .filter(|b| b.len() <= super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES);
-            if super::profile_card::store_card(&card, avatar.as_deref(), db_path, db_passphrase) {
+            let ceiling = super::frame_auth::stamp_ceiling(frame_ts_ms);
+            if super::profile_card::store_card(&card, avatar.as_deref(), ceiling, db_path, db_passphrase) {
                 let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: card.master.clone() }).await;
             }
             // A new avatar we hold no bytes for: pull them once.
@@ -14125,6 +14290,7 @@ async fn handle_incoming_request(
                     avatar_hash, banner_hash, showcase_board, showcase_assets_hash, avatar_frame, avatar_anim,
                     banner_anim, profile_sig, profile_pk,
                 },
+                local_peer_str, super::frame_auth::stamp_ceiling(frame_ts_ms),
                 db_path, db_passphrase,
             ).await;
         }

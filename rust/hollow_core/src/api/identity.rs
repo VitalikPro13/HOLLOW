@@ -46,7 +46,11 @@ pub fn set_data_dir(path: String) -> Result<(), String> {
 /// On subsequent runs, returns just the peer ID (mnemonic is not stored).
 #[frb]
 pub fn load_or_create_identity() -> Result<IdentityInfo, String> {
-    let data = identity::load_or_create_identity()?;
+    crate::api::storage::finish_wipe_before_a_new_identity()?;
+    let data = identity::load_or_create_identity().inspect_err(|e| {
+        crate::log::init();
+        hollow_log!("[HOLLOW-ID] The identity would not load: {e}");
+    })?;
     Ok(IdentityInfo {
         peer_id: data.peer_id,
         device_peer_id: data.device_peer_id,
@@ -58,6 +62,7 @@ pub fn load_or_create_identity() -> Result<IdentityInfo, String> {
 /// Returns the new peer ID and mnemonic phrase.
 #[frb]
 pub fn generate_new_identity() -> Result<IdentityInfo, String> {
+    crate::api::storage::finish_wipe_before_a_new_identity()?;
     let data = identity::generate_new_identity()?;
     Ok(IdentityInfo {
         peer_id: data.peer_id,
@@ -70,6 +75,7 @@ pub fn generate_new_identity() -> Result<IdentityInfo, String> {
 /// Replaces any existing identity on disk.
 #[frb]
 pub fn restore_identity_from_mnemonic(phrase: String) -> Result<IdentityInfo, String> {
+    crate::api::storage::finish_wipe_before_a_new_identity()?;
     let data = identity::restore_identity_from_mnemonic(&phrase)?;
     Ok(IdentityInfo {
         peer_id: data.peer_id,
@@ -100,8 +106,11 @@ fn keychain_key_that_decrypts_at(
 ) -> Option<[u8; 32]> {
     use crate::identity::platform_keystore;
     let (source, key) = platform_keystore::key_that_opens(root, bytes)?;
-    if heal && source != platform_keystore::Source::Profile {
-        let _ = platform_keystore::store_key_at(root, &key);
+    if heal
+        && source != platform_keystore::Source::Profile
+        && let Err(e) = platform_keystore::store_key_at(root, &key)
+    {
+        hollow_log!("[HOLLOW-ID] The keychain key opens the identity but could not be kept in this profile's slot: {e}");
     }
     Some(key)
 }
@@ -137,6 +146,22 @@ fn open_typed_secret(secret: &str, bytes: &[u8], salt: &[u8; 16]) -> Result<[u8;
 /// encrypted one decrypts with the password and/or the OS keychain.
 #[frb]
 pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String> {
+    crate::log::init();
+    // Only the launch's own unlock says why it stopped; what a typed secret did
+    // stays out of the log.
+    let silent = password.is_none();
+    let unlocked = unlock_identity_with(password).inspect_err(|e| {
+        if silent {
+            hollow_log!("[HOLLOW-ID] The identity did not unlock at launch: {e}");
+        }
+    });
+    if unlocked.is_ok() {
+        crate::identity::reclaim_after_unlock();
+    }
+    unlocked
+}
+
+fn unlock_identity_with(password: Option<String>) -> Result<IdentityInfo, String> {
     use crate::identity::encryption;
 
     let dir = crate::identity::data_dir()?;
@@ -1933,5 +1958,65 @@ mod keychain_tests {
         switch_to_plaintext(fx.root()).expect("off");
         assert_eq!(fx.files(), before);
         assert_eq!(platform_keystore::read_profile_key_at(fx.root()), Ok(None));
+    }
+}
+
+// md-integrity
+
+#[cfg(test)]
+mod boot_log_tests {
+    use super::*;
+    use crate::identity::encryption;
+    use crate::identity::native_identity::NativeKeypair;
+
+    /// A root holding an identity only a password opens, the data root from now on,
+    /// with no log open.
+    fn password_only_identity() -> (std::sync::MutexGuard<'static, ()>, crate::test_tmp::TestDir) {
+        let g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the lock above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        encryption::clear_session_key();
+        crate::log::erase();
+        let salt = [0x07u8; 16];
+        let key = encryption::derive_wrapping_key_from_password("correct horse", &salt).unwrap();
+        let plain = NativeKeypair::from_secret_bytes(&[0x6b; 32]).to_protobuf_encoding().unwrap();
+        let blob = encryption::encrypt_identity(&plain, &key, &salt, true, false).unwrap();
+        std::fs::write(tmp.path().join("identity.key"), blob).unwrap();
+        (g, tmp)
+    }
+
+    fn log_text() -> String {
+        let text = crate::log::open_path().map(|p| std::fs::read_to_string(p).unwrap_or_default()).unwrap_or_default();
+        crate::log::erase();
+        text
+    }
+
+    /// The launch's own unlock says why it stopped, before anything else opened the log.
+    #[test]
+    fn a_launch_unlock_that_fails_says_why_in_the_log() {
+        let (_g, _tmp) = password_only_identity();
+        assert!(unlock_identity(None).is_err());
+        let text = log_text();
+        assert!(text.contains("[HOLLOW-ID] The identity did not unlock at launch"), "{text}");
+    }
+
+    /// What a typed secret did, a wrong password or a duress code, never reaches the log.
+    #[test]
+    fn a_typed_secret_leaves_no_line_in_the_log() {
+        let (_g, _tmp) = password_only_identity();
+        assert!(unlock_identity(Some("not the password".into())).is_err());
+        let text = log_text();
+        assert!(!text.contains("[HOLLOW-ID]"), "{text}");
+    }
+
+    /// Dart's first lines (the data folder verdict) land although no Rust step opened
+    /// the log yet.
+    #[test]
+    fn dart_boot_lines_reach_the_log() {
+        let (_g, _tmp) = password_only_identity();
+        crate::api::network::log_from_dart("[PORTABLE] md-integrity probe".into());
+        let text = log_text();
+        assert!(text.contains("[PORTABLE] md-integrity probe"), "{text}");
     }
 }

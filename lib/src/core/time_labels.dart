@@ -36,6 +36,11 @@ String calendarDateLabel(DateTime at, {DateTime? now}) {
       : '$monthDay, ${at.year}';
 }
 
+/// A day with its year, whatever the year: `Oct 10, 2026`. For a name that
+/// outlives the year it was given in.
+String dateWithYearLabel(DateTime at) =>
+    '${_months[at.month - 1]} ${at.day}, ${at.year}';
+
 /// How long ago [at] was, for a status line: `just now`, `5 minutes ago`,
 /// `3 hours ago`, `yesterday`, `4 days ago`, then `on Sep 17`.
 String relativeTimeLabel(DateTime at, {DateTime? now}) {

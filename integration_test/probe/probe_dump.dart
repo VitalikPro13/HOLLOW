@@ -12,7 +12,9 @@ import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
@@ -405,7 +407,12 @@ class ProbeDump {
       out['identityLoaded'] = identity.isLoaded;
       if (_devicePeerId != null) out['devicePeerId'] = _devicePeerId;
       if (identity.error != null) out['identityError'] = identity.error;
+      // Sibling journeys compare what each device of one identity shows.
+      final own = read(profileProvider)?[identity.peerId];
+      if (own != null) out['ownName'] = own.displayName;
     }
+    final blocked = read(blockedUsersProvider);
+    if (blocked != null) out['blocked'] = blocked.toList()..sort();
     // overallConnectionProvider is derived, so only a widget watching it ever
     // creates it, and the mobile shell watches it inside a chat and nowhere
     // else. Its two inputs are what carry the state (the node, and the relay

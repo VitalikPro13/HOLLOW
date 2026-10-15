@@ -184,6 +184,9 @@ class RecoveryPhraseDialog extends StatefulWidget {
   final bool cancellable;
   final Future<void> Function(String phrase) onRecover;
 
+  /// Ghost extras on the leading edge of the action row.
+  final List<Widget> leadingActions;
+
   const RecoveryPhraseDialog({
     super.key,
     required this.title,
@@ -191,6 +194,7 @@ class RecoveryPhraseDialog extends StatefulWidget {
     required this.confirmLabel,
     required this.onRecover,
     this.cancellable = true,
+    this.leadingActions = const [],
   });
 
   @override
@@ -260,6 +264,7 @@ class _RecoveryPhraseDialogState extends State<RecoveryPhraseDialog>
           ),
         ],
       ),
+      leadingActions: widget.leadingActions,
       actions: [
         if (widget.cancellable)
           HollowButton.ghost(

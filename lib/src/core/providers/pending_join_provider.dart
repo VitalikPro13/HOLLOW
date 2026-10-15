@@ -154,7 +154,8 @@ void onPendingJoinUpdated(
 }
 
 void _toast(String message, HollowToastType type) {
-  final context = hollowNavigatorKey.currentContext;
-  if (context == null) return;
-  HollowToast.show(context, message, type: type);
+  final overlay = hollowNavigatorKey.currentState?.overlay;
+  final context = overlay?.context;
+  if (overlay == null || context == null || !context.mounted) return;
+  HollowToast.show(context, message, type: type, overlayState: overlay);
 }

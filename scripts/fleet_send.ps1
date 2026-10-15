@@ -17,7 +17,10 @@
 # for its answer before the next is sent.
 #
 # `-Peer` is the default for commands that do not carry one; `-Peer all` sends
-# every command to every instance. Values captured by one step are NOT carried
+# every command to every instance. A peer of ANOTHER machine is named
+# `<platform>:<letter>` (android:a, ios:b, macos:c, linux:d) and is driven
+# through that machine's agent (fleet_remote.ps1), so one batch can span the
+# Windows fleet, the Mac mini and the VM. Values captured by one step are NOT carried
 # across invocations - use fleet.ps1 with a scenario file for that.
 #
 # The op vocabulary and target grammar live in integration_test\probe\. Start
@@ -39,14 +42,16 @@ $script:FleetStageRoot = Join-Path (Join-Path $repoRoot 'build') 'fleet'
 $script:FleetOutRoot = Join-Path (Join-Path $repoRoot 'build') 'fleet_out'
 . (Join-Path $PSScriptRoot 'fleet_lib.ps1')
 
-$live = Get-LivePeers
-if ($live.Count -eq 0) {
-    throw "no fleet is running. Start one with: powershell -File scripts\fleet.ps1 -Live"
-}
-
 $parsed = $Command | ConvertFrom-Json
 $commands = @()
 if ($parsed -is [System.Array]) { $commands = $parsed } else { $commands = @($parsed) }
+
+$remote = @(@($commands | ForEach-Object { $_.peer }) + @($Peer) | Where-Object { "$_" -match '^[a-z]+:[a-z]$' } | Select-Object -Unique)
+foreach ($name in $remote) { if ((Register-FleetPeer $name) -notmatch ':') { throw "'$name' names this machine: use the bare letter" } }
+$live = @(Get-LivePeers) + $remote
+if ($live.Count -eq 0) {
+    throw "no fleet is running. Start one with: powershell -File scripts\fleet.ps1 -Live"
+}
 
 $failed = $false
 $index = 0
@@ -76,7 +81,8 @@ foreach ($step in $commands) {
 }
 
 # Shots and dumps taken inside an emulator only reach build/fleet_out this way.
-foreach ($peerName in $live) { Sync-PeerOut $peerName }
+foreach ($peerName in $live) { if (-not (Test-RemotePeer $peerName)) { Sync-PeerOut $peerName } }
+Stop-FleetAgents
 
 if ($failed) { exit 1 }
 exit 0

@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `clear_beside`, `clear`, `close_store_singleton`, `destroy_data_root`, `destroy_with`, `erase_recordings`, `is_hollow_temp`, `is_pasted_image`, `is_recording_name`, `is_recording_path`, `kept_by_wipe`, `looks_like_a_profile`, `mark_destroy`, `of_this_process`, `publish_scope`, `read_recordings`, `recorder_log`, `run_duress`, `same_folder`, `scrub`, `sweep_root`, `wait_for`, `write_recordings`, `zero_and_remove`, `zero_keys`
+// These functions are ignored because they are not marked as `pub`: `clear_beside`, `clear`, `close_store_singleton`, `destroy_data_root`, `destroy_with`, `destroyed_in_this_process`, `erase_recordings`, `held_by_another_program`, `is_hollow_temp`, `is_pasted_image`, `is_recording_name`, `is_recording_path`, `kept_by_wipe`, `looks_like_a_profile`, `make_writable`, `mark_destroy`, `of_this_process`, `overwrite_with_zeros`, `publish_scope`, `read_recordings`, `recorder_log`, `remove_dir_zeroing_keys`, `root_keys_gone`, `run_duress`, `same_folder`, `scrub`, `sweep_root`, `wait_for`, `write_recordings`, `zero_and_remove`, `zero_in_place`, `zero_keys_in`, `zero_keys`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Outside`, `Signal`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 

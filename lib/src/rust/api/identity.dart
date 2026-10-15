@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `code_is_the_password`, `database_opens_with`, `db_key_of`, `debug_defaults_hook`, `default_eligible_for`, `default_eligible`, `duress_available`, `forget_duress_code`, `is_running_root`, `keychain_key_that_decrypts_at`, `keychain_key_that_decrypts`, `lands_as`, `lock_to_keychain`, `open_typed_secret`, `owner_gate`, `phrase_is_this_identitys`, `protection_status_of`, `read_plain_key_file`, `refuse_short_pin`, `refused`, `save_duress_settings`, `seal_for_keychain`, `switch_to_keychain`, `switch_to_plaintext`, `this_os`
+// These functions are ignored because they are not marked as `pub`: `code_is_the_password`, `database_opens_with`, `db_key_of`, `debug_defaults_hook`, `default_eligible_for`, `default_eligible`, `duress_available`, `forget_duress_code`, `is_running_root`, `keychain_key_that_decrypts_at`, `keychain_key_that_decrypts`, `lands_as`, `lock_to_keychain`, `open_typed_secret`, `owner_gate`, `phrase_is_this_identitys`, `protection_status_of`, `read_plain_key_file`, `refuse_short_pin`, `refused`, `save_duress_settings`, `seal_for_keychain`, `switch_to_keychain`, `switch_to_plaintext`, `this_os`, `unlock_identity_with`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DesktopOs`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `eq`, `fmt`
 

@@ -101,7 +101,7 @@ pub(crate) fn accepted_friend_entries(db_path: &str, db_passphrase: &str) -> Vec
         .unwrap_or_default()
         .into_iter()
         .map(|(peer_id, status, direction, requested_at, _updated)| FriendListEntry {
-            peer_id, status, direction, requested_at,
+            peer_id, status, direction, requested_at, roster: None,
         })
         .collect()
 }
@@ -114,24 +114,69 @@ pub(crate) fn send_friend_list_to_sibling(
     db_path: &str,
     db_passphrase: &str,
 ) -> usize {
-    let friends = accepted_friend_entries(db_path, db_passphrase);
-    let removed = crate::storage::MessageStore::open(db_path, db_passphrase)
-        .map(|store| super::social::friend_removals(&store))
+    let mut friends = accepted_friend_entries(db_path, db_passphrase);
+    let (removed, blocks) = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .map(|store| {
+            for f in &mut friends {
+                f.roster = super::roster_book::load(&store, &f.peer_id);
+            }
+            newest_rosters_first(&store, &mut friends);
+            (super::social::friend_removals(&store), super::social::block_entries(&store))
+        })
         .unwrap_or_default();
-    let entries = friends.len() + removed.len();
+    let entries = friends.len() + removed.len() + blocks.len();
     if entries > 0 {
         hollow_log!(
-            "[HOLLOW-MULTIDEV] Sharing {} friends and {} removals with sibling {sibling}",
+            "[HOLLOW-MULTIDEV] Sharing {} friends, {} removals and {} blocks with sibling {sibling}",
             friends.len(),
-            removed.len()
+            removed.len(),
+            blocks.len()
         );
-        super::olm_lane::carry(
-            ws_cmd_tx, sibling, None,
-            &HavenMessage::FriendListSync { friends, removed },
-            super::olm_lane::NoSession::Queue,
-        );
+        for msg in friend_list_frames(friends, removed, blocks) {
+            super::olm_lane::carry(ws_cmd_tx, sibling, None, &msg, super::olm_lane::NoSession::Queue);
+        }
     }
     entries
+}
+
+/// Friends whose roster changed last first, so the rosters a sibling most likely lacks
+/// ride the first frame.
+pub(crate) fn newest_rosters_first(store: &crate::storage::MessageStore, friends: &mut [FriendListEntry]) {
+    friends.sort_by_cached_key(|f| std::cmp::Reverse(store.roster_updated_at(&f.peer_id)));
+}
+
+/// Bytes of friend entries, rosters included, one friend list frame carries.
+pub(crate) const FRIEND_LIST_FRAME_BUDGET: usize = 512 * 1024;
+
+/// Our friend list as frames of at most [`FRIEND_LIST_FRAME_BUDGET`] each, in the order
+/// `friends` come (newest-changed roster first). Removals and blocks ride the first
+/// frame: they must land before any friendship a later frame would bring back.
+pub(crate) fn friend_list_frames(
+    friends: Vec<FriendListEntry>,
+    removed: Vec<FriendRemoval>,
+    blocks: Vec<BlockEntry>,
+) -> Vec<HavenMessage> {
+    let mut chunks: Vec<Vec<FriendListEntry>> = vec![Vec::new()];
+    let mut bytes = 0;
+    for friend in friends {
+        let size = serde_json::to_vec(&friend).map_or(0, |b| b.len());
+        if bytes + size > FRIEND_LIST_FRAME_BUDGET && chunks.last().is_some_and(|c| !c.is_empty()) {
+            chunks.push(Vec::new());
+            bytes = 0;
+        }
+        bytes += size;
+        if let Some(chunk) = chunks.last_mut() {
+            chunk.push(friend);
+        }
+    }
+    let mut first = Some((removed, blocks));
+    chunks
+        .into_iter()
+        .map(|friends| {
+            let (removed, blocks) = first.take().unwrap_or_default();
+            HavenMessage::FriendListSync { friends, removed, blocks }
+        })
+        .collect()
 }
 
 /// What a sibling that just proved itself gets, from either detection path (the
@@ -2970,6 +3015,12 @@ pub(crate) enum CommitApplyOutcome {
     /// Did not process. The group stays as it was and an epoch probe asks whether
     /// we are behind: anyone can send a frame that fails.
     Failed,
+    /// Processed before and never merged (held past its bound, dropped at the held
+    /// cap, held when the app closed, or refused): its key is spent, so it can never
+    /// apply. Probed as for `Failed`. From our catch-up responder it asks a repair,
+    /// throttled to one a minute: a refusal's repair heals a group that only lagged
+    /// our view, and its Welcome is refused where the refused leaf is still in it.
+    Spent,
 }
 
 /// How long an evicted device waits for the repair's Welcome before asking for a
@@ -3091,7 +3142,10 @@ pub(crate) async fn handle_mls_commit_frame(
                     channel_id.as_deref(), local_peer_str, epoch_hint_cooldown,
                 );
             }
-            CommitApplyOutcome::Failed
+            match e {
+                crate::crypto::CommitError::Spent => CommitApplyOutcome::Spent,
+                crate::crypto::CommitError::Other(_) => CommitApplyOutcome::Failed,
+            }
         }
     }
 }
@@ -3241,6 +3295,97 @@ pub(crate) async fn rebind_unbound_leaves(
             hollow_log!("[HOLLOW-MLS] Asked {target} to repair our unbound leaf in {group_key}");
         }
     }
+}
+
+/// Ask for a repair of our leaf in `group_key`: a fresh KeyPackage to the member our
+/// own election names to answer our catch-up, whose remove + re-add carries us to the
+/// current epoch in one Welcome. Stamps the bootstrap throttle, which makes that
+/// Welcome asked-for; false when nobody was reached or the throttle still runs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ask_leaf_repair(
+    mls_mgr: &MlsManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    state: &crate::crdt::server_state::ServerState,
+    mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    group_key: &str,
+    local_peer_str: &str,
+) -> bool {
+    if mls_bootstrap_requested.get(group_key).is_some_and(|t| t.elapsed() < super::swarm::MLS_BOOTSTRAP_TIMEOUT) {
+        return false;
+    }
+    let (server_id, channel_id) = crate::crypto::split_group_key(group_key);
+    // Checked before minting: an ask that cannot be sent would mint again on every tick.
+    let entitled = !super::conference::is_conference_sid(&server_id)
+        && state.members.contains_key(local_peer_str)
+        && !state.is_banned(local_peer_str)
+        && channel_id.as_deref().is_none_or(|cid| state.can_see_channel(local_peer_str, cid));
+    if !entitled || mls_mgr.welcome_waits(group_key) {
+        return false;
+    }
+    let Some(target) = epoch_catchup_responder(state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str) else {
+        return false;
+    };
+    if preferred_online_device(ws_room_peers, &target).is_none() {
+        return false;
+    }
+    let Ok(kp_bytes) = mint_group_key_package(mls_mgr, crypto_store, group_key, false) else { return false };
+    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+        server_id,
+        key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
+        channel_id,
+    })
+    .unwrap_or_default();
+    if send_raw_to_identity(ws_cmd_tx, ws_room_peers, &target, data) == 0 {
+        return false;
+    }
+    mls_bootstrap_requested.insert(group_key.to_string(), std::time::Instant::now());
+    hollow_log!("[HOLLOW-MLS] Asked {target} to repair our leaf in {group_key}");
+    true
+}
+
+/// After a catch-up frame at our next epoch came back [`CommitApplyOutcome::Spent`]:
+/// the group moved past a commit we processed and never merged, which no catch-up can
+/// ever bring, so ask one repair of our leaf. It needs nothing kept in RAM, so it holds
+/// after a restart and once the kept facts have lapsed. It counts only from the member
+/// our own election names to answer our catch-up (the one the repair asks, who may ask
+/// for our KeyPackage anyway), and never while a held commit of ours may still merge.
+/// The repair's Welcome is judged as any other.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn repair_after_spent_catchup(
+    mls_mgr: &mut MlsManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
+    mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    server_id: &str,
+    channel_id: Option<&str>,
+    frame_sender: &str,
+    local_peer_str: &str,
+) -> bool {
+    let group_key = match channel_id {
+        Some(cid) => crate::crypto::subgroup_id(server_id, cid),
+        None => server_id.to_string(),
+    };
+    let Some(state) = server_states.get(server_id) else { return false };
+    if mls_mgr.holds_commit(&group_key) {
+        return false;
+    }
+    let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str);
+    if !responder.is_some_and(|r| super::resolver::same_identity(&r, frame_sender)) {
+        hollow_log!("[HOLLOW-MLS] A spent commit for {group_key} came from {frame_sender}, not our catch-up responder; no repair");
+        return false;
+    }
+    if !ask_leaf_repair(
+        mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, state, mls_bootstrap_requested, &group_key, local_peer_str,
+    ) {
+        return false;
+    }
+    hollow_log!("[HOLLOW-MLS] {group_key} moved past a commit we spent unmerged; asked for a repair");
+    mls_mgr.clear_lapsed(&group_key);
+    true
 }
 
 /// Per-(group, peer) cooldown for epoch-hint service and self-probes — bounds
@@ -3502,7 +3647,7 @@ fn is_authoritys_acting_device(
 /// Probe the group authority with our current epoch ("am I behind?").
 /// Fired at VC join, from SFrame heal step 2, and when a peer's hint says the
 /// group moved past us. No-op when we ARE the authority, the authority is
-/// unreachable, it's a conference, or the per-group cooldown is active.
+/// unreachable, it's a conference, or the per-group cooldown is active; true when sent.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn send_epoch_probe(
     mls_mgr: &MlsManager,
@@ -3513,26 +3658,26 @@ pub(crate) fn send_epoch_probe(
     channel_id: Option<&str>,
     local_peer_str: &str,
     epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
-) {
+) -> bool {
     if super::conference::is_conference_sid(server_id) {
-        return;
+        return false;
     }
     let group_key = match channel_id {
         Some(cid) => crate::crypto::subgroup_id(server_id, cid),
         None => server_id.to_string(),
     };
-    let Ok(own_epoch) = mls_mgr.epoch(&group_key) else { return };
+    let Ok(own_epoch) = mls_mgr.epoch(&group_key) else { return false };
     // WE would be the peer that is behind, so we are excluded from the election:
     // "we are the authority" says who COMMITS, never who holds the newest epoch,
     // and treating it as the latter left a returning owner with nobody to ask.
     let Some(authority) =
         epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str)
     else {
-        return; // no other online member — nobody to ask
+        return false; // no other online member — nobody to ask
     };
     let cd_key = format!("{group_key}|probe");
     if epoch_hint_cooldown.get(&cd_key).is_some_and(|t| t.elapsed() < EPOCH_HINT_COOLDOWN) {
-        return;
+        return false;
     }
     epoch_hint_cooldown.insert(cd_key, std::time::Instant::now());
     let data = serde_json::to_vec(&HavenMessage::MlsEpochProbe {
@@ -3545,6 +3690,7 @@ pub(crate) fn send_epoch_probe(
     if sent > 0 {
         hollow_log!("[HOLLOW-MLS] Sent epoch probe (epoch {own_epoch}) to authority {authority} for {group_key}");
     }
+    sent > 0
 }
 
 /// Send pre-serialized bytes to EVERY online device of an identity, returning
@@ -5792,5 +5938,146 @@ mod tests {
             BackfillSig::Oversized,
             "an unsigned oversized item is refused for its size",
         );
+    }
+    // md-sibling
+    /// A friend list with many large rosters goes out in frames that each fit the
+    /// budget, every friend once and in order, with removals and blocks in the first.
+    #[test]
+    fn md_a_friend_list_is_split_into_frames_within_the_budget() {
+        let roster = |tag: usize| crate::identity::roster::Roster { master: format!("{tag}{}", "r".repeat(150_000)), ..Default::default() };
+        let friends: Vec<FriendListEntry> = (0..9)
+            .map(|i| FriendListEntry { peer_id: format!("friend-{i}"), status: "accepted".into(), direction: String::new(), requested_at: i, roster: Some(roster(i as usize)) })
+            .chain((9..12).map(|i| FriendListEntry { peer_id: format!("friend-{i}"), status: "accepted".into(), direction: String::new(), requested_at: i, roster: None }))
+            .collect();
+        let removed = vec![FriendRemoval { peer_id: "gone".into(), at: 5 }];
+        let blocks = vec![BlockEntry { peer_id: "blocked".into(), blocked: true, at: 6 }];
+        let frames = friend_list_frames(friends, removed, blocks);
+        assert!(frames.len() >= 3, "nine rosters of 150 KB rode {} frame(s)", frames.len());
+        let mut seen = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            let HavenMessage::FriendListSync { friends, removed, blocks } = frame else { panic!("not a friend list") };
+            let bytes: usize = friends.iter().map(|f| serde_json::to_vec(f).unwrap().len()).sum();
+            assert!(bytes <= FRIEND_LIST_FRAME_BUDGET, "frame {i} carries {bytes} bytes of friends");
+            assert_eq!(i == 0, !removed.is_empty() && !blocks.is_empty(), "removals and blocks ride the first frame only");
+            seen.extend(friends.iter().map(|f| f.peer_id.clone()));
+        }
+        assert_eq!(seen, (0..12).map(|i| format!("friend-{i}")).collect::<Vec<_>>(), "every friend once, in order");
+        let empty = friend_list_frames(Vec::new(), vec![FriendRemoval { peer_id: "gone".into(), at: 5 }], Vec::new());
+        assert_eq!(empty.len(), 1, "removals alone still go out");
+
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("md_frames.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        for (master, at) in [("old", 100), ("newest", 300), ("middle", 200)] {
+            store.save_device_list(master, "{}", 1, &[], at).unwrap();
+        }
+        let mut ordered: Vec<FriendListEntry> = ["none", "old", "newest", "middle"]
+            .into_iter()
+            .map(|p| FriendListEntry { peer_id: p.into(), ..Default::default() })
+            .collect();
+        newest_rosters_first(&store, &mut ordered);
+        let order: Vec<&str> = ordered.iter().map(|f| f.peer_id.as_str()).collect();
+        assert_eq!(order, ["newest", "middle", "old", "none"], "the newest-changed rosters go first");
+    }
+
+    // md-mls-2
+
+    /// A repair of our leaf is asked, and its KeyPackage minted, only where we may hold
+    /// that leaf (a member, not banned, able to see a subgroup's channel) and the member
+    /// asked is reachable: an ask that cannot go out would mint again every tick.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // the resolver is process-global
+    async fn a_leaf_repair_mints_nothing_it_may_not_ask_or_cannot_send() {
+        use crate::crdt::admin_lww::AdminLwwReg;
+        use crate::crdt::server_state::{ChannelVisibility, MemberInfo, ServerState};
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("lr.db").to_str().unwrap().to_string();
+        let pass = "cd".repeat(32);
+        crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let store = crate::crypto::CryptoStore::open(db, pass).unwrap();
+        let kp = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[44; 32]);
+        let me = kp.peer_id();
+        let mut mls = MlsManager::new(&kp, &kp).unwrap();
+        mls.create_group("lr_srv").unwrap();
+        let mut state = ServerState::new("lr_srv".into(), "s".into(), "lr_owner".into());
+        for m in ["lr_owner", me.as_str()] {
+            state.members.insert(m.into(), MemberInfo { peer_id: m.into(), display_name: m.into() });
+        }
+        let restricted = state.channels.keys().next().unwrap().clone();
+        state.channels.get_mut(&restricted).unwrap().visibility = ChannelVisibility::AdminPlus;
+        let subgroup = crate::crypto::subgroup_id("lr_srv", &restricted);
+        mls.create_group(&subgroup).unwrap();
+        let online = make_room_peers(&[("lr_srv", &["lr_owner"])]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ask = |mls: &MlsManager, state: &ServerState, rooms: &HashMap<String, HashSet<String>>, group: &str| {
+            ask_leaf_repair(mls, &store, &tx, rooms, state, &mut HashMap::new(), group, &me)
+        };
+        let minted = |mls: &MlsManager| mls.discard_stale_key_packages(std::time::Duration::ZERO);
+
+        assert!(!ask(&mls, &state, &HashMap::new(), "lr_srv"), "asked nobody online");
+        assert!(!ask(&mls, &state, &online, &subgroup), "asked for a seat in a channel we cannot see");
+        let mut banned = state.clone();
+        let hlc = banned.hlc.as_mut().unwrap().now();
+        banned.banned_members.insert(me.clone(), AdminLwwReg::new(true, hlc, 2));
+        assert!(!ask(&mls, &banned, &online, "lr_srv"), "a banned member asked");
+        let mut gone = state.clone();
+        gone.members.remove(&me);
+        assert!(!ask(&mls, &gone, &online, "lr_srv"), "a non-member asked");
+        assert_eq!(minted(&mls), 0, "a KeyPackage was minted for an ask that never went out");
+        assert!(rx.try_recv().is_err());
+
+        assert!(ask(&mls, &state, &online, "lr_srv"));
+        assert_eq!(minted(&mls), 1);
+        assert!(matches!(rx.try_recv(), Ok(super::super::ws_client::WsCommand::SendDirect { target_peer, .. }) if target_peer == "lr_owner"));
+        super::super::resolver::clear_all();
+    }
+
+    // md-review-mls-2
+
+    /// A Welcome held for our view to catch up is the repair already on its way. The
+    /// throttle runs 60 s from the ask, the hold 60 s from the Welcome's later arrival,
+    /// so a spent catch-up in between must not mint the KeyPackage of a second repair.
+    /// `seat()` cannot say it here: we still hold the stale group the Welcome replaces.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // the resolver is process-global
+    async fn md_review_mls_2_no_second_leaf_repair_while_the_first_ones_welcome_waits() {
+        use crate::crdt::server_state::{MemberInfo, ServerState};
+        use crate::identity::native_identity::NativeKeypair;
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("rw.db").to_str().unwrap().to_string();
+        let pass = "ce".repeat(32);
+        crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let store = crate::crypto::CryptoStore::open(db, pass).unwrap();
+        let (my_dev, my_master) = (NativeKeypair::from_secret_bytes(&[45; 32]), NativeKeypair::from_secret_bytes(&[46; 32]));
+        let me = my_master.peer_id();
+        let mut mls = MlsManager::new(&my_dev, &my_master).unwrap();
+        mls.create_group("rw_srv").unwrap();
+        let (o_dev, o_master) = (NativeKeypair::from_secret_bytes(&[47; 32]), NativeKeypair::from_secret_bytes(&[48; 32]));
+        let mut owner = MlsManager::new(&o_dev, &o_master).unwrap();
+        owner.create_group("rw_srv").unwrap();
+        let (_, welcome) = owner.add_member("rw_srv", &mint_key_package(&mls, &store).unwrap()).unwrap();
+        owner.merge_pending_commit("rw_srv").unwrap();
+        assert_eq!(
+            mls.join_from_welcome_judged("rw_srv", &welcome, |_| crate::crypto::Verdict::Hold("roster".into())).unwrap(),
+            crate::crypto::Verdict::Hold("roster".into()),
+        );
+        let mut state = ServerState::new("rw_srv".into(), "s".into(), "rw_owner".into());
+        for m in ["rw_owner", me.as_str()] {
+            state.members.insert(m.into(), MemberInfo { peer_id: m.into(), display_name: m.into() });
+        }
+        let online = make_room_peers(&[("rw_srv", &["rw_owner"])]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let before = mls.discard_stale_key_packages(std::time::Duration::from_secs(3600));
+        let asked = ask_leaf_repair(&mls, &store, &tx, &online, &state, &mut HashMap::new(), "rw_srv", &me);
+        let minted = mls.discard_stale_key_packages(std::time::Duration::ZERO);
+        assert!(!asked && minted == 0 && rx.try_recv().is_err(),
+            "a second repair was asked (minted {minted}, before {before}) while the first one's Welcome waits");
+        super::super::resolver::clear_all();
     }
 }

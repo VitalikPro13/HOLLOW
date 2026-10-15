@@ -64,6 +64,9 @@ fn load_or_create_device_keypair_at(
     let device = NativeKeypair::from_secret_bytes(&secret);
 
     save_keypair_to(path, &device)?;
+    if master.is_some() {
+        hollow_log!("[HOLLOW-ID] No device key beside the identity, so this install starts as a new device");
+    }
     Ok(device)
 }
 

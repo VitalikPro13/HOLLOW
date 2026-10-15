@@ -882,7 +882,7 @@ pub fn get_channel_layout(server_id: String) -> Result<String, String> {
 
     let layout_json = serde_json::to_string(&state.channel_layout)
         .map_err(|e| format!("Failed to serialize layout: {e}"))?;
-    hollow_log!("[HOLLOW-LAYOUT] get_channel_layout({server_id}): {} items, json={layout_json}", state.channel_layout.len());
+    hollow_log!("[HOLLOW-LAYOUT] get_channel_layout({server_id}): {} items", state.channel_layout.len());
     Ok(layout_json)
 }
 

@@ -207,6 +207,10 @@ pub(crate) struct FriendListEntry {
     pub direction: String,
     #[serde(default)]
     pub requested_at: i64,
+    /// The friend's roster as the sharing device holds it, so a device that lost its
+    /// database places the friend's devices. Verified on its own on arrival.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roster: Option<crate::identity::roster::Roster>,
 }
 
 /// A friendship our identity ended, as our own devices tell each other: whose, and
@@ -215,6 +219,18 @@ pub(crate) struct FriendListEntry {
 pub(crate) struct FriendRemoval {
     #[serde(default)]
     pub peer_id: String,
+    #[serde(default)]
+    pub at: i64,
+}
+
+/// A block (or its lifting) our identity made, as our own devices tell each other:
+/// whose, which way, and when (ms). The newest of a master's entries wins.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct BlockEntry {
+    #[serde(default)]
+    pub peer_id: String,
+    #[serde(default)]
+    pub blocked: bool,
     #[serde(default)]
     pub at: i64,
 }
@@ -300,7 +316,9 @@ pub(crate) enum NetworkEvent {
     MemberJoined { server_id: String, peer_id: String },
     MemberLeft { server_id: String, peer_id: String },
     SyncCompleted { server_id: String, ops_applied: u32 },
-    ServerJoined { server_id: String, name: String },
+    /// `quiet`: a join our other device re-shared rather than one just made;
+    /// `from_sibling`: a join our other device started, not this one.
+    ServerJoined { server_id: String, name: String, quiet: bool, from_sibling: bool },
     ServerJoinFailed { server_id: String, reason: String },
     /// The live window elapsed with nobody there to answer, so the request was
     /// parked in the server room's join ring. Not a failure; the UI shows a tile.
@@ -366,6 +384,8 @@ pub(crate) enum NetworkEvent {
     FriendRemoved { peer_id: String },
     /// A sibling sent our identity's friend list and we inserted `count` new rows.
     FriendsBackfilled { count: u32 },
+    /// One of our own devices blocked or unblocked someone: the block list changed.
+    BlockListChanged,
     // -- Conference events (see node/conference.rs + reports/shipped/voice-and-media/CONFERENCES_PLAN.md) --
     /// (Host) a stranger is at the door. Blocklist already applied at ingest;
     /// `avatar_hash` is a hash, never blob bytes.
@@ -857,6 +877,8 @@ pub(crate) struct PendingJoin {
     /// Another device of ours told us of the server, possibly long ago: the user asked
     /// nothing here, so this join never signs an ask, keeps a row or shows a refusal.
     pub(crate) from_sibling: bool,
+    /// It completes without a toast: the server came from a re-share, not a new join.
+    pub(crate) quiet: bool,
 }
 
 impl PendingJoin {
@@ -1368,6 +1390,10 @@ pub(crate) enum NodeCommand {
         mls_server: Option<String>,
         envelope: Box<MessageEnvelope>,
     },
+    /// TEST-ONLY: age every held MLS commit by `by`, as if it had waited that long.
+    /// Absent in release builds.
+    #[cfg(test)]
+    TestAgeHeldCommits { by: std::time::Duration },
 }
 
 impl NodeCommand {
@@ -1541,6 +1567,8 @@ impl NodeCommand {
             Self::TestConferenceLine { .. } => "TestConferenceLine",
             #[cfg(test)]
             Self::TestEnvelope { .. } => "TestEnvelope",
+            #[cfg(test)]
+            Self::TestAgeHeldCommits { .. } => "TestAgeHeldCommits",
         }
     }
 }
@@ -1579,6 +1607,12 @@ pub(crate) struct DebugSnapshotReply {
     pub ws_transfers: Vec<String>,
     /// Sender DEVICE id -> frames the inbound rate limit has dropped from it.
     pub rate_dropped: std::collections::HashMap<String, u64>,
+    /// Group keys holding a staged commit for a retry.
+    pub mls_held_commits: Vec<String>,
+    /// Group keys holding a commit dropped at its bound, judged again for a repair.
+    pub mls_lapsed_commits: Vec<String>,
+    /// Group keys holding a staged Welcome for a retry.
+    pub mls_held_welcomes: Vec<String>,
 }
 
 // -- Wire protocol types (v2: encrypted) --
@@ -1883,6 +1917,10 @@ pub(crate) enum HavenMessage {
         /// anyone's. `None` until the owner has set one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         join_key: Option<String>,
+        /// The announcing device just made or joined it. A re-share of what it holds
+        /// leaves this false, and the join it starts here is quiet.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fresh: bool,
     },
 
     // -- MLS group encryption messages --
@@ -2225,6 +2263,9 @@ pub(crate) enum HavenMessage {
         /// out of `friends`, which an older device reads as accepted whatever the status.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         removed: Vec<FriendRemoval>,
+        /// Blocks and unblocks, so every device of ours refuses the same people.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocks: Vec<BlockEntry>,
     },
 
     /// Multi-device: ask a SIBLING device to send us its friend list. The pull

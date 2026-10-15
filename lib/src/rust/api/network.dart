@@ -9,7 +9,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 import 'showcase.dart';
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `flat`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `openable_card_url`, `reads_persisted_server_state`, `refuse_oversized_message`, `send_node_command`, `store_profile_media`, `to_ffi_event`
+// These functions are ignored because they are not marked as `pub`: `a_node_runs`, `event_forwarding_task`, `flat`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `openable_card_url`, `reads_persisted_server_state`, `refuse_oversized_message`, `send_node_command`, `store_profile_media`, `to_ffi_event`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `EventFeed`, `NodeState`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`
 
@@ -1778,9 +1778,15 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String serverId,
     required int opsApplied,
   }) = NetworkEvent_SyncCompleted;
+
+  /// `quiet`: our other device re-shared a server we lacked as we came back (a
+  /// repair, a relink, a lost database); no toast and no switch to it.
+  /// `from_sibling`: our other device joined or made it; a toast, no switch.
   const factory NetworkEvent.serverJoined({
     required String serverId,
     required String name,
+    required bool quiet,
+    required bool fromSibling,
   }) = NetworkEvent_ServerJoined;
   const factory NetworkEvent.serverJoinFailed({
     required String serverId,
@@ -1961,6 +1967,9 @@ sealed class NetworkEvent with _$NetworkEvent {
   /// Multi-device: a sibling device backfilled `count` new friends (Phase 6).
   const factory NetworkEvent.friendsBackfilled({required int count}) =
       NetworkEvent_FriendsBackfilled;
+
+  /// Multi-device: another device of ours blocked or unblocked someone.
+  const factory NetworkEvent.blockListChanged() = NetworkEvent_BlockListChanged;
   const factory NetworkEvent.nicknameClaimed({required String nickname}) =
       NetworkEvent_NicknameClaimed;
   const factory NetworkEvent.nicknameReleased() = NetworkEvent_NicknameReleased;

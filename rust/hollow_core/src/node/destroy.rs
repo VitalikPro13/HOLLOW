@@ -17,7 +17,7 @@ use super::types::*;
 
 /// An order older than this was issued against a device that no longer exists, so
 /// acting on it would wipe a machine the user linked afterwards.
-fn link_key(device_peer_id: &str) -> String {
+pub(crate) fn link_key(device_peer_id: &str) -> String {
     format!("device_linked_at_ms:{device_peer_id}")
 }
 
@@ -75,15 +75,26 @@ fn read_i64(store: &MessageStore, key: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// Beside the database while a repair replaces it: the link time the repair read off
+/// the identity files, for a start after a crash that left the new database unstamped.
+pub(crate) const REPAIR_LINK_HINT: &str = "repair_link_time";
+
 /// Stamped once, at the first start after `identity.device` was created. A re-linked
-/// device has a NEW id and no row in the imported database, so it stamps fresh.
+/// device has a NEW id and no row in the imported database, so it stamps fresh; a
+/// repair a crash cut short stamps the earlier time it left beside the database.
 pub(crate) fn stamp_device_link(db_path: &str, db_passphrase: &str, device_peer_id: &str) {
     let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
+    let hint = std::path::Path::new(db_path).with_file_name(REPAIR_LINK_HINT);
     let key = link_key(device_peer_id);
     if store.load_setting(&key).ok().flatten().is_some() {
+        let _ = std::fs::remove_file(&hint);
         return;
     }
-    let _ = store.save_setting(&key, &now_ms().to_string());
+    let hinted = std::fs::read_to_string(&hint).ok().and_then(|t| t.trim().parse::<i64>().ok());
+    let stamp = hinted.map_or_else(now_ms, |t| t.min(now_ms()));
+    if store.save_setting(&key, &stamp.to_string()).is_ok() {
+        let _ = std::fs::remove_file(&hint);
+    }
 }
 
 /// Whether the identity's authority stands behind `order`, judged against the roster

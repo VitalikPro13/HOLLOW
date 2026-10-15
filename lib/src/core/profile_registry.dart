@@ -146,20 +146,47 @@ Future<void> saveProfileRegistryIfChanged(
   await saveProfileRegistry(next);
 }
 
+/// The registry with [path] listed as [name], unless it is listed already.
+ProfileRegistry registryWithKeptProfile(
+    ProfileRegistry registry, String path, String name) {
+  if (registry.custom.any((p) => sameProfilePath(p.path, path))) {
+    return registry;
+  }
+  return registry.copyWith(
+      custom: [...registry.custom, HollowProfile(name: name, path: path)]);
+}
+
+/// Whether [path] is a folder a relink kept aside from [root], at any depth:
+/// `<root>-old-YYYY-MM-DD` (or that with `-<n>`), and old data kept aside from
+/// that in turn.
+bool isKeptAsideOf(String path, String root) {
+  final pattern = RegExp(
+      '^${RegExp.escape(canonicalProfilePath(root))}(-old-\\d{4}-\\d{2}-\\d{2}(-\\d+)?)+\$');
+  return pattern.hasMatch(canonicalProfilePath(path));
+}
+
 /// The registry once the profile at [wipedRoot] is wiped: its entry goes, the
 /// rest stays. If the next launch would have opened it, the pin moves to the
 /// first other profile in [profilePaths] that still holds an identity, or
 /// clears so that launch opens Welcome. A wipe touches only its own profile.
+///
+/// A destroy also erased the old data a relink kept aside from [wipedRoot], so
+/// those entries go once their folder is gone: a leftover "Old data" profile
+/// would tell that a wipe ran.
 ProfileRegistry registryAfterWipe(
   ProfileRegistry registry,
   String wipedRoot, {
   required String runningRoot,
   required Iterable<String> profilePaths,
   required bool Function(String path) holdsIdentity,
+  bool Function(String path)? folderExists,
 }) {
+  final exists = folderExists ?? (String p) => Directory(p).existsSync();
   final custom = [
     for (final p in registry.custom)
-      if (!sameProfilePath(p.path, wipedRoot)) p,
+      if (!sameProfilePath(p.path, wipedRoot) &&
+          !(isKeptAsideOf(p.path, wipedRoot) && !exists(p.path)))
+        p,
   ];
   final pin = registry.activePath;
   final opensWiped = sameProfilePath(pin ?? runningRoot, wipedRoot);

@@ -53,6 +53,11 @@ pub(crate) mod log {
         PathBuf::from("hollow_debug.log")
     }
 
+    /// Where this process's log file is, or would be.
+    pub(crate) fn path() -> PathBuf {
+        log_path()
+    }
+
     /// An identity lives in `root` and no wipe is waiting on it.
     pub(crate) fn holds_identity(root: &Path) -> bool {
         root.join("identity.key").exists() && !root.join("pending_wipe.marker").exists()

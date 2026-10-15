@@ -35,6 +35,14 @@ has the whole pipeline.
 - A push wake on Android with the node alive goes through `rejoinThroughLiveNode`: a `push`
   nudge brings the suspended session back BEFORE the live node rejoins, or the rejoin waits in
   the queue until the app returns.
+- A phone presenting a device link (`linkPresentingProvider`: showing or renewing a code,
+  asking to confirm, sending) holds the relay like a call (`relayRealtimeProvider`; hidden, it
+  never hears the joiner arrive) and on Android runs `LinkKeepAliveService`, a `shortService`
+  foreground service (not exported, both `onTimeout` overloads stop it), so Android keeps its
+  network while the code is typed on the other device. Each phase must end on its own: the
+  code's 300 s countdown, `dialogGone()` for a code waiting for the relay, `kLinkSendingTimeout`
+  (10 min) for a send never confirmed. Guards: `test/link_keep_alive_test.dart`,
+  `test/device_link_wait_test.dart`, `test/widget/device_link_dialog_close_test.dart`.
 - App Lock (mobile): the PIN via the Rust Argon2id flow; the biometric secret in
   flutter_secure_storage after `local_auth` (3.x named params); the lock-type marker is
   readable BEFORE identity unlock; MainActivity MUST extend `FlutterFragmentActivity`.

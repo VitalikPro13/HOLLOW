@@ -377,7 +377,14 @@ pub(crate) async fn accept(
     {
         let _ = store.set_device_kind(&device, kind);
     }
-    let blob = match crate::api::storage::export_backup_bytes(&key_hex, include_vault, include_files) {
+    // The export reads the whole database and may wait on it: never on a runtime worker.
+    let code = key_hex.clone();
+    let exported = tokio::task::spawn_blocking(move || {
+        crate::api::storage::export_backup_bytes(&code, include_vault, include_files)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("The export stopped: {e}")));
+    let blob = match exported {
         Ok(b) => b,
         Err(e) => {
             hollow_log!("[HOLLOW-LINK] Backup build failed: {e}");

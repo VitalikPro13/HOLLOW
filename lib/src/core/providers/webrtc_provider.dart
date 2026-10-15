@@ -68,12 +68,14 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
     _service!.onShareConnectionFailed = (peerId) {
       final short = peerId.length > 12 ? '${peerId.substring(0, 12)}...' : peerId;
       debugPrint('[HOLLOW-SHARE] STUN-only connection failed to $peerId — peer unreachable without TURN');
-      final ctx = hollowNavigatorKey.currentContext;
-      if (ctx != null) {
+      final overlay = hollowNavigatorKey.currentState?.overlay;
+      final ctx = overlay?.context;
+      if (overlay != null && ctx != null && ctx.mounted) {
         HollowToast.show(
           ctx,
           'Share: peer $short unreachable (strict NAT)',
           type: HollowToastType.error,
+          overlayState: overlay,
         );
       }
     };

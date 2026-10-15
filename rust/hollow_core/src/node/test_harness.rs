@@ -27279,7 +27279,17 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // sibling join echoing back) added two spawn staggers (3.0 s, total 791.5 s).
     // 2026-10-09: a listed sibling's re-join announcing nothing early is an absence
     // proof (2.0 s, total 793.5 s).
-    const BUDGET_MS: u64 = 793_500;
+    // 2026-10-10: the md-recovery repair tests added three spawn staggers and the
+    // absence proof that a lost session reads nothing (6.1 s, total 799.6 s).
+    // 2026-10-11: md-sibling's lost-database tests prove two absences, a stranger's
+    // friend list not heard and a friend's key request not answered with our state
+    // (2.0 s, total 801.6 s).
+    // 2026-10-11: md-mls proves two batch ticks after a held add's bound merge nothing
+    // and ask for no repair (4.5 s, total 806.1 s).
+    // 2026-10-15: md-mls-2 proves a spent catch-up asks nothing while a commit is held
+    // or from a member we would not ask, and an add vouched late costs no repair where
+    // the group did not move (6.0 s, total 812.1 s).
+    const BUDGET_MS: u64 = 812_100;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -33957,6 +33967,7 @@ async fn authz_a_stale_siblings_friend_list_never_brings_back_a_removed_friend()
         status: "accepted".into(),
         direction: String::new(),
         requested_at,
+        roster: None,
     };
     let backfilled = async |b: &mut TestNode| {
         let mut count = 0;
@@ -33971,12 +33982,12 @@ async fn authz_a_stale_siblings_friend_list_never_brings_back_a_removed_friend()
         seen.then_some(count)
     };
     drain_events(&mut b);
-    carry_as(&c, &b, HavenMessage::FriendListSync { friends: vec![entry(&friend, hour_ago), entry(&other, hour_ago)], removed: Vec::new() }).await;
+    carry_as(&c, &b, HavenMessage::FriendListSync { friends: vec![entry(&friend, hour_ago), entry(&other, hour_ago)], removed: Vec::new(), blocks: Vec::new() }).await;
     assert_eq!(backfilled(&mut b).await, Some(1), "only the friend B lacked may land");
     assert_eq!(friend_row(&b, &friend), None, "a stale sibling brought back a removed friend");
 
     // A friendship made again since the removal carries a newer stamp.
-    carry_as(&c, &b, HavenMessage::FriendListSync { friends: vec![entry(&friend, super::frame_auth::now_ms())], removed: Vec::new() }).await;
+    carry_as(&c, &b, HavenMessage::FriendListSync { friends: vec![entry(&friend, super::frame_auth::now_ms())], removed: Vec::new(), blocks: Vec::new() }).await;
     assert_eq!(backfilled(&mut b).await, Some(1), "a friend re-added since the removal must land");
     assert!(is_friend(&b, &friend), "and as a friend");
 }
@@ -34013,6 +34024,7 @@ fn removals(entries: &[(&str, i64)]) -> super::types::HavenMessage {
             .iter()
             .map(|(peer, at)| super::types::FriendRemoval { peer_id: peer.to_string(), at: *at })
             .collect(),
+        blocks: Vec::new(),
     }
 }
 
@@ -34109,8 +34121,10 @@ async fn authz_a_removal_reaches_an_online_sibling_and_never_undoes_a_readd() {
             status: "accepted".into(),
             direction: String::new(),
             requested_at: super::frame_auth::now_ms(),
+            roster: None,
         }],
         removed: Vec::new(),
+        blocks: Vec::new(),
     };
     carry_and_settle(&a1, &mut a2, readd).await;
     assert!(is_friend(&a2, &other), "a removal stamped ahead of its frame outlived the friendship made since");
@@ -37605,8 +37619,9 @@ async fn authz_a_sibling_lane_stamp_never_runs_ahead_of_its_frame() {
     assert!(ts_of("dm:far").is_some_and(|ts| ts <= ceiling), "a far-future marker ran ahead: {:?}", ts_of("dm:far"));
 
     carry_as(&c, &b, HavenMessage::FriendListSync {
-        friends: vec![FriendListEntry { peer_id: friend.clone(), status: "accepted".into(), direction: String::new(), requested_at: far }],
+        friends: vec![FriendListEntry { peer_id: friend.clone(), status: "accepted".into(), direction: String::new(), requested_at: far, roster: None }],
         removed: Vec::new(),
+        blocks: Vec::new(),
     })
     .await;
     assert!(
@@ -37865,7 +37880,7 @@ async fn join_with_a_malformed_server_id_starts_nothing() {
         server_id: server_id.to_string(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: key.clone(),
     };
     let announce = |server_id: &str| HavenMessage::SiblingServerAnnounce {
-        server_id: server_id.to_string(), owner: None, join_key: key.clone(),
+        server_id: server_id.to_string(), owner: None, join_key: key.clone(), fresh: false,
     };
     for id in &bad {
         b.cmd_tx.send(join(id)).await.unwrap();
@@ -37923,8 +37938,10 @@ async fn c24_a_plaintext_copy_of_an_olm_only_message_is_dropped() {
             status: "accepted".into(),
             direction: "outgoing".into(),
             requested_at: 1,
+            roster: None,
         }],
         removed: Vec::new(),
+        blocks: Vec::new(),
     };
     relay.inject_direct(
         &format!("inbox:{m_master}"), &b.device_id, &c.device_id,
@@ -44683,6 +44700,7 @@ fn t1_sibling_server_announce_may_arrive_late() {
         server_id: "a".repeat(40),
         owner: None,
         join_key: None,
+        fresh: false,
     };
     assert!(!announce.live_only(), "a bare announce is durable");
     let carried: super::types::MessageEnvelope =
@@ -45478,4 +45496,2489 @@ async fn a_dm_stored_without_a_mid_takes_its_synced_copy_once() {
     drop(f);
     drop(n1);
     drop(n2);
+}
+
+// md-recovery
+
+/// Breaks a stopped node's database the way the field saw it (a database under another
+/// identity's key beside this identity), then runs the real repair against its root.
+fn md_break_and_repair(db_path: &str, passphrase: &str, master: &NativeKeypair, device_id: &str) {
+    let root = std::path::Path::new(db_path).parent().expect("root").to_path_buf();
+    std::fs::write(root.join("identity.key"), master.to_protobuf_encoding().unwrap()).unwrap();
+    for name in ["messages.db", "messages.db-wal", "messages.db-shm"] {
+        let _ = std::fs::remove_file(root.join(name));
+    }
+    let stranger = passphrase_for(&NativeKeypair::from_secret_bytes(&seed_bytes(0xEE)));
+    crate::storage::MessageStore::open(db_path, &stranger).unwrap().save_setting("who", "a stranger").unwrap();
+    let out = crate::api::recovery::repair_at(&root, passphrase, device_id, super::destroy::now_ms()).expect("repair");
+    assert!(!out.restored, "nothing kept opens with this identity");
+    assert!(root.join(&out.folder).join("messages.db").exists(), "the unreadable database is kept");
+    crate::storage::MessageStore::migrate_auto_vacuum_once(db_path, passphrase).expect("auto_vacuum migration");
+}
+
+/// A device whose database would not open is repaired in place (same device key, new
+/// database) and gets its server back from its sibling: the server, a fresh MLS leaf in
+/// place of its stale one, and the channel both ways.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn md_recovery_a_repaired_device_gets_its_server_back_from_its_sibling() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let [m_tag, d1_tag, d2_tag, x_tag] = [241u8, 242, 243, 244];
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    super::resolver::seed_self(&id(m_tag), &[id(d1_tag), id(d2_tag)]);
+
+    let mut d1 = spawn_node_on(&relay, m_tag, d1_tag).await;
+    // Spawn stagger against the symmetric KeyBundle glare (counted in BUDGET_MS).
+    sleep_ms(1500).await;
+    let mut d2 = spawn_node_on(&relay, m_tag, d2_tag).await;
+    let mut x = spawn_node_on(&relay, x_tag, x_tag).await;
+    expect_siblings_ready(&relay, &d1, &d2, 15).await;
+
+    let server_id = create_server_and_wait(&mut d1, "Repair me").await;
+    t1_join_and_wait(&mut x, &server_id).await;
+    expect_mls_leaf(&x, &server_id, &d2.device_id, 25).await;
+    assert!(d2.servers().contains(&server_id), "precondition: device 2 holds the server");
+
+    let master = d2.master_kp.clone();
+    let device_id = d2.device_id.clone();
+    d2 = restart_node_with(&relay, d2, m_tag, d2_tag, |db, pass| md_break_and_repair(db, pass, &master, &device_id)).await;
+    assert!(d2.servers().is_empty(), "the repaired device starts with an empty database");
+
+    let back = wait_event(&mut d2, std::time::Duration::from_secs(30), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(back, "the repaired device must get its server back from its sibling");
+    expect_mls_leaf(&d2, &server_id, &x.device_id, 30).await;
+    assert!(
+        wait_until(30, async || {
+            let leaves = x.mls_members(&server_id).await;
+            leaves.iter().filter(|l| **l == device_id).count() == 1
+        })
+        .await,
+        "the member holds exactly one leaf for the repaired device, got {:?}",
+        x.mls_members(&server_id).await,
+    );
+
+    drain_events(&mut d2);
+    x.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general_channel_of(&server_id),
+            text: "md welcome back".to_string(),
+            message_id: "md-repair-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let read = wait_event(&mut d2, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "md welcome back")
+    })
+    .await;
+    assert!(read, "the repaired device reads the channel");
+
+    drain_events(&mut x);
+    d2.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general_channel_of(&server_id),
+            text: "md repaired says hi".to_string(),
+            message_id: "md-repair-2".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let heard = wait_event(&mut x, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "md repaired says hi")
+    })
+    .await;
+    assert!(heard, "a member reads what the repaired device posts");
+    drop(d1);
+}
+
+/// A repaired device gets its friends, its DM history in both directions and its profile
+/// back from its sibling, and a friend's new DM reaches it on a fresh Olm session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn md_recovery_a_repaired_device_gets_friends_dms_and_profile_back_from_its_sibling() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let [m_tag, d1_tag, d2_tag, b_tag, bd_tag] = [245u8, 246, 247, 248, 249];
+    let (mut a1, mut a2, mut b) = siblings_and_friend(&relay, [m_tag, d1_tag, d2_tag, b_tag, bd_tag], &[]).await;
+    let b_master = b.master_id.clone();
+    let a_master = a1.master_id.clone();
+
+    a1.cmd_tx
+        .send(NodeCommand::UpdateProfile {
+            display_name: "Repaired Person".to_string(),
+            status: String::new(),
+            about_me: String::new(),
+            avatar_bytes: None,
+            banner_bytes: None,
+            twitch_username: String::new(),
+            showcase_board: None,
+            showcase_assets: None,
+            avatar_frame: None,
+            avatar_anim: None,
+            banner_anim: None,
+            support_creds: None,
+        })
+        .await
+        .unwrap();
+    send_dm_burst(&b, &a1, "md-theirs", 2).await;
+    assert_eq!(read_dm_burst(&mut a1, "md-theirs", 2, 20).await.0, 2);
+    send_dm_burst(&a1, &b, "md-ours", 2).await;
+    assert_eq!(read_dm_burst(&mut b, "md-ours", 2, 20).await.0, 2);
+    assert!(
+        wait_until(20, async || {
+            ["md-theirs-0", "md-theirs-1", "md-ours-0", "md-ours-1"].iter().all(|m| a2.store().dm_message_exists(m))
+                && a2.store().load_profile(&a_master).ok().flatten().is_some_and(|p| p.display_name == "Repaired Person")
+        })
+        .await,
+        "precondition: the sibling holds the history and the profile",
+    );
+
+    let master = a2.master_kp.clone();
+    let device_id = a2.device_id.clone();
+    a2 = restart_node_with(&relay, a2, m_tag, d2_tag, |db, pass| md_break_and_repair(db, pass, &master, &device_id)).await;
+    assert!(a2.store().load_friends(None).unwrap().is_empty(), "the repaired device starts with an empty database");
+
+    assert!(
+        wait_until(40, async || {
+            a2.store().load_friends(Some("accepted")).unwrap().iter().any(|f| f.0 == b_master)
+        })
+        .await,
+        "the friend comes back from the sibling",
+    );
+    assert!(
+        wait_until(40, async || {
+            ["md-theirs-0", "md-theirs-1", "md-ours-0", "md-ours-1"].iter().all(|m| a2.store().dm_message_exists(m))
+        })
+        .await,
+        "the DM history comes back in both directions: {:?}",
+        a2.store().load_all_dm_messages(&b_master).map(|v| v.into_iter().map(|m| (m.text, m.is_mine)).collect::<Vec<_>>()),
+    );
+    let mine: Vec<(String, bool)> = a2
+        .store()
+        .load_all_dm_messages(&b_master)
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.text, m.is_mine))
+        .collect();
+    assert!(mine.contains(&("md-ours-0".to_string(), true)) && mine.contains(&("md-theirs-0".to_string(), false)), "{mine:?}");
+    assert!(
+        wait_until(30, async || {
+            a2.store().load_profile(&a_master).ok().flatten().is_some_and(|p| p.display_name == "Repaired Person")
+        })
+        .await,
+        "the profile comes back from the sibling",
+    );
+
+    drain_events(&mut a2);
+    send_dm_burst(&b, &a1, "md-after", 1).await;
+    let (read, _) = read_dm_burst(&mut a2, "md-after", 1, 30).await;
+    assert_eq!(read, 1, "a friend's new DM reaches the repaired device");
+    drop(a1);
+}
+
+/// A repaired device keeps its seat in a roster the phrase roots: it is still a member
+/// in its own fold, the relay still lets it own the identity's inbox, and the master-key
+/// claim a fresh database makes never reaches its sibling's roster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn md_recovery_a_repaired_device_keeps_its_seat_in_a_phrase_rooted_roster() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let [m_tag, d1_tag, d2_tag, r_tag] = [236u8, 237, 238, 239];
+    let master = tag_kp(m_tag);
+    let m_id = master.peer_id();
+    let (d1_id, d2_id) = (tag_kp(d1_tag).peer_id(), tag_kp(d2_tag).peer_id());
+    super::resolver::seed_self(&m_id, &[d1_id.clone(), d2_id.clone()]);
+    let mut roster = crate::identity::roster::Roster::genesis(&master, &tag_kp(r_tag), &tag_kp(d1_tag), super::roster_book::now_ms());
+    roster.add_vouch(crate::identity::roster::sign_vouch(&tag_kp(d1_tag), &m_id, &roster.base(), &d2_id));
+    roster.add_consent(crate::identity::roster::sign_consent(&tag_kp(d2_tag), &m_id));
+
+    let d1 = spawn_node_seeded(&relay, m_tag, d1_tag, &[], Some(roster.clone())).await;
+    // Spawn stagger against the symmetric KeyBundle glare (counted in BUDGET_MS).
+    sleep_ms(1500).await;
+    let d2 = spawn_node_seeded(&relay, m_tag, d2_tag, &[], Some(roster)).await;
+    expect_siblings_ready(&relay, &d1, &d2, 15).await;
+    let member = |node: &TestNode, dev: &str| {
+        super::roster_book::own(&node.master_id, &node.db_path, &node.passphrase).is_some_and(|(_, s)| s.is_member(dev))
+    };
+    assert!(member(&d1, &d2_id) && member(&d2, &d2_id), "precondition: the phrase's roster counts device 2");
+
+    let device_id = d2.device_id.clone();
+    let d2 = restart_node_with(&relay, d2, m_tag, d2_tag, |db, pass| md_break_and_repair(db, pass, &master, &device_id)).await;
+
+    let inbox = format!("inbox:{m_id}");
+    assert!(
+        wait_until(30, async || relay.room_devices(&inbox).contains(&d2_id)).await,
+        "the relay still lets the repaired device own the identity's inbox",
+    );
+    expect_siblings_ready(&relay, &d1, &d2, 30).await;
+    assert!(
+        wait_until(30, async || {
+            super::roster_book::own(&m_id, &d2.db_path, &d2.passphrase)
+                .is_some_and(|(r, s)| s.is_member(&d2_id) && s.is_member(&d1_id) && r.base() != crate::identity::roster::LEGACY_BASE)
+        })
+        .await,
+        "the repaired device folds the phrase's roster again and is a member in it",
+    );
+    let held = super::roster_book::own_roster(&m_id, &d1.db_path, &d1.passphrase).expect("device 1 holds the roster");
+    assert!(held.legacy.is_empty(), "the claim a fresh database makes never sticks: {:?}", held.legacy);
+    assert!(member(&d1, &d2_id), "device 1 still counts the repaired device");
+}
+
+/// The order the fleet showed: the sibling converges the moment the repaired device
+/// joins, on the Olm session the repair lost, so all of it dies there; only the re-key
+/// the repaired device then asks for can carry the sibling's state. The relay holds the
+/// repaired device's frames to its sibling until that convergence has gone out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn md_recovery_a_sibling_converges_again_once_a_repaired_device_rekeys() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let [m_tag, d1_tag, d2_tag] = [225u8, 226, 227];
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    super::resolver::seed_self(&id(m_tag), &[id(d1_tag), id(d2_tag)]);
+
+    let mut d1 = spawn_node_on(&relay, m_tag, d1_tag).await;
+    // Spawn stagger against the symmetric KeyBundle glare (counted in BUDGET_MS).
+    sleep_ms(1500).await;
+    let mut d2 = spawn_node_on(&relay, m_tag, d2_tag).await;
+    expect_siblings_ready(&relay, &d1, &d2, 15).await;
+    let server_id = create_server_and_wait(&mut d1, "Converge again").await;
+    assert!(
+        wait_until(30, async || d2.servers().contains(&server_id)).await,
+        "precondition: device 2 holds the server",
+    );
+
+    let (d1_id, d2_id) = (d1.device_id.clone(), d2.device_id.clone());
+    relay.hold_direct(&d2_id, &d1_id);
+    let master = d2.master_kp.clone();
+    d2 = restart_node_with(&relay, d2, m_tag, d2_tag, |db, pass| md_break_and_repair(db, pass, &master, &d2_id)).await;
+    assert!(d2.servers().is_empty(), "the repaired device starts with an empty database");
+    assert!(
+        wait_until(15, async || !relay.held_kinds(&d2_id, &d1_id).is_empty()).await,
+        "the repaired device asks its sibling for a key",
+    );
+    // Device 1 heard nothing from device 2 yet: what it sends now rides the old session.
+    // An absence with no signal to poll (counted in BUDGET_MS).
+    sleep_ms(2500).await;
+    assert!(!d2.servers().contains(&server_id), "precondition: what device 1 sent on the lost session never read");
+    relay.release_held(&d2_id, &d1_id);
+
+    let back = wait_event(&mut d2, std::time::Duration::from_secs(40), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(back, "after the re-key the sibling must converge again and hand the server back");
+    drop(d1);
+}
+
+/// A KeyRequest over a session we hold converges again only with a device of ours the
+/// roster still counts: never a stranger's, never a revoked device's. Both gates, the
+/// re-key path's and the convergence's own, are judged alone.
+#[test]
+fn md_recovery_only_a_sibling_that_lost_its_session_is_converged_again() {
+    let _g = test_guard();
+    let tmp = crate::test_tmp::tempdir().expect("tmp");
+    let db = tmp.path().join("messages.db").to_string_lossy().into_owned();
+    let pass = "ab".repeat(32);
+    let master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(220));
+    let master = master_kp.peer_id();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (here, sibling, revoked, stranger) = (id(221), id(222), id(223), id(224));
+    super::resolver::seed_self(&master, &[here, sibling.clone(), revoked.clone()]);
+    super::resolver::mark_revoked(std::slice::from_ref(&revoked));
+    let ours = ServerState::new("ab".repeat(20), "Ours".into(), master.clone());
+    let servers: HashMap<String, ServerState> = [(ours.server_id.clone(), ours)].into_iter().collect();
+    // (what the re-key path decided, what reached the peer) or, convergence alone, (None, ...).
+    let run = |peer: &str, convergence_alone: bool| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let decided = if convergence_alone {
+            super::swarm::on_verified_sibling(
+                &tx, &HashMap::new(), &master_kp, &master, &servers, false, &db, &pass, peer, None,
+            );
+            None
+        } else {
+            Some(super::swarm::reconverge_after_lost_session(
+                &tx, &HashMap::new(), &master_kp, &master, &servers, false, &db, &pass, peer, None,
+            ))
+        };
+        let mut sent = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, WsCommand::Carry { ref device, .. } if device == peer) {
+                sent += 1;
+            }
+        }
+        (decided, sent)
+    };
+    let to_sibling = run(&sibling, false);
+    let to_stranger = run(&stranger, false);
+    let to_revoked = run(&revoked, false);
+    let alone = [run(&sibling, true).1, run(&stranger, true).1, run(&revoked, true).1];
+    super::resolver::unmark_revoked(std::slice::from_ref(&revoked));
+    assert!(to_sibling.0 == Some(true) && to_sibling.1 > 0,"control: a sibling that lost its session hears our state again");
+    assert_eq!(to_stranger, (Some(false), 0), "a stranger's KeyRequest never gets our sibling state");
+    assert_eq!(to_revoked, (Some(false), 0), "a revoked device's KeyRequest never gets our sibling state");
+    assert!(alone[0] > 0, "control: the convergence alone reaches a sibling");
+    assert_eq!(alone[1], 0, "the convergence alone refuses a stranger");
+    assert_eq!(alone[2], 0, "the convergence alone refuses a revoked device");
+}
+
+// md-review
+
+/// G1: a master id its own roster does not count is no device of ours, yet
+/// `same_identity(M, M)` holds. The re-key path's convergence gate, judged alone, must
+/// refuse it the way the KeyRequest arm's device check does.
+#[test]
+fn md_review_the_reconvergence_gate_alone_refuses_a_bare_master() {
+    let _g = test_guard();
+    let tmp = crate::test_tmp::tempdir().expect("tmp");
+    let db = tmp.path().join("messages.db").to_string_lossy().into_owned();
+    let pass = "ab".repeat(32);
+    let master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(214));
+    let master = master_kp.peer_id();
+    let sibling = NativeKeypair::from_secret_bytes(&seed_bytes(215)).peer_id();
+    super::resolver::seed_self(&master, std::slice::from_ref(&sibling));
+    super::resolver::note_roster(&master);
+    assert!(super::resolver::is_bare_master(&master), "precondition: our roster does not count the master id");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+    let decided = super::swarm::reconverge_after_lost_session(
+        &tx, &HashMap::new(), &master_kp, &master, &HashMap::new(), false, &db, &pass, &master, None,
+    );
+    let mut sent = 0;
+    while let Ok(cmd) = rx.try_recv() {
+        if matches!(cmd, WsCommand::Carry { ref device, .. } if *device == master) {
+            sent += 1;
+        }
+    }
+    assert!(!decided && sent == 0, "the bare master id got our sibling state: decided {decided}, {sent} carries");
+}
+
+// md-recovery-4
+
+/// G1, the convergence's own gate judged alone: a bare master id hears no sibling
+/// state even when the caller's gate let it through.
+#[test]
+fn md_recovery_4_the_convergence_alone_refuses_a_bare_master() {
+    let _g = test_guard();
+    let tmp = crate::test_tmp::tempdir().expect("tmp");
+    let db = tmp.path().join("messages.db").to_string_lossy().into_owned();
+    let pass = "ab".repeat(32);
+    let master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(216));
+    let master = master_kp.peer_id();
+    let sibling = NativeKeypair::from_secret_bytes(&seed_bytes(217)).peer_id();
+    super::resolver::seed_self(&master, std::slice::from_ref(&sibling));
+    super::resolver::note_roster(&master);
+    assert!(super::resolver::is_bare_master(&master), "precondition: our roster does not count the master id");
+    let carries_to = |peer: &str| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        super::swarm::on_verified_sibling(
+            &tx, &HashMap::new(), &master_kp, &master, &HashMap::new(), false, &db, &pass, peer, None,
+        );
+        let mut sent = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, WsCommand::Carry { ref device, .. } if device == peer) {
+                sent += 1;
+            }
+        }
+        sent
+    };
+    assert!(carries_to(&sibling) > 0, "control: the convergence reaches a rostered sibling");
+    assert_eq!(carries_to(&master), 0, "the bare master id got our sibling state");
+}
+
+// md-link
+/// md-link-3 saw a friend refuse a `ServerJoinResolved` from the owner's second device
+/// as a non-member's (fleet cell 193735). That copy came out of the join ring after
+/// the owner deleted the server; a live server counts its owner's sibling like the
+/// owner: its answer to an ask stops a member serving that ask again, and only that ask.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_join_resolved_from_an_owners_second_device_counts() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_master, m_master, j_master) = (keys(157).peer_id(), keys(159).peer_id(), keys(156).peer_id());
+    super::resolver::seed_self(&o_master, &[keys(158).peer_id(), keys(155).peer_id()]);
+    let mut o1 = spawn_node_with_friends(&relay, 157, 158, &[&m_master, &j_master]).await;
+    let mut o2 = spawn_node_with_friends(&relay, 157, 155, &[&m_master, &j_master]).await;
+    let mut m = spawn_node_with_friends(&relay, 159, 159, &[&o_master, &j_master]).await;
+    let j = spawn_node_with_friends(&relay, 156, 156, &[&o_master, &m_master]).await;
+    expect_siblings_ready(&relay, &o1, &o2, 15).await;
+    expect_dm_pair_ready(&relay, &o1, &m, 15).await;
+    let server_id = create_server_and_wait(&mut o1, "Two-device owner").await;
+    assert!(
+        wait_event(&mut o2, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "the owner's second device holds the server"
+    );
+    m.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut m, &server_id, 10).await, "M must join");
+    assert!(expect_sees_room(&relay, &server_id, &m.device_id).await);
+    drain_events(&mut o1);
+
+    let parked = |at: i64| super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.clone(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        requested_at: at,
+        device_list: None,
+        parked: true,
+        key_package: None,
+        reply_key: fresh_reply_key(),
+        card: None,
+        avatar_b64: String::new(),
+        ask: join_ask(&server_id, at, &j.master_kp),
+    };
+    let asked = super::frame_auth::now_ms();
+    let answered = super::types::HavenMessage::ServerJoinResolved {
+        server_id: server_id.clone(),
+        joiner_master: j_master.clone(),
+        requested_at: asked,
+        admitted: false,
+        reason: "banned".into(),
+        op_json: None,
+    };
+    relay.inject(&server_id, &o2.device_id, &m.device_id, sealed_to_members(&relay, &server_id, &o2.device_id, &answered));
+    relay.inject(&server_id, &j.device_id, &m.device_id, sealed_to_members(&relay, &server_id, &j.device_id, &parked(asked)));
+    let m_admits = async || m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j_master));
+    assert!(!wait_until(10, m_admits).await, "M served an ask the owner's second device had answered");
+
+    // Honesty: the same member serves the joiner's next ask, which nobody answered.
+    let again = super::frame_auth::now_ms();
+    relay.inject(&server_id, &j.device_id, &m.device_id, sealed_to_members(&relay, &server_id, &j.device_id, &parked(again)));
+    assert!(wait_until(10, m_admits).await, "M never serves a parked ask at all");
+    drop((o1, o2, j));
+}
+
+// md-sibling
+
+/// What device 1 of an identity does while device 2 is away (tmp8 item 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MdOp {
+    Create,
+    Join,
+    Leave,
+    Delete,
+    AddFriend,
+    AcceptFriend,
+    RemoveFriend,
+    Profile,
+    Dm,
+    Block,
+}
+
+/// Where device 2 is while device 1 acts. `Background` is a phone's: socket up, hidden.
+/// `Closed*` is a quit app: socket gone, the session handed to the mailbox, a new
+/// process. The minutes ride the frame clock (`frame_auth::now_ms`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MdAway {
+    Online,
+    Background,
+    Closed1m,
+    Closed10m,
+    Hours,
+}
+
+impl MdAway {
+    fn clock_ms(self) -> i64 {
+        match self {
+            MdAway::Online | MdAway::Background | MdAway::Closed1m => 0,
+            MdAway::Closed10m => 10 * 60_000,
+            MdAway::Hours => 3 * 3_600_000,
+        }
+    }
+}
+
+fn md_avatar(red: u8) -> Vec<u8> {
+    use image::{Rgba, RgbaImage};
+    let mut png = Vec::new();
+    RgbaImage::from_pixel(64, 64, Rgba([red, 90, 140, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    png
+}
+
+fn md_profile(name: &str, avatar: Option<Vec<u8>>) -> NodeCommand {
+    NodeCommand::UpdateProfile {
+        display_name: name.to_string(),
+        status: String::new(),
+        about_me: String::new(),
+        avatar_bytes: avatar,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: None,
+        showcase_assets: None,
+        avatar_frame: None,
+        avatar_anim: None,
+        banner_anim: None,
+        support_creds: None,
+    }
+}
+
+/// `node` asks `master` to be friends and `master`'s device `other` accepts.
+async fn md_befriend(asker: &mut TestNode, answerer: &mut TestNode) {
+    drain_events(answerer);
+    asker.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: answerer.master_id.clone() }).await.unwrap();
+    let mut asked_by = None;
+    assert!(
+        wait_event(answerer, std::time::Duration::from_secs(15), |ev| match ev {
+            NetworkEvent::FriendRequestReceived { peer_id } => {
+                asked_by = Some(peer_id.clone());
+                true
+            }
+            _ => false,
+        })
+        .await,
+        "{} hears the friend request",
+        answerer.device_id,
+    );
+    answerer.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: asked_by.unwrap() }).await.unwrap();
+    let asker_master = asker.master_id.clone();
+    let answerer_master = answerer.master_id.clone();
+    assert!(
+        wait_until(20, async || is_friend(asker, &answerer_master) && is_friend(answerer, &asker_master)).await,
+        "the friendship lands on both sides",
+    );
+}
+
+/// What device 2 must show once it is back, and the server it may be told it joined.
+struct MdExpect {
+    holds: Option<String>,
+    lacks: Option<String>,
+    friend: Option<String>,
+    not_friend: Option<String>,
+    profile: Option<(String, Vec<u8>)>,
+    dm: Option<(String, Vec<String>)>,
+    blocked: Option<String>,
+}
+
+impl MdExpect {
+    fn none() -> Self {
+        MdExpect { holds: None, lacks: None, friend: None, not_friend: None, profile: None, dm: None, blocked: None }
+    }
+
+    fn unmet(&self, d2: &TestNode) -> Vec<String> {
+        let mut out = Vec::new();
+        let servers = d2.servers();
+        if let Some(sid) = &self.holds && !servers.contains(sid) {
+            out.push(format!("does not list server {sid}"));
+        }
+        if let Some(sid) = &self.lacks && servers.contains(sid) {
+            out.push(format!("still lists server {sid}"));
+        }
+        if let Some(f) = &self.friend && !is_friend(d2, f) {
+            out.push(format!("friend {f} is {:?}", d2.friend_status(f)));
+        }
+        if let Some(f) = &self.not_friend && d2.friend_status(f).is_some_and(|s| s == "accepted" || s == "pending") {
+            out.push(format!("removed friend {f} is still {:?}", d2.friend_status(f)));
+        }
+        if let Some((name, avatar)) = &self.profile {
+            let store = d2.store();
+            let shown = store.load_profile(&d2.master_id).ok().flatten().map(|p| p.display_name).unwrap_or_default();
+            if shown != *name {
+                out.push(format!("own name is {shown:?}"));
+            }
+            if store.load_avatar(&d2.master_id).ok().flatten().as_deref() != Some(avatar.as_slice()) {
+                out.push("own avatar differs".to_string());
+            }
+        }
+        if let Some(b) = &self.blocked && !md_blocked(d2).contains(b) {
+            out.push(format!("does not block {b}"));
+        }
+        if let Some((friend, texts)) = &self.dm {
+            let thread: Vec<String> = d2.dm_thread(friend).into_iter().map(|b| b.text).collect();
+            for t in texts {
+                if !thread.contains(t) {
+                    out.push(format!("DM thread lacks {t:?} (has {thread:?})"));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A `ServerJoined` for a server device 2 held or that our identity left (the
+/// "Joined" toast and server switch in Dart), or a join row it never asked for. A
+/// friend request that shows while pending and settles once the sibling's list lands
+/// is the request itself, not a stray: the final state is checked instead.
+fn md_note_stray(ev: &NetworkEvent, held: &std::collections::HashSet<String>, lacks: Option<&str>, strays: &mut Vec<String>) {
+    match ev {
+        NetworkEvent::ServerJoined { server_id, .. } if held.contains(server_id) || lacks == Some(server_id.as_str()) => {
+            strays.push(format!("ServerJoined for {server_id}"));
+        }
+        NetworkEvent::PendingJoinUpdated { server_id, .. } => strays.push(format!("PendingJoinUpdated for {server_id}")),
+        _ => {}
+    }
+}
+
+/// One cell of the sibling grid: device 1 does `op` while device 2 is `away`, then
+/// device 2 comes back and must show the same servers, friends, profile and DMs within
+/// `MD_CONVERGE_SECS`, with no `ServerJoined` for a server it held or left, no friend
+/// request it was never asked, and no join row. Returns the seconds it took.
+#[allow(clippy::await_holding_lock)]
+async fn md_grid_cell(tags: [u8; 7], op: MdOp, away: MdAway) -> f64 {
+    const MD_CONVERGE_SECS: u64 = 30;
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let [m, d1_tag, d2_tag, xm, xd, ym, yd] = tags;
+    let (mut d1, mut d2, mut x) = siblings_and_friend(&relay, [m, d1_tag, d2_tag, xm, xd], &[]).await;
+    let m_master = d1.master_id.clone();
+    let x_master = x.master_id.clone();
+    let mut y = match op {
+        MdOp::AddFriend | MdOp::AcceptFriend => Some(spawn_node_with_friends(&relay, ym, yd, &[]).await),
+        _ => None,
+    };
+
+    // Before device 2 goes: what both devices already hold.
+    let mut sid = String::new();
+    match op {
+        MdOp::Join => sid = create_server_and_wait(&mut x, "Grid joined").await,
+        MdOp::Leave => {
+            sid = create_server_and_wait(&mut x, "Grid left").await;
+            t1_join_and_wait(&mut d1, &sid).await;
+        }
+        MdOp::Delete => sid = create_server_and_wait(&mut d1, "Grid deleted").await,
+        MdOp::Profile => {
+            d1.cmd_tx.send(md_profile("Grid before", None)).await.unwrap();
+            assert!(
+                wait_until(20, async || {
+                    d2.store().load_profile(&m_master).ok().flatten().is_some_and(|p| p.display_name == "Grid before")
+                })
+                .await,
+                "precondition: device 2 shows the first profile",
+            );
+        }
+        _ => {}
+    }
+    if matches!(op, MdOp::Leave | MdOp::Delete) {
+        assert!(wait_until(25, async || d2.servers().contains(&sid)).await, "precondition: device 2 holds the server");
+        expect_mls_leaf(&d1, &sid, &d2.device_id, 25).await;
+    }
+    let held_before: std::collections::HashSet<String> = d2.servers().into_iter().collect();
+    drain_events(&mut d2);
+
+    match away {
+        MdAway::Online => {}
+        MdAway::Background => relay.set_background(&d2, true),
+        _ => relay.suspend(&d2.device_id),
+    }
+    if away != MdAway::Online {
+        flush_frames(&relay, &mut d1).await;
+        flush_frames(&relay, &mut x).await;
+    }
+
+    // Device 1 acts.
+    let mut expect = MdExpect::none();
+    match op {
+        MdOp::Create => {
+            sid = create_server_and_wait(&mut d1, "Grid made").await;
+            expect.holds = Some(sid.clone());
+        }
+        MdOp::Join => {
+            t1_join_and_wait(&mut d1, &sid).await;
+            expect_mls_leaf(&x, &sid, &d1.device_id, 20).await;
+            expect.holds = Some(sid.clone());
+        }
+        MdOp::Leave => {
+            d1.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+            assert!(
+                wait_until(30, async || !x.raw_crdt_member_keys(&sid).contains(&m_master)).await,
+                "the member sees our identity leave",
+            );
+            expect.lacks = Some(sid.clone());
+        }
+        MdOp::Delete => {
+            d1.cmd_tx.send(NodeCommand::DeleteServer { server_id: sid.clone() }).await.unwrap();
+            assert!(wait_until(15, async || !d1.servers().contains(&sid)).await, "device 1 drops the server it deleted");
+            expect.lacks = Some(sid.clone());
+        }
+        MdOp::AddFriend => {
+            let y = y.as_mut().unwrap();
+            md_befriend(&mut d1, y).await;
+            expect.friend = Some(y.master_id.clone());
+        }
+        MdOp::AcceptFriend => {
+            let y = y.as_mut().unwrap();
+            md_befriend(y, &mut d1).await;
+            expect.friend = Some(y.master_id.clone());
+        }
+        MdOp::RemoveFriend => {
+            d1.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: x_master.clone() }).await.unwrap();
+            assert!(wait_until(15, async || !is_friend(&d1, &x_master)).await, "device 1 removes the friend");
+            expect.not_friend = Some(x_master.clone());
+        }
+        MdOp::Profile => {
+            let avatar = md_avatar(200);
+            d1.cmd_tx.send(md_profile("Grid after", Some(avatar))).await.unwrap();
+            assert!(
+                wait_until(15, async || {
+                    d1.store().load_profile(&m_master).ok().flatten().is_some_and(|p| p.display_name == "Grid after")
+                        && d1.store().load_avatar(&m_master).ok().flatten().is_some()
+                })
+                .await,
+                "device 1 holds its new profile",
+            );
+            let stored = d1.store().load_avatar(&m_master).ok().flatten().unwrap();
+            expect.profile = Some(("Grid after".to_string(), stored));
+        }
+        MdOp::Dm => {
+            d1.cmd_tx
+                .send(NodeCommand::SendMessage {
+                    peer_id: x_master.clone(),
+                    text: "grid-out".into(),
+                    message_id: "md-grid-out".into(),
+                    reply_to_mid: None,
+                    link_preview: None,
+                })
+                .await
+                .unwrap();
+            x.cmd_tx
+                .send(NodeCommand::SendMessage {
+                    peer_id: m_master.clone(),
+                    text: "grid-in".into(),
+                    message_id: "md-grid-in".into(),
+                    reply_to_mid: None,
+                    link_preview: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                wait_until(15, async || {
+                    d1.dm_thread(&x_master).iter().any(|b| b.text == "grid-in")
+                        && x.dm_thread(&m_master).iter().any(|b| b.text == "grid-out")
+                })
+                .await,
+                "device 1 and the friend exchange the DMs",
+            );
+            expect.dm = Some((x_master.clone(), vec!["grid-out".to_string(), "grid-in".to_string()]));
+        }
+        MdOp::Block => {
+            md_block(&d1, &x_master, true).await;
+            expect.blocked = Some(x_master.clone());
+        }
+    }
+    flush_frames(&relay, &mut d1).await;
+
+    let mut strays: Vec<String> = Vec::new();
+    let lacks = expect.lacks.clone();
+    let note = |ev: &NetworkEvent, strays: &mut Vec<String>| md_note_stray(ev, &held_before, lacks.as_deref(), strays);
+    // What a device still running took in while device 1 acted counts too.
+    for ev in take_events(&mut d2) {
+        note(&ev, &mut strays);
+    }
+
+    let _clock = (away.clock_ms() > 0).then(|| super::frame_auth::clock_ahead_for_test(away.clock_ms()));
+    match away {
+        MdAway::Online => {}
+        MdAway::Background => relay.set_background(&d2, false),
+        _ => {
+            relay.expire_session(&d2.device_id);
+            d2 = restart_node(&relay, d2, m, d2_tag).await;
+        }
+    }
+    let back = std::time::Instant::now();
+
+    let deadline = back + std::time::Duration::from_secs(MD_CONVERGE_SECS);
+    let mut unmet = expect.unmet(&d2);
+    while !unmet.is_empty() && std::time::Instant::now() < deadline {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            if let Some(ev) = d2.event_rx.recv().await {
+                note(&ev, &mut strays);
+            }
+        })
+        .await;
+        while let Ok(ev) = d2.event_rx.try_recv() {
+            note(&ev, &mut strays);
+        }
+        unmet = expect.unmet(&d2);
+    }
+    let took = back.elapsed().as_secs_f64();
+    // The frames already on their way land before the stray check.
+    seen_before_flush(&relay, &mut d2, |ev| {
+        note(ev, &mut strays);
+        false
+    })
+    .await;
+    let rows = d2.pending_joins();
+    println!("md-grid {op:?} x {away:?}: {} in {took:.1} s, strays {strays:?}, rows {rows:?}", if unmet.is_empty() { "PASS" } else { "FAIL" });
+    assert!(unmet.is_empty(), "{op:?} while device 2 was {away:?}: after {took:.1} s device 2 {unmet:?}");
+    assert!(strays.is_empty(), "{op:?} while device 2 was {away:?}: stray {strays:?}");
+    assert!(rows.is_empty(), "{op:?} while device 2 was {away:?}: join rows {rows:?}");
+    drop((d1, x, y));
+    took
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_create_online() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Create, MdAway::Online).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_create_background() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Create, MdAway::Background).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_create_closed1m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Create, MdAway::Closed1m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_create_closed10m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Create, MdAway::Closed10m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_create_hours() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Create, MdAway::Hours).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_join_online() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Join, MdAway::Online).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_join_background() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Join, MdAway::Background).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_join_closed1m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Join, MdAway::Closed1m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_join_closed10m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Join, MdAway::Closed10m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_join_hours() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Join, MdAway::Hours).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_leave_online() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Leave, MdAway::Online).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_leave_background() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Leave, MdAway::Background).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_leave_closed1m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Leave, MdAway::Closed1m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_leave_closed10m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Leave, MdAway::Closed10m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_leave_hours() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Leave, MdAway::Hours).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_delete_online() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Delete, MdAway::Online).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_delete_background() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Delete, MdAway::Background).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_delete_closed1m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Delete, MdAway::Closed1m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_delete_closed10m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Delete, MdAway::Closed10m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_delete_hours() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Delete, MdAway::Hours).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_add_friend_online() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::AddFriend, MdAway::Online).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_add_friend_background() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::AddFriend, MdAway::Background).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_add_friend_closed1m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::AddFriend, MdAway::Closed1m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_add_friend_closed10m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::AddFriend, MdAway::Closed10m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_add_friend_hours() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::AddFriend, MdAway::Hours).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_accept_friend_online() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::AcceptFriend, MdAway::Online).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_accept_friend_background() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::AcceptFriend, MdAway::Background).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_accept_friend_closed1m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::AcceptFriend, MdAway::Closed1m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_accept_friend_closed10m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::AcceptFriend, MdAway::Closed10m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_accept_friend_hours() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::AcceptFriend, MdAway::Hours).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_remove_friend_online() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::RemoveFriend, MdAway::Online).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_remove_friend_background() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::RemoveFriend, MdAway::Background).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_remove_friend_closed1m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::RemoveFriend, MdAway::Closed1m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_remove_friend_closed10m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::RemoveFriend, MdAway::Closed10m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_remove_friend_hours() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::RemoveFriend, MdAway::Hours).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_profile_online() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Profile, MdAway::Online).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_profile_background() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Profile, MdAway::Background).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_profile_closed1m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Profile, MdAway::Closed1m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_profile_closed10m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Profile, MdAway::Closed10m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_profile_hours() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Profile, MdAway::Hours).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_dm_online() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Dm, MdAway::Online).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_dm_background() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Dm, MdAway::Background).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_dm_closed1m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Dm, MdAway::Closed1m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_dm_closed10m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Dm, MdAway::Closed10m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_dm_hours() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Dm, MdAway::Hours).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_block_online() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Block, MdAway::Online).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_block_background() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Block, MdAway::Background).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_block_closed1m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Block, MdAway::Closed1m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_block_closed10m() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Block, MdAway::Closed10m).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn md_grid_block_hours() {
+    md_grid_cell([230, 231, 232, 233, 234, 235, 236], MdOp::Block, MdAway::Hours).await;
+}
+
+/// Device 1 sits in its session's grace (a phone put away) while device 2 restarts with
+/// a list that lost a server (a repair, an older backup); device 1 then resumes within
+/// its grace. Neither sees the other arrive, since device 1 still lists device 2 and
+/// device 2 came up while device 1 was out of the room: device 2 must still get the
+/// server back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_a_sibling_resuming_in_grace_reaches_a_device_that_cycled_meanwhile() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, c) = sibling_pair(&relay, 240, 241, 242).await;
+
+    let server_id = create_server_and_wait(&mut b, "Cycled").await;
+    assert!(wait_until(20, async || c.servers().contains(&server_id)).await, "precondition: the sibling holds the server");
+    expect_mls_leaf(&b, &server_id, &c.device_id, 20).await;
+
+    relay.suspend(&b.device_id);
+    let sid = server_id.clone();
+    let mut c = restart_node_with(&relay, c, 240, 242, |db_path, pass| {
+        crate::storage::MessageStore::open(db_path, pass)
+            .expect("open the sibling's store")
+            .delete_server_state(&sid)
+            .expect("drop the server from the sibling's list");
+    })
+    .await;
+    let inbox = format!("inbox:{}", b.master_id);
+    assert!(
+        wait_until(10, async || relay.room_devices(&inbox).contains(&c.device_id)).await,
+        "precondition: the cycled device is back in its inbox",
+    );
+    assert!(!c.servers().contains(&server_id), "precondition: the cycled device lost the server");
+
+    relay.resume(&b.device_id);
+    let mut quiet = None;
+    let back = wait_event(&mut c, std::time::Duration::from_secs(20), |ev| match ev {
+        NetworkEvent::ServerJoined { server_id: sid, quiet: q, .. } if *sid == server_id => {
+            quiet = Some(*q);
+            true
+        }
+        _ => false,
+    })
+    .await;
+    assert!(back, "the cycled device gets the server back once its sibling resumes, got {:?}", c.servers());
+    assert_eq!(quiet, Some(true), "a server shared back in answer to our ask comes back without a toast");
+}
+
+/// A sibling's state-sync ask is answered with our profile too, so a device that asks
+/// on its return gets an edit it missed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_a_state_sync_request_is_answered_with_the_profile() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (b, c) = sibling_pair(&relay, 243, 244, 245).await;
+    b.cmd_tx.send(md_profile("Phone name", None)).await.unwrap();
+    let profiles_to_c = async |b: &TestNode| {
+        b.carried_to(&c.device_id).await.iter().filter(|m| matches!(m, super::types::HavenMessage::ProfileUpdate { .. })).count()
+    };
+    assert!(wait_until(10, async || profiles_to_c(&b).await > 0).await, "precondition: the live update reaches the sibling");
+    // The live update goes out more than once; count only once it has settled.
+    let mut before = profiles_to_c(&b).await;
+    while wait_until(3, async || profiles_to_c(&b).await > before).await {
+        before = profiles_to_c(&b).await;
+    }
+    carry_as(&c, &b, super::types::HavenMessage::SiblingStateSyncRequest).await;
+    assert!(
+        wait_until(10, async || profiles_to_c(&b).await > before).await,
+        "a state-sync ask must be answered with our profile",
+    );
+}
+
+/// A stored profile never yields to an older copy, however close in time: a device back
+/// from away re-announces what it last held, and that must not undo an edit.
+#[test]
+fn md_an_older_profile_never_replaces_a_newer_one() {
+    let dir = crate::test_tmp::tempdir().expect("tmp");
+    let db = dir.path().join("md-profile.db").to_string_lossy().to_string();
+    let store = crate::storage::MessageStore::open(&db, "md-profile").expect("store");
+    let save = |name: &str, at: i64| {
+        store.save_profile("peer", name, "", "", at, None, None, "", None, None, None, None, None, None, None).unwrap()
+    };
+    assert!(save("Newer", 1_000_000), "control: the first copy lands");
+    assert!(!save("Older", 1_000_000 - 60_000), "a copy a minute older was written");
+    assert_eq!(store.load_profile("peer").unwrap().unwrap().display_name, "Newer");
+    assert!(save("Same stamp", 1_000_000), "control: the same stamp again lands (a pulled full copy)");
+}
+
+/// An edit on a device whose clock runs behind the stamp a sibling put on the profile
+/// still lands, and outranks that stamp.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_an_own_edit_outranks_a_stamp_from_a_clock_ahead() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let master = NativeKeypair::from_secret_bytes(&seed_bytes(246));
+    let master_id = master.peer_id();
+    // Ahead by what a sibling's clock can be while its frames still pass (a stamp
+    // further ahead is a planted one, replaced rather than outranked).
+    let ahead = super::frame_auth::now_ms() + 3 * 60_000;
+    let node = spawn_node_staged(&relay, master, 247, &[], |store| {
+        store
+            .save_profile(&master_id, "From a clock ahead", "", "", ahead, None, None, "", None, None, None, None, None, None, None)
+            .expect("seed the profile");
+    })
+    .await;
+    node.cmd_tx.send(md_profile("Edited here", None)).await.unwrap();
+    assert!(
+        wait_until(10, async || {
+            node.store().load_profile(&master_id).ok().flatten().is_some_and(|p| p.display_name == "Edited here" && p.updated_at > ahead)
+        })
+        .await,
+        "the edit must land over a stamp from a clock ahead, got {:?}",
+        node.store().load_profile(&master_id).ok().flatten().map(|p| (p.display_name, p.updated_at)),
+    );
+}
+
+/// A block, and later an unblock, on one device reaches every device of the identity:
+/// the row lands, the DM room is left and rejoined.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_block_reaches_every_own_device() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, d2, x) = siblings_and_friend(&relay, [250, 251, 252, 253, 254], &[]).await;
+    let x_master = x.master_id.clone();
+    let room = super::types::dm_room_code(&d1.master_id, &x_master);
+
+    md_block(&d1, &x_master, true).await;
+    assert!(
+        wait_until(15, async || md_blocked(&d2).contains(&x_master)).await,
+        "the other device must hold the block, got {:?}",
+        md_blocked(&d2),
+    );
+    assert!(
+        wait_until(10, async || !relay.room_devices(&room).contains(&d2.device_id)).await,
+        "the other device must leave the blocked friend's DM room",
+    );
+
+    md_block(&d1, &x_master, false).await;
+    assert!(
+        wait_until(15, async || !md_blocked(&d2).contains(&x_master)).await,
+        "the other device must lift the block too",
+    );
+    assert!(
+        wait_until(10, async || relay.room_devices(&room).contains(&d2.device_id)).await,
+        "the other device must rejoin the friend's DM room",
+    );
+    drop(x);
+}
+
+/// A device back from away learns a block and an unblock made while it was gone, and
+/// an older block a sibling still lists never undoes a newer unblock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_block_made_while_away_reaches_the_device_on_return() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let other = NativeKeypair::from_secret_bytes(&seed_bytes(9)).peer_id();
+    let (d1, d2, x) = siblings_and_friend(&relay, [255, 1, 2, 3, 4], &[]).await;
+    let x_master = x.master_id.clone();
+    // Blocked on both before the trip; device 1 lifts it while device 2 is away.
+    md_block(&d1, &other, true).await;
+    assert!(wait_until(15, async || md_blocked(&d2).contains(&other)).await, "precondition: both hold the first block");
+
+    relay.suspend(&d2.device_id);
+    relay.expire_session(&d2.device_id);
+    md_block(&d1, &x_master, true).await;
+    md_block(&d1, &other, false).await;
+    let d2 = restart_node(&relay, d2, 255, 2).await;
+    assert!(
+        wait_until(20, async || {
+            let held = md_blocked(&d2);
+            held.contains(&x_master) && !held.contains(&other)
+        })
+        .await,
+        "back from away, the device must hold the new block and drop the lifted one, got {:?}",
+        md_blocked(&d2),
+    );
+    // Its own older block of `other` must not have travelled back.
+    let mut d1 = d1;
+    flush_frames(&relay, &mut d1).await;
+    assert!(!md_blocked(&d1).contains(&other), "a returning device's older block undid our newer unblock");
+    drop(x);
+}
+
+/// What the block FFI does on `node`: the row, then the node told.
+async fn md_block(node: &TestNode, master: &str, blocked: bool) {
+    let store = node.store();
+    if blocked {
+        store.block_peer(master).expect("block");
+    } else {
+        store.unblock_peer(master).expect("unblock");
+    }
+    node.cmd_tx.send(NodeCommand::BlockChanged { master: master.to_string(), blocked }).await.unwrap();
+}
+
+fn md_blocked(node: &TestNode) -> Vec<String> {
+    node.store().load_blocked_peers().unwrap_or_default()
+}
+
+/// Blocks as one of our devices shares them.
+fn md_blocks(entries: &[(&str, bool, i64)]) -> super::types::HavenMessage {
+    super::types::HavenMessage::FriendListSync {
+        friends: Vec::new(),
+        removed: Vec::new(),
+        blocks: entries
+            .iter()
+            .map(|(peer, blocked, at)| super::types::BlockEntry { peer_id: peer.to_string(), blocked: *blocked, at: *at })
+            .collect(),
+    }
+}
+
+/// Only our own device blocks or unblocks for us; its stamps never run ahead of its
+/// frame, and a lifting older than our block leaves the block standing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_only_our_own_device_blocks_for_us() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (target, other) = (NativeKeypair::from_secret_bytes(&seed_bytes(20)).peer_id(), NativeKeypair::from_secret_bytes(&seed_bytes(21)).peer_id());
+    let (d1, mut d2, x) = siblings_and_friend(&relay, [15, 16, 17, 18, 19], &[]).await;
+    let now = super::frame_auth::now_ms();
+
+    carry_and_settle(&x, &mut d2, md_blocks(&[(&target, true, now)])).await;
+    assert!(!md_blocked(&d2).contains(&target), "a friend's list blocked someone for us");
+
+    let far = now + 24 * 3_600_000;
+    carry_and_settle(&d1, &mut d2, md_blocks(&[(&target, true, far)])).await;
+    let since = d2.store().blocked_rows().unwrap().into_iter().find(|(p, _)| *p == target).map(|(_, at)| at);
+    assert!(
+        since.is_some_and(|at| at <= super::frame_auth::now_ms() + super::frame_auth::LIVE_SKEW_MS),
+        "our own device's block must land, held to its frame: {since:?}",
+    );
+
+    let blocked_at = since.unwrap();
+    carry_and_settle(&d1, &mut d2, md_blocks(&[(&target, false, blocked_at - 60_000)])).await;
+    assert!(md_blocked(&d2).contains(&target), "a lifting older than the block ended it");
+
+    carry_and_settle(&x, &mut d2, md_blocks(&[(&target, false, super::frame_auth::now_ms() + 1)])).await;
+    assert!(md_blocked(&d2).contains(&target), "a friend's list lifted our block");
+
+    // Our own identity is never blocked, whichever of its ids a list names.
+    let now = super::frame_auth::now_ms();
+    carry_and_settle(&d1, &mut d2, md_blocks(&[(&d1.master_id, true, now), (&d1.device_id, true, now)])).await;
+    assert!(
+        !md_blocked(&d2).iter().any(|p| *p == d1.master_id || *p == d1.device_id),
+        "our own device's list blocked our own identity: {:?}",
+        md_blocked(&d2),
+    );
+    drop(other);
+}
+
+/// A device our identity removed is no device of ours: its state-sync ask gets nothing.
+/// The roster removal also unlinks it; this holds the arm alone to the mark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_removed_device_is_never_served_our_state() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, c) = sibling_pair(&relay, 5, 6, 7).await;
+    create_server_and_wait(&mut b, "Kept from the removed").await;
+    let announced = async |b: &TestNode| {
+        b.carried_to(&c.device_id).await.iter().filter(|m| matches!(m, super::types::HavenMessage::SiblingServerAnnounce { .. })).count()
+    };
+
+    // Control: while it is ours, the ask is answered.
+    let before = announced(&b).await;
+    carry_as(&c, &b, super::types::HavenMessage::SiblingStateSyncRequest).await;
+    assert!(wait_until(10, async || announced(&b).await > before).await, "control: our own device's ask is answered");
+
+    super::resolver::mark_revoked(std::slice::from_ref(&c.device_id));
+    let before = announced(&b).await;
+    carry_as(&c, &b, super::types::HavenMessage::SiblingStateSyncRequest).await;
+    assert!(
+        !wait_until(5, async || announced(&b).await > before).await,
+        "a removed device was served our servers",
+    );
+}
+
+/// A list naming a block and its lifting of the same person (blocked, unblocked,
+/// blocked again) keeps only the newest of the two, whichever order they come in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_a_block_and_its_lifting_in_one_list_keep_the_newest() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (reblocked, relifted) = (NativeKeypair::from_secret_bytes(&seed_bytes(22)).peer_id(), NativeKeypair::from_secret_bytes(&seed_bytes(23)).peer_id());
+    let (d1, mut d2, x) = siblings_and_friend(&relay, [24, 25, 26, 27, 28], &[]).await;
+    let now = super::frame_auth::now_ms();
+
+    carry_and_settle(&d1, &mut d2, md_blocks(&[(&reblocked, true, now), (&reblocked, false, now - 60_000)])).await;
+    assert!(md_blocked(&d2).contains(&reblocked), "a block newer than its lifting did not hold");
+    assert!(super::blocklist::is_blocked(&reblocked), "the node does not refuse the blocked person");
+
+    carry_and_settle(&d1, &mut d2, md_blocks(&[(&relifted, false, now), (&relifted, true, now - 60_000)])).await;
+    assert!(!md_blocked(&d2).contains(&relifted), "a lifting newer than its block did not hold");
+    assert!(!super::blocklist::is_blocked(&relifted), "the node still refuses an unblocked person");
+
+    // A block older than the lifting this device holds stays lifted.
+    let lifted_here = NativeKeypair::from_secret_bytes(&seed_bytes(29)).peer_id();
+    d2.store().unblock_peer_at(&lifted_here, now).unwrap();
+    carry_and_settle(&d1, &mut d2, md_blocks(&[(&lifted_here, true, now - 60_000)])).await;
+    assert!(!md_blocked(&d2).contains(&lifted_here), "an older block undid a newer lifting");
+    drop(x);
+}
+
+/// Our own device that holds no working leaf in a server we share still gets our
+/// profile edit: own devices always get the carried copy, whatever MLS reached.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_a_sibling_without_a_leaf_still_gets_our_profile() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, c) = sibling_pair(&relay, 30, 31, 32).await;
+    // The sibling never gets a leaf: every KeyPackage it sends is lost.
+    let (from, to) = (c.device_id.clone(), b.device_id.clone());
+    relay.hold_direct(&from, &to);
+    let pump = || {
+        relay.discard_held_kind(&from, &to, "mls_kp");
+        for kind in relay.held_kinds(&from, &to) {
+            relay.release_held_kind(&from, &to, &kind);
+        }
+    };
+    let server_id = create_server_and_wait(&mut b, "No leaf").await;
+    assert!(
+        wait_until(30, async || {
+            pump();
+            c.servers().contains(&server_id)
+        })
+        .await,
+        "precondition: the sibling holds the server",
+    );
+    assert!(!b.mls_members(&server_id).await.contains(&c.device_id), "precondition: the sibling holds no leaf");
+
+    b.cmd_tx.send(md_profile("Heard without a leaf", None)).await.unwrap();
+    let master = b.master_id.clone();
+    assert!(
+        wait_until(15, async || {
+            pump();
+            c.store().load_profile(&master).ok().flatten().is_some_and(|p| p.display_name == "Heard without a leaf")
+        })
+        .await,
+        "our own leafless device never got our profile edit",
+    );
+}
+
+/// A server our other device makes reaches us with its "Joined" toast; the same
+/// server shared back to us after we lost it (a repair, a relink, a lost database)
+/// comes back quietly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_a_server_shared_back_after_a_loss_joins_quietly() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, mut c) = sibling_pair(&relay, 243, 244, 245).await;
+    drain_events(&mut c);
+
+    let server_id = create_server_and_wait(&mut b, "Shared back").await;
+    let mut quiet = None;
+    let joined = wait_event(&mut c, std::time::Duration::from_secs(20), |ev| match ev {
+        NetworkEvent::ServerJoined { server_id: sid, quiet: q, .. } if *sid == server_id => {
+            quiet = Some(*q);
+            true
+        }
+        _ => false,
+    })
+    .await;
+    assert!(joined, "precondition: the sibling joins the new server");
+    assert_eq!(quiet, Some(false), "a server our other device just made is announced with its toast");
+    expect_mls_leaf(&b, &server_id, &c.device_id, 20).await;
+
+    let sid = server_id.clone();
+    let mut c = restart_node_with(&relay, c, 243, 245, |db_path, pass| {
+        crate::storage::MessageStore::open(db_path, pass)
+            .expect("open the sibling's store")
+            .delete_server_state(&sid)
+            .expect("drop the server from the sibling's list");
+    })
+    .await;
+    let mut quiet = None;
+    let back = wait_event(&mut c, std::time::Duration::from_secs(25), |ev| match ev {
+        NetworkEvent::ServerJoined { server_id: sid, quiet: q, .. } if *sid == server_id => {
+            quiet = Some(*q);
+            true
+        }
+        _ => false,
+    })
+    .await;
+    assert!(back, "the device that lost the server gets it back, got {:?}", c.servers());
+    assert_eq!(quiet, Some(true), "a server shared back after a loss comes back without a toast");
+}
+
+/// Their removal and our new request crossed: the removal was sealed inside the clock
+/// window of our request, so on their side our request counts as newer and they may
+/// accept it. Ours must still hold it, or their accept finds nothing to land on. A
+/// removal sealed clearly after our request still ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_removal_crossing_our_new_request_keeps_the_request() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = friend_pair(&relay, 246, 247).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let a_key = NativeKeypair::from_secret_bytes(&seed_bytes(246));
+    let pending = |b: &TestNode| friend_row(b, &a.master_id).is_some_and(|(status, _)| status == "pending");
+    let now = super::frame_auth::now_ms();
+    {
+        let store = b.store();
+        store.remove_friend(&a.master_id).unwrap();
+        store.save_friend(&a.master_id, "pending", "outgoing", now).unwrap();
+    }
+
+    // Sealed just before our request, and just after it by a clock running ahead.
+    for (seal, nonce) in [(now - 2_000, [11; 16]), (now + 60_000, [12; 16])] {
+        let crossed = super::frame_auth::seal_at(&a_key, &room, &b.device_id, seal, nonce, &removal());
+        relay.inject_raw_direct(&room, &a.device_id, &b.device_id, crossed);
+        flush_frames(&relay, &mut b).await;
+        assert!(pending(&b), "a removal that crossed our request (sealed at {seal}, request at {now}) must not drop it");
+    }
+
+    // Our request went out well over the clock window ago: a removal sealed now came after it.
+    let long_ago = now - super::frame_auth::LIVE_SKEW_MS - 60_000;
+    {
+        let store = b.store();
+        store.remove_friend(&a.master_id).unwrap();
+        store.save_friend(&a.master_id, "pending", "outgoing", long_ago).unwrap();
+    }
+    relay.inject_direct(&room, &a.device_id, &b.device_id, removal());
+    assert!(
+        wait_until(10, async || !pending(&b)).await,
+        "a removal sealed clearly after our request ends it"
+    );
+
+    // Only our own pending request gets the window: a friendship that began a moment
+    // ago still ends on a removal sealed now.
+    {
+        let store = b.store();
+        store.remove_friend(&a.master_id).unwrap();
+        store.save_friend(&a.master_id, "accepted", "outgoing", super::frame_auth::now_ms()).unwrap();
+    }
+    relay.inject_direct(&room, &a.device_id, &b.device_id, removal());
+    assert!(
+        wait_until(10, async || !is_friend(&b, &a.master_id)).await,
+        "a removal sealed now ends a friendship that began a moment ago"
+    );
+}
+
+/// What a device that lost its database (a repair, a reinstall) holds of a friend: no
+/// roster, no row, no thread. `forget_for_test` because the harness resolver is shared.
+async fn md_lose_the_friend(relay: &MockRelay, node: TestNode, tags: (u8, u8), friend: &TestNode) -> TestNode {
+    let (master, device) = (friend.master_id.clone(), friend.device_id.clone());
+    let node = restart_node_with(relay, node, tags.0, tags.1, |db_path, pass| {
+        let conn = rusqlite::Connection::open(db_path).expect("open the store");
+        conn.execute_batch(&format!("PRAGMA key = \"x'{pass}'\"; PRAGMA busy_timeout = 8000;")).expect("key the store");
+        for table in ["device_lists", "device_links", "roster_pending_seen"] {
+            conn.execute(&format!("DELETE FROM {table} WHERE master_peer_id = ?1"), [&master]).expect("drop the roster");
+        }
+        conn.execute("DELETE FROM friends WHERE peer_id = ?1", [&master]).expect("drop the friend");
+        conn.execute("DELETE FROM messages WHERE peer_id = ?1", [&master]).expect("drop the thread");
+    })
+    .await;
+    super::resolver::forget_for_test(&device);
+    node
+}
+
+/// A device that lost its database gets its friends back from a sibling and must place
+/// each friend's devices before their first frame: else it refuses every row the friend
+/// signs, synced or live, as from a device of nobody's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_repaired_sibling_accepts_every_signed_dm_its_sibling_backfills() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, d2, x) = siblings_and_friend(&relay, [40, 41, 42, 43, 44], &[]).await;
+    let (m_master, x_master) = (d1.master_id.clone(), x.master_id.clone());
+    let dm = async |from: &TestNode, to: &str, text: &str, mid: &str| {
+        from.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: to.to_string(),
+                text: text.into(),
+                message_id: mid.into(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    };
+    dm(&d1, &x_master, "before-out", "md-repair-out").await;
+    dm(&x, &m_master, "before-in", "md-repair-in").await;
+    let holds = |n: &TestNode, texts: &[&str]| {
+        let thread: Vec<String> = n.dm_thread(&x_master).into_iter().map(|b| b.text).collect();
+        texts.iter().all(|t| thread.iter().any(|h| h == t))
+    };
+    assert!(wait_until(20, async || holds(&d2, &["before-out", "before-in"])).await, "precondition: device 2 holds the thread");
+    assert!(
+        super::roster_book::load(&d1.store(), &x_master).is_some(),
+        "precondition: device 1 holds the friend's roster",
+    );
+
+    // The friend is away while device 2 comes back empty, so nothing it sends can
+    // teach device 2 its devices: only what device 1 shares can.
+    relay.set_online(&x.device_id, false);
+    let mut d2 = md_lose_the_friend(&relay, d2, (40, 42), &x).await;
+    assert!(d2.friend_row(&x_master).is_none() && !holds(&d2, &["before-in"]), "precondition: device 2 lost the friend");
+    assert!(
+        wait_event(&mut d2, std::time::Duration::from_secs(30), |ev| matches!(ev, NetworkEvent::FriendsBackfilled { .. })).await,
+        "device 2 gets its friends back from device 1",
+    );
+    assert!(
+        d2.store().device_links_for(&x_master).unwrap_or_default().contains(&x.device_id),
+        "the friend came back without its devices: every row it signs would be refused",
+    );
+
+    relay.set_online(&x.device_id, true);
+    dm(&x, &m_master, "after-repair", "md-repair-after").await;
+    assert!(
+        wait_until(30, async || holds(&d2, &["before-out", "before-in", "after-repair"])).await,
+        "device 2 must take every row the friend signs, got {:?}",
+        d2.dm_thread(&x_master).into_iter().map(|b| b.text).collect::<Vec<_>>(),
+    );
+}
+
+/// What a device back from a lost database re-learns from a sibling still verifies: a
+/// friend's row whose text was changed is refused, a roster for anyone but the friend
+/// the entry names is not taken, and a stranger's friend list is not heard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_repaired_sibling_still_refuses_a_tampered_row_or_a_misnamed_roster() {
+    use base64::Engine as _;
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, d2, x) = siblings_and_friend(&relay, [45, 46, 47, 48, 49], &[]).await;
+    let (m_master, x_master) = (d1.master_id.clone(), x.master_id.clone());
+    let stranger = spawn_node_with_friends(&relay, 50, 51, &[]).await;
+    let y = stranger.master_id.clone();
+    let stranger_roster = crate::identity::roster::Roster::legacy_for_test(&stranger.master_kp, &[&tag_kp(51)]);
+
+    relay.set_online(&x.device_id, false);
+    let mut d2 = md_lose_the_friend(&relay, d2, (45, 47), &x).await;
+    assert!(
+        wait_event(&mut d2, std::time::Duration::from_secs(30), |ev| matches!(ev, NetworkEvent::FriendsBackfilled { .. })).await,
+        "device 2 gets its friends back from device 1",
+    );
+
+    let entry = |peer: &str, roster: crate::identity::roster::Roster| super::types::FriendListEntry {
+        peer_id: peer.to_string(),
+        status: "accepted".into(),
+        direction: String::new(),
+        requested_at: super::frame_auth::now_ms() - 1_000,
+        roster: Some(roster),
+    };
+    let list = |entries: Vec<super::types::FriendListEntry>| super::types::HavenMessage::FriendListSync {
+        friends: entries,
+        removed: Vec::new(),
+        blocks: Vec::new(),
+    };
+    // An entry naming the friend that carries someone else's roster places nobody.
+    carry_and_settle(&d1, &mut d2, list(vec![entry(&x_master, stranger_roster.clone())])).await;
+    // A stranger's own list, with its own roster, is not heard at all. Absence proof:
+    // a stranger's status settles nothing we can wait on.
+    carry_as(&stranger, &d2, list(vec![entry(&y, stranger_roster.clone())])).await;
+    sleep_ms(1000).await;
+    assert!(super::roster_book::load(&d2.store(), &y).is_none(), "a roster for someone the entry does not name was taken");
+    assert!(d2.friend_row(&y).is_none(), "a stranger's friend list was heard");
+
+    // A friend's row with its text changed is refused; the genuine one beside it lands.
+    relay.set_online(&x.device_id, true);
+    expect_dm_pair_ready(&relay, &d2, &x, 20).await;
+    assert!(d2.store().device_links_for(&x_master).unwrap_or_default().contains(&x.device_id), "precondition: the friend is placed");
+    let x_pk = base64::engine::general_purpose::STANDARD.encode(x.master_kp.public_key_protobuf());
+    let item = |mid: &str, signed: &str, shipped: &str, ts: i64| {
+        let extras = super::crypto_handler::SignedExtras { mid: Some(mid), order_us: Some(ts * 1000), ..Default::default() };
+        let (sig, pk) = super::crypto_handler::sign_message_versioned(
+            &x.master_kp, &x_pk, "dm", &m_master, &x_master, ts, &extras, signed,
+        );
+        serde_json::from_value::<super::types::DmSyncItem>(serde_json::json!({
+            "t": shipped, "ts": ts, "mine": true, "sig": sig, "pk": pk, "mid": mid, "order_us": ts * 1000,
+        }))
+        .unwrap()
+    };
+    let ts = super::frame_auth::now_ms() - 5_000;
+    let batch = vec![
+        item("0123456789abcdef0123456789abcd01", "pay me", "pay mallory", ts),
+        item("0123456789abcdef0123456789abcd02", "genuine", "genuine", ts + 1),
+    ];
+    olm_envelope_as(&x, &d2, super::types::MessageEnvelope::DmSyncBatch { messages: batch, has_more: None }).await;
+    assert!(
+        wait_until(15, async || d2.dm_thread(&x_master).iter().any(|b| b.text == "genuine")).await,
+        "control: the genuine row lands",
+    );
+    assert!(
+        !d2.dm_thread(&x_master).iter().any(|b| b.text.contains("mallory")),
+        "a row whose text was changed was stored",
+    );
+}
+
+/// A sibling that asks for a new key while we hold a session lost its own (a lost
+/// database, a reinstall): what we sent it on its arrival was unreadable, so it gets
+/// our state again. A friend that asks the same gets a key and nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_a_sibling_that_lost_its_session_gets_our_state_again() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, d2, x) = siblings_and_friend(&relay, [65, 66, 67, 68, 69], &[]).await;
+    let server_id = create_server_and_wait(&mut d1, "Told again").await;
+    assert!(wait_until(20, async || d2.servers().contains(&server_id)).await, "precondition: device 2 holds the server");
+    let announces = async |to: &str| {
+        d1.carried_to(to).await.iter().filter(|m| matches!(m, super::types::HavenMessage::SiblingServerAnnounce { .. })).count()
+    };
+    let ask = async |from: &TestNode, tag: u8| {
+        let req = super::crypto_handler::signed_key_request(&tag_kp(tag), &from.device_id, &d1.device_id);
+        send_as(&relay, &format!("inbox:{}", d1.master_id), from, &d1, req).await;
+    };
+    // Settle: the shares of the sibling's arrival are counted before the ask.
+    let mut before = announces(&d2.device_id).await;
+    while wait_until(3, async || announces(&d2.device_id).await > before).await {
+        before = announces(&d2.device_id).await;
+    }
+    ask(&d2, 67).await;
+    assert!(
+        wait_until(10, async || announces(&d2.device_id).await > before).await,
+        "a sibling that lost its session never got our servers again",
+    );
+
+    let friend_before = announces(&x.device_id).await;
+    ask(&x, 69).await;
+    // Absence proof: the re-share would go out in the same arm as the key.
+    sleep_ms(1000).await;
+    assert_eq!(announces(&x.device_id).await, friend_before, "a friend's key request was answered with our servers");
+}
+
+/// A server we leave drops off a sibling the relay hides (a phone put away) at once:
+/// presence leaves it out, so the op goes to every device our roster counts through our
+/// own inbox, as a server we join or make does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_a_hidden_sibling_drops_a_server_we_leave_at_once() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, d2, mut x) = siblings_and_friend(&relay, [75, 76, 77, 78, 79], &[]).await;
+    let sid = create_server_and_wait(&mut x, "Left while hidden").await;
+    t1_join_and_wait(&mut d1, &sid).await;
+    assert!(wait_until(25, async || d2.servers().contains(&sid)).await, "precondition: device 2 holds the server");
+    relay.set_background(&d2, true);
+    assert!(
+        wait_until(10, async || !d1.sees_peer(&d2.device_id).await).await,
+        "precondition: device 1 no longer sees device 2",
+    );
+    d1.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(wait_until(10, async || !d1.servers().contains(&sid)).await, "precondition: device 1 left");
+    // The direct carry lands within a second; the owner's later traffic can reach a
+    // hidden device too, but only seconds after, so the window stays short.
+    assert!(
+        wait_until(3, async || !d2.servers().contains(&sid)).await,
+        "a hidden sibling still lists the server we left",
+    );
+    drop(x);
+}
+
+/// A friend's own profile stamped past the frame that carries it is refused live: stored,
+/// it would outrank every edit that friend makes for as long as the stamp is ahead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_a_profile_stamped_past_its_frame_is_refused_live() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(81)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(83)).peer_id();
+    let a = spawn_node_with_friends(&relay, 81, 82, &[&b_master]).await;
+    let b = spawn_node_with_friends(&relay, 83, 83, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+    let status_at = || b.store().load_profile(&a_master).ok().flatten().map(|p| p.status).unwrap_or_default();
+
+    // Past the frame's ceiling but short of where a stored stamp counts as planted,
+    // so only the ingest ceiling keeps it out.
+    let now = super::frame_auth::now_ms();
+    carry_as(&a, &b, crafted_announce(&a, now + 7 * 60_000, "minutes ahead", None, None)).await;
+    // Carried in order: once the honest one lands, the one ahead was judged first.
+    carry_as(&a, &b, crafted_announce(&a, now, "honest", None, None)).await;
+    assert!(
+        wait_until(10, async || status_at() == "honest").await,
+        "a profile stamped past its frame was stored and outranks the honest one: {:?}",
+        status_at(),
+    );
+}
+
+/// An own edit made over a planted stamp goes out stamped by our clock, so every
+/// other device, held to its frame, takes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_an_own_edit_over_a_planted_stamp_is_stamped_honestly() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let master = NativeKeypair::from_secret_bytes(&seed_bytes(84));
+    let master_id = master.peer_id();
+    let node = spawn_node_staged(&relay, master, 85, &[], |store| {
+        store
+            .save_profile(&master_id, "Planted", "", "", i64::MAX - 7, None, None, "", None, None, None, None, None, None, None)
+            .expect("seed the profile");
+    })
+    .await;
+    node.cmd_tx.send(md_profile("Edited here", None)).await.unwrap();
+    let stored = || node.store().load_profile(&master_id).ok().flatten().map(|p| (p.display_name, p.updated_at));
+    assert!(
+        wait_until(10, async || stored().is_some_and(|(name, _)| name == "Edited here")).await,
+        "the edit never landed: {:?}",
+        stored(),
+    );
+    let ceiling = super::frame_auth::stamp_ceiling(super::frame_auth::now_ms());
+    assert!(
+        stored().is_some_and(|(_, at)| at <= ceiling),
+        "the edit went out stamped past any frame, so every other device refuses it: {:?}",
+        stored(),
+    );
+}
+
+/// A friend removed minutes after the friendship was made stays removed when a sibling's
+/// older list, or one naming the removal too, still carries the friendship (gate R6:
+/// the two devices re-added and removed it from each other's lists for good).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_a_sibling_list_never_brings_back_a_friend_we_just_removed() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, d2, x) = siblings_and_friend(&relay, [86, 87, 88, 89, 90], &[]).await;
+    // The friendship as the friend stamped it a minute ahead of our clock.
+    let ahead = super::frame_auth::now_ms() + 60_000;
+    let store = d1.store();
+    store.remove_friend(&x.master_id).expect("clear the seeded row");
+    store.save_friend(&x.master_id, "accepted", "", ahead).expect("stamp the friendship");
+    assert_eq!(d1.friend_row(&x.master_id).map(|r| r.2), Some(ahead), "precondition: the friendship is stamped ahead");
+    drop(store);
+    d1.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: x.master_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || d1.friend_row(&x.master_id).is_none()).await, "precondition: device 1 removed the friend");
+    let entry = |since: i64| super::types::FriendListEntry {
+        peer_id: x.master_id.clone(), status: "accepted".into(), direction: String::new(), requested_at: since, roster: None,
+    };
+    let list = |since: i64, removed: Vec<super::types::FriendRemoval>| {
+        super::types::HavenMessage::FriendListSync { friends: vec![entry(since)], removed, blocks: Vec::new() }
+    };
+    carry_and_settle(&d2, &mut d1, list(ahead, Vec::new())).await;
+    assert_eq!(d1.friend_row(&x.master_id), None, "our removal did not outrank a friendship stamped by a clock ahead");
+    let fresh = super::frame_auth::now_ms() - 2_000;
+    carry_and_settle(&d2, &mut d1, list(fresh, Vec::new())).await;
+    assert_eq!(d1.friend_row(&x.master_id), None, "a sibling's list from before our removal brought back a friendship made seconds before it");
+    let removal = vec![super::types::FriendRemoval { peer_id: x.master_id.clone(), at: fresh + 1 }];
+    carry_and_settle(&d2, &mut d1, list(fresh, removal)).await;
+    assert_eq!(d1.friend_row(&x.master_id), None, "a list naming the friendship and its removal brought the friend back");
+    drop((d2, x));
+}
+// md-sibling end
+
+// md-review
+
+/// A device that lost its database gets back a friend our identity blocked, block and
+/// friendship in one list: it must not sit in the blocked person's DM room or announce
+/// itself to them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_review_a_backfilled_blocked_friend_keeps_us_out_of_their_room() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, d2, x) = siblings_and_friend(&relay, [226, 227, 228, 229, 230], &[]).await;
+    let x_master = x.master_id.clone();
+    let room = super::types::dm_room_code(&d1.master_id, &x_master);
+
+    md_block(&d1, &x_master, true).await;
+    assert!(wait_until(15, async || md_blocked(&d2).contains(&x_master)).await, "precondition: device 2 holds the block");
+    assert!(
+        wait_until(10, async || !relay.room_devices(&room).contains(&d2.device_id)).await,
+        "precondition: device 2 left the blocked friend's room",
+    );
+
+    let mut d2 = md_lose_the_friend(&relay, d2, (226, 228), &x).await;
+    assert!(
+        wait_event(&mut d2, std::time::Duration::from_secs(30), |ev| matches!(ev, NetworkEvent::FriendsBackfilled { .. })).await,
+        "device 2 gets its friends back from device 1",
+    );
+    assert!(md_blocked(&d2).contains(&x_master), "precondition: the block is still held");
+    let joined = wait_until(6, async || relay.room_devices(&room).contains(&d2.device_id)).await;
+    assert!(!joined, "a backfilled friend we block put device 2 back in their DM room: {:?}", relay.room_devices(&room));
+    drop((d1, x));
+}
+
+/// Our own profile row stamped at the end of time (a master-signed copy anyone holding
+/// the master key can mint, relayed by anyone): an edit made here must still land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn md_review_an_own_edit_outranks_a_profile_stamped_at_the_end_of_time() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let master = NativeKeypair::from_secret_bytes(&seed_bytes(236));
+    let master_id = master.peer_id();
+    let node = spawn_node_staged(&relay, master, 237, &[], |store| {
+        store
+            .save_profile(&master_id, "Planted", "", "", i64::MAX, None, None, "", None, None, None, None, None, None, None)
+            .expect("seed the profile");
+    })
+    .await;
+    node.cmd_tx.send(md_profile("Edited here", None)).await.unwrap();
+    assert!(
+        wait_until(10, async || {
+            node.store().load_profile(&master_id).ok().flatten().is_some_and(|p| p.display_name == "Edited here")
+        })
+        .await,
+        "an edit never lands over a stamp at i64::MAX, got {:?}",
+        node.store().load_profile(&master_id).ok().flatten().map(|p| (p.display_name, p.updated_at)),
+    );
+}
+
+// md-mls
+
+/// The F1 scene of wave md: the owner's new device `o2` hands its KeyPackage to the
+/// friend `c` (in the field the owner's device looked away), `c` commits the add, and
+/// that commit reaches the owner's first device `o1` while `o1`'s roster does not place
+/// `o2` yet. One resolver serves every node here, so `o2`'s link is forgotten for the
+/// moment `o1` judges; `o1` stays deaf to broadcasts and to `c`'s and `o2`'s directs.
+struct MdMlsScene {
+    o1: TestNode,
+    c: TestNode,
+    o2: TestNode,
+    server_id: String,
+    epoch_before: u64,
+}
+
+async fn md_mls_commit_before_the_roster(relay: &MockRelay, tags: [u8; 5]) -> MdMlsScene {
+    md_mls_scene_and_commit(relay, tags).await.0
+}
+
+/// [`md_mls_commit_before_the_roster`], and the friend's commit as it went out.
+async fn md_mls_scene_and_commit(relay: &MockRelay, tags: [u8; 5]) -> (MdMlsScene, super::types::HavenMessage) {
+    use super::types::HavenMessage;
+    let [o_m, o_d1, o_d2, c_m, c_d] = tags;
+    let (o_master, c_master) = (tag_kp(o_m).peer_id(), tag_kp(c_m).peer_id());
+    let (o_dev1, o_dev2, c_dev) = (tag_kp(o_d1).peer_id(), tag_kp(o_d2).peer_id(), tag_kp(c_d).peer_id());
+    let now = super::roster_book::now_ms();
+    let o_roster = protected_roster(o_m, &[o_d1, o_d2], now - 60_000);
+
+    let mut o1 = spawn_node_seeded(relay, o_m, o_d1, &[&c_master], Some(o_roster.clone())).await;
+    let mut c = spawn_node_seeded(relay, c_m, c_d, &[&o_master], Some(protected_roster(c_m, &[c_d], now - 60_000))).await;
+    let server_id = create_server_and_wait(&mut o1, "Roster Lag").await;
+    c.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut c, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "the friend joins",
+    );
+    expect_mls_group(&[&o1, &c], &server_id, 20).await;
+
+    // The new device's KeyPackage never reaches its sibling; everything else does.
+    relay.hold_direct(&o_dev2, &o_dev1);
+    relay.set_recording(&o_dev2, true);
+    let o2 = spawn_node_seeded(relay, o_m, o_d2, &[&c_master], Some(o_roster)).await;
+    let is_kp = |f: &Vec<u8>| {
+        matches!(serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+            Ok(HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. }) if *sid == server_id)
+    };
+    let mut kp = None;
+    assert!(
+        wait_until(40, async || {
+            for kind in relay.held_kinds(&o_dev2, &o_dev1).into_iter().filter(|k| k != "mls_kp") {
+                relay.release_held_kind(&o_dev2, &o_dev1, &kind);
+            }
+            kp = relay.recorded_frames(&o_dev2).into_iter().find(is_kp);
+            kp.is_some()
+        })
+        .await,
+        "the new device asks for its leaf",
+    );
+    relay.discard_held_kind(&o_dev2, &o_dev1, "mls_kp");
+    relay.set_recording(&o_dev2, false);
+
+    // The friend gets it and commits the add; the owner's first device hears nothing.
+    let epoch_before = o1.mls_epoch(&server_id).await.expect("o1 holds the group");
+    relay.set_broadcast_deaf(&o_dev1, true);
+    relay.hold_direct(&c_dev, &o_dev1);
+    relay.set_recording(&c_dev, true);
+    relay.inject_direct(&server_id, &o_dev2, &c_dev, super::frame_auth::unchecked_body(&kp.unwrap()).to_vec());
+    let mut commit = None;
+    assert!(
+        wait_until(30, async || {
+            commit = relay.recorded_frames(&c_dev).into_iter().find_map(|f| {
+                match serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(&f)) {
+                    Ok(m @ HavenMessage::MlsCommit { channel_id: None, .. }) => Some(m),
+                    _ => None,
+                }
+            });
+            commit.is_some()
+        })
+        .await,
+        "the friend commits the new device's add",
+    );
+    assert!(
+        wait_until(30, async || {
+            let (theirs, ours) = (c.mls_epoch_state(&server_id).await, o2.mls_epoch_state(&server_id).await);
+            ours.is_some() && ours == theirs
+        })
+        .await,
+        "the new device joins from the friend's Welcome",
+    );
+    relay.set_recording(&c_dev, false);
+
+    // Any roster ingest on any node here re-links the device for all of them, so
+    // nothing moves between the three while o1 does not place it.
+    md_mls_freeze(relay, &[&o_dev1, &c_dev, &o_dev2], true);
+    super::resolver::forget(&o_dev2);
+    let commit = commit.unwrap();
+    relay.inject(&server_id, &c_dev, &o_dev1, frame(&commit));
+    assert!(
+        wait_until(10, async || md_mls_held(&o1).await.0.contains(&server_id)).await,
+        "an add of a device our roster does not place yet was refused, not held",
+    );
+    assert_eq!(o1.mls_epoch(&server_id).await, Some(epoch_before), "held, never merged unjudged");
+    (MdMlsScene { o1, c, o2, server_id, epoch_before }, commit)
+}
+
+/// Hold back, or deliver and stop holding, every frame between `devices`.
+fn md_mls_freeze(relay: &MockRelay, devices: &[&str], frozen: bool) {
+    for from in devices {
+        relay.set_broadcast_deaf(from, frozen);
+        for to in devices.iter().filter(|to| *to != from) {
+            if frozen {
+                relay.hold_direct(from, to);
+            } else {
+                relay.release_held(from, to);
+            }
+        }
+    }
+}
+
+/// Group keys with a held commit, and those with a lapsed one, on `node`.
+async fn md_mls_held(node: &TestNode) -> (Vec<String>, Vec<String>) {
+    node.debug_snapshot().await.map(|s| (s.mls_held_commits, s.mls_lapsed_commits)).unwrap_or_default()
+}
+
+/// Whether `node` has received the channel post `text`.
+async fn md_mls_hears(node: &mut TestNode, text: &str) -> bool {
+    wait_event(node, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text: t, .. } if t == text)
+    })
+    .await
+}
+
+fn md_mls_post(server_id: &str, text: &str, mid: &str) -> NodeCommand {
+    NodeCommand::SendChannelMessage {
+        server_id: server_id.to_string(),
+        channel_id: general_channel_of(server_id),
+        text: text.to_string(),
+        message_id: mid.to_string(),
+        reply_to_mid: None,
+        link_preview: None,
+    }
+}
+
+/// F1 (wave md): a co-member commits a just-linked device's add before our roster
+/// places it. The commit waits instead of being refused for good, merges once the
+/// roster places the device, and the new device's posts are read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_commit_adding_a_device_our_roster_has_not_placed_yet_is_held_not_refused() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let MdMlsScene { mut o1, c, o2, server_id, .. } = md_mls_commit_before_the_roster(&relay, [240, 241, 242, 243, 244]).await;
+
+    // The roster arrives: its ingest links the device to its master.
+    super::resolver::update_many(&o1.master_id, [o2.device_id.as_str()]);
+    md_mls_freeze(&relay, &[&o1.device_id, &c.device_id, &o2.device_id], false);
+    assert!(
+        wait_until(15, async || {
+            let (ours, theirs) = (o1.mls_epoch_state(&server_id).await, c.mls_epoch_state(&server_id).await);
+            ours.is_some() && ours == theirs
+        })
+        .await,
+        "the held add never merged once the roster placed the device",
+    );
+    expect_mls_leaf(&o1, &server_id, &o2.device_id, 5).await;
+    assert!(md_mls_held(&o1).await.0.is_empty(), "the merged commit is still held");
+
+    drain_events(&mut o1);
+    o2.cmd_tx.send(md_mls_post(&server_id, "from the linked device", "md-mls-1")).await.unwrap();
+    assert!(md_mls_hears(&mut o1, "from the linked device").await, "the owner's first device never read the new device");
+    drop((o1, c, o2));
+}
+
+/// F1's bounds: a held add whose roster never comes is dropped at the bound, never
+/// merged, and nothing is asked of the group while the device stays unplaced. Once a
+/// genuine roster places it, the spent commit cannot be caught up, so one repair of our
+/// leaf brings us to the group's epoch. (A forged roster is proven at the ingest, in
+/// `an_mls_add_waits_for_a_genuine_roster_and_a_removal_refuses_it`: here o1's own
+/// stored roster already lists the device, so any ingest would re-link it.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_held_add_whose_roster_never_comes_lapses_unmerged_and_heals_only_once_placed() {
+    use super::types::HavenMessage;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let MdMlsScene { mut o1, c, o2, server_id, epoch_before } =
+        md_mls_commit_before_the_roster(&relay, [245, 246, 247, 248, 249]).await;
+    let (o_master, o_dev1, o_dev2) = (o1.master_id.clone(), o1.device_id.clone(), o2.device_id.clone());
+    relay.set_recording(&o_dev1, true);
+
+    o1.cmd_tx.send(NodeCommand::TestAgeHeldCommits { by: std::time::Duration::from_secs(3600) }).await.unwrap();
+    assert!(
+        wait_until(10, async || {
+            let (held, lapsed) = md_mls_held(&o1).await;
+            held.is_empty() && lapsed.contains(&server_id)
+        })
+        .await,
+        "the held add outlived its bound",
+    );
+    let asked = || {
+        relay.recorded_frames(&o_dev1).iter().any(|f| {
+            matches!(serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+                Ok(HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. }) if *sid == server_id)
+        })
+    };
+    sleep_ms(4500).await; // ABSENCE: two batch ticks with the device still unplaced
+    assert_eq!(o1.mls_epoch(&server_id).await, Some(epoch_before), "a lapsed add merged");
+    assert!(!asked(), "a repair was asked while the added device is still unplaced");
+    assert!(!o1.mls_members(&server_id).await.contains(&o_dev2));
+
+    // The genuine roster comes after the bound: o1 asks whether the group moved past
+    // it, and the friend's catch-up, failing on the spent key, brings one repair.
+    super::resolver::update_many(&o_master, [o_dev2.as_str()]);
+    assert!(
+        wait_until(10, async || relay.held_kinds(&o_dev1, &c.device_id).iter().any(|k| k == "mls_epoch_probe")).await,
+        "a lapsed add that now passes never asked whether the group moved on",
+    );
+    assert!(!asked(), "a repair was asked before the group showed it had moved on");
+    md_mls_freeze(&relay, &[&o_dev1, &c.device_id, &o_dev2], false);
+    assert!(wait_until(10, async || asked()).await, "the friend's catch-up never brought a repair ask");
+    assert!(
+        wait_until(30, async || {
+            let (ours, theirs) = (o1.mls_epoch_state(&server_id).await, c.mls_epoch_state(&server_id).await);
+            ours.is_some() && ours == theirs
+        })
+        .await,
+        "the repair never brought o1 to the group's epoch",
+    );
+    expect_mls_leaf(&o1, &server_id, &o_dev2, 5).await;
+    assert!(md_mls_held(&o1).await.1.is_empty(), "the lapsed add outlived its repair");
+    drain_events(&mut o1);
+    o2.cmd_tx.send(md_mls_post(&server_id, "after the repair", "md-mls-2")).await.unwrap();
+    assert!(md_mls_hears(&mut o1, "after the repair").await, "the repaired device never read the new device");
+    drop((o1, c, o2));
+}
+
+// md-review-mls
+
+/// F1 with a restart inside the hold: the held commit lives in RAM while the key its
+/// processing spent was persisted, so after a restart the catch-up re-serves a commit
+/// that can never be processed again. Once the device is placed the restarted node must
+/// still reach the group's epoch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn md_review_mls_a_restart_inside_a_held_add_still_heals_once_placed() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let MdMlsScene { o1, c, o2, server_id, epoch_before } =
+        md_mls_commit_before_the_roster(&relay, [250, 251, 252, 253, 254]).await;
+
+    // The app is closed and reopened before the roster arrives.
+    let mut o1 = restart_node(&relay, o1, 250, 251).await;
+    assert_eq!(o1.mls_epoch(&server_id).await, Some(epoch_before), "the restart lost the group");
+    super::resolver::update_many(&o1.master_id, [o2.device_id.as_str()]);
+    md_mls_freeze(&relay, &[&o1.device_id, &c.device_id, &o2.device_id], false);
+    assert!(
+        wait_until(60, async || {
+            let (ours, theirs) = (o1.mls_epoch_state(&server_id).await, c.mls_epoch_state(&server_id).await);
+            ours.is_some() && ours == theirs
+        })
+        .await,
+        "a restart inside the hold left o1 behind for good: {:?} vs {:?}",
+        o1.mls_epoch_state(&server_id).await,
+        c.mls_epoch_state(&server_id).await,
+    );
+    drain_events(&mut o1);
+    o2.cmd_tx.send(md_mls_post(&server_id, "after the restart", "md-review-mls-1")).await.unwrap();
+    assert!(md_mls_hears(&mut o1, "after the restart").await, "the restarted device never read the new device");
+    drop((o1, c, o2));
+}
+
+// md-mls-2
+
+/// KeyPackages for the server group `device` has sent while recorded.
+fn md_mls2_key_packages(relay: &MockRelay, device: &str, server_id: &str) -> usize {
+    use super::types::HavenMessage;
+    relay
+        .recorded_frames(device)
+        .iter()
+        .filter(|f| {
+            matches!(serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+                Ok(HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. }) if sid == server_id)
+        })
+        .count()
+}
+
+/// Whether a direct frame of `kind` from `from` to `to` comes to be held within `secs`.
+async fn md_mls2_held_kind(relay: &MockRelay, from: &str, to: &str, kind: &str, secs: u64) -> bool {
+    wait_until(secs, async || relay.held_kinds(from, to).iter().any(|k| k == kind)).await
+}
+
+/// Group keys with a held Welcome on `node`.
+async fn md_mls2_held_welcomes(node: &TestNode) -> Vec<String> {
+    node.debug_snapshot().await.map(|s| s.mls_held_welcomes).unwrap_or_default()
+}
+
+/// Whether `a` and `b` sit at the same epoch of the group, with the same digest.
+async fn md_mls2_level(a: &TestNode, b: &TestNode, group: &str, secs: u64) -> bool {
+    wait_until(secs, async || {
+        let (ours, theirs) = (a.mls_epoch_state(group).await, b.mls_epoch_state(group).await);
+        ours.is_some() && ours == theirs
+    })
+    .await
+}
+
+/// Review finding 1 with nothing kept in RAM: the held commit outlives its bound and
+/// then the lapsed bound. A catch-up re-serving it fails on the spent key, and that
+/// alone asks one repair, but only from the member our own election names to answer
+/// our catch-up and only once no held commit of ours may still merge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_spent_commit_brings_one_repair_from_our_responder_once_nothing_is_held() {
+    use super::types::HavenMessage;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (MdMlsScene { mut o1, c, o2, server_id, epoch_before }, commit) =
+        md_mls_scene_and_commit(&relay, [215, 216, 217, 218, 219]).await;
+    let (o_master, o_dev1, o_dev2, c_dev) =
+        (o1.master_id.clone(), o1.device_id.clone(), o2.device_id.clone(), c.device_id.clone());
+    let HavenMessage::MlsCommit { commit: commit_b64, .. } = commit else { panic!("not a commit") };
+    let catchup = frame(&HavenMessage::MlsCommitCatchup {
+        server_id: server_id.clone(),
+        channel_id: None,
+        commits: vec![(epoch_before + 1, commit_b64)],
+    });
+    relay.set_recording(&o_dev1, true);
+    let asks = || md_mls2_key_packages(&relay, &o_dev1, &server_id);
+
+    // While the commit is held, a catch-up re-serving it is a duplicate.
+    relay.inject_direct(&server_id, &c_dev, &o_dev1, catchup.clone());
+    assert!(
+        md_mls2_held_kind(&relay, &o_dev1, &c_dev, "mls_epoch_probe", 10).await,
+        "the re-served commit was never processed",
+    );
+    sleep_ms(500).await; // ABSENCE: a repair would go out right after that probe
+    assert_eq!(asks(), 0, "a repair was asked while a held commit may still merge");
+    relay.discard_held_kind(&o_dev1, &c_dev, "mls_epoch_probe");
+
+    let age = || o1.cmd_tx.send(NodeCommand::TestAgeHeldCommits { by: std::time::Duration::from_secs(3600) });
+    age().await.unwrap();
+    assert!(wait_until(10, async || md_mls_held(&o1).await.1.contains(&server_id)).await, "the held add never lapsed");
+    age().await.unwrap();
+    assert!(
+        wait_until(10, async || md_mls_held(&o1).await == (Vec::new(), Vec::new())).await,
+        "the lapsed add outlived its own bound",
+    );
+    super::resolver::update_many(&o_master, [o_dev2.as_str()]);
+
+    relay.inject_direct(&server_id, &o_dev2, &o_dev1, catchup.clone());
+    sleep_ms(1000).await; // ABSENCE: a catch-up from a member we would not ask asks nothing
+    assert_eq!(asks(), 0, "a catch-up from a member our election does not name asked for a repair");
+    relay.inject_direct(&server_id, &c_dev, &o_dev1, catchup);
+    assert!(wait_until(10, async || asks() == 1).await, "our responder's spent catch-up asked for no repair");
+
+    md_mls_freeze(&relay, &[&o_dev1, &c_dev, &o_dev2], false);
+    assert!(md_mls2_level(&o1, &c, &server_id, 30).await, "the repair never brought o1 to the group's epoch");
+    expect_mls_leaf(&o1, &server_id, &o_dev2, 5).await;
+    assert_eq!(asks(), 1, "one spent commit asked for more than one repair");
+    drain_events(&mut o1);
+    o2.cmd_tx.send(md_mls_post(&server_id, "after the lapsed bound", "md-mls-2-1")).await.unwrap();
+    assert!(md_mls_hears(&mut o1, "after the lapsed bound").await, "the repaired device never read the new device");
+    drop((o1, c, o2));
+}
+
+/// The Welcome side of F1: the repair Welcome that carries us past a spent commit can
+/// name a device our roster does not place yet. It waits, keeps our KeyPackage, asks
+/// nothing more, and installs once the roster places the device.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_repair_welcome_naming_an_unplaced_device_is_held_not_refused() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let MdMlsScene { mut o1, c, o2, server_id, epoch_before } =
+        md_mls_commit_before_the_roster(&relay, [210, 211, 212, 213, 214]).await;
+    let (o_master, o_dev1, o_dev2, c_dev) =
+        (o1.master_id.clone(), o1.device_id.clone(), o2.device_id.clone(), c.device_id.clone());
+    relay.set_recording(&o_dev1, true);
+    o1.cmd_tx.send(NodeCommand::TestAgeHeldCommits { by: std::time::Duration::from_secs(3600) }).await.unwrap();
+    assert!(wait_until(10, async || md_mls_held(&o1).await.1.contains(&server_id)).await, "the held add never lapsed");
+
+    // Placed now: o1 probes, the friend re-serves the spent commit, o1 asks a repair.
+    // The new device hears the repair's commit, as it would on a live relay.
+    super::resolver::update_many(&o_master, [o_dev2.as_str()]);
+    relay.set_broadcast_deaf(&o_dev2, false);
+    for (from, to, kind, what) in [
+        (&o_dev1, &c_dev, "mls_epoch_probe", "o1 never probed"),
+        (&c_dev, &o_dev1, "mls_commit_catchup", "the friend served no catch-up"),
+        (&o_dev1, &c_dev, "mls_kp", "the spent catch-up asked no repair"),
+        (&c_dev, &o_dev1, "mls_welcome", "the friend sent no repair Welcome"),
+    ] {
+        assert!(md_mls2_held_kind(&relay, from, to, kind, 15).await, "{what}");
+        if kind != "mls_welcome" {
+            relay.release_held_kind(from, to, kind);
+        }
+    }
+
+    assert!(md_mls2_level(&o2, &c, &server_id, 15).await, "the new device never took the repair's commit");
+    relay.set_broadcast_deaf(&o_dev2, true);
+
+    // The Welcome reaches o1 while its roster does not place the new device.
+    super::resolver::forget(&o_dev2);
+    relay.release_held_kind(&c_dev, &o_dev1, "mls_welcome");
+    assert!(
+        wait_until(10, async || md_mls2_held_welcomes(&o1).await.contains(&server_id)).await,
+        "a repair Welcome naming a device our roster does not place yet was refused, not held",
+    );
+    assert_eq!(o1.mls_epoch(&server_id).await, Some(epoch_before), "held, never installed unjudged");
+
+    super::resolver::update_many(&o_master, [o_dev2.as_str()]);
+    assert!(md_mls2_level(&o1, &c, &server_id, 15).await, "the held Welcome never installed once the device was placed");
+    assert!(md_mls2_held_welcomes(&o1).await.is_empty(), "the installed Welcome is still held");
+    assert_eq!(md_mls2_key_packages(&relay, &o_dev1, &server_id), 1, "the held Welcome cost another KeyPackage");
+    md_mls_freeze(&relay, &[&o_dev1, &c_dev, &o_dev2], false);
+    expect_mls_leaf(&o1, &server_id, &o_dev2, 5).await;
+    drain_events(&mut o1);
+    o2.cmd_tx.send(md_mls_post(&server_id, "after the held Welcome", "md-mls-2-2")).await.unwrap();
+    assert!(md_mls_hears(&mut o1, "after the held Welcome").await, "the device Welcomed late never read the new device");
+    drop((o1, c, o2));
+}
+
+/// Review finding 3: a member commits the add of its own new device before its roster
+/// vouches it, everyone else holds that add past the bound, and the vouch comes after.
+/// A member whose catch-up responder never took the commit is not behind, so it asks
+/// whether the group moved on and asks for no repair.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn an_add_vouched_after_the_bound_costs_no_repair_where_the_group_did_not_move() {
+    use super::types::HavenMessage;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let now = super::roster_book::now_ms();
+    let (r_master, h_master, m_master) = (tag_kp(200).peer_id(), tag_kp(202).peer_id(), tag_kp(204).peer_id());
+    let (m_dev1, m_dev2) = (tag_kp(205).peer_id(), tag_kp(206).peer_id());
+    let m_roster = protected_roster(204, &[205, 206], now - 60_000);
+    let mut r = spawn_node_seeded(&relay, 200, 201, &[&h_master, &m_master], Some(protected_roster(200, &[201], now - 60_000))).await;
+    let mut h = spawn_node_seeded(&relay, 202, 203, &[&r_master, &m_master], Some(protected_roster(202, &[203], now - 60_000))).await;
+    let mut m1 = spawn_node_seeded(&relay, 204, 205, &[&r_master, &h_master], Some(m_roster.clone())).await;
+    let server_id = create_server_and_wait(&mut r, "Late Vouch").await;
+    for joiner in [&mut h, &mut m1] {
+        joiner
+            .cmd_tx
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+            .await
+            .unwrap();
+        assert!(
+            wait_event(joiner, std::time::Duration::from_secs(20), |ev| {
+                matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+            })
+            .await,
+            "a member joins",
+        );
+    }
+    expect_mls_group(&[&r, &h, &m1], &server_id, 30).await;
+    let (r_dev, h_dev) = (r.device_id.clone(), h.device_id.clone());
+    let epoch_before = h.mls_epoch(&server_id).await.expect("h holds the group");
+
+    // From here the owner and h hear nothing from the member's devices, and the new
+    // device's leaf ask reaches only its sibling, which commits the add.
+    for to in [&r_dev, &h_dev] {
+        relay.set_broadcast_deaf(to, true);
+        relay.hold_direct(&m_dev1, to);
+        relay.hold_direct(&m_dev2, to);
+    }
+    relay.set_recording(&m_dev1, true);
+    relay.set_recording(&m_dev2, true);
+    let m2 = spawn_node_seeded(&relay, 204, 206, &[&r_master, &h_master], Some(m_roster)).await;
+    let (mut commit, mut injected) = (None, false);
+    assert!(
+        wait_until(60, async || {
+            for to in [&r_dev, &h_dev] {
+                for kind in relay.held_kinds(&m_dev2, to).into_iter().filter(|k| k != "mls_kp") {
+                    relay.release_held_kind(&m_dev2, to, &kind);
+                }
+            }
+            commit = relay.recorded_frames(&m_dev1).into_iter().find_map(|f| {
+                match serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(&f)) {
+                    Ok(m @ HavenMessage::MlsCommit { channel_id: None, .. }) => Some(m),
+                    _ => None,
+                }
+            });
+            if commit.is_none() && !injected {
+                let kp = relay.recorded_frames(&m_dev2).into_iter().find(|f| {
+                    matches!(serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+                        Ok(HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. }) if *sid == server_id)
+                });
+                if let Some(kp) = kp {
+                    relay.inject_direct(&server_id, &m_dev2, &m_dev1, super::frame_auth::unchecked_body(&kp).to_vec());
+                    injected = true;
+                }
+            }
+            commit.is_some()
+        })
+        .await,
+        "the member never committed its new device's add",
+    );
+    for to in [&r_dev, &h_dev] {
+        relay.discard_held_kind(&m_dev2, to, "mls_kp");
+    }
+
+    // The member's roster does not place the device yet: h holds the add past the bound.
+    super::resolver::forget(&m_dev2);
+    relay.inject(&server_id, &m_dev1, &h_dev, frame(&commit.unwrap()));
+    assert!(wait_until(10, async || md_mls_held(&h).await.0.contains(&server_id)).await, "h never held the add");
+    h.cmd_tx.send(NodeCommand::TestAgeHeldCommits { by: std::time::Duration::from_secs(3600) }).await.unwrap();
+    assert!(wait_until(10, async || md_mls_held(&h).await.1.contains(&server_id)).await, "the held add never lapsed");
+
+    // The vouch comes. h asks the owner, who never took the commit, and nothing more.
+    relay.set_recording(&h_dev, true);
+    super::resolver::update_many(&m_master, [m_dev2.as_str()]);
+    let probed = || {
+        relay.recorded_frames(&h_dev).iter().any(|f| {
+            matches!(serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+                Ok(HavenMessage::MlsEpochProbe { server_id: ref sid, channel_id: None, .. }) if *sid == server_id)
+        })
+    };
+    assert!(wait_until(10, async || probed()).await, "a lapsed add that now passes never asked whether the group moved on");
+    sleep_ms(4500).await; // ABSENCE: two batch ticks after the probe, with nobody past h
+    assert_eq!(md_mls2_key_packages(&relay, &h_dev, &server_id), 0, "a member nobody had moved past asked for a repair");
+    assert_eq!(h.mls_epoch(&server_id).await, Some(epoch_before), "h moved without a commit it could take");
+    assert_eq!(r.mls_epoch(&server_id).await, Some(epoch_before), "the owner took the commit after all");
+    assert!(md_mls_held(&h).await.1.is_empty(), "the lapsed add outlived the probe it called for");
+    drop((r, h, m1, m2));
 }

@@ -188,11 +188,20 @@ pub(crate) fn staging_path(path: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
+static KEY_FILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Held by every write of a key file through its staging name: two at once share that
+/// name, and one clearing it under the other would rename a zeroed key into place.
+pub(crate) fn key_file_lock() -> std::sync::MutexGuard<'static, ()> {
+    KEY_FILES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Replaces a key file so a crash or a full disk leaves the old file or the new one,
 /// never a torn one: the bytes go to a staging file, are flushed, read back and must
 /// match before the rename, and the folder is flushed after it where the platform can.
 pub(crate) fn write_key_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
+    let _landing = key_file_lock();
     let tmp = staging_path(path);
     let staged = (|| -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
@@ -200,7 +209,7 @@ pub(crate) fn write_key_file(path: &std::path::Path, bytes: &[u8]) -> Result<(),
         f.sync_all()
     })();
     let fail = |what: String| {
-        let _ = std::fs::remove_file(&tmp);
+        crate::api::wipe::zero_and_remove(&tmp);
         Err(what)
     };
     if let Err(e) = staged {
@@ -340,5 +349,30 @@ mod tests {
 
         let k3 = derive_wrapping_key_from_password("different", &salt).unwrap();
         assert_ne!(k1, k3);
+    }
+
+    // md-review-2
+
+    /// A key write that does not land (here its rename fails) drops the staged copy;
+    /// that copy holds the key (plaintext when a password is being removed) and must be
+    /// zeroed before it is unlinked, as every other unlink of a key is.
+    #[test]
+    fn md_review_2_a_staged_key_that_does_not_land_is_zeroed() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("identity.key");
+        std::fs::write(&path, b"the sealed key stays").unwrap();
+        // A second name for the staging file's inode: File::create truncates it in
+        // place, so the peek reads whatever the stage wrote once the name is gone.
+        let staged = staging_path(&path);
+        std::fs::write(&staged, b"").unwrap();
+        let peek = tmp.path().join("peek");
+        std::fs::hard_link(&staged, &peek).unwrap();
+        test_faults::fail_rename_of("identity.key");
+        let landed = write_key_file(&path, &dummy_keypair());
+        test_faults::clear();
+        assert!(landed.is_err(), "the rename was expected to fail");
+        assert!(!staged.exists(), "the staged key stayed");
+        let left = std::fs::read(&peek).unwrap();
+        assert!(left.iter().all(|b| *b == 0), "the staged key was unlinked unzeroed: {left:?}");
     }
 }

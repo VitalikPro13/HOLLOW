@@ -93,6 +93,22 @@ pub(crate) fn older_than_removal(store: &crate::storage::MessageStore, master: &
     requested_at.saturating_add(super::frame_auth::LIVE_SKEW_MS) < removed_at(store, master)
 }
 
+/// KV key of when THIS device removed `master` itself: a stamp from our own clock,
+/// unlike a removal a frame carried, which may sit up to the frame's skew ahead.
+fn removed_here_key(master: &str) -> String {
+    format!("friend_removed_here:{master}")
+}
+
+/// Whether a friendship our own device lists, stamped `since`, is the one our identity
+/// ended. A removal made on this device judges strictly (it is stamped past the
+/// friendship it ends); with only the skew slack, a friendship removed minutes after it
+/// was made came back from a sibling's older list, and the two devices then undid each
+/// other's removal for good.
+pub(crate) fn ended_by_removal(store: &crate::storage::MessageStore, master: &str, since: i64) -> bool {
+    let here = store.load_setting(&removed_here_key(master)).ok().flatten().and_then(|v| v.parse::<i64>().ok());
+    older_than_removal(store, master, since) || here.is_some_and(|at| since < at)
+}
+
 /// [`older_than_removal`] for a friend request from `sender`, logged. Out of line so
 /// the swarm's request handler, near the worker stack's limit, holds no store.
 pub(crate) fn request_predates_removal(
@@ -145,6 +161,7 @@ pub(crate) fn share_removal_with_siblings(
     let msg = HavenMessage::FriendListSync {
         friends: Vec::new(),
         removed: vec![FriendRemoval { peer_id: master.to_string(), at }],
+        blocks: Vec::new(),
     };
     super::olm_lane::carry_to_own_siblings(
         ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &msg, super::olm_lane::NoSession::Queue,
@@ -325,6 +342,7 @@ pub(crate) async fn take_friend_card(
     local_master: &str,
     requested_at: i64,
     sealed_card: &super::types::SealedCard,
+    ceiling: i64,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -337,7 +355,7 @@ pub(crate) async fn take_friend_card(
     else {
         return;
     };
-    let card_written = super::profile_card::store_card(&opened.card, None, db_path, db_passphrase);
+    let card_written = super::profile_card::store_card(&opened.card, None, ceiling, db_path, db_passphrase);
     let thumb_written =
         super::profile_card::keep_thumb(&store, &opened.card.master, "outgoing", requested_at, opened.thumb.as_deref());
     drop(store);
@@ -436,15 +454,14 @@ pub(crate) fn share_friend_with_siblings(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Some((status, direction, requested_at)) = crate::storage::MessageStore::open(db_path, db_passphrase)
-        .ok()
-        .and_then(|st| st.get_friend_row(master).ok().flatten())
-    else {
-        return;
-    };
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Some((status, direction, requested_at)) = store.get_friend_row(master).ok().flatten() else { return };
+    let roster = super::roster_book::load(&store, master);
+    drop(store);
     let msg = HavenMessage::FriendListSync {
-        friends: vec![FriendListEntry { peer_id: master.to_string(), status, direction, requested_at }],
+        friends: vec![FriendListEntry { peer_id: master.to_string(), status, direction, requested_at, roster }],
         removed: Vec::new(),
+        blocks: Vec::new(),
     };
     super::olm_lane::carry_to_own_siblings(
         ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &msg, super::olm_lane::NoSession::Queue,
@@ -512,6 +529,81 @@ pub(crate) fn handle_block_changed(
             room_code: dm_room_code(local_master, &master),
         });
     }
+}
+
+/// Every block and lifted block we hold, newest first, as our own devices share them.
+pub(crate) fn block_entries(store: &crate::storage::MessageStore) -> Vec<BlockEntry> {
+    let blocked = store.blocked_rows().unwrap_or_default().into_iter().map(|(peer_id, at)| BlockEntry { peer_id, blocked: true, at });
+    let lifted = store.lifted_blocks().into_iter().map(|(peer_id, at)| BlockEntry { peer_id, blocked: false, at });
+    let mut out: Vec<BlockEntry> = blocked.chain(lifted).filter(|e| e.at > 0).collect();
+    out.sort_unstable_by_key(|e| std::cmp::Reverse(e.at));
+    out.truncate(MAX_SHARED_REMOVALS);
+    out
+}
+
+/// The newest word we hold on `master`, its block or its lifting. Opens the store, so
+/// the event loop calls it through `spawn_blocking`.
+pub(crate) fn own_block_entry(master: &str, db_path: &str, db_passphrase: &str) -> Option<BlockEntry> {
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    block_entries(&store).into_iter().find(|e| e.peer_id == master)
+}
+
+/// Our block or unblock, as [`own_block_entry`] read it, to our own online devices; one
+/// that is away hears it in our friend list once it is back.
+pub(crate) fn share_block_with_siblings(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    entry: BlockEntry,
+) {
+    let msg = HavenMessage::FriendListSync { friends: Vec::new(), removed: Vec::new(), blocks: vec![entry] };
+    super::olm_lane::carry_to_own_siblings(
+        ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &msg, super::olm_lane::NoSession::Queue,
+    );
+}
+
+/// Take the blocks one of our own devices shared, each held to `ceiling`: for each
+/// master the newest of its block and its lifting wins. Returns the masters whose
+/// block changed here, with the new state.
+pub(crate) fn take_sibling_blocks(
+    blocks: &[BlockEntry],
+    ceiling: i64,
+    local_master: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Vec<(String, bool)> {
+    let mut changed = Vec::new();
+    if blocks.is_empty() {
+        return changed;
+    }
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return changed };
+    let held: HashMap<String, i64> = store.blocked_rows().unwrap_or_default().into_iter().collect();
+    // A list names a block and its lifting both when the person was blocked again.
+    let mut newest: HashMap<String, (bool, i64)> = HashMap::new();
+    for entry in blocks.iter().take(MAX_SHARED_REMOVALS) {
+        let master = super::resolver::resolve(&entry.peer_id);
+        if entry.at <= 0 || master.is_empty() || super::resolver::same_identity(&master, local_master) {
+            continue;
+        }
+        let at = entry.at.min(ceiling);
+        if newest.get(&master).is_none_or(|(_, seen)| *seen < at) {
+            newest.insert(master, (entry.blocked, at));
+        }
+    }
+    for (master, (blocked, at)) in newest {
+        let blocked_since = held.get(&master).copied();
+        if blocked {
+            if blocked_since.is_none() && at > store.block_lifted_at(&master) && store.block_peer_at(&master, at).is_ok() {
+                hollow_log!("[HOLLOW-MULTIDEV] Blocked {master}, as our other device did");
+                changed.push((master, true));
+            }
+        } else if blocked_since.is_none_or(|since| since < at) && store.unblock_peer_at(&master, at).is_ok() && blocked_since.is_some() {
+            hollow_log!("[HOLLOW-MULTIDEV] Unblocked {master}, as our other device did");
+            changed.push((master, false));
+        }
+    }
+    changed
 }
 
 /// True when `master` is an accepted friend on disk. A queued accept for anyone else
@@ -1002,9 +1094,15 @@ pub(crate) async fn handle_remove_friend(
     // Delete the local row up-front, unconditionally: removal is a local-first
     // action and must take effect whether or not the peer is online to hear about
     // it. Also clean up any legacy device-stranded row so no duplicate survives.
-    let ended_at = super::frame_auth::now_ms();
+    let mut ended_at = super::frame_auth::now_ms();
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        // Past the friendship it ends, even one stamped by a clock ahead of ours, so
+        // every device of ours counts that friendship as ended.
+        if let Ok(Some((_, _, since))) = store.get_friend_row(&master) {
+            ended_at = ended_at.max(since.saturating_add(1));
+        }
         note_removal(&store, &master, ended_at);
+        let _ = store.save_setting(&removed_here_key(&master), &ended_at.to_string());
         let _ = store.remove_friend(&master);
         if master != peer_id_str {
             let _ = store.remove_friend(&peer_id_str);
@@ -1202,10 +1300,19 @@ pub(crate) async fn handle_update_profile(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let now = std::time::SystemTime::now()
+    let wall = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
+    // An edit outranks every copy this device holds, even one a sibling with a clock
+    // ahead of ours stamped: a stored row never yields to an older stamp. A planted
+    // stamp past any honest one is replaced instead of outranked.
+    let now = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|db| db.load_profile_light(local_peer_str).ok().flatten())
+        .map(|p| p.updated_at)
+        .filter(|at| *at <= crate::storage::messages::stored_profile_stamp_limit())
+        .map_or(wall, |at| wall.max(at.saturating_add(1)));
 
     // None = no change → empty string. Some(empty) = clear → "CLEAR". Some(data) = base64.
     let avatar_b64 = match &avatar_bytes {
@@ -1371,11 +1478,13 @@ pub(crate) async fn handle_update_profile(
         ws_room_peers.values().flat_map(|peers| peers.iter().cloned()).collect();
     let mut carried = 0usize;
     for peer in &room_peers {
-        // `mls_reached` holds MASTER member keys and `peer` is a room DEVICE id.
+        // `mls_reached` holds MASTER member keys and `peer` is a room DEVICE id. Our
+        // own master is always in it, so our own devices take the carried copy: one
+        // without a leaf, or an epoch behind, would never hear the edit.
+        let own = super::resolver::same_identity(peer, local_peer_str);
         if peer == local_peer_str
             || peer == device_peer_id
-            || mls_reached.contains(peer)
-            || mls_reached.contains(&super::resolver::resolve(peer))
+            || (!own && (mls_reached.contains(peer) || mls_reached.contains(&super::resolver::resolve(peer))))
             || send_tombstone_if_revoked(ws_cmd_tx, ws_room_peers, local_peer_str, peer, db_path, db_passphrase)
         {
             continue;
@@ -1487,6 +1596,8 @@ pub(crate) fn save_incoming_profile(
     support_creds: Option<&str>,
     // The MASTER's signature over that raw field. See [`gated_support_creds`].
     support_creds_sig: Option<&str>,
+    // The frame's [`super::frame_auth::stamp_ceiling`].
+    ceiling: i64,
     db_path: &str,
     db_passphrase: &str,
 ) -> (String, bool) {
@@ -1498,6 +1609,9 @@ pub(crate) fn save_incoming_profile(
     let Some(proof) = proof else {
         return (master, false);
     };
+    if profile_from_the_future(&master, updated_at, ceiling) {
+        return (master, false);
+    }
     let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
         return (master, false);
     };
@@ -1550,6 +1664,16 @@ pub(crate) fn save_incoming_profile(
     }
 }
 
+/// Whether a profile or card of `master` is stamped past what its frame can honestly
+/// carry: stored, it would outrank every edit its owner makes after it.
+pub(crate) fn profile_from_the_future(master: &str, updated_at: i64, ceiling: i64) -> bool {
+    let ahead = updated_at > ceiling;
+    if ahead {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED a profile of {master} stamped past its frame (updated_at={updated_at})");
+    }
+    ahead
+}
+
 /// `bytes` when they are the blob the owner signed by `signed_hash` (or a clear).
 fn signed_blob<'a>(master: &str, what: &str, bytes: Option<&'a [u8]>, signed_hash: &str) -> Option<&'a [u8]> {
     bytes.filter(|b| {
@@ -1599,7 +1723,7 @@ fn gated_support_creds(
 ) -> Option<String> {
     let raw = raw?;
     if let Ok(Some(stored)) = db.load_profile(master) {
-        if updated_at < stored.updated_at {
+        if updated_at < stored.updated_at && stored.updated_at <= crate::storage::messages::stored_profile_stamp_limit() {
             return None;
         }
     }
@@ -2185,6 +2309,7 @@ pub(crate) async fn handle_envelope_profile_update(
     support_creds_sig: Option<String>,
     profile_sig: Option<String>,
     profile_pk: Option<String>,
+    ceiling: i64,
     db_path: &str,
     db_passphrase: &str,
 ) -> Vec<String> {
@@ -2267,6 +2392,7 @@ pub(crate) async fn handle_envelope_profile_update(
         sanitize_incoming_anim(banner_anim.as_deref()),
         support_creds.as_deref(),
         support_creds_sig.as_deref(),
+        ceiling,
         db_path, db_passphrase,
     );
     // Light announce with hashes we don't match → pull the full profile once.
@@ -2393,6 +2519,9 @@ pub(crate) async fn handle_profile_relay(
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &mut HashMap<String, ServerState>,
     relayed: RelayedProfile,
+    local_master: &str,
+    // The frame's [`super::frame_auth::stamp_ceiling`].
+    ceiling: i64,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -2401,6 +2530,15 @@ pub(crate) async fn handle_profile_relay(
     // any co-member could overwrite anyone's profile for good by claiming
     // updated_at = i64::MAX.
     let source = relayed.source_peer_id.as_str();
+    // Our own profile comes only from our own devices; a master-signed copy of it
+    // is what a removed device or an old backup can still mint (G1).
+    if super::resolver::same_identity(source, local_master) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED a relayed copy of our own profile");
+        return;
+    }
+    if profile_from_the_future(source, relayed.updated_at, ceiling) {
+        return;
+    }
     if profile_text_oversized(&relayed.display_name, &relayed.status, &relayed.about_me, &relayed.twitch_username) {
         hollow_log!("[HOLLOW-SECURITY] REJECTED relayed profile for {source} — field exceeds its limit");
         return;
@@ -2434,7 +2572,10 @@ pub(crate) async fn handle_profile_relay(
     let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
         return;
     };
-    if store.load_profile_light(source).ok().flatten().is_some_and(|existing| existing.updated_at >= relayed.updated_at) {
+    let limit = crate::storage::messages::stored_profile_stamp_limit();
+    if store.load_profile_light(source).ok().flatten().is_some_and(|existing| {
+        existing.updated_at >= relayed.updated_at && existing.updated_at <= limit
+    }) {
         hollow_log!("[HOLLOW-PROFILE] Skipped relayed profile for {source} (already have newer)");
         return;
     }
@@ -2737,7 +2878,7 @@ mod tests {
         let save = |updated_at: i64, avatar: Option<&[u8]>| {
             save_incoming_profile(
                 &master, "Anon", "", "", updated_at, avatar, None, "", None, None, Some(proof),
-                None, None, None, None, None, &db, &pass,
+                None, None, None, None, None, i64::MAX, &db, &pass,
             )
             .1
         };
@@ -2751,7 +2892,7 @@ mod tests {
         // Every blob is signed by hash, the banner included (N1 since 0.12).
         assert!(save_incoming_profile(
             &master, "Anon", "", "", 9 * 86_400_000, None, Some(&forged), "", None, None, Some(proof),
-            None, None, None, None, None, &db, &pass,
+            None, None, None, None, None, i64::MAX, &db, &pass,
         ).1);
         assert_eq!(stored_banner(), None, "a banner that misses its signed hash was stored");
 
@@ -2841,7 +2982,7 @@ mod tests {
             let (_, saved) = save_incoming_profile(
                 &self.master_id, "Anon", "", "", updated_at,
                 None, None, "", None, None, Some(proof), None, None, None,
-                creds, creds_sig, &self.db, &self.pass,
+                creds, creds_sig, i64::MAX, &self.db, &self.pass,
             );
             saved
         }
@@ -3013,9 +3154,9 @@ mod tests {
         let name = || store.load_profile(&target.peer_id()).ok().flatten().map(|p| p.display_name);
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
-        super::take_friend_card(&tx, &me.peer_id(), 50, &seal(50), &db, &pass).await;
+        super::take_friend_card(&tx, &me.peer_id(), 50, &seal(50), i64::MAX, &db, &pass).await;
         assert_eq!(name(), None, "a card answering another request of ours");
-        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), &db, &pass).await;
+        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), i64::MAX, &db, &pass).await;
         assert_eq!(name().as_deref(), Some("Target"));
     }
 
@@ -3061,10 +3202,10 @@ mod tests {
         let shown = || store.load_avatar_for_display(&t).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
 
-        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), &db, &pass).await;
+        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), i64::MAX, &db, &pass).await;
         assert_eq!(shown(), None, "no row of ours");
         store.save_friend(&t, "pending", "outgoing", 100).unwrap();
-        super::take_friend_card(&tx, &me.peer_id(), 50, &seal(50), &db, &pass).await;
+        super::take_friend_card(&tx, &me.peer_id(), 50, &seal(50), i64::MAX, &db, &pass).await;
         assert_eq!(shown(), None, "a card answering another request of ours");
 
         // The store's own gate, for every row the card's request did not make.
@@ -3082,12 +3223,12 @@ mod tests {
 
         store.save_friend(&t, "pending", "outgoing", 100).unwrap();
         while rx.try_recv().is_ok() {}
-        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), &db, &pass).await;
+        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), i64::MAX, &db, &pass).await;
         let kept = shown().expect("our pending request shows the target's thumb");
         assert!(crate::node::image_convert::webp_header_dimensions(&kept).is_some(), "a WebP we encoded");
         assert_eq!(store.load_avatar(&t).unwrap(), None, "the signed avatar column holds no thumb");
         assert!(matches!(rx.try_recv(), Ok(crate::node::NetworkEvent::ProfileUpdated { .. })), "the row is told to repaint");
-        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), &db, &pass).await;
+        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), i64::MAX, &db, &pass).await;
         assert!(rx.try_recv().is_err(), "a replayed card repaints nothing");
     }
 
@@ -3135,5 +3276,278 @@ mod tests {
         assert_eq!(store.load_avatar_for_display("recarded").unwrap(), Some(face.clone()), "its pulled avatar wins");
         assert!(store.save_profile_card("recarded", "Faceless now", 9, "", None).unwrap());
         assert_eq!(store.load_avatar_for_display("recarded").unwrap(), None, "a newer card that signs no avatar");
+    }
+
+    // md-review
+    /// A block the person makes here outranks a lifting our other device stamped with a
+    /// clock a minute ahead: the next friend list must not undo it, and what this device
+    /// shares must name the block as the newest word on that person.
+    #[test]
+    fn md_review_a_fresh_block_survives_a_siblings_lifting_from_a_clock_ahead() {
+        use super::super::types::BlockEntry;
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("md_review_block.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let x = "md-review-blocked-master";
+        let me = "md-review-local-master";
+        let now = crate::node::frame_auth::now_ms();
+        // Our other device, its clock 60 s ahead, lifted a block of x; its frame is sealed
+        // by that clock, so the ceiling sits past it.
+        let lifted = BlockEntry { peer_id: x.to_string(), blocked: false, at: now + 60_000 };
+        let ceiling = crate::node::frame_auth::stamp_ceiling(now + 60_000);
+        super::take_sibling_blocks(std::slice::from_ref(&lifted), ceiling, me, &db, &pass);
+        // The person blocks x here a moment later (the FFI's own write).
+        store.block_peer(x).unwrap();
+        // The same device shares its friend list again (any reconnect).
+        super::take_sibling_blocks(std::slice::from_ref(&lifted), ceiling, me, &db, &pass);
+        assert!(
+            store.blocked_rows().unwrap().iter().any(|(p, _)| p == x),
+            "the block the person just made was undone by an older lifting from a clock ahead",
+        );
+        let newest = super::block_entries(&store).into_iter().find(|e| e.peer_id == x);
+        assert!(newest.is_some_and(|e| e.blocked), "this device shares the old lifting as newer than its own block");
+    }
+
+    // md-sibling
+    /// A master-signed profile of `kp` stamped `updated_at`, as a co-member relays it.
+    fn md_relayed(kp: &NativeKeypair, updated_at: i64, name: &str) -> super::RelayedProfile {
+        let fields = crate::node::crypto_handler::ProfileFields { display_name: name, ..Default::default() };
+        let (profile_sig, profile_pk) = crate::node::crypto_handler::sign_profile(kp, &kp.peer_id(), updated_at, &fields);
+        super::RelayedProfile {
+            source_peer_id: kp.peer_id(),
+            display_name: name.to_string(),
+            status: String::new(),
+            about_me: String::new(),
+            updated_at,
+            avatar_b64: String::new(),
+            twitch_username: String::new(),
+            avatar_hash: String::new(),
+            banner_hash: String::new(),
+            showcase_board: String::new(),
+            showcase_assets_hash: String::new(),
+            avatar_frame: String::new(),
+            avatar_anim: String::new(),
+            banner_anim: String::new(),
+            profile_sig,
+            profile_pk,
+        }
+    }
+
+    /// A relayed profile is held to its frame like any other ingest, and a copy of our
+    /// own profile never comes by relay: the master key that signs it may sit on a
+    /// removed device or an old backup (G1).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn md_a_relayed_profile_past_its_frame_or_of_our_own_master_is_refused() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("md_relay.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let (subject, me) = (NativeKeypair::from_secret_bytes(&[0x61; 32]), NativeKeypair::from_secret_bytes(&[0x62; 32]));
+        let name = |id: &str| {
+            crate::storage::MessageStore::open(&db, &pass).unwrap().load_profile(id).ok().flatten().map(|p| p.display_name)
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut states = std::collections::HashMap::new();
+        let now = crate::node::frame_auth::now_ms();
+        let ceiling = crate::node::frame_auth::stamp_ceiling(now);
+
+        super::handle_profile_relay(&tx, &mut states, md_relayed(&subject, ceiling + 1, "Ahead"), &me.peer_id(), ceiling, &db, &pass).await;
+        assert_eq!(name(&subject.peer_id()), None, "a relayed profile stamped past its frame was stored");
+        super::handle_profile_relay(&tx, &mut states, md_relayed(&subject, ceiling, "At the edge"), &me.peer_id(), ceiling, &db, &pass).await;
+        assert_eq!(name(&subject.peer_id()).as_deref(), Some("At the edge"), "a relayed profile within its frame");
+
+        super::handle_profile_relay(&tx, &mut states, md_relayed(&me, now, "Planted"), &me.peer_id(), ceiling, &db, &pass).await;
+        assert_eq!(name(&me.peer_id()), None, "a relayed copy of our own profile was stored");
+        crate::node::resolver::clear_all();
+    }
+
+    /// A pushed profile and a signed card are held to their frame's ceiling too.
+    #[test]
+    fn md_a_profile_or_card_past_its_frame_is_refused() {
+        use base64::Engine as _;
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("md_ceiling.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let owner = NativeKeypair::from_secret_bytes(&[0x63; 32]);
+        let id = owner.peer_id();
+        let ceiling = crate::node::frame_auth::stamp_ceiling(crate::node::frame_auth::now_ms());
+        let push = |updated_at: i64| {
+            let fields = crate::node::crypto_handler::ProfileFields { display_name: "Anon", ..Default::default() };
+            let (sig, pk) = crate::node::crypto_handler::sign_profile(&owner, &id, updated_at, &fields);
+            let (sig, pk) = (sig.unwrap(), pk.unwrap());
+            let proof = crate::storage::ProfileProof { sig: &sig, pk: &pk, avatar_hash: "", banner_hash: "", assets_hash: "" };
+            save_incoming_profile(
+                &id, "Anon", "", "", updated_at, None, None, "", None, None, Some(proof),
+                None, None, None, None, None, ceiling, &db, &pass,
+            )
+            .1
+        };
+        assert!(!push(ceiling + 1), "a profile stamped past its frame was stored");
+        assert!(push(ceiling), "a profile at its frame's ceiling");
+
+        let card = |updated_at: i64| {
+            let payload = crate::node::crypto_handler::card_signing_payload(&id, updated_at, "Card", "");
+            let pk = base64::engine::general_purpose::STANDARD.encode(owner.public_key_protobuf());
+            let (Some(sig), Some(pk)) = crate::node::crypto_handler::sign_message(&owner, &pk, &payload) else { panic!("signs") };
+            crate::node::types::SignedCard { master: id.clone(), display_name: "Card".into(), avatar_hash: String::new(), updated_at, sig, pk }
+        };
+        let ahead = card(ceiling + 2);
+        assert!(crate::node::profile_card::card_holds(&ahead), "precondition: the card is genuinely signed");
+        assert!(!crate::node::profile_card::store_card(&ahead, None, ceiling + 1, &db, &pass), "a card stamped past its frame was stored");
+        assert!(!crate::node::profile_card::keep_card(&ahead, &id, ceiling + 1, &db, &pass), "a card stamped past its frame was kept");
+        assert!(crate::node::profile_card::keep_card(&card(ceiling + 1), &id, ceiling + 1, &db, &pass), "a card within its frame");
+        crate::node::resolver::clear_all();
+    }
+
+    /// A profile or card already stored with a planted stamp yields to the next genuine
+    /// one, so a stamp at the end of time cannot freeze a person's profile here.
+    #[test]
+    fn md_a_planted_profile_stamp_yields_to_the_next_genuine_profile() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("md_void.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let now = crate::node::frame_auth::now_ms();
+        let save = |peer: &str, name: &str, at: i64| {
+            store.save_profile(peer, name, "", "", at, None, None, "", None, None, None, None, None, None, None).unwrap()
+        };
+        assert!(save("planted", "Planted", i64::MAX));
+        assert!(save("planted", "Genuine", now), "a genuine profile did not replace a planted stamp");
+        assert!(save("honest", "Ahead", crate::node::frame_auth::stored_stamp_limit(now) - 60_000));
+        assert!(!save("honest", "Older", now), "an older profile replaced a stamp an ingest could have let in");
+
+        assert!(store.save_profile_card("carded", "Planted", i64::MAX, "", None).unwrap());
+        assert!(store.save_profile_card("carded", "Genuine", now, "", None).unwrap(), "a genuine card did not replace a planted stamp");
+        let signed = |at: i64, name: &str| crate::storage::messages::StoredCard {
+            master: "carded".into(), display_name: name.into(), updated_at: at, avatar_hash: String::new(), sig: String::new(), pk: String::new(),
+        };
+        assert!(store.save_signed_card(&signed(i64::MAX, "Planted")).unwrap());
+        assert!(store.save_signed_card(&signed(now, "Genuine")).unwrap(), "a planted signed card held its place");
+    }
+    /// Every production call of a profile or card ingest hands it its frame's ceiling.
+    #[test]
+    fn md_every_profile_ingest_is_held_to_its_frame() {
+        let src = |f: &str| {
+            let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f))
+                .unwrap()
+                .replace("\r\n", "\n");
+            match text.find("#[cfg(test)]\nmod tests") {
+                Some(end) => text[..end].to_string(),
+                None => text,
+            }
+        };
+        let ingests = [
+            "store_card(", "keep_card(", "save_incoming_profile(", "handle_profile_relay(",
+            "take_friend_card(", "handle_envelope_profile_update(",
+        ];
+        let mut calls = 0;
+        for file in ["src/node/swarm.rs", "src/node/social.rs", "src/node/conference.rs", "src/node/profile_card.rs"] {
+            let text = src(file);
+            for name in ingests {
+                for (at, _) in text.match_indices(name) {
+                    let before = &text[..at];
+                    if before.ends_with("fn ") || before.ends_with('_') || before.ends_with("save_signed_") {
+                        continue;
+                    }
+                    let mut depth = 0usize;
+                    let args: String = text[at + name.len() - 1..]
+                        .chars()
+                        .take_while(|c| {
+                            match c {
+                                '(' => depth += 1,
+                                ')' => depth -= 1,
+                                _ => {}
+                            }
+                            depth > 0
+                        })
+                        .collect();
+                    calls += 1;
+                    assert!(
+                        args.contains("ceiling") && !args.contains("i64::MAX"),
+                        "{file}: a call of {name} is not held to its frame: {args}",
+                    );
+                }
+            }
+        }
+        assert!(calls >= 12, "the scan found only {calls} ingest calls");
+        // A ceiling named once and passed on must still come from the frame (or our clock).
+        for file in ["src/node/swarm.rs", "src/node/social.rs", "src/node/conference.rs"] {
+            for line in src(file).lines().filter(|l| l.trim_start().starts_with("let ceiling =")) {
+                assert!(line.contains("stamp_ceiling("), "{file}: a ceiling not taken from a stamp: {line}");
+            }
+        }
+    }
+    /// The mirror of the review's block case: an unblock made here outranks a block our
+    /// other device stamped with a clock a minute ahead.
+    #[test]
+    fn md_a_fresh_unblock_survives_a_siblings_block_from_a_clock_ahead() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("md_unblock.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let (x, me) = ("md-unblock-blocked-master", "md-unblock-local-master");
+        let now = crate::node::frame_auth::now_ms();
+        let blocked = super::super::types::BlockEntry { peer_id: x.to_string(), blocked: true, at: now + 60_000 };
+        let ceiling = crate::node::frame_auth::stamp_ceiling(now + 60_000);
+        super::take_sibling_blocks(std::slice::from_ref(&blocked), ceiling, me, &db, &pass);
+        assert!(store.blocked_rows().unwrap().iter().any(|(p, _)| p == x), "precondition: the sibling's block landed");
+        store.unblock_peer(x).unwrap();
+        super::take_sibling_blocks(std::slice::from_ref(&blocked), ceiling, me, &db, &pass);
+        assert!(!store.blocked_rows().unwrap().iter().any(|(p, _)| p == x), "the unblock just made was undone by an older block");
+        let newest = super::block_entries(&store).into_iter().find(|e| e.peer_id == x);
+        assert!(newest.is_some_and(|e| !e.blocked), "this device shares the old block as newer than its own lifting");
+    }
+
+    /// A relayed genuine profile replaces a row stamped at the end of time.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn md_a_relayed_profile_replaces_a_planted_stamp() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("md_relay_void.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let subject = NativeKeypair::from_secret_bytes(&[0x64; 32]);
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        store.save_profile(&subject.peer_id(), "Planted", "", "", i64::MAX, None, None, "", None, None, None, None, None, None, None).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut states = std::collections::HashMap::new();
+        let now = crate::node::frame_auth::now_ms();
+        super::handle_profile_relay(
+            &tx, &mut states, md_relayed(&subject, now, "Genuine"), "md-relay-local-master",
+            crate::node::frame_auth::stamp_ceiling(now), &db, &pass,
+        )
+        .await;
+        let name = store.load_profile(&subject.peer_id()).unwrap().map(|p| p.display_name);
+        assert_eq!(name.as_deref(), Some("Genuine"), "a relayed genuine profile never replaced a planted stamp");
+        crate::node::resolver::clear_all();
+    }
+
+    /// A signed credential field lands over a row stamped at the end of time.
+    #[test]
+    fn md_support_creds_land_over_a_planted_stamp() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = CredsFixture::new(0x73);
+        crate::storage::MessageStore::open(&f.db, &f.pass)
+            .unwrap()
+            .save_profile(&f.master_id, "Anon", "", "", i64::MAX, None, None, "", None, None, None, None, None, None, Some(""))
+            .unwrap();
+        let now = crate::node::frame_auth::now_ms();
+        let sig = f.creds_sig(now, &f.field);
+        assert!(f.announce(now, Some(&f.field), Some(&sig)), "a genuine announce replaces a planted stamp");
+        assert_eq!(f.stored_creds(), f.field, "the signed field was kept off a planted row");
+        crate::node::resolver::clear_all();
     }
 }

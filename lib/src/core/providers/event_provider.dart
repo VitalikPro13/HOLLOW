@@ -103,6 +103,67 @@ String? shareAutoDownloadScope({
   return serverSyncDone ? 'server:$serverId' : null;
 }
 
+/// A toast raised by an event, in the root Navigator's overlay. The Navigator's own
+/// context has no Overlay above it, so resolving one from it throws and the toast
+/// is lost (after clearing whatever toast was showing). The log, which a person may
+/// export, gets the toast's [kind] and an opaque [id] only, never the text (server
+/// names, refusal reasons).
+void showEventToast(String message,
+    {required String kind,
+    String? id,
+    HollowToastType type = HollowToastType.info}) {
+  final overlay = hollowNavigatorKey.currentState?.overlay;
+  final overlayContext = overlay?.context;
+  if (overlay == null || overlayContext == null || !overlayContext.mounted) {
+    return;
+  }
+  if (HollowToast.lockedOut) return;
+  HollowToast.show(overlayContext, message, type: type, overlayState: overlay);
+  // The fleet's stray-toast gate reads this line.
+  final logged = id == null ? kind : '$kind $id';
+  Future.sync(() => logFromDart(message: '[HOLLOW-TOAST] $logged'))
+      .catchError((_) {});
+}
+
+/// A completed join. [quiet]: a server our other device re-shared as we came back
+/// (a repair, a relink, a lost database) slots in silently. [fromSibling]: one our
+/// other device joined or made says so and leaves the screen where it is. Only a
+/// join made on this device opens the server.
+void applyServerJoined(ProviderRead read,
+    {required String serverId,
+    required String name,
+    required bool quiet,
+    required bool fromSibling}) {
+  final ours = !quiet && !fromSibling;
+  if (ours) handleTwitchJoinResult(success: true);
+  read(serverListProvider.notifier).onServerCreated(serverId, name);
+  // Order matters for a PARKED join: onServerCreated turns the pending tile
+  // into the real server IN PLACE, so it must run while that tile exists.
+  // Dropping the row first would append the server at the end of the strip.
+  read(serverStripLayoutProvider.notifier).onServerCreated(serverId);
+  read(pendingJoinsProvider.notifier).remove(serverId);
+  if (quiet) return;
+  showEventToast('Joined $name',
+      kind: 'joined', id: serverId, type: HollowToastType.success);
+  if (!ours) return;
+  // Close any centre tab first: joining out of Browse Public Channels is a
+  // normal flow and the tab would sit on top of the server we just selected (#28).
+  setShellTab(read, null);
+  read(selectedServerProvider.notifier).state = serverId;
+  read(selectedPeerProvider.notifier).state = null;
+  read(serverSettingsOpenProvider.notifier).state = false;
+  read(channelListProvider.notifier).loadForServer(serverId).then((_) async {
+    await read(channelLayoutProvider.notifier).loadForServer(serverId);
+    final joinedChannels = read(channelListProvider);
+    if (joinedChannels.isNotEmpty) {
+      final layout = read(channelLayoutProvider);
+      read(selectedChannelProvider.notifier).state =
+          firstTextChannelInLayout(joinedChannels, layout) ??
+              joinedChannels.keys.first;
+    }
+  }).catchError((_) {});
+}
+
 /// Listens to the Rust event stream and dispatches to the right providers.
 class EventStreamNotifier extends Notifier<bool> {
   StreamSubscription<NetworkEvent>? _subscription;
@@ -691,46 +752,19 @@ class EventStreamNotifier extends Notifier<bool> {
               serverId, channelIds);
         }).catchError((_) {});
 
-      case NetworkEvent_ServerJoined(:final serverId, :final name):
-        debugPrint('[HOLLOW] Server joined: $name ($serverId)');
-        handleTwitchJoinResult(success: true);
-        ref.read(serverListProvider.notifier).onServerCreated(serverId, name);
-        // Order matters for a PARKED join: onServerCreated turns the pending tile
-        // into the real server IN PLACE, so it must run while that tile exists.
-        // Dropping the row first would append the server at the end of the strip.
-        ref.read(serverStripLayoutProvider.notifier).onServerCreated(serverId);
-        ref.read(pendingJoinsProvider.notifier).remove(serverId);
-        // Close any centre tab first: joining out of Browse Public Channels is a
-        // normal flow and the tab would sit on top of the server we just selected (#28).
-        setShellTab(ref.read, null);
-        ref.read(selectedServerProvider.notifier).state = serverId;
-        ref.read(selectedPeerProvider.notifier).state = null;
-        ref.read(serverSettingsOpenProvider.notifier).state = false;
-        ref.read(channelListProvider.notifier).loadForServer(serverId).then((_) async {
-          await ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
-          final joinedChannels = ref.read(channelListProvider);
-          if (joinedChannels.isNotEmpty) {
-            final layout = ref.read(channelLayoutProvider);
-            ref.read(selectedChannelProvider.notifier).state =
-                firstTextChannelInLayout(joinedChannels, layout)
-                    ?? joinedChannels.keys.first;
-          }
-        });
-        final joinCtx = hollowNavigatorKey.currentContext;
-        if (joinCtx != null) {
-          HollowToast.show(joinCtx, 'Joined $name',
-              type: HollowToastType.success);
-        }
+      case NetworkEvent_ServerJoined(
+            :final serverId, :final name, :final quiet, :final fromSibling):
+        debugPrint('[HOLLOW] Server joined: $name ($serverId)'
+            '${quiet ? ' quietly' : fromSibling ? ' by our other device' : ''}');
+        applyServerJoined(ref.read,
+            serverId: serverId, name: name, quiet: quiet, fromSibling: fromSibling);
 
       // Rust no longer emits this on the 15 second timeout (that path PARKS the
       // join). The arm stays for other emitters and older nodes.
       case NetworkEvent_ServerJoinFailed(:final serverId, :final reason):
         debugPrint('[HOLLOW] Server join failed: $serverId — $reason');
-        final failCtx = hollowNavigatorKey.currentContext;
-        if (failCtx != null) {
-          HollowToast.show(failCtx, 'Failed to join server: $reason',
-              type: HollowToastType.error);
-        }
+        showEventToast('Failed to join server: $reason',
+            kind: 'join_failed', type: HollowToastType.error);
 
       // Nobody was online to answer: the request is parked, not failed.
       case NetworkEvent_ServerJoinParked(:final serverId):
@@ -1025,6 +1059,11 @@ class EventStreamNotifier extends Notifier<bool> {
         // inserted rows. Reload so device-collapse online status can resolve them.
         debugPrint('[HOLLOW] Friends backfilled from sibling device: $count');
         ref.read(friendsProvider.notifier).loadAll();
+
+      case NetworkEvent_BlockListChanged():
+        // Another device of ours blocked or unblocked someone; the node already
+        // enforces it, the mirror and the push hints follow.
+        ref.read(blockedUsersProvider.notifier).load().then((_) => PushHintsCache.rewriteLast()).catchError((_) {});
 
       case NetworkEvent_FriendRemoved(:final peerId):
         debugPrint('[HOLLOW] Friend removed: $peerId');
@@ -1732,19 +1771,16 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_RoomCapHit(:final room):
         debugPrint('[HOLLOW] Room cap hit: $room');
-        final ctx = hollowNavigatorKey.currentContext;
-        if (ctx != null) {
-          final kind = room.startsWith('share:')
-              ? 'Share'
-              : room.startsWith('inbox:')
-                  ? 'Inbox'
-                  : 'Connection';
-          HollowToast.show(
-            ctx,
-            '$kind limit reached. Try leaving unused servers or stopping share seeds.',
-            type: HollowToastType.error,
-          );
-        }
+        final kind = room.startsWith('share:')
+            ? 'Share'
+            : room.startsWith('inbox:')
+                ? 'Inbox'
+                : 'Connection';
+        showEventToast(
+          '$kind limit reached. Try leaving unused servers or stopping share seeds.',
+          kind: 'room_limit',
+          type: HollowToastType.error,
+        );
 
       case NetworkEvent_TwitchJoinRejected(:final serverId, :final reason):
         debugPrint('[HOLLOW] Twitch join rejected for $serverId: $reason');
@@ -1794,7 +1830,7 @@ class EventStreamNotifier extends Notifier<bool> {
           final msg = 'Server owner of $serverName is offline. Owner-verified servers require the owner to be online to accept joins. Try again later.';
           final handled = handleTwitchJoinResult(success: false, error: msg);
           if (!handled) {
-            HollowToast.show(ctx, msg, type: HollowToastType.error);
+            showEventToast(msg, kind: 'join_refused', type: HollowToastType.error);
           }
         } else if (reason.startsWith('server_private:')) {
           // Format: "server_private:{server_name}"
@@ -1830,7 +1866,7 @@ class EventStreamNotifier extends Notifier<bool> {
           final msg = pendingJoinReasonText(reason);
           final handled = handleTwitchJoinResult(success: false, error: msg);
           if (!handled) {
-            HollowToast.show(ctx, msg, type: HollowToastType.error);
+            showEventToast(msg, kind: 'join_refused', type: HollowToastType.error);
           }
         } else if (reason.startsWith('nsfw_confirm:')) {
           // Format: "nsfw_confirm:{server_name}". A consent gate, not a rejection.
@@ -1849,7 +1885,7 @@ class EventStreamNotifier extends Notifier<bool> {
         } else {
           final handled = handleTwitchJoinResult(success: false, error: reason);
           if (!handled) {
-            HollowToast.show(ctx, reason, type: HollowToastType.error);
+            showEventToast(reason, kind: 'join_refused', type: HollowToastType.error);
           }
         }
 

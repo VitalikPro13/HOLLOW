@@ -1331,3 +1331,46 @@ wait carries a `why` key in the scenario JSON (the probe ignores it) or a commen
 Kept on purpose: absence proofs, stability windows, media settles before an evidence shot, the
 auto-download advert, idle timers. Presence after `Stop-Peer`: `Wait-SeesOffline` in the file
 journeys polls the observer's `online` provider for neither the master nor the device id.
+
+## The linking matrix across machines (wave md, 2026-10-10/11)
+
+`scriptsleet_link_gate.ps1` runs device-link cells (`<presenter>><receiver>` pairs x conditions:
+clean, background, relay_resume, relay_lost, transfer_drop, held_db, cancel_retry, third_device)
+through `fleet_link_matrix.ps1`, one summary, non-zero exit on any FAIL; `-Quick` = clean +
+background over the four phone pairs (~45 min), `-Pairs 'a>b,c>d'` (one string: `powershell -File`
+splits arrays). `-Build` rebuilds the Windows fleet, ships the tree to the mini and builds the
+Android, iOS and macOS apps there; the Linux copy on the VM is shipped (`scripts/vm_sync.sh`) and
+built there by hand. `fleet_link_matrix.ps1 -KeepUp` leaves a cell's peers up; a FAIL always does.
+
+- **Remote agents.** A peer named `<platform>:<letter>` (android, ios, macos, linux) is driven by an
+  AGENT, `fleet_remote_agent.ps1 -Serve`, one detached server per machine and backend running the
+  same fleet_lib code there, reached through one ssh connection (`fleet_agent_attach.sh`). The
+  server outlives the connection: a dropped ssh is re-opened with backoff and the request in
+  flight re-sent under the same key, answered from the server's record if it already ran, so a
+  tap or a send never repeats; the verdict counts reconnects. Captured values (a link code read
+  on a phone) expand into later steps on any machine. One command vocabulary for local and remote
+  peers: `Invoke-FleetPeerCommand` (step, fleet, mailbox, status, data_file, evidence, proxy...).
+  Hosts: `FLEET_MINI_SSH` (Tailscale `jabun@100.80.56.79` when the LAN address moves, always
+  `-o HostKeyAlias=192.168.18.39`), `FLEET_VM_SSH` (`hollowvm`).
+- **Proxy stdout trap.** Off Windows the zombie proxy (`-NetProxy`) is started with its OWN stdout
+  and stderr files (`_proxy.stdout`); inheriting the caller's stdout made a `fleet.ps1` read
+  through a pipe (every remote agent's) wait on the proxy until it quit.
+- **macOS relaunch copy.** A macOS app that relaunches itself after a link import goes through
+  LaunchServices, whose copy never runs the probe's live loop; the matrix takes the new pid as
+  proof of the relaunch, stops it and starts the peer directly on its data (`-Live -ReuseData`).
+  Known macOS-fleet limit (wave md): the matrix rarely sees that copy (it never goes live), so it
+  restarts the peer itself after 120 s; in `transfer_drop` (with `-NetProxy`) that direct copy
+  twice hung in the probe's boot settle (Dart isolate idle with an empty stack, main thread idle in
+  its run loop, `live-ready` never written) while its node ran normally: import, sync and both
+  images had landed before the restart. relay_resume passes the same path. Evidence
+  `D:\dev\wt\md-link\.team\matrix\mac3\`; untried: `UI_PROBE_TRACE=1` on that restart.
+- **Linux headless compositor grace.** `FLEET_LINUX_HEADLESS=1` runs each copy under its own
+  headless compositor, which must outlive the app by 15 s: `relaunchApp`'s waiter starts the new
+  copy just after the old one exits, and that copy needs the same compositor.
+- **Refusal baseline additions** (each classified on every instance in wave md):
+  `REJECTED file metadata write ... the card belongs to <author>` from a holder WE asked;
+  `REJECTED FileRequest from <our new device> ... not entitled (channel file)` before its roster
+  reached the presenter (the sweep asks again later); `Own device X added by Y` in third_device
+  cells; `Ignoring ServerJoinResolved from non-member <owner device> for <server>` seconds after
+  that server was DELETED (the join ring replays the old resolution; a live server counts its
+  owner's devices, harness `a_join_resolved_from_an_owners_second_device_counts`).

@@ -150,10 +150,13 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
   /// provider at once, so the confirm view stays up until the answer is sent.
   String? _decliningPeer;
 
+  late final DeviceLinkSyncNotifier _link;
+
   @override
   void initState() {
     super.initState();
     deviceLinkDialogIsOpen = true;
+    _link = ref.read(deviceLinkSyncProvider.notifier);
     // Defer provider mutation until after the first frame.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // Only mint a fresh code when actually idle: a dialog opened BECAUSE an
@@ -172,6 +175,8 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
   @override
   void dispose() {
     deviceLinkDialogIsOpen = false;
+    // Providers may not change while the tree is being torn down.
+    scheduleMicrotask(_link.dialogGone);
     _restartTimer?.cancel();
     _codeController.dispose();
     super.dispose();

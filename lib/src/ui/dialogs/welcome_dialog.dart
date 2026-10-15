@@ -27,11 +27,17 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 typedef WelcomeResult = ({String action, String relayDomain});
 
-Future<WelcomeResult?> showWelcomeDialog(BuildContext context) {
+/// [relinkedTo]: this device was set to link again; the old data's profile
+/// name on a desktop, empty on a phone. [relinkedFolder]: the same, where no
+/// profile lists the old data (a portable copy, a data folder override).
+/// Linking then comes first.
+Future<WelcomeResult?> showWelcomeDialog(BuildContext context,
+    {String? relinkedTo, String? relinkedFolder}) {
   return showHollowDialog<WelcomeResult>(
     context: context,
     barrierDismissible: false,
-    builder: (dialogContext) => const _WelcomeContent(),
+    builder: (dialogContext) => _WelcomeContent(
+        relinkedTo: relinkedTo, relinkedFolder: relinkedFolder),
   );
 }
 
@@ -44,7 +50,10 @@ class _Backup {
 }
 
 class _WelcomeContent extends StatefulWidget {
-  const _WelcomeContent();
+  final String? relinkedTo;
+  final String? relinkedFolder;
+
+  const _WelcomeContent({this.relinkedTo, this.relinkedFolder});
 
   @override
   State<_WelcomeContent> createState() => _WelcomeContentState();
@@ -218,6 +227,8 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     final phone = WelcomeFrame.isPhone(context);
     final align = phone ? TextAlign.start : TextAlign.center;
     final prose = HollowTypography.body.copyWith(color: hollow.textSecondary);
+    final folder = widget.relinkedFolder;
+    final relinked = widget.relinkedTo ?? (folder == null ? null : '');
 
     final hero = Column(
       crossAxisAlignment: phone
@@ -241,6 +252,28 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           style: HollowTypography.display.copyWith(color: hollow.textPrimary),
         ),
         const SizedBox(height: HollowSpacing.sm),
+        if (relinked != null) ...[
+          Text(
+            folder != null
+                ? 'Your old data is in this folder. Link this device to bring '
+                      'your messages back.'
+                : relinked.isEmpty
+                    ? 'Link this phone to bring your messages back.'
+                    : 'Your old data is in the $relinked profile. Link this '
+                          'device to bring your messages back.',
+            textAlign: align,
+            style: prose,
+          ),
+          if (folder != null) ...[
+            const SizedBox(height: HollowSpacing.xs),
+            Text(
+              folder,
+              textAlign: align,
+              style: HollowTypography.monoSmall
+                  .copyWith(color: hollow.textSecondary),
+            ),
+          ],
+        ] else ...[
         Text(
           phone
               ? 'Your identity is made on this phone and stays with you. '
@@ -257,19 +290,56 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           textAlign: align,
           style: prose,
         ),
+        ],
       ],
+    );
+
+    final linkRow = HollowListRow(
+      touch: phone,
+      leading: Icon(
+        LucideIcons.smartphone,
+        size: 20,
+        color: hollow.textSecondary,
+      ),
+      title: 'Link a device',
+      subtitle: phone
+          ? 'Enter a code from your other device'
+          : 'Enter the 10-character code from your other device',
+      trailing: Icon(
+        LucideIcons.chevronRight,
+        size: 16,
+        color: hollow.textTertiary,
+      ),
+      onTap: () => _finish('link_device'),
     );
 
     final rest = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        HollowButton.filled(
-          expand: true,
-          touch: phone,
-          onPressed: () => _finish('create_new'),
-          child: const Text('Create an identity'),
-        ),
+        // After a relink, linking is the way back: it leads, and a new
+        // identity is the alternative.
+        if (relinked != null) ...[
+          HollowButton.filled(
+            expand: true,
+            touch: phone,
+            onPressed: () => _finish('link_device'),
+            child: const Text('Link a device'),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          HollowButton.outline(
+            expand: true,
+            touch: phone,
+            onPressed: () => _finish('create_new'),
+            child: const Text('Create an identity'),
+          ),
+        ] else
+          HollowButton.filled(
+            expand: true,
+            touch: phone,
+            onPressed: () => _finish('create_new'),
+            child: const Text('Create an identity'),
+          ),
         SizedBox(height: phone ? HollowSpacing.xl : HollowSpacing.xxl),
         Text(
           'Already use Hollow?',
@@ -282,24 +352,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         // phrase regenerates the master keypair alone, carries NO synced data,
         // and leaves a stale database on disk. The mnemonic FFI stays for the
         // in-app recovery dialogs.
-        HollowListRow(
-          touch: phone,
-          leading: Icon(
-            LucideIcons.smartphone,
-            size: 20,
-            color: hollow.textSecondary,
-          ),
-          title: 'Link a device',
-          subtitle: phone
-              ? 'Enter a code from your other device'
-              : 'Enter the 10-character code from your other device',
-          trailing: Icon(
-            LucideIcons.chevronRight,
-            size: 16,
-            color: hollow.textTertiary,
-          ),
-          onTap: () => _finish('link_device'),
-        ),
+        if (relinked == null) linkRow,
         HollowListRow(
           touch: phone,
           leading: Icon(

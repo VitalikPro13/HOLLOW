@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
+import 'package:hollow/src/core/services/link_keep_alive.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
 
 class _LinkApi implements RustLibApi {
@@ -18,6 +19,15 @@ class _LinkApi implements RustLibApi {
     this.kind = kind;
     await pending?.future;
   }
+
+  int releases = 0;
+
+  @override
+  Future<void> crateApiNetworkAcceptLinkPush(
+      {required String targetPeer, required bool includeVault, required bool includeFiles}) async {}
+
+  @override
+  Future<void> crateApiNetworkReleaseLinkCode() async => releases++;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -101,5 +111,48 @@ void main() {
     notifier.reset();
     await tester.pump(const Duration(seconds: 60));
     expect(c.read(deviceLinkSyncProvider).phase, LinkPhase.idle);
+  });
+
+  testWidgets('a sent snapshot the other device never confirms stops keeping the link up', (tester) async {
+    final c = container(OverallConnection.connected);
+    final notifier = c.read(deviceLinkSyncProvider.notifier);
+    await notifier.acceptPush('their-device', includeVault: false, includeFiles: false);
+    await tester.pump(kLinkSendingTimeout - const Duration(seconds: 1));
+    expect(c.read(linkPresentingProvider), isTrue);
+    await tester.pump(const Duration(seconds: 1));
+    expect(c.read(deviceLinkSyncProvider).phase, LinkPhase.failed);
+    expect(c.read(deviceLinkSyncProvider).error,
+        "Your other device didn't confirm it got the data. If it isn't linked yet, show a new code and try again.");
+    expect(c.read(linkPresentingProvider), isFalse);
+    notifier.reset();
+  });
+
+  testWidgets('a confirmed snapshot is not failed by the timeout', (tester) async {
+    final c = container(OverallConnection.connected);
+    final notifier = c.read(deviceLinkSyncProvider.notifier);
+    await notifier.acceptPush('their-device', includeVault: false, includeFiles: false);
+    notifier.onPushComplete();
+    await tester.pump(kLinkSendingTimeout);
+    expect(c.read(deviceLinkSyncProvider).phase, LinkPhase.pushDone);
+    notifier.reset();
+  });
+
+  test('a closed dialog ends a code that waits for the relay, and only that', () async {
+    final offline = container(OverallConnection.offline);
+    final waiting = offline.read(deviceLinkSyncProvider.notifier);
+    await waiting.startShowingCode();
+    expect(offline.read(deviceLinkSyncProvider).phase, LinkPhase.renewingCode);
+    final before = api.releases;
+    waiting.dialogGone();
+    expect(offline.read(deviceLinkSyncProvider).phase, LinkPhase.idle);
+    expect(offline.read(linkPresentingProvider), isFalse);
+    expect(api.releases, before + 1);
+
+    final online = container(OverallConnection.connected);
+    final linking = online.read(deviceLinkSyncProvider.notifier);
+    await linking.acceptPush('their-device', includeVault: false, includeFiles: false);
+    linking.dialogGone();
+    expect(online.read(deviceLinkSyncProvider).phase, LinkPhase.sending);
+    linking.reset();
   });
 }

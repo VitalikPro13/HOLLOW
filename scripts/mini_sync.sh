@@ -38,7 +38,7 @@ git rev-parse --git-dir > /dev/null
 idx=$(mktemp)
 trap 'rm -f "$idx" "$idx".*' EXIT
 cp "$(git rev-parse --git-path index)" "$idx"
-GIT_INDEX_FILE=$idx git add -A -- . ':(exclude)tmp*.txt'
+GIT_INDEX_FILE=$idx git add -A -- . ':(exclude)tmp*.txt' ':(exclude).team'
 tree=$(GIT_INDEX_FILE=$idx git write-tree)
 export_git() { git -c core.autocrlf=false -c core.eol=lf "$@"; }
 

@@ -166,6 +166,12 @@ param(
     # Keep whatever the last run left in the data directories instead of
     # restoring the fixtures. Useful for continuing an investigation.
     [switch]$ReuseData,
+    # Start the -Peers from an EMPTY data directory whatever fixture exists, so
+    # they come up at the welcome flow (a device about to be linked).
+    [switch]$Empty,
+    # With -Peers: stop and restart only those peers and leave every other
+    # instance of this fleet running (a journey that adds a device midway).
+    [switch]$KeepOthers,
     # Arrange the windows side by side so a human can watch.
     [bool]$Tile = $true,
     # Run every non-Android peer's relay connection through the zombie proxy
@@ -533,6 +539,17 @@ function Get-PeerDataDir($peer) {
 
 function Reset-PeerData($peer) {
     $fixture = Join-Path (Get-FixtureRoot $peer) $peer
+    if ($Empty) {
+        if (Test-AndroidBackend $peer) {
+            Invoke-AppShell $peer "rm -rf $($script:AndroidDocs)/hollow && mkdir -p $($script:AndroidDocs)/hollow" | Out-Null
+        } else {
+            $run = Get-PeerDataDir $peer
+            if (Test-Path $run) { Remove-Item $run -Recurse -Force }
+            New-Item -ItemType Directory -Path $run -Force | Out-Null
+        }
+        Write-Step "$peer starting from an EMPTY data directory (-Empty)" 'Yellow'
+        return
+    }
     if (Test-AndroidBackend $peer) {
         $data = "$($script:AndroidDocs)/hollow"
         if ($Onboard -and $Fresh -and (Test-Path $fixture)) {
@@ -797,8 +814,17 @@ done
 [ -n "$shell" ] || exit 1
 "@APP@" &
 app=$!
-trap 'kill $app 2>/dev/null' TERM INT
+stopping=
+trap 'stopping=1; pkill -f "^@APP@" 2>/dev/null' TERM INT
 wait $app
+# relaunchApp's waiter starts a new copy just after this one exits (a device link,
+# a profile switch), and that copy needs this compositor: it goes once no copy has
+# run for 15 s.
+quiet=0
+while [ -z "$stopping" ] && [ $quiet -lt 30 ]; do
+    if pgrep -f "^@APP@" >/dev/null; then quiet=0; else quiet=$((quiet + 1)); fi
+    sleep 0.5
+done
 stop_shell
 exit 0
 '@
@@ -1020,8 +1046,14 @@ if ($Relay) {
 # Run
 # --------------------------------------------------------------------------
 
+$stopOnly = @()
+if ($KeepOthers) {
+    if (-not $Peers) { throw '-KeepOthers needs -Peers: it restarts only those peers' }
+    $stopOnly = $peerList
+}
+
 if (-not $Attach) {
-    Stop-Fleet
+    Stop-Fleet $stopOnly
     foreach ($peer in $peerList) { Reset-PeerData $peer }
     if ($NetProxy) {
         $proxied = @($peerList | Where-Object { -not (Test-AndroidBackend $_) })
@@ -1083,7 +1115,7 @@ try {
         # The fixture is the data directory AFTER a clean exit, so the WAL is
         # folded in and the lock file is gone. A half-onboarded directory is
         # worse than none: it looks like a fixture and fails every later run.
-        Stop-Fleet
+        Stop-Fleet $stopOnly
         if ($script:onboardOk) {
             foreach ($peer in $peerList) { Save-Fixture $peer }
         } else {

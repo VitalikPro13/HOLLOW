@@ -329,6 +329,18 @@ struct HeldCommit {
 /// another member's, whose bytes could never be processed again.
 const HELD_COMMITS_CAP: usize = 8;
 
+/// What is left of a commit held past [`HELD_MAX_AGE`] or dropped at
+/// [`HELD_COMMITS_CAP`]: its key is spent, so no catch-up can bring it again, and only
+/// a repair of our leaf moves us past it.
+struct LapsedCommit {
+    facts: CommitFacts,
+    epoch: u64,
+    since: std::time::Instant,
+}
+
+/// How long a lapsed commit is judged again for the repair it may still call for.
+const LAPSED_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// KeyPackages we minted for a group and may still be Welcomed with, by hash reference
 /// and mint time. A parked join's is not listed: its Welcome can come days later.
 type MintedKeyPackages = Mutex<HashMap<String, Vec<(KeyPackageRef, std::time::Instant)>>>;
@@ -377,6 +389,45 @@ impl std::fmt::Display for DecryptFail {
     }
 }
 
+/// Our place in a group. A Welcome held for our view to catch up is a seat on its
+/// way: asking for another leaf then mints the KeyPackage of a second repair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Seat {
+    Held,
+    WelcomeWaits,
+    Missing,
+}
+
+/// Why a commit did not process.
+#[derive(Debug)]
+pub(crate) enum CommitError {
+    /// Its key at our epoch is already spent: we processed this commit before and
+    /// never merged it, so it can never process again.
+    Spent,
+    Other(String),
+}
+
+impl std::fmt::Display for CommitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommitError::Spent => write!(f, "processed before and never merged, its key is spent"),
+            CommitError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<CommitError> for String {
+    fn from(e: CommitError) -> Self {
+        e.to_string()
+    }
+}
+
+impl From<String> for CommitError {
+    fn from(e: String) -> Self {
+        CommitError::Other(e)
+    }
+}
+
 /// One commit that removes and adds leaves, from [`MlsManager::commit_membership`].
 pub(crate) struct MembershipCommit {
     pub commit: Vec<u8>,
@@ -407,6 +458,7 @@ pub(crate) struct MlsManager {
     /// whose digest differs from ours there comes from a fork, not from behind.
     epoch_digests: HashMap<String, VecDeque<(u64, String)>>,
     held_commits: HashMap<String, Vec<HeldCommit>>,
+    lapsed_commits: HashMap<String, Vec<LapsedCommit>>,
     held_welcomes: HashMap<String, HeldWelcome>,
     /// A meeting's only committer, by master: the host that admitted us, or ourselves
     /// when we host it. RAM-only, like meetings.
@@ -465,6 +517,7 @@ impl MlsManager {
             commit_cache: HashMap::new(),
             epoch_digests: HashMap::new(),
             held_commits: HashMap::new(),
+            lapsed_commits: HashMap::new(),
             held_welcomes: HashMap::new(),
             pinned_committers: HashMap::new(),
             answered_key_requests: HashMap::new(),
@@ -1037,6 +1090,7 @@ impl MlsManager {
         self.commit_cache.remove(group_key);
         self.epoch_digests.remove(group_key);
         self.held_commits.remove(group_key);
+        self.lapsed_commits.remove(group_key);
         // We are seated; a held Welcome must not replace this group later.
         self.held_welcomes.remove(group_key);
         let group = staged
@@ -1138,10 +1192,10 @@ impl MlsManager {
         match &verdict {
             Verdict::Accept => self.install_welcome(group_key, staged)?,
             Verdict::Hold(_) => {
-                self.held_welcomes.insert(
-                    group_key.to_string(),
-                    HeldWelcome { staged, facts, since: std::time::Instant::now(), spent: Vec::new() },
-                );
+                // A Welcome replacing a held one keeps its wait: a refreshed Welcome
+                // never holds a seat open past the bound.
+                let since = self.held_welcomes.get(group_key).map_or_else(std::time::Instant::now, |h| h.since);
+                self.held_welcomes.insert(group_key.to_string(), HeldWelcome { staged, facts, since, spent: Vec::new() });
             }
             Verdict::Refuse(_) => {}
         }
@@ -1270,7 +1324,7 @@ impl MlsManager {
         server_id: &str,
         commit_bytes: &[u8],
         judge: impl FnOnce(&CommitFacts) -> Verdict,
-    ) -> Result<Verdict, String> {
+    ) -> Result<Verdict, CommitError> {
         let group = self.groups.get_mut(server_id)
             .ok_or_else(|| format!("No MLS group for server {server_id}"))?;
 
@@ -1281,9 +1335,13 @@ impl MlsManager {
             .try_into_protocol_message()
             .map_err(|e| format!("Commit is not a protocol message: {e:?}"))?;
 
-        let processed = group
-            .process_message(&self.provider, protocol_msg)
-            .map_err(|e| format!("Failed to process commit: {e:?}"))?;
+        let processed = match group.process_message(&self.provider, protocol_msg) {
+            Ok(processed) => processed,
+            Err(ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+                MessageDecryptionError::SecretTreeError(SecretTreeError::SecretReuseError),
+            ))) => return Err(CommitError::Spent),
+            Err(e) => return Err(CommitError::Other(format!("Failed to process commit: {e:?}"))),
+        };
 
         let committer = match processed.sender() {
             Sender::Member(index) => group.member_at(*index).map(|m| member_view(&self.leaf_cache, &m)),
@@ -1291,7 +1349,7 @@ impl MlsManager {
         };
         let staged = match processed.into_content() {
             ProcessedMessageContent::StagedCommitMessage(staged) => *staged,
-            _ => return Err("Expected a commit message".to_string()),
+            _ => return Err(CommitError::Other("Expected a commit message".to_string())),
         };
 
         let own_index = group.own_leaf_index();
@@ -1345,7 +1403,9 @@ impl MlsManager {
                 if held.len() < HELD_COMMITS_CAP {
                     held.push(HeldCommit { staged, facts, epoch, since: std::time::Instant::now() });
                 } else {
-                    hollow_log!("[HOLLOW-MLS] Not holding another commit for {server_id}: {HELD_COMMITS_CAP} committers already wait");
+                    // Its key is spent all the same, so it is dropped as one held past its bound.
+                    self.note_lapsed(server_id, facts, epoch);
+                    return Ok(Verdict::Refuse(format!("{HELD_COMMITS_CAP} committers already wait, dropped unmerged")));
                 }
             }
             Verdict::Refuse(_) => {}
@@ -1354,6 +1414,38 @@ impl MlsManager {
             self.note_epoch(server_id);
         }
         Ok(verdict)
+    }
+
+    /// Keep what is left of a commit dropped unmerged after processing spent its key.
+    fn note_lapsed(&mut self, group_key: &str, facts: CommitFacts, epoch: u64) {
+        let lapsed = self.lapsed_commits.entry(group_key.to_string()).or_default();
+        let from = committer_key(&facts);
+        lapsed.retain(|l| committer_key(&l.facts) != from);
+        if lapsed.len() < HELD_COMMITS_CAP {
+            lapsed.push(LapsedCommit { facts, epoch, since: std::time::Instant::now() });
+        }
+    }
+
+    /// Whether a commit for the group waits for a retry and may still merge.
+    pub fn holds_commit(&self, group_key: &str) -> bool {
+        self.held_commits.get(group_key).is_some_and(|held| !held.is_empty())
+    }
+
+    /// Whether a Welcome into the group is held for our view, whether or not we still
+    /// hold the stale group it would replace: the repair it carries is on its way.
+    pub fn welcome_waits(&self, group_key: &str) -> bool {
+        self.held_welcomes.contains_key(group_key)
+    }
+
+    /// Whether we hold the group, wait on a held Welcome into it, or neither.
+    pub fn seat(&self, group_key: &str) -> Seat {
+        if self.groups.contains_key(group_key) {
+            Seat::Held
+        } else if self.held_welcomes.contains_key(group_key) {
+            Seat::WelcomeWaits
+        } else {
+            Seat::Missing
+        }
     }
 
     /// Re-judge the commits held for a group. `None` when nothing is held. The first
@@ -1368,7 +1460,7 @@ impl MlsManager {
         let Some(group) = self.groups.get_mut(group_key) else {
             return Some(Ok(Verdict::Refuse("group gone".to_string())));
         };
-        let (mut kept, mut ruling) = (Vec::new(), None);
+        let (mut kept, mut lapsing, mut ruling) = (Vec::new(), Vec::new(), None);
         for commit in held {
             if matches!(ruling, Some(Verdict::Accept)) || group.epoch().as_u64() != commit.epoch {
                 ruling.get_or_insert(Verdict::Refuse("overtaken by another commit".to_string()));
@@ -1376,6 +1468,7 @@ impl MlsManager {
             }
             if commit.since.elapsed() >= HELD_MAX_AGE {
                 ruling.get_or_insert(Verdict::Refuse("held too long".to_string()));
+                lapsing.push((commit.facts, commit.epoch));
                 continue;
             }
             match judge(&commit.facts) {
@@ -1397,6 +1490,9 @@ impl MlsManager {
                 }
             }
         }
+        for (facts, epoch) in lapsing {
+            self.note_lapsed(group_key, facts, epoch);
+        }
         if matches!(ruling, Some(Verdict::Accept)) {
             self.note_epoch(group_key);
         } else if !kept.is_empty() {
@@ -1405,15 +1501,70 @@ impl MlsManager {
         ruling.map(Ok)
     }
 
+    /// Whether a commit we held past its bound would pass `judge` now, while we still
+    /// sit at the epoch it left: then the group moved on without us and only a repair
+    /// brings us back. Lapsed commits our epoch passed, past [`LAPSED_MAX_AGE`] or now
+    /// refused are forgotten; [`Self::clear_lapsed`] ends the rest once a repair is asked.
+    pub fn lapsed_commit_passes(&mut self, group_key: &str, mut judge: impl FnMut(&CommitFacts) -> Verdict) -> bool {
+        let Some(lapsed) = self.lapsed_commits.remove(group_key) else { return false };
+        let Ok(epoch) = self.epoch(group_key) else { return false };
+        let mut passes = false;
+        let kept: Vec<LapsedCommit> = lapsed
+            .into_iter()
+            .filter(|l| l.epoch == epoch && l.since.elapsed() < LAPSED_MAX_AGE)
+            .filter(|l| match judge(&l.facts) {
+                Verdict::Accept => {
+                    passes = true;
+                    true
+                }
+                Verdict::Hold(_) => true,
+                Verdict::Refuse(_) => false,
+            })
+            .collect();
+        if !kept.is_empty() {
+            self.lapsed_commits.insert(group_key.to_string(), kept);
+        }
+        passes
+    }
+
+    /// Forget the lapsed commits of a group once a repair of our leaf is asked for.
+    pub fn clear_lapsed(&mut self, group_key: &str) {
+        self.lapsed_commits.remove(group_key);
+    }
+
+    /// Ages every held and lapsed commit by `by`, as if it had waited that long.
+    #[cfg(test)]
+    pub fn age_held_commits(&mut self, by: std::time::Duration) {
+        let age = |since: &mut std::time::Instant| *since = since.checked_sub(by).unwrap_or(*since);
+        self.held_commits.values_mut().flatten().for_each(|c| age(&mut c.since));
+        self.lapsed_commits.values_mut().flatten().for_each(|l| age(&mut l.since));
+    }
+
+    /// Group keys holding a commit, those holding a lapsed one, and those holding a Welcome.
+    #[cfg(test)]
+    pub fn held_and_lapsed(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+        (
+            self.held_commits.keys().cloned().collect(),
+            self.lapsed_commits.keys().cloned().collect(),
+            self.held_welcomes.keys().cloned().collect(),
+        )
+    }
+
     /// Whether the Welcome that should follow the commit that evicted us from
     /// `group_key` can be opened: it re-adds this device with a KeyPackage we hold.
     pub fn take_eviction_welcome(&mut self, group_key: &str) -> bool {
         self.evictions.remove(group_key).unwrap_or(true)
     }
 
-    /// Group keys with a held commit or Welcome awaiting a retry.
+    /// Group keys with a held or lapsed commit or a held Welcome awaiting a retry.
     pub fn held_group_keys(&self) -> Vec<String> {
-        let mut keys: Vec<String> = self.held_commits.keys().chain(self.held_welcomes.keys()).cloned().collect();
+        let mut keys: Vec<String> = self
+            .held_commits
+            .keys()
+            .chain(self.lapsed_commits.keys())
+            .chain(self.held_welcomes.keys())
+            .cloned()
+            .collect();
         keys.sort();
         keys.dedup();
         keys
@@ -1515,6 +1666,7 @@ impl MlsManager {
         self.commit_cache.remove(server_id);
         self.epoch_digests.remove(server_id);
         self.held_commits.remove(server_id);
+        self.lapsed_commits.remove(server_id);
         self.held_welcomes.remove(server_id);
         self.pinned_committers.remove(server_id);
         if let Ok(mut cache) = self.seat_cache.lock() {
@@ -2513,6 +2665,78 @@ mod tests {
         assert!(member.retry_held_commit("s", |_| Verdict::Accept).is_none());
     }
 
+    /// A commit held past its bound is dropped unmerged and its key stays spent, so it
+    /// never merges later; what is left of it asks for a repair only once it would pass,
+    /// only while we sit at its epoch, and is forgotten when refused.
+    #[test]
+    fn a_commit_held_past_its_bound_lapses_unmerged_and_calls_for_a_repair_once_it_passes() {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group("s").unwrap();
+        let (mut member, _) = bound(3, 4);
+        let (_, welcome) = owner.add_member("s", &member.generate_key_package().unwrap()).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        member.join_from_welcome("s", &welcome).unwrap();
+
+        let (joiner, _) = bound(5, 6);
+        let (commit, _) = owner.add_member("s", &joiner.generate_key_package().unwrap()).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        let before = member.epoch("s").unwrap();
+        member.process_commit_judged("s", &commit, |_| Verdict::Hold("lag".into())).unwrap();
+        member.age_held_commits(HELD_MAX_AGE);
+        assert_eq!(member.retry_held_commit("s", |_| Verdict::Accept).unwrap().unwrap(),
+            Verdict::Refuse("held too long".into()), "a commit past its bound merged");
+        assert_eq!(member.epoch("s").unwrap(), before);
+        assert_eq!(member.held_and_lapsed(), (Vec::new(), vec!["s".to_string()], Vec::new()));
+        assert!(member.held_group_keys().contains(&"s".to_string()), "the batch tick no longer judges it");
+
+        assert!(!member.lapsed_commit_passes("s", |_| Verdict::Hold("lag".into())));
+        assert!(member.lapsed_commit_passes("s", |_| Verdict::Accept));
+        assert!(member.lapsed_commit_passes("s", |_| Verdict::Accept), "kept until a repair is asked");
+        member.clear_lapsed("s");
+        assert!(!member.lapsed_commit_passes("s", |_| Verdict::Accept));
+        assert!(member.process_commit_judged("s", &commit, |_| Verdict::Accept).is_err(), "its key is spent");
+
+    }
+
+    /// A lapsed commit is forgotten once it is refused, and once another commit at its
+    /// epoch moved us on.
+    #[test]
+    fn a_lapsed_commit_is_forgotten_when_refused_or_passed_by_our_epoch() {
+        let lapse = |member: &mut MlsManager, commit: &[u8]| {
+            member.process_commit_judged("s", commit, |_| Verdict::Hold("lag".into())).unwrap();
+            member.age_held_commits(HELD_MAX_AGE);
+            member.retry_held_commit("s", |_| Verdict::Accept);
+        };
+        let trio = || {
+            let (mut owner, _) = bound(1, 2);
+            owner.create_group("s").unwrap();
+            let (mut member, member_id) = bound(3, 4);
+            let (mut other, other_id) = bound(5, 6);
+            let kps = [
+                (member_id, member.generate_key_package().unwrap()),
+                (other_id, other.generate_key_package().unwrap()),
+            ];
+            let (_, welcome, _) = owner.add_members_batch("s", &kps).unwrap();
+            owner.merge_pending_commit("s").unwrap();
+            member.join_from_welcome("s", &welcome).unwrap();
+            other.join_from_welcome("s", &welcome).unwrap();
+            (owner, member, other)
+        };
+
+        let (mut owner, mut member, _) = trio();
+        let (held, _) = owner.add_member("s", &bound(7, 8).0.generate_key_package().unwrap()).unwrap();
+        lapse(&mut member, &held);
+        assert!(!member.lapsed_commit_passes("s", |_| Verdict::Refuse("revoked".into())));
+        assert!(!member.lapsed_commit_passes("s", |_| Verdict::Accept), "a refused lapsed commit came back");
+
+        let (mut owner, mut member, mut other) = trio();
+        let (held, _) = owner.add_member("s", &bound(9, 10).0.generate_key_package().unwrap()).unwrap();
+        let (rival, _) = other.add_member("s", &bound(11, 12).0.generate_key_package().unwrap()).unwrap();
+        lapse(&mut member, &held);
+        assert_eq!(member.process_commit_judged("s", &rival, |_| Verdict::Accept).unwrap(), Verdict::Accept);
+        assert!(!member.lapsed_commit_passes("s", |_| Verdict::Accept), "a lapsed commit outlived its epoch");
+    }
+
     /// While our own leaf is unbound we neither encrypt nor commit in the group.
     #[test]
     fn an_unbound_own_leaf_neither_encrypts_nor_commits() {
@@ -2886,5 +3110,138 @@ mod persisted_storage_fixture {
             .encrypt(&server_id, b"after the upgrade")
             .expect("rebound group must encrypt");
         assert!(!ct.is_empty());
+    }
+}
+
+// md-mls-2
+#[cfg(test)]
+mod md_mls_2 {
+    use super::test_keys::bound;
+    use super::*;
+
+    /// A commit processed before and never merged says its key is spent, unlike a frame
+    /// that fails for any other reason; one dropped at the held cap is reported refused,
+    /// never held, and leaves what a repair needs.
+    #[test]
+    fn a_commit_processed_before_says_its_key_is_spent_and_one_dropped_at_the_cap_is_refused() {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group("s").unwrap();
+        let (mut member, member_id) = bound(3, 4);
+        let mut committers: Vec<(MlsManager, String)> =
+            (0..HELD_COMMITS_CAP as u8 + 1).map(|i| bound(40 + 2 * i, 41 + 2 * i)).collect();
+        let mut kps = vec![(member_id, member.generate_key_package().unwrap())];
+        for (c, id) in committers.iter_mut() {
+            kps.push((id.clone(), c.generate_key_package().unwrap()));
+        }
+        let (_, welcome, _) = owner.add_members_batch("s", &kps).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        member.join_from_welcome("s", &welcome).unwrap();
+        for (c, _) in committers.iter_mut() {
+            c.join_from_welcome("s", &welcome).unwrap();
+        }
+
+        let mut verdicts = Vec::new();
+        let mut first = Vec::new();
+        for (i, (c, _)) in committers.iter_mut().enumerate() {
+            let kp = bound(120 + 2 * i as u8, 121 + 2 * i as u8).0.generate_key_package().unwrap();
+            let (commit, _) = c.add_member("s", &kp).unwrap();
+            verdicts.push(member.process_commit_judged("s", &commit, |_| Verdict::Hold("lag".into())).unwrap());
+            if i == 0 {
+                first = commit;
+            }
+        }
+        assert!(verdicts[..HELD_COMMITS_CAP].iter().all(|v| matches!(v, Verdict::Hold(_))));
+        assert!(matches!(&verdicts[HELD_COMMITS_CAP], Verdict::Refuse(_)), "dropped at the cap, yet reported held");
+        assert!(member.holds_commit("s"));
+        assert_eq!(member.lapsed_commits.get("s").map(Vec::len), Some(1), "the commit dropped at the cap left nothing");
+
+        assert!(matches!(member.process_commit_judged("s", &first, |_| Verdict::Accept), Err(CommitError::Spent)));
+        let mut torn = first.clone();
+        torn.truncate(torn.len() / 2);
+        assert!(matches!(member.process_commit_judged("s", &torn, |_| Verdict::Accept), Err(CommitError::Other(_))));
+    }
+
+    /// A Welcome held for our view is a seat on its way, so nothing asks for another
+    /// leaf meanwhile; it keeps our KeyPackage until it installs or is refused.
+    #[test]
+    fn a_held_welcome_is_a_seat_on_its_way_and_keeps_our_key_package() {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group("s").unwrap();
+        let (mut member, _) = bound(3, 4);
+        assert_eq!(member.seat("s"), Seat::Missing);
+        let (_, welcome) = owner.add_member("s", &member.generate_key_package().unwrap()).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+
+        assert_eq!(member.join_from_welcome_judged("s", &welcome, |_| Verdict::Hold("roster".into())).unwrap(),
+            Verdict::Hold("roster".into()));
+        assert_eq!(member.seat("s"), Seat::WelcomeWaits, "a held Welcome left us asking for another leaf");
+        assert!(member.names_our_key_package(&welcome), "holding the Welcome spent our KeyPackage");
+        assert_eq!(member.retry_held_welcome("s", |_| Verdict::Accept), Some(Ok(Verdict::Accept)));
+        assert_eq!(member.seat("s"), Seat::Held);
+    }
+
+    /// A Welcome that replaces a held one keeps the first one's wait, so a stream of
+    /// refreshed Welcomes cannot hold a seat open past the bound.
+    #[test]
+    fn a_held_welcome_replaced_by_another_keeps_its_bound() {
+        let (mut member, _) = bound(3, 4);
+        let mut welcome_from = |tags: (u8, u8)| {
+            let (mut owner, _) = bound(tags.0, tags.1);
+            owner.create_group("s").unwrap();
+            let (_, welcome) = owner.add_member("s", &member.generate_key_package().unwrap()).unwrap();
+            welcome
+        };
+        let (first, second) = (welcome_from((1, 2)), welcome_from((5, 6)));
+        let hold = |_: &WelcomeFacts| Verdict::Hold("roster".into());
+        assert!(matches!(member.join_from_welcome_judged("s", &first, hold).unwrap(), Verdict::Hold(_)));
+        let held = member.held_welcomes.get_mut("s").unwrap();
+        held.since = held.since.checked_sub(HELD_MAX_AGE).unwrap();
+        assert!(matches!(member.join_from_welcome_judged("s", &second, hold).unwrap(), Verdict::Hold(_)));
+        assert!(member.welcome_waits("s"));
+        assert_eq!(member.retry_held_welcome("s", |_| Verdict::Accept), Some(Ok(Verdict::Refuse("held too long".into()))),
+            "a refreshed Welcome kept the seat waiting past the bound");
+        assert!(!member.welcome_waits("s"));
+    }
+}
+
+// md-review-mls
+#[cfg(test)]
+mod md_review_mls {
+    use super::test_keys::bound;
+    use super::*;
+
+    /// A commit held while the cap is full is processed (its key spent) and then dropped
+    /// with no lapsed record, so nothing ever calls for the repair it needs: the F1 fork.
+    #[test]
+    fn a_commit_dropped_at_the_held_cap_still_leaves_a_lapsed_record() {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group("s").unwrap();
+        let (mut member, member_id) = bound(3, 4);
+        let mut committers: Vec<(MlsManager, String)> = (0..HELD_COMMITS_CAP as u8 + 1).map(|i| bound(20 + 2 * i, 21 + 2 * i)).collect();
+        let mut kps = vec![(member_id, member.generate_key_package().unwrap())];
+        for (c, id) in committers.iter_mut() {
+            kps.push((id.clone(), c.generate_key_package().unwrap()));
+        }
+        let (_, welcome, _) = owner.add_members_batch("s", &kps).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        member.join_from_welcome("s", &welcome).unwrap();
+        for (c, _) in committers.iter_mut() {
+            c.join_from_welcome("s", &welcome).unwrap();
+        }
+
+        let mut last = Vec::new();
+        for (i, (c, _)) in committers.iter_mut().enumerate() {
+            let (commit, _) = c.add_member("s", &bound(100 + 2 * i as u8, 101 + 2 * i as u8).0.generate_key_package().unwrap()).unwrap();
+            member.process_commit_judged("s", &commit, |_| Verdict::Hold("lag".into())).unwrap();
+            last = commit;
+        }
+        assert_eq!(member.held_commits["s"].len(), HELD_COMMITS_CAP);
+        assert!(member.process_commit_judged("s", &last, |_| Verdict::Accept).is_err(), "its key is spent");
+        member.age_held_commits(HELD_MAX_AGE);
+        member.retry_held_commit("s", |_| Verdict::Accept);
+        let ninth = Some(super::test_keys::keypair(20 + 2 * HELD_COMMITS_CAP as u8).peer_id());
+        let lapsed: Vec<Option<String>> =
+            member.lapsed_commits.get("s").into_iter().flatten().map(|l| committer_key(&l.facts)).collect();
+        assert!(lapsed.contains(&ninth), "the commit dropped at the cap left nothing to call for its repair: {lapsed:?}");
     }
 }

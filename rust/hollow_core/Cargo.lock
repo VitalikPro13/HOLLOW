@@ -1961,6 +1961,7 @@ dependencies = [
  "hollow_dfn",
  "image",
  "jni",
+ "libc",
  "libwebp-sys2",
  "log",
  "openmls",

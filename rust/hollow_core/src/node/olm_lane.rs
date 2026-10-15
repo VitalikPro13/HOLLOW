@@ -93,6 +93,35 @@ pub(crate) fn carry_to_own_siblings(
     siblings.len()
 }
 
+/// [`carry_to_own_siblings`], plus every other device our roster counts through our own
+/// inbox: one the relay hides (a phone put away) is in no presence list but still takes
+/// frames, and an offline one gets it from the relay's buffer. One copy per device.
+pub(crate) fn carry_to_every_own_device(
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    local_master: &str,
+    local_device: &str,
+    msg: &HavenMessage,
+) -> usize {
+    let Some(json) = carried_json(msg) else { return 0 };
+    let present = super::crypto_handler::online_devices_for(ws_room_peers, local_master);
+    let own_inbox = format!("inbox:{local_master}");
+    let mut sent = 0;
+    for device in &present {
+        if device != local_device {
+            carry_json(ws_cmd_tx, device, None, json.clone(), NoSession::Queue);
+            sent += 1;
+        }
+    }
+    for device in super::resolver::devices_for(local_master) {
+        if device != local_device && !present.contains(&device) && !super::resolver::is_revoked(&device) {
+            carry_json(ws_cmd_tx, &device, Some(&own_inbox), json.clone(), NoSession::Queue);
+            sent += 1;
+        }
+    }
+    sent
+}
+
 /// Carry an envelope to every online device of one identity (a master or a device
 /// id), the Olm counterpart of `send_raw_to_identity`. Returns how many there were.
 pub(crate) fn carry_to_identity(

@@ -360,6 +360,13 @@ pub(crate) fn stamp_ceiling(sent_ms: i64) -> i64 {
     sent_ms.saturating_add(LIVE_SKEW_MS)
 }
 
+/// The latest stamp a row we stored can honestly carry at `now_ms`: every ingest holds
+/// a stamp to its frame's [`stamp_ceiling`], and a frame is refused past ours by
+/// [`LIVE_SKEW_MS`]. A stored row past it was planted, and any genuine write replaces it.
+pub(crate) fn stored_stamp_limit(now_ms: i64) -> i64 {
+    stamp_ceiling(stamp_ceiling(now_ms))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

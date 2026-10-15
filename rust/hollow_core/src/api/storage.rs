@@ -66,14 +66,16 @@ pub(crate) fn derive_db_key_public() -> Result<String, String> {
 }
 
 fn derive_db_key() -> Result<String, String> {
-    let id = identity::load_or_create_identity()?;
-    let proto = id
-        .keypair
+    db_key_of(&identity::load_or_create_identity()?.keypair)
+}
+
+/// The database key of the identity `master`: the first 32 bytes of its protobuf
+/// encoding, deterministic per identity.
+fn db_key_of(master: &crate::identity::native_identity::NativeKeypair) -> Result<String, String> {
+    let proto = master
         .to_protobuf_encoding()
         .map_err(|e| format!("Failed to encode keypair: {e}"))?;
-    // The first 32 bytes of the protobuf-encoded keypair, deterministic per identity.
-    let key_bytes = &proto[..32.min(proto.len())];
-    Ok(hex::encode(key_bytes))
+    Ok(hex::encode(&proto[..32.min(proto.len())]))
 }
 
 /// Open the encrypted message database, once at app start after the identity loads.
@@ -90,8 +92,15 @@ pub fn open_message_store() -> Result<(), String> {
     std::fs::create_dir_all(&hollow_dir)
         .map_err(|e| format!("Failed to create data dir: {e}"))?;
     let db_path = hollow_dir.join("messages.db");
+    // A relink moving the old set out: a database made now would land beside it. A
+    // reclaim still waiting: one made now would take the kept database's place.
+    let reclaim_waits = crate::identity::reclaim_pending(&hollow_dir)
+        && !DB_PARTS.iter().any(|part| present(&hollow_dir.join(format!("messages.db{part}"))));
+    if crate::api::recovery::relink_in_progress() || reclaim_waits {
+        return Err(IDENTITY_NOT_READY.to_string());
+    }
 
-    let passphrase = derive_db_key()?;
+    let passphrase = derive_db_key().inspect_err(|e| note_store_refusal(&hollow_dir, e))?;
     let path = db_path.to_str().ok_or("Invalid path encoding")?;
     let ms = MessageStore::open(path, &passphrase).inspect_err(|e| note_store_refusal(&hollow_dir, e))?;
     // Dart can open the store before the node starts, and it reads attachments
@@ -1457,7 +1466,9 @@ pub fn get_missing_image_file_ids_for_server(server_id: String) -> Result<Vec<St
 #[frb]
 pub fn has_identity() -> Result<bool, String> {
     let dir = crate::identity::data_dir()?;
-    Ok(dir.join("identity.key").exists())
+    // A key a wipe could not take yet (another program held it) belongs to an
+    // identity that is gone: the launch shows Welcome, never its unlock.
+    Ok(dir.join("identity.key").exists() && !present(&dir.join(PENDING_WIPE_MARKER)))
 }
 
 /// Delete the on-disk identity and local DB so the next launch shows a fresh Welcome.
@@ -1636,24 +1647,108 @@ fn check_snapshot(zip_bytes: &[u8]) -> Result<CheckedSnapshot<'_>, String> {
 /// identities and any stored recovery phrase removed. The live database is untouched.
 fn scrubbed_db_copy(data_dir: &std::path::Path, db_path: &std::path::Path) -> Result<Vec<u8>, String> {
     let db_passphrase = derive_db_key()?;
-    if let Ok(store) = crate::storage::MessageStore::open(
-        db_path.to_str().unwrap_or_default(), &db_passphrase,
-    ) {
-        let _ = store.wal_checkpoint();
-    }
     let copy = data_dir.join("export_scrub.db");
-    let _ = std::fs::remove_file(&copy);
-    std::fs::copy(db_path, &copy).map_err(|e| format!("Failed to copy messages.db: {e}"))?;
-    let scrubbed = (|| {
+    let clear = || {
+        for leftover in ["export_scrub.db", "export_scrub.db-wal", "export_scrub.db-shm"] {
+            let _ = std::fs::remove_file(data_dir.join(leftover));
+        }
+    };
+    clear();
+    let scrubbed = backup_database(db_path, &copy, &db_passphrase).and_then(|()| {
         let store = crate::storage::MessageStore::open(copy.to_str().unwrap_or_default(), &db_passphrase)?;
         store.scrub_device_secrets()?;
         drop(store);
+        // Closing the only connection folds its WAL into the file; one left over would
+        // hold rows the read below misses.
+        if std::fs::metadata(data_dir.join("export_scrub.db-wal")).is_ok_and(|m| m.len() > 0) {
+            return Err("The scrubbed copy kept part of itself in its WAL".to_string());
+        }
         std::fs::read(&copy).map_err(|e| format!("Failed to read the scrubbed copy: {e}"))
-    })();
-    for leftover in ["export_scrub.db", "export_scrub.db-wal", "export_scrub.db-shm"] {
-        let _ = std::fs::remove_file(data_dir.join(leftover));
-    }
+    });
+    clear();
     scrubbed
+}
+
+/// How long a snapshot waits for the database to let a backup read it.
+const SNAPSHOT_BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Pages a snapshot of a rollback-journal database (iOS) reads at a time: while it
+/// reads, no writer can commit.
+const SNAPSHOT_STEP_PAGES: i32 = 256;
+const SNAPSHOT_STEP_PAUSE: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// A rollback-journal snapshot starts over after every commit it lets through. One
+/// that kept starting over finishes in ONE read only when that read is short enough
+/// that no writer's busy wait (4 s) runs out behind it, else it is refused.
+const SNAPSHOT_RESTARTS: u32 = 20;
+const SNAPSHOT_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[cfg(test)]
+static SNAPSHOT_READING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static SNAPSHOT_HOLD_LIMIT_OVERRIDE: Mutex<Option<std::time::Duration>> = Mutex::new(None);
+
+/// Copies the committed state of `from` into a new database at `to` under the same key,
+/// with SQLite's online backup. A file copy after a checkpoint misses the rows a
+/// checkpoint could not move past the node's open connections. Under WAL it is ONE
+/// read, which never blocks a writer; under a rollback journal it goes in short steps,
+/// so a writer's busy wait never runs out behind it: a waiting writer holds the next
+/// step off until it has committed.
+fn backup_database(from: &std::path::Path, to: &std::path::Path, passphrase: &str) -> Result<(), String> {
+    use rusqlite::backup::{Backup, StepResult};
+    let failed = |e: rusqlite::Error| format!("Failed to copy messages.db: {e}");
+    let key = format!("PRAGMA key = \"x'{passphrase}'\";");
+    let source = rusqlite::Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(failed)?;
+    source.execute_batch(&key).map_err(failed)?;
+    let wal = source
+        .query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+        .map_err(failed)?
+        .eq_ignore_ascii_case("wal");
+    let (mut pages, pause) = if wal { (-1, std::time::Duration::ZERO) } else { (SNAPSHOT_STEP_PAGES, SNAPSHOT_STEP_PAUSE) };
+    #[cfg(not(test))]
+    let hold_limit = SNAPSHOT_HOLD_LIMIT;
+    #[cfg(test)]
+    let hold_limit = SNAPSHOT_HOLD_LIMIT_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or(SNAPSHOT_HOLD_LIMIT);
+    let mut target = rusqlite::Connection::open(to).map_err(failed)?;
+    target.execute_batch(&key).map_err(failed)?;
+    let backup = Backup::new(&source, &mut target).map_err(failed)?;
+    #[cfg(test)]
+    SNAPSHOT_READING.store(true, std::sync::atomic::Ordering::Release);
+    let mut busy_until = None;
+    let (mut remaining, mut restarts) = (i32::MAX, 0);
+    let (mut steps, mut reading) = (0u32, std::time::Duration::ZERO);
+    loop {
+        let began = std::time::Instant::now();
+        match backup.step(pages).map_err(failed)? {
+            StepResult::Done => return Ok(()),
+            StepResult::More => {
+                busy_until = None;
+                steps += 1;
+                reading += began.elapsed();
+                let now_remaining = backup.progress().remaining;
+                // A step that copied pages yet left as many to go started over.
+                if now_remaining >= remaining {
+                    restarts += 1;
+                }
+                remaining = now_remaining;
+                if restarts > SNAPSHOT_RESTARTS {
+                    let one_read = reading / (steps * SNAPSHOT_STEP_PAGES as u32) * backup.progress().pagecount.max(0) as u32;
+                    if one_read > hold_limit {
+                        return Err("Failed to copy messages.db: it kept changing".to_string());
+                    }
+                    pages = -1;
+                }
+                std::thread::sleep(pause);
+            }
+            _ => {
+                let until = *busy_until.get_or_insert_with(|| std::time::Instant::now() + SNAPSHOT_BUSY_WAIT);
+                if std::time::Instant::now() >= until {
+                    return Err("Failed to copy messages.db: it stayed busy".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 /// Extract a plaintext snapshot ZIP into the data directory, replacing the identity and
@@ -1709,6 +1804,9 @@ static FAIL_COMMIT_AT: Mutex<Option<&'static str>> = Mutex::new(None);
 /// Test hook: the process dies at this file, so nothing after it runs.
 #[cfg(test)]
 static CRASH_COMMIT_AT: Mutex<Option<&'static str>> = Mutex::new(None);
+/// Test hook: a second name for the staged key, taken when the commit fails.
+#[cfg(test)]
+static STAGE_PEEK: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 #[cfg(test)]
 static COMMIT_SAW_LANDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Test hook: the process dies at this step of a finished landing's cleanup.
@@ -1829,6 +1927,9 @@ fn commit_new_set(root: &std::path::Path, stage: &std::path::Path) -> Result<(),
         #[cfg(test)]
         if *FAIL_COMMIT_AT.lock().unwrap_or_else(|e| e.into_inner()) == Some(name) {
             COMMIT_SAW_LANDING.store(landing_in_progress(), std::sync::atomic::Ordering::Release);
+            if let Some(peek) = STAGE_PEEK.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                std::fs::hard_link(stage.join("identity.key"), peek).unwrap();
+            }
             return Err(format!("Failed to place {name}: test fault"));
         }
         #[cfg(test)]
@@ -1861,9 +1962,8 @@ fn roll_back_landing(root: &std::path::Path, aside: &std::path::Path) -> Result<
     let moved = aside.join(ASIDE_MOVED);
     if present(&moved) {
         for name in IDENTITY_SET {
-            let p = root.join(name);
-            if present(&p) {
-                std::fs::remove_file(&p).map_err(|e| format!("Failed to remove the new {name}: {e}"))?;
+            if present(&root.join(name)) {
+                remove_set_file(root, name).map_err(|e| format!("Failed to remove the new {name}: {e}"))?;
             }
         }
         std::fs::remove_file(&moved).map_err(|e| format!("Failed to clear the moved mark: {e}"))?;
@@ -1875,7 +1975,21 @@ fn roll_back_landing(root: &std::path::Path, aside: &std::path::Path) -> Result<
     for name in back {
         std::fs::rename(aside.join(name), root.join(name)).map_err(|e| format!("Failed to put back {name}: {e}"))?;
     }
-    std::fs::remove_dir_all(aside).map_err(|e| format!("Failed to clear the old identity's folder: {e}"))
+    remove_landing_dir(aside).map_err(|e| format!("Failed to clear the old identity's folder: {e}"))
+}
+
+/// Removes one file of the identity set from `dir`; a key is zeroed first.
+fn remove_set_file(dir: &std::path::Path, name: &str) -> std::io::Result<()> {
+    let path = dir.join(name);
+    if name.starts_with("identity.") {
+        crate::api::wipe::zero_in_place(&path)?;
+    }
+    std::fs::remove_file(path)
+}
+
+/// Removes a landing's stage or aside folder, zeroing the keys in it first.
+fn remove_landing_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    crate::api::wipe::remove_dir_zeroing_keys(dir)
 }
 
 /// Clears what a finished landing leaves behind, and returns how many content files
@@ -1891,7 +2005,7 @@ fn finish_landing(root: &std::path::Path) -> (usize, Result<(), String>) {
 
 fn clear_landing_leftovers(root: &std::path::Path, stage: &std::path::Path) -> Result<(), String> {
     if present(stage) {
-        std::fs::remove_dir_all(stage).map_err(|e| format!("Failed to clear the landing's stage: {e}"))?;
+        remove_landing_dir(stage).map_err(|e| format!("Failed to clear the landing's stage: {e}"))?;
     }
     let aside = root.join(LANDING_ASIDE);
     #[cfg(test)]
@@ -1905,7 +2019,7 @@ fn clear_landing_leftovers(root: &std::path::Path, stage: &std::path::Path) -> R
     #[cfg(test)]
     cleanup_crash_point("aside");
     if present(&aside) {
-        std::fs::remove_dir_all(&aside).map_err(|e| format!("Failed to clear the replaced identity: {e}"))?;
+        remove_landing_dir(&aside).map_err(|e| format!("Failed to clear the replaced identity: {e}"))?;
     }
     #[cfg(test)]
     cleanup_crash_point("landed");
@@ -1930,7 +2044,7 @@ fn recover_interrupted_landing(root: &std::path::Path) -> Result<(), String> {
     }
     let stage = root.join(LANDING_STAGE);
     if present(&stage) {
-        std::fs::remove_dir_all(&stage).map_err(|e| format!("Failed to clear an old landing: {e}"))?;
+        remove_landing_dir(&stage).map_err(|e| format!("Failed to clear an old landing: {e}"))?;
     }
     let aside = root.join(LANDING_ASIDE);
     if !present(&aside) {
@@ -1961,20 +2075,54 @@ fn place_content(stage: &std::path::Path, root: &std::path::Path) -> usize {
     misplaced
 }
 
+/// The staged database, before anything moves, forgets every path outside this root
+/// (HOL-SEC-129: a backup may come from someone else) and loses the source device's
+/// Olm and MLS identities and stored phrase (a restored or linked device is a NEW
+/// device). A set whose database either step cannot finish never lands.
+fn clean_staged_database(stage: &std::path::Path, root: &std::path::Path) -> Result<(), String> {
+    let db = stage.join("messages.db");
+    if !present(&db) {
+        return Ok(());
+    }
+    let forgotten = (|| {
+        let key = zeroize::Zeroizing::new(
+            std::fs::read(stage.join("identity.key")).map_err(|e| format!("identity.key: {e}"))?,
+        );
+        let master = crate::identity::native_identity::NativeKeypair::from_protobuf_encoding(&key)
+            .map_err(|e| format!("identity.key: {e}"))?;
+        let store =
+            crate::storage::MessageStore::open(db.to_str().ok_or("a database path that is not text")?, &db_key_of(&master)?)?;
+        let forgotten = store.forget_foreign_paths_staged(root, &stage.join("files"))?;
+        // After the path gate, so its rebuild leaves no forgotten path in a free page.
+        store.scrub_device_secrets()?;
+        store.wal_checkpoint()?;
+        Ok::<u32, String>(forgotten)
+    })()
+    .map_err(|e| {
+        hollow_log!("[HOLLOW-LINK] The snapshot's database could not be checked: {e}");
+        "This backup's database could not be checked, so nothing was restored.".to_string()
+    })?;
+    if forgotten > 0 {
+        hollow_log!("[HOLLOW-LINK] {forgotten} path(s) of the source device forgotten");
+    }
+    Ok(())
+}
+
 fn land_snapshot(snapshot: CheckedSnapshot<'_>, device: Option<&[u8]>) -> Result<(), String> {
     let CheckedSnapshot { mut archive, landings } = snapshot;
     let data_dir = crate::identity::data_dir()?;
-    // The next launch's wipe would take whatever lands now.
-    if present(&data_dir.join(PENDING_WIPE_MARKER)) {
-        return Err(IDENTITY_NOT_READY.to_string());
-    }
+    // The same guard as every key mint: a pending wipe would take whatever lands now,
+    // and an unsettled relink would move old data into it.
+    refuse_while_not_ready()?;
     recover_interrupted_landing(&data_dir)?;
 
     let stage = data_dir.join(LANDING_STAGE);
-    let landed = match stage_new_set(&mut archive, &landings, &stage, device) {
+    let staged = stage_new_set(&mut archive, &landings, &stage, device)
+        .and_then(|landed| clean_staged_database(&stage, &data_dir).map(|()| landed));
+    let landed = match staged {
         Ok(landed) => landed,
         Err(e) => {
-            let _ = std::fs::remove_dir_all(&stage);
+            let _ = remove_landing_dir(&stage);
             return Err(e);
         }
     };
@@ -1993,7 +2141,7 @@ fn land_snapshot(snapshot: CheckedSnapshot<'_>, device: Option<&[u8]>) -> Result
     if let Err(e) = swapped {
         let undone = roll_back_landing(&data_dir, &aside);
         drop(flag);
-        let _ = std::fs::remove_dir_all(&stage);
+        let _ = remove_landing_dir(&stage);
         return Err(match undone {
             Ok(()) => e,
             Err(u) => format!("{e}; the old identity is not back yet ({u})"),
@@ -2015,15 +2163,10 @@ fn land_snapshot(snapshot: CheckedSnapshot<'_>, device: Option<&[u8]>) -> Result
     // IMPORTED database rather than the one that is gone.
     crate::node::at_rest::forget_stores();
 
-    // A restored or linked device is a NEW device: it mints its own Olm and MLS
-    // identities. An older snapshot still carries its source's, and its phrase.
+    // The keys landed unprotected whatever the source used (C-IDENTITY-15).
     if let Ok(passphrase) = derive_db_key() {
         let db_path = data_dir.join("messages.db");
         if let Ok(store) = crate::storage::MessageStore::open(db_path.to_str().unwrap_or_default(), &passphrase) {
-            if let Err(e) = store.scrub_device_secrets() {
-                hollow_log!("[HOLLOW-LINK] Could not clear the source device's secrets: {e}");
-            }
-            // The keys landed unprotected whatever the source used (C-IDENTITY-15).
             let _ = store.save_setting(PROTECTION_OFFER_DUE, "1");
         }
     }
@@ -2180,6 +2323,7 @@ pub(crate) fn decrypt_backup_bytes(blob: &[u8], passphrase: &str) -> Result<Vec<
 /// Must be called BEFORE start_node() since it overwrites the data directory.
 #[frb]
 pub fn import_backup(backup_path: String, passphrase: String) -> Result<(), String> {
+    finish_wipe_before_a_new_identity()?;
     let blob = std::fs::read(&backup_path)
         .map_err(|e| format!("Failed to read backup: {e}"))?;
     import_backup_bytes(&blob, &passphrase)
@@ -2221,7 +2365,12 @@ pub(crate) fn stash_pending_link(blob: &[u8], passphrase: &str, device: &[u8]) -
 /// also finishes or undoes a landing a crash cut short.
 #[frb]
 pub fn has_pending_link() -> Result<bool, String> {
-    if let Err(e) = recover_interrupted_landing(&crate::identity::data_dir()?) {
+    // The first step of every launch after the wipe check, so the log is open for
+    // every step after it.
+    crate::log::init();
+    let root = crate::identity::data_dir()?;
+    crate::identity::recover_interrupted_key_landing(&root);
+    if let Err(e) = recover_interrupted_landing(&root) {
         hollow_log!("[HOLLOW-LINK] A landing that did not finish is still in the way: {e}");
     }
     Ok(pending_link_blob_path()?.exists() && pending_link_code_path()?.exists())
@@ -2253,7 +2402,10 @@ fn drop_pending_link() {
     .into_iter()
     .flatten()
     {
-        if present(&path) && std::fs::remove_file(&path).is_err() {
+        // The code opens the blob and the device file is this device's key.
+        let secret = !path.ends_with("pending_link.hollow") && !path.ends_with("pending_link.tries");
+        let zeroed = !secret || crate::api::wipe::zero_in_place(&path).is_ok();
+        if present(&path) && (!zeroed || std::fs::remove_file(&path).is_err()) {
             hollow_log!("[HOLLOW-LINK] Could not clear part of the link stash");
         }
     }
@@ -2363,13 +2515,18 @@ pub fn perform_pending_wipe() -> Result<bool, String> {
     let data_dir = crate::identity::data_dir()?;
     std::fs::read_dir(&data_dir).map_err(|e| format!("Failed to read data dir for wipe: {e}"))?;
     let destroyed = std::fs::read(&marker).is_ok_and(|m| m == crate::api::wipe::DESTROY_MARK);
+    let kept = if destroyed { crate::api::recovery::zero_kept_aside(&data_dir) } else { Vec::new() };
+    // The sweep zeroes every key right before it unlinks it.
     crate::api::wipe::sweep_root(&data_dir);
     crate::api::wipe::clear_beside(&data_dir);
-    // The marker stays while any of the identity's own files survived, a landing's
-    // leftovers included: without it the next identity is minted beside a database it
-    // can never open, or an old one is put back. The next launch wipes again. Anything
+    crate::api::recovery::remove_kept_aside(&kept);
+    let kept_gone = crate::api::recovery::kept_keys_gone(&kept);
+    // The marker stays while any of the identity's own files or any key survived, a
+    // landing's leftovers and old data kept aside included: without it the next
+    // identity is minted beside a database it can never open, an old one is put back,
+    // or a held key never gets its later pass. The next launch wipes again. Anything
     // else the sweep left (a recording still held) never blocks.
-    if !identity_set_gone(&data_dir, std::time::Instant::now() + HELD_FILE_WAIT) {
+    if !identity_set_gone(&data_dir, std::time::Instant::now() + HELD_FILE_WAIT) || !kept_gone {
         return Ok(false);
     }
     // Last: a crash before this line re-runs the wipe next launch.
@@ -2377,20 +2534,24 @@ pub fn perform_pending_wipe() -> Result<bool, String> {
     Ok(destroyed)
 }
 
-/// Removes what is left of the identity set and of any landing, waiting for a held
-/// file until `deadline`.
+/// Removes what is left of the identity set, of any key and of any landing, waiting
+/// for a held file until `deadline`.
 fn identity_set_gone(root: &std::path::Path, deadline: std::time::Instant) -> bool {
     loop {
-        let mut gone = true;
+        let mut gone = crate::api::wipe::root_keys_gone(root);
         for name in IDENTITY_SET.into_iter().chain([LANDED]) {
-            let p = root.join(name);
-            if present(&p) && std::fs::remove_file(&p).is_err() {
+            if present(&root.join(name)) && remove_set_file(root, name).is_err() {
                 gone = false;
             }
         }
         for dir in [LANDING_STAGE, LANDING_ASIDE] {
             let p = root.join(dir);
-            if present(&p) && std::fs::remove_dir_all(&p).is_err() {
+            if present(&p) && remove_landing_dir(&p).is_err() {
+                gone = false;
+            }
+        }
+        for db in databases_kept_in(root) {
+            if std::fs::remove_file(&db).is_err() && present(&db) {
                 gone = false;
             }
         }
@@ -2399,6 +2560,217 @@ fn identity_set_gone(root: &std::path::Path, deadline: std::time::Instant) -> bo
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+}
+
+/// Every database file in `root` besides the live set that holds an identity's
+/// history and its per-file keys: the rollback journal, what a start-up kept aside
+/// (`messages.db.unreadable-*`), and what a repair kept (`unreadable-*/messages.db*`,
+/// real folders only).
+fn databases_kept_in(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = vec![root.join("messages.db-journal")];
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("messages.db.unreadable-") {
+            found.push(entry.path());
+        } else if name.starts_with("unreadable-") && entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let parts = std::fs::read_dir(entry.path()).into_iter().flatten().flatten();
+            found.extend(parts.filter(|p| p.file_name().to_string_lossy().starts_with("messages.db")).map(|p| p.path()));
+        }
+    }
+    found
+}
+
+/// Refuses, in a landing's words, to write a key while a wipe is pending (the next
+/// launch's wipe would take it, or it would sit beside a database the wipe could not
+/// take yet) or while a landing or a relink has the old identity partly moved out.
+pub(crate) fn refuse_while_not_ready() -> Result<(), String> {
+    let destroyed_here = crate::identity::data_dir().is_ok_and(|root| crate::api::wipe::destroyed_in_this_process(&root));
+    if has_pending_wipe().unwrap_or(false)
+        || landing_in_progress()
+        || crate::api::recovery::relink_in_progress()
+        || destroyed_here
+    {
+        return Err(IDENTITY_NOT_READY.into());
+    }
+    Ok(())
+}
+
+/// Welcome's choices (Create, a phrase, a backup) run where no identity is. A wipe the
+/// launch could not finish, because something held a file, is finished here first,
+/// so the refusal clears once the holder lets go rather than at a relaunch. While the
+/// marker exists no identity counts as one (`has_identity`), so the only thing to
+/// spare is an identity this process still has open: a node, a fetch node or the
+/// store. Then it refuses, and the destroyed identity never loads.
+pub(crate) fn finish_wipe_before_a_new_identity() -> Result<(), String> {
+    let root = crate::identity::data_dir()?;
+    if !present(&root.join(PENDING_WIPE_MARKER)) {
+        return Ok(());
+    }
+    let store_open = get_store().lock().map_or(true, |store| store.is_some());
+    if !store_open && !crate::api::network::a_node_runs() {
+        perform_pending_wipe()?;
+    }
+    if present(&root.join(PENDING_WIPE_MARKER)) {
+        return Err(IDENTITY_NOT_READY.into());
+    }
+    Ok(())
+}
+
+/// Before a key of the identity `master` is written into `root`: a database that
+/// identity cannot open (another identity's, or a damaged one) goes aside, kept, so
+/// the key never lands beside it ("file is not a database" at every launch). One
+/// that cannot be read at all, such as one another program holds, refuses the key.
+/// Returns the kept name, for [`put_database_back`] if the key then fails to land.
+pub(crate) fn keep_aside_a_database_this_identity_cannot_open(
+    root: &std::path::Path,
+    master: &crate::identity::native_identity::NativeKeypair,
+) -> Result<Option<String>, String> {
+    let db = root.join("messages.db");
+    let opens = if present(&db) {
+        database_opens_with(&db, &db_key_of(master)?).map_err(|e| {
+            crate::log::init();
+            hollow_log!("[HOLLOW-STORE] The database could not be read before a new key was written: {e}");
+            IDENTITY_NOT_READY.to_string()
+        })?
+    } else {
+        // A WAL or journal without its database would be replayed into the next one.
+        !DB_PARTS[1..].iter().any(|part| present(&root.join(format!("messages.db{part}"))))
+    };
+    if opens {
+        return Ok(None);
+    }
+    let kept = set_database_aside(root).map_err(|e| {
+        crate::log::init();
+        hollow_log!("[HOLLOW-STORE] A database this identity cannot open could not be set aside: {e}");
+        IDENTITY_NOT_READY.to_string()
+    })?;
+    crate::log::init();
+    hollow_log!("[HOLLOW-STORE] A database this identity cannot open was kept aside as {kept}");
+    Ok(Some(kept))
+}
+
+/// Whether `db` opens under `key`: false when it is no database under this key, an
+/// error when it could not be read at all.
+fn database_opens_with(db: &std::path::Path, key: &str) -> Result<bool, String> {
+    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|e| e.to_string())?;
+    conn.execute_batch(&format!("PRAGMA key = \"x'{key}'\"; PRAGMA busy_timeout = 3000;"))
+        .map_err(|e| e.to_string())?;
+    match conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0)) {
+        Ok(_) => Ok(true),
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if matches!(e.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The database and the files SQLite keeps beside it: what moves with it, as one.
+const DB_PARTS: [&str; 4] = ["", "-wal", "-shm", "-journal"];
+
+/// Keeps the database in `root` (with its WAL, shared memory and rollback journal)
+/// under one name family, `messages.db.unreadable-<UTC stamp>`, never deleted, so a
+/// repair or the right phrase can still open it. All of it moves, or none; returns
+/// the kept name.
+pub(crate) fn set_database_aside(root: &std::path::Path) -> Result<String, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let base = format!("messages.db.unreadable-{}", utc_stamp(secs));
+    let mut stem = base.clone();
+    let mut n = 1;
+    while DB_PARTS.iter().any(|part| present(&root.join(format!("{stem}{part}")))) {
+        n += 1;
+        stem = format!("{base}-{n}");
+    }
+    let deadline = std::time::Instant::now() + HELD_FILE_WAIT;
+    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for part in DB_PARTS {
+        let from = root.join(format!("messages.db{part}"));
+        if !present(&from) {
+            continue;
+        }
+        let to = root.join(format!("{stem}{part}"));
+        if let Err(e) = rename_when_free(&from, &to, deadline) {
+            let unmoved = moved.iter().rev().filter(|(from, to)| std::fs::rename(to, from).is_err()).count();
+            return Err(format!("messages.db{part} is in use by another program ({e}), {unmoved} part(s) not put back"));
+        }
+        moved.push((from, to));
+    }
+    Ok(stem)
+}
+
+/// Where `root` holds no database: the newest kept one `master`'s key opens goes back
+/// into place. Only the identity's own key says which kept database is its.
+pub(crate) fn put_back_a_kept_database_this_identity_opens(
+    root: &std::path::Path,
+    master: &crate::identity::native_identity::NativeKeypair,
+) -> Result<Option<String>, String> {
+    if DB_PARTS.iter().any(|part| present(&root.join(format!("messages.db{part}")))) {
+        return Ok(None);
+    }
+    let key = db_key_of(master)?;
+    let mut kept: Vec<String> = std::fs::read_dir(root)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("messages.db.unreadable-") && !DB_PARTS[1..].iter().any(|part| name.ends_with(part)))
+        .collect();
+    kept.sort_by(|a, b| b.cmp(a));
+    for stem in kept {
+        // One that cannot be read now (held) may be this identity's: never passed over.
+        if database_opens_with(&root.join(&stem), &key)? {
+            put_database_back(root, &stem)?;
+            return Ok(Some(stem));
+        }
+    }
+    Ok(None)
+}
+
+/// Moves the database in place to the kept name `stem`: the undo of
+/// [`put_database_back`], never over a kept file.
+pub(crate) fn move_database_to(root: &std::path::Path, stem: &str) -> Result<(), String> {
+    let parts: Vec<&str> = DB_PARTS.into_iter().filter(|part| present(&root.join(format!("messages.db{part}")))).collect();
+    if let Some(part) = parts.iter().find(|part| present(&root.join(format!("{stem}{part}")))) {
+        return Err(format!("{stem}{part} is kept already, so messages.db{part} stays"));
+    }
+    for part in parts {
+        std::fs::rename(root.join(format!("messages.db{part}")), root.join(format!("{stem}{part}")))
+            .map_err(|e| format!("Failed to move messages.db{part} aside: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Undoes [`set_database_aside`] for `stem`, never over a file already in place.
+pub(crate) fn put_database_back(root: &std::path::Path, stem: &str) -> Result<(), String> {
+    let back: Vec<&str> = DB_PARTS.into_iter().filter(|part| present(&root.join(format!("{stem}{part}")))).collect();
+    if let Some(part) = back.iter().find(|part| present(&root.join(format!("messages.db{part}")))) {
+        return Err(format!("messages.db{part} is in place already, so {stem} stays aside"));
+    }
+    for part in back {
+        std::fs::rename(root.join(format!("{stem}{part}")), root.join(format!("messages.db{part}")))
+            .map_err(|e| format!("Failed to put back messages.db{part}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// `YYYYMMDD-HHMMSS` in UTC.
+fn utc_stamp(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}{month:02}{day:02}-{:02}{:02}{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
 #[cfg(test)]
@@ -2683,6 +3055,81 @@ mod tests {
         assert_eq!(std::fs::read(data.join("files").join("ab12.png")).unwrap(), b"HFE1");
         assert_eq!(std::fs::read(data.join("vault").join("cd34")).unwrap(), b"shard");
         assert!(!data.join("files").join(".ws_recv_ab12.0.tmp").exists(), "a transfer's temp file landed");
+    }
+
+    /// A snapshot's database names files on the device that made it. After the import
+    /// no row may lead this device to read, serve or delete a file outside its own
+    /// data folder: on one machine that is another profile's data.
+    #[test]
+    fn a_linked_device_never_reads_a_path_outside_its_own_data_root() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let (tmp, data) = snapshot_target();
+        let key = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x67; 32])
+            .to_protobuf_encoding()
+            .unwrap();
+        std::fs::write(data.join("identity.key"), &key).unwrap();
+        let pass = derive_db_key().unwrap();
+
+        // The presenter's data folder, on this same disk.
+        let theirs = tmp.path().join("presenter");
+        std::fs::create_dir_all(theirs.join("files")).unwrap();
+        let their_file = |name: &str| {
+            let p = theirs.join("files").join(name);
+            std::fs::write(&p, b"HFE1 theirs").unwrap();
+            p.to_string_lossy().to_string()
+        };
+        let source_db = theirs.join("messages.db");
+        {
+            let store = crate::storage::MessageStore::open(source_db.to_str().unwrap(), &pass).unwrap();
+            let file = |id: &str, path: &str| {
+                store
+                    .insert_file_metadata(
+                        id, id, "png", "image/png", 11, 1, true, None, None, None, "dm", "friend", "friend", false,
+                        1000, None, None, None,
+                    )
+                    .unwrap();
+                store.mark_file_complete(id, path).unwrap();
+            };
+            file("aa11", &their_file("aa11.png"));
+            file("bb22", &their_file("bb22.png"));
+            let ours = data.join("files").join("cc33.png").to_string_lossy().to_string();
+            file("cc33", &ours);
+            let climbs = data.join("files").join("..").join("..").join("presenter").join("files").join("bb22.png");
+            file("dd44", &climbs.to_string_lossy());
+            let doc = theirs.join("doc.pdf");
+            std::fs::write(&doc, b"theirs").unwrap();
+            store
+                .upsert_share(
+                    &"ee".repeat(32), "doc", "pdf", "application/pdf", 6, 6, 1, "{}", &[7u8; 32], "link",
+                    "completed", true, Some(doc.to_str().unwrap()), Some(theirs.to_str().unwrap()), 1000, None, None,
+                )
+                .unwrap();
+            store.save_setting("ringtone_path", &their_file("ring.mp3")).unwrap();
+            store.wal_checkpoint().unwrap();
+        }
+        let db_bytes = std::fs::read(&source_db).unwrap();
+        // Only aa11's bytes travel with the snapshot.
+        let zip = zip_of(&[("identity.key", &key), ("messages.db", &db_bytes), ("files/aa11.png", b"HFE1 landed")]);
+        import_snapshot_bytes(&zip).unwrap();
+
+        let store = crate::storage::MessageStore::open(data.join("messages.db").to_str().unwrap(), &pass).unwrap();
+        let path_of = |id: &str| {
+            let f = store.get_file_metadata(id).unwrap().unwrap();
+            (f.disk_path, f.completed_at.is_some())
+        };
+        let landed = data.join("files").join("aa11.png").to_string_lossy().to_string();
+        assert_eq!(path_of("aa11"), (Some(landed), true), "a file that landed reads its own copy");
+        assert_eq!(path_of("bb22"), (None, false), "a file on the presenter's disk is read from there");
+        let own = data.join("files").join("cc33.png").to_string_lossy().to_string();
+        assert_eq!(path_of("cc33"), (Some(own), true), "a path in our own folder was dropped");
+        assert_eq!(path_of("dd44"), (None, false), "a path climbing out of our folder is read");
+        let share = store.load_share(&"ee".repeat(32)).unwrap().unwrap();
+        assert_eq!(share.disk_path, None, "a share serves the presenter's file");
+        assert!(!share.seeding, "a share seeds bytes this device does not hold");
+        assert_eq!(share.state, "stale");
+        assert_eq!(share.save_dir, None, "a share saves into the presenter's folder");
+        assert_eq!(store.load_setting("ringtone_path").unwrap(), None, "the ringtone plays the presenter's file");
     }
 
     /// C-IDENTITY-01. A snapshot unpacks to no more than a real one could from its
@@ -3617,5 +4064,1370 @@ mod landing_tests {
         std::fs::write(tmp.path().join("pending_link.tries"), (LINK_LANDING_TRIES - 1).to_string()).unwrap();
         stash_pending_link(b"blob", "code", b"device").unwrap();
         assert!(!spend_link_try(), "a new link inherited an earlier one's spent tries");
+    }
+
+    // md-integrity
+
+    const PHRASE_A: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+    const PHRASE_B: &str = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo vote";
+
+    /// An empty root at `tmp/data`, the data root from now on.
+    fn empty_root(tmp: &std::path::Path) -> std::path::PathBuf {
+        let root = tmp.join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        // SAFETY: serialized by the callers' locks.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &root) };
+        crate::identity::encryption::clear_session_key();
+        root
+    }
+
+    /// The databases kept aside in `root`, main files only.
+    fn kept_aside(root: &std::path::Path) -> Vec<String> {
+        let mut kept: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("messages.db.unreadable-") && !n.ends_with("-wal") && !n.ends_with("-shm"))
+            .collect();
+        kept.sort();
+        kept
+    }
+
+    /// Opens a held boot wipe: the identity `who` in `tmp/data`, its database held the
+    /// way a scanner holds it, a wipe pending that could not finish.
+    #[cfg(windows)]
+    fn held_boot_wipe(tmp: &std::path::Path, seed: u8) -> (std::path::PathBuf, std::fs::File) {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let root = tmp.join("data");
+        identity_in(&root, seed, "destroyed");
+        let scanner = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(root.join("messages.db"))
+            .unwrap();
+        stash_pending_wipe().unwrap();
+        assert!(!perform_pending_wipe().unwrap(), "the boot wipe finished while held");
+        crate::identity::encryption::clear_session_key();
+        (root, scanner)
+    }
+
+    /// A phrase for another identity used to write its key beside the database it
+    /// found, which no key it derives opens ("file is not a database" at every launch).
+    /// That database is kept aside instead and the phrase's identity opens a fresh one;
+    /// the phrase of the identity that owns the database keeps it in place.
+    #[test]
+    fn a_phrase_for_another_identity_never_lands_beside_its_database() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = empty_root(tmp.path());
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into()).unwrap();
+        let mine = derive_db_key().unwrap();
+        MessageStore::open(root.join("messages.db").to_str().unwrap(), &mine)
+            .unwrap()
+            .save_setting("who", "mine")
+            .unwrap();
+
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into()).unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("mine"), "the same phrase lost its own database");
+        assert!(kept_aside(&root).is_empty(), "the same phrase set its own database aside");
+
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_B.into()).unwrap();
+        assert!(pair_in_root().is_ok(), "the new key landed beside the old database: {:?}", pair_in_root());
+        let kept = kept_aside(&root);
+        assert_eq!(kept.len(), 1, "the old database was not kept: {kept:?}");
+        let old = MessageStore::open(root.join(&kept[0]).to_str().unwrap(), &mine).unwrap();
+        assert_eq!(old.load_setting("who").unwrap().as_deref(), Some("mine"));
+    }
+
+    /// A WAL whose database is gone would be read into the next one: it is kept aside
+    /// too, never left for a new key's database.
+    #[test]
+    fn a_loose_wal_of_another_database_is_kept_aside() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = empty_root(tmp.path());
+        std::fs::write(root.join("messages.db-wal"), b"another database's pages").unwrap();
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into()).unwrap();
+        assert!(!root.join("messages.db-wal").exists(), "the loose WAL stayed for the new database");
+        let kept: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with("-wal"))
+            .collect();
+        assert_eq!(kept.len(), 1, "the loose WAL was not kept");
+    }
+
+    /// A database another program holds cannot be judged, so no phrase's key lands
+    /// beside it; once let go, the restore goes on.
+    #[cfg(windows)]
+    #[test]
+    fn a_phrase_restore_never_lands_beside_a_database_it_cannot_read() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        for share in [0, FILE_SHARE_READ] {
+            let root = tmp.path().join(format!("share{share}"));
+            identity_in(&root, 0xbd, "held");
+            let key = std::fs::read(root.join("identity.key")).unwrap();
+            let scanner = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(share)
+                .open(root.join("messages.db"))
+                .unwrap();
+            let held = crate::api::identity::restore_identity_from_mnemonic(PHRASE_B.into()).map(|_| ());
+            assert_eq!(held, Err(IDENTITY_NOT_READY.to_string()), "share {share}");
+            assert_eq!(std::fs::read(root.join("identity.key")).unwrap(), key, "share {share}: a key landed beside a held database");
+            drop(scanner);
+            crate::api::identity::restore_identity_from_mnemonic(PHRASE_B.into()).unwrap();
+            assert!(pair_in_root().is_ok(), "share {share}: {:?}", pair_in_root());
+            assert_eq!(kept_aside(&root).len(), 1, "share {share}");
+        }
+    }
+
+    /// A new identity minted where another identity's database was left (no key beside
+    /// it) never lands beside it either.
+    #[test]
+    fn a_new_identity_never_lands_beside_a_database_it_cannot_open() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xb4, "left behind");
+        std::fs::remove_file(root.join("identity.key")).unwrap();
+        crate::api::identity::load_or_create_identity().unwrap();
+        assert!(pair_in_root().is_ok(), "a new key landed beside an old database: {:?}", pair_in_root());
+        assert_eq!(kept_aside(&root).len(), 1);
+    }
+
+    /// The link and backup snapshot used to copy only the main database file after a
+    /// checkpoint whose failure it ignored: rows still in the WAL, behind a reader the
+    /// checkpoint could not pass, never left the device.
+    #[test]
+    fn a_snapshot_taken_while_the_node_writes_holds_every_committed_row() {
+        use std::io::Read;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        let pass = identity_in(&root, 0xb1, "early");
+        let db = root.join("messages.db");
+        let writer = MessageStore::open(db.to_str().unwrap(), &pass).unwrap();
+        writer.save_setting("first", "row").unwrap();
+        // A connection parked on a read keeps a checkpoint from moving what follows.
+        let reader = rusqlite::Connection::open(&db).unwrap();
+        reader.execute_batch(&format!("PRAGMA key = \"x'{pass}'\"; BEGIN;")).unwrap();
+        let _: i64 = reader.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0)).unwrap();
+        writer.save_setting("late", "row").unwrap();
+
+        let zip = build_snapshot_bytes(false, false).unwrap();
+        drop(reader);
+        drop(writer);
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+        let mut bytes = Vec::new();
+        archive.by_name("messages.db").unwrap().read_to_end(&mut bytes).unwrap();
+        let out = tmp.path().join("snapshot.db");
+        std::fs::write(&out, bytes).unwrap();
+        let snapshot = MessageStore::open(out.to_str().unwrap(), &pass).unwrap();
+        assert_eq!(snapshot.load_setting("late").unwrap().as_deref(), Some("row"), "a committed row stayed behind");
+        assert_eq!(snapshot.load_setting("who").unwrap().as_deref(), Some("early"));
+    }
+
+    /// A phrase restore or a new identity never writes a key while a wipe is pending or
+    /// a landing runs: the next launch's wipe would take the restored key, or the key
+    /// would sit beside a database the wipe could not take yet.
+    #[test]
+    fn a_phrase_restore_never_lands_while_a_wipe_is_pending() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xb2, "old");
+        let key = std::fs::read(root.join("identity.key")).unwrap();
+        type Attempt = fn() -> Result<(), String>;
+        let attempts: [(&str, Attempt); 2] = [
+            ("restore", || crate::identity::restore_identity_from_mnemonic(PHRASE_A).map(|_| ())),
+            ("generate", || crate::identity::generate_new_identity().map(|_| ())),
+        ];
+
+        stash_pending_wipe().unwrap();
+        for (what, attempt) in attempts {
+            assert_eq!(attempt(), Err(IDENTITY_NOT_READY.to_string()), "{what} with a wipe pending");
+            assert_eq!(std::fs::read(root.join("identity.key")).unwrap(), key, "{what} wrote a key");
+        }
+        std::fs::remove_file(root.join(PENDING_WIPE_MARKER)).unwrap();
+        let _landing = LandingFlag::raise();
+        for (what, attempt) in attempts {
+            assert_eq!(attempt(), Err(IDENTITY_NOT_READY.to_string()), "{what} mid-landing");
+            assert_eq!(std::fs::read(root.join("identity.key")).unwrap(), key, "{what} wrote a key");
+        }
+        assert_eq!(pair_in_root().as_deref(), Ok("old"));
+    }
+
+    /// The refusal says "try again in a moment": once the held file is let go, a
+    /// retry in the same session must succeed, not wait for a relaunch.
+    #[cfg(windows)]
+    #[test]
+    fn review2_refusal_clears_once_the_holder_lets_go_without_a_relaunch() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (_root, scanner) = held_boot_wipe(tmp.path(), 0xa1);
+        drop(scanner);
+        // Welcome -> Create, a moment later, same session.
+        let retry = crate::api::identity::load_or_create_identity().map(|_| ());
+        assert!(retry.is_ok(), "still refused after the holder let go: {retry:?}");
+    }
+
+    /// Every Welcome choice that writes an identity refuses while the held database
+    /// survives, and finishes the wipe and goes on once it is let go.
+    #[cfg(windows)]
+    #[test]
+    fn every_welcome_choice_finishes_a_held_wipe_once_the_holder_lets_go() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let backup = tmp.path().join("backup.hollow");
+        std::fs::write(&backup, link_blob(tmp.path(), 0xb5, "a long enough passphrase")).unwrap();
+        let backup = backup.to_string_lossy().into_owned();
+        type Choice<'a> = &'a dyn Fn() -> Result<(), String>;
+        let choices: [(&str, Choice); 4] = [
+            ("create", &|| crate::api::identity::load_or_create_identity().map(|_| ())),
+            ("generate", &|| crate::api::identity::generate_new_identity().map(|_| ())),
+            ("phrase", &|| crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into()).map(|_| ())),
+            ("backup", &|| import_backup(backup.clone(), "a long enough passphrase".into())),
+        ];
+        for (i, (what, choose)) in choices.iter().enumerate() {
+            let run = tmp.path().join(format!("run{i}"));
+            let (root, scanner) = held_boot_wipe(&run, 0xb6);
+            assert_eq!(choose(), Err(IDENTITY_NOT_READY.to_string()), "{what} while held");
+            assert!(!root.join("identity.key").exists(), "{what} wrote a key beside the held database");
+            drop(scanner);
+            choose().unwrap_or_else(|e| panic!("{what} still refused once let go: {e}"));
+            assert!(!has_pending_wipe().unwrap(), "{what} left the wipe pending");
+            assert!(pair_in_root().is_ok(), "{what}: {:?}", pair_in_root());
+            assert_ne!(pair_in_root().as_deref(), Ok("destroyed"), "{what} kept the wiped database");
+        }
+    }
+
+    /// Welcome's re-run of a pending wipe never runs while this process has the
+    /// identity open (the store, a node, a fetch node): the wipe belongs to the next
+    /// launch. Each alone.
+    #[test]
+    fn a_welcome_choice_never_wipes_while_this_process_has_the_identity_open() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        for what in ["store", "node", "fetch node"] {
+            let root = tmp.path().join(what);
+            let pass = identity_in(&root, 0xc1, "running");
+            match what {
+                "store" => set_test_store(MessageStore::open(root.join("messages.db").to_str().unwrap(), &pass).unwrap()),
+                "node" => crate::api::network::pretend_a_node_runs(true, false),
+                _ => crate::api::network::pretend_a_node_runs(false, true),
+            }
+            stash_pending_wipe().unwrap();
+            let choice = crate::api::identity::load_or_create_identity().map(|_| ());
+            get_store().lock().unwrap().take();
+            crate::api::network::pretend_a_node_runs(false, false);
+            assert_eq!(choice, Err(IDENTITY_NOT_READY.to_string()), "{what}");
+            assert!(has_pending_wipe().unwrap(), "{what}: the marker went");
+            assert_eq!(pair_in_root().as_deref(), Ok("running"), "{what}: the open identity was wiped");
+        }
+    }
+
+    /// A key another program held through the boot wipe after a destroy must not count
+    /// as an identity: the launch would ask to unlock the destroyed one (a duress tell
+    /// and a dead end). Welcome shows instead, and Create goes on once it is let go.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_key_never_reopens_a_destroyed_identity() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xc2, "destroyed");
+        let old = crate::identity::load_or_create_identity().unwrap().peer_id;
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(root.join("identity.key"))
+            .unwrap();
+        std::fs::write(root.join(PENDING_WIPE_MARKER), crate::api::wipe::DESTROY_MARK).unwrap();
+        assert!(!perform_pending_wipe().unwrap(), "the boot wipe finished while the key was held");
+        assert!(root.join("identity.key").exists(), "nothing held the key");
+        assert!(!has_identity().unwrap(), "the held key of a destroyed identity counts as an identity");
+        let held = crate::api::identity::load_or_create_identity().map(|i| i.peer_id);
+        assert_eq!(held, Err(IDENTITY_NOT_READY.to_string()), "Create opened the destroyed identity");
+        drop(holder);
+        crate::identity::encryption::clear_session_key();
+        // Welcome's Create, as Dart runs it: the wipe again, then the identity.
+        perform_pending_wipe().unwrap();
+        let fresh = crate::api::identity::load_or_create_identity().unwrap().peer_id;
+        assert_ne!(fresh, old, "the destroyed identity came back");
+        assert!(!has_pending_wipe().unwrap());
+        assert!(has_identity().unwrap());
+    }
+
+    /// A destroy zeroes the root's keys; a landing leftover's key must get the same.
+    #[test]
+    fn review2_destroy_zeroes_a_landing_leftovers_key() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = landed_then_died_at(tmp.path(), "aside");
+        let aside_key = root.join(LANDING_ASIDE).join("identity.key");
+        assert!(aside_key.exists(), "no leftover key to test");
+        let peek = tmp.path().join("peek_aside");
+        std::fs::hard_link(&aside_key, &peek).unwrap();
+        let root_peek = tmp.path().join("peek_root");
+        std::fs::hard_link(root.join("identity.key"), &root_peek).unwrap();
+        crate::api::wipe::destroy_data_root(&root).unwrap();
+        assert!(std::fs::read(&root_peek).unwrap().iter().all(|b| *b == 0), "root key not zeroed");
+        assert!(
+            std::fs::read(&peek).unwrap().iter().all(|b| *b == 0),
+            "the replaced identity's key was unlinked, never zeroed"
+        );
+    }
+
+    /// A second name for `file`, which still reads its bytes once `file` is unlinked.
+    fn peek_at(file: &std::path::Path, tmp: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let peek = tmp.join(name);
+        std::fs::hard_link(file, &peek).unwrap();
+        assert!(std::fs::read(&peek).unwrap().iter().any(|b| *b != 0));
+        peek
+    }
+
+    fn zeroed(peek: &std::path::Path) -> bool {
+        std::fs::read(peek).unwrap().iter().all(|b| *b == 0)
+    }
+
+    /// The boot wipe zeroes a landing leftover's key too, not only a destroy.
+    #[test]
+    fn a_boot_wipe_zeroes_a_landing_leftovers_key() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = landed_then_died_at(tmp.path(), "aside");
+        let peek = peek_at(&root.join(LANDING_ASIDE).join("identity.key"), tmp.path(), "peek");
+        let root_peek = peek_at(&root.join("identity.key"), tmp.path(), "peek_root");
+        stash_pending_wipe().unwrap();
+        perform_pending_wipe().unwrap();
+        assert!(!has_pending_wipe().unwrap());
+        assert!(zeroed(&root_peek), "the boot wipe unlinked the root key unzeroed");
+        assert!(zeroed(&peek), "the boot wipe unlinked the replaced key unzeroed");
+    }
+
+    /// A key the boot wipe could not zero at once, because something held it a moment,
+    /// is zeroed when it goes.
+    #[cfg(windows)]
+    #[test]
+    fn a_boot_wipe_zeroes_a_key_held_a_moment() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = landed_then_died_at(tmp.path(), "aside");
+        let keys = [root.join("identity.key"), root.join(LANDING_ASIDE).join("identity.key")];
+        let peeks: Vec<_> = keys.iter().enumerate().map(|(i, k)| peek_at(k, tmp.path(), &format!("peek{i}"))).collect();
+        let holders: Vec<_> = keys
+            .iter()
+            .map(|k| std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(k).unwrap())
+            .collect();
+        // Let go once the wipe has begun, inside the wait that follows its sweep.
+        let marker = root.join(PENDING_WIPE_MARKER);
+        let released = std::thread::spawn(move || {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !marker.exists() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            drop(holders);
+        });
+        stash_pending_wipe().unwrap();
+        perform_pending_wipe().unwrap();
+        released.join().unwrap();
+        assert!(!has_pending_wipe().unwrap(), "the wipe gave up on keys held a moment");
+        for peek in &peeks {
+            assert!(zeroed(peek), "{} went unzeroed", peek.display());
+        }
+    }
+
+    /// A finished landing zeroes the key of the identity it replaced.
+    #[test]
+    fn a_finished_landing_zeroes_the_key_it_replaced() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        identity_in(&source, 0xb7, "linked");
+        let zip = zip_of(&[
+            ("identity.key", &std::fs::read(source.join("identity.key")).unwrap()),
+            ("messages.db", &std::fs::read(source.join("messages.db")).unwrap()),
+        ]);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xb8, "throwaway");
+        let peek = peek_at(&root.join("identity.key"), tmp.path(), "peek");
+        import_snapshot_bytes(&zip).unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("linked"));
+        assert!(zeroed(&peek), "the replaced key was unlinked unzeroed");
+    }
+
+    /// A landing a crash cut short is undone at the next launch; the key it had already
+    /// placed is zeroed as it goes.
+    #[test]
+    fn an_undone_landing_zeroes_the_key_it_had_placed() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        identity_in(&source, 0xb9, "linked");
+        let zip = zip_of(&[
+            ("identity.key", &std::fs::read(source.join("identity.key")).unwrap()),
+            ("messages.db", &std::fs::read(source.join("messages.db")).unwrap()),
+        ]);
+        // Cut at the key: the new key is still staged. Cut at the database: it is placed.
+        for (crash_at, new_key) in [("identity.key", LANDING_STAGE), ("messages.db", "")] {
+            let run = tmp.path().join(crash_at);
+            let root = run.join("data");
+            identity_in(&root, 0xba, "throwaway");
+            *CRASH_COMMIT_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(crash_at);
+            let crashed = std::panic::catch_unwind(|| import_snapshot_bytes(&zip));
+            *CRASH_COMMIT_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            assert!(crashed.is_err());
+            let peek = peek_at(&root.join(new_key).join("identity.key"), &run, "peek");
+            has_pending_link().unwrap();
+            assert_eq!(pair_in_root().as_deref(), Ok("throwaway"), "cut at {crash_at}");
+            assert!(zeroed(&peek), "cut at {crash_at}: the undone landing's key was unlinked unzeroed");
+        }
+    }
+
+    /// A landing that fails before its key is placed zeroes the staged key it drops.
+    #[test]
+    fn a_failed_landing_zeroes_its_staged_key() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        identity_in(&source, 0xbb, "linked");
+        let zip = zip_of(&[
+            ("identity.key", &std::fs::read(source.join("identity.key")).unwrap()),
+            ("messages.db", &std::fs::read(source.join("messages.db")).unwrap()),
+        ]);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xbc, "throwaway");
+        let peek = tmp.path().join("peek");
+        *STAGE_PEEK.lock().unwrap_or_else(|e| e.into_inner()) = Some(peek.clone());
+        *FAIL_COMMIT_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some("identity.key");
+        let landed = import_snapshot_bytes(&zip);
+        *FAIL_COMMIT_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *STAGE_PEEK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        assert!(landed.is_err());
+        assert_eq!(pair_in_root().as_deref(), Ok("throwaway"));
+        assert!(zeroed(&peek), "the staged key was unlinked unzeroed");
+    }
+
+    /// A link that landed drops its stash; the code that opens the blob and the device
+    /// key it carried are zeroed as they go.
+    #[test]
+    fn a_spent_link_stash_is_zeroed() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let code = "be".repeat(32);
+        let blob = link_blob(tmp.path(), 0xbe, &code);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xbf, "throwaway");
+        let device = NativeKeypair::from_secret_bytes(&[0xc0; 32]).to_protobuf_encoding().unwrap();
+        stash_pending_link(&blob, &code, &device).unwrap();
+        let peeks = [
+            peek_at(&root.join("pending_link.code"), tmp.path(), "peek_code"),
+            peek_at(&root.join("pending_link.device"), tmp.path(), "peek_device"),
+        ];
+        import_pending_link().unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("linked"));
+        for peek in &peeks {
+            assert!(zeroed(peek), "{} went unzeroed", peek.display());
+        }
+    }
+
+    #[test]
+    fn a_kept_database_is_named_by_its_utc_time() {
+        assert_eq!(utc_stamp(0), "19700101-000000");
+        assert_eq!(utc_stamp(1_760_054_400 + 3_723), "20251010-010203");
+        assert_eq!(utc_stamp(951_782_400), "20000229-000000");
+    }
+    // md-review
+
+    fn md_review_read_only(path: &std::path::Path) {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    /// A key file that cannot be written (a read-only attribute, a 0400 mode) is still
+    /// one the OS lets us unlink; the boot wipe must not keep it, bytes intact, and
+    /// keep the marker for ever.
+    #[test]
+    fn md_review_a_read_only_key_never_wedges_the_boot_wipe() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xd1, "destroyed");
+        md_review_read_only(&root.join("identity.key"));
+        std::fs::write(root.join(PENDING_WIPE_MARKER), crate::api::wipe::DESTROY_MARK).unwrap();
+        let _ = perform_pending_wipe();
+        let key_left = root.join("identity.key").exists();
+        let pending = has_pending_wipe().unwrap();
+        assert!(!key_left && !pending, "boot wipe vs a read-only key: key left {key_left}, wipe still pending {pending}");
+    }
+
+    /// The boot wipe ends (marker gone) once the IDENTITY_SET is gone; a key name
+    /// outside that set that could not be zeroed is then never taken by a later pass.
+    #[test]
+    fn md_review_a_boot_wipe_never_ends_while_a_key_outside_the_set_survives() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xd2, "destroyed");
+        std::fs::write(root.join("identity.duress"), b"duress slot").unwrap();
+        md_review_read_only(&root.join("identity.duress"));
+        std::fs::write(root.join(PENDING_WIPE_MARKER), crate::api::wipe::DESTROY_MARK).unwrap();
+        let _ = perform_pending_wipe();
+        let ended = !has_pending_wipe().unwrap();
+        let survived = root.join("identity.duress").exists();
+        assert!(!(ended && survived), "the wipe ended with identity.duress still on disk, so no later pass comes");
+    }
+
+    /// The same with the builder's own holder (read + delete share, no write): once
+    /// the holder lets go, the key must not still be there with the wipe over.
+    #[cfg(windows)]
+    #[test]
+    fn md_review_a_key_held_through_the_boot_wipe_is_taken_once_let_go() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ_DELETE: u32 = 1 | 4;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xd4, "destroyed");
+        std::fs::write(root.join("pending_link.device"), b"a device's private key").unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ_DELETE)
+            .open(root.join("pending_link.device"))
+            .unwrap();
+        stash_pending_wipe().unwrap();
+        let _ = perform_pending_wipe();
+        drop(holder);
+        let ended = !has_pending_wipe().unwrap();
+        let survived = std::fs::read(root.join("pending_link.device")).ok();
+        assert!(
+            !(ended && survived.is_some()),
+            "the wipe ended and the held key outlived it with its bytes: {survived:?}"
+        );
+    }
+
+    /// Welcome's "Restore a backup" runs inside the Welcome dialog, before Dart's re-run
+    /// of the wipe (which only follows the dialog). With the KEY the held file, it
+    /// refuses in the landing's words for the whole session, even once the holder has
+    /// let go (the 2d tell); a phrase restore shares the same gate.
+    #[cfg(windows)]
+    #[test]
+    fn md_review_a_welcome_backup_restore_clears_once_a_held_key_is_let_go() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let backup = tmp.path().join("backup.hollow");
+        std::fs::write(&backup, link_blob(tmp.path(), 0xd6, "a long enough passphrase")).unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xd3, "destroyed");
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(root.join("identity.key"))
+            .unwrap();
+        std::fs::write(root.join(PENDING_WIPE_MARKER), crate::api::wipe::DESTROY_MARK).unwrap();
+        assert!(!perform_pending_wipe().unwrap(), "the boot wipe finished while the key was held");
+        assert!(!has_identity().unwrap(), "Welcome would not show");
+        drop(holder);
+        crate::identity::encryption::clear_session_key();
+        // Welcome > Restore a backup, same session, the holder gone.
+        let restored = import_backup(backup.to_string_lossy().into_owned(), "a long enough passphrase".into());
+        assert!(restored.is_ok(), "still refused after the holder let go: {restored:?}");
+        let phrase = crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into()).map(|_| ());
+        assert!(phrase.is_ok(), "the phrase gate: {phrase:?}");
+    }
+
+    /// The database moves aside BEFORE the new key is written; a key write that then
+    /// fails (a held or read-only identity.key, a full disk) leaves the identity that
+    /// is still in the root beside no database: its next launch opens an empty one and
+    /// nothing puts the kept file back.
+    // Windows only: a POSIX rename replaces a 0400 key, so there the restore lands
+    // (`a_key_that_does_not_land_puts_everything_back` covers every platform).
+    #[cfg(windows)]
+    #[test]
+    fn md_review_a_restore_that_cannot_write_its_key_leaves_the_database_in_place() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xd5, "still mine");
+        md_review_read_only(&root.join("identity.key"));
+        let restored = crate::api::identity::restore_identity_from_mnemonic(PHRASE_B.into()).map(|_| ());
+        assert!(restored.is_err(), "the key write was expected to fail");
+        crate::identity::encryption::clear_session_key();
+        assert_eq!(pair_in_root().as_deref(), Ok("still mine"), "the identity left in the root lost its database: kept {:?}", kept_aside(&root));
+    }
+
+    // md-integrity-2
+
+    /// The reviewer's restore case, on every platform: a key that does not land (here
+    /// its rename fails) puts back the database it had set aside and the encrypted key
+    /// it had moved to its locked name, and leaves no staged copy. A new identity too.
+    #[test]
+    fn a_key_that_does_not_land_puts_everything_back() {
+        use crate::identity::encryption;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        type Attempt = fn() -> Result<(), String>;
+        let attempts: [(&str, Attempt); 2] = [
+            ("restore", || crate::api::identity::restore_identity_from_mnemonic(PHRASE_B.into()).map(|_| ())),
+            ("generate", || crate::api::identity::generate_new_identity().map(|_| ())),
+        ];
+        for (what, attempt) in attempts {
+            let root = tmp.path().join(what);
+            let pass = identity_in(&root, 0xe1, "still mine");
+            let salt = [0x07u8; 16];
+            let wrap = encryption::derive_wrapping_key_from_password("correct horse", &salt).unwrap();
+            let plain = std::fs::read(root.join("identity.key")).unwrap();
+            let sealed = encryption::encrypt_identity(&plain, &wrap, &salt, true, false).unwrap();
+            std::fs::write(root.join("identity.key"), &sealed).unwrap();
+            encryption::test_faults::fail_rename_of("identity.key");
+            let landed = attempt();
+            encryption::test_faults::clear();
+            assert!(landed.is_err(), "{what}: the key was expected not to land");
+            assert_eq!(std::fs::read(root.join("identity.key")).ok(), Some(sealed), "{what}: the old key is not back");
+            assert!(!root.join("identity.key.locked").exists(), "{what}: the old key stayed under its locked name");
+            assert!(!root.join("identity.key.tmp").exists(), "{what}: the staged key stayed");
+            assert!(kept_aside(&root).is_empty(), "{what}: the database stayed aside");
+            let db = MessageStore::open(root.join("messages.db").to_str().unwrap(), &pass).unwrap();
+            assert_eq!(db.load_setting("who").unwrap().as_deref(), Some("still mine"), "{what}");
+        }
+    }
+
+    /// A key the boot wipe could not take is no identity (the marker says so), so once
+    /// nothing in this process has it open, Welcome finishes the wipe and goes on.
+    #[test]
+    fn a_welcome_choice_finishes_a_wipe_that_left_a_key() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xe3, "destroyed");
+        std::fs::write(root.join(PENDING_WIPE_MARKER), crate::api::wipe::DESTROY_MARK).unwrap();
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into()).unwrap();
+        assert!(!has_pending_wipe().unwrap(), "the wipe was not finished");
+        assert!(pair_in_root().is_ok(), "{:?}", pair_in_root());
+        assert_ne!(pair_in_root().as_deref(), Ok("destroyed"), "the destroyed database stayed");
+        assert!(kept_aside(&root).is_empty(), "the destroyed database was kept instead of wiped");
+    }
+
+    /// After a destroy this process ran, nothing mints an identity in that root until
+    /// the relaunch: not a stray load, not a phrase, not a backup.
+    #[test]
+    fn no_identity_is_minted_where_this_process_destroyed_one() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let backup = tmp.path().join("backup.hollow");
+        std::fs::write(&backup, link_blob(tmp.path(), 0xe4, "a long enough passphrase")).unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xe5, "gone");
+        crate::api::wipe::destroy_local().unwrap();
+        assert!(!root.join("identity.key").exists(), "the destroy left the key");
+        let refused = Err(IDENTITY_NOT_READY.to_string());
+        assert_eq!(crate::identity::load_or_create_identity().map(|_| ()), refused, "a stray load");
+        assert_eq!(crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into()).map(|_| ()), refused, "a phrase");
+        assert_eq!(import_backup(backup.to_string_lossy().into_owned(), "a long enough passphrase".into()), refused, "a backup");
+        assert!(!root.join("identity.key").exists(), "an identity was minted in the destroyed root");
+    }
+
+    /// A database set aside takes its rollback journal along (iOS), and comes back with it.
+    #[test]
+    fn a_kept_database_takes_its_rollback_journal_along() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("messages.db"), b"pages").unwrap();
+        std::fs::write(root.join("messages.db-journal"), b"a hot journal").unwrap();
+        let stem = set_database_aside(&root).unwrap();
+        assert!(!root.join("messages.db-journal").exists(), "the journal stayed for the next database");
+        assert_eq!(std::fs::read(root.join(format!("{stem}-journal"))).unwrap(), b"a hot journal");
+        put_database_back(&root, &stem).unwrap();
+        assert_eq!(std::fs::read(root.join("messages.db-journal")).unwrap(), b"a hot journal");
+        assert_eq!(std::fs::read(root.join("messages.db")).unwrap(), b"pages");
+    }
+
+    /// A snapshot of a rollback-journal database (iOS) holds a read lock while it
+    /// reads, and no writer commits under one. A writer with a short busy wait must
+    /// still commit while a large snapshot runs, and the snapshot holds its row.
+    #[test]
+    fn a_writer_commits_while_a_snapshot_of_a_large_rollback_journal_database_runs() {
+        const ROWS: i64 = 6000;
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("journal.db");
+        let copy = tmp.path().join("copy.db");
+        let pass = "ab".repeat(32);
+        let open = |busy_ms: u32| {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(&format!(
+                "PRAGMA key = \"x'{pass}'\"; PRAGMA journal_mode = TRUNCATE; PRAGMA busy_timeout = {busy_ms};"
+            ))
+            .unwrap();
+            conn
+        };
+        let filler = open(4000);
+        filler
+            .execute_batch(&format!(
+                "CREATE TABLE t(b BLOB); BEGIN; WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {ROWS}) \
+                 INSERT INTO t SELECT randomblob(16000) FROM n; COMMIT;"
+            ))
+            .unwrap();
+        drop(filler);
+
+        SNAPSHOT_READING.store(false, std::sync::atomic::Ordering::Release);
+        let snapshot = {
+            let (db, copy, pass) = (db.clone(), copy.clone(), pass.clone());
+            std::thread::spawn(move || backup_database(&db, &copy, &pass))
+        };
+        while !SNAPSHOT_READING.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let committed = open(250).execute("INSERT INTO t VALUES (x'01')", []);
+        let finished_first = snapshot.is_finished();
+        snapshot.join().unwrap().expect("snapshot");
+        assert!(!finished_first, "the snapshot ended before the writer tried: make the database larger");
+        assert!(committed.is_ok(), "a writer could not commit while the snapshot ran: {committed:?}");
+        let copied = rusqlite::Connection::open(&copy).unwrap();
+        copied.execute_batch(&format!("PRAGMA key = \"x'{pass}'\";")).unwrap();
+        let rows: i64 = copied.query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, ROWS + 1, "the snapshot misses the row committed while it ran");
+    }
+
+    /// A snapshot of a rollback-journal database that a writer changes every 2 ms,
+    /// taken with `hold_limit` as the longest one read may hold writers off; returns
+    /// the result and the rows the copy holds.
+    fn snapshot_under_churn(hold_limit: std::time::Duration) -> (Result<(), String>, Option<i64>) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("busy.db");
+        let copy = tmp.path().join("copy.db");
+        let pass = "cd".repeat(32);
+        let open = |path: &std::path::Path| {
+            let conn = rusqlite::Connection::open(path).unwrap();
+            conn.execute_batch(&format!(
+                "PRAGMA key = \"x'{pass}'\"; PRAGMA journal_mode = TRUNCATE; PRAGMA busy_timeout = 4000;"
+            ))
+            .unwrap();
+            conn
+        };
+        open(&db)
+            .execute_batch(
+                "CREATE TABLE t(b BLOB); BEGIN; WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 250) INSERT INTO t SELECT randomblob(16000) FROM n; COMMIT;",
+            )
+            .unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (stop, writer) = (stop.clone(), open(&db));
+            std::thread::spawn(move || {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !stop.load(std::sync::atomic::Ordering::Acquire) && std::time::Instant::now() < until {
+                    writer.execute("INSERT INTO t VALUES (x'01')", []).expect("a writer failed behind the snapshot");
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            })
+        };
+        *SNAPSHOT_HOLD_LIMIT_OVERRIDE.lock().unwrap() = Some(hold_limit);
+        let copied = backup_database(&db, &copy, &pass);
+        *SNAPSHOT_HOLD_LIMIT_OVERRIDE.lock().unwrap() = None;
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        writer.join().expect("the writer");
+        let rows = copied.is_ok().then(|| open(&copy).query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap());
+        (copied, rows)
+    }
+
+    /// A snapshot that keeps starting over behind writers finishes in one read when
+    /// that read is short, and no writer fails meanwhile.
+    #[test]
+    fn a_snapshot_that_keeps_starting_over_finishes_in_one_short_read() {
+        let (copied, rows) = snapshot_under_churn(SNAPSHOT_HOLD_LIMIT);
+        assert_eq!(copied, Ok(()));
+        assert!(rows.is_some_and(|n| n >= 250), "{rows:?}");
+    }
+
+    /// One whose single read would hold writers off too long is refused instead.
+    #[test]
+    fn a_snapshot_that_keeps_starting_over_is_refused_when_one_read_is_too_long() {
+        let (copied, _) = snapshot_under_churn(std::time::Duration::ZERO);
+        assert_eq!(copied, Err("Failed to copy messages.db: it kept changing".to_string()));
+    }
+
+    // md-review-2
+
+    /// Seals the root's plaintext identity.key under `password`; returns the plaintext.
+    fn md_review_2_seal_key(root: &std::path::Path, password: &str) -> Vec<u8> {
+        use crate::identity::encryption;
+        let salt = [0x07u8; 16];
+        let wrap = encryption::derive_wrapping_key_from_password(password, &salt).unwrap();
+        let plain = std::fs::read(root.join("identity.key")).unwrap();
+        let sealed = encryption::encrypt_identity(&plain, &wrap, &salt, true, false).unwrap();
+        std::fs::write(root.join("identity.key"), &sealed).unwrap();
+        plain
+    }
+
+    /// A phrase restore over a sealed identity (the unlock screen's Recover, the
+    /// key-missing screen) stages the master in PLAINTEXT at identity.key.tmp before it
+    /// opens the database and renames (keys.rs:161 to :173). A kill in that window
+    /// leaves the sealed key in place and the plaintext copy beside it. The next launch
+    /// asks for the password as before, and nothing ever clears the staged copy.
+    #[test]
+    fn md_review_2_a_launch_clears_a_plaintext_key_a_killed_restore_staged() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xf1, "mine");
+        let plain = md_review_2_seal_key(&root, "correct horse");
+        // What keys.rs:161 leaves when the process dies before keys.rs:173.
+        std::fs::write(root.join("identity.key.tmp"), &plain).unwrap();
+
+        // The next launch, as Dart runs it: the link check, then the password prompt.
+        crate::identity::encryption::clear_session_key();
+        has_pending_link().unwrap();
+        crate::api::identity::unlock_identity(Some("correct horse".into())).unwrap();
+        crate::identity::encryption::clear_session_key();
+
+        let left = std::fs::read(root.join("identity.key.tmp")).ok();
+        assert!(
+            left.as_ref().is_none_or(|b| b.iter().all(|x| *x == 0)),
+            "a plaintext copy of the sealed master outlived the launch"
+        );
+    }
+
+    /// A phrase for another identity over a sealed one sets the database aside
+    /// (keys.rs:165) before it moves the sealed key to its locked name (keys.rs:172).
+    /// A kill between the two leaves the old identity in the root beside no database:
+    /// its next launch opens an empty one and nothing puts the kept file back.
+    #[test]
+    fn md_review_2_a_kill_mid_restore_never_strands_the_database_of_the_identity_left() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xf2, "still mine");
+        md_review_2_seal_key(&root, "correct horse");
+        // What keys.rs:161 and :165 leave when the process dies before :172.
+        let other = NativeKeypair::from_secret_bytes(&[0xf3; 32]);
+        std::fs::write(root.join("identity.key.tmp"), other.to_protobuf_encoding().unwrap()).unwrap();
+        set_database_aside(&root).unwrap();
+
+        crate::identity::encryption::clear_session_key();
+        has_pending_link().unwrap();
+        crate::api::identity::unlock_identity(Some("correct horse".into())).unwrap();
+        let who = pair_in_root();
+        crate::identity::encryption::clear_session_key();
+        assert_eq!(who.as_deref(), Ok("still mine"), "the identity left in the root lost its database: kept {:?}", kept_aside(&root));
+    }
+
+    // md-integrity-2b
+
+    /// Two key landings at once (Welcome's Create and a stray load, say) used to share
+    /// one staging file: one clearing it under the other renamed a zeroed key into
+    /// place. Each lands whole; the key left is one of theirs, never zeros.
+    #[test]
+    fn two_key_landings_at_once_never_land_a_zeroed_key() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        for round in 0..30 {
+            let root = tmp.path().join(format!("round{round}"));
+            let pass = identity_in(&root, 0xa7, "old");
+            drop(pass);
+            let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let restore = {
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    crate::identity::restore_identity_from_mnemonic(PHRASE_A).map(|id| id.peer_id)
+                })
+            };
+            let generate = {
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    crate::identity::generate_new_identity().map(|id| id.peer_id)
+                })
+            };
+            let a = restore.join().unwrap();
+            let b = generate.join().unwrap();
+            let bytes = std::fs::read(root.join("identity.key")).unwrap();
+            assert!(bytes.iter().any(|x| *x != 0), "round {round}: a zeroed key landed");
+            let landed = NativeKeypair::from_protobuf_encoding(&bytes)
+                .unwrap_or_else(|e| panic!("round {round}: the key in place is no key: {e}"))
+                .peer_id();
+            assert!(
+                [&a, &b].iter().any(|r| r.as_deref() == Ok(landed.as_str())),
+                "round {round}: the key in place is neither landing's ({a:?}, {b:?})"
+            );
+            assert!(!root.join("identity.key.tmp").exists(), "round {round}: a staged key stayed");
+            assert!(!root.join(".key_landing").exists(), "round {round}: the landing mark stayed");
+        }
+    }
+
+    /// A landing that died before its rename left its mark naming the encrypted key it
+    /// moved: the next launch puts that key back before anything asks to unlock it.
+    #[test]
+    fn a_launch_puts_back_a_locked_key_a_killed_landing_moved() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xa8, "still mine");
+        md_review_2_seal_key(&root, "correct horse");
+        let sealed = std::fs::read(root.join("identity.key")).unwrap();
+        // What a restore leaves when it dies after moving the sealed key, before the rename.
+        let other = NativeKeypair::from_secret_bytes(&[0xa9; 32]);
+        std::fs::write(root.join("identity.key.tmp"), other.to_protobuf_encoding().unwrap()).unwrap();
+        std::fs::write(root.join(".key_landing"), "identity.key").unwrap();
+        set_database_aside(&root).unwrap();
+        std::fs::rename(root.join("identity.key"), root.join("identity.key.locked")).unwrap();
+
+        crate::identity::encryption::clear_session_key();
+        has_pending_link().unwrap();
+        assert_eq!(std::fs::read(root.join("identity.key")).ok(), Some(sealed), "the sealed key is not back");
+        assert!(has_identity().unwrap(), "the launch would show Welcome over the identity left");
+        crate::api::identity::unlock_identity(Some("correct horse".into())).unwrap();
+        let who = pair_in_root();
+        crate::identity::encryption::clear_session_key();
+        assert_eq!(who.as_deref(), Ok("still mine"));
+        assert!(!root.join(".key_landing").exists(), "the mark outlived the unlock that used it");
+    }
+
+    /// The unlock takes back only a database the identity's own key opens: after a
+    /// finished switch to another identity, the old database stays kept.
+    #[test]
+    fn an_unlock_never_takes_back_another_identitys_database() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xaa, "the old one");
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_B.into()).unwrap();
+        assert_eq!(kept_aside(&root).len(), 1);
+        std::fs::write(root.join(".key_landing"), "reclaim").unwrap();
+        crate::identity::encryption::clear_session_key();
+        crate::api::identity::unlock_identity(None).unwrap();
+        crate::identity::encryption::clear_session_key();
+        assert_eq!(kept_aside(&root).len(), 1, "another identity's database came back");
+        assert!(!root.join("messages.db").exists(), "another identity's database came back");
+    }
+
+    /// A key write through `write_key_file` (a password change) and a key landing at
+    /// once share the staging name too: neither may land the other's cleared copy.
+    #[test]
+    fn a_key_write_and_a_landing_at_once_never_land_a_zeroed_key() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let written = NativeKeypair::from_secret_bytes(&[0xab; 32]);
+        for round in 0..30 {
+            let root = tmp.path().join(format!("round{round}"));
+            identity_in(&root, 0xac, "old");
+            let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let restore = {
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    crate::identity::restore_identity_from_mnemonic(PHRASE_A).map(|id| id.peer_id)
+                })
+            };
+            let write = {
+                let (start, key, bytes) = (start.clone(), root.join("identity.key"), written.to_protobuf_encoding().unwrap());
+                std::thread::spawn(move || {
+                    start.wait();
+                    crate::identity::encryption::write_key_file(&key, &bytes)
+                })
+            };
+            let a = restore.join().unwrap();
+            let b = write.join().unwrap();
+            let bytes = std::fs::read(root.join("identity.key")).unwrap();
+            let landed = NativeKeypair::from_protobuf_encoding(&bytes)
+                .unwrap_or_else(|e| panic!("round {round}: the key in place is no key: {e}"))
+                .peer_id();
+            let ok = (a.as_deref() == Ok(landed.as_str())) || (b.is_ok() && landed == written.peer_id());
+            assert!(ok, "round {round}: the key in place is neither write's ({a:?}, {b:?})");
+        }
+    }
+    // md-review-merge
+
+    /// A relink Welcome shows over before its settle could finish (the kept slot would
+    /// not store, `settle_relink_at` returns with the journal kept and the identity
+    /// moved out). Every key mint refuses while the journal exists, but a backup restore
+    /// lands through `land_snapshot`, which asks only the wipe marker and the in-session
+    /// destroy. The next launch's settle then sees a key in the root, takes it for an
+    /// undo, and moves what the root lacks out of the old data into the backup's
+    /// identity: the old data's roster, its files and its repair folders.
+    #[test]
+    fn md_review_merge_a_backup_never_lands_while_a_relink_is_unsettled() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let blob = link_blob(tmp.path(), 0xd1, "a long backup passphrase");
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xd2, "old data");
+        std::fs::write(root.join("roster_bootstrap.json"), b"the old identity's roster").unwrap();
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        std::fs::write(root.join("files").join("f.webp"), b"an old attachment").unwrap();
+        // The relink's state once the identity moved, before the settle could finish.
+        let target = tmp.path().join("data-old-2025-10-10");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("relink_origin.json"), serde_json::json!({ "root": root.to_string_lossy() }).to_string()).unwrap();
+        std::fs::write(root.join("relink.json"), serde_json::json!({ "target": target.to_string_lossy() }).to_string()).unwrap();
+        for name in ["messages.db", "files", "roster_bootstrap.json", "identity.device", "identity.key"] {
+            std::fs::rename(root.join(name), target.join(name)).unwrap();
+        }
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &root) };
+        crate::identity::encryption::clear_session_key();
+        assert!(!has_identity().unwrap(), "Welcome would not show");
+
+        let landed = import_backup_bytes(&blob, "a long backup passphrase");
+        if let Ok(mut store) = get_store().lock() {
+            store.take();
+        }
+        crate::node::at_rest::forget_stores();
+        // The next launch.
+        crate::api::recovery::settle_relink().unwrap();
+
+        assert!(
+            target.join("roster_bootstrap.json").exists() && target.join("files").join("f.webp").exists(),
+            "the old data was split into the backup's identity (import: {landed:?}); root holds {:?}",
+            std::fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A wrong phrase sets the identity's database aside as `messages.db.unreadable-*`
+    /// and the wiki says the kept file still opens with the old phrase. Typing the right
+    /// phrase next lands the key where the root holds the WRONG identity's database:
+    /// that one goes aside, the root is left with none, and the right identity opens a
+    /// new empty one. Its own kept database is never put back, and Repair answers
+    /// "nothing to repair" since the new database opens.
+    #[test]
+    fn md_review_merge_the_right_phrase_after_a_wrong_one_gets_its_database_back() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = empty_root(tmp.path());
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into()).unwrap();
+        let mine = derive_db_key().unwrap();
+        MessageStore::open(root.join("messages.db").to_str().unwrap(), &mine)
+            .unwrap()
+            .save_setting("who", "mine")
+            .unwrap();
+
+        // The wrong phrase, which then runs (and so makes its own database).
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_B.into()).unwrap();
+        assert!(pair_in_root().is_ok());
+        // The right one.
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into()).unwrap();
+
+        assert_eq!(
+            pair_in_root().as_deref(),
+            Ok("mine"),
+            "the right phrase came back to an empty database; kept aside: {:?}",
+            kept_aside(&root)
+        );
+    }
+
+    /// A destroy's boot wipe waits for a kept folder's database (`kept_keys_gone`) but
+    /// not for the root's own set-aside copies: a `messages.db.unreadable-*` a start-up
+    /// kept (the replaced identity's whole history, and its per-file keys) that another
+    /// program holds through the wipe is left, the marker goes, and no pass comes back.
+    #[cfg(windows)]
+    #[test]
+    fn md_review_merge_a_boot_wipe_waits_for_a_database_kept_aside_in_the_root() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xd3, "the replaced identity");
+        let stem = set_database_aside(&root).unwrap();
+        identity_in(&root, 0xd4, "the identity destroyed");
+        let scanner = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(root.join(&stem)).unwrap();
+        std::fs::write(root.join(PENDING_WIPE_MARKER), crate::api::wipe::DESTROY_MARK).unwrap();
+        crate::identity::encryption::clear_session_key();
+
+        let first = perform_pending_wipe();
+        let marker_kept = present(&root.join(PENDING_WIPE_MARKER));
+        drop(scanner);
+        let second = perform_pending_wipe();
+
+        assert!(marker_kept, "the marker went while a kept database survived the wipe ({first:?})");
+        assert!(!root.join(&stem).exists(), "no later pass took the kept database ({second:?})");
+    }
+
+    /// A key landing a kill cut short leaves the mark `reclaim`, and the unlock puts the
+    /// set-aside database back. When that put-back fails (another program held the kept
+    /// file a moment), the mark stays for "a later unlock", but the same launch then
+    /// opens the store, which makes a new empty database in the root; the next unlock
+    /// finds a database in place and drops the mark. The identity runs on an empty
+    /// database with its own kept beside it, and Repair finds nothing to repair.
+    #[cfg(windows)]
+    #[test]
+    fn md_review_merge_a_reclaim_that_waits_is_never_overtaken_by_a_new_database() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ_WRITE: u32 = 1 | 2;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xd5, "still mine");
+        // What a phrase restore leaves when it dies after setting the database aside.
+        let other = NativeKeypair::from_secret_bytes(&[0xd6; 32]);
+        std::fs::write(root.join("identity.key.tmp"), other.to_protobuf_encoding().unwrap()).unwrap();
+        std::fs::write(root.join(".key_landing"), "").unwrap();
+        let stem = set_database_aside(&root).unwrap();
+
+        // Launch 1: the kept file is held while the unlock tries to put it back.
+        crate::identity::encryption::clear_session_key();
+        has_pending_link().unwrap();
+        let scanner = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ_WRITE).open(root.join(&stem)).unwrap();
+        crate::api::identity::unlock_identity(None).unwrap();
+        let opened = open_message_store();
+        drop(scanner);
+        if let Ok(mut store) = get_store().lock() {
+            store.take();
+        }
+        crate::node::at_rest::forget_stores();
+        crate::identity::encryption::clear_session_key();
+
+        // Launch 2, nothing held.
+        has_pending_link().unwrap();
+        crate::api::identity::unlock_identity(None).unwrap();
+        let who = pair_in_root();
+        crate::identity::encryption::clear_session_key();
+
+        assert_eq!(
+            who.as_deref(),
+            Ok("still mine"),
+            "the identity runs on a new empty database (store opened: {opened:?}); kept aside: {:?}",
+            kept_aside(&root)
+        );
+    }
+
+    // md-merge
+
+    /// The right phrase after a wrong one whose key then does not land: the identity
+    /// still in the root keeps its database in place, and the one put back for the
+    /// phrase goes aside again under its kept name.
+    #[test]
+    fn md_merge_a_right_phrase_that_does_not_land_leaves_both_databases_where_they_were() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = empty_root(tmp.path());
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into()).unwrap();
+        MessageStore::open(root.join("messages.db").to_str().unwrap(), &derive_db_key().unwrap())
+            .unwrap()
+            .save_setting("who", "mine")
+            .unwrap();
+        crate::api::identity::restore_identity_from_mnemonic(PHRASE_B.into()).unwrap();
+        MessageStore::open(root.join("messages.db").to_str().unwrap(), &derive_db_key().unwrap())
+            .unwrap()
+            .save_setting("who", "theirs")
+            .unwrap();
+        let kept_before = kept_aside(&root);
+
+        crate::identity::encryption::test_faults::fail_rename_of("identity.key");
+        let landed = crate::api::identity::restore_identity_from_mnemonic(PHRASE_A.into());
+        crate::identity::encryption::test_faults::clear();
+
+        assert!(landed.is_err(), "precondition: the key did not land");
+        assert_eq!(pair_in_root().as_deref(), Ok("theirs"), "the identity in the root lost its database");
+        assert_eq!(kept_aside(&root), kept_before, "the database put back for the phrase did not go aside again");
+    }
+
+    /// A reclaim whose kept database cannot be read at all (another program has it
+    /// open exclusively) keeps waiting: the identity never starts on a new empty
+    /// database in its place, and the next unlock takes its own back.
+    #[cfg(windows)]
+    #[test]
+    fn md_merge_a_reclaim_that_cannot_read_its_kept_database_keeps_waiting() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xe5, "still mine");
+        let other = NativeKeypair::from_secret_bytes(&[0xe6; 32]);
+        std::fs::write(root.join("identity.key.tmp"), other.to_protobuf_encoding().unwrap()).unwrap();
+        std::fs::write(root.join(".key_landing"), "").unwrap();
+        let stem = set_database_aside(&root).unwrap();
+
+        crate::identity::encryption::clear_session_key();
+        has_pending_link().unwrap();
+        let scanner = std::fs::OpenOptions::new().read(true).share_mode(0).open(root.join(&stem)).unwrap();
+        crate::api::identity::unlock_identity(None).unwrap();
+        let opened = open_message_store();
+        drop(scanner);
+        if let Ok(mut store) = get_store().lock() {
+            store.take();
+        }
+        crate::node::at_rest::forget_stores();
+        crate::identity::encryption::clear_session_key();
+
+        has_pending_link().unwrap();
+        crate::api::identity::unlock_identity(None).unwrap();
+        let who = pair_in_root();
+        crate::identity::encryption::clear_session_key();
+
+        assert!(opened.is_err(), "a new database was made while the reclaim waited");
+        assert_eq!(who.as_deref(), Ok("still mine"), "kept aside: {:?}", kept_aside(&root));
+    }
+
+    /// A phrase landing killed after it put the phrase identity's own database back
+    /// and before its key went in: the next unlock of the identity still in the root
+    /// sets that database aside again and takes its own back.
+    #[test]
+    fn md_merge_a_kill_after_the_put_back_never_leaves_the_old_identity_on_the_wrong_database() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xe7, "still mine");
+        set_database_aside(&root).unwrap();
+        let phrase_identity = NativeKeypair::from_secret_bytes(&[0xe8; 32]);
+        MessageStore::open(root.join("messages.db").to_str().unwrap(), &db_key_of(&phrase_identity).unwrap())
+            .unwrap()
+            .save_setting("who", "theirs")
+            .unwrap();
+        std::fs::write(root.join("identity.key.tmp"), phrase_identity.to_protobuf_encoding().unwrap()).unwrap();
+        std::fs::write(root.join(".key_landing"), "").unwrap();
+
+        crate::identity::encryption::clear_session_key();
+        has_pending_link().unwrap();
+        crate::api::identity::unlock_identity(None).unwrap();
+        let who = pair_in_root();
+        crate::identity::encryption::clear_session_key();
+
+        assert_eq!(who.as_deref(), Ok("still mine"), "kept aside: {:?}", kept_aside(&root));
+        assert_eq!(kept_aside(&root).len(), 1, "the phrase identity's database was not kept");
+    }
+
+    // md-link
+    /// HOL-SEC-129. A snapshot whose database the path gate cannot finish, or that does
+    /// not open with the snapshot's own key, never lands: the identity it would have
+    /// replaced stays, and nothing of the snapshot is left in the root.
+    #[test]
+    fn a_snapshot_the_path_gate_cannot_judge_never_lands() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let pass = identity_in(&source, 0x91, "crafted");
+        let elsewhere = tmp.path().join("someone_elses.docx");
+        std::fs::write(&elsewhere, b"not ours").unwrap();
+        {
+            let store = MessageStore::open(source.join("messages.db").to_str().unwrap(), &pass).unwrap();
+            store
+                .insert_file_metadata(
+                    "aa11", "aa11", "png", "image/png", 8, 1, true, None, None, None, "dm", "friend", "friend", false,
+                    1000, None, None, None,
+                )
+                .unwrap();
+            store.mark_file_complete("aa11", elsewhere.to_str().unwrap()).unwrap();
+            store.wal_checkpoint().unwrap();
+        }
+        {
+            // A database made to refuse the gate's reset of that row.
+            let conn = rusqlite::Connection::open(source.join("messages.db")).unwrap();
+            conn.execute_batch(&format!("PRAGMA key = \"x'{pass}'\";")).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER keep_path BEFORE UPDATE ON files BEGIN SELECT RAISE(ABORT, 'kept'); END;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        }
+        let key = std::fs::read(source.join("identity.key")).unwrap();
+        let db = std::fs::read(source.join("messages.db")).unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x92, "throwaway");
+
+        let refused = import_snapshot_bytes(&zip_of(&[("identity.key", &key), ("messages.db", &db)]));
+        assert!(refused.is_err(), "a database the gate could not finish landed");
+        assert_eq!(pair_in_root().as_deref(), Ok("throwaway"));
+
+        let other = NativeKeypair::from_secret_bytes(&[0x93; 32]).to_protobuf_encoding().unwrap();
+        let refused = import_snapshot_bytes(&zip_of(&[("identity.key", &other), ("messages.db", &db)]));
+        assert!(refused.is_err(), "a database its own key does not open landed");
+        assert_eq!(pair_in_root().as_deref(), Ok("throwaway"));
+        assert!(!present(&root.join(LANDING_STAGE)), "a refused landing left its stage");
+    }
+
+    /// A restored or linked device mints its own Olm and MLS identities. A snapshot whose
+    /// database keeps the source's when they are cleared never lands: the device would
+    /// speak as the source.
+    #[test]
+    fn a_snapshot_whose_scrub_fails_never_lands() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let pass = identity_in(&source, 0x94, "source");
+        {
+            let store = MessageStore::open(source.join("messages.db").to_str().unwrap(), &pass).unwrap();
+            store.save_olm_account("the source's account").unwrap();
+            store.wal_checkpoint().unwrap();
+        }
+        let key = std::fs::read(source.join("identity.key")).unwrap();
+        let db = |trigger: &str| {
+            let conn = rusqlite::Connection::open(source.join("messages.db")).unwrap();
+            conn.execute_batch(&format!("PRAGMA key = \"x'{pass}'\"; {trigger} PRAGMA wal_checkpoint(TRUNCATE);"))
+                .unwrap();
+            drop(conn);
+            std::fs::read(source.join("messages.db")).unwrap()
+        };
+        // A database made to refuse the scrub's delete of the source's account.
+        let kept = db("CREATE TRIGGER keep_account BEFORE DELETE ON olm_account BEGIN SELECT RAISE(ABORT, 'kept'); END;");
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x95, "throwaway");
+
+        let refused = import_snapshot_bytes(&zip_of(&[("identity.key", &key), ("messages.db", &kept)]));
+        assert!(refused.is_err(), "a database still holding the source's account landed");
+        assert_eq!(pair_in_root().as_deref(), Ok("throwaway"));
+        assert!(!present(&root.join(LANDING_STAGE)), "a refused landing left its stage");
+
+        // The same snapshot whose scrub can finish lands, without the source's account.
+        let clean = db("DROP TRIGGER keep_account;");
+        import_snapshot_bytes(&zip_of(&[("identity.key", &key), ("messages.db", &clean)])).unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("source"));
+        let store = MessageStore::open(root.join("messages.db").to_str().unwrap(), &pass).unwrap();
+        assert_eq!(store.load_olm_account().unwrap(), None, "the source's account landed");
     }
 }

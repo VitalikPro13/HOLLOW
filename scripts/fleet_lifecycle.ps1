@@ -336,6 +336,12 @@ function Start-FleetProxy($peers, $relayHost = 'relay.anonlisten.com') {
     }
     $start = @{ FilePath = (Get-PythonExe); ArgumentList = $arguments; PassThru = $true }
     if (Test-WindowsBackend) { $start['WindowStyle'] = 'Hidden' }
+    else {
+        # Its own files, never the caller's stdout: a fleet.ps1 run read through a pipe
+        # (a remote agent's) would otherwise wait on the proxy until it quits.
+        $start['RedirectStandardOutput'] = Join-Path $script:FleetOutRoot '_proxy.stdout'
+        $start['RedirectStandardError'] = Join-Path $script:FleetOutRoot '_proxy.stderr'
+    }
     $process = Start-Process @start
     if (-not (Wait-Condition { Test-Path $ready } 15 200)) { throw 'the zombie proxy never became ready' }
     [System.IO.File]::WriteAllText((Get-FleetProxyFile),
@@ -389,7 +395,10 @@ function Invoke-FleetHostOp($peer, $step) {
     $op = "$($step.op)"
     $started = Get-Date
     $proc = Get-PeerProcess $peer
-    if (-not $proc) { return (New-HostAnswer $op $false "peer $peer is not running" $started) }
+    # A cut is the emulator's or the proxy's, never the app's: a link restarts the app
+    # mid-cut, and the network must still come back.
+    $netOp = $op -eq 'net_off' -or $op -eq 'net_on'
+    if (-not $proc -and -not $netOp) { return (New-HostAnswer $op $false "peer $peer is not running" $started) }
     try {
         if (($op -eq 'net_off' -or $op -eq 'net_on') -and -not (Test-AndroidBackend $peer)) {
             $message = Invoke-ProxyNet $peer $op $step

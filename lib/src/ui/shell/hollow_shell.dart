@@ -8,7 +8,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/services/android_version.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
-import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
@@ -48,7 +47,10 @@ import 'package:hollow/src/core/providers/status_provider.dart';
 import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
+import 'package:hollow/src/rust/api/recovery.dart' as recovery_api;
+import 'package:hollow/src/ui/shell/data_recovery.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/recent_files_sweep.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
@@ -700,6 +702,16 @@ class _HollowShellState extends ConsumerState<HollowShell>
         ],
         confirmLabel: 'Recover identity',
         cancellable: false,
+        leadingActions: [
+          Builder(
+            builder: (context) => HollowButton.ghost(
+              onPressed: () => showDiagnosticsDialog(context,
+                  starting: false,
+                  trouble: unreadable ? 'identity file' : 'identity elsewhere'),
+              child: const Text('Copy diagnostics'),
+            ),
+          ),
+        ],
         onRecover: (phrase) async {
           await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
           await identity_api.unlockIdentity();
@@ -839,15 +851,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     DeepLinkService.instance.handleUrl(parked);
   }
 
-  Future<void> _bootstrap() async {
-    if (_initialized) return;
-    _initialized = true;
-
-    // Backing out of "Link a device" leaves a throwaway identity, and a wipe the
-    // last session could not finish leaves its marker. Wipe the data dir HERE,
-    // before the node starts and before the pending link import: with SQLCipher
-    // handles open, Windows keeps messages.db and the next identity loads
-    // forever. A finished destroy also takes this profile off the profile list.
+  /// Finishes a wipe the last session left; a finished destroy also takes this
+  /// profile off the profile list. Says nothing either way.
+  Future<void> _finishPendingWipe() async {
     try {
       if (await storage_api.hasPendingWipe()) {
         if (await storage_api.performPendingWipe()) {
@@ -857,6 +863,23 @@ class _HollowShellState extends ConsumerState<HollowShell>
     } catch (e) {
       debugPrint('[HOLLOW] Pending data-dir wipe failed: $e');
     }
+  }
+
+  Future<void> _bootstrap() async {
+    if (_initialized) return;
+    _initialized = true;
+
+    // Backing out of "Link a device" leaves a throwaway identity, and a wipe the
+    // last session could not finish leaves its marker. Wipe the data dir HERE,
+    // before the node starts and before the pending link import: with SQLCipher
+    // handles open, Windows keeps messages.db and the next identity loads
+    // forever.
+    await _finishPendingWipe();
+    // A relink a restart cut short is finished or undone before the link import
+    // and anything else reads the identity.
+    try {
+      await recovery_api.settleRelink();
+    } catch (_) {}
 
     // A link transfer stashed an encrypted .hollow blob. Import it FIRST, in the
     // same pre-node-start window a manual restore uses, then fall through as a
@@ -864,8 +887,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     var linkedThisLaunch = false;
     try {
       if (await storage_api.hasPendingLink()) {
-        linkedThisLaunch = true;
         await storage_api.importPendingLink();
+        // Only a link that landed: a failed one leaves the old identity in place.
+        linkedThisLaunch = true;
       }
     } catch (e) {
       // Release builds print nothing, so the reason goes to hollow_debug.log.
@@ -879,8 +903,12 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     WelcomeResult? welcomeResult;
     if (!hasExisting && mounted) {
-      welcomeResult = await showWelcomeDialog(context);
+      final relinked = await keptOldDataForWelcome();
       if (!mounted) return;
+      welcomeResult = await showWelcomeDialog(context,
+          relinkedTo: relinked?.profile, relinkedFolder: relinked?.folder);
+      if (!mounted) return;
+      unawaited(recovery_api.clearRelinkWelcome().catchError((_) {}));
 
       // 'restored_mnemonic' and 'restored_backup' leave an identity on disk;
       // 'create_new' and null fall through to a normal load, which generates.
@@ -890,6 +918,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
       final unlocked = await _unlockIdentity();
       if (!unlocked || !mounted) return;
     } else {
+      // A file something held at launch kept the wipe from finishing; it may be
+      // free by now, and the identity about to be made must not wait for a
+      // relaunch.
+      await _finishPendingWipe();
       // New or just restored: no password to ask for.
       try {
         await identity_api.unlockIdentity();
@@ -900,11 +932,37 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     await ref.read(identityProvider.notifier).load();
 
-    final identity = ref.read(identityProvider);
-    if (identity.error != null) {
+    if (ref.read(identityProvider).error != null) {
       if (_unlocking && mounted) setState(() => _unlocking = false);
       return;
     }
+    await _afterIdentity(
+        welcomeResult: welcomeResult, linkedThisLaunch: linkedThisLaunch);
+  }
+
+  /// A repair put a database that opens in place of one that did not: load
+  /// again and start as any launch would, on the relay the person picked.
+  Future<void> _afterRepair(String relay) async {
+    await ref.read(identityProvider.notifier).load();
+    if (ref.read(identityProvider).error != null || !mounted) return;
+    if (relay != kDefaultRelayDomain) {
+      await ref.read(relayDomainProvider.notifier).setDomain(relay);
+      await ref.read(savedRelayListProvider.notifier).addRelay(relay);
+    }
+    if (mounted) {
+      HollowToast.show(context,
+          'This device is repaired. Your data comes back as your other devices connect.',
+          type: HollowToastType.success);
+    }
+    await _afterIdentity(welcomeResult: null, linkedThisLaunch: false);
+  }
+
+  /// Everything a launch does once the identity and its database are open.
+  Future<void> _afterIdentity({
+    required WelcomeResult? welcomeResult,
+    required bool linkedThisLaunch,
+  }) async {
+    final identity = ref.read(identityProvider);
 
     // Must follow the identity load, which opens the DB. Building the provider
     // self-applies the persisted mode to ReduceMotionController, refining the OS
@@ -1121,6 +1179,12 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
 
     await ref.read(nodeProvider.notifier).start();
+
+    // The node keeps each ask until a holder is online, so this need not wait.
+    unawaited(ref
+        .read(recentFilesSweepProvider)
+        .runIfDue(linkedThisLaunch: linkedThisLaunch)
+        .catchError((_) {}));
 
     // The node brings our own roster up to date at start.
     await ref.read(rosterGateProvider.notifier).refresh();
@@ -1685,17 +1749,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final identityError = ref.watch(identityProvider
         .select((s) => s.isLoaded ? null : s.error));
     if (identityError != null) {
-      return ColoredBox(
-        color: hollow.background,
-        child: HollowEmptyState(
-          title: "Hollow couldn't open your identity",
-          description: friendlyError(identityError),
-          action: const HollowButton.ghost(
-            onPressed: relaunchApp,
-            child: Text('Restart Hollow'),
-          ),
-        ),
-      );
+      return DataTroubleScreen(error: identityError, onRepaired: _afterRepair);
     }
 
     final nodeState = ref.watch(nodeProvider);

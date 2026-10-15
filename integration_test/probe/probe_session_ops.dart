@@ -1,14 +1,20 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage;
 
 import 'probe_dump.dart';
+import 'probe_link_seed.dart';
+import 'probe_link_state.dart';
+import 'probe_sibling_state.dart';
 
 /// A probe op that could not do what it was asked; its text is the answer.
 class SessionOpFailure implements Exception {
@@ -26,12 +32,16 @@ class SessionOpFailure implements Exception {
 /// |---|---|---|
 /// | `lifecycle` | `state` (`resumed`, `inactive`) | delivers that app lifecycle state |
 /// | `clock` | | the device's wall clock, for the host's offset |
-/// | `friend` | `action` (`request`, `accept`), `contact` | the friends provider's own call |
+/// | `friend` | `contact`, `action` (`request`, `accept`, `remove`, `block`, `unblock`, `dm` + `text`) | through the providers the UI calls |
+/// | `profile` | `name`, `avatar_file` | saves our own profile as the editor does |
+/// | `dm_has` | `contact`, `texts`, `timeout_ms` | waits until the database holds every text in that DM |
 /// | `autoreply` | `contact`, `on`, `reply`, `off` | answers `ping:` DMs from `contact` with `pong:` |
 /// | `health` | `rt_peer`, `timeout_ms`, `poll_ms` | time to `connected`, then a DM round trip |
 /// | `stream_start` | `contact`, `tag`, `every_ms` | sends `soak:<tag>:<n>` to `contact` on a timer |
 /// | `stream_stop` | `tag` | stops that stream |
 /// | `stream_stats` | `contact`, `tag` | what this app sent and what it holds from `contact` |
+/// | `link_state` | `dm`, `server`, `channel`, `tag` | roster, own devices, profile, friends, rows (`probe_link_state.dart`) |
+/// | `seed_*` | see `probe_link_seed.dart` | content a linking journey seeds through providers |
 ///
 /// `contact` is a master peer id; `peer` names the fleet instance and never
 /// reaches the app.
@@ -49,11 +59,16 @@ class SessionOps {
     'lifecycle',
     'clock',
     'friend',
+    'profile',
+    'dm_has',
     'autoreply',
     'health',
     'stream_start',
     'stream_stop',
     'stream_stats',
+    'link_state',
+    ...linkSeedOps,
+    ...siblingOps,
   };
 
   ProviderContainer get _container {
@@ -71,6 +86,10 @@ class SessionOps {
         return Future.value('clock ${extra['epoch_ms']}');
       case 'friend':
         return _friend(step);
+      case 'profile':
+        return _profile(step);
+      case 'dm_has':
+        return _dmHas(step);
       case 'autoreply':
         return Future.value(_autoreplyOp(step));
       case 'health':
@@ -81,6 +100,14 @@ class SessionOps {
         return Future.value(_streamStop(step, extra));
       case 'stream_stats':
         return _streamStats(step, extra);
+      case 'link_state':
+        return linkStateOp(tester, _container, step, extra);
+    }
+    if (linkSeedOps.contains(op)) {
+      return linkSeedOp(op, tester, _container, step, extra);
+    }
+    if (siblingOps.contains(op)) {
+      return siblingOp(op, tester, _container, step, extra);
     }
     throw SessionOpFailure('unknown session op "$op"');
   }
@@ -144,10 +171,54 @@ class SessionOps {
         await tester.runAsync(() => notifier.sendRequest(peer));
       case 'accept':
         await tester.runAsync(() => notifier.acceptRequest(peer));
+      case 'remove':
+        await tester.runAsync(() => notifier.removeFriend(peer));
+      case 'block':
+        await tester.runAsync(() => _container.read(blockedUsersProvider.notifier).block(peer));
+      case 'unblock':
+        await tester.runAsync(() => _container.read(blockedUsersProvider.notifier).unblock(peer));
+      case 'dm':
+        final text = '${step['text'] ?? ''}';
+        if (text.isEmpty) throw SessionOpFailure('friend dm needs a "text"');
+        await tester.runAsync(() => _container.read(chatProvider.notifier).sendMessage(peer, text));
       default:
-        throw SessionOpFailure('friend takes action "request" or "accept"');
+        throw SessionOpFailure('friend takes action "request", "accept", "remove", "block", "unblock" or "dm"');
     }
     return 'friend $action $peer';
+  }
+
+  /// Our own name, and an avatar read from `avatar_file` when given, as the
+  /// profile editor saves them.
+  Future<String> _profile(Map<String, dynamic> step) async {
+    final name = '${step['name'] ?? ''}';
+    if (name.isEmpty) throw SessionOpFailure('profile needs a "name"');
+    final file = '${step['avatar_file'] ?? ''}';
+    final avatar = file.isEmpty ? null : await tester.runAsync(() => File(file).readAsBytes());
+    await tester.runAsync(() => _container.read(profileProvider.notifier).updateMyProfile(
+          displayName: name,
+          avatarBytes: avatar,
+        ));
+    return 'profile $name${avatar == null ? '' : ' + avatar (${avatar.length} bytes)'}';
+  }
+
+  /// The DM history in the database, where every delivery path ends (live, a
+  /// sibling's backfill, a mailbox replay), whether or not a chat is open.
+  Future<String> _dmHas(Map<String, dynamic> step) async {
+    final peer = '${step['contact'] ?? ''}';
+    final texts = [for (final t in (step['texts'] as List? ?? const [])) '$t'];
+    if (peer.isEmpty || texts.isEmpty) throw SessionOpFailure('dm_has needs a "contact" and "texts"');
+    final timeout = Duration(milliseconds: (step['timeout_ms'] as num?)?.toInt() ?? 30000);
+    final clock = Stopwatch()..start();
+    var missing = texts;
+    while (true) {
+      final rows = await tester.runAsync(() => storage.loadAllDmMessages(peerId: peer)) ?? const [];
+      final held = {for (final r in rows) r.text};
+      missing = [for (final t in texts) if (!held.contains(t)) t];
+      if (missing.isEmpty) return 'dm_has ${texts.length} text(s) after ${clock.elapsedMilliseconds}ms';
+      if (clock.elapsed > timeout) break;
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 500)));
+    }
+    throw SessionOpFailure('dm_has: still missing $missing after ${clock.elapsedMilliseconds}ms');
   }
 
   String _autoreplyOp(Map<String, dynamic> step) {

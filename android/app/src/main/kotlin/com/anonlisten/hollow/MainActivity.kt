@@ -32,6 +32,15 @@ class MainActivity : FlutterFragmentActivity() {
             relayTriggers.invokeMethod("network", null)
         }.also { it.start() }
 
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hollow/link_keep_alive")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "start" -> { LinkKeepAliveService.start(this); result.success(null) }
+                    "stop" -> { LinkKeepAliveService.stop(this); result.success(null) }
+                    else -> result.notImplemented()
+                }
+            }
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {

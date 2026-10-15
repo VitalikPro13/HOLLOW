@@ -388,9 +388,8 @@ fn broadcast_removal_op(
         ws_cmd_tx, ws_room_peers, targets.iter().filter(|m| skip != Some(m.as_str())),
         local_peer_str, &json, super::olm_lane::NoSession::Queue,
     );
-    super::olm_lane::carry_to_own_siblings(
-        ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, &msg, super::olm_lane::NoSession::Queue,
-    );
+    // A removal drops the server on our own devices at once, the hidden ones included.
+    super::olm_lane::carry_to_every_own_device(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, &msg);
 }
 
 /// Tell every online device of the removed `identity` with the removal op itself:
@@ -2243,6 +2242,7 @@ pub(crate) fn announce_server_to_own_devices(
         server_id: server_id.to_string(),
         owner: state.anchor_owner(),
         join_key: state.join_public_text(),
+        fresh: true,
     };
     let devices: Vec<String> = super::resolver::devices_for(local_master)
         .into_iter()
@@ -2253,6 +2253,32 @@ pub(crate) fn announce_server_to_own_devices(
     }
     if !devices.is_empty() {
         hollow_log!("[HOLLOW-CRDT] Announced server {server_id} to {} sibling device(s), online or not", devices.len());
+    }
+    devices.len()
+}
+
+/// Ask each device our roster counts that the relay did not list in our inbox as we
+/// came back for its state. One sitting in its session's grace still lists us when it
+/// resumes, so it never sees us arrive: the ask waits in its session and it answers.
+/// A late ask is dropped as stale. Returns how many were asked.
+pub(crate) fn ask_absent_siblings(
+    ws_cmd_tx: &WsCmdTx,
+    local_master: &str,
+    local_device: &str,
+    present: &std::collections::HashSet<String>,
+) -> usize {
+    let own_inbox = format!("inbox:{local_master}");
+    let devices: Vec<String> = super::resolver::devices_for(local_master)
+        .into_iter()
+        .filter(|d| d != local_device && d != local_master && !present.contains(d) && !super::resolver::is_revoked(d))
+        .collect();
+    for device in &devices {
+        super::olm_lane::carry(
+            ws_cmd_tx, device, Some(&own_inbox), &HavenMessage::SiblingStateSyncRequest, super::olm_lane::NoSession::Drop,
+        );
+    }
+    if !devices.is_empty() {
+        hollow_log!("[HOLLOW-SYNC] Back in our inbox: asked {} absent sibling device(s) for their state", devices.len());
     }
     devices.len()
 }

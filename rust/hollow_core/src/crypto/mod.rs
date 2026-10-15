@@ -4,7 +4,7 @@ pub(crate) mod safety_number;
 mod store;
 
 pub(crate) use mls_manager::{
-    certified_device, classify_leaf, CommitFacts, DecryptFail, Decrypted, LeafIdentity, LeafView, MlsManager,
+    certified_device, classify_leaf, CommitError, CommitFacts, DecryptFail, Seat, Decrypted, LeafIdentity, LeafView, MlsManager,
     Verdict, WelcomeFacts,
 };
 pub(crate) use mls_manager::{subgroup_id, KEY_PACKAGE_MAX_AGE};

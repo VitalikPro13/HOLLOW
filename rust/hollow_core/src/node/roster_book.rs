@@ -680,7 +680,37 @@ pub(crate) async fn ingest(
     db_passphrase: &str,
 ) -> Ingested {
     Box::pin(ingest_inner(
-        event_tx, ws_cmd_tx, local_master, local_device, sender, incoming, db_path, db_passphrase,
+        event_tx, ws_cmd_tx, local_master, local_device, sender, incoming, db_path, db_passphrase, false,
+    ))
+    .await
+}
+
+/// [`ingest`] for a friend's roster one of our own devices shared with its friend list,
+/// so a device that lost its database places the friend's devices before their first
+/// frame. The statements still verify alone; what the sibling buys is only the first
+/// sight of a roster for a master we hold nothing about, and only for an accepted friend.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ingest_friend_roster_from_sibling(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_master: &str,
+    local_device: &str,
+    sibling: &str,
+    roster: Roster,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Ingested {
+    // A bare master id is never a sibling (G1), and `same_identity(M, M)` holds.
+    let ours = sibling != local_master
+        && sibling != local_device
+        && super::resolver::same_identity(sibling, local_master)
+        && !super::resolver::is_revoked(sibling);
+    if !ours {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a friend roster from {sibling}: not our own other device");
+        return Ingested::default();
+    }
+    Box::pin(ingest_inner(
+        event_tx, ws_cmd_tx, local_master, local_device, sibling, Some(roster), db_path, db_passphrase, true,
     ))
     .await
 }
@@ -695,6 +725,7 @@ async fn ingest_inner(
     incoming: Option<Roster>,
     db_path: &str,
     db_passphrase: &str,
+    from_sibling: bool,
 ) -> Ingested {
     let Some(incoming) = incoming else { return Ingested::default() };
     if serde_json::to_vec(&incoming).map(|b| b.len()).unwrap_or(usize::MAX) > MAX_ROSTER_BYTES {
@@ -709,7 +740,7 @@ async fn ingest_inner(
     let folded = {
         let (db, pass) = (db_path.to_string(), db_passphrase.to_string());
         let (from, our_master, our_device) = (sender.to_string(), local_master.to_string(), local_device.to_string());
-        tokio::task::spawn_blocking(move || fold_in(&db, &pass, &incoming, &from, &our_master, &our_device))
+        tokio::task::spawn_blocking(move || fold_in(&db, &pass, &incoming, &from, &our_master, &our_device, from_sibling))
             .await
             .ok()
             .flatten()
@@ -833,12 +864,19 @@ fn fold_in(
     sender: &str,
     local_master: &str,
     local_device: &str,
+    from_sibling: bool,
 ) -> Option<Folded> {
     let master = incoming.master.as_str();
     let store = MessageStore::open(db_path, db_passphrase).ok()?;
     let stored = load(&store, master);
     let known = stored.is_some() || store.load_device_list(master).ok().flatten().is_some();
-    if !known {
+    if from_sibling {
+        let friend = store.get_friend_row(master).ok().flatten().is_some_and(|(status, ..)| status == "accepted");
+        if !friend {
+            hollow_log!("[HOLLOW-SECURITY] Dropped a roster for {master} from sibling {sender}: not an accepted friend");
+            return None;
+        }
+    } else if !known {
         let alone = incoming.fold(|_| None, now_ms());
         if !alone.is_member(sender) {
             hollow_log!(
@@ -1981,5 +2019,93 @@ mod tests {
         assert_eq!(held.pendings.len(), roster::MAX_PENDING);
         me.store().set_roster_seen(&bob.peer_id(), &r.base(), &real.peer_id(), now_ms() - PENDING_MATURITY_MS).unwrap();
         assert!(me.state_of(&bob.peer_id()).is_member(&real.peer_id()), "the ask seen first never matured");
+    }
+
+    /// A friend's roster one of our own devices shares counts on first sight only from
+    /// that device, only for an accepted friend, and only for the statements that
+    /// verify: the sibling picks no member and plants no stranger.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn authz_a_sibling_shares_only_a_friends_roster_and_only_what_verifies() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let sibling = kp(0x03);
+        super::super::resolver::seed_self(&me.master.peer_id(), &[me.device.peer_id(), sibling.peer_id()]);
+        let (bob, bob_dev, mallory, carrier) = (kp(0x60), kp(0x61), kp(0x62), kp(0x70));
+        let bob_id = bob.peer_id();
+        let real = Roster::legacy_for_test(&bob, &[&bob_dev]);
+        let shared = async |from: &str, roster: &Roster| {
+            ingest_friend_roster_from_sibling(
+                &me.events, &me.ws, &me.master.peer_id(), &me.device.peer_id(), from, roster.clone(), &me.db, &me.pass,
+            )
+            .await
+        };
+
+        shared(&sibling.peer_id(), &real).await;
+        assert!(load(&me.store(), &bob_id).is_none(), "a sibling planted a roster for someone who is not our friend");
+
+        me.store().save_friend(&bob_id, "accepted", "", 1).unwrap();
+        let removed = kp(0x04);
+        super::super::resolver::seed_self(&me.master.peer_id(), &[me.device.peer_id(), sibling.peer_id(), removed.peer_id()]);
+        super::super::resolver::mark_revoked(&[removed.peer_id()]);
+        for not_ours in [carrier.peer_id(), me.master.peer_id(), me.device.peer_id(), removed.peer_id()] {
+            shared(&not_ours, &real).await;
+            assert!(load(&me.store(), &bob_id).is_none(), "{not_ours}, not one of our other devices, planted a friend's roster");
+        }
+
+        // Mallory's statements under Bob's name: none verifies, so nobody joins Bob.
+        let mut forged = Roster::legacy_for_test(&mallory, &[&kp(0x63)]);
+        forged.master = bob_id.clone();
+        shared(&sibling.peer_id(), &forged).await;
+        assert!(me.state_of(&bob_id).members.is_empty(), "a forged roster made a member");
+
+        shared(&sibling.peer_id(), &real).await;
+        assert!(me.state_of(&bob_id).is_member(&bob_dev.peer_id()), "our sibling's copy of a friend's roster never counted");
+        assert_eq!(super::super::resolver::resolve(&bob_dev.peer_id()), bob_id, "the friend's device is still not placed");
+        shared(&sibling.peer_id(), &forged).await;
+        assert_eq!(me.state_of(&bob_id).members.len(), 1, "a forged roster added to the held one");
+    }
+
+    /// F1 (wave md), through real ingests: an MLS add of a device Bob's roster here does
+    /// not list waits, a forged roster naming it changes nothing, Bob's own vouch lets it
+    /// pass, and once his roster removes it the add is refused for good.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_mls_add_waits_for_a_genuine_roster_and_a_removal_refuses_it() {
+        use super::super::mls_authority::{commit_verdict, GroupRules};
+        use crate::crypto::{CommitFacts, LeafIdentity, LeafView, Verdict};
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (bob, bob_dev, linked, mallory) = (kp(0x60), kp(0x61), kp(0x62), kp(0x50));
+        let bob_id = bob.peer_id();
+        let mut r = Roster::legacy_for_test(&bob, &[&bob_dev]);
+        me.ingest(&bob_dev.peer_id(), &r).await;
+
+        let mut state = crate::crdt::server_state::ServerState::new("s1".into(), "s".into(), "owner".into());
+        for m in ["owner", bob_id.as_str()] {
+            state.members.insert(m.into(), crate::crdt::server_state::MemberInfo { peer_id: m.into(), display_name: m.into() });
+        }
+        let leaf = |d: &str, m: &str| LeafView::Bound(LeafIdentity { device: d.into(), master: m.into() });
+        let add = CommitFacts {
+            committer: Some(leaf("owner-d", "owner")),
+            adds: vec![leaf(&linked.peer_id(), &bob_id)],
+            ..Default::default()
+        };
+        let verdict = || commit_verdict(&add, &GroupRules::Server { state: &state, channel: None });
+        assert!(matches!(verdict(), Verdict::Hold(_)), "{:?}", verdict());
+
+        let mut forged = Roster::legacy_for_test(&mallory, &[&linked]);
+        forged.master = bob_id.clone();
+        me.ingest(&linked.peer_id(), &forged).await;
+        assert!(matches!(verdict(), Verdict::Hold(_)), "a forged roster unlocked the add: {:?}", verdict());
+
+        r.add_consent(sign_consent(&linked, &bob_id));
+        r.add_vouch(sign_vouch(&bob_dev, &bob_id, LEGACY_BASE, &linked.peer_id()));
+        me.ingest(&linked.peer_id(), &r).await;
+        assert_eq!(verdict(), Verdict::Accept, "Bob's own roster places it");
+
+        r.add_removal(sign_removal(&bob_dev, &bob_id, LEGACY_BASE, &linked.peer_id(), &[]));
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        assert!(matches!(verdict(), Verdict::Refuse(_)), "the add of a removed device: {:?}", verdict());
     }
 }

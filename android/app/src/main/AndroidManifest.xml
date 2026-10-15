@@ -67,6 +67,12 @@
                 <data android:scheme="hollow"/>
             </intent-filter>
         </activity>
+        <!-- Keeps a phone that presents a link code online while it is in the
+             background (LinkKeepAliveService.kt). -->
+        <service
+            android:name=".LinkKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
         <provider
             android:name="com.superlist.super_native_extensions.DataProvider"
             android:authorities="com.anonlisten.hollow.SuperClipboardDataProvider"

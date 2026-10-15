@@ -11,6 +11,7 @@ import 'api/emotes.dart';
 import 'api/gifs.dart';
 import 'api/identity.dart';
 import 'api/network.dart';
+import 'api/recovery.dart';
 import 'api/roster.dart';
 import 'api/screen_audio.dart';
 import 'api/share.dart';
@@ -574,6 +575,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RemoteReadMarker dco_decode_remote_read_marker(dynamic raw);
 
   @protected
+  RepairOutcome dco_decode_repair_outcome(dynamic raw);
+
+  @protected
   RosterDevice dco_decode_roster_device(dynamic raw);
 
   @protected
@@ -638,6 +642,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   StorageStatsFfi dco_decode_storage_stats_ffi(dynamic raw);
+
+  @protected
+  StoreTrouble dco_decode_store_trouble(dynamic raw);
 
   @protected
   StoredChannelMessage dco_decode_stored_channel_message(dynamic raw);
@@ -1373,6 +1380,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RemoteReadMarker sse_decode_remote_read_marker(SseDeserializer deserializer);
 
   @protected
+  RepairOutcome sse_decode_repair_outcome(SseDeserializer deserializer);
+
+  @protected
   RosterDevice sse_decode_roster_device(SseDeserializer deserializer);
 
   @protected
@@ -1447,6 +1457,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   StorageStatsFfi sse_decode_storage_stats_ffi(SseDeserializer deserializer);
+
+  @protected
+  StoreTrouble sse_decode_store_trouble(SseDeserializer deserializer);
 
   @protected
   StoredChannelMessage sse_decode_stored_channel_message(
@@ -2428,6 +2441,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_repair_outcome(RepairOutcome self, SseSerializer serializer);
+
+  @protected
   void sse_encode_roster_device(RosterDevice self, SseSerializer serializer);
 
   @protected
@@ -2519,6 +2535,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     StorageStatsFfi self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_store_trouble(StoreTrouble self, SseSerializer serializer);
 
   @protected
   void sse_encode_stored_channel_message(

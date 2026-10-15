@@ -205,7 +205,10 @@ pub enum NetworkEvent {
     MemberJoined { server_id: String, peer_id: String },
     MemberLeft { server_id: String, peer_id: String },
     SyncCompleted { server_id: String, ops_applied: u32 },
-    ServerJoined { server_id: String, name: String },
+    /// `quiet`: our other device re-shared a server we lacked as we came back (a
+    /// repair, a relink, a lost database); no toast and no switch to it.
+    /// `from_sibling`: our other device joined or made it; a toast, no switch.
+    ServerJoined { server_id: String, name: String, quiet: bool, from_sibling: bool },
     ServerJoinFailed { server_id: String, reason: String },
     /// Nobody was online to answer, so the request was PARKED (persisted plus
     /// deposited in the server room's join ring). Not a failure: the pending tile
@@ -267,6 +270,8 @@ pub enum NetworkEvent {
     FriendRemoved { peer_id: String },
     /// Multi-device: a sibling device backfilled `count` new friends (Phase 6).
     FriendsBackfilled { count: u32 },
+    /// Multi-device: another device of ours blocked or unblocked someone.
+    BlockListChanged,
     // -- Temporary nickname events --
     NicknameClaimed { nickname: String },
     NicknameReleased,
@@ -635,6 +640,28 @@ pub(crate) fn get_node() -> &'static Mutex<Option<NodeState>> {
     NODE.get_or_init(|| Mutex::new(None))
 }
 
+/// Whether this process runs a node, full or fetch, on the data root.
+pub(crate) fn a_node_runs() -> bool {
+    FETCH_ACTIVE.load(Ordering::SeqCst) || get_node().lock().map_or(true, |node| node.is_some())
+}
+
+/// Stands in for a running node (or a fetch node), so a test reaches the gates that
+/// spare an identity this process has open.
+#[cfg(test)]
+pub(crate) fn pretend_a_node_runs(full: bool, fetch: bool) {
+    FETCH_ACTIVE.store(fetch, Ordering::SeqCst);
+    let mut node = get_node().lock().unwrap_or_else(|e| e.into_inner());
+    *node = full.then(|| {
+        let (cmd_tx, _) = mpsc::channel(1);
+        NodeState {
+            local_peer_id: String::new(),
+            cmd_tx,
+            handle: get_runtime().spawn(async {}),
+            olm_fingerprint: String::new(),
+        }
+    });
+}
+
 pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
     TOKIO_RUNTIME.get_or_init(|| {
         // A P2P messenger is I/O-bound, not CPU-bound, and the default multi-thread
@@ -944,8 +971,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::SyncCompleted { server_id, ops_applied } => {
             NetworkEvent::SyncCompleted { server_id, ops_applied }
         }
-        node::NetworkEvent::ServerJoined { server_id, name } => {
-            NetworkEvent::ServerJoined { server_id, name }
+        node::NetworkEvent::ServerJoined { server_id, name, quiet, from_sibling } => {
+            NetworkEvent::ServerJoined { server_id, name, quiet, from_sibling }
         }
         node::NetworkEvent::ServerJoinFailed { server_id, reason } => {
             NetworkEvent::ServerJoinFailed { server_id, reason }
@@ -1053,6 +1080,7 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::FriendsBackfilled { count } => {
             NetworkEvent::FriendsBackfilled { count }
         }
+        node::NetworkEvent::BlockListChanged => NetworkEvent::BlockListChanged,
         node::NetworkEvent::NicknameClaimed { nickname } => {
             NetworkEvent::NicknameClaimed { nickname }
         }
@@ -2629,8 +2657,8 @@ pub fn get_push_profile(peer_id: String) -> Result<Option<PushProfile>, String> 
     match profile {
         Some(p) => {
             let avatar = store.load_avatar(&master).unwrap_or(None);
-            hollow_log!("[HOLLOW-PUSH] get_push_profile: loaded '{}' (avatar={})",
-                p.display_name, avatar.is_some());
+            let named = !p.display_name.is_empty();
+            hollow_log!("[HOLLOW-PUSH] get_push_profile: loaded (name={named}, avatar={})", avatar.is_some());
             Ok(Some(PushProfile {
                 display_name: p.display_name,
                 avatar_bytes: avatar,
@@ -3853,6 +3881,8 @@ pub fn get_files_dir() -> String {
 /// Log a message from Dart to hollow_debug.log (visible in release builds).
 #[frb]
 pub fn log_from_dart(message: String) {
+    // Dart's boot lines come before any Rust step that opens the log.
+    crate::log::init();
     hollow_log!("{message}");
 }
 

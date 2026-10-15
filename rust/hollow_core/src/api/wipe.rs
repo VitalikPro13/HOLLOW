@@ -201,13 +201,94 @@ impl Outside {
 }
 
 /// Zeroes a regular file before unlinking it. Anything else (a link, a device) is
-/// only unlinked, so a write never follows a path out of the folder.
-fn zero_and_remove(path: &Path) {
-    let Ok(meta) = std::fs::symlink_metadata(path) else { return };
-    if meta.is_file() {
-        let _ = std::fs::write(path, vec![0u8; meta.len() as usize]);
+/// only unlinked, so a write never follows a path out of the folder. A file another
+/// program holds stays: unlinked now it would be gone unzeroed once let go, and a
+/// later pass takes it.
+#[frb(ignore)]
+pub(crate) fn zero_and_remove(path: &Path) {
+    if zero_in_place(path).is_ok() {
+        let _ = std::fs::remove_file(path);
     }
-    let _ = std::fs::remove_file(path);
+}
+
+/// Overwrites a regular file with zeros on disk, leaving it in place; anything else
+/// is left alone. A read-only file is made writable first. Fails only while another
+/// program holds the file: any other failure leaves the file to its unlink, since a
+/// key no pass can write must still not outlive the wipe.
+#[frb(ignore)]
+pub(crate) fn zero_in_place(path: &Path) -> std::io::Result<()> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return Ok(()) };
+    if !meta.is_file() {
+        return Ok(());
+    }
+    let mut written = overwrite_with_zeros(path, meta.len());
+    if written.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied) && make_writable(path).is_ok() {
+        written = overwrite_with_zeros(path, meta.len());
+    }
+    match written {
+        Err(e) if held_by_another_program(&e) => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Zeros over the file's own bytes, flushed: an unlink right after an unflushed write
+/// can free the old blocks with the key still in them.
+fn overwrite_with_zeros(path: &Path, len: u64) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(test)]
+    if let Some(code) = WRITE_FAULT.with(std::cell::Cell::get) {
+        return Err(std::io::Error::from_raw_os_error(code));
+    }
+    let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
+    file.write_all(&vec![0u8; len as usize])?;
+    file.sync_all()
+}
+
+fn make_writable(path: &Path) -> std::io::Result<()> {
+    let mut perms = std::fs::metadata(path)?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(perms.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(path, perms)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every zeroing write on this thread fails with this OS error.
+    static WRITE_FAULT: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+/// A sharing or lock violation: another program has the file open, and lets go later.
+fn held_by_another_program(e: &std::io::Error) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    cfg!(windows) && matches!(e.raw_os_error(), Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION))
+}
+
+/// The folders a landing keeps an identity's files in while it swaps them.
+const LANDING_DIRS: &[&str] = &[".landing", ".replaced"];
+
+/// Zeroes the key files directly in `dir`, a real folder only: through a planted link
+/// the writes would land outside the root.
+fn zero_keys_in(dir: &Path) -> std::io::Result<()> {
+    if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
+    KEY_FILES.iter().map(|name| zero_in_place(&dir.join(name))).fold(Ok(()), Result::and)
+}
+
+/// Removes a folder that may hold an identity's keys, zeroing them first, as every
+/// unlink of a key must; one that could not be zeroed keeps the folder for a later
+/// pass.
+#[frb(ignore)]
+pub(crate) fn remove_dir_zeroing_keys(dir: &Path) -> std::io::Result<()> {
+    zero_keys_in(dir)?;
+    std::fs::remove_dir_all(dir)
 }
 
 /// [`zero_and_remove`] for every file under `path`, then the folder itself.
@@ -242,8 +323,13 @@ pub(crate) fn sweep_root(root: &Path) -> bool {
             continue;
         }
         let path = entry.path();
+        // Zeroed again right before the unlink: a key held while `zero_keys` ran and
+        // let go since would otherwise go unzeroed.
         let gone = match entry.file_type() {
-            Ok(t) if t.is_dir() => std::fs::remove_dir_all(&path),
+            Ok(t) if t.is_dir() => remove_dir_zeroing_keys(&path),
+            _ if KEY_FILES.iter().any(|key| entry.file_name() == *key) => {
+                zero_in_place(&path).and_then(|()| std::fs::remove_file(&path))
+            }
             _ => std::fs::remove_file(&path),
         };
         clean &= gone.is_ok();
@@ -274,14 +360,33 @@ fn mark_destroy(root: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to stash the wipe marker: {e}"))
 }
 
-/// Everything else under a root is only as readable as these are.
-fn zero_keys(root: &Path) {
+/// Everything else under a root is only as readable as these are, a landing's copies
+/// included.
+#[frb(ignore)]
+pub(crate) fn zero_keys(root: &Path) {
     for name in KEY_FILES {
         zero_and_remove(&root.join(name));
     }
+    for dir in LANDING_DIRS {
+        let _ = zero_keys_in(&root.join(dir));
+    }
+}
+
+/// Takes every key file left directly in `root`; true when none is left. A wipe is
+/// over only then, or the key a held file kept would never get its later pass.
+#[frb(ignore)]
+pub(crate) fn root_keys_gone(root: &Path) -> bool {
+    KEY_FILES.iter().fold(true, |gone, name| {
+        let path = root.join(name);
+        zero_and_remove(&path);
+        gone & std::fs::symlink_metadata(&path).is_err()
+    })
 }
 
 fn destroy_with(root: &Path, outside: &Outside) -> Result<(), String> {
+    // A key write between steps 1 and 2 would rename its staged key into place after
+    // the zeroing: every staged key write holds this lock.
+    let key_writes = crate::identity::encryption::key_file_lock();
     // 1. The marker.
     mark_destroy(root)?;
 
@@ -291,6 +396,10 @@ fn destroy_with(root: &Path, outside: &Outside) -> Result<(), String> {
     let identity_before = std::fs::read(root.join("identity.key")).ok();
     zero_keys(root);
     crate::identity::platform_keystore::forget_key_at(root, identity_before.as_deref());
+    // What a relink kept aside loses its keys now and its bulk after the root's, so
+    // its size never holds up the root's erase.
+    let kept = super::recovery::zero_kept_aside(root);
+    drop(key_writes);
     crate::identity::encryption::clear_session_key();
     crate::node::at_rest::forget_stores();
     // The log goes with the identity, before anything else can add a line to it.
@@ -305,6 +414,7 @@ fn destroy_with(root: &Path, outside: &Outside) -> Result<(), String> {
     // 4. The rest of what Hollow wrote, under the root and beside it.
     let clean = sweep_root(root);
     outside.clear();
+    let clean = super::recovery::remove_kept_aside(&kept) && clean;
 
     // 5. A finished wipe leaves no marker saying it ran; an unfinished one keeps
     // it, so the next launch completes the job before anything else.
@@ -320,11 +430,24 @@ fn close_store_singleton() {
     }
 }
 
+/// Roots this process destroyed through [`destroy_local`]. Dart relaunches after every
+/// such destroy; until then nothing may mint an identity there (a stray FFI call
+/// reaching `load_or_create_identity` would, once the marker is gone).
+static DESTROYED_HERE: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[frb(ignore)]
+pub(crate) fn destroyed_in_this_process(root: &Path) -> bool {
+    DESTROYED_HERE.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|r| r == root)
+}
+
 /// Scope (a), and the tail of every other. Leaves the node RUNNING for Dart's step 5.
 #[frb]
 pub fn destroy_local() -> Result<(), String> {
     let root = crate::identity::data_dir()?;
     let out = destroy_data_root(&root);
+    if out.is_ok() {
+        DESTROYED_HERE.lock().unwrap_or_else(|e| e.into_inner()).push(root.clone());
+    }
     // Only once the wipe has actually run: an unacked entry is re-delivered.
     let _ = super::network::send_node_command(NodeCommand::KillAck);
     // The relay stops waking this phone for an identity that is gone.
@@ -351,11 +474,15 @@ pub fn erase_profile_at(data_dir: String) -> Result<(), String> {
     if !looks_like_a_profile(&root) {
         return Err("That folder doesn't look like Hollow data, so it stays.".into());
     }
+    let key_writes = crate::identity::encryption::key_file_lock();
     mark_destroy(&root)?;
     let identity_before = std::fs::read(root.join("identity.key")).ok();
     zero_keys(&root);
     crate::identity::platform_keystore::forget_key_at(&root, identity_before.as_deref());
-    if sweep_root(&root) {
+    let kept = super::recovery::zero_kept_aside(&root);
+    drop(key_writes);
+    let clean = sweep_root(&root);
+    if super::recovery::remove_kept_aside(&kept) && clean {
         let _ = std::fs::remove_file(root.join(MARKER));
     }
     Ok(())
@@ -1086,5 +1213,181 @@ mod tests {
             }
         }
         out
+    }
+
+    // md-integrity: each zeroing layer alone, the others out of the way.
+
+    /// A second name for `file` that still reads its bytes once `file` is unlinked.
+    fn peek_at(file: &Path, peek: &Path) -> std::path::PathBuf {
+        std::fs::hard_link(file, peek).unwrap();
+        peek.to_path_buf()
+    }
+
+    fn zeroed(peek: &Path) -> bool {
+        std::fs::read(peek).unwrap().iter().all(|b| *b == 0)
+    }
+
+    /// The destroy's key step zeroes a landing's copies of the keys too, before the
+    /// sweep ever runs.
+    #[test]
+    fn the_key_step_alone_zeroes_a_landings_copies() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        for dir in LANDING_DIRS {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("identity.key"), b"key material").unwrap();
+        }
+        let peeks: Vec<_> = LANDING_DIRS
+            .iter()
+            .enumerate()
+            .map(|(i, dir)| peek_at(&root.join(dir).join("identity.key"), &tmp.path().join(format!("peek{i}"))))
+            .collect();
+        zero_keys(&root);
+        for peek in &peeks {
+            assert!(zeroed(peek), "{} kept its key", peek.display());
+        }
+    }
+
+    /// The sweep alone zeroes a key in the root before it unlinks it.
+    #[test]
+    fn the_sweep_alone_zeroes_a_root_key_before_the_unlink() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("identity.key"), b"key material").unwrap();
+        let peek = peek_at(&root.join("identity.key"), &tmp.path().join("peek"));
+        sweep_root(&root);
+        assert!(!root.join("identity.key").exists());
+        assert!(zeroed(&peek), "the sweep unlinked a key unzeroed");
+    }
+
+    /// A key that cannot be overwritten (its holder shares deletes, not writes) is
+    /// never unlinked with its bytes in place; a later pass takes it.
+    #[cfg(windows)]
+    #[test]
+    fn a_key_that_cannot_be_zeroed_is_never_unlinked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ_DELETE: u32 = 1 | 4;
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let key = tmp.path().join("identity.key");
+        std::fs::write(&key, b"key material").unwrap();
+        let holder = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ_DELETE).open(&key).unwrap();
+        zero_and_remove(&key);
+        drop(holder);
+        assert_eq!(std::fs::read(&key).ok().as_deref(), Some(&b"key material"[..]), "unlinked with its bytes in place");
+        zero_and_remove(&key);
+        assert!(!key.exists(), "the later pass did not take it");
+    }
+    // md-review
+
+    /// A destroy must not leave a key it can unlink but not overwrite (a read-only
+    /// attribute or a 0400 mode) in place with its bytes.
+    #[test]
+    fn md_review_a_read_only_key_never_outlives_a_destroy() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let key = root.join("identity.key");
+        std::fs::write(&key, b"key material").unwrap();
+        let mut perms = std::fs::metadata(&key).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&key, perms).unwrap();
+        destroy_data_root(&root).expect("wipe");
+        assert_eq!(std::fs::read(&key).ok(), None, "a destroy left a read-only identity.key with its bytes");
+    }
+
+    // md-integrity-2
+
+    /// Only a sharing or lock violation (another program has the file open) keeps a key
+    /// for a later pass; nothing else ever does.
+    #[test]
+    fn only_another_programs_hold_keeps_a_key_for_later() {
+        use std::io::Error;
+        assert_eq!(held_by_another_program(&Error::from_raw_os_error(32)), cfg!(windows));
+        assert_eq!(held_by_another_program(&Error::from_raw_os_error(33)), cfg!(windows));
+        assert!(!held_by_another_program(&Error::from_raw_os_error(5)));
+        assert!(!held_by_another_program(&Error::other("no space")));
+    }
+
+    /// A key no pass can overwrite, for any reason but a holder, still goes: kept, its
+    /// bytes would outlive the wipe for good, and the wipe would never end.
+    #[test]
+    fn a_key_no_pass_can_overwrite_still_goes() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let key = tmp.path().join("identity.duress");
+        std::fs::write(&key, b"duress slot").unwrap();
+        let disk_full = if cfg!(windows) { 112 } else { 28 };
+        WRITE_FAULT.with(|f| f.set(Some(disk_full)));
+        zero_and_remove(&key);
+        WRITE_FAULT.with(|f| f.set(None));
+        assert!(!key.exists(), "a key that could not be overwritten was kept");
+    }
+
+    /// The zeros reach the file before it goes, a read-only one included.
+    #[test]
+    fn a_read_only_key_is_zeroed_before_it_goes() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let key = tmp.path().join("identity.key");
+        std::fs::write(&key, b"key material").unwrap();
+        let peek = peek_at(&key, &tmp.path().join("peek"));
+        let mut perms = std::fs::metadata(&key).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&key, perms).unwrap();
+        zero_and_remove(&key);
+        assert!(!key.exists(), "a read-only key was kept");
+        assert!(zeroed(&peek), "a read-only key went unzeroed");
+    }
+
+    /// A key a holder kept through the wipe leaves the root unfinished, so the marker
+    /// stays for the pass that takes it once let go.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_key_outside_the_identity_set_keeps_the_wipe_unfinished() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ_DELETE: u32 = 1 | 4;
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let duress = root.join("identity.duress");
+        std::fs::write(&duress, b"duress slot").unwrap();
+        let holder = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ_DELETE).open(&duress).unwrap();
+        assert!(!root_keys_gone(&root), "a held key counted as gone");
+        drop(holder);
+        let peek = peek_at(&duress, &tmp.path().join("peek"));
+        assert!(root_keys_gone(&root), "the later pass did not take it");
+        assert!(zeroed(&peek), "the later pass unlinked it unzeroed");
+    }
+
+    // md-merge
+
+    /// A key write in flight (it holds the key-file lock between staging and rename)
+    /// is never cut by a destroy's key step, or its rename would put a key back after
+    /// the zeroing. Each erase waits for the write, then takes the key.
+    #[test]
+    fn md_merge_a_destroy_and_a_profile_erase_wait_for_a_key_write_in_flight() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        type Erase = fn(&Path) -> Result<(), String>;
+        let erases: [(&str, Erase); 2] = [
+            ("destroy", |root| destroy_data_root(root)),
+            ("profile erase", |root| erase_profile_at(root.to_string_lossy().into_owned())),
+        ];
+        for (what, erase) in erases {
+            let root = tmp.path().join(what.replace(' ', "_"));
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("identity.key"), b"key material").unwrap();
+            let writing = crate::identity::encryption::key_file_lock();
+            let erasing = {
+                let root = root.clone();
+                std::thread::spawn(move || erase(&root))
+            };
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let during = std::fs::read(root.join("identity.key")).ok();
+            drop(writing);
+            erasing.join().unwrap().unwrap();
+            assert_eq!(during.as_deref(), Some(&b"key material"[..]), "the {what} took the key while a key write was in flight");
+            assert!(!root.join("identity.key").exists(), "the {what} left the key once the write was done");
+        }
     }
 }

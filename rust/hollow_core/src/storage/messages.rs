@@ -244,6 +244,15 @@ pub(crate) struct MessageStore {
     conn: Connection,
 }
 
+/// Settings key prefix: when a block of a master was lifted.
+const BLOCK_LIFTED_PREFIX: &str = "block_lifted:";
+
+/// A stored profile stamped past this was planted (every ingest holds its stamp to the
+/// frame), so any genuine profile replaces it; else it would outrank every real edit.
+pub(crate) fn stored_profile_stamp_limit() -> i64 {
+    crate::node::frame_auth::stored_stamp_limit(crate::node::frame_auth::now_ms())
+}
+
 /// One ended DM call as stored in `call_records`. Times are milliseconds;
 /// `outcome` is the Dart side's word for how it ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1307,8 +1316,8 @@ impl MessageStore {
                  ON CONFLICT(master) DO UPDATE SET
                     display_name = excluded.display_name, updated_at = excluded.updated_at,
                     avatar_hash = excluded.avatar_hash, sig = excluded.sig, pk = excluded.pk
-                 WHERE excluded.updated_at > signed_cards.updated_at",
-                params![card.master, card.display_name, card.updated_at, card.avatar_hash, card.sig, card.pk],
+                 WHERE excluded.updated_at > signed_cards.updated_at OR signed_cards.updated_at > ?7",
+                params![card.master, card.display_name, card.updated_at, card.avatar_hash, card.sig, card.pk, stored_profile_stamp_limit()],
             )
             .map(|n| n > 0)
             .map_err(|e| format!("Failed to save signed card: {e}"))
@@ -3149,6 +3158,13 @@ impl MessageStore {
             .and_then(|v| serde_json::from_value(v).ok()))
     }
 
+    /// When the roster stored for a master last changed, 0 for none.
+    pub fn roster_updated_at(&self, master_peer_id: &str) -> i64 {
+        self.conn
+            .query_row("SELECT updated_at FROM device_lists WHERE master_peer_id = ?1", [master_peer_id], |row| row.get(0))
+            .unwrap_or(0)
+    }
+
     /// The roster stored for a master, unverified. `None` for no row or a 0.11 row; a
     /// row that does not read is an error, never "no roster".
     pub fn load_roster(
@@ -3359,7 +3375,9 @@ impl MessageStore {
 
     // ── User Profile Persistence (Phase 3.5) ──
 
-    /// Upsert a user profile, ours or a peer's.
+    /// Upsert a user profile, ours or a peer's. Nothing older than the stored row is
+    /// written: a device back from away re-announces the profile it last held, and
+    /// that copy must not undo an edit made on another device meanwhile.
     ///
     /// `avatar`, `banner`, `showcase_board`, `avatar_frame`, `avatar_anim` and
     /// `banner_anim` are three-state: `None` preserves what is stored (an update from a
@@ -3422,10 +3440,8 @@ impl MessageStore {
                     avatar_anim = COALESCE(?15, user_profiles.avatar_anim),
                     banner_anim = COALESCE(?16, user_profiles.banner_anim),
                     support_creds = COALESCE(?17, user_profiles.support_creds)
-                 WHERE excluded.updated_at >= user_profiles.updated_at
-                    OR (excluded.updated_at < user_profiles.updated_at
-                        AND ABS(excluded.updated_at - user_profiles.updated_at) < 86400000)",
-                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash],
+                 WHERE excluded.updated_at >= user_profiles.updated_at OR user_profiles.updated_at > ?20",
+                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash, stored_profile_stamp_limit()],
             )
             .map_err(|e| format!("Failed to save profile: {e}"))?;
         // The freshness WHERE refused a stale profile: its clears must not land either.
@@ -3484,8 +3500,8 @@ impl MessageStore {
                     avatar = CASE WHEN ?5 = '' THEN NULL ELSE COALESCE(excluded.avatar, user_profiles.avatar) END,
                     profile_sig = NULL, profile_pk = NULL, profile_avatar_hash = NULL,
                     profile_banner_hash = NULL, profile_assets_hash = NULL
-                 WHERE excluded.updated_at > user_profiles.updated_at",
-                params![peer_id, display_name, updated_at, avatar, avatar_hash],
+                 WHERE excluded.updated_at > user_profiles.updated_at OR user_profiles.updated_at > ?6",
+                params![peer_id, display_name, updated_at, avatar, avatar_hash, stored_profile_stamp_limit()],
             )
             .map_err(|e| format!("Failed to save profile card: {e}"))?;
         if written > 0 {
@@ -4733,11 +4749,15 @@ impl MessageStore {
 
     // ── Blocked peers (local block list, MASTER-keyed) ───────────
 
+    /// Block `master_peer_id` now. The stamp outranks any lifting we hold, even one a
+    /// sibling with a clock ahead of ours stamped, or our devices would share the
+    /// lifting as the newer word and undo this block.
     pub fn block_peer(&self, master_peer_id: &str) -> Result<(), String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(self.block_lifted_at(master_peer_id).saturating_add(1));
         self.conn
             .execute(
                 "INSERT INTO blocked_peers (peer_id, blocked_at) VALUES (?1, ?2)
@@ -4748,14 +4768,82 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Block `master_peer_id` as of `at`, as one of our own devices did; an existing
+    /// block keeps its own time.
+    pub fn block_peer_at(&self, master_peer_id: &str, at: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO blocked_peers (peer_id, blocked_at) VALUES (?1, ?2)
+                 ON CONFLICT(peer_id) DO NOTHING",
+                params![master_peer_id, at],
+            )
+            .map_err(|e| format!("Failed to block peer: {e}"))?;
+        Ok(())
+    }
+
+    /// Lift a block, remembering when: our other devices must not bring an older block
+    /// of the same person back. The stamp outranks the block it lifts, as in
+    /// [`Self::block_peer`].
     pub fn unblock_peer(&self, master_peer_id: &str) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+            .max(self.blocked_at(master_peer_id).unwrap_or(0).saturating_add(1));
+        self.unblock_peer_at(master_peer_id, now)
+    }
+
+    /// When the block of `master_peer_id` we hold was made, if we hold one.
+    pub fn blocked_at(&self, master_peer_id: &str) -> Option<i64> {
+        self.conn
+            .query_row(
+                "SELECT blocked_at FROM blocked_peers WHERE peer_id = ?1",
+                params![master_peer_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+    }
+
+    /// [`Self::unblock_peer`] as of `at`; a later lifting already noted keeps its time.
+    pub fn unblock_peer_at(&self, master_peer_id: &str, at: i64) -> Result<(), String> {
         self.conn
             .execute(
                 "DELETE FROM blocked_peers WHERE peer_id = ?1",
                 params![master_peer_id],
             )
             .map_err(|e| format!("Failed to unblock peer: {e}"))?;
-        Ok(())
+        let at = at.max(self.block_lifted_at(master_peer_id));
+        self.save_setting(&format!("{BLOCK_LIFTED_PREFIX}{master_peer_id}"), &at.to_string())
+    }
+
+    /// When a block of `master_peer_id` was last lifted, 0 if never.
+    pub fn block_lifted_at(&self, master_peer_id: &str) -> i64 {
+        self.load_setting(&format!("{BLOCK_LIFTED_PREFIX}{master_peer_id}"))
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Every block lifted, as (master, when).
+    pub fn lifted_blocks(&self) -> Vec<(String, i64)> {
+        self.load_settings_with_prefix(BLOCK_LIFTED_PREFIX)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(key, at)| Some((key.strip_prefix(BLOCK_LIFTED_PREFIX)?.to_string(), at.parse().ok()?)))
+            .collect()
+    }
+
+    /// Every block, as (master, since when).
+    pub fn blocked_rows(&self) -> Result<Vec<(String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT peer_id, blocked_at FROM blocked_peers")
+            .map_err(|e| format!("Failed to prepare blocked query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|e| format!("Failed to query blocked peers: {e}"))?;
+        collect_rows(rows, "blocked")
     }
 
     /// All blocked master peer_ids, newest first.
@@ -6380,6 +6468,148 @@ impl MessageStore {
         Ok(count)
     }
 
+    /// Forget every path an imported database names outside `data_root`: another
+    /// device's disk, or another profile's on this one, is never read, served or
+    /// deleted from here. A file whose bytes landed with the snapshot points at its
+    /// own copy; any other comes back through the normal gated pull. Returns the rows
+    /// changed.
+    pub fn forget_foreign_paths(&self, data_root: &std::path::Path) -> Result<u32, String> {
+        self.forget_foreign_paths_staged(data_root, &data_root.join("files"))
+    }
+
+    /// [`Self::forget_foreign_paths`] for a database still in a landing's stage: a file
+    /// whose bytes sit in `landed_files` points at where they will be placed. A path
+    /// counts as ours only in its content folder under its own name, and a value that
+    /// does not read as text counts as foreign; an error means nothing was changed.
+    pub fn forget_foreign_paths_staged(
+        &self,
+        data_root: &std::path::Path,
+        landed_files: &std::path::Path,
+    ) -> Result<u32, String> {
+        use rusqlite::types::ValueRef;
+        use std::path::Path;
+        // None = NULL, Some(None) = a value that is not text.
+        fn column(v: ValueRef<'_>) -> Option<Option<String>> {
+            match v {
+                ValueRef::Null => None,
+                ValueRef::Text(t) => Some(std::str::from_utf8(t).ok().map(str::to_owned)),
+                _ => Some(None),
+            }
+        }
+        let files_dir = data_root.join("files");
+        let shares_dir = data_root.join("shares");
+        // `final_file_path`'s shape: a trailing dot or an empty extension would name
+        // another file on Windows.
+        let content_name = |id: Option<&str>, ext: Option<&str>| {
+            let (id, ext) = (id?, ext?);
+            let id_ok = (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric());
+            (id_ok && crate::node::file_transfer::is_wire_ext(ext)).then(|| format!("{id}.{ext}"))
+        };
+        // A rowid and its values, each `column`'s reading.
+        type Row = (i64, Vec<Option<Option<String>>>);
+        let read_rows = |sql: &str, width: usize| -> Result<Vec<Row>, String> {
+            let mut stmt = self.conn.prepare(sql).map_err(|e| format!("Failed to prepare path query: {e}"))?;
+            let mut rows = stmt.query([]).map_err(|e| format!("Failed to query paths: {e}"))?;
+            let mut out = Vec::new();
+            while let Some(r) = rows.next().map_err(|e| format!("Failed to read paths: {e}"))? {
+                let rowid: i64 = r.get(0).map_err(|e| format!("Failed to read a rowid: {e}"))?;
+                let values = (1..=width)
+                    .map(|i| r.get_ref(i).map(column))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| format!("Failed to read paths: {e}"))?;
+                out.push((rowid, values));
+            }
+            Ok(out)
+        };
+        let files = read_rows("SELECT rowid, file_id, file_ext, disk_path FROM files WHERE disk_path IS NOT NULL", 3)?;
+        let shares = read_rows(
+            "SELECT rowid, disk_path, save_dir FROM shares WHERE disk_path IS NOT NULL OR save_dir IS NOT NULL",
+            2,
+        )?;
+
+        let mut changed = 0u32;
+        self.conn.execute_batch("BEGIN").map_err(|e| format!("BEGIN: {e}"))?;
+        let result = (|| -> Result<(), String> {
+            for (rowid, row) in &files {
+                let text = |i: usize| row[i].clone().flatten();
+                let name = content_name(text(0).as_deref(), text(1).as_deref());
+                let ours = match (text(2), &name) {
+                    (Some(p), Some(name)) => {
+                        let p = Path::new(&p);
+                        p.parent() == Some(files_dir.as_path()) && p.file_name() == Some(std::ffi::OsStr::new(name))
+                    }
+                    _ => false,
+                };
+                if ours {
+                    continue;
+                }
+                match name.filter(|name| landed_files.join(name).is_file()) {
+                    Some(name) => self
+                        .conn
+                        .execute(
+                            "UPDATE files SET disk_path = ?2 WHERE rowid = ?1",
+                            params![rowid, files_dir.join(name).to_string_lossy()],
+                        )
+                        .map_err(|e| format!("Failed to repoint a file: {e}"))?,
+                    None => self
+                        .conn
+                        .execute(
+                            "UPDATE files SET disk_path = NULL, completed_at = NULL WHERE rowid = ?1",
+                            params![rowid],
+                        )
+                        .map_err(|e| format!("Failed to reset a file: {e}"))?,
+                };
+                changed += 1;
+            }
+            for (rowid, row) in &shares {
+                let foreign_file = row[0].as_ref().is_some_and(|p| {
+                    !p.as_deref().is_some_and(|p| {
+                        let p = Path::new(p);
+                        p.parent() == Some(shares_dir.as_path())
+                            && p.file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(crate::node::share_handler::is_inert_file_name)
+                    })
+                });
+                if foreign_file {
+                    self.conn
+                        .execute(
+                            "UPDATE shares SET disk_path = NULL, seeding = 0,
+                                 state = CASE WHEN state = 'completed' THEN 'stale' ELSE state END
+                             WHERE rowid = ?1",
+                            params![rowid],
+                        )
+                        .map_err(|e| format!("Failed to reset a share: {e}"))?;
+                    changed += 1;
+                }
+                if row[1].as_ref().is_some_and(|p| p.as_deref().map(Path::new) != Some(shares_dir.as_path())) {
+                    self.conn
+                        .execute("UPDATE shares SET save_dir = NULL WHERE rowid = ?1", params![rowid])
+                        .map_err(|e| format!("Failed to reset a share folder: {e}"))?;
+                    changed += 1;
+                }
+            }
+            // Both name a file or folder the user picked on the device that made the
+            // database, never one in a content folder here.
+            let settings = self
+                .conn
+                .execute("DELETE FROM app_settings WHERE key IN ('ringtone_path', 'share_download_path')", [])
+                .map_err(|e| format!("Failed to forget path settings: {e}"))?;
+            changed += settings as u32;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT").map_err(|e| format!("COMMIT: {e}"))?;
+                Ok(changed)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     // ── Storage Manager (downloaded-file disk usage) ────────────────────────
 
     /// Per-context disk usage of downloaded files as `(context_type, context_id, bytes,
@@ -7903,5 +8133,191 @@ mod fs_review_tests {
         assert!(!ours_onto_theirs && !theirs_onto_ours, "a reconcile crossed directions");
         let texts: Vec<String> = store.load_all_dm_messages("friend").expect("rows").into_iter().map(|m| m.text).collect();
         assert_eq!(texts, ["theirs", "ours"]);
+    }
+}
+
+// md-review
+#[cfg(test)]
+mod md_review {
+    use super::*;
+
+    fn store_in(root: &std::path::Path) -> MessageStore {
+        MessageStore::open(root.join("messages.db").to_str().unwrap(), &"ab".repeat(32)).unwrap()
+    }
+
+    fn complete_file(store: &MessageStore, id: &str, path: &std::path::Path) {
+        store
+            .insert_file_metadata(
+                id, id, "png", "image/png", 11, 1, true, None, None, None, "dm", "friend", "friend", false, 1000,
+                None, None, None,
+            )
+            .unwrap();
+        store.mark_file_complete(id, path.to_str().unwrap()).unwrap();
+    }
+
+    /// One row a crafted snapshot stores as a BLOB must not leave every other row's
+    /// foreign path in place: the gate fails open on the first unreadable value.
+    #[test]
+    fn md_review_one_unreadable_row_does_not_keep_every_foreign_path() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("ours");
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        let elsewhere = tmp.path().join("someone_elses.docx");
+        std::fs::write(&elsewhere, b"not ours").unwrap();
+        let store = store_in(&root);
+        complete_file(&store, "aa11", &elsewhere);
+        complete_file(&store, "bb22", &root.join("files").join("bb22.png"));
+        store.conn.execute("UPDATE files SET disk_path = X'00' WHERE file_id = 'bb22'", []).unwrap();
+
+        let outcome = store.forget_foreign_paths(&root);
+        let f = store.get_file_metadata("aa11").unwrap().unwrap();
+        assert_eq!(
+            (f.disk_path.as_deref(), f.completed_at.is_some()),
+            (None, false),
+            "a path outside the data root survived the import ({outcome:?})"
+        );
+    }
+
+    /// "Ours" means a content folder, not anything under the data root: the identity
+    /// key, the database or a profile kept inside the root must never become a file
+    /// row's bytes (served by FileRequest, deleted by "Clear" and by retention).
+    #[test]
+    fn md_review_a_path_in_the_root_but_outside_its_content_folders_is_forgotten() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("ours");
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        std::fs::write(root.join("identity.key"), b"key").unwrap();
+        let nested = root.join("work").join("files");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("cc33.png"), b"another profile's file").unwrap();
+        let store = store_in(&root);
+        complete_file(&store, "aa11", &root.join("identity.key"));
+        complete_file(&store, "bb22", &root.join("messages.db"));
+        complete_file(&store, "cc33", &nested.join("cc33.png"));
+
+        store.forget_foreign_paths(&root).unwrap();
+        for id in ["aa11", "bb22", "cc33"] {
+            let f = store.get_file_metadata(id).unwrap().unwrap();
+            assert_eq!(f.disk_path, None, "{id} still names a non-content file under the root");
+        }
+    }
+}
+
+// md-link
+#[cfg(test)]
+mod md_link_paths {
+    use super::*;
+
+    /// A repoint names the landed copy only by the row's exact `<file_id>.<ext>`: an
+    /// id with a dot and an empty extension would name `filesa11.png.`, which
+    /// Windows opens as another file's `aa11.png`.
+    #[test]
+    fn a_repoint_takes_only_the_exact_name_of_its_own_file() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("ours");
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        std::fs::write(root.join("files").join("aa11.png"), b"HFE1 aa11").unwrap();
+        let store = MessageStore::open(root.join("messages.db").to_str().unwrap(), &"cd".repeat(32)).unwrap();
+        let elsewhere = tmp.path().join("presenter").join("x.png");
+        std::fs::create_dir_all(root.join("files").join("x")).unwrap();
+        for (id, ext) in [("aa11", "png"), ("aa11.png", ""), ("bb22", ""), ("x/../aa11", "png")] {
+            store
+                .insert_file_metadata(
+                    id, id, ext, "image/png", 9, 1, true, None, None, None, "dm", "friend", "friend", false, 1000,
+                    None, None, None,
+                )
+                .unwrap();
+            store.mark_file_complete(id, elsewhere.to_str().unwrap()).unwrap();
+        }
+        std::fs::write(root.join("files").join("bb22."), b"").ok();
+
+        store.forget_foreign_paths(&root).unwrap();
+        let path_of = |id: &str| store.get_file_metadata(id).unwrap().unwrap().disk_path;
+        let own = root.join("files").join("aa11.png").to_string_lossy().to_string();
+        assert_eq!(path_of("aa11"), Some(own), "the landed copy was not taken");
+        assert_eq!(path_of("aa11.png"), None, "a dotted id took another file's copy");
+        assert_eq!(path_of("bb22"), None, "an empty extension took a copy");
+        assert_eq!(path_of("x/../aa11"), None, "an id naming a path took another file's copy");
+    }
+
+    /// A value a crafted database stores as something other than text is foreign: its
+    /// row is reset by rowid, and the rest of the gate still runs.
+    #[test]
+    fn an_unreadable_path_is_reset_and_the_gate_goes_on() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("ours");
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        let store = MessageStore::open(root.join("messages.db").to_str().unwrap(), &"ef".repeat(32)).unwrap();
+        let ours = |id: &str| root.join("files").join(format!("{id}.png"));
+        for id in ["aa11", "bb22", "cc33"] {
+            store
+                .insert_file_metadata(
+                    id, id, "png", "image/png", 9, 1, true, None, None, None, "dm", "friend", "friend", false, 1000,
+                    None, None, None,
+                )
+                .unwrap();
+            store.mark_file_complete(id, ours(id).to_str().unwrap()).unwrap();
+        }
+        store.conn.execute("UPDATE files SET disk_path = X'00' WHERE file_id = 'aa11'", []).unwrap();
+        store.conn.execute("UPDATE files SET file_ext = X'01' WHERE file_id = 'bb22'", []).unwrap();
+        let shared = root.join("shares").join("doc.pdf");
+        store
+            .upsert_share(
+                &"aa".repeat(32), "doc", "pdf", "application/pdf", 6, 6, 1, "{}", &[7u8; 32], "link", "completed", true,
+                Some(shared.to_str().unwrap()), Some(root.join("shares").to_str().unwrap()), 1000, None, None,
+            )
+            .unwrap();
+        store.conn.execute("UPDATE shares SET disk_path = X'00', save_dir = X'01'", []).unwrap();
+
+        store.forget_foreign_paths(&root).unwrap();
+        let kind = |id: &str| -> String {
+            store.conn.query_row("SELECT typeof(disk_path) FROM files WHERE file_id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(kind("aa11"), "null", "a path that is not text was kept");
+        assert_eq!(kind("bb22"), "null", "a row whose extension is not text kept its path");
+        assert_eq!(kind("cc33"), "text", "a readable path of our own was dropped");
+        let share: (String, String, i64) = store
+            .conn
+            .query_row("SELECT typeof(disk_path), typeof(save_dir), seeding FROM shares", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(share, ("null".into(), "null".into(), 0), "a share kept a path that is not text");
+    }
+
+    /// Our content folder under another file's name is not ours, and a share is ours
+    /// only in `shares/`, never as a file elsewhere under the root.
+    #[test]
+    fn a_path_under_another_files_name_or_outside_shares_is_forgotten() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("ours");
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        std::fs::write(root.join("files").join("aa11.png"), b"HFE1 aa11").unwrap();
+        let store = MessageStore::open(root.join("messages.db").to_str().unwrap(), &"ab".repeat(32)).unwrap();
+        store
+            .insert_file_metadata(
+                "dd44", "dd44", "png", "image/png", 9, 1, true, None, None, None, "dm", "friend", "friend", false, 1000,
+                None, None, None,
+            )
+            .unwrap();
+        store.mark_file_complete("dd44", root.join("files").join("aa11.png").to_str().unwrap()).unwrap();
+        let share = |hash: &str, path: &std::path::Path| {
+            store
+                .upsert_share(
+                    hash, "doc", "pdf", "application/pdf", 6, 6, 1, "{}", &[7u8; 32], "link", "completed", true,
+                    Some(path.to_str().unwrap()), None, 1000, None, None,
+                )
+                .unwrap();
+        };
+        share(&"aa".repeat(32), &root.join("messages.db"));
+        share(&"bb".repeat(32), &root.join("shares").join("doc.pdf"));
+
+        store.forget_foreign_paths(&root).unwrap();
+        let f = store.get_file_metadata("dd44").unwrap().unwrap();
+        assert_eq!(f.disk_path, None, "a row kept another file's bytes");
+        let outside = store.load_share(&"aa".repeat(32)).unwrap().unwrap();
+        assert_eq!((outside.disk_path, outside.seeding), (None, false), "a share serves the database");
+        let inside = store.load_share(&"bb".repeat(32)).unwrap().unwrap();
+        assert!(inside.disk_path.is_some() && inside.seeding, "a share in its own folder was dropped");
     }
 }

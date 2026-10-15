@@ -41,6 +41,13 @@ pub(crate) fn refused(leaf: &LeafIdentity) -> bool {
     super::resolver::is_revoked(&leaf.device) || super::resolver::disowns(&leaf.master, &leaf.device)
 }
 
+/// A [`refused`] leaf that roster news may still seat: neither a removed device nor a
+/// master id, only one our copy of its master's roster does not list yet. A device
+/// just linked reaches a co-member's roster before ours (F1, wave md).
+fn may_be_placed_later(leaf: &LeafIdentity) -> bool {
+    leaf.device != leaf.master && !super::resolver::is_revoked(&leaf.device)
+}
+
 /// A commit may remove a leaf of the committer's own identity, an unbound leaf, a
 /// non-member's, a revoked device's, or one the same commit repairs.
 fn removable(leaf: &LeafView, committer: &LeafIdentity, facts: &CommitFacts, rules: &GroupRules) -> bool {
@@ -103,7 +110,10 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
     if refused(committer) {
         return Verdict::Refuse(format!("committed by revoked or disowned device {}", committer.device));
     }
-    if let Some(add) = facts.adds.iter().filter_map(LeafView::bound).find(|a| refused(a)) {
+    // A meeting never holds: it has no roster view of ours to wait for.
+    let meeting = matches!(rules, GroupRules::Meeting { .. });
+    let refused_for_good = |a: &&LeafIdentity| refused(a) && (meeting || !may_be_placed_later(a));
+    if let Some(add) = facts.adds.iter().filter_map(LeafView::bound).find(refused_for_good) {
         return Verdict::Refuse(format!("adds revoked or disowned device {}", add.device));
     }
     if let GroupRules::Meeting { host } = rules {
@@ -120,6 +130,9 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
         if let hold @ Verdict::Hold(_) = rules.membership(&add.master, "added leaf") {
             return hold;
         }
+    }
+    if let Some(add) = facts.adds.iter().filter_map(LeafView::bound).find(|a| refused(a)) {
+        return Verdict::Hold(format!("adds device {} its master's roster here does not place yet", add.device));
     }
     if let Some(leaf) = facts.removes.iter().find(|l| !removable(l, committer, facts, rules)) {
         return Verdict::Hold(format!("removes {} while still a member", leaf.id()));
@@ -139,7 +152,10 @@ pub(crate) fn welcome_verdict(facts: &WelcomeFacts, rules: &GroupRules, asked: b
     if let Some(leaf) = facts.leaves.iter().find(|l| l.bound().is_none()) {
         return Verdict::Refuse(format!("holds unbound leaf {}", leaf.id()));
     }
-    if let Some(leaf) = facts.leaves.iter().filter_map(LeafView::bound).find(|l| refused(l)) {
+    // As for a commit's add: a device only our roster does not place yet waits.
+    let meeting = matches!(rules, GroupRules::Meeting { .. });
+    let refused_for_good = |l: &&LeafIdentity| refused(l) && (meeting || !may_be_placed_later(l));
+    if let Some(leaf) = facts.leaves.iter().filter_map(LeafView::bound).find(refused_for_good) {
         return Verdict::Refuse(format!("holds revoked or disowned device {}", leaf.device));
     }
     if facts.replaces && !asked {
@@ -162,6 +178,9 @@ pub(crate) fn welcome_verdict(facts: &WelcomeFacts, rules: &GroupRules, asked: b
                 if let hold @ Verdict::Hold(_) = rules.membership(&leaf.master, "leaf") {
                     return hold;
                 }
+            }
+            if let Some(leaf) = facts.leaves.iter().filter_map(LeafView::bound).find(|l| refused(l)) {
+                return Verdict::Hold(format!("holds device {} its master's roster here does not place yet", leaf.device));
             }
             Verdict::Accept
         }
@@ -626,7 +645,8 @@ mod tests {
     }
 
     /// ID-1: a leaf certified by the master key alone holds no seat once its master's
-    /// roster is known and does not name the device.
+    /// roster is known and does not name the device. An add of it waits for a roster
+    /// that may still name it, and never passes while ours does not.
     #[test]
     fn disowned_devices_are_never_added_or_welcomed_and_always_removable() {
         let _g = crate::node::resolver::test_lock();
@@ -638,7 +658,7 @@ mod tests {
         let restored = leaf("alice-restored", "alice");
         assert!(matches!(
             commit_verdict(&CommitFacts { adds: vec![restored.clone()], ..facts(owner.clone()) }, &rules),
-            Verdict::Refuse(_)
+            Verdict::Hold(_)
         ));
         assert_eq!(
             commit_verdict(&CommitFacts { removes: vec![restored.clone()], ..facts(owner.clone()) }, &rules),
@@ -646,7 +666,7 @@ mod tests {
         );
         assert!(matches!(
             welcome_verdict(&welcome(owner.clone(), vec![owner.clone(), restored.clone()], false), &rules, true),
-            Verdict::Refuse(_)
+            Verdict::Hold(_)
         ));
         assert_eq!(
             stale_leaves(&[owner, restored, leaf("alice-d", "alice")], "owner-d", &rules),
@@ -657,7 +677,8 @@ mod tests {
 
     /// A-10 and G1: a device its roster removed or never counted commits nothing, not
     /// even a removal of its own identity's other leaves, and is never added; the master
-    /// id itself is such a device once its roster leaves it out.
+    /// id itself is such a device once its roster leaves it out. Only the add of a device
+    /// the roster never counted waits: a newer roster may count it.
     #[test]
     fn a_removed_disowned_or_bare_master_leaf_neither_commits_nor_is_added() {
         let _g = crate::node::resolver::test_lock();
@@ -668,15 +689,19 @@ mod tests {
         let state = server(&["owner", "alice"]);
         let rules = GroupRules::Server { state: &state, channel: None };
         let owner = leaf("owner-d", "owner");
-        for (what, bad) in [
-            ("a removed device", leaf("alice-gone", "alice")),
-            ("a device the roster never counted", leaf("alice-restored", "alice")),
-            ("the bare master id", leaf("alice", "alice")),
+        for (what, bad, add_waits) in [
+            ("a removed device", leaf("alice-gone", "alice"), false),
+            ("a device the roster never counted", leaf("alice-restored", "alice"), true),
+            ("the bare master id", leaf("alice", "alice"), false),
         ] {
             let evicts_sibling = CommitFacts { removes: vec![leaf("alice-d", "alice")], ..facts(bad.clone()) };
             assert!(matches!(commit_verdict(&evicts_sibling, &rules), Verdict::Refuse(_)), "{what} committed");
             let added = CommitFacts { adds: vec![bad.clone()], ..facts(owner.clone()) };
-            assert!(matches!(commit_verdict(&added, &rules), Verdict::Refuse(_)), "{what} was added");
+            match commit_verdict(&added, &rules) {
+                Verdict::Hold(_) => assert!(add_waits, "the add of {what} waits for roster news that cannot seat it"),
+                Verdict::Refuse(_) => assert!(!add_waits, "the add of {what} is refused before its roster arrives"),
+                Verdict::Accept => panic!("{what} was added"),
+            }
             let rebind = CommitFacts { path_leaf: Some(bad.clone()), ..facts(LeafView::Unbound("alice".into())) };
             assert!(matches!(commit_verdict(&rebind, &rules), Verdict::Refuse(_)), "a legacy leaf rebound as {what}");
         }
@@ -685,6 +710,76 @@ mod tests {
             Verdict::Accept,
             "a member still sweeps them",
         );
+        crate::node::resolver::clear_all();
+    }
+
+    /// F1 (wave md): a co-member that heard a just-linked device's roster first commits
+    /// its add before our roster lists it. That add waits and passes once our roster
+    /// places the device; a removed device, a bare master id or any refused add riding
+    /// along is refused outright, and a meeting never waits.
+    #[test]
+    fn an_add_our_roster_has_not_placed_yet_holds_until_it_is_placed() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::resolver::update_many("alice", ["alice-d"]);
+        crate::node::resolver::note_roster("alice");
+        crate::node::resolver::mark_revoked(&["alice-gone".into()]);
+        let state = server(&["owner", "alice"]);
+        let rules = GroupRules::Server { state: &state, channel: None };
+        let adds = |leaves: &[LeafView]| CommitFacts { adds: leaves.to_vec(), ..facts(leaf("owner-d", "owner")) };
+        let linked = leaf("alice-linked", "alice");
+
+        assert!(matches!(commit_verdict(&adds(std::slice::from_ref(&linked)), &rules), Verdict::Hold(_)));
+        for (what, bad) in [("a removed device", leaf("alice-gone", "alice")), ("the bare master id", leaf("alice", "alice"))] {
+            assert!(matches!(commit_verdict(&adds(&[linked.clone(), bad.clone()]), &rules), Verdict::Refuse(_)),
+                "an add waiting on its roster let {what} ride along");
+            assert!(matches!(commit_verdict(&adds(&[bad, linked.clone()]), &rules), Verdict::Refuse(_)));
+        }
+        let meeting = GroupRules::Meeting { host: Some("owner") };
+        assert!(matches!(commit_verdict(&adds(std::slice::from_ref(&linked)), &meeting), Verdict::Refuse(_)),
+            "a meeting waited for a roster");
+
+        crate::node::resolver::update_many("alice", ["alice-linked"]);
+        assert_eq!(commit_verdict(&adds(std::slice::from_ref(&linked)), &rules), Verdict::Accept, "placed, it passes");
+        crate::node::resolver::clear_all();
+    }
+
+    /// F1's Welcome side (wave md): a Welcome seating a device our copy of its master's
+    /// roster does not list yet waits for that roster and passes once it places the
+    /// device; a removed device, a master id, or one riding along with them is refused,
+    /// and a meeting never waits. A refusal of the Welcome as a whole still wins.
+    #[test]
+    fn a_welcome_naming_a_device_our_roster_has_not_placed_yet_holds_until_it_is_placed() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::resolver::update_many("alice", ["alice-d"]);
+        crate::node::resolver::note_roster("alice");
+        crate::node::resolver::mark_revoked(&["alice-gone".into()]);
+        let state = server(&["owner", "alice"]);
+        let rules = GroupRules::Server { state: &state, channel: None };
+        let owner = leaf("owner-d", "owner");
+        let linked = leaf("alice-linked", "alice");
+        let seats = |extra: &[LeafView]| {
+            let mut leaves = vec![owner.clone(), leaf("alice-d", "alice")];
+            leaves.extend_from_slice(extra);
+            welcome(owner.clone(), leaves, true)
+        };
+
+        assert!(matches!(welcome_verdict(&seats(std::slice::from_ref(&linked)), &rules, true), Verdict::Hold(_)));
+        for (what, bad) in [("a removed device", leaf("alice-gone", "alice")), ("the bare master id", leaf("alice", "alice"))] {
+            assert!(matches!(welcome_verdict(&seats(std::slice::from_ref(&bad)), &rules, true), Verdict::Refuse(_)),
+                "a Welcome seating {what} waited");
+            assert!(matches!(welcome_verdict(&seats(&[linked.clone(), bad]), &rules, true), Verdict::Refuse(_)),
+                "{what} rode along with a device that waits");
+        }
+        assert!(matches!(welcome_verdict(&seats(std::slice::from_ref(&linked)), &rules, false), Verdict::Refuse(_)),
+            "a Welcome replacing our group unasked waited");
+        let meeting = GroupRules::Meeting { host: Some("owner") };
+        assert!(matches!(welcome_verdict(&seats(std::slice::from_ref(&linked)), &meeting, true), Verdict::Refuse(_)),
+            "a meeting waited for a roster");
+
+        crate::node::resolver::update_many("alice", ["alice-linked"]);
+        assert_eq!(welcome_verdict(&seats(std::slice::from_ref(&linked)), &rules, true), Verdict::Accept, "placed, it passes");
         crate::node::resolver::clear_all();
     }
 

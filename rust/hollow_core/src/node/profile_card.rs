@@ -158,10 +158,12 @@ fn stored(card: &SignedCard) -> crate::storage::messages::StoredCard {
 }
 
 /// Keep `card` as `master`'s newest signed card, when it is that master's own. Only the
-/// card: a co-member's full profile stays what decides how we show them.
-pub(crate) fn keep_card(card: &SignedCard, master: &str, db_path: &str, db_passphrase: &str) -> bool {
+/// card: a co-member's full profile stays what decides how we show them. `ceiling` is
+/// the frame's [`super::frame_auth::stamp_ceiling`].
+pub(crate) fn keep_card(card: &SignedCard, master: &str, ceiling: i64, db_path: &str, db_passphrase: &str) -> bool {
     card.master == master
         && card_holds(card)
+        && !super::social::profile_from_the_future(&card.master, card.updated_at, ceiling)
         && crate::storage::MessageStore::open(db_path, db_passphrase)
             .ok()
             .and_then(|st| st.save_signed_card(&stored(card)).ok())
@@ -220,8 +222,12 @@ pub(crate) fn guest_sender(sender: &str, given: SenderCard) -> Option<(String, O
 }
 
 /// Store a card that `card_holds` passed, with the avatar when its bytes hash to the
-/// signed hash. Returns whether anything was written.
-pub(crate) fn store_card(card: &SignedCard, avatar: Option<&[u8]>, db_path: &str, db_passphrase: &str) -> bool {
+/// signed hash, unless it is stamped past `ceiling` (the frame's
+/// [`super::frame_auth::stamp_ceiling`]). Returns whether anything was written.
+pub(crate) fn store_card(card: &SignedCard, avatar: Option<&[u8]>, ceiling: i64, db_path: &str, db_passphrase: &str) -> bool {
+    if super::social::profile_from_the_future(&card.master, card.updated_at, ceiling) {
+        return false;
+    }
     let avatar = avatar
         .filter(|b| super::social::profile_blob_hash(Some(b)) == card.avatar_hash)
         .and_then(|b| {
@@ -293,8 +299,8 @@ mod tests {
         let key = "ab".repeat(32);
         let (a, b, c) = (keypair(53), keypair(54), keypair(55));
         let a_card = genuine_card(&a, "Ay");
-        assert!(!keep_card(&a_card, &c.peer_id(), &db, &key), "a card kept for someone else");
-        assert!(keep_card(&a_card, &a.peer_id(), &db, &key));
+        assert!(!keep_card(&a_card, &c.peer_id(), i64::MAX, &db, &key), "a card kept for someone else");
+        assert!(keep_card(&a_card, &a.peer_id(), i64::MAX, &db, &key));
         let store = crate::storage::MessageStore::open(&db, &key).unwrap();
         let own = genuine_card(&b, "Bee");
         let (a_id, b_id, c_id) = (a.peer_id(), b.peer_id(), c.peer_id());

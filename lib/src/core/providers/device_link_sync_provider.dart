@@ -170,9 +170,14 @@ String aDeviceOfKind(String kind) => switch (kind) {
 /// How long a shown code lives; the relay drops the claim after the same time.
 const kLinkCodeLifetimeSeconds = 300;
 
+/// How long a sent snapshot waits for the other device to say it arrived. The
+/// phase keeps the relay session (and an Android phone's service) up meanwhile.
+const kLinkSendingTimeout = Duration(minutes: 10);
+
 class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
   Timer? _waitingTimer;
   Timer? _codeTimer;
+  Timer? _sendingTimer;
   bool _disposed = false;
 
   @override
@@ -182,10 +187,12 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
       _disposed = true;
       _waitingTimer?.cancel();
       _codeTimer?.cancel();
+      _sendingTimer?.cancel();
     });
     listenSelf((previous, next) {
       if (next.phase != LinkPhase.waiting) _waitingTimer?.cancel();
       if (next.phase != LinkPhase.showingCode) _codeTimer?.cancel();
+      if (next.phase != LinkPhase.sending) _sendingTimer?.cancel();
     });
     // The node coming up counts as well as the relay event: a dialog opened
     // during startup waits for either.
@@ -285,6 +292,13 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
   /// (Populated device) Accept an inbound request and push the snapshot.
   Future<void> acceptPush(String targetPeer, {required bool includeVault, required bool includeFiles}) async {
     state = state.copyWith(phase: LinkPhase.sending, peerId: targetPeer);
+    _sendingTimer?.cancel();
+    _sendingTimer = Timer(kLinkSendingTimeout, () {
+      if (state.phase != LinkPhase.sending) return;
+      state = state.copyWith(phase: LinkPhase.failed,
+          error: "Your other device didn't confirm it got the data. If it isn't linked yet, show a new code and try again.");
+      _releaseQuietly();
+    });
     await network_api.acceptLinkPush(
       targetPeer: targetPeer,
       includeVault: includeVault,
@@ -299,6 +313,21 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
   }
 
   void reset() => state = const DeviceLinkState();
+
+  /// The link dialog closed: a code still waiting for the relay has nobody to
+  /// show it to, and nothing else would end that wait.
+  void dialogGone() {
+    if (_disposed || state.phase != LinkPhase.renewingCode) return;
+    state = const DeviceLinkState();
+    _releaseQuietly();
+  }
+
+  /// Gives the code up from a timer or a teardown, where nobody could take an error.
+  Future<void> _releaseQuietly() async {
+    try {
+      await network_api.releaseLinkCode();
+    } catch (_) {}
+  }
 
   /// The relay echoes only the rendezvous part, so the code on screen stays.
   void onCodeClaimed(String code) {}

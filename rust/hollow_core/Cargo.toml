@@ -36,7 +36,7 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util", "fs"] }
-rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher", "backup"] }
 hex = "0.4"
 sha2 = "0.10"
 bip39 = "2.2"
@@ -106,6 +106,10 @@ toml = { version = "0.8", optional = true }
 # TCP_USER_TIMEOUT on the relay socket (node/ws_client.rs); already in the tree through tokio.
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 socket2 = { version = "0.6", features = ["all"] }
+
+# The instance-lock probe before an erase (api/recovery.rs): fcntl range locks, as dart:io takes them.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Foundation"] }

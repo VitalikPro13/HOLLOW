@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 
@@ -102,6 +103,10 @@ bool identityIsOnline(WidgetRef ref, String masterPeerId) =>
 /// master identity in `get_local_peer_id`). Used to mark "This device" + hide its
 /// Remove button. `null` until the node has loaded an identity.
 final localDevicePeerIdProvider = FutureProvider<String?>((ref) async {
+  // Widgets read this before the shell lands a pending link import, while the
+  // throwaway identity is still on disk; a new master is the cue to re-read.
+  final master = ref.watch(identityProvider.select((s) => s.peerId));
+  if (master == null) return null;
   try {
     return await network_api.getLocalDevicePeerId();
   } catch (_) {

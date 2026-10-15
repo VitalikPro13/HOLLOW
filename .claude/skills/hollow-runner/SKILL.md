@@ -125,7 +125,10 @@ NOTES: anything odd (a flake TRY 1 FAIL / TRY 2 PASS, a non-empty refusals file,
   dropped: overtaken by another commit`, after a device link `[HOLLOW-SECURITY] Alert ...: new_device`,
   `DROPPED ... not in any WS room`, `REJECTED` channel backfill / `ChannelSyncRequest` lines from the
   restricted-channel steps, moderation's ban lines, FileHeader `already complete`, and `Rate limited
-  WS peer ... asked again`. Any OTHER line is a failure. (`KeyBundle glare ... deferring` no longer
+  WS peer ... asked again`. Device-link cells add: `REJECTED file metadata write ... the card
+  belongs to` (from a holder we asked), `REJECTED FileRequest from <own new device> ... not entitled
+  (channel file)`, `Own device X added by Y`, and `Ignoring ServerJoinResolved from non-member` right
+  after the server was deleted (wiki fleet_probe, linking matrix). Any OTHER line is a failure. (`KeyBundle glare ... deferring` no longer
   exists since s43: if it appears, the build is stale.)
 - Parallel: `fleet_all.ps1` runs 3 lanes by default (`-MaxParallel 1` = serial, up to 9;
   `-DryRun` shows the schedule). Start it from the PowerShell tool with `run_in_background`

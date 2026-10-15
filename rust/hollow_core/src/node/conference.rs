@@ -1111,7 +1111,9 @@ pub(crate) async fn handle_inbound_chat(
             .and_then(|a| a.as_str())
             .and_then(|a| base64::engine::general_purpose::STANDARD.decode(a).ok())
             .filter(|b| b.len() <= super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES);
-        if super::profile_card::store_card(&card, avatar.as_deref(), db_path, db_passphrase) {
+        // A group line carries no frame stamp here; our own clock bounds the card.
+        let ceiling = super::frame_auth::stamp_ceiling(super::frame_auth::now_ms());
+        if super::profile_card::store_card(&card, avatar.as_deref(), ceiling, db_path, db_passphrase) {
             let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: card.master.clone() }).await;
         }
         if !card_seen_by(&master_keypair.peer_id(), &conf_id, &sender.device) {

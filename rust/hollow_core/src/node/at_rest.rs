@@ -664,7 +664,14 @@ pub fn migrate_plaintext(targets: &[PathBuf]) {
             let _ = std::fs::remove_file(tmp_sibling(target));
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(target) else { continue };
+        let entries = match std::fs::read_dir(target) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                hollow_log!("[HOLLOW-ATREST] could not look through a folder to protect: {e}");
+                continue;
+            }
+        };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".hfe.tmp") {
