@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/staged_attachments.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
+import 'package:hollow/src/ui/chat/composer_draft_keeper.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/message_preview.dart';
@@ -111,9 +112,16 @@ class ChatPane extends ConsumerStatefulWidget {
 }
 
 class _ChatPaneState extends ConsumerState<ChatPane>
-    with ComposerFocusOnOpen<ChatPane> {
+    with ComposerFocusOnOpen<ChatPane>, ComposerDraftKeeper<ChatPane> {
   @override
   String get composerScope => ComposerInsert.dmScope(widget.peerId);
+
+  @override
+  String get draftScope => ComposerInsert.dmScope(
+      ref.read(deviceLinkProvider).identityOf(widget.peerId));
+
+  @override
+  EmoteComposerController get draftComposer => _controller;
 
   @override
   FocusNode get composerFocusNode => _focusNode;

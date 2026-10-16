@@ -388,6 +388,10 @@ class EventStreamNotifier extends Notifier<bool> {
     }
   }
 
+  /// Feeds [event] through the same handling a node event gets.
+  @visibleForTesting
+  void debugDispatch(NetworkEvent event) => _dispatch(event);
+
   void _dispatch(NetworkEvent event) {
     // SECURITY: an unhandled exception here would kill the event loop.
     try {
@@ -1506,13 +1510,12 @@ class EventStreamNotifier extends Notifier<bool> {
         // Self vs remote comes from RUST, never from comparing peerId to a local id:
         // the id is the ROUTABLE DEVICE form and every local guess has self-dialed.
         if (isSelf) {
+          // Joining never moves the view (#110): a person in a text channel
+          // stays there, and the surface that wants the stage opens it.
           if (!isConferenceJoin) {
             vcNotifier.preVcChannelId = ref.read(selectedChannelProvider);
           }
           vcNotifier.onLocalJoined(serverId, channelId);
-          if (!isConferenceJoin) {
-            ref.read(selectedChannelProvider.notifier).state = channelId;
-          }
         } else {
           // Remote peer joined — initiate WebRTC if we're in the same channel.
           final vcState = ref.read(voiceChannelProvider);

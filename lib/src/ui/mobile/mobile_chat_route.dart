@@ -48,6 +48,8 @@ import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
+import 'package:hollow/src/ui/chat/composer_draft_keeper.dart';
+import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/ui/chat/expression_picker.dart';
 import 'package:hollow/src/ui/chat/staged_attachments.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
@@ -136,7 +138,17 @@ class MobileChatRoute extends ConsumerStatefulWidget {
   ConsumerState<MobileChatRoute> createState() => _MobileChatRouteState();
 }
 
-class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
+class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
+    with ComposerDraftKeeper<MobileChatRoute> {
+  @override
+  String get draftScope => widget.isDm
+      ? ComposerInsert.dmScope(
+          ref.read(deviceLinkProvider).identityOf(widget.peerId!))
+      : ComposerInsert.channelScope(widget.serverId!, widget.channelId!);
+
+  @override
+  EmoteComposerController get draftComposer => _controller;
+
   final _controller = EmoteComposerController();
   final _composerLink = LayerLink();
   final _focusNode = FocusNode();
