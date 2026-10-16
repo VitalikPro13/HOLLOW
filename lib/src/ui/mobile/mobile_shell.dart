@@ -27,6 +27,7 @@ import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_friends_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
+import 'package:hollow/src/ui/shell/clock_skew_banner.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 
 class MobileShell extends ConsumerStatefulWidget {
@@ -209,6 +210,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
             ),
             // Self-hides when there is nothing to announce.
             const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
+            const ClockSkewBanner(anchor: StatusBannerAnchor.bottom),
           ],
         ),
       ),

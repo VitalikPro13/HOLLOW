@@ -127,7 +127,7 @@ rows in `authz_matrix.md`.
 | F-02 | Removal to the removed device, which locks and erases after three days | TB-3 | A removal signed by a current device, in the roster's base (design ID-1) | Answered by HOL-SEC-077: the master signature no longer moves the roster |
 | F-03 | `DestroyIdentity` order | TB-2, TB-3 | Master signature, `judge_own_order` (own master, targets, link time, in-process applied stamp) | Replay after restart? Link-time rule vs a stolen device? |
 | F-04 | Relay kill list: order couriered on connect, `KillAck` back | TB-1, TB-10 | Relay is courier only; the order carries its own signature | Can the relay use withholding or ordering to cause harm? |
-| F-05 | Relay authentication | TB-1 | Device key challenge; relay derives peer_id from the pubkey; 60 s window | |
+| F-05 | Relay authentication | TB-1 | Device key challenge; relay derives peer_id from the pubkey; the one-use nonce is the freshness (the 60 s window binds v1 only since 0.12.1) | |
 | F-06 | Unlock, duress, app lock secret | TB-4 | Argon2id, both slots derived, keystore wrap | Offline PIN search (L-07) |
 | F-07 | Sibling sync: DM backfill, read markers, personal emotes, server re-announce, manual sync | TB-3 | "Sender proven to be the same identity" | How is "same identity" proven, and can a stranger's device be resolved to our master (the HOL-SEC-001 rebinding class)? |
 | F-11 | Link code claim and resolve (relay JSON, `link:{CODE}` room) | TB-1 | none: the code is in plaintext | HOL-SEC-002 |

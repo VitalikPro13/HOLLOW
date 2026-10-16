@@ -83,6 +83,12 @@ pub(crate) fn sign(master: &NativeKeypair, nickname: &str, device: &str, ts_ms: 
     }
 }
 
+/// The clock a resolved claim is judged by: the relay's, the one claims are stamped
+/// with, so a resolver whose own clock is off still accepts a fresh claim.
+pub(crate) fn judge_now_ms() -> i64 {
+    super::relay_clock::now_ms()
+}
+
 /// Claims `nickname` (lowercase) for `device` with the master's signature.
 pub(crate) fn send_claim(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -90,7 +96,8 @@ pub(crate) fn send_claim(
     device: &str,
     nickname: &str,
 ) {
-    let claim = sign(master, nickname, device, super::types::now_ms());
+    // The relay judges the claim's age by its own clock (resolvers allow 11 minutes).
+    let claim = sign(master, nickname, device, super::relay_clock::now_ms());
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ClaimNickname {
         nickname: nickname.to_string(),
         master: master.peer_id(),
@@ -126,6 +133,23 @@ mod tests {
             payload("vitalik_7", "12D3KooWDevice", "12D3KooWMaster", 1790000000000),
             "hollow-nick1\nvitalik_7\n12D3KooWDevice\n12D3KooWMaster\n1790000000000"
         );
+    }
+
+    /// Issue #72: the relay judges a claim's age by its clock, so a device whose clock is
+    /// 20 minutes behind stamps the relay's time.
+    #[test]
+    fn a_claim_carries_the_relays_time() {
+        use super::super::relay_clock;
+        let _clock = relay_clock::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relay_ms = relay_clock::local_ms() + 20 * 60 * 1000;
+        relay_clock::observe((relay_ms / 1000) as u64);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        send_claim(&tx, &NativeKeypair::from_secret_bytes(&[3; 32]), "dev-a", "nick");
+        relay_clock::forget_for_test();
+        let Ok(super::super::ws_client::WsCommand::ClaimNickname { claim, .. }) = rx.try_recv() else {
+            panic!("no claim sent")
+        };
+        assert!(claim.ts_ms.abs_diff(relay_ms) < 2_000, "stamp {} vs relay {relay_ms}", claim.ts_ms);
     }
 
     #[test]
@@ -187,5 +211,27 @@ mod tests {
             let claim = sign(&master, "nick", "dev-a", ts);
             assert_eq!(verified_master("nick", "dev-a", &master.peer_id(), &claim, now), None, "stamp {ts}");
         }
+    }
+
+    // r1-review
+    /// A claim stamped in relay time is judged by resolvers on their OWN clock
+    /// (swarm.rs nickname_resolved arm). A resolver whose clock is 20 minutes behind,
+    /// which can now log in, must still accept a fresh claim the relay just stored.
+    #[test]
+    fn r1_review_a_skewed_resolver_still_accepts_a_fresh_claim() {
+        use super::super::relay_clock;
+        let _clock = relay_clock::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let master = NativeKeypair::from_secret_bytes(&[3; 32]);
+        let relay_ms = relay_clock::local_ms() + 20 * 60 * 1000;
+        relay_clock::observe((relay_ms / 1000) as u64);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        send_claim(&tx, &master, "dev-a", "nick");
+        let Ok(super::super::ws_client::WsCommand::ClaimNickname { claim, .. }) = rx.try_recv() else {
+            panic!("no claim sent")
+        };
+        // The same clock the swarm's resolve arm passes.
+        let got = verified_master("nick", "dev-a", &master.peer_id(), &claim, judge_now_ms());
+        relay_clock::forget_for_test();
+        assert_eq!(got, Some(master.peer_id()), "a fresh claim refused by a resolver 20 min off");
     }
 }

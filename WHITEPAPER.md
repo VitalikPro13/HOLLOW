@@ -1073,7 +1073,7 @@ Peers authenticate to the relay via Ed25519 signature:
 Signed payload: "hollow-ws-auth:{peer_id}:{unix_timestamp}"
 ```
 
-The relay verifies the signature against the provided public key and checks that the timestamp is within ±60 seconds of server time (replay protection).
+The relay verifies the signature against the provided public key; for this pre-0.12 (v1) frame it also checks that the timestamp is within ±60 seconds of server time (replay protection). Since 0.12 the client first asks for a challenge and signs the relay's one-use nonce, its domain and every flag the relay acts on; that nonce is the replay protection, so since 0.12.1 the relay no longer judges a v2 login by its timestamp. The challenge also carries the relay's time, which the client uses for the few stamps only the relay checks and to warn its user when the device clock is off.
 
 ### 12.3 Room Model
 

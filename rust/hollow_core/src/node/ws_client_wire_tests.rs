@@ -134,6 +134,15 @@ struct Relay {
     accept_times: Vec<Instant>,
     /// The `type` of every client text frame, with its connection, in arrival order.
     text_types: Vec<(u64, String)>,
+    /// Send `now` on challenges and heartbeat answers, this many seconds off real time.
+    clock_off_secs: Option<i64>,
+    /// Every auth frame's timestamp.
+    auth_stamps: Vec<u64>,
+}
+
+fn relay_now(off_secs: i64) -> u64 {
+    let real = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    (real as i64 + off_secs) as u64
 }
 
 impl Relay {
@@ -312,6 +321,9 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
     if offer {
         challenge["session"] = json!(1);
     }
+    if let Some(off) = state.lock().unwrap().clock_off_secs {
+        challenge["now"] = json!(relay_now(off));
+    }
     let held = state.lock().unwrap().challenge_delay;
     if let Some(d) = held {
         tokio::time::sleep(d).await;
@@ -326,6 +338,7 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
     let delay = {
         let mut s = state.lock().unwrap();
         s.auths_seen += 1;
+        s.auth_stamps.push(auth["timestamp"].as_u64().unwrap_or_default());
         s.auth_delay
     };
     if let Some(d) = delay {
@@ -495,7 +508,11 @@ fn on_client_frame(state: &Arc<Mutex<Relay>>, id: u64, msg: Message) {
                         None => 0,
                     };
                     if !s.mute_hb_acks {
-                        send(json!({ "type": "hb_ack", "h": in_h }));
+                        let mut ack = json!({ "type": "hb_ack", "h": in_h });
+                        if let Some(off) = s.clock_off_secs {
+                            ack["now"] = json!(relay_now(off));
+                        }
+                        send(ack);
                     }
                     return;
                 }
@@ -1920,4 +1937,208 @@ async fn hostile_relay_a_drain_hint_cannot_outwait_a_nudge() {
     c.nudge();
     c.wait_kind("Resumed", T).await;
     assert!(nudged.elapsed() < Duration::from_secs(2), "a nudge ends the wait: {:?}", nudged.elapsed());
+}
+
+// r1-clock
+/// Issue #72: a client whose clock is five minutes off signs the relay's time, so the
+/// relay's verify (the fake checks the signature over the stamp) passes; the node hears
+/// the offset, and again when a heartbeat answer shows it moved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_skewed_clock_signs_the_relays_time_and_hears_the_offset() {
+    let _clock = super::super::relay_clock::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let relay = FakeRelay::start(true).await;
+    relay.with(|r| r.clock_off_secs = Some(-300));
+    let mut c = spawn_client(&relay.url(), quick());
+    let told = c.wait_kind("ClockOffset", T).await;
+    c.wait_kind("Connected", T).await;
+    let want = relay_now(-300);
+    let stamp = relay.with(|r| r.auth_stamps[0]);
+    assert!(stamp + 2 >= want && stamp <= want, "signed {stamp}, relay time {want}");
+    let WsEvent::ClockOffset { offset_ms: Some(offset_ms) } = told else { panic!("{told:?}") };
+    assert!((-301_000..=-298_500).contains(&offset_ms), "offset {offset_ms}");
+
+    relay.with(|r| r.clock_off_secs = Some(120));
+    let WsEvent::ClockOffset { offset_ms: Some(offset_ms) } = c.wait_kind("ClockOffset", T).await else {
+        panic!("no re-measure")
+    };
+    assert!((118_500..=121_000).contains(&offset_ms), "a heartbeat answer re-measures: {offset_ms}");
+
+    // The relay is swapped for one that tells no time: the offset is forgotten and the
+    // node told so.
+    relay.with(|r| r.clock_off_secs = None);
+    relay.kill();
+    let told = c.wait_kind("ClockOffset", T).await;
+    assert!(matches!(told, WsEvent::ClockOffset { offset_ms: None }), "{told:?}");
+    assert_eq!(super::super::relay_clock::offset_ms(), None);
+    super::super::relay_clock::forget_for_test();
+}
+
+/// A relay older than 0.12.1 sends no time: the login carries our own clock, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_without_a_clock_gets_ours() {
+    let _clock = super::super::relay_clock::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    let ours = relay_now(0);
+    let stamp = relay.with(|r| r.auth_stamps[0]);
+    assert!(stamp + 2 >= ours && stamp <= ours, "signed {stamp}, our clock {ours}");
+}
+
+// r1-review
+/// A fresh login the relay refuses (no session held, the issue #72 case) climbs the
+/// backoff ladder on its own: its tries thin out as a held session's refusal does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_login_backs_off_fully() {
+    let t = Timing {
+        backoff_base: Duration::from_millis(20),
+        backoff_cap: Duration::from_secs(3),
+        resume_backoff_cap: Duration::from_millis(100),
+        ..quick()
+    };
+    let ms = Duration::from_millis;
+    let relay = FakeRelay::start(true).await;
+    relay.with(|r| r.refuse_auth = true);
+    let start = Instant::now();
+    let mut c = spawn_client(&relay.url(), t);
+    tokio::time::sleep_until(start + ms(4000)).await;
+    c.drain();
+    let late = relay.with(|r| r.accept_times.iter().filter(|at| **at >= start + ms(2500)).count());
+    assert!(late <= 4, "{late} refused tries in 1.5 s with no nudge");
+}
+
+/// After the relay refused us, a nudge (on desktop every window focus) must not dial
+/// past the backoff: each such dial is another socket against the address's
+/// new-connection window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r1_review_nudges_after_a_refusal_keep_the_backoff() {
+    let t = Timing {
+        backoff_base: Duration::from_millis(20),
+        backoff_cap: Duration::from_secs(3),
+        resume_backoff_cap: Duration::from_millis(100),
+        ..quick()
+    };
+    let ms = Duration::from_millis;
+    let relay = FakeRelay::start(true).await;
+    relay.with(|r| r.refuse_auth = true);
+    let start = Instant::now();
+    let mut c = spawn_client(&relay.url(), t);
+    tokio::time::sleep_until(start + ms(1000)).await;
+    for i in 0..15u32 {
+        c.nudge();
+        tokio::time::sleep_until(start + ms(1000 + 200 * u64::from(i + 1))).await;
+    }
+    c.drain();
+    let tries = relay.with(|r| r.accept_times.iter().filter(|at| **at >= start + ms(1000)).count());
+    assert!(tries <= 6, "{tries} refused tries in 3 s of nudges");
+}
+
+/// A refusal while a call is live (ringing, a VC, a lobby, link presenting) still backs
+/// off: `retry_wait` gives the steady call interval (1 s in production) whatever the
+/// relay said, so a refused login dials once a second for as long as the call lasts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r1_review_a_refused_login_during_a_call_backs_off() {
+    let t = Timing {
+        backoff_base: Duration::from_millis(20),
+        backoff_cap: Duration::from_secs(3),
+        resume_backoff_cap: Duration::from_millis(100),
+        realtime_retry: Duration::from_millis(100),
+        ..quick()
+    };
+    let ms = Duration::from_millis;
+    let relay = FakeRelay::start(true).await;
+    relay.with(|r| r.refuse_auth = true);
+    let in_call = Arc::new(AtomicBool::new(true));
+    let start = Instant::now();
+    let mut c = spawn_seamed_client(&relay.url(), t, Arc::new(Mutex::new(None)), in_call);
+    tokio::time::sleep_until(start + ms(4000)).await;
+    c.drain();
+    let late = relay.with(|r| r.accept_times.iter().filter(|at| **at >= start + ms(2500)).count());
+    assert!(late <= 4, "{late} refused tries in 1.5 s during a call");
+}
+
+/// The other side of the refusal rule: during a call, an ordinary lost relay (no
+/// refusal) is still redialled at the steady call interval, never up the ladder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_redials_a_lost_relay_at_the_call_interval() {
+    let t = Timing {
+        backoff_base: Duration::from_millis(20),
+        backoff_cap: Duration::from_secs(3),
+        resume_backoff_cap: Duration::from_millis(100),
+        realtime_retry: Duration::from_millis(100),
+        ..quick()
+    };
+    let ms = Duration::from_millis;
+    let relay = FakeRelay::start(true).await;
+    let in_call = Arc::new(AtomicBool::new(true));
+    let mut c = spawn_seamed_client(&relay.url(), t, Arc::new(Mutex::new(None)), in_call);
+    c.wait_kind("Connected", T).await;
+    relay.with(|r| r.refuse_new = true);
+    relay.kill();
+    let start = Instant::now();
+    tokio::time::sleep_until(start + ms(2500)).await;
+    c.drain();
+    let late = relay.with(|r| r.accept_times.iter().filter(|at| **at >= start + ms(1000)).count());
+    assert!(late >= 8, "only {late} redials in 1.5 s during a call");
+}
+
+/// A login that succeeds after refusals clears them: the next ordinary loss during a
+/// call is redialled at the call interval again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_login_after_a_refusal_clears_it() {
+    let t = Timing {
+        backoff_base: Duration::from_millis(20),
+        backoff_cap: Duration::from_millis(800),
+        resume_backoff_cap: Duration::from_millis(100),
+        realtime_retry: Duration::from_millis(100),
+        ..quick()
+    };
+    let ms = Duration::from_millis;
+    let relay = FakeRelay::start(true).await;
+    relay.with(|r| r.refuse_auth = true);
+    let in_call = Arc::new(AtomicBool::new(true));
+    let mut c = spawn_seamed_client(&relay.url(), t, Arc::new(Mutex::new(None)), in_call);
+    tokio::time::sleep(ms(1200)).await;
+    relay.with(|r| r.refuse_auth = false);
+    c.wait_kind("Connected", T).await;
+    relay.with(|r| r.refuse_new = true);
+    relay.kill();
+    let start = Instant::now();
+    tokio::time::sleep_until(start + ms(2500)).await;
+    c.drain();
+    let late = relay.with(|r| r.accept_times.iter().filter(|at| **at >= start + ms(1000)).count());
+    assert!(late >= 8, "only {late} redials in 1.5 s: the old refusal still holds the ladder");
+}
+
+/// After a refusal a network change still buys one immediate retry (a new network may
+/// be a new address), and only one until a login succeeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_refusal_one_network_change_retries_at_once() {
+    let t = Timing {
+        backoff_base: Duration::from_secs(2),
+        backoff_cap: Duration::from_secs(4),
+        resume_backoff_cap: Duration::from_millis(100),
+        nudge_quiet: Duration::from_millis(50),
+        ..quick()
+    };
+    let ms = Duration::from_millis;
+    let relay = FakeRelay::start(true).await;
+    relay.with(|r| r.refuse_auth = true);
+    let c = spawn_client(&relay.url(), t);
+    relay.wait("the first refusal", T, |r| r.auths_seen >= 1).await;
+    tokio::time::sleep(ms(300)).await;
+    let network = || {
+        let _ = c.ctl.send(Control::Nudge { reason: "network".into(), external: true });
+    };
+    let before = relay.with(|r| r.tcp_accepts);
+    network();
+    tokio::time::sleep(ms(300)).await;
+    let after_first = relay.with(|r| r.tcp_accepts);
+    assert!(after_first > before, "the first network change after a refusal dials at once");
+    for _ in 0..20 {
+        network();
+        tokio::time::sleep(ms(100)).await;
+    }
+    let later = relay.with(|r| r.tcp_accepts) - after_first;
+    assert!(later <= 4, "{later} dials for 20 later network changes: they must wait for the ladder");
 }

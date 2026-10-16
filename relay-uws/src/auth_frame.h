@@ -60,6 +60,17 @@ inline std::optional<std::string> auth_mode(bool guest, bool fetch) {
     return std::string("full");
 }
 
+// How far a v1 frame's timestamp may sit from the relay's clock.
+static constexpr uint64_t AUTH_V1_SKEW_SECS = 60;
+
+// Only v1 is judged by time: v2 and v3 sign this socket's one-use nonce, which is
+// the freshness proof, so a client whose clock is off still logs in (issue #72).
+inline bool auth_time_ok(int version, uint64_t timestamp, uint64_t now) {
+    if (version >= 2) return true;
+    const uint64_t diff = now > timestamp ? now - timestamp : timestamp - now;
+    return diff <= AUTH_V1_SKEW_SECS;
+}
+
 namespace auth_detail {
 
 // A v3 frame's session and count, by the shape rules of section 9.1: only a full

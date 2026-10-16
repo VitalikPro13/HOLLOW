@@ -25,7 +25,6 @@
 
 using json = nlohmann::json;
 
-static constexpr uint64_t TIMESTAMP_SKEW_SECS = 60;
 static constexpr size_t MAX_ROOMS_PER_PEER = 10000;
 static constexpr int PUSH_SIDECAR_PORT = 3001;
 static constexpr int PUSH_DEBOUNCE_SECS = 10;
@@ -352,7 +351,8 @@ static constexpr bool ACCEPT_AUTH_V1 = HOLLOW_ACCEPT_AUTH_V1;
 
 // The one frame an unauthenticated socket may send besides `auth`. The nonce is
 // minted once per socket; asking again gets the same one. `door_key` is what this
-// socket's door proofs are made for; `session` says a v3 login may ask for one.
+// socket's door proofs are made for; `session` says a v3 login may ask for one;
+// `now` (unix seconds) is what the client stamps relay-judged statements with.
 static void handle_auth_hello(SSLWebSocket* ws, PerSocketData* data, const RelayState& state) {
     if (data->auth_nonce.empty()) {
         data->auth_nonce = random_hex(AUTH_NONCE_HEX_LEN / 2);
@@ -360,7 +360,8 @@ static void handle_auth_hello(SSLWebSocket* ws, PerSocketData* data, const Relay
     send_json(ws, {{"type", "auth_challenge"},
                    {"nonce", data->auth_nonce},
                    {"door_key", state.door_key.text},
-                   {"session", 1}});
+                   {"session", 1},
+                   {"now", now_unix_secs()}});
 }
 
 static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
@@ -393,9 +394,7 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         return;
     }
 
-    uint64_t now = now_unix_secs();
-    uint64_t diff = (now > timestamp) ? (now - timestamp) : (timestamp - now);
-    if (diff > TIMESTAMP_SKEW_SECS) {
+    if (!auth_time_ok(frame->version, timestamp, now_unix_secs())) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
         ws->end(1008, "bad_auth");
         return;
@@ -3520,7 +3519,9 @@ static bool handle_session_control(SSLWebSocket* ws, PerSocketData* data, const 
     if (type == "hb") {
         // An `h` out of range acks nothing.
         if (s && json_h(j, h)) session_bounds::ring_ack(state, *s, h);
-        write_raw(ws, json{{"type", "hb_ack"}, {"h", s ? s->in_h : 0}}.dump(), uWS::OpCode::TEXT);
+        // `now` lets the client notice its clock moving while the socket lives.
+        write_raw(ws, json{{"type", "hb_ack"}, {"h", s ? s->in_h : 0}, {"now", now_unix_secs()}}.dump(),
+                  uWS::OpCode::TEXT);
         if (s) s->unacked_in = 0;
         return true;
     }

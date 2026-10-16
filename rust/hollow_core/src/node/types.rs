@@ -444,6 +444,8 @@ pub(crate) enum NetworkEvent {
     /// The socket dropped but the relay holds our session: Reconnecting, nothing is
     /// lost.
     RelaySuspended,
+    /// How far our clock sits from the relay's (relay minus ours, seconds).
+    RelayClockOffset { offset_secs: Option<i64> },
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,

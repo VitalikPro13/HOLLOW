@@ -11,7 +11,8 @@ Binary name: `hollow-relay`
 ## Security model after design A-D4 (2026-09-29, HOL-SEC-063..066)
 
 - **Auth v2** (`auth_frame.h`): `auth_hello` gets a per-socket 32-byte nonce
-  (`auth_challenge`); the auth frame (`v:2`) signs `hollow-ws-auth2`, the relay's domain
+  (`auth_challenge`, which also carries the relay's unix seconds as `now`, as does every
+  `hb_ack`; issue #72); the auth frame (`v:2`) signs `hollow-ws-auth2`, the relay's domain
   (`auth_domain(--domain)`: lowercase, no port), the nonce, device, time, mode
   (`full`/`fetch`/`guest`) and SHA-256 of the license key. One attempt per nonce. v1 is
   refused since 0.12 (`ACCEPT_AUTH_V1` = 0, deployed 2026-10-05).
@@ -770,7 +771,7 @@ The 30-second reload cycle means key revocation takes at most 30 seconds to take
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `TIMESTAMP_SKEW_SECS` | 60 | Max allowed clock skew for auth timestamps |
+| `AUTH_V1_SKEW_SECS` (`auth_frame.h`) | 60 | Max clock skew for a v1 auth timestamp; v2/v3 are judged by the nonce only (`auth_time_ok`, issue #72) |
 | `MAX_ROOMS_PER_PEER` | 2000 | Maximum rooms a single peer can join |
 
 ### ws_handler.cpp:setup_ws_handler() — WebSocket endpoint configuration
@@ -842,7 +843,7 @@ Authentication protocol (first message after WebSocket open):
 1. Parse JSON. Reject on parse failure.
 2. Check `type == "auth"`. Reject otherwise.
 3. Validate `peer_id`, `public_key`, `signature` are non-empty. Reject if any missing.
-4. Check timestamp skew: `|now - timestamp| <= 60s`. Reject if too far.
+4. Check timestamp skew for v1 only (`auth_time_ok`): `|now - timestamp| <= 60s`. A v2/v3 frame signs the socket's one-use nonce, so its timestamp is signed but never judged (since 0.12.1, issue #72: a device with a skewed clock logs in; the client signs relay time anyway).
 5. **SECURITY — bind `peer_id` to `public_key`:** recompute the peer_id via `derive_peer_id(public_key)` (crypto.cpp) and reject any mismatch. A peer_id is an identity multihash that INLINES the Ed25519 public key, so it is a pure function of that key. Without this check, step 6 proves only that the sender holds the private half of the key they supplied — NOT that they own the peer_id they claim. Anyone could mint a throwaway keypair, sign `hollow-ws-auth:<victim_peer_id>:<ts>` with it, and authenticate AS the victim; since a newer socket for an existing peer_id EVICTS the incumbent, that is a persistent remote deauth of any user (peer_ids are public — broadcast in `peer_joined` + member snapshots). Added 0.8.2 after an external report; the same check also guards both legacy HTTP register/unregister endpoints. **The derivation is duplicated in Rust and C++ and is pinned by matching known-answer tests** (`peer_id_derivation_known_answer` / `relay-uws/test/test_derive_peer_id.cpp`) — silent drift fails auth for EVERY client, so change both or neither.
 6. Build signed message: `"hollow-ws-auth:" + peer_id + ":" + timestamp`.
 7. Verify Ed25519 signature via `verify_ed25519()`. Reject if invalid.
@@ -1396,7 +1397,7 @@ The `deploy/` templates assume the repo cloned at `/opt/HOLLOW` and a `hollow` u
 | Auth not sent within 10s | `auth_timeout`, connection closed 1008 |
 | Invalid auth JSON | `auth_failed`, connection closed 1008 |
 | Bad Ed25519 signature | `auth_failed`, connection closed 1008 |
-| Timestamp skew > 60s | `auth_failed`, connection closed 1008 |
+| v1 timestamp skew > 60s | `auth_failed`, connection closed 1008 |
 | License key required but missing | `license_key_required`, connection closed 1008 |
 | License key invalid | `invalid_license_key`, connection closed 1008 |
 | License key already held by 5 other peers | `license_key_in_use`, connection closed 1008; the client keeps retrying with backoff and keeps its key |
@@ -1498,7 +1499,7 @@ iOS build/config: classic non-UIScene AppDelegate + firebase pinned below the iO
 - **Authenticated connections:** Every WebSocket connection requires a valid Ed25519 signature over a timestamped challenge. No anonymous connections.
 - **No metadata logging (source-enforced, 2026-06-23):** NO log statement in the relay prints a peer_id, room, push target/sender, channel, server, or push token. The entire `[push]` family (buffer/replay/send-push/token-register/prefs/channel-push/direct-not-in-room) and `[license] Key revoked for peer <id>` were stripped — the relay must not record who-talks-to-whom (a truncated `12D3KooW…` prefix still fingerprints). Only aggregate counts (`Swept N`, `Loaded N key(s)`), config-file paths in parse errors, and `[main]` startup/shutdown banners remain. peer_ids in `state.*` maps / protocol `send_json` responses / signature strings are routing logic, NOT logging. See `feedback_relay_no_metadata_logging.md`.
 - **Sender identity injection:** For binary types 0x02/0x03/0x04, the relay replaces/injects the sender's peer_id — peers cannot spoof their identity to the relay.
-- **Timestamp anti-replay:** 60-second skew window limits replay attacks on auth and signaling requests.
+- **Auth anti-replay:** the per-socket one-use nonce (v2/v3); the 60-second skew window now binds only v1 frames (off since 0.12) and the legacy signed HTTP requests. The client stamps relay-judged statements (login, ring control, nickname claims) with the relay's time (`node/relay_clock.rs`); anything a peer judges stays on the device clock.
 - **No rate limiting:** Removed — Ed25519 auth + license keys are the DoS protection layer.
 - **Room isolation:** Peers can only send to rooms they've joined. Non-members are silently rejected.
 - **License revocation:** Active connections can be terminated within 30 seconds by removing their key from `keys.json`.

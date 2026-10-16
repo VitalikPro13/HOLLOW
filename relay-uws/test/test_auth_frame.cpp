@@ -118,6 +118,16 @@ static void test_v3() {
     check("a prefix is no match", !session::sid_equal(sid, sid.substr(0, 31)) && !session::sid_equal(sid, ""));
 }
 
+// Issue #72: the nonce is a v2/v3 login's freshness, so only v1 is judged by time.
+static void test_time() {
+    const uint64_t now = 1790000000;
+    check("a v2 login an hour off passes", auth_time_ok(2, now - 3600, now) && auth_time_ok(2, now + 3600, now));
+    check("a v3 login an hour off passes", auth_time_ok(3, now - 3600, now) && auth_time_ok(3, now + 3600, now));
+    check("a v2 login with no timestamp passes", auth_time_ok(2, 0, now));
+    check("a v1 login inside a minute passes", auth_time_ok(1, now - 60, now) && auth_time_ok(1, now + 60, now));
+    check("a v1 login past a minute is refused", !auth_time_ok(1, now - 61, now) && !auth_time_ok(1, now + 61, now));
+}
+
 int main() {
     printf("auth frame\n");
 
@@ -201,6 +211,7 @@ int main() {
 
     printf("auth v3 (resumable sessions)\n");
     test_v3();
+    test_time();
 
     if (failures) {
         printf("%d FAILED\n", failures);

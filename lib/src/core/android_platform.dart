@@ -36,6 +36,16 @@ Future<bool> openAndroidNotificationSettings() async {
   }
 }
 
+/// Opens the system date and time settings. False off Android or when refused.
+Future<bool> openAndroidDateSettings() async {
+  if (!_isAndroid) return false;
+  try {
+    return await _channel.invokeMethod<bool>('openDateSettings') ?? false;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// The package that installed this APK (`com.android.vending` for Play), or
 /// null off Android, on a sideload that reports nothing, or on failure. A store
 /// always reports its own package, so null means "not a store".

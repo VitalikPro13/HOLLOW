@@ -95,6 +95,7 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
+import 'package:hollow/src/ui/shell/clock_skew_banner.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -1506,6 +1507,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
                 _buildMessageArea(),
               // Just above the input cluster, where the thumb already rests.
               const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
+              const ClockSkewBanner(anchor: StatusBannerAnchor.bottom),
               _TypingBar(
                 contextKey: widget.isDm ? widget.peerId! : _channelKey,
                 child: Column(

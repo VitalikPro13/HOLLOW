@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
+import 'package:hollow/src/core/providers/clock_skew_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
@@ -1768,6 +1769,9 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_LicenseError(:final reason):
         ref.read(licenseErrorProvider.notifier).state = reason;
+
+      case NetworkEvent_RelayClockOffset(:final offsetSecs):
+        ref.read(clockSkewProvider.notifier).onOffset(offsetSecs?.toInt());
 
       case NetworkEvent_RoomBudgetUpdate(:final joined, :final limit):
         ref.read(roomBudgetProvider.notifier).state =

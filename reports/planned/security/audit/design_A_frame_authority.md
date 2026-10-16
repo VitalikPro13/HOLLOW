@@ -76,8 +76,10 @@ section 5 in full, then ID-1 follows.
   (`forwarder/signaling.rs`: answers each client in the format it used, refuses unsealed
   frames from a client that ever sealed, so it can deploy before 0.12). The web public
   viewer must seal and open (anonlisten-sites, ships on release day).
-- **Clock.** Relay auth holds every client within 60 s of the relay, so honest peers
-  differ by two minutes at most; 300 s is the key-exchange window.
+- **Clock.** Until 0.12.1 relay auth held every client within 60 s of the relay; since
+  then a v2/v3 login is judged by its nonce only (issue #72), so a device whose clock is
+  off connects and the app warns it past 60 s and urgently past 240 s, before peers'
+  300 s windows (seal freshness, key exchange) refuse it. 300 s is the key-exchange window.
 - **Breaking.** 0.12 refuses unsealed frames and 0.11 cannot parse sealed ones. No relay
   change is needed; the relay stores and replays payloads opaquely.
 

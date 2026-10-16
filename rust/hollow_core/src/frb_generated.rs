@@ -18254,6 +18254,12 @@ impl SseDecode for crate::api::network::NetworkEvent {
                 return crate::api::network::NetworkEvent::RelaySuspended;
             }
             67 => {
+                let mut var_offsetSecs = <Option<i64>>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::RelayClockOffset {
+                    offset_secs: var_offsetSecs,
+                };
+            }
+            68 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_fromPeer = <String>::sse_decode(deserializer);
@@ -18271,7 +18277,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     is_reply_to_own: var_isReplyToOwn,
                 };
             }
-            68 => {
+            69 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
@@ -18281,7 +18287,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     channel_id: var_channelId,
                 };
             }
-            69 => {
+            70 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 let mut var_status = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::PeerStatusChanged {
@@ -18289,7 +18295,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     status: var_status,
                 };
             }
-            70 => {
+            71 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_messageId = <String>::sse_decode(deserializer);
@@ -18299,7 +18305,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     message_id: var_messageId,
                 };
             }
-            71 => {
+            72 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_messageId = <String>::sse_decode(deserializer);
@@ -18309,7 +18315,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     message_id: var_messageId,
                 };
             }
-            72 => {
+            73 => {
                 let mut var_fileId = <String>::sse_decode(deserializer);
                 let mut var_fileName = <String>::sse_decode(deserializer);
                 let mut var_sizeBytes = <u64>::sse_decode(deserializer);
@@ -18342,7 +18348,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     thumb_b64: var_thumbB64,
                 };
             }
-            73 => {
+            74 => {
                 let mut var_fileId = <String>::sse_decode(deserializer);
                 let mut var_chunksReceived = <u32>::sse_decode(deserializer);
                 let mut var_totalChunks = <u32>::sse_decode(deserializer);
@@ -18352,7 +18358,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     total_chunks: var_totalChunks,
                 };
             }
-            74 => {
+            75 => {
                 let mut var_fileId = <String>::sse_decode(deserializer);
                 let mut var_diskPath = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::FileCompleted {
@@ -18360,7 +18366,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     disk_path: var_diskPath,
                 };
             }
-            75 => {
+            76 => {
                 let mut var_fileId = <String>::sse_decode(deserializer);
                 let mut var_error = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::FileFailed {
@@ -18368,7 +18374,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     error: var_error,
                 };
             }
-            76 => {
+            77 => {
                 let mut var_fileId = <String>::sse_decode(deserializer);
                 let mut var_state = <String>::sse_decode(deserializer);
                 let mut var_peerId = <String>::sse_decode(deserializer);
@@ -18378,7 +18384,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     peer_id: var_peerId,
                 };
             }
-            77 => {
+            78 => {
                 let mut var_username = <String>::sse_decode(deserializer);
                 let mut var_password = <String>::sse_decode(deserializer);
                 let mut var_ttl = <u64>::sse_decode(deserializer);
@@ -18390,11 +18396,11 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     uris: var_uris,
                 };
             }
-            78 => {
+            79 => {
                 let mut var_code = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::LinkCodeClaimed { code: var_code };
             }
-            79 => {
+            80 => {
                 let mut var_error = <String>::sse_decode(deserializer);
                 let mut var_code = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::LinkCodeError {
@@ -18402,7 +18408,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     code: var_code,
                 };
             }
-            80 => {
+            81 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 let mut var_theirMsgCount = <u32>::sse_decode(deserializer);
                 let mut var_theirFriendCount = <u32>::sse_decode(deserializer);
@@ -18416,7 +18422,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     kind: var_kind,
                 };
             }
-            81 => {
+            82 => {
                 let mut var_linkId = <String>::sse_decode(deserializer);
                 let mut var_bytesReceived = <u64>::sse_decode(deserializer);
                 let mut var_totalBytes = <u64>::sse_decode(deserializer);
@@ -18426,7 +18432,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     total_bytes: var_totalBytes,
                 };
             }
-            82 => {
+            83 => {
                 let mut var_linkId = <String>::sse_decode(deserializer);
                 let mut var_msgCount = <u32>::sse_decode(deserializer);
                 let mut var_friendCount = <u32>::sse_decode(deserializer);
@@ -18438,7 +18444,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     server_count: var_serverCount,
                 };
             }
-            83 => {
+            84 => {
                 let mut var_linkId = <String>::sse_decode(deserializer);
                 let mut var_error = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::LinkFailed {
@@ -18446,11 +18452,11 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     error: var_error,
                 };
             }
-            84 => {
+            85 => {
                 let mut var_bytes = <u64>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::LinkPushComplete { bytes: var_bytes };
             }
-            85 => {
+            86 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_shardIndex = <u16>::sse_decode(deserializer);
@@ -18462,7 +18468,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     from_peer: var_fromPeer,
                 };
             }
-            86 => {
+            87 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_shardIndex = <u16>::sse_decode(deserializer);
@@ -18476,7 +18482,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     error: var_error,
                 };
             }
-            87 => {
+            88 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_shardIndex = <u16>::sse_decode(deserializer);
@@ -18490,7 +18496,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     error: var_error,
                 };
             }
-            88 => {
+            89 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ShardDeleted {
@@ -18498,7 +18504,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     content_id: var_contentId,
                 };
             }
-            89 => {
+            90 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_shardIndex = <u16>::sse_decode(deserializer);
@@ -18510,7 +18516,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     from_peer: var_fromPeer,
                 };
             }
-            90 => {
+            91 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_shardIndex = <u16>::sse_decode(deserializer);
@@ -18522,7 +18528,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     error: var_error,
                 };
             }
-            91 => {
+            92 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_phase = <String>::sse_decode(deserializer);
@@ -18534,7 +18540,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     progress: var_progress,
                 };
             }
-            92 => {
+            93 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
@@ -18544,7 +18550,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     channel_id: var_channelId,
                 };
             }
-            93 => {
+            94 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_error = <String>::sse_decode(deserializer);
@@ -18554,7 +18560,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     error: var_error,
                 };
             }
-            94 => {
+            95 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_phase = <String>::sse_decode(deserializer);
@@ -18566,7 +18572,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     progress: var_progress,
                 };
             }
-            95 => {
+            96 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_diskPath = <String>::sse_decode(deserializer);
@@ -18576,7 +18582,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     disk_path: var_diskPath,
                 };
             }
-            96 => {
+            97 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_error = <String>::sse_decode(deserializer);
@@ -18586,7 +18592,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     error: var_error,
                 };
             }
-            97 => {
+            98 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_shardsToMove = <u32>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::RebalanceStarted {
@@ -18594,7 +18600,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     shards_to_move: var_shardsToMove,
                 };
             }
-            98 => {
+            99 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_moved = <u32>::sse_decode(deserializer);
                 let mut var_total = <u32>::sse_decode(deserializer);
@@ -18604,13 +18610,13 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     total: var_total,
                 };
             }
-            99 => {
+            100 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::RebalanceCompleted {
                     server_id: var_serverId,
                 };
             }
-            100 => {
+            101 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_online = <usize>::sse_decode(deserializer);
@@ -18622,13 +18628,13 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     needed: var_needed,
                 };
             }
-            101 => {
+            102 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::KeyExchangeStarted {
                     peer_id: var_peerId,
                 };
             }
-            102 => {
+            103 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 let mut var_stage = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::KeyExchangeProgress {
@@ -18636,7 +18642,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     stage: var_stage,
                 };
             }
-            103 => {
+            104 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 let mut var_signalType = <String>::sse_decode(deserializer);
                 let mut var_payload = <String>::sse_decode(deserializer);
@@ -18648,7 +18654,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     conn_id: var_connId,
                 };
             }
-            104 => {
+            105 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 let mut var_transferId = <String>::sse_decode(deserializer);
                 let mut var_filePath = <String>::sse_decode(deserializer);
@@ -18666,7 +18672,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     chunk_index: var_chunkIndex,
                 };
             }
-            105 => {
+            106 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 let mut var_signalType = <String>::sse_decode(deserializer);
                 let mut var_payload = <String>::sse_decode(deserializer);
@@ -18676,7 +18682,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     payload: var_payload,
                 };
             }
-            106 => {
+            107 => {
                 let mut var_device = <String>::sse_decode(deserializer);
                 let mut var_active = <bool>::sse_decode(deserializer);
                 let mut var_kind = <String>::sse_decode(deserializer);
@@ -18692,10 +18698,10 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     started_ms: var_startedMs,
                 };
             }
-            107 => {
+            108 => {
                 return crate::api::network::NetworkEvent::DeviceKindsChanged;
             }
-            108 => {
+            109 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_peerId = <String>::sse_decode(deserializer);
@@ -18707,7 +18713,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     is_self: var_isSelf,
                 };
             }
-            109 => {
+            110 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_peerId = <String>::sse_decode(deserializer);
@@ -18719,7 +18725,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     is_self: var_isSelf,
                 };
             }
-            110 => {
+            111 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_peerId = <String>::sse_decode(deserializer);
@@ -18733,7 +18739,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     payload: var_payload,
                 };
             }
-            111 => {
+            112 => {
                 let mut var_fromPeer = <String>::sse_decode(deserializer);
                 let mut var_signalType = <String>::sse_decode(deserializer);
                 let mut var_payload = <String>::sse_decode(deserializer);
@@ -18743,7 +18749,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     payload: var_payload,
                 };
             }
-            112 => {
+            113 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 let mut var_online = <bool>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::MediaForwarderInfo {
@@ -18751,19 +18757,19 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     online: var_online,
                 };
             }
-            113 => {
+            114 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::GossipConnect {
                     peer_id: var_peerId,
                 };
             }
-            114 => {
+            115 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::GossipDisconnect {
                     peer_id: var_peerId,
                 };
             }
-            115 => {
+            116 => {
                 let mut var_broadcastId = <String>::sse_decode(deserializer);
                 let mut var_ttl = <u8>::sse_decode(deserializer);
                 let mut var_originPeerId = <String>::sse_decode(deserializer);
@@ -18787,7 +18793,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     channel_id: var_channelId,
                 };
             }
-            116 => {
+            117 => {
                 let mut var_targets = <Vec<String>>::sse_decode(deserializer);
                 let mut var_payload = <Vec<u8>>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::GossipRelayOp {
@@ -18795,7 +18801,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     payload: var_payload,
                 };
             }
-            117 => {
+            118 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_mode = <String>::sse_decode(deserializer);
@@ -18807,7 +18813,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     gossip_neighbors: var_gossipNeighbors,
                 };
             }
-            118 => {
+            119 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_epoch = <u64>::sse_decode(deserializer);
                 let mut var_sframeKey = <Vec<u8>>::sse_decode(deserializer);
@@ -18819,7 +18825,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     channel_id: var_channelId,
                 };
             }
-            119 => {
+            120 => {
                 let mut var_confId = <String>::sse_decode(deserializer);
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 let mut var_displayName = <String>::sse_decode(deserializer);
@@ -18831,7 +18837,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     avatar_hash: var_avatarHash,
                 };
             }
-            120 => {
+            121 => {
                 let mut var_confId = <String>::sse_decode(deserializer);
                 let mut var_reason = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ConferenceJoinDenied {
@@ -18839,7 +18845,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     reason: var_reason,
                 };
             }
-            121 => {
+            122 => {
                 let mut var_confId = <String>::sse_decode(deserializer);
                 let mut var_hostPeerId = <String>::sse_decode(deserializer);
                 let mut var_hostName = <String>::sse_decode(deserializer);
@@ -18851,13 +18857,13 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     host_avatar_hash: var_hostAvatarHash,
                 };
             }
-            122 => {
+            123 => {
                 let mut var_confId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ConferenceAdmitted {
                     conf_id: var_confId,
                 };
             }
-            123 => {
+            124 => {
                 let mut var_confId = <String>::sse_decode(deserializer);
                 let mut var_senderPeerId = <String>::sse_decode(deserializer);
                 let mut var_text = <String>::sse_decode(deserializer);
@@ -18869,7 +18875,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     timestamp: var_timestamp,
                 };
             }
-            124 => {
+            125 => {
                 let mut var_confId = <String>::sse_decode(deserializer);
                 let mut var_byPeerId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ConferenceEnded {
@@ -18877,7 +18883,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     by_peer_id: var_byPeerId,
                 };
             }
-            125 => {
+            126 => {
                 let mut var_confId = <String>::sse_decode(deserializer);
                 let mut var_byPeerId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ConferenceKicked {
@@ -18885,7 +18891,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     by_peer_id: var_byPeerId,
                 };
             }
-            126 => {
+            127 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_inviteLink = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::RecoveryPoolCreated {
@@ -18893,13 +18899,13 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     invite_link: var_inviteLink,
                 };
             }
-            127 => {
+            128 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::RecoveryPoolJoined {
                     server_id: var_serverId,
                 };
             }
-            128 => {
+            129 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_reason = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::RecoveryPoolJoinFailed {
@@ -18907,7 +18913,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     reason: var_reason,
                 };
             }
-            129 => {
+            130 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::RecoveryPoolMemberJoined {
@@ -18915,7 +18921,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     peer_id: var_peerId,
                 };
             }
-            130 => {
+            131 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::RecoveryPoolMemberLeft {
@@ -18923,7 +18929,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     peer_id: var_peerId,
                 };
             }
-            131 => {
+            132 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_totalFiles = <u32>::sse_decode(deserializer);
                 let mut var_reconstructable = <u32>::sse_decode(deserializer);
@@ -18939,7 +18945,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     progress_pct: var_progressPct,
                 };
             }
-            132 => {
+            133 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_shardIndex = <u16>::sse_decode(deserializer);
@@ -18949,7 +18955,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     shard_index: var_shardIndex,
                 };
             }
-            133 => {
+            134 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_contentId = <String>::sse_decode(deserializer);
                 let mut var_diskPath = <String>::sse_decode(deserializer);
@@ -18959,13 +18965,13 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     disk_path: var_diskPath,
                 };
             }
-            134 => {
+            135 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::RecoveryPoolStopped {
                     server_id: var_serverId,
                 };
             }
-            135 => {
+            136 => {
                 let mut var_rootHash = <String>::sse_decode(deserializer);
                 let mut var_fileName = <String>::sse_decode(deserializer);
                 let mut var_totalSize = <u64>::sse_decode(deserializer);
@@ -18977,7 +18983,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     chunk_count: var_chunkCount,
                 };
             }
-            136 => {
+            137 => {
                 let mut var_rootHash = <String>::sse_decode(deserializer);
                 let mut var_chunksHave = <u32>::sse_decode(deserializer);
                 let mut var_chunksTotal = <u32>::sse_decode(deserializer);
@@ -18993,7 +18999,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     bytes_per_sec: var_bytesPerSec,
                 };
             }
-            137 => {
+            138 => {
                 let mut var_rootHash = <String>::sse_decode(deserializer);
                 let mut var_diskPath = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ShareCompleted {
@@ -19001,7 +19007,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     disk_path: var_diskPath,
                 };
             }
-            138 => {
+            139 => {
                 let mut var_rootHash = <String>::sse_decode(deserializer);
                 let mut var_error = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ShareFailed {
@@ -19009,7 +19015,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     error: var_error,
                 };
             }
-            139 => {
+            140 => {
                 let mut var_rootHash = <String>::sse_decode(deserializer);
                 let mut var_seeding = <bool>::sse_decode(deserializer);
                 let mut var_seeders = <u8>::sse_decode(deserializer);
@@ -19023,7 +19029,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     bytes_uploaded: var_bytesUploaded,
                 };
             }
-            140 => {
+            141 => {
                 let mut var_rootHash = <String>::sse_decode(deserializer);
                 let mut var_link = <String>::sse_decode(deserializer);
                 let mut var_fileName = <String>::sse_decode(deserializer);
@@ -19035,7 +19041,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     total_size: var_totalSize,
                 };
             }
-            141 => {
+            142 => {
                 let mut var_rootHash = <String>::sse_decode(deserializer);
                 let mut var_keyHex = <String>::sse_decode(deserializer);
                 let mut var_fileName = <String>::sse_decode(deserializer);
@@ -19047,14 +19053,14 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     total_size: var_totalSize,
                 };
             }
-            142 => {
+            143 => {
                 let mut var_entries =
                     <Vec<crate::api::network::ShareEntry>>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ShareList {
                     entries: var_entries,
                 };
             }
-            143 => {
+            144 => {
                 let mut var_peerId = <String>::sse_decode(deserializer);
                 let mut var_hidden = <bool>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ShareNeedWebRtc {
@@ -19062,11 +19068,11 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     hidden: var_hidden,
                 };
             }
-            144 => {
+            145 => {
                 let mut var_reason = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::LicenseError { reason: var_reason };
             }
-            145 => {
+            146 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_reason = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::TwitchJoinRejected {
@@ -19074,7 +19080,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     reason: var_reason,
                 };
             }
-            146 => {
+            147 => {
                 let mut var_joined = <u32>::sse_decode(deserializer);
                 let mut var_limit = <u32>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::RoomBudgetUpdate {
@@ -19082,11 +19088,11 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     limit: var_limit,
                 };
             }
-            147 => {
+            148 => {
                 let mut var_room = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::RoomCapHit { room: var_room };
             }
-            148 => {
+            149 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_serverName = <String>::sse_decode(deserializer);
                 let mut var_channels =
@@ -19101,7 +19107,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     server_banner_thumb: var_serverBannerThumb,
                 };
             }
-            149 => {
+            150 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_messages =
@@ -19117,7 +19123,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     sender_profiles: var_senderProfiles,
                 };
             }
-            150 => {
+            151 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_isPublic = <bool>::sse_decode(deserializer);
@@ -19131,29 +19137,29 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     category: var_category,
                 };
             }
-            151 => {
+            152 => {
                 let mut var_master = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::OverlayLookReceived {
                     master: var_master,
                 };
             }
-            152 => {
+            153 => {
                 let mut var_master = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::OverlayPersonRemoved {
                     master: var_master,
                 };
             }
-            153 => {
+            154 => {
                 let mut var_master = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::OverlayFieldChanged {
                     master: var_master,
                 };
             }
-            154 => {
+            155 => {
                 let mut var_port = <u16>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::OverlayPortChanged { port: var_port };
             }
-            155 => {
+            156 => {
                 let mut var_open = <u32>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::OverlayStreamsChanged { open: var_open };
             }
@@ -23409,6 +23415,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 [65.into_dart(), reconnecting.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::RelaySuspended => [66.into_dart()].into_dart(),
+            crate::api::network::NetworkEvent::RelayClockOffset { offset_secs } => {
+                [67.into_dart(), offset_secs.into_into_dart().into_dart()].into_dart()
+            }
             crate::api::network::NetworkEvent::ChannelNotificationHint {
                 server_id,
                 channel_id,
@@ -23418,7 +23427,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 mentioned_names,
                 is_reply_to_own,
             } => [
-                67.into_dart(),
+                68.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 from_peer.into_into_dart().into_dart(),
@@ -23433,14 +23442,14 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 server_id,
                 channel_id,
             } => [
-                68.into_dart(),
+                69.into_dart(),
                 peer_id.into_into_dart().into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::PeerStatusChanged { peer_id, status } => [
-                69.into_dart(),
+                70.into_dart(),
                 peer_id.into_into_dart().into_dart(),
                 status.into_into_dart().into_dart(),
             ]
@@ -23450,7 +23459,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 channel_id,
                 message_id,
             } => [
-                70.into_dart(),
+                71.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 message_id.into_into_dart().into_dart(),
@@ -23461,7 +23470,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 channel_id,
                 message_id,
             } => [
-                71.into_dart(),
+                72.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 message_id.into_into_dart().into_dart(),
@@ -23483,7 +23492,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 share_key_hex,
                 thumb_b64,
             } => [
-                72.into_dart(),
+                73.into_dart(),
                 file_id.into_into_dart().into_dart(),
                 file_name.into_into_dart().into_dart(),
                 size_bytes.into_into_dart().into_dart(),
@@ -23505,20 +23514,20 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 chunks_received,
                 total_chunks,
             } => [
-                73.into_dart(),
+                74.into_dart(),
                 file_id.into_into_dart().into_dart(),
                 chunks_received.into_into_dart().into_dart(),
                 total_chunks.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::FileCompleted { file_id, disk_path } => [
-                74.into_dart(),
+                75.into_dart(),
                 file_id.into_into_dart().into_dart(),
                 disk_path.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::FileFailed { file_id, error } => [
-                75.into_dart(),
+                76.into_dart(),
                 file_id.into_into_dart().into_dart(),
                 error.into_into_dart().into_dart(),
             ]
@@ -23528,7 +23537,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 state,
                 peer_id,
             } => [
-                76.into_dart(),
+                77.into_dart(),
                 file_id.into_into_dart().into_dart(),
                 state.into_into_dart().into_dart(),
                 peer_id.into_into_dart().into_dart(),
@@ -23540,7 +23549,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 ttl,
                 uris,
             } => [
-                77.into_dart(),
+                78.into_dart(),
                 username.into_into_dart().into_dart(),
                 password.into_into_dart().into_dart(),
                 ttl.into_into_dart().into_dart(),
@@ -23548,10 +23557,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::LinkCodeClaimed { code } => {
-                [78.into_dart(), code.into_into_dart().into_dart()].into_dart()
+                [79.into_dart(), code.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::LinkCodeError { error, code } => [
-                79.into_dart(),
+                80.into_dart(),
                 error.into_into_dart().into_dart(),
                 code.into_into_dart().into_dart(),
             ]
@@ -23563,7 +23572,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 their_has_profile,
                 kind,
             } => [
-                80.into_dart(),
+                81.into_dart(),
                 peer_id.into_into_dart().into_dart(),
                 their_msg_count.into_into_dart().into_dart(),
                 their_friend_count.into_into_dart().into_dart(),
@@ -23576,7 +23585,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 bytes_received,
                 total_bytes,
             } => [
-                81.into_dart(),
+                82.into_dart(),
                 link_id.into_into_dart().into_dart(),
                 bytes_received.into_into_dart().into_dart(),
                 total_bytes.into_into_dart().into_dart(),
@@ -23588,7 +23597,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 friend_count,
                 server_count,
             } => [
-                82.into_dart(),
+                83.into_dart(),
                 link_id.into_into_dart().into_dart(),
                 msg_count.into_into_dart().into_dart(),
                 friend_count.into_into_dart().into_dart(),
@@ -23596,13 +23605,13 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::LinkFailed { link_id, error } => [
-                83.into_dart(),
+                84.into_dart(),
                 link_id.into_into_dart().into_dart(),
                 error.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::LinkPushComplete { bytes } => {
-                [84.into_dart(), bytes.into_into_dart().into_dart()].into_dart()
+                [85.into_dart(), bytes.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::ShardStored {
                 server_id,
@@ -23610,7 +23619,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 shard_index,
                 from_peer,
             } => [
-                85.into_dart(),
+                86.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 shard_index.into_into_dart().into_dart(),
@@ -23624,7 +23633,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 success,
                 error,
             } => [
-                86.into_dart(),
+                87.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 shard_index.into_into_dart().into_dart(),
@@ -23639,7 +23648,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 target_peer,
                 error,
             } => [
-                87.into_dart(),
+                88.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 shard_index.into_into_dart().into_dart(),
@@ -23651,7 +23660,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 server_id,
                 content_id,
             } => [
-                88.into_dart(),
+                89.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
             ]
@@ -23662,7 +23671,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 shard_index,
                 from_peer,
             } => [
-                89.into_dart(),
+                90.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 shard_index.into_into_dart().into_dart(),
@@ -23675,7 +23684,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 shard_index,
                 error,
             } => [
-                90.into_dart(),
+                91.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 shard_index.into_into_dart().into_dart(),
@@ -23688,7 +23697,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 phase,
                 progress,
             } => [
-                91.into_dart(),
+                92.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 phase.into_into_dart().into_dart(),
@@ -23700,7 +23709,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 content_id,
                 channel_id,
             } => [
-                92.into_dart(),
+                93.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
@@ -23711,7 +23720,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 content_id,
                 error,
             } => [
-                93.into_dart(),
+                94.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 error.into_into_dart().into_dart(),
@@ -23723,7 +23732,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 phase,
                 progress,
             } => [
-                94.into_dart(),
+                95.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 phase.into_into_dart().into_dart(),
@@ -23735,7 +23744,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 content_id,
                 disk_path,
             } => [
-                95.into_dart(),
+                96.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 disk_path.into_into_dart().into_dart(),
@@ -23746,7 +23755,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 content_id,
                 error,
             } => [
-                96.into_dart(),
+                97.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 error.into_into_dart().into_dart(),
@@ -23756,7 +23765,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 server_id,
                 shards_to_move,
             } => [
-                97.into_dart(),
+                98.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 shards_to_move.into_into_dart().into_dart(),
             ]
@@ -23766,14 +23775,14 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 moved,
                 total,
             } => [
-                98.into_dart(),
+                99.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 moved.into_into_dart().into_dart(),
                 total.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::RebalanceCompleted { server_id } => {
-                [99.into_dart(), server_id.into_into_dart().into_dart()].into_dart()
+                [100.into_dart(), server_id.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::VaultUploadReplicationFallback {
                 server_id,
@@ -23781,7 +23790,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 online,
                 needed,
             } => [
-                100.into_dart(),
+                101.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 online.into_into_dart().into_dart(),
@@ -23789,10 +23798,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::KeyExchangeStarted { peer_id } => {
-                [101.into_dart(), peer_id.into_into_dart().into_dart()].into_dart()
+                [102.into_dart(), peer_id.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::KeyExchangeProgress { peer_id, stage } => [
-                102.into_dart(),
+                103.into_dart(),
                 peer_id.into_into_dart().into_dart(),
                 stage.into_into_dart().into_dart(),
             ]
@@ -23803,7 +23812,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 payload,
                 conn_id,
             } => [
-                103.into_dart(),
+                104.into_dart(),
                 peer_id.into_into_dart().into_dart(),
                 signal_type.into_into_dart().into_dart(),
                 payload.into_into_dart().into_dart(),
@@ -23819,7 +23828,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 shard_index,
                 chunk_index,
             } => [
-                104.into_dart(),
+                105.into_dart(),
                 peer_id.into_into_dart().into_dart(),
                 transfer_id.into_into_dart().into_dart(),
                 file_path.into_into_dart().into_dart(),
@@ -23834,7 +23843,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 signal_type,
                 payload,
             } => [
-                105.into_dart(),
+                106.into_dart(),
                 peer_id.into_into_dart().into_dart(),
                 signal_type.into_into_dart().into_dart(),
                 payload.into_into_dart().into_dart(),
@@ -23848,7 +23857,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 channel,
                 started_ms,
             } => [
-                106.into_dart(),
+                107.into_dart(),
                 device.into_into_dart().into_dart(),
                 active.into_into_dart().into_dart(),
                 kind.into_into_dart().into_dart(),
@@ -23857,14 +23866,14 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 started_ms.into_into_dart().into_dart(),
             ]
             .into_dart(),
-            crate::api::network::NetworkEvent::DeviceKindsChanged => [107.into_dart()].into_dart(),
+            crate::api::network::NetworkEvent::DeviceKindsChanged => [108.into_dart()].into_dart(),
             crate::api::network::NetworkEvent::VoiceChannelJoined {
                 server_id,
                 channel_id,
                 peer_id,
                 is_self,
             } => [
-                108.into_dart(),
+                109.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 peer_id.into_into_dart().into_dart(),
@@ -23877,7 +23886,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 peer_id,
                 is_self,
             } => [
-                109.into_dart(),
+                110.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 peer_id.into_into_dart().into_dart(),
@@ -23891,7 +23900,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 signal_type,
                 payload,
             } => [
-                110.into_dart(),
+                111.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 peer_id.into_into_dart().into_dart(),
@@ -23904,23 +23913,23 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 signal_type,
                 payload,
             } => [
-                111.into_dart(),
+                112.into_dart(),
                 from_peer.into_into_dart().into_dart(),
                 signal_type.into_into_dart().into_dart(),
                 payload.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::MediaForwarderInfo { peer_id, online } => [
-                112.into_dart(),
+                113.into_dart(),
                 peer_id.into_into_dart().into_dart(),
                 online.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::GossipConnect { peer_id } => {
-                [113.into_dart(), peer_id.into_into_dart().into_dart()].into_dart()
+                [114.into_dart(), peer_id.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::GossipDisconnect { peer_id } => {
-                [114.into_dart(), peer_id.into_into_dart().into_dart()].into_dart()
+                [115.into_dart(), peer_id.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::GossipRelayFile {
                 broadcast_id,
@@ -23934,7 +23943,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 server_id,
                 channel_id,
             } => [
-                115.into_dart(),
+                116.into_dart(),
                 broadcast_id.into_into_dart().into_dart(),
                 ttl.into_into_dart().into_dart(),
                 origin_peer_id.into_into_dart().into_dart(),
@@ -23948,7 +23957,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::GossipRelayOp { targets, payload } => [
-                116.into_dart(),
+                117.into_dart(),
                 targets.into_into_dart().into_dart(),
                 payload.into_into_dart().into_dart(),
             ]
@@ -23959,7 +23968,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 mode,
                 gossip_neighbors,
             } => [
-                117.into_dart(),
+                118.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 mode.into_into_dart().into_dart(),
@@ -23972,7 +23981,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 sframe_key,
                 channel_id,
             } => [
-                118.into_dart(),
+                119.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 epoch.into_into_dart().into_dart(),
                 sframe_key.into_into_dart().into_dart(),
@@ -23985,7 +23994,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 display_name,
                 avatar_hash,
             } => [
-                119.into_dart(),
+                120.into_dart(),
                 conf_id.into_into_dart().into_dart(),
                 peer_id.into_into_dart().into_dart(),
                 display_name.into_into_dart().into_dart(),
@@ -23993,7 +24002,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::ConferenceJoinDenied { conf_id, reason } => [
-                120.into_dart(),
+                121.into_dart(),
                 conf_id.into_into_dart().into_dart(),
                 reason.into_into_dart().into_dart(),
             ]
@@ -24004,7 +24013,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 host_name,
                 host_avatar_hash,
             } => [
-                121.into_dart(),
+                122.into_dart(),
                 conf_id.into_into_dart().into_dart(),
                 host_peer_id.into_into_dart().into_dart(),
                 host_name.into_into_dart().into_dart(),
@@ -24012,7 +24021,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::ConferenceAdmitted { conf_id } => {
-                [122.into_dart(), conf_id.into_into_dart().into_dart()].into_dart()
+                [123.into_dart(), conf_id.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::ConferenceChatMessage {
                 conf_id,
@@ -24020,7 +24029,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 text,
                 timestamp,
             } => [
-                123.into_dart(),
+                124.into_dart(),
                 conf_id.into_into_dart().into_dart(),
                 sender_peer_id.into_into_dart().into_dart(),
                 text.into_into_dart().into_dart(),
@@ -24031,7 +24040,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 conf_id,
                 by_peer_id,
             } => [
-                124.into_dart(),
+                125.into_dart(),
                 conf_id.into_into_dart().into_dart(),
                 by_peer_id.into_into_dart().into_dart(),
             ]
@@ -24040,7 +24049,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 conf_id,
                 by_peer_id,
             } => [
-                125.into_dart(),
+                126.into_dart(),
                 conf_id.into_into_dart().into_dart(),
                 by_peer_id.into_into_dart().into_dart(),
             ]
@@ -24049,28 +24058,28 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 server_id,
                 invite_link,
             } => [
-                126.into_dart(),
+                127.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 invite_link.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::RecoveryPoolJoined { server_id } => {
-                [127.into_dart(), server_id.into_into_dart().into_dart()].into_dart()
+                [128.into_dart(), server_id.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::RecoveryPoolJoinFailed { server_id, reason } => [
-                128.into_dart(),
+                129.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 reason.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::RecoveryPoolMemberJoined { server_id, peer_id } => [
-                129.into_dart(),
+                130.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 peer_id.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::RecoveryPoolMemberLeft { server_id, peer_id } => [
-                130.into_dart(),
+                131.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 peer_id.into_into_dart().into_dart(),
             ]
@@ -24083,7 +24092,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 no_shards,
                 progress_pct,
             } => [
-                131.into_dart(),
+                132.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 total_files.into_into_dart().into_dart(),
                 reconstructable.into_into_dart().into_dart(),
@@ -24097,7 +24106,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 content_id,
                 shard_index,
             } => [
-                132.into_dart(),
+                133.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 shard_index.into_into_dart().into_dart(),
@@ -24108,14 +24117,14 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 content_id,
                 disk_path,
             } => [
-                133.into_dart(),
+                134.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 content_id.into_into_dart().into_dart(),
                 disk_path.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::RecoveryPoolStopped { server_id } => {
-                [134.into_dart(), server_id.into_into_dart().into_dart()].into_dart()
+                [135.into_dart(), server_id.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::ShareManifestReady {
                 root_hash,
@@ -24123,7 +24132,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 total_size,
                 chunk_count,
             } => [
-                135.into_dart(),
+                136.into_dart(),
                 root_hash.into_into_dart().into_dart(),
                 file_name.into_into_dart().into_dart(),
                 total_size.into_into_dart().into_dart(),
@@ -24138,7 +24147,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 leechers,
                 bytes_per_sec,
             } => [
-                136.into_dart(),
+                137.into_dart(),
                 root_hash.into_into_dart().into_dart(),
                 chunks_have.into_into_dart().into_dart(),
                 chunks_total.into_into_dart().into_dart(),
@@ -24151,13 +24160,13 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 root_hash,
                 disk_path,
             } => [
-                137.into_dart(),
+                138.into_dart(),
                 root_hash.into_into_dart().into_dart(),
                 disk_path.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::ShareFailed { root_hash, error } => [
-                138.into_dart(),
+                139.into_dart(),
                 root_hash.into_into_dart().into_dart(),
                 error.into_into_dart().into_dart(),
             ]
@@ -24169,7 +24178,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 leechers,
                 bytes_uploaded,
             } => [
-                139.into_dart(),
+                140.into_dart(),
                 root_hash.into_into_dart().into_dart(),
                 seeding.into_into_dart().into_dart(),
                 seeders.into_into_dart().into_dart(),
@@ -24183,7 +24192,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 file_name,
                 total_size,
             } => [
-                140.into_dart(),
+                141.into_dart(),
                 root_hash.into_into_dart().into_dart(),
                 link.into_into_dart().into_dart(),
                 file_name.into_into_dart().into_dart(),
@@ -24196,7 +24205,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 file_name,
                 total_size,
             } => [
-                141.into_dart(),
+                142.into_dart(),
                 root_hash.into_into_dart().into_dart(),
                 key_hex.into_into_dart().into_dart(),
                 file_name.into_into_dart().into_dart(),
@@ -24204,31 +24213,31 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::ShareList { entries } => {
-                [142.into_dart(), entries.into_into_dart().into_dart()].into_dart()
+                [143.into_dart(), entries.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::ShareNeedWebRtc { peer_id, hidden } => [
-                143.into_dart(),
+                144.into_dart(),
                 peer_id.into_into_dart().into_dart(),
                 hidden.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::LicenseError { reason } => {
-                [144.into_dart(), reason.into_into_dart().into_dart()].into_dart()
+                [145.into_dart(), reason.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::TwitchJoinRejected { server_id, reason } => [
-                145.into_dart(),
+                146.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 reason.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::RoomBudgetUpdate { joined, limit } => [
-                146.into_dart(),
+                147.into_dart(),
                 joined.into_into_dart().into_dart(),
                 limit.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::RoomCapHit { room } => {
-                [147.into_dart(), room.into_into_dart().into_dart()].into_dart()
+                [148.into_dart(), room.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::PublicChannelListReceived {
                 server_id,
@@ -24237,7 +24246,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 server_avatar,
                 server_banner_thumb,
             } => [
-                148.into_dart(),
+                149.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 server_name.into_into_dart().into_dart(),
                 channels.into_into_dart().into_dart(),
@@ -24252,7 +24261,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 has_more,
                 sender_profiles,
             } => [
-                149.into_dart(),
+                150.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 messages.into_into_dart().into_dart(),
@@ -24267,7 +24276,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 channel_name,
                 category,
             } => [
-                150.into_dart(),
+                151.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 is_public.into_into_dart().into_dart(),
@@ -24276,19 +24285,19 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::OverlayLookReceived { master } => {
-                [151.into_dart(), master.into_into_dart().into_dart()].into_dart()
-            }
-            crate::api::network::NetworkEvent::OverlayPersonRemoved { master } => {
                 [152.into_dart(), master.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::network::NetworkEvent::OverlayFieldChanged { master } => {
+            crate::api::network::NetworkEvent::OverlayPersonRemoved { master } => {
                 [153.into_dart(), master.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::network::NetworkEvent::OverlayFieldChanged { master } => {
+                [154.into_dart(), master.into_into_dart().into_dart()].into_dart()
+            }
             crate::api::network::NetworkEvent::OverlayPortChanged { port } => {
-                [154.into_dart(), port.into_into_dart().into_dart()].into_dart()
+                [155.into_dart(), port.into_into_dart().into_dart()].into_dart()
             }
             crate::api::network::NetworkEvent::OverlayStreamsChanged { open } => {
-                [155.into_dart(), open.into_into_dart().into_dart()].into_dart()
+                [156.into_dart(), open.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -27500,6 +27509,10 @@ impl SseEncode for crate::api::network::NetworkEvent {
             crate::api::network::NetworkEvent::RelaySuspended => {
                 <i32>::sse_encode(66, serializer);
             }
+            crate::api::network::NetworkEvent::RelayClockOffset { offset_secs } => {
+                <i32>::sse_encode(67, serializer);
+                <Option<i64>>::sse_encode(offset_secs, serializer);
+            }
             crate::api::network::NetworkEvent::ChannelNotificationHint {
                 server_id,
                 channel_id,
@@ -27509,7 +27522,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 mentioned_names,
                 is_reply_to_own,
             } => {
-                <i32>::sse_encode(67, serializer);
+                <i32>::sse_encode(68, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(from_peer, serializer);
@@ -27523,13 +27536,13 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 server_id,
                 channel_id,
             } => {
-                <i32>::sse_encode(68, serializer);
+                <i32>::sse_encode(69, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
             }
             crate::api::network::NetworkEvent::PeerStatusChanged { peer_id, status } => {
-                <i32>::sse_encode(69, serializer);
+                <i32>::sse_encode(70, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <String>::sse_encode(status, serializer);
             }
@@ -27538,7 +27551,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 channel_id,
                 message_id,
             } => {
-                <i32>::sse_encode(70, serializer);
+                <i32>::sse_encode(71, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(message_id, serializer);
@@ -27548,7 +27561,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 channel_id,
                 message_id,
             } => {
-                <i32>::sse_encode(71, serializer);
+                <i32>::sse_encode(72, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(message_id, serializer);
@@ -27569,7 +27582,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 share_key_hex,
                 thumb_b64,
             } => {
-                <i32>::sse_encode(72, serializer);
+                <i32>::sse_encode(73, serializer);
                 <String>::sse_encode(file_id, serializer);
                 <String>::sse_encode(file_name, serializer);
                 <u64>::sse_encode(size_bytes, serializer);
@@ -27590,18 +27603,18 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 chunks_received,
                 total_chunks,
             } => {
-                <i32>::sse_encode(73, serializer);
+                <i32>::sse_encode(74, serializer);
                 <String>::sse_encode(file_id, serializer);
                 <u32>::sse_encode(chunks_received, serializer);
                 <u32>::sse_encode(total_chunks, serializer);
             }
             crate::api::network::NetworkEvent::FileCompleted { file_id, disk_path } => {
-                <i32>::sse_encode(74, serializer);
+                <i32>::sse_encode(75, serializer);
                 <String>::sse_encode(file_id, serializer);
                 <String>::sse_encode(disk_path, serializer);
             }
             crate::api::network::NetworkEvent::FileFailed { file_id, error } => {
-                <i32>::sse_encode(75, serializer);
+                <i32>::sse_encode(76, serializer);
                 <String>::sse_encode(file_id, serializer);
                 <String>::sse_encode(error, serializer);
             }
@@ -27610,7 +27623,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 state,
                 peer_id,
             } => {
-                <i32>::sse_encode(76, serializer);
+                <i32>::sse_encode(77, serializer);
                 <String>::sse_encode(file_id, serializer);
                 <String>::sse_encode(state, serializer);
                 <String>::sse_encode(peer_id, serializer);
@@ -27621,18 +27634,18 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 ttl,
                 uris,
             } => {
-                <i32>::sse_encode(77, serializer);
+                <i32>::sse_encode(78, serializer);
                 <String>::sse_encode(username, serializer);
                 <String>::sse_encode(password, serializer);
                 <u64>::sse_encode(ttl, serializer);
                 <Vec<String>>::sse_encode(uris, serializer);
             }
             crate::api::network::NetworkEvent::LinkCodeClaimed { code } => {
-                <i32>::sse_encode(78, serializer);
+                <i32>::sse_encode(79, serializer);
                 <String>::sse_encode(code, serializer);
             }
             crate::api::network::NetworkEvent::LinkCodeError { error, code } => {
-                <i32>::sse_encode(79, serializer);
+                <i32>::sse_encode(80, serializer);
                 <String>::sse_encode(error, serializer);
                 <String>::sse_encode(code, serializer);
             }
@@ -27643,7 +27656,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 their_has_profile,
                 kind,
             } => {
-                <i32>::sse_encode(80, serializer);
+                <i32>::sse_encode(81, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <u32>::sse_encode(their_msg_count, serializer);
                 <u32>::sse_encode(their_friend_count, serializer);
@@ -27655,7 +27668,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 bytes_received,
                 total_bytes,
             } => {
-                <i32>::sse_encode(81, serializer);
+                <i32>::sse_encode(82, serializer);
                 <String>::sse_encode(link_id, serializer);
                 <u64>::sse_encode(bytes_received, serializer);
                 <u64>::sse_encode(total_bytes, serializer);
@@ -27666,19 +27679,19 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 friend_count,
                 server_count,
             } => {
-                <i32>::sse_encode(82, serializer);
+                <i32>::sse_encode(83, serializer);
                 <String>::sse_encode(link_id, serializer);
                 <u32>::sse_encode(msg_count, serializer);
                 <u32>::sse_encode(friend_count, serializer);
                 <u32>::sse_encode(server_count, serializer);
             }
             crate::api::network::NetworkEvent::LinkFailed { link_id, error } => {
-                <i32>::sse_encode(83, serializer);
+                <i32>::sse_encode(84, serializer);
                 <String>::sse_encode(link_id, serializer);
                 <String>::sse_encode(error, serializer);
             }
             crate::api::network::NetworkEvent::LinkPushComplete { bytes } => {
-                <i32>::sse_encode(84, serializer);
+                <i32>::sse_encode(85, serializer);
                 <u64>::sse_encode(bytes, serializer);
             }
             crate::api::network::NetworkEvent::ShardStored {
@@ -27687,7 +27700,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 shard_index,
                 from_peer,
             } => {
-                <i32>::sse_encode(85, serializer);
+                <i32>::sse_encode(86, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <u16>::sse_encode(shard_index, serializer);
@@ -27700,7 +27713,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 success,
                 error,
             } => {
-                <i32>::sse_encode(86, serializer);
+                <i32>::sse_encode(87, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <u16>::sse_encode(shard_index, serializer);
@@ -27714,7 +27727,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 target_peer,
                 error,
             } => {
-                <i32>::sse_encode(87, serializer);
+                <i32>::sse_encode(88, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <u16>::sse_encode(shard_index, serializer);
@@ -27725,7 +27738,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 server_id,
                 content_id,
             } => {
-                <i32>::sse_encode(88, serializer);
+                <i32>::sse_encode(89, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
             }
@@ -27735,7 +27748,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 shard_index,
                 from_peer,
             } => {
-                <i32>::sse_encode(89, serializer);
+                <i32>::sse_encode(90, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <u16>::sse_encode(shard_index, serializer);
@@ -27747,7 +27760,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 shard_index,
                 error,
             } => {
-                <i32>::sse_encode(90, serializer);
+                <i32>::sse_encode(91, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <u16>::sse_encode(shard_index, serializer);
@@ -27759,7 +27772,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 phase,
                 progress,
             } => {
-                <i32>::sse_encode(91, serializer);
+                <i32>::sse_encode(92, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <String>::sse_encode(phase, serializer);
@@ -27770,7 +27783,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 content_id,
                 channel_id,
             } => {
-                <i32>::sse_encode(92, serializer);
+                <i32>::sse_encode(93, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
@@ -27780,7 +27793,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 content_id,
                 error,
             } => {
-                <i32>::sse_encode(93, serializer);
+                <i32>::sse_encode(94, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <String>::sse_encode(error, serializer);
@@ -27791,7 +27804,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 phase,
                 progress,
             } => {
-                <i32>::sse_encode(94, serializer);
+                <i32>::sse_encode(95, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <String>::sse_encode(phase, serializer);
@@ -27802,7 +27815,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 content_id,
                 disk_path,
             } => {
-                <i32>::sse_encode(95, serializer);
+                <i32>::sse_encode(96, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <String>::sse_encode(disk_path, serializer);
@@ -27812,7 +27825,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 content_id,
                 error,
             } => {
-                <i32>::sse_encode(96, serializer);
+                <i32>::sse_encode(97, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <String>::sse_encode(error, serializer);
@@ -27821,7 +27834,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 server_id,
                 shards_to_move,
             } => {
-                <i32>::sse_encode(97, serializer);
+                <i32>::sse_encode(98, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <u32>::sse_encode(shards_to_move, serializer);
             }
@@ -27830,13 +27843,13 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 moved,
                 total,
             } => {
-                <i32>::sse_encode(98, serializer);
+                <i32>::sse_encode(99, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <u32>::sse_encode(moved, serializer);
                 <u32>::sse_encode(total, serializer);
             }
             crate::api::network::NetworkEvent::RebalanceCompleted { server_id } => {
-                <i32>::sse_encode(99, serializer);
+                <i32>::sse_encode(100, serializer);
                 <String>::sse_encode(server_id, serializer);
             }
             crate::api::network::NetworkEvent::VaultUploadReplicationFallback {
@@ -27845,18 +27858,18 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 online,
                 needed,
             } => {
-                <i32>::sse_encode(100, serializer);
+                <i32>::sse_encode(101, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <usize>::sse_encode(online, serializer);
                 <usize>::sse_encode(needed, serializer);
             }
             crate::api::network::NetworkEvent::KeyExchangeStarted { peer_id } => {
-                <i32>::sse_encode(101, serializer);
+                <i32>::sse_encode(102, serializer);
                 <String>::sse_encode(peer_id, serializer);
             }
             crate::api::network::NetworkEvent::KeyExchangeProgress { peer_id, stage } => {
-                <i32>::sse_encode(102, serializer);
+                <i32>::sse_encode(103, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <String>::sse_encode(stage, serializer);
             }
@@ -27866,7 +27879,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 payload,
                 conn_id,
             } => {
-                <i32>::sse_encode(103, serializer);
+                <i32>::sse_encode(104, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <String>::sse_encode(signal_type, serializer);
                 <String>::sse_encode(payload, serializer);
@@ -27881,7 +27894,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 shard_index,
                 chunk_index,
             } => {
-                <i32>::sse_encode(104, serializer);
+                <i32>::sse_encode(105, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <String>::sse_encode(transfer_id, serializer);
                 <String>::sse_encode(file_path, serializer);
@@ -27895,7 +27908,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 signal_type,
                 payload,
             } => {
-                <i32>::sse_encode(105, serializer);
+                <i32>::sse_encode(106, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <String>::sse_encode(signal_type, serializer);
                 <String>::sse_encode(payload, serializer);
@@ -27908,7 +27921,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 channel,
                 started_ms,
             } => {
-                <i32>::sse_encode(106, serializer);
+                <i32>::sse_encode(107, serializer);
                 <String>::sse_encode(device, serializer);
                 <bool>::sse_encode(active, serializer);
                 <String>::sse_encode(kind, serializer);
@@ -27917,7 +27930,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 <i64>::sse_encode(started_ms, serializer);
             }
             crate::api::network::NetworkEvent::DeviceKindsChanged => {
-                <i32>::sse_encode(107, serializer);
+                <i32>::sse_encode(108, serializer);
             }
             crate::api::network::NetworkEvent::VoiceChannelJoined {
                 server_id,
@@ -27925,7 +27938,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 peer_id,
                 is_self,
             } => {
-                <i32>::sse_encode(108, serializer);
+                <i32>::sse_encode(109, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(peer_id, serializer);
@@ -27937,7 +27950,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 peer_id,
                 is_self,
             } => {
-                <i32>::sse_encode(109, serializer);
+                <i32>::sse_encode(110, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(peer_id, serializer);
@@ -27950,7 +27963,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 signal_type,
                 payload,
             } => {
-                <i32>::sse_encode(110, serializer);
+                <i32>::sse_encode(111, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(peer_id, serializer);
@@ -27962,22 +27975,22 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 signal_type,
                 payload,
             } => {
-                <i32>::sse_encode(111, serializer);
+                <i32>::sse_encode(112, serializer);
                 <String>::sse_encode(from_peer, serializer);
                 <String>::sse_encode(signal_type, serializer);
                 <String>::sse_encode(payload, serializer);
             }
             crate::api::network::NetworkEvent::MediaForwarderInfo { peer_id, online } => {
-                <i32>::sse_encode(112, serializer);
+                <i32>::sse_encode(113, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <bool>::sse_encode(online, serializer);
             }
             crate::api::network::NetworkEvent::GossipConnect { peer_id } => {
-                <i32>::sse_encode(113, serializer);
+                <i32>::sse_encode(114, serializer);
                 <String>::sse_encode(peer_id, serializer);
             }
             crate::api::network::NetworkEvent::GossipDisconnect { peer_id } => {
-                <i32>::sse_encode(114, serializer);
+                <i32>::sse_encode(115, serializer);
                 <String>::sse_encode(peer_id, serializer);
             }
             crate::api::network::NetworkEvent::GossipRelayFile {
@@ -27992,7 +28005,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 server_id,
                 channel_id,
             } => {
-                <i32>::sse_encode(115, serializer);
+                <i32>::sse_encode(116, serializer);
                 <String>::sse_encode(broadcast_id, serializer);
                 <u8>::sse_encode(ttl, serializer);
                 <String>::sse_encode(origin_peer_id, serializer);
@@ -28005,7 +28018,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 <String>::sse_encode(channel_id, serializer);
             }
             crate::api::network::NetworkEvent::GossipRelayOp { targets, payload } => {
-                <i32>::sse_encode(116, serializer);
+                <i32>::sse_encode(117, serializer);
                 <Vec<String>>::sse_encode(targets, serializer);
                 <Vec<u8>>::sse_encode(payload, serializer);
             }
@@ -28015,7 +28028,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 mode,
                 gossip_neighbors,
             } => {
-                <i32>::sse_encode(117, serializer);
+                <i32>::sse_encode(118, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(mode, serializer);
@@ -28027,7 +28040,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 sframe_key,
                 channel_id,
             } => {
-                <i32>::sse_encode(118, serializer);
+                <i32>::sse_encode(119, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <u64>::sse_encode(epoch, serializer);
                 <Vec<u8>>::sse_encode(sframe_key, serializer);
@@ -28039,14 +28052,14 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 display_name,
                 avatar_hash,
             } => {
-                <i32>::sse_encode(119, serializer);
+                <i32>::sse_encode(120, serializer);
                 <String>::sse_encode(conf_id, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <String>::sse_encode(display_name, serializer);
                 <String>::sse_encode(avatar_hash, serializer);
             }
             crate::api::network::NetworkEvent::ConferenceJoinDenied { conf_id, reason } => {
-                <i32>::sse_encode(120, serializer);
+                <i32>::sse_encode(121, serializer);
                 <String>::sse_encode(conf_id, serializer);
                 <String>::sse_encode(reason, serializer);
             }
@@ -28056,14 +28069,14 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 host_name,
                 host_avatar_hash,
             } => {
-                <i32>::sse_encode(121, serializer);
+                <i32>::sse_encode(122, serializer);
                 <String>::sse_encode(conf_id, serializer);
                 <String>::sse_encode(host_peer_id, serializer);
                 <String>::sse_encode(host_name, serializer);
                 <String>::sse_encode(host_avatar_hash, serializer);
             }
             crate::api::network::NetworkEvent::ConferenceAdmitted { conf_id } => {
-                <i32>::sse_encode(122, serializer);
+                <i32>::sse_encode(123, serializer);
                 <String>::sse_encode(conf_id, serializer);
             }
             crate::api::network::NetworkEvent::ConferenceChatMessage {
@@ -28072,7 +28085,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 text,
                 timestamp,
             } => {
-                <i32>::sse_encode(123, serializer);
+                <i32>::sse_encode(124, serializer);
                 <String>::sse_encode(conf_id, serializer);
                 <String>::sse_encode(sender_peer_id, serializer);
                 <String>::sse_encode(text, serializer);
@@ -28082,7 +28095,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 conf_id,
                 by_peer_id,
             } => {
-                <i32>::sse_encode(124, serializer);
+                <i32>::sse_encode(125, serializer);
                 <String>::sse_encode(conf_id, serializer);
                 <String>::sse_encode(by_peer_id, serializer);
             }
@@ -28090,7 +28103,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 conf_id,
                 by_peer_id,
             } => {
-                <i32>::sse_encode(125, serializer);
+                <i32>::sse_encode(126, serializer);
                 <String>::sse_encode(conf_id, serializer);
                 <String>::sse_encode(by_peer_id, serializer);
             }
@@ -28098,26 +28111,26 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 server_id,
                 invite_link,
             } => {
-                <i32>::sse_encode(126, serializer);
+                <i32>::sse_encode(127, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(invite_link, serializer);
             }
             crate::api::network::NetworkEvent::RecoveryPoolJoined { server_id } => {
-                <i32>::sse_encode(127, serializer);
+                <i32>::sse_encode(128, serializer);
                 <String>::sse_encode(server_id, serializer);
             }
             crate::api::network::NetworkEvent::RecoveryPoolJoinFailed { server_id, reason } => {
-                <i32>::sse_encode(128, serializer);
+                <i32>::sse_encode(129, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(reason, serializer);
             }
             crate::api::network::NetworkEvent::RecoveryPoolMemberJoined { server_id, peer_id } => {
-                <i32>::sse_encode(129, serializer);
+                <i32>::sse_encode(130, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(peer_id, serializer);
             }
             crate::api::network::NetworkEvent::RecoveryPoolMemberLeft { server_id, peer_id } => {
-                <i32>::sse_encode(130, serializer);
+                <i32>::sse_encode(131, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(peer_id, serializer);
             }
@@ -28129,7 +28142,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 no_shards,
                 progress_pct,
             } => {
-                <i32>::sse_encode(131, serializer);
+                <i32>::sse_encode(132, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <u32>::sse_encode(total_files, serializer);
                 <u32>::sse_encode(reconstructable, serializer);
@@ -28142,7 +28155,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 content_id,
                 shard_index,
             } => {
-                <i32>::sse_encode(132, serializer);
+                <i32>::sse_encode(133, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <u16>::sse_encode(shard_index, serializer);
@@ -28152,13 +28165,13 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 content_id,
                 disk_path,
             } => {
-                <i32>::sse_encode(133, serializer);
+                <i32>::sse_encode(134, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <String>::sse_encode(disk_path, serializer);
             }
             crate::api::network::NetworkEvent::RecoveryPoolStopped { server_id } => {
-                <i32>::sse_encode(134, serializer);
+                <i32>::sse_encode(135, serializer);
                 <String>::sse_encode(server_id, serializer);
             }
             crate::api::network::NetworkEvent::ShareManifestReady {
@@ -28167,7 +28180,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 total_size,
                 chunk_count,
             } => {
-                <i32>::sse_encode(135, serializer);
+                <i32>::sse_encode(136, serializer);
                 <String>::sse_encode(root_hash, serializer);
                 <String>::sse_encode(file_name, serializer);
                 <u64>::sse_encode(total_size, serializer);
@@ -28181,7 +28194,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 leechers,
                 bytes_per_sec,
             } => {
-                <i32>::sse_encode(136, serializer);
+                <i32>::sse_encode(137, serializer);
                 <String>::sse_encode(root_hash, serializer);
                 <u32>::sse_encode(chunks_have, serializer);
                 <u32>::sse_encode(chunks_total, serializer);
@@ -28193,12 +28206,12 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 root_hash,
                 disk_path,
             } => {
-                <i32>::sse_encode(137, serializer);
+                <i32>::sse_encode(138, serializer);
                 <String>::sse_encode(root_hash, serializer);
                 <String>::sse_encode(disk_path, serializer);
             }
             crate::api::network::NetworkEvent::ShareFailed { root_hash, error } => {
-                <i32>::sse_encode(138, serializer);
+                <i32>::sse_encode(139, serializer);
                 <String>::sse_encode(root_hash, serializer);
                 <String>::sse_encode(error, serializer);
             }
@@ -28209,7 +28222,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 leechers,
                 bytes_uploaded,
             } => {
-                <i32>::sse_encode(139, serializer);
+                <i32>::sse_encode(140, serializer);
                 <String>::sse_encode(root_hash, serializer);
                 <bool>::sse_encode(seeding, serializer);
                 <u8>::sse_encode(seeders, serializer);
@@ -28222,7 +28235,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 file_name,
                 total_size,
             } => {
-                <i32>::sse_encode(140, serializer);
+                <i32>::sse_encode(141, serializer);
                 <String>::sse_encode(root_hash, serializer);
                 <String>::sse_encode(link, serializer);
                 <String>::sse_encode(file_name, serializer);
@@ -28234,37 +28247,37 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 file_name,
                 total_size,
             } => {
-                <i32>::sse_encode(141, serializer);
+                <i32>::sse_encode(142, serializer);
                 <String>::sse_encode(root_hash, serializer);
                 <String>::sse_encode(key_hex, serializer);
                 <String>::sse_encode(file_name, serializer);
                 <u64>::sse_encode(total_size, serializer);
             }
             crate::api::network::NetworkEvent::ShareList { entries } => {
-                <i32>::sse_encode(142, serializer);
+                <i32>::sse_encode(143, serializer);
                 <Vec<crate::api::network::ShareEntry>>::sse_encode(entries, serializer);
             }
             crate::api::network::NetworkEvent::ShareNeedWebRtc { peer_id, hidden } => {
-                <i32>::sse_encode(143, serializer);
+                <i32>::sse_encode(144, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <bool>::sse_encode(hidden, serializer);
             }
             crate::api::network::NetworkEvent::LicenseError { reason } => {
-                <i32>::sse_encode(144, serializer);
+                <i32>::sse_encode(145, serializer);
                 <String>::sse_encode(reason, serializer);
             }
             crate::api::network::NetworkEvent::TwitchJoinRejected { server_id, reason } => {
-                <i32>::sse_encode(145, serializer);
+                <i32>::sse_encode(146, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(reason, serializer);
             }
             crate::api::network::NetworkEvent::RoomBudgetUpdate { joined, limit } => {
-                <i32>::sse_encode(146, serializer);
+                <i32>::sse_encode(147, serializer);
                 <u32>::sse_encode(joined, serializer);
                 <u32>::sse_encode(limit, serializer);
             }
             crate::api::network::NetworkEvent::RoomCapHit { room } => {
-                <i32>::sse_encode(147, serializer);
+                <i32>::sse_encode(148, serializer);
                 <String>::sse_encode(room, serializer);
             }
             crate::api::network::NetworkEvent::PublicChannelListReceived {
@@ -28274,7 +28287,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 server_avatar,
                 server_banner_thumb,
             } => {
-                <i32>::sse_encode(148, serializer);
+                <i32>::sse_encode(149, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(server_name, serializer);
                 <Vec<crate::api::network::PublicChannelEntryFfi>>::sse_encode(channels, serializer);
@@ -28288,7 +28301,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 has_more,
                 sender_profiles,
             } => {
-                <i32>::sse_encode(149, serializer);
+                <i32>::sse_encode(150, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <Vec<crate::api::network::GuestSyncMessageFfi>>::sse_encode(messages, serializer);
@@ -28305,7 +28318,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 channel_name,
                 category,
             } => {
-                <i32>::sse_encode(150, serializer);
+                <i32>::sse_encode(151, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <bool>::sse_encode(is_public, serializer);
@@ -28313,23 +28326,23 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 <Option<String>>::sse_encode(category, serializer);
             }
             crate::api::network::NetworkEvent::OverlayLookReceived { master } => {
-                <i32>::sse_encode(151, serializer);
-                <String>::sse_encode(master, serializer);
-            }
-            crate::api::network::NetworkEvent::OverlayPersonRemoved { master } => {
                 <i32>::sse_encode(152, serializer);
                 <String>::sse_encode(master, serializer);
             }
-            crate::api::network::NetworkEvent::OverlayFieldChanged { master } => {
+            crate::api::network::NetworkEvent::OverlayPersonRemoved { master } => {
                 <i32>::sse_encode(153, serializer);
                 <String>::sse_encode(master, serializer);
             }
-            crate::api::network::NetworkEvent::OverlayPortChanged { port } => {
+            crate::api::network::NetworkEvent::OverlayFieldChanged { master } => {
                 <i32>::sse_encode(154, serializer);
+                <String>::sse_encode(master, serializer);
+            }
+            crate::api::network::NetworkEvent::OverlayPortChanged { port } => {
+                <i32>::sse_encode(155, serializer);
                 <u16>::sse_encode(port, serializer);
             }
             crate::api::network::NetworkEvent::OverlayStreamsChanged { open } => {
-                <i32>::sse_encode(155, serializer);
+                <i32>::sse_encode(156, serializer);
                 <u32>::sse_encode(open, serializer);
             }
             _ => {

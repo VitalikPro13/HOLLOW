@@ -82,6 +82,16 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                         result.success(opened)
                     }
+                    // The clock warning's button (clock_skew_banner.dart).
+                    "openDateSettings" -> {
+                        val opened = try {
+                            startActivity(Intent(Settings.ACTION_DATE_SETTINGS))
+                            true
+                        } catch (e: Exception) {
+                            false
+                        }
+                        result.success(opened)
+                    }
                     else -> result.notImplemented()
                 }
             }

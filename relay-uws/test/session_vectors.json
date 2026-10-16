@@ -49,11 +49,11 @@
     { "mode": "guest", "session": "new", "ok": false }
   ],
   "counted": [
-    { "dir": "relay_to_client", "text": "{\"type\":\"auth_challenge\",\"nonce\":\"ab\",\"door_key\":\"k\",\"session\":1}", "counts": 0 },
+    { "dir": "relay_to_client", "text": "{\"type\":\"auth_challenge\",\"nonce\":\"ab\",\"door_key\":\"k\",\"session\":1,\"now\":1790000000}", "counts": 0 },
     { "dir": "relay_to_client", "text": "{\"type\":\"auth_ok\",\"sid\":\"00112233445566778899aabbccddeeff\",\"grace_secs\":120,\"hb_secs\":15}", "counts": 0 },
     { "dir": "relay_to_client", "text": "{\"type\":\"auth_failed\",\"error\":\"Authentication failed\"}", "counts": 0 },
     { "dir": "relay_to_client", "text": "{\"type\":\"resumed\",\"h\":7,\"gap\":false,\"reprove\":false,\"grace_secs\":120,\"hb_secs\":15}", "counts": 0 },
-    { "dir": "relay_to_client", "text": "{\"type\":\"hb_ack\",\"h\":3}", "counts": 0 },
+    { "dir": "relay_to_client", "text": "{\"type\":\"hb_ack\",\"h\":3,\"now\":1790000000}", "counts": 0 },
     { "dir": "relay_to_client", "text": "{\"type\":\"ack\",\"h\":3}", "counts": 0 },
     { "dir": "relay_to_client", "text": "{\"type\":\"reconnect\",\"after_ms\":4000}", "counts": 0 },
     { "dir": "relay_to_client", "text": "{\"type\":\"members\",\"room\":\"r\",\"peers\":[\"a\"]}", "counts": 0 },

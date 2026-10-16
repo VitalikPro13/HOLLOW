@@ -128,6 +128,7 @@ import 'package:hollow/src/ui/shell/channel_sidebar.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/shell/friends_bar.dart';
 import 'package:hollow/src/ui/shell/lock_cover.dart';
+import 'package:hollow/src/ui/shell/clock_skew_banner.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
@@ -1907,6 +1908,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
         // Full-width strip at the very top, self-hiding when there is nothing
         // to announce.
         const SystemStatusBanner(),
+        const ClockSkewBanner(),
         Expanded(
           child: Row(
             children: [
@@ -2054,6 +2056,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
         // Self-hides unless there is a banner-worthy notice, so it reaches
         // users whatever they are viewing.
         const SystemStatusBanner(),
+        const ClockSkewBanner(),
 
         Expanded(
           child: settingsPlace != null

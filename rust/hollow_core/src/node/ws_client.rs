@@ -56,6 +56,12 @@ const SUSPEND_MAX: Duration = Duration::from_secs(5);
 /// The signature that ends a `frame_auth` seal ahead of its body.
 const SEAL_SIG_LEN: usize = 64;
 
+/// How far the relay clock offset moves before the node hears it again.
+const CLOCK_TELL_STEP_MS: u64 = 2_000;
+
+/// An offset past this is logged: the relay judges some of our stamps by its clock.
+const CLOCK_LOG_ABOVE_MS: u64 = 60_000;
+
 // -- Public types --
 
 /// One signal parked on the relay's kill list: who deposited it, and its stamp.
@@ -266,6 +272,9 @@ pub enum WsEvent {
     LicenseError { reason: String },
     /// Room budget update — current count and server-side cap.
     RoomBudgetUpdate { joined: u32, limit: u32 },
+    /// The relay's clock minus ours, in ms ([`super::relay_clock`]), when it moved;
+    /// `None` once a relay stops telling its time.
+    ClockOffset { offset_ms: Option<i64> },
     /// Server rejected a room join (cap hit).
     RoomCapHit { room: String },
     /// Response to CheckPeers — which peers/rooms are actually alive.
@@ -323,6 +332,7 @@ impl WsEvent {
             Self::BinaryDirect { .. } => "BinaryDirect",
             Self::LicenseError { .. } => "LicenseError",
             Self::RoomBudgetUpdate { .. } => "RoomBudgetUpdate",
+            Self::ClockOffset { .. } => "ClockOffset",
             Self::RoomCapHit { .. } => "RoomCapHit",
             Self::PeerStatus { .. } => "PeerStatus",
             Self::DiscoveredPeers { .. } => "DiscoveredPeers",
@@ -434,8 +444,8 @@ enum ServerMsg {
         #[serde(default)] links: Vec<super::join_lock::LockLink>,
         #[serde(default)] put: Option<bool>,
     },
-    /// The relay's count of our stream frames, answering a heartbeat.
-    HbAck { h: u64 },
+    /// The relay's count of our stream frames, answering a heartbeat, and its clock.
+    HbAck { h: u64, #[serde(default)] now: Option<serde_json::Value> },
     Ack { h: u64 },
     /// The relay is about to restart: resume after this long.
     Reconnect { #[serde(default)] after_ms: u64 },
@@ -792,8 +802,11 @@ struct Client {
     /// When this outage's `Suspended` went to the node: the relay's grace runs from about
     /// then, and while it does the backoff stays short.
     suspended_at: Option<Instant>,
-    /// The relay refused a socket of this outage: the full backoff, whatever the grace.
+    /// The relay refused a socket of this outage: the full backoff, whatever the grace,
+    /// a call or a nudge.
     refused: bool,
+    /// A network change already bought one immediate retry since the refusal.
+    refusal_retried: bool,
     background: bool,
     /// Closed on purpose until an external nudge.
     suspended: bool,
@@ -803,6 +816,8 @@ struct Client {
     attempts: u64,
     license_busy_notified: bool,
     stopped: bool,
+    /// The relay clock offset last sent to the node ([`WsEvent::ClockOffset`]).
+    clock_told: Option<i64>,
 }
 
 /// The socket's next frame; never while `held` (a move is under way).
@@ -830,6 +845,7 @@ impl Client {
             relay_host: relay_auth_domain(&dial.url).unwrap_or_default(),
             next_beat: now + timing.heartbeat_for(background, realtime_active()),
             clocks: Clocks { wall_ms: super::frame_auth::now_ms(), mono: now },
+            clock_told: None,
             dial,
             timing,
             event_tx,
@@ -849,6 +865,7 @@ impl Client {
             backoff: Backoff::default(),
             suspended_at: None,
             refused: false,
+            refusal_retried: false,
             background,
             suspended: false,
             suspending: None,
@@ -1210,7 +1227,11 @@ impl Client {
         let Ok(msg) = serde_json::from_str::<ServerMsg>(text) else { return };
         let session = self.socket.as_ref().is_some_and(|s| s.session);
         match msg {
-            ServerMsg::HbAck { h } => {
+            ServerMsg::HbAck { h, now } => {
+                if let Some(secs) = now.as_ref().and_then(serde_json::Value::as_u64) {
+                    super::relay_clock::observe(secs);
+                    self.tell_clock();
+                }
                 if session {
                     self.out.ack(h);
                     self.flag.answered();
@@ -1369,8 +1390,10 @@ impl Client {
     }
 
     /// Section 9.6: a socket that spoke in the quiet window is fine; otherwise probe it
-    /// and race a new socket on a miss. With no socket, connect now. Every nudge resets
-    /// the backoff. While the app keeps the socket closed, only its coming back counts.
+    /// and race a new socket on a miss. With no socket, connect now. A nudge resets the
+    /// backoff, except after a refusal: then only one network change per refusal does,
+    /// so focus and push wakes cannot spend the address's new-connection allowance.
+    /// While the app keeps the socket closed, only its coming back counts.
     async fn nudge(&mut self, reason: &str, external: bool) {
         let reopens = relay_session::ends_suspend(reason, external);
         if self.suspended || self.suspending.is_some() {
@@ -1382,7 +1405,11 @@ impl Client {
                 let _ = s.done.send(());
             }
         }
-        self.backoff.reset();
+        let skips_backoff = !self.refused || (reason == "network" && !self.refusal_retried);
+        if skips_backoff {
+            self.refusal_retried |= self.refused;
+            self.backoff.reset();
+        }
         let now = Instant::now();
         if self.socket.is_some() {
             // One probe or one new socket at a time, however many nudges arrive.
@@ -1403,6 +1430,9 @@ impl Client {
             {
                 socket.live.probe_sent(now, &self.timing);
             }
+            return;
+        }
+        if !skips_backoff {
             return;
         }
         match &self.attempt {
@@ -1507,6 +1537,30 @@ impl Client {
         self.attempt = Some(Attempt { fut, purpose, signing: false, started: Instant::now() });
     }
 
+    /// Tells the node the relay clock offset when it moved by a couple of seconds: the
+    /// relay sends whole seconds, so smaller moves are noise.
+    /// A relay that stopped telling its time (an older one after a switch) is told
+    /// once as unknown, so the app drops a warning it can no longer back.
+    fn tell_clock(&mut self) {
+        let Some(offset_ms) = super::relay_clock::offset_ms() else {
+            if self.clock_told.take().is_some() {
+                let _ = self.event_tx.send(WsEvent::ClockOffset { offset_ms: None });
+            }
+            return;
+        };
+        if self.clock_told.is_some_and(|told| told.abs_diff(offset_ms) < CLOCK_TELL_STEP_MS) {
+            return;
+        }
+        self.clock_told = Some(offset_ms);
+        if offset_ms.unsigned_abs() > CLOCK_LOG_ABOVE_MS {
+            hollow_log!(
+                "[HOLLOW-WS] Our clock is {} s off the relay's (relay minus ours)",
+                super::relay_clock::offset_secs(offset_ms)
+            );
+        }
+        let _ = self.event_tx.send(WsEvent::ClockOffset { offset_ms: Some(offset_ms) });
+    }
+
     /// The move's socket has the relay's challenge: sign in with the count of what the old
     /// socket delivered and leave that socket alone from here on. What the relay still
     /// writes into it stays unacked in its ring and comes back once, in the replay.
@@ -1525,6 +1579,8 @@ impl Client {
 
     async fn on_attempt(&mut self, result: Result<Step, ConnectError>) {
         let Some(attempt) = self.attempt.take() else { return };
+        // The challenge measured the clock even when the login then failed.
+        self.tell_clock();
         let result = match result {
             Ok(Step::Challenged(challenged)) => {
                 self.sign_in_move(attempt, *challenged);
@@ -1680,6 +1736,7 @@ impl Client {
         self.reconnect_at = None;
         self.suspended_at = None;
         self.refused = false;
+        self.refusal_retried = false;
         self.next_beat = now + self.beat_every();
     }
 
@@ -1750,7 +1807,10 @@ impl Client {
         // A call riding on this socket retries at a steady short interval and does
         // NOT let the ladder climb, so an ICE restart can be delivered inside the
         // call's hold-open window. See REALTIME_ACTIVE.
-        if (self.realtime)() {
+        // A refusal climbs the ladder even then: retrying sooner only spends the
+        // address's new-connection allowance.
+        let realtime = (self.realtime)();
+        if realtime && !self.refused {
             self.backoff.reset();
             return self.timing.realtime_retry;
         }
@@ -1758,7 +1818,8 @@ impl Client {
         let _ = getrandom::fill(&mut roll);
         let since = self.suspended_at.map(|at| at.elapsed());
         let cap = relay_session::backoff_cap(&self.timing, self.sid.is_some(), since, self.refused);
-        self.backoff.next_within(u64::from_le_bytes(roll), &self.timing, cap)
+        let ladder = self.backoff.next_within(u64::from_le_bytes(roll), &self.timing, cap);
+        if realtime { ladder.max(self.timing.realtime_retry) } else { ladder }
     }
 
     /// The node is shutting down: end the session so the relay hands its ring to the
@@ -2255,6 +2316,9 @@ struct Challenged {
     /// The challenge and the relay's door key, which this socket's door proofs cover.
     door: RelaySession,
     offered: bool,
+    /// The relay's clock the challenge carried, and when it arrived.
+    relay_now: Option<u64>,
+    arrived: Instant,
     path: Option<(SocketAddr, SocketAddr)>,
 }
 
@@ -2271,6 +2335,16 @@ async fn challenge(dial: &Dial, timing: &Timing) -> Result<Challenged, ConnectEr
         .await
         .map_err(|e| format!("Failed to ask for a challenge: {e}"))?;
     let (challenge, kind) = read_auth_reply(&mut read, timing.auth_reply).await?;
+    let arrived = Instant::now();
+    let relay_now = challenge.relay_now();
+    // Every login measures, fetch sockets too: they reach the same relay, so they can
+    // only refresh the offset; one that tells no time leaves none to trust.
+    match relay_now {
+        Some(secs) => {
+            super::relay_clock::observe(secs);
+        }
+        None => super::relay_clock::forget(),
+    }
     let offered = challenge.offers_sessions();
     let (nonce, door_key) = match challenge {
         AuthReply::AuthChallenge { nonce, door_key, .. } if is_auth_nonce(&nonce) => (nonce, door_key),
@@ -2281,7 +2355,7 @@ async fn challenge(dial: &Dial, timing: &Timing) -> Result<Challenged, ConnectEr
         _ => return Err(format!("Auth rejected: a {kind} frame").into()),
     };
     let door = RelaySession { domain, nonce, peer_id: dial.peer_id.clone(), door_key };
-    Ok(Challenged { write, read, door, offered, path })
+    Ok(Challenged { write, read, door, offered, relay_now, arrived, path })
 }
 
 /// Sign in on a challenged socket and read the relay's answer.
@@ -2292,13 +2366,11 @@ async fn sign_in(
     held: Option<(String, u64)>,
     timing: &Timing,
 ) -> Result<Opened, ConnectError> {
-    let Challenged { mut write, mut read, door, offered, path } = challenged;
+    let Challenged { mut write, mut read, door, offered, relay_now, arrived, path } = challenged;
     let (domain, nonce) = (door.domain.clone(), door.nonce.clone());
     let ask = Ask::choose(offered && want_session, dial.fetch, held.as_ref().map(|(sid, in_h)| (sid.as_str(), *in_h)));
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let local_secs = u64::try_from(super::relay_clock::local_ms() / 1000).unwrap_or_default();
+    let timestamp = super::relay_clock::login_secs(relay_now, arrived.elapsed(), local_secs);
     let mode = if dial.fetch { "fetch" } else { "full" };
     let digest = license_digest(dial.license_key.as_deref());
     let session = ask.session_field();

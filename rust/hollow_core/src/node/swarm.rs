@@ -5150,6 +5150,10 @@ async fn run_event_loop(
                     WsEvent::RoomBudgetUpdate { joined, limit } => {
                         let _ = event_tx.send(NetworkEvent::RoomBudgetUpdate { joined, limit }).await;
                     }
+                    WsEvent::ClockOffset { offset_ms } => {
+                        let offset_secs = offset_ms.map(super::relay_clock::offset_secs);
+                        let _ = event_tx.send(NetworkEvent::RelayClockOffset { offset_secs }).await;
+                    }
                     WsEvent::RoomCapHit { room } => {
                         hollow_log!("[HOLLOW] Room cap hit for room: {room}");
                         // A refused inbox join is an answer too: the session is up.
@@ -5226,7 +5230,7 @@ async fn run_event_loop(
                             // nickname counts, and even then the person confirms before any
                             // request goes out. Never fed to `resolver`: that takes only
                             // master-signed device lists.
-                            let ev = match super::nick_claim::verified_master(&nickname, &peer_id, &master_id, &claim, super::types::now_ms()) {
+                            let ev = match super::nick_claim::verified_master(&nickname, &peer_id, &master_id, &claim, super::nick_claim::judge_now_ms()) {
                                 Some(master_id) => NetworkEvent::NicknameResolved { nickname, master_id },
                                 None => {
                                     hollow_log!("[HOLLOW-SECURITY] A nickname resolved to a claim its master did not sign");

@@ -1267,8 +1267,8 @@ pub(crate) fn message_body_fits(text: &str) -> bool {
     text.len() <= MAX_MESSAGE_BYTES
 }
 
-/// How far past our clock a message may be dated. Relay auth already holds every
-/// connected client to 60 s, so only a forged stamp gets near it.
+/// How far past our clock a message may be dated. Relay auth no longer bounds clocks
+/// (issue #72); the app warns a device past 240 s off the relay, long before this.
 pub(crate) const MAX_FUTURE_SKEW_MS: i64 = 10 * 60 * 1000;
 
 /// True when `ts` is not dated past our clock by more than [`MAX_FUTURE_SKEW_MS`].

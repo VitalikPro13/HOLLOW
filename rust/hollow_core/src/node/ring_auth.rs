@@ -65,10 +65,8 @@ pub(crate) fn sign(
     if base64::engine::general_purpose::STANDARD.encode(signer.public_key_protobuf()) != link.change {
         return None;
     }
-    let ts_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or_default();
+    // Only the relay judges ring control, so it carries the relay's time.
+    let ts_ms = super::relay_clock::now_ms();
     let bytes = payload(room, owner, ts_ms, retention_secs, clear, channels);
     Some(RingAuth {
         owner: owner.to_string(),
@@ -181,5 +179,22 @@ mod tests {
         let other = vec![ring_topic(server, Some("12D3KooWSomeoneElse"), "general")];
         let auth = sign(server, &owner_id, 3600, false, &other, &lock.link, &lock.change).unwrap();
         assert!(!relay_accepts(server, &auth, 3600, false, &other, &chain, auth.ts_ms), "another owner's topic");
+    }
+
+    /// Issue #72: only the relay judges ring control, so a device whose clock is
+    /// 20 minutes behind still stamps it fresh for the relay.
+    #[test]
+    fn ring_control_carries_the_relays_time() {
+        let server = "0123456789abcdef0123456789abcdef01234567";
+        let owner = NativeKeypair::from_secret_bytes(&[7; 32]);
+        let lock = super::super::join_lock::mint_base(server, 1, &owner, Some("00")).unwrap();
+        let chain = vec![lock.link.clone()];
+        let channels = vec!["general".to_string()];
+        let _clock = super::super::relay_clock::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relay_ms = super::super::relay_clock::local_ms() + 20 * 60 * 1000;
+        super::super::relay_clock::observe((relay_ms / 1000) as u64);
+        let auth = sign(server, "", 3600, false, &channels, &lock.link, &lock.change).unwrap();
+        super::super::relay_clock::forget_for_test();
+        assert!(relay_accepts(server, &auth, 3600, false, &channels, &chain, relay_ms), "stamp {} vs relay {relay_ms}", auth.ts_ms);
     }
 }

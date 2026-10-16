@@ -33,9 +33,13 @@ and `slow_mode_judges_fresh_posts_by_our_clock` (node/message_ops.rs tests).
 ## Fix
 
 - A message dated more than ten minutes past our clock fails verification,
-  live, pushed or synced (`BackfillSig::FutureDated`), DMs included. Relay auth
-  already holds every connected client's clock to 60 seconds, so no honest
-  message comes near the bound.
+  live, pushed or synced (`BackfillSig::FutureDated`), DMs included. Relay
+  auth no longer bounds a client's clock (0.12.1, issue #72: the nonce is the
+  login's freshness, so a device whose clock is off still connects), so an
+  honest device more than ten minutes ahead now has its messages refused here
+  instead of not connecting at all. The app warns that device past a minute
+  and urgently past four (`clock_skew_banner.dart`, measured against the
+  relay's time), and the bound stays: the relay never sets message times.
 - Slow mode judges a fresh post (dated inside the window) by when it reached
   us, per sender and channel, so future stamps no longer space a burst; an
   older post, such as a relay-ring replay, is still judged by its own stamp

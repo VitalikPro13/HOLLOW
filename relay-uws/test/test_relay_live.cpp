@@ -480,6 +480,11 @@ static std::unique_ptr<Peer> open_socket(const Ident& id) {
     return p;
 }
 
+// How far the test client's clock is off; login() and login3() sign with it.
+static int64_t g_clock_skew_secs = 0;
+
+static uint64_t client_now_secs() { return static_cast<uint64_t>(static_cast<int64_t>(now_unix_secs()) + g_clock_skew_secs); }
+
 // A socket logged in with auth v2 as `id`, mode full, fetch or guest.
 static std::unique_ptr<Peer> login(const Ident& id, const std::string& mode = "full") {
     auto p = open_socket(id);
@@ -489,9 +494,10 @@ static std::unique_ptr<Peer> login(const Ident& id, const std::string& mode = "f
         check("the relay answers auth_hello with a challenge", false);
         return p;
     }
+    p->challenge = *ch;
     p->nonce = ch->value("nonce", "");
     p->relay_key = ch->value("door_key", "");
-    const uint64_t ts = now_unix_secs();
+    const uint64_t ts = client_now_secs();
     json a = {{"type", "auth"}, {"v", 2}, {"peer_id", id.peer}, {"public_key", id.pub_b64}, {"timestamp", ts},
               {"nonce", p->nonce}, {"domain", g_domain},
               {"signature", id.sign(auth_v2_message(g_domain, p->nonce, id.peer, ts, mode, ""))}};
@@ -522,7 +528,7 @@ static std::unique_ptr<Peer> login3(const Ident& id, const std::string& session,
     p->challenge = *ch;
     p->nonce = ch->value("nonce", "");
     p->relay_key = ch->value("door_key", "");
-    const uint64_t ts = now_unix_secs();
+    const uint64_t ts = client_now_secs();
     const std::string covered = signed_session.empty() ? session : signed_session;
     json a = {{"type", "auth"}, {"v", 3}, {"peer_id", id.peer}, {"public_key", id.pub_b64}, {"timestamp", ts},
               {"nonce", p->nonce}, {"domain", g_domain}, {"session", session}, {"in_h", in_h},
@@ -1537,6 +1543,44 @@ static bool is_json(const Frame& f, const std::function<bool(const json&)>& pred
 static void sleep_ms(int ms) {
     pollfd none{-1, 0, 0};
     poll(&none, 0, ms);
+}
+
+// Issue #72: a client whose clock is off still logs in, and learns the relay's time.
+static void test_clock() {
+    printf("clock: the relay's time rides the challenge and heartbeats; a skewed clock logs in\n");
+    const int64_t before = static_cast<int64_t>(now_unix_secs());
+    auto plain = login(Ident());
+    const int64_t after = static_cast<int64_t>(now_unix_secs());
+    const json now = plain->challenge.value("now", json());
+    check("auth_challenge carries the relay's unix seconds as `now`",
+          now.is_number_unsigned() && now.get<int64_t>() >= before && now.get<int64_t>() <= after);
+
+    for (int64_t skew : {-300, 300}) {
+        g_clock_skew_secs = skew;
+        const std::string off = std::to_string(skew) + " s";
+        check("a v2 full login with a clock " + off + " off is accepted", login(Ident())->ok);
+        check("a v2 fetch login with a clock " + off + " off is accepted", login(Ident(), "fetch")->ok);
+        Ident ida;
+        auto a = login3(ida, "new", 0);
+        check("a v3 login with a clock " + off + " off gets a session", a->ok && is_sid(a->sid));
+        const json ack = hb(*a, 0);
+        check("hb_ack carries the relay's time", ack.value("now", json()).is_number_unsigned() &&
+                                                     ack["now"].get<int64_t>() >= before);
+        a->ws.abort();
+        auto a2 = login3(ida, a->sid, a->ws.counted);
+        check("a resume with a clock " + off + " off resumes", resumed(*a2));
+    }
+    g_clock_skew_secs = 0;
+
+    if (g_legacy) {
+        // v1 signs no nonce, so its timestamp is still its only freshness.
+        Ident id;
+        auto v1 = open_socket(id);
+        const uint64_t ts = now_unix_secs() - 300;
+        v1->send({{"type", "auth"}, {"peer_id", id.peer}, {"public_key", id.pub_b64}, {"timestamp", ts},
+                  {"signature", id.sign("hollow-ws-auth:" + id.peer + ":" + std::to_string(ts))}});
+        check("a v1 login 5 minutes off is still refused", next(*v1, typed("auth_failed")).has_value());
+    }
 }
 
 static void test_session_logins() {
@@ -2715,16 +2759,9 @@ static void hs_replays_and_shapes() {
              j["domain"] = "another.relay";
              j["signature"] = id.sign(auth_v3_message("another.relay", p.nonce, id.peer, ts, "full", "", sid, x_read));
          }},
-        {"two minutes old",
-         [&](json& j, const Peer& p) {
-             j["timestamp"] = ts - 120;
-             j["signature"] = id.sign(v3_bytes(p, sid, x_read, ts - 120));
-         }},
-        {"two minutes ahead",
-         [&](json& j, const Peer& p) {
-             j["timestamp"] = ts + 120;
-             j["signature"] = id.sign(v3_bytes(p, sid, x_read, ts + 120));
-         }},
+        // A clock off by minutes is no refusal since issue #72 (test_clock); the stamp
+        // is still signed.
+        {"a timestamp the signature does not cover", [&](json& j, const Peer&) { j["timestamp"] = ts - 120; }},
         {"a v3 frame signed with v2 bytes",
          [&](json& j, const Peer& p) { j["signature"] = id.sign(auth_v2_message(g_domain, p.nonce, id.peer, ts, "full", "")); }},
         {"a v2 frame signed with v3 bytes", [&](json& j, const Peer&) { j["v"] = 2; }},
@@ -3930,6 +3967,7 @@ int main(int argc, char** argv) {
     }
     if (!bounds_only) {
         test_session_logins();
+        test_clock();
         test_session_resume();
         test_session_counting();
         test_session_acks();

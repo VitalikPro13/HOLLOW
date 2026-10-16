@@ -2000,6 +2000,12 @@ sealed class NetworkEvent with _$NetworkEvent {
   /// The socket dropped but the relay holds our session: Reconnecting, nothing is
   /// lost.
   const factory NetworkEvent.relaySuspended() = NetworkEvent_RelaySuspended;
+
+  /// How far our clock sits from the relay's: relay minus ours, in seconds, so a
+  /// positive value means our clock is behind. Sent when it moves; `None` when the
+  /// relay stopped telling its time.
+  const factory NetworkEvent.relayClockOffset({PlatformInt64? offsetSecs}) =
+      NetworkEvent_RelayClockOffset;
   const factory NetworkEvent.channelNotificationHint({
     required String serverId,
     required String channelId,

@@ -241,6 +241,9 @@ pub(crate) enum AuthReply {
         door_key: String,
         #[serde(default)]
         session: Option<serde_json::Value>,
+        /// The relay's unix seconds (`relay_clock`); a value of the wrong shape is no time.
+        #[serde(default)]
+        now: Option<serde_json::Value>,
     },
     AuthOk {
         #[serde(default)]
@@ -265,6 +268,14 @@ impl AuthReply {
     /// A challenge advertising sessions carries exactly the number 1.
     pub(crate) fn offers_sessions(&self) -> bool {
         matches!(self, Self::AuthChallenge { session: Some(v), .. } if v.as_u64() == Some(1))
+    }
+
+    /// The relay's clock a challenge carries, absent from a relay older than 0.12.1.
+    pub(crate) fn relay_now(&self) -> Option<u64> {
+        match self {
+            Self::AuthChallenge { now: Some(v), .. } => v.as_u64(),
+            _ => None,
+        }
     }
 }
 

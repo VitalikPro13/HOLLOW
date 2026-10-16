@@ -290,6 +290,10 @@ pub enum NetworkEvent {
     /// The socket dropped but the relay holds our session: Reconnecting, nothing is
     /// lost.
     RelaySuspended,
+    /// How far our clock sits from the relay's: relay minus ours, in seconds, so a
+    /// positive value means our clock is behind. Sent when it moves; `None` when the
+    /// relay stopped telling its time.
+    RelayClockOffset { offset_secs: Option<i64> },
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
@@ -1116,6 +1120,7 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
             NetworkEvent::RelayConnecting { reconnecting }
         }
         node::NetworkEvent::RelaySuspended => NetworkEvent::RelaySuspended,
+        node::NetworkEvent::RelayClockOffset { offset_secs } => NetworkEvent::RelayClockOffset { offset_secs },
         node::NetworkEvent::ChannelNotificationHint {
             server_id, channel_id, from_peer, message_id, has_everyone, mentioned_names, is_reply_to_own,
         } => {

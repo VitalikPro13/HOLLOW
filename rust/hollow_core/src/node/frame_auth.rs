@@ -24,9 +24,9 @@ const DOMAIN: &[u8] = b"hollow-frame1\0";
 /// The route of a frame fanned out to a whole room or topic.
 pub(crate) const ROUTE_ROOM: &str = "*";
 
-/// How far a live-only frame's clock may sit from ours, either way. Relay auth holds
-/// every connected client within 60 s of the relay, so honest peers differ by two
-/// minutes at most.
+/// How far a live-only frame's clock may sit from ours, either way. Relay auth no
+/// longer bounds clocks (issue #72); the app warns a device past 240 s off the relay,
+/// before this refuses it.
 pub(crate) const LIVE_SKEW_MS: i64 = 300_000;
 
 pub(crate) const NONCE_LEN: usize = 16;
