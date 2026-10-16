@@ -152,7 +152,7 @@ fn collect_entry_bytes(archive: &mut ZipReader<'_>, budget: u64) -> Result<Archi
 
 /// The name an attachment lands under in the viewer's folder: one inert component under
 /// `files/`, read only through `enclosed_name`. Any other entry is never written.
-fn attachment_landing(entry: &zip::read::ZipFile<'_>) -> Option<String> {
+fn attachment_landing<R: std::io::Read>(entry: &zip::read::ZipFile<'_, R>) -> Option<String> {
     use std::path::Component;
     let path = entry.enclosed_name()?;
     let mut parts = path.components();

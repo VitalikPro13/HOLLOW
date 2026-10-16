@@ -1595,7 +1595,7 @@ fn snapshot_leaf(leaf: &str) -> bool {
 /// older export carried. Only what `build_snapshot_bytes` writes lands: any other entry
 /// (a path out of the folder, a key file, a marker, the profile registry) refuses the
 /// whole snapshot.
-fn snapshot_landing(entry: &zip::read::ZipFile<'_>) -> Result<Option<std::path::PathBuf>, String> {
+fn snapshot_landing<R: std::io::Read>(entry: &zip::read::ZipFile<'_, R>) -> Result<Option<std::path::PathBuf>, String> {
     let foreign = || "This backup holds a file Hollow never puts in a backup, so nothing was restored.".to_string();
     let path = entry.enclosed_name().filter(|_| entry.is_file()).ok_or_else(foreign)?;
     let parts: Option<Vec<&str>> = path
