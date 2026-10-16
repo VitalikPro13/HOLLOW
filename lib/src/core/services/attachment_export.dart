@@ -60,6 +60,7 @@ Future<String?> saveBytesFromPhone(
     return FilePicker.platform
         .saveFile(dialogTitle: dialogTitle, fileName: name, bytes: bytes);
   }
+  await sweepStaleSaveStages();
   final stageName = '.save_${DateTime.now().microsecondsSinceEpoch}';
   final stage = Directory(
       p.join((await getApplicationDocumentsDirectory()).path, stageName));
@@ -72,4 +73,22 @@ Future<String?> saveBytesFromPhone(
       await stage.delete(recursive: true);
     } catch (_) {}
   }
+}
+
+final _saveStageName = RegExp(r'^\.save_\d+$');
+
+/// Removes iOS Save staging folders a killed app left behind, each holding a
+/// plaintext copy of a received file. Runs at launch and before every stage.
+Future<void> sweepStaleSaveStages() async {
+  if (!Platform.isIOS) return;
+  try {
+    final docs = await getApplicationDocumentsDirectory();
+    await for (final entry in docs.list(followLinks: false)) {
+      if (entry is Directory && _saveStageName.hasMatch(p.basename(entry.path))) {
+        try {
+          await entry.delete(recursive: true);
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
 }

@@ -30,6 +30,7 @@ import 'package:hollow/src/core/crash_log.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/single_instance_lock.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
+import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/ui/shader_warmup.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:window_manager/window_manager.dart';
@@ -137,6 +138,7 @@ Future<void> main(List<String> args) async {
       overrideHollowDataDir(migrated);
       debugPrint('████ [HOLLOW] iOS data dir → App Group: $migrated');
     }
+    unawaited(sweepStaleSaveStages());
   }
 
   await RustLib.init();

@@ -26,7 +26,7 @@ Every Save dialog seeded with a name someone else chose goes through `attachment
 `pickSavePathFor` (desktop) and `saveBytesFromPhone` (phones) scrub the name with the node's own
 `safe_file_name` (new sync FFI `safe_save_name`), and on iOS the copy is staged in a fresh
 `Documents/.save_<time>/` folder that is removed when the sheet closes, so the plugin can never
-delete or overwrite anything of ours and no plaintext copy stays behind. A source guard keeps
+delete or overwrite anything of ours and no plaintext copy stays behind. A killed app cannot run that cleanup, so every launch and every new stage first removes leftover `Documents/.save_*` folders (`sweepStaleSaveStages`). A source guard keeps
 direct `FilePicker.platform.saveFile` calls to files that suggest names they build themselves.
 
 ## Test
