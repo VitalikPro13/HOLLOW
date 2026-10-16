@@ -7,6 +7,11 @@
 # relay unit and coturn have used a different secret since (checked 2026-09-02).
 25b6ba52de696f2887dd94c1e2a734504690d8ca:relay-uws/deploy/hollow-relay.service:hollow-turn-static-secret:16
 
+# Not a value: a comment naming the variables kept in the root-only env file
+# ("TURN_SECRET, HOLLOW_PUSH_TOKEN and ..."); the rule reads the next variable
+# name as the secret. Reviewed 2026-10-16.
+4de926698e1793929e6bc19e8242e169910e811d:relay-uws/deploy/hollow-relay.service:hollow-turn-static-secret:23
+
 # Random BIP-39 words with an invalid checksum, so no identity can come from
 # them; the test now uses the public all-zero vector.
 3fee2a6caf9a20bb312fb6398bd81c8bf72d381e:test/widget/recovery_phrase_dialogs_test.dart:hollow-bip39-mnemonic:10
