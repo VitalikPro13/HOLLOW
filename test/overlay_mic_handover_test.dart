@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/services/overlay_mic.dart';
@@ -94,7 +96,8 @@ void main() {
     expect(listen.status.value.listening, isTrue,
         reason: 'a note that never started hands the mic straight back');
     expect(listen.holds, isEmpty);
-  });
+    // Linux records with no permission check, so start() never refuses there.
+  }, skip: Platform.isLinux);
 
   test('a voice note hands the mic back when it ends', () async {
     await listen.turnOn();
