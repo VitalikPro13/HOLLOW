@@ -333,7 +333,10 @@ void main() {
             ChangelogRelease(
               version: '0.12.0',
               title: 'Dialogs that finish what they start',
-              notes: ['A calmer release, mostly polish.'],
+              notes: [
+                'A calmer release. Self-hosters, see the '
+                    '[self-hosting guide](https://example.org).'
+              ],
               sections: [
                 ChangelogSection(name: 'Changed', items: [
                   'Creating a channel or a server now waits for Hollow to '
@@ -342,7 +345,7 @@ void main() {
                       'simply is not on this device.',
                 ]),
                 ChangelogSection(name: 'Fixed', items: [
-                  'The Twitch sign-in offers a retry after a failure.',
+                  'The Twitch sign-in offers a **retry** after a failure.',
                 ]),
               ],
             ),

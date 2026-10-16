@@ -1,21 +1,21 @@
 {
-  "latest": "0.12.0",
+  "latest": "0.12.1",
   "versions": [
     {
-      "version": "0.12.0",
-      "date": "October 5, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.12.0-win64.zip",
-      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.12.0-win64-setup.exe",
-      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.12.0-macos.zip",
-      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.12.0.dmg",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.12.0-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.12.0-linux.tar.gz",
-      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.12.0-android.apk",
-      "notes": "Hollow Shop, New Design, Albums, Media Viewer & UnifiedPush",
-      "sha256_windows": "0f4e553fe7bf73aed08498a7bc55a527a501a703c845e28ab736ee1e5b37787c",
-      "sha256_macos": "3d63ab17e63eaa8288cf8e54a98d3088426a5757e028bcba2ebf5c1afff01873",
-      "sha256_linux": "3575146c99b81a423fd9b30713f63c638fe12450b6e01b26f8418c4fbcd4e082",
-      "sha256_linux_targz": "d6306bf8f1efd01ec5af1fac25799302d0b08aea52334ee186eed3d3a456939e"
+      "version": "0.12.1",
+      "date": "October 16, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.12.1-win64.zip",
+      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.12.1-win64-setup.exe",
+      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.12.1-macos.zip",
+      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.12.1.dmg",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.12.1-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.12.1-linux.tar.gz",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.12.1-android.apk",
+      "notes": "Resumable Connections, OBS Stream Overlay, Device Linking & Voice Room Chat",
+      "sha256_windows": "ca3cdfda3b65c2c6b3a29a539d9b48a774855dbbb47330002939c65b4a460a7c",
+      "sha256_macos": "ead551c743cbccb92ff4fa905c262849d2b922c7e7792cc2d1becc2cfca688b7",
+      "sha256_linux": "a3fc4ee220240a377f8cbd9b54cf0a59256e09810d8b5b0ed1a1c743dd12fd23",
+      "sha256_linux_targz": "3dac957a29ac936b27426d256f4568dee6e03bef93bae30d3b18e5d18cf1caf1"
     }
   ]
 }

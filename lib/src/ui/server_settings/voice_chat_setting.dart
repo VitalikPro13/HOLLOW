@@ -53,6 +53,9 @@ class _VoiceRoomsChatSectionState extends ConsumerState<VoiceRoomsChatSection> {
   Widget build(BuildContext context) {
     final saved = ref.watch(serverSettingProvider(
         (serverId: widget.serverId, key: kVoiceTextChatKey)));
+    // Showing the default before the saved value loads flips the switch on
+    // screen for a frame.
+    if (_shown == null && !saved.hasValue) return const SizedBox.shrink();
     final value = _shown ?? (saved.valueOrNull ?? '') != 'false';
     return SettingsSection(
       title: 'Voice rooms',

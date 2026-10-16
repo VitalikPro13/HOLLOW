@@ -1,3 +1,65 @@
+v0.12.1 - Resumable Connections, OBS Stream Overlay, Device Linking & Voice Room Chat
+
+No breaking changes. Self-hosters that run their own relays, please upgrade it according to the [self-hosting guide](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/SELF_HOSTING.md), which covers both Docker and standalone users.
+
+SECURITY
+
+- Important security fixes, including safer saving of files people send you
+
+CONNECTION
+
+- Your connection to the relay is now a session that survives drops, so nothing you send or receive is lost when the network cuts out, you switch between Wi-Fi and mobile data, or the relay restarts
+- Coming back after a drop takes about a second, and Hollow picks up where it left off instead of signing in and rejoining every conversation from scratch
+- A connection that quietly died is noticed within seconds instead of more than a minute, and Hollow moves to a better network before the old one fails
+- Phones reconnect in about a second when you open Hollow and no longer ask you to turn off battery optimization
+- A phone shows as online only while Hollow is on its screen or you are in a call
+- Catching up after time away no longer skips messages that arrive in the middle of it
+- A device with a wrong clock can sign in again, and a banner tells you to fix the time
+
+YOUR DEVICES
+
+- Linking a phone and a desktop now works in either direction, even if the app goes to the background or the connection drops
+- A newly linked device fetches the files from your last 7 days of chats, within your auto-download settings
+- Servers, friends, blocks and profile edits now reach a device of yours that was away
+- If Hollow can't open your data, it offers to repair the device or link it again and keeps the old data aside instead of deleting it
+- Windows and macOS now protect your identity with the system keychain by default, once you confirm your recovery phrase
+- All your devices now see when a new device is added, and removing one lists the devices that stay
+
+STREAM OVERLAY
+
+- A new Stream overlay page in Settings puts your voice room in OBS, with an image for each person that changes when they talk
+- You choose whether you appear on other people's overlays
+
+VOICE ROOMS
+
+- Admins can turn off text chat in voice rooms, for the whole server or one room at a time
+- Joining a voice room keeps your text channel on screen, and a half-typed message stays put when you switch chats
+- The "Switch voice room?" prompt has "Don't ask again", and a new Voice rooms section in Settings turns it back on
+- AI noise suppression is now on by default
+- Your speaking light now works when you are alone in a voice room
+- Fixed Windows freezing when someone left a voice room
+
+CHAT
+
+- Pasting on Windows now works while a dictation app or clipboard manager is using the clipboard
+- Emoji on Windows now use the system's own emoji font, so they are no longer pixelated
+- Press Up in an empty composer to edit your last message
+- A new switch in Network settings hides link previews
+- The "New" line now marks only messages that arrived while you were away
+- Fixed two messages sent at the same moment turning into one
+- Fixed a renamed server showing its old name until the next rename
+- A temporary nickname now stays yours for as long as Hollow is open
+- Fixed a friend sometimes not showing up after accepting your request
+- A large file in a direct message now starts in about a second instead of eleven
+
+PHONES
+
+- Fixed Android notifications not appearing, and the test notification doing nothing on iPhone
+- Sheets close when you pull them down anywhere, and the emoji, GIF and sticker picker opens as a tall sheet
+- Dialogs keep clear of the status bar and the home bar
+- You can search direct messages on a phone, and searching a meeting chat now finds messages
+- When your UnifiedPush app has trouble, Home says so and Hollow keeps trying it unless you turn on falling back to Google
+
 v0.12 - Hollow Shop, New Design, Albums, Media Viewer & UnifiedPush (BREAKING for all older versions)
 
 BREAKING CHANGE: 0.12 cannot talk to 0.11 or anything older. Everything it sends is now signed by the device that sent it and anything unsigned is refused, so messages, calls, friend requests and servers all fail between versions. Everyone needs to update together. Your identity, friends, servers and history carry over, and Hollow asks you once to confirm your recovery phrase, then stops keeping a copy of it. Invite and meeting links made before 0.12 no longer work, so ask for a new one. A meeting room made before 0.12 has to be made again. If you run your own relay, update it before anyone on it updates the app, since 0.12 cannot sign in to an older relay.

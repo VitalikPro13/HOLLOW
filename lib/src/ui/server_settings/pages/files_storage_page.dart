@@ -767,6 +767,14 @@ class _RetentionState extends ConsumerState<_Retention> {
     // Every member's sweep deletes by these, so the network takes them from the
     // Owner only (Rust `setting_change_allowed`).
     final canEdit = role == 'owner';
+    // Showing the defaults before the saved values load flips the choices on
+    // screen for a frame.
+    final loading = ['retention_messages', 'retention_files'].any((key) =>
+        !_local.containsKey(key) &&
+        !ref
+            .watch(serverSettingProvider((serverId: widget.serverId, key: key)))
+            .hasValue);
+    if (loading) return const SizedBox.shrink();
     Widget row(String title, String key, String sheetTitle) =>
         _ChoiceRow<String>(
           title: title,

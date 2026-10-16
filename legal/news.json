@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-10-16-v0121",
+    "date": "October 16, 2026",
+    "title": "v0.12.1 - Resumable Connections, OBS Stream Overlay, Device Linking & Voice Room Chat",
+    "body": "Personally, the mobile connectivity was a big issue for me because whenever the app went to the background, whether from the notification center or just switching to other apps, the socket connection simply went down until it healed itself after a minute or so (it was literally easier to just restart the app in 10 seconds). Now it should be fixed by turning the sockets into persistent sessions that survive connection drops between your device and the relay.\n\nIf you wanted a stream overlay for when you talk with somebody, now you can have one! It works locally and creates an easy browser source that you can paste into OBS or other streaming software, and your friends can show up on your stream. I wanted the customization to be simple but deep for all cases.\n\nMulti-device went through a lot of testing and bug fixes, especially on the phone-to-desktop scenario, which was pretty much broken. On top of that, there are tons of enhancements suggested by amazing contributors, which you can check in the changelog and on the [Issues](https://github.com/VitalikPro13/HOLLOW/issues) page on GitHub.\n\nThank you so much for using Hollow! Your support, and especially your feedback through Issues, is the most valuable thing I can get to improve the project even more. Community ideas are always better than mine, so enjoy! :D"
+  },
+  {
     "id": "2026-10-05-v0120",
     "date": "October 05, 2026",
     "title": "v0.12 - Hollow Shop, New Design, Albums, Media Viewer & UnifiedPush (BREAKING for all older versions)",

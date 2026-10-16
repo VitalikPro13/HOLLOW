@@ -11,7 +11,7 @@ use super::network::get_runtime;
 use crate::frb_generated::StreamSink;
 use crate::identity::data_dir;
 
-pub(crate) const APP_VERSION: &str = "0.12.0";
+pub(crate) const APP_VERSION: &str = "0.12.1";
 
 /// Keys allowed to sign `manifest.json`; the private half never enters the repo.
 /// More than one entry only during a key rotation.

@@ -6,6 +6,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/dialogs/news_post_dialog.dart';
 
 /// The bundled changelog, opened on [start] with Older / Newer to walk it.
 void showChangelogDialog(
@@ -58,7 +59,7 @@ class _ChangelogDialogState extends State<_ChangelogDialog> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   for (final note in release.notes) ...[
-                    Text(note, style: body),
+                    NewsPostBody(markdown: note),
                     const SizedBox(height: HollowSpacing.lg),
                   ],
                   for (final section in release.sections) ...[
@@ -74,7 +75,7 @@ class _ChangelogDialogState extends State<_ChangelogDialog> {
                                 style: body.copyWith(
                                     color: hollow.textTertiary)),
                             const SizedBox(width: HollowSpacing.sm),
-                            Expanded(child: Text(item, style: body)),
+                            Expanded(child: NewsPostBody(markdown: item)),
                           ],
                         ),
                       ),
