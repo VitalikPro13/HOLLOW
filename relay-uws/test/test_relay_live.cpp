@@ -3787,6 +3787,7 @@ static void test_bounds_drain() {
 // v4-mapped) and runs RELAY_LIVE_ONLY=rate_exempt against it.
 static constexpr int RATE_EXEMPT_SOURCE = 60001;
 static constexpr int RATE_PLAIN_SOURCE = 60002;
+static constexpr int RATE_IDLE_SOURCE = 60003;
 
 // A socket the relay lets in (it answers auth_hello), closed cleanly so its slot is back.
 static bool let_in_and_closed() {
@@ -3802,8 +3803,7 @@ static bool refused_for_rate() {
     return closed_by_relay(*p) && p->ws.close_code == 1008 && p->ws.close_reason == "rate_limit";
 }
 
-// A socket the relay let in, held open. The relay forgets an address's rate window
-// once it holds no socket, so each case keeps one.
+// A socket the relay let in, held open.
 static std::unique_ptr<Peer> held_open() {
     auto p = open_socket(Ident());
     p->send({{"type", "auth_hello"}});
@@ -3819,6 +3819,17 @@ static void test_rate_limit() {
     for (int i = 0; i < 9; i++) all_in = let_in_and_closed() && all_in;
     check("an address opens ten sockets in a minute", all_in);
     check("the eleventh is refused with rate_limit", refused_for_rate());
+}
+
+// An address that closes each socket before it opens the next is counted all the same,
+// at thirty a minute (MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP): a phone opens one per push wake.
+static void test_rate_limit_idle_address() {
+    printf("rate: an address holding no socket keeps its window\n");
+    PinnedSource pin(RATE_IDLE_SOURCE);
+    bool all_in = true;
+    for (int i = 0; i < 30; i++) all_in = let_in_and_closed() && all_in;
+    check("an address opens thirty sockets in a minute, closing each", all_in);
+    check("the thirty-first is refused with rate_limit while none is open", refused_for_rate());
 }
 
 static void test_rate_exempt() {
@@ -3888,7 +3899,12 @@ int main(int argc, char** argv) {
     }
     // =rate: the new-connection rate alone; =rate_exempt against the relay that lists one.
     if (only && (std::string(only) == "rate" || std::string(only) == "rate_exempt")) {
-        if (std::string(only) == "rate") test_rate_limit(); else test_rate_exempt();
+        if (std::string(only) == "rate") {
+            test_rate_limit();
+            test_rate_limit_idle_address();
+        } else {
+            test_rate_exempt();
+        }
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
@@ -3910,6 +3926,7 @@ int main(int argc, char** argv) {
         test_fetch();
         test_door_rooms();
         test_rate_limit();
+        test_rate_limit_idle_address();
     }
     if (!bounds_only) {
         test_session_logins();

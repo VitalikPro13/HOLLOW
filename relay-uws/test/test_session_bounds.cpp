@@ -460,12 +460,7 @@ static void table_tests() {
 struct Ip {
     RelayState& st;
     void open(const std::string& key) { st.ip_states[key].active_count++; }
-    void close(const std::string& key) {
-        auto it = st.ip_states.find(key);
-        if (it == st.ip_states.end()) return;
-        if (it->second.active_count > 0) it->second.active_count--;
-        if (it->second.active_count == 0) st.ip_states.erase(it);
-    }
+    void close(const std::string& key) { session_bounds::free_ip_slot(st, key); }
     uint32_t count(const std::string& key) const {
         auto it = st.ip_states.find(key);
         return it == st.ip_states.end() ? 0 : it->second.active_count;
@@ -548,6 +543,103 @@ static void ip_slot_tests() {
         session_bounds::release_ip_slot(st, s);  // ended by the table cap, as on expiry
         st.sessions.erase(p);
         check("an evicted session frees its slot", st.ip_states.empty());
+    }
+
+    printf("\n");
+}
+
+// The new-connection rate as .open and .close keep it (admit_socket, free_ip_slot).
+static void test_rate_limit_idle_address() {
+    printf("the new-connection rate of an address holding no socket\n");
+    using session_bounds::Admission;
+    using session_bounds::admit_socket;
+    using session_bounds::free_ip_slot;
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto at = [&](int secs) { return t0 + std::chrono::seconds(secs); };
+
+    {
+        RelayState st;
+        bool all_in = true;
+        for (size_t i = 0; i < MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP; i++) {
+            all_in = admit_socket(st, "192.0.2.1", false, at(1), MAX_CONNS_PER_IP) == Admission::In && all_in;
+            free_ip_slot(st, "192.0.2.1", at(1));
+        }
+        check("an address opens thirty sockets in a minute, closing each", all_in);
+        check("the thirty-first is refused while none is open",
+              admit_socket(st, "192.0.2.1", false, at(2), MAX_CONNS_PER_IP) == Admission::RateLimit);
+        check("the refusal takes no slot and keeps the window",
+              st.ip_states.at("192.0.2.1").active_count == 0 && st.ip_states.at("192.0.2.1").recent_connects.full() &&
+                  st.ip_idle.contains("192.0.2.1"));
+        session_bounds::sweep_rate_windows(st, at(61));
+        check("a sweep inside the minute keeps the window", st.ip_idle.contains("192.0.2.1"));
+        check("past the minute the address comes in again",
+              admit_socket(st, "192.0.2.1", false, at(62), MAX_CONNS_PER_IP) == Admission::In &&
+                  !st.ip_idle.contains("192.0.2.1"));
+        free_ip_slot(st, "192.0.2.1", at(62));
+        session_bounds::sweep_rate_windows(st, at(123));
+        check("and once its window runs out the sweep forgets it", st.ip_states.empty() && st.ip_idle.size() == 0);
+    }
+
+    {
+        // An address holding a socket keeps the tighter rate, and one that comes back
+        // with more than that behind it waits.
+        RelayState st;
+        bool all_in = admit_socket(st, "192.0.2.5", false, at(1), MAX_CONNS_PER_IP) == Admission::In;
+        for (size_t i = 1; i < MAX_NEW_CONNS_PER_MIN_PER_IP; i++) {
+            all_in = admit_socket(st, "192.0.2.5", false, at(1), MAX_CONNS_PER_IP) == Admission::In && all_in;
+            free_ip_slot(st, "192.0.2.5", at(1));
+        }
+        check("an address holding a socket opens ten in a minute", all_in);
+        check("the eleventh is refused while it holds one",
+              admit_socket(st, "192.0.2.5", false, at(2), MAX_CONNS_PER_IP) == Admission::RateLimit);
+        free_ip_slot(st, "192.0.2.5", at(2));
+        check("once it holds none, it opens more",
+              admit_socket(st, "192.0.2.5", false, at(2), MAX_CONNS_PER_IP) == Admission::In);
+        check("and holding that one, no more",
+              admit_socket(st, "192.0.2.5", false, at(2), MAX_CONNS_PER_IP) == Admission::RateLimit);
+    }
+
+    {
+        RelayState st;
+        for (int i = 0; i < 3; i++) {
+            admit_socket(st, "192.0.2.2", true, at(1), MAX_CONNS_PER_IP);
+            free_ip_slot(st, "192.0.2.2", at(1));
+        }
+        check("a listed address keeps no window and no entry", st.ip_states.empty() && st.ip_idle.size() == 0);
+    }
+
+    {
+        RelayState st;
+        Session& s = mint(st, peer(1), 1);
+        admit_socket(st, "192.0.2.3", false, at(1), MAX_CONNS_PER_IP);
+        session_bounds::hold_ip_slot(st, s, "192.0.2.3");
+        check("a grace slot keeps the address in use", !st.ip_idle.contains("192.0.2.3"));
+        session_bounds::release_ip_slot(st, s);
+        check("its end leaves the window counted", st.ip_idle.contains("192.0.2.3") &&
+                                                       st.ip_states.at("192.0.2.3").recent_connects.size() == 1);
+    }
+
+    {
+        // A flood of /64s from two /48s forgets only its own: the bound holds and a lone
+        // address idle before it is still counted.
+        RelayState st;
+        for (size_t i = 0; i < MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP; i++) {
+            admit_socket(st, "192.0.2.4", false, at(1), MAX_CONNS_PER_IP);
+            free_ip_slot(st, "192.0.2.4", at(1));
+        }
+        const size_t flood = conn_rate::MAX_IDLE + 1000;
+        for (size_t i = 0; i < flood; i++) {
+            char key[64];
+            snprintf(key, sizeof(key), "2001:db8:%x:%x::/64", unsigned(7 + i / 65536), unsigned(i % 65536));
+            admit_socket(st, key, false, at(2), MAX_CONNS_PER_IP);
+            free_ip_slot(st, key, at(2));
+        }
+        check("idle addresses stay within the bound",
+              st.ip_idle.size() == conn_rate::MAX_IDLE && st.ip_states.size() == conn_rate::MAX_IDLE);
+        check("the lone address is still refused",
+              admit_socket(st, "192.0.2.4", false, at(3), MAX_CONNS_PER_IP) == Admission::RateLimit);
+        session_bounds::sweep_rate_windows(st, at(63));
+        check("and the sweep empties the table once the minute is out", st.ip_states.empty() && st.ip_idle.size() == 0);
     }
 
     printf("\n");
@@ -819,6 +911,7 @@ int main() {
     budget_tests();
     table_tests();
     ip_slot_tests();
+    test_rate_limit_idle_address();
     snapshot_tests();
     drain_tests();
     config_tests();

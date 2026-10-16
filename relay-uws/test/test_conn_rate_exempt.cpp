@@ -101,6 +101,34 @@ int main() {
         check("and exempts no raw text", !mixed.contains("nonsense") && !exempts(mixed, "nonsense"));
     }
 
+    printf("addresses no client connects from\n");
+    {
+        const char* never[] = {"0.0.0.0", "0.1.2.3", "::", "::1", "0:0:0:0:0:0:0:1", "::/64", "::a00:1",
+                               "::ffff:0.0.0.0", "::ffff:127.0.0.1", "127.0.0.1", "127.0.241.3",
+                               "255.255.255.255", "224.0.0.1", "239.255.255.250", "240.0.0.1",
+                               "ff02::1", "ff05::1:3", "ff00::/64"};
+        for (const char* n : never) {
+            auto one = conn_rate_exempt::parse(n);
+            check(std::string("ignored and counted: ") + n, one.keys.empty() && one.ignored == 1);
+        }
+        const char* kept[] = {"1.0.0.1", "126.255.255.255", "128.0.0.1", "223.255.255.254",
+                              "2001:db8::1", "fe00::1", "0:0:0:1::1"};
+        for (const char* k : kept) {
+            auto one = conn_rate_exempt::parse(k);
+            check(std::string("kept: ") + k, one.keys.size() == 1 && one.ignored == 0);
+        }
+        auto mixed = conn_rate_exempt::parse("::1, 192.0.2.7, 0.0.0.0, 255.255.255.255");
+        check("a list keeps its real address beside them", mixed.keys.size() == 1 && mixed.ignored == 3 &&
+                                                               exempts(mixed, "192.0.2.7"));
+        check("and exempts no loopback client", !exempts(mixed, "::1") && !exempts(mixed, "127.0.0.1"));
+
+        // The test relay hears only loopback (HOLLOW_RELAY_TEST_LOOPBACK), so its list may
+        // name a v4 loopback address; nothing else on the list changes.
+        auto test_build = conn_rate_exempt::parse("::ffff:127.0.241.3, 127.0.0.2, ::1, 0.0.0.0", true);
+        check("a test build keeps v4 loopback entries", test_build.keys.size() == 2 && test_build.ignored == 2 &&
+                                                            exempts(test_build, "127.0.241.3"));
+    }
+
     if (failures) {
         printf("%d FAILURE(S)\n", failures);
         return 1;

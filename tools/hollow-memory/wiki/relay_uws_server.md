@@ -418,7 +418,6 @@ Attached to every WebSocket via uWebSockets' templated user data. Fields:
 | `license_key` | `std::string` | The license key this peer authenticated with (empty if license not required) |
 | `is_guest` | `bool` | `true` if auth included `"guest": true` flag. Guests are invisible to members, rate-limited, room-capped |
 | `ip_key` | `std::string` | Normalized `ip_limit_key` (v4 addr / v6 /64; stored for decrement on close, never logged) |
-| `ip_state` | `IpState*` | Cached pointer into `state.ip_states` for zero-lookup per-frame byte accounting (stable: values survive rehash; entry never erased while `active_count > 0`) |
 | `last_binary_activity` | `steady_clock::time_point` | Last 0x03 binary frame timestamp (for guest idle timeout) |
 | `binary_frames_this_minute` | `uint32_t` | Guest rate limit counter (reset every 60s) |
 | `minute_window_start` | `steady_clock::time_point` | Start of current rate limit window |
@@ -427,16 +426,16 @@ Attached to every WebSocket via uWebSockets' templated user data. Fields:
 
 ### IpState (per-IP connection tracking)
 
-In-memory only — never logged, never persisted. Erased on close once `active_count == 0`.
+In-memory only — never logged, never persisted (a restart gives every address a fresh window). Changed ONLY through `session_bounds.h`: `admit_socket` (`.open`: rate, then the cap, then the slot), `free_ip_slot` (`.close` and `release_ip_slot`), `sweep_rate_windows` (the 250 ms session tick).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `active_count` | `uint32_t` | Currently open connections from this IP |
-| `recent_connects` | `deque<steady_clock::time_point>` | Sliding window of connection timestamps for rate limiting |
+| `active_count` | `uint32_t` | Currently open connections from this IP (a grace session's held slot counts) |
+| `recent_connects` | `conn_rate::Window<30>` | The last admitted connects within 60 s, a fixed array (`src/conn_rate.h`) |
 
-Because the entry is erased at `active_count == 0`, the rate window only exists while the address holds a socket: open-close-open from an idle address is never rate-limited (live tests hold one socket for that reason).
+**Rate (2026-10-16, s43 bug):** an address holding a socket opens `MAX_NEW_CONNS_PER_MIN_PER_IP` (10) new sockets a minute; one holding none `MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP` (30: a phone killed in the background opens a fetch socket per push wake). A refusal (`1008 "rate_limit"`) takes nothing. The entry is NOT erased at `active_count == 0` while its window holds connects (before, close-then-open churn was never counted): it waits in `RelayState::ip_idle` (`conn_rate::IdleBook`), bounded at `conn_rate::MAX_IDLE` = 65,536 and fair (`fair_share.h`, share = the exact v4 address or v6 /48 of the key, no hash: the table holds the keys already); a full book forgets the least recently idled address of the heaviest block, which only lets that address in sooner. Measured worst case (every entry its own /48): about 61 MB at the bound, about 980 bytes per idle entry. Swept once the window ends. Tests: `test_conn_rate` (window, shares, book bound and expiry), `test_session_bounds` `test_rate_limit_idle_address`, `test_relay_live` `test_rate_limit_idle_address` (`RELAY_LIVE_ONLY=rate`).
 
-**Rate exemption (`HOLLOW_CONN_RATE_EXEMPT`, `src/conn_rate_exempt.h`, 2026-10-09):** an operator's own addresses, comma/space separated, read from the ENVIRONMENT only (root-only `EnvironmentFile`, never `Environment=` or a flag, never in the repo/memory/logs). Entries normalize through `ip_limit_key` (v4, v4-mapped -> its v4, v6 -> its /64, or `addr/64`); anything else is ignored and counted. A listed key skips ONLY the per-minute check in `.open` and keeps no window; `MAX_CONNS_PER_IP`/`admits`, fair share, auth, door rooms and every frame rule still apply. Startup prints only `[config] New-connection rate exemption: N address block(s), M entry(s) ignored`, and nothing when unset or empty; no per-connection line ever. No wire or snapshot change. Tests: `test_conn_rate_exempt` (parse + normalization) and `test_relay_live` `RELAY_LIVE_ONLY=rate|rate_exempt` (run_live.sh's third relay run, which also greps the log for the count line and for the absence of the address). Official box: Vitalik's address in `/etc/hollow-relay/relay.env`.
+**Rate exemption (`HOLLOW_CONN_RATE_EXEMPT`, `src/conn_rate_exempt.h`, 2026-10-09):** an operator's own addresses, comma/space separated, read from the ENVIRONMENT only (root-only `EnvironmentFile`, never `Environment=` or a flag, never in the repo/memory/logs). Entries normalize through `ip_limit_key` (v4, v4-mapped -> its v4, v6 -> its /64, or `addr/64`); anything else is ignored and counted, and so is an address no client connects from (0/8, 127/8, 224/4, 240/4 incl. broadcast, ::/64 incl. `::`/`::1`, ff00::/8; v4-mapped judged as its v4), since loopback behind a proxy on the box would exempt everybody. Only the loopback test build (`HOLLOW_RELAY_TEST_LOOPBACK`, `config.h` passes `allow_loopback`) keeps v4 loopback entries; a rejected entry is skipped, never fatal. A listed key skips ONLY the per-minute check in `.open` and keeps no window; `MAX_CONNS_PER_IP`/`admits`, fair share, auth, door rooms and every frame rule still apply. Startup prints only `[config] New-connection rate exemption: N address block(s), M entry(s) ignored`, and nothing when unset or empty; no per-connection line ever. No wire or snapshot change. Tests: `test_conn_rate_exempt` (parse + normalization) and `test_relay_live` `RELAY_LIVE_ONLY=rate|rate_exempt` (run_live.sh's third relay run, which also greps the log for the count line and for the absence of the address). Official box: Vitalik's address in `/etc/hollow-relay/relay.env`.
 
 ### PeerEntry (signaling registration)
 

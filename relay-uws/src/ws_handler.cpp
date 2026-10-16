@@ -3557,6 +3557,7 @@ static bool handle_session_control(SSLWebSocket* ws, PerSocketData* data, const 
 // gives its earliest deadline first, so a tick with nothing due reads three fronts.
 static void sweep_sessions(RelayState& state) {
     const auto now = std::chrono::steady_clock::now();
+    session_bounds::sweep_rate_windows(state, now);
     while (!state.presence_due.empty() && state.presence_due.top().first <= now) {
         const std::string peer = state.presence_due.top().second;
         state.presence_due.pop();
@@ -3657,35 +3658,24 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             const std::string remote(ws->getRemoteAddressAsText());
             std::string ip = ip_limit_key(remote);
             data->share_block = share_block(remote);
-            auto& ip_state = state.ip_states[ip];
 
             // A refused socket never took a slot, so its close must give none back:
-            // `ip_key` is set only once the slot is taken, and an address holding no
-            // slot keeps no entry. The rate check goes first, so a probe at the cap
-            // costs no look at the session table. A listed address (HOLLOW_CONN_RATE_EXEMPT)
-            // skips the rate alone and keeps no window; the cap below holds for it too.
+            // `ip_key` is set only once the slot is taken. At the cap, a socket comes in
+            // only against a grace slot the address holds, and ends nobody yet: its login
+            // settles it (settle_ip_slot), once the device is known, so a device coming
+            // back takes back its own slot.
             const bool rate_exempt = config.conn_rate_exempt.contains(ip);
-            auto now = std::chrono::steady_clock::now();
-            while (!ip_state.recent_connects.empty() &&
-                   (now - ip_state.recent_connects.front()) > std::chrono::seconds(60)) {
-                ip_state.recent_connects.pop_front();
+            switch (session_bounds::admit_socket(state, ip, rate_exempt, std::chrono::steady_clock::now(),
+                                                 CONNS_PER_IP)) {
+                case session_bounds::Admission::RateLimit:
+                    ws->end(1008, "rate_limit");
+                    return;
+                case session_bounds::Admission::IpLimit:
+                    ws->end(1008, "ip_limit");
+                    return;
+                case session_bounds::Admission::In:
+                    break;
             }
-            if (!rate_exempt && ip_state.recent_connects.size() >= MAX_NEW_CONNS_PER_MIN_PER_IP) {
-                if (ip_state.active_count == 0) state.ip_states.erase(ip);
-                ws->end(1008, "rate_limit");
-                return;
-            }
-
-            // At the cap, a socket comes in only against a grace slot the address holds,
-            // and ends nobody yet: its login settles it (settle_ip_slot), once the device
-            // is known, so a device coming back takes back its own slot.
-            if (!session_bounds::admits(state, ip, CONNS_PER_IP)) {
-                ws->end(1008, "ip_limit");
-                return;
-            }
-
-            ip_state.active_count++;
-            if (!rate_exempt) ip_state.recent_connects.push_back(now);
             data->ip_key = ip;
 
             // 10-second auth timeout
@@ -3819,15 +3809,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             }
 
             // IP tracking cleanup (in-memory only).
-            if (!s && !data->ip_key.empty()) {
-                auto it = state.ip_states.find(data->ip_key);
-                if (it != state.ip_states.end()) {
-                    if (it->second.active_count > 0) it->second.active_count--;
-                    if (it->second.active_count == 0) {
-                        state.ip_states.erase(it);
-                    }
-                }
-            }
+            if (!s && !data->ip_key.empty()) session_bounds::free_ip_slot(state, data->ip_key);
 
             if (data->is_guest) {
                 if (state.guest_count > 0) state.guest_count--;

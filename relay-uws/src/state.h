@@ -15,6 +15,7 @@
 #include "join_lock.h"
 #include "kill_list.h"
 #include "license.h"
+#include "conn_rate.h"
 #include "fair_share.h"
 #include "session.h"
 #include "offline_index.h"
@@ -26,6 +27,10 @@
 
 static constexpr size_t MAX_CONNS_PER_IP = 34;
 static constexpr size_t MAX_NEW_CONNS_PER_MIN_PER_IP = 10;
+// For an address holding no socket: a phone killed in the background opens a fetch socket
+// per push wake, and a busy minute passes ten of those.
+static constexpr size_t MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP = 30;
+static_assert(MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP >= MAX_NEW_CONNS_PER_MIN_PER_IP, "the window holds both");
 // No byte quotas of any kind (the 10 GB/day per-IP budget was removed
 // 2026-08-28). Volume fairness lives BELOW the relay: the host shapes egress
 // with CAKE per destination host, so a saturated line is shared equally and
@@ -225,9 +230,11 @@ struct WsRoom {
     std::unordered_set<std::string> held;
 };
 
+// An address holding a socket, or holding none with connects in the last minute
+// (`RelayState::ip_idle`). Changed only through session_bounds.h.
 struct IpState {
     uint32_t active_count = 0;
-    std::deque<std::chrono::steady_clock::time_point> recent_connects;
+    conn_rate::Window<MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP> recent_connects;
 };
 
 // Delivery diagnostics (counters ONLY — the relay logs nothing, and these
@@ -291,6 +298,9 @@ struct RelayState {
 
     // Per-IP connection tracking (in-memory only, never logged/persisted)
     std::unordered_map<std::string, IpState> ip_states;
+    // The entries above holding no socket, bounded and fair: an address that closes each
+    // socket before it opens the next is still counted.
+    conn_rate::IdleBook ip_idle;
     std::unordered_set<SSLWebSocket*> guest_sockets;
     size_t guest_count = 0;
 

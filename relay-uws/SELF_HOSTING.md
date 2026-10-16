@@ -128,7 +128,7 @@ The fields:
 | `PUBLIC_IP`, `PUBLIC_IPV6` | Leave empty. The IPv4 is detected at start. Fill the v6 in only if the machine has one. |
 | `OWN_CERT_DIR` | Advanced. A directory holding a `fullchain.pem` and `privkey.pem` you manage yourself. Set it and certbot is not used at all. |
 | `SESSION_GRACE_SECS` | Optional. How many seconds the relay waits for someone whose connection dropped, from 30 to 600. Leave it empty for 120. See [Dropped connections](#dropped-connections). |
-| `HOLLOW_CONN_RATE_EXEMPT` | Optional, and best left empty. The relay lets each address open 10 new connections a minute. To lift that one limit for your own machines, for example while you test with many copies of the app at once, list their public addresses here, separated by commas. An IPv6 address covers its whole /64. Every other limit still applies to them. Without Docker, put the same line in `relay.env`. |
+| `HOLLOW_CONN_RATE_EXEMPT` | Optional, and best left empty. The relay lets each address open 10 new connections a minute, or 30 while it has none open. To lift that one limit for your own machines, for example while you test with many copies of the app at once, list their public addresses here, separated by commas. An IPv6 address covers its whole /64. Every other limit still applies to them. The relay skips local, broadcast and multicast addresses on the list, such as 127.0.0.1 or ::1, since no outside machine connects from them. Without Docker, put the same line in `relay.env`. |
 | `CERTBOT_STAGING` | Troubleshooting. Set to `1` to use the Let's Encrypt staging service while you get the setup right. |
 
 ## Start

@@ -22,6 +22,12 @@ namespace session_bounds {
 
 namespace detail {
 
+// Erases the entry of an address `ip_idle` let go of, never one holding a socket.
+inline void forget_idle(RelayState& st, const std::string& ip_key) {
+    auto it = st.ip_states.find(ip_key);
+    if (it != st.ip_states.end() && it->second.active_count == 0) st.ip_states.erase(it);
+}
+
 // Lets the budget bury a ring frame it picked (OfflineIndex::released).
 inline void attach(RelayState& st) {
     if (st.buffer_index.bury_session) return;
@@ -142,15 +148,34 @@ inline std::vector<std::string> make_room(RelayState& st, uint64_t share, const 
     return out;
 }
 
+// A socket of `ip_key`, or the grace session holding its slot, is gone. An address left
+// holding no socket keeps its entry while its window has connects in it (`ip_idle`).
+inline void free_ip_slot(RelayState& st, const std::string& ip_key,
+                         conn_rate::Clock::time_point now = conn_rate::Clock::now()) {
+    auto it = st.ip_states.find(ip_key);
+    if (it == st.ip_states.end()) return;
+    IpState& ip = it->second;
+    if (ip.active_count > 0) ip.active_count--;
+    if (ip.active_count > 0) return;
+    ip.recent_connects.prune(now);
+    if (ip.recent_connects.empty()) {
+        st.ip_idle.remove(ip_key);
+        st.ip_states.erase(it);
+        return;
+    }
+    for (const std::string& gone : st.ip_idle.put(ip_key, ip.recent_connects.ends())) detail::forget_idle(st, gone);
+}
+
+// Forgets the addresses holding no socket whose windows have run out.
+inline void sweep_rate_windows(RelayState& st, conn_rate::Clock::time_point now) {
+    for (const std::string& key : st.ip_idle.expired(now)) detail::forget_idle(st, key);
+}
+
 // `s` is gone, or back on a socket that holds a slot of its own: free the held slot.
 inline void release_ip_slot(RelayState& st, session::Session& s) {
     st.session_book.to_live(s.peer_id);
     if (s.ip_key.empty()) return;
-    auto it = st.ip_states.find(s.ip_key);
-    if (it != st.ip_states.end()) {
-        if (it->second.active_count > 0) it->second.active_count--;
-        if (it->second.active_count == 0) st.ip_states.erase(it);
-    }
+    free_ip_slot(st, s.ip_key);
     s.ip_key.clear();
 }
 
@@ -180,6 +205,33 @@ inline bool admits(RelayState& st, const std::string& ip_key, size_t cap = MAX_C
     auto it = st.ip_states.find(ip_key);
     const size_t count = it == st.ip_states.end() ? 0 : it->second.active_count;
     return count < cap || count < cap + grace_slots(st, ip_key);
+}
+
+// Why a new socket was refused at .open, if it was.
+enum class Admission { In, RateLimit, IpLimit };
+
+// Whether a new socket from `ip_key` may come in now, taking its slot and counting it in
+// the address's window if so: ten connects a minute while the address holds a socket,
+// thirty while it holds none. The rate goes first, so a probe at the cap costs no look at
+// the session table. A listed address (`rate_exempt`) skips the rate alone and keeps no
+// window. A refusal takes nothing, so its close gives nothing back.
+inline Admission admit_socket(RelayState& st, const std::string& ip_key, bool rate_exempt,
+                              conn_rate::Clock::time_point now, size_t cap = MAX_CONNS_PER_IP) {
+    auto it = st.ip_states.find(ip_key);
+    if (it != st.ip_states.end()) {
+        IpState& ip = it->second;
+        ip.recent_connects.prune(now);
+        const size_t per_min =
+            ip.active_count > 0 ? MAX_NEW_CONNS_PER_MIN_PER_IP : MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP;
+        if (!rate_exempt && ip.recent_connects.size() >= per_min) return Admission::RateLimit;
+    }
+    if (!admits(st, ip_key, cap)) return Admission::IpLimit;
+    if (it == st.ip_states.end()) it = st.ip_states.try_emplace(ip_key).first;
+    IpState& ip = it->second;
+    if (ip.active_count == 0) st.ip_idle.remove(ip_key);
+    ip.active_count++;
+    if (!rate_exempt) ip.recent_connects.push(now);
+    return Admission::In;
 }
 
 // A login from `ip_key` is through, its own session resumed or ended: while the address

@@ -71,7 +71,11 @@ inline Config parse_args(int argc, char** argv) {
     if (turn_env) config.turn_secret = turn_env;
     const char* exempt = getenv("HOLLOW_CONN_RATE_EXEMPT");
     if (exempt && *exempt) {
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+        config.conn_rate_exempt = conn_rate_exempt::parse(exempt, true);
+#else
         config.conn_rate_exempt = conn_rate_exempt::parse(exempt);
+#endif
         fprintf(stderr, "[config] New-connection rate exemption: %zu address block(s), %zu entry(s) ignored\n",
                 config.conn_rate_exempt.keys.size(), config.conn_rate_exempt.ignored);
     }

@@ -172,7 +172,7 @@ run_variant() {
     # The list is announced by its counts alone, and only when it is set.
     local said=ok
     if [ -n "$exempt" ]; then
-        grep -qxF "[config] New-connection rate exemption: 1 address block(s), 2 entry(s) ignored" "$log" ||
+        grep -qxF "[config] New-connection rate exemption: 1 address block(s), 3 entry(s) ignored" "$log" ||
             said="no count line"
         ! grep -qF "127.0.241" "$log" || said="the log names an address"
     elif grep -qF "rate exemption" "$log"; then
@@ -202,6 +202,6 @@ run_variant() {
 for v in $variants; do
     run_variant "$v"
 done
-# The exemption list: a v4 address written v4-mapped, beside two entries it ignores.
-run_variant "${variants%% *}" exempt "::ffff:127.0.241.3, not-an-address,127.0.241"
+# The exemption list: a v4 address written v4-mapped, beside three entries it ignores.
+run_variant "${variants%% *}" exempt "::ffff:127.0.241.3, not-an-address,127.0.241, 0.0.0.0"
 exit $fail
