@@ -406,6 +406,12 @@ pub enum CrdtPayload {
         channel_id: String,
         media_only: bool,
     },
+    /// A voice channel's text chat: follow the server's `voice_text_chat`, or
+    /// override it on or off (#107).
+    ChannelVoiceChatChanged {
+        channel_id: String,
+        mode: super::server_state::VoiceChat,
+    },
 
     // Custom emotes (server emote set)
     /// Add (or replace, same name) a custom emote. The CRDT carries METADATA ONLY:

@@ -697,8 +697,8 @@ async fn channel_file_send_rejection(
     if !server.can_post_in_channel(local_peer_str, cid) {
         return Some("You don't have permission to post in this channel".to_string());
     }
-    if server.is_muted(local_peer_str, now_ms as u64) {
-        return Some("You are muted on this server".to_string());
+    if let Some(message) = super::message_ops::change_send_error(server, local_peer_str, cid) {
+        return Some(message);
     }
     if server.is_channel_media_only(cid) {
         let mime = file_transfer::mime_from_ext(original_ext);
@@ -3275,8 +3275,8 @@ pub(crate) async fn handle_envelope_file_header(
         return;
     }
 
-    if mls_file_header_moderation_dropped(
-        server_states, server_id, &sender_peer_id, &cid, &mime, img, &vthumb,
+    if mls_file_header_dropped(
+        server_states, server_id, &sender_peer_id, &cid, &mime, img, &vthumb, explicitly_requested,
     ) {
         return;
     }
@@ -3385,9 +3385,8 @@ fn mls_file_header_exceeds_cap(
     }
 }
 
-/// Moderation trio (receive-side) for an MLS FileHeader: drop files from
-/// muted members and non-media files headed into a media-only channel.
-/// Mirrors the text ingest gate in message_ops::handle_envelope_channel_message.
+/// [`mls_file_header_dropped`] for a header nobody asked for.
+#[cfg(test)]
 fn mls_file_header_moderation_dropped(
     server_states: &HashMap<String, ServerState>,
     server_id: &str,
@@ -3397,6 +3396,25 @@ fn mls_file_header_moderation_dropped(
     img: bool,
     vthumb: &Option<VideoThumbRef>,
 ) -> bool {
+    mls_file_header_dropped(server_states, server_id, sender_peer_id, cid, mime, img, vthumb, false)
+}
+
+/// Moderation trio (receive-side) for an MLS FileHeader: drop files from
+/// muted members and non-media files headed into a media-only channel, and an
+/// unasked card from a member the live change ladder refuses there (cannot see
+/// the channel, or a voice room with its chat off, #107). Mirrors the text
+/// ingest gate in message_ops::handle_envelope_channel_message.
+#[allow(clippy::too_many_arguments)]
+fn mls_file_header_dropped(
+    server_states: &HashMap<String, ServerState>,
+    server_id: &str,
+    sender_peer_id: &str,
+    cid: &Option<String>,
+    mime: &str,
+    img: bool,
+    vthumb: &Option<VideoThumbRef>,
+    asked: bool,
+) -> bool {
     let Some(state) = server_states.get(server_id) else { return false; };
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3404,6 +3422,15 @@ fn mls_file_header_moderation_dropped(
         .as_millis() as u64;
     if state.is_muted(sender_peer_id, now_ms) {
         hollow_log!("[HOLLOW-MOD] DROPPED MLS FileHeader from muted member {sender_peer_id} in {server_id}");
+        return true;
+    }
+    if !asked
+        && let Some(c) = cid
+        && let Some(reason) = super::message_ops::live_channel_change_refusal(
+            state, &super::resolver::resolve(sender_peer_id), c, now_ms,
+        )
+    {
+        hollow_log!("[HOLLOW-MOD] DROPPED MLS FileHeader from {sender_peer_id} in {server_id}/{c}: {reason}");
         return true;
     }
     if let Some(c) = cid {
@@ -4121,5 +4148,55 @@ mod tests {
             assert!(accept_header_thumb(Some(refused.clone()), true, "image/png").is_none(), "{refused:.40}");
         }
         assert!(accept_header_thumb(Some(b64(&still(32, 24))), false, "application/pdf").is_none());
+    }
+
+    // r1-vcchat107-review
+
+    /// #107 review: an MLS file header into a voice room whose chat is off is dropped,
+    /// like a muted member's, so no card key or bytes land for a post every receiver
+    /// refuses.
+    #[test]
+    fn review_mls_file_header_into_a_closed_voice_room_is_dropped() {
+        let _g = super::super::resolver::test_lock();
+        use crate::crdt::operations::CrdtPayload;
+        let (mut state, _owner) = crate::crdt::testkeys::owned_state("srv", "S", 1);
+        let bob = crate::crdt::testkeys::keys(2).1;
+        let vc = crate::node::new_channel_id("srv");
+        for payload in [
+            CrdtPayload::MemberAdded { peer_id: bob.clone(), display_name: "b".into(), follow: None, ask: None },
+            CrdtPayload::ChannelAdded { channel_id: vc.clone(), name: "vc".into(), category: None, channel_type: "voice".into() },
+        ] {
+            let op = state.create_op(payload);
+            state.apply_op(&op).unwrap();
+        }
+        let open = HashMap::from([("srv".to_string(), state.clone())]);
+        assert!(
+            !mls_file_header_moderation_dropped(&open, "srv", &bob, &Some(vc.clone()), "image/png", true, &None),
+            "control: an open voice room takes the file",
+        );
+        let op = state.create_op(CrdtPayload::ChannelVoiceChatChanged {
+            channel_id: vc.clone(), mode: crate::crdt::server_state::VoiceChat::Off,
+        });
+        state.apply_op(&op).unwrap();
+        assert!(!state.channel_chat_open(&vc), "fixture: the room's chat is off");
+        let closed = HashMap::from([("srv".to_string(), state)]);
+        assert!(
+            mls_file_header_moderation_dropped(&closed, "srv", &bob, &Some(vc.clone()), "image/png", true, &None),
+            "an MLS file header landed in a voice room whose chat is off",
+        );
+    }
+
+    /// #107 review: the Olm FileHeader arm in swarm.rs asks the closed-chat rung too.
+    #[test]
+    fn review_olm_file_header_arm_asks_the_closed_chat_rung() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node").join("swarm.rs");
+        let swarm = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+        let start = swarm.find("Ok(MessageEnvelope::FileHeader { inner }) => {").expect("Olm FileHeader arm");
+        let end = start + swarm[start..].find("let ctx_type").expect("end of the gate block");
+        let arm = &swarm[start..end];
+        assert!(
+            arm.contains("channel_chat_open(") || arm.contains("live_channel_change_refusal("),
+            "swarm.rs: the Olm FileHeader arm takes a file into a voice room whose chat is off",
+        );
     }
 }

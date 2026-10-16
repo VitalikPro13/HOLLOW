@@ -39,6 +39,35 @@ impl Default for ChannelType {
     }
 }
 
+/// A voice channel's own text chat setting (#107): follow the server's
+/// `voice_text_chat`, or override it on or off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceChat {
+    #[default]
+    Server,
+    On,
+    Off,
+}
+
+impl VoiceChat {
+    fn is_server(&self) -> bool {
+        *self == Self::Server
+    }
+
+    /// Stored-state reader: a value this version does not know (a newer client's
+    /// checkpoint or snapshot) follows the server rather than failing the whole
+    /// `ServerState`. Ops stay strict, so `parse_ops_tolerant` skips such an op.
+    fn deserialize_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(d)?;
+        Ok(serde_json::from_value(raw).unwrap_or_default())
+    }
+}
+
+/// The server setting for text chat in voice rooms: absent or anything but
+/// "false" is on.
+pub const VOICE_TEXT_CHAT_KEY: &str = "voice_text_chat";
+
 /// An item in the channel layout — category header, channel reference, or separator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -179,6 +208,14 @@ pub struct ChannelInfo {
     /// Label gate for posting; same semantics as `visibility_labels`.
     #[serde(default)]
     pub posting_labels: Vec<String>,
+    /// Voice channels only; skipped while it follows the server, so a state
+    /// without an override serializes as it did before the field.
+    #[serde(
+        default,
+        skip_serializing_if = "VoiceChat::is_server",
+        deserialize_with = "VoiceChat::deserialize_lenient"
+    )]
+    pub voice_chat: VoiceChat,
 }
 
 impl ChannelInfo {
@@ -461,6 +498,7 @@ impl ServerState {
             media_only: false,
             visibility_labels: Vec::new(),
             posting_labels: Vec::new(),
+            voice_chat: VoiceChat::Server,
         });
         if self.owner_pin.is_none() {
             self.owner_pin = Some(owner.to_string());
@@ -911,6 +949,7 @@ impl ServerState {
                         media_only: false,
                         visibility_labels: Vec::new(),
                         posting_labels: Vec::new(),
+                        voice_chat: VoiceChat::Server,
                     }
                 });
             }
@@ -1005,6 +1044,12 @@ impl ServerState {
             CrdtPayload::ChannelMediaOnlyChanged { channel_id, media_only } => {
                 if let Some(ch) = self.channels.get_mut(channel_id) {
                     ch.media_only = *media_only;
+                }
+            }
+
+            CrdtPayload::ChannelVoiceChatChanged { channel_id, mode } => {
+                if let Some(ch) = self.channels.get_mut(channel_id) {
+                    ch.voice_chat = *mode;
                 }
             }
 
@@ -1674,6 +1719,10 @@ impl ServerState {
             "retention_files_since" | "retention_messages_since" => {
                 *role == MemberRole::Owner && value.parse::<u64>().is_ok()
             }
+            // The same permission as a voice channel's own override.
+            VOICE_TEXT_CHAT_KEY => {
+                perms & Permission::MANAGE_CHANNELS != 0 && matches!(value, "true" | "false")
+            }
             _ => perms & Permission::MANAGE_SERVER != 0,
         }
     }
@@ -1718,6 +1767,11 @@ impl ServerState {
             | CrdtPayload::ChannelGrantRevoked { .. } => has(Permission::MANAGE_CHANNELS),
             CrdtPayload::RoleChanged { peer_id, role: new_role, .. } => {
                 self.role_change_allowed(&role, perms, peer_id, new_role)
+            }
+            // Only a voice room has a text chat setting of its own.
+            CrdtPayload::ChannelVoiceChatChanged { channel_id, .. } => {
+                has(Permission::MANAGE_CHANNELS)
+                    && self.channels.get(channel_id).is_some_and(|c| c.channel_type == ChannelType::Voice)
             }
             CrdtPayload::ServerRenamed { .. } => has(Permission::MANAGE_SERVER),
             CrdtPayload::JoinKeySet { secret } => role == MemberRole::Owner && join_secret_shape(&secret.0).is_some(),
@@ -2077,6 +2131,26 @@ impl ServerState {
         self.channels.get(channel_id).map_or(false, |ch| ch.media_only)
     }
 
+    /// Whether `channel_id` takes text posts at all: false only for a voice channel
+    /// whose chat is off, by its own override or else the server's setting (#107).
+    /// The one answer the live post gate, the send gates and Dart all read.
+    pub fn channel_chat_open(&self, channel_id: &str) -> bool {
+        let Some(ch) = self.channels.get(channel_id) else { return true };
+        if ch.channel_type != ChannelType::Voice {
+            return true;
+        }
+        match ch.voice_chat {
+            VoiceChat::On => true,
+            VoiceChat::Off => false,
+            VoiceChat::Server => self.voice_text_chat_default(),
+        }
+    }
+
+    /// The server-wide text chat in voice rooms setting, on unless set to "false".
+    pub fn voice_text_chat_default(&self) -> bool {
+        self.settings.get(VOICE_TEXT_CHAT_KEY).is_none_or(|reg| reg.read() != "false")
+    }
+
     /// Moderator+ (and Owner) bypass slow mode, matching the Discord behavior.
     pub fn bypasses_slow_mode(&self, peer_id: &str) -> bool {
         self.get_role(peer_id).priority() >= MemberRole::Moderator.priority()
@@ -2188,6 +2262,11 @@ mod tests {
             });
             let _ = s.apply_op(&op);
         }
+        // A voice room for the voice chat override rows.
+        let op = s.create_op(CrdtPayload::ChannelAdded {
+            channel_id: "vc".into(), name: "vc".into(), category: None, channel_type: "voice".into(),
+        });
+        let _ = s.apply_op(&op);
         // Labels for the assign/unassign rows: one cosmetic, one access-bearing
         // (self-toggle is only legal for EXISTING cosmetic labels).
         for (lid, access) in [("l1", false), ("lacc", true)] {
@@ -2260,6 +2339,17 @@ mod tests {
             ("admin", CrdtPayload::ChannelPublicChanged { channel_id: "c".into(), is_public: true }, true),
             ("alice", CrdtPayload::ChannelSlowModeChanged { channel_id: "c".into(), seconds: 5 }, false),
             ("admin", CrdtPayload::ChannelMediaOnlyChanged { channel_id: "c".into(), media_only: true }, true),
+            // Text chat in voice rooms (#107): MANAGE_CHANNELS for the server's setting
+            // and a channel's override alike, and only "true"/"false" for the setting.
+            ("admin", CrdtPayload::ChannelVoiceChatChanged { channel_id: "vc".into(), mode: VoiceChat::Off }, true),
+            ("moder", CrdtPayload::ChannelVoiceChatChanged { channel_id: "vc".into(), mode: VoiceChat::On }, false),
+            ("alice", CrdtPayload::ChannelVoiceChatChanged { channel_id: "vc".into(), mode: VoiceChat::Server }, false),
+            ("admin", CrdtPayload::ChannelVoiceChatChanged { channel_id: "s1-general".into(), mode: VoiceChat::Off }, false),
+            ("admin", CrdtPayload::ChannelVoiceChatChanged { channel_id: "ghost".into(), mode: VoiceChat::Off }, false),
+            ("admin", CrdtPayload::ServerSettingChanged { key: VOICE_TEXT_CHAT_KEY.into(), value: "false".into() }, true),
+            ("admin", CrdtPayload::ServerSettingChanged { key: VOICE_TEXT_CHAT_KEY.into(), value: "off".into() }, false),
+            ("moder", CrdtPayload::ServerSettingChanged { key: VOICE_TEXT_CHAT_KEY.into(), value: "false".into() }, false),
+            ("alice", CrdtPayload::ServerSettingChanged { key: VOICE_TEXT_CHAT_KEY.into(), value: "true".into() }, false),
             // Labels: create/delete/update need MANAGE_ROLES; assign is
             // self-or-MANAGE_ROLES, and self ONLY for existing cosmetic labels, since
             // access labels gate channels and unknown ids fail closed.
@@ -4443,6 +4533,31 @@ mod tests {
         assert_eq!(refusal(&s, "vipper", "ch", false, now), None);
     }
 
+    /// #107: the live gates refuse a post, an edit, a card, a reaction and a typing or
+    /// unread signal in a voice room whose chat is off, for the owner too, and only
+    /// there.
+    #[test]
+    fn authz_live_gates_refuse_a_closed_voice_room() {
+        let _g = crate::node::resolver::test_lock();
+        use crate::node::message_ops::{channel_signal_accepted, live_channel_change_refusal, live_channel_post_refusal};
+        let mut s = label_gate_fixture();
+        let now = epoch_ms_now();
+        let op = s.create_op(CrdtPayload::ChannelAdded {
+            channel_id: "vc".into(), name: "vc".into(), category: None, channel_type: "voice".into(),
+        });
+        s.apply_op(&op).unwrap();
+        assert_eq!(live_channel_post_refusal(&s, "member", "vc", false, now), None, "open by default");
+        let op = s.create_op(CrdtPayload::ChannelVoiceChatChanged { channel_id: "vc".into(), mode: VoiceChat::Off });
+        s.apply_op(&op).unwrap();
+        for who in ["member", "admin", "owner"] {
+            assert!(live_channel_post_refusal(&s, who, "vc", false, now).is_some(), "{who} posted in a closed room");
+            assert!(live_channel_post_refusal(&s, who, "vc", true, now).is_some(), "{who} posted a file in a closed room");
+            assert!(live_channel_change_refusal(&s, who, "vc", now).is_some(), "{who} edited or reacted in a closed room");
+            assert!(!channel_signal_accepted(&s, who, "owner", "vc", now), "{who} signalled in a closed room");
+            assert_eq!(live_channel_post_refusal(&s, who, "ch", false, now), None, "a text channel is untouched");
+        }
+    }
+
     /// C1: a plaintext public-channel frame is unencrypted, so anyone in the room can
     /// send one; it is taken in only for a channel that is public in our own state.
     #[test]
@@ -4736,5 +4851,111 @@ mod tests {
         assert!(!s.is_muted("owner", 0));
         assert!(!s.is_banned("moder"));
         assert!(s.is_banned("alice"), "a plain member's device-keyed ban is adopted");
+    }
+
+    /// #107: a voice room's chat is open unless its own override is off, or it follows
+    /// the server and the server's setting is "false"; text channels and unknown ids
+    /// stay open. Deleting a channel drops its override.
+    #[test]
+    fn voice_chat_follows_the_server_unless_the_channel_overrides_it() {
+        let mut s = test_state("s1".into(), "S".into(), "owner".into());
+        for (cid, kind) in [("vc", "voice"), ("tx", "text")] {
+            let op = s.create_op(CrdtPayload::ChannelAdded {
+                channel_id: cid.into(), name: cid.into(), category: None, channel_type: kind.into(),
+            });
+            let _ = s.apply_op(&op);
+        }
+        let set = |s: &mut ServerState, payload: CrdtPayload| {
+            let op = s.create_op(payload);
+            assert!(s.op_allowed(&op), "the owner may change it");
+            let _ = s.apply_op(&op);
+        };
+        let server = |on: bool| CrdtPayload::ServerSettingChanged { key: VOICE_TEXT_CHAT_KEY.into(), value: on.to_string() };
+        let channel = |mode: VoiceChat| CrdtPayload::ChannelVoiceChatChanged { channel_id: "vc".into(), mode };
+        assert!(s.channel_chat_open("vc"), "on by default");
+        set(&mut s, server(false));
+        assert!(!s.channel_chat_open("vc"), "the server's setting closes a room that follows it");
+        assert!(s.channel_chat_open("tx"), "a text channel never closes");
+        assert!(s.channel_chat_open("ghost"), "an unknown channel is left to the other rungs");
+        set(&mut s, channel(VoiceChat::On));
+        assert!(s.channel_chat_open("vc"), "a room overridden on stays open with the server off");
+        set(&mut s, server(true));
+        set(&mut s, channel(VoiceChat::Off));
+        assert!(!s.channel_chat_open("vc"), "a room overridden off closes with the server on");
+        set(&mut s, channel(VoiceChat::Server));
+        assert!(s.channel_chat_open("vc"), "following the server again");
+        let op = s.create_op(CrdtPayload::ChannelVoiceChatChanged { channel_id: "tx".into(), mode: VoiceChat::Off });
+        let _ = s.apply_op(&op);
+        assert!(s.channel_chat_open("tx"), "an override on a text channel closes nothing");
+
+        set(&mut s, channel(VoiceChat::Off));
+        set(&mut s, CrdtPayload::ChannelRemoved { channel_id: "vc".into() });
+        let op = s.create_op(CrdtPayload::ChannelAdded {
+            channel_id: "vc".into(), name: "vc".into(), category: None, channel_type: "voice".into(),
+        });
+        let _ = s.apply_op(&op);
+        assert_eq!(s.channels["vc"].voice_chat, VoiceChat::Server, "a deleted channel's override went with it");
+    }
+
+    /// #107: both voice chat writes need Manage Channels, not Manage Server, so a role
+    /// holding only one of them gets exactly the matching half.
+    #[test]
+    fn voice_chat_setting_needs_manage_channels() {
+        let mut s = test_state("s1".into(), "S".into(), "owner".into());
+        for payload in [
+            CrdtPayload::MemberAdded { peer_id: "alice".into(), display_name: "alice".into(), follow: None, ask: None },
+            CrdtPayload::ChannelAdded { channel_id: "vc".into(), name: "vc".into(), category: None, channel_type: "voice".into() },
+        ] {
+            let op = s.create_op(payload);
+            let _ = s.apply_op(&op);
+        }
+        let base = MemberRole::Member.default_permissions();
+        for (bits, voice, other) in [(Permission::MANAGE_CHANNELS, true, false), (Permission::MANAGE_SERVER, false, true)] {
+            let op = s.create_op(CrdtPayload::RolePermissionsChanged { role: "member".into(), permissions: base | bits });
+            let _ = s.apply_op(&op);
+            assert_eq!(s.setting_change_allowed("alice", VOICE_TEXT_CHAT_KEY, "false"), voice, "server setting with {bits:#x}");
+            assert_eq!(s.setting_change_allowed("alice", "description", "x"), other, "another setting with {bits:#x}");
+            let mut op = s.create_op(CrdtPayload::ChannelVoiceChatChanged { channel_id: "vc".into(), mode: VoiceChat::Off });
+            op.author = "alice".into();
+            assert_eq!(s.op_allowed(&op), voice, "channel override with {bits:#x}");
+        }
+    }
+
+    /// #107: a channel stored before the override existed reads as following the
+    /// server, and one that follows it serializes without the field, byte for byte
+    /// as older clients wrote it.
+    #[test]
+    fn voice_chat_field_is_backward_compatible() {
+        let old = r#"{"channel_id":"vc","name":"vc","category":null,"channel_type":"voice"}"#;
+        let ch: ChannelInfo = serde_json::from_str(old).expect("an old channel parses");
+        assert_eq!(ch.voice_chat, VoiceChat::Server);
+        assert!(!serde_json::to_string(&ch).unwrap().contains("voice_chat"));
+        let off = ChannelInfo { voice_chat: VoiceChat::Off, ..ch };
+        let json = serde_json::to_string(&off).unwrap();
+        assert!(json.contains(r#""voice_chat":"off""#), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelInfo>(&json).unwrap().voice_chat, VoiceChat::Off);
+        let payload = CrdtPayload::ChannelVoiceChatChanged { channel_id: "vc".into(), mode: VoiceChat::On };
+        let back: CrdtPayload = serde_json::from_str(&serde_json::to_string(&payload).unwrap()).unwrap();
+        assert!(matches!(back, CrdtPayload::ChannelVoiceChatChanged { mode: VoiceChat::On, .. }));
+    }
+
+    // r1-vcchat107-review
+
+    /// #107 review: a `voice_chat` value a newer client writes (a checkpoint, a join
+    /// snapshot, a downgrade) must not make the whole server state unreadable.
+    #[test]
+    fn review_an_unknown_voice_chat_mode_keeps_the_state_loadable() {
+        let mut s = test_state("s1".into(), "S".into(), "owner".into());
+        let op = s.create_op(CrdtPayload::ChannelAdded {
+            channel_id: "vc".into(), name: "vc".into(), category: None, channel_type: "voice".into(),
+        });
+        let _ = s.apply_op(&op);
+        let op = s.create_op(CrdtPayload::ChannelVoiceChatChanged { channel_id: "vc".into(), mode: VoiceChat::Off });
+        let _ = s.apply_op(&op);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""voice_chat":"off""#), "fixture: the override is stored");
+        let newer = json.replace(r#""voice_chat":"off""#, r#""voice_chat":"members""#);
+        let parsed = serde_json::from_str::<ServerState>(&newer);
+        assert!(parsed.is_ok(), "one newer voice_chat value made the whole server state unreadable: {:?}", parsed.err());
     }
 }

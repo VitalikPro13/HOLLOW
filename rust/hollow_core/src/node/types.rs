@@ -1039,6 +1039,7 @@ pub(crate) enum NodeCommand {
     UnmuteMember { server_id: String, peer_id: String },
     SetChannelSlowMode { server_id: String, channel_id: String, seconds: u32 },
     SetChannelMediaOnly { server_id: String, channel_id: String, media_only: bool },
+    SetChannelVoiceChat { server_id: String, channel_id: String, mode: crate::crdt::server_state::VoiceChat },
     // -- Label-gated access + temporary grants (issue #32) --
     SetChannelVisibilityLabels { server_id: String, channel_id: String, labels: Vec<String> },
     SetChannelPostingLabels { server_id: String, channel_id: String, labels: Vec<String> },
@@ -1471,6 +1472,7 @@ impl NodeCommand {
             Self::UnmuteMember { .. } => "UnmuteMember",
             Self::SetChannelSlowMode { .. } => "SetChannelSlowMode",
             Self::SetChannelMediaOnly { .. } => "SetChannelMediaOnly",
+            Self::SetChannelVoiceChat { .. } => "SetChannelVoiceChat",
             Self::SetChannelVisibilityLabels { .. } => "SetChannelVisibilityLabels",
             Self::SetChannelPostingLabels { .. } => "SetChannelPostingLabels",
             Self::GrantChannelAccess { .. } => "GrantChannelAccess",

@@ -1385,6 +1385,23 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
     final typingPeers =
         ref.watch(typingProvider.select((t) => t[_stateKey])) ?? {};
 
+    // A voice room with its text chat off (#107) shows none of its history.
+    if (!ref.watch(channelChatOpenProvider(
+        (serverId: widget.serverId, channelId: widget.channelId)))) {
+      return Column(
+        children: [
+          _buildHeader(hollow),
+          Expanded(
+            child: ColoredBox(
+              color: hollow.background,
+              child: const HollowEmptyState(
+                  title: 'Text chat is off in this voice room'),
+            ),
+          ),
+        ],
+      );
+    }
+
     // Custom-emote pull source for every token and reaction in this channel:
     // one online member of the server room.
     return EmoteScope(

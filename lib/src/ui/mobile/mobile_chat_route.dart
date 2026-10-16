@@ -1460,6 +1460,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
     final hollow = HollowTheme.of(context);
     final bg = ref.watch(backgroundProvider);
     _registerBuildListeners();
+    // A voice room with its text chat off (#107) shows none of its history.
+    final chatClosed = !widget.isDm &&
+        !ref.watch(channelChatOpenProvider(
+            (serverId: widget.serverId!, channelId: widget.channelId!)));
 
     Widget scaffold = Scaffold(
       backgroundColor:
@@ -1491,7 +1495,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
                         .identityOf(widget.peerId!)),
               if (_searchOpen) _buildSearchBar(hollow),
               if (!widget.isDm) _buildSyncIndicator(hollow),
-              if (!widget.isDm && !_canReadChannel)
+              if (chatClosed)
+                const Expanded(
+                  child: HollowEmptyState(
+                      title: 'Text chat is off in this voice room'),
+                )
+              else if (!widget.isDm && !_canReadChannel)
                 _buildNoReadPermission(hollow)
               else
                 _buildMessageArea(),
@@ -1814,6 +1823,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       )));
       final muteText = muteBannerText(
           ref.watch(myMuteStatusProvider(widget.serverId!)).valueOrNull);
+      final chatOpen = ref.watch(channelChatOpenProvider((
+        serverId: widget.serverId!,
+        channelId: widget.channelId!,
+      )));
+      // The message area says why (#107); nothing to type into.
+      if (!chatOpen) return const SizedBox.shrink();
       if (!canPost || muteText != null) {
         return _buildBlockedBanner(hollow, muteText);
       }

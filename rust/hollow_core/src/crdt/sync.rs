@@ -213,6 +213,7 @@ pub fn payload_name(payload: &super::operations::CrdtPayload) -> &'static str {
         P::MemberUnmuted { .. } => "MemberUnmuted",
         P::ChannelSlowModeChanged { .. } => "ChannelSlowModeChanged",
         P::ChannelMediaOnlyChanged { .. } => "ChannelMediaOnlyChanged",
+        P::ChannelVoiceChatChanged { .. } => "ChannelVoiceChatChanged",
         P::EmojiAdded { .. } => "EmojiAdded",
         P::EmojiRemoved { .. } => "EmojiRemoved",
         P::StickerAdded { .. } => "StickerAdded",

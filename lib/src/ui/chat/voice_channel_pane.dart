@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -42,7 +43,9 @@ class VoiceChannelPane extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final joined = ref.watch(voiceChannelProvider.select((s) =>
         s.currentServerId == serverId && s.currentChannelId == channelId));
-    final chatOpen = ref.watch(vcChatPanelOpenProvider);
+    final chatOpen = ref.watch(vcChatPanelOpenProvider) &&
+        ref.watch(channelChatOpenProvider(
+            (serverId: serverId, channelId: channelId)));
 
     return CallStageWithPanel(
       stage: Column(
@@ -96,6 +99,9 @@ class _StageHeader extends ConsumerWidget {
     final count = ref.watch(voiceChannelProvider
         .select((s) => s.getParticipants(serverId, channelId).length));
     final chatOpen = ref.watch(vcChatPanelOpenProvider);
+    // The server or this room turned its text chat off (#107).
+    final hasChat = ref.watch(
+        channelChatOpenProvider((serverId: serverId, channelId: channelId)));
     return Container(
       height: kChatHeaderHeight,
       padding: const EdgeInsets.only(
@@ -133,13 +139,14 @@ class _StageHeader extends ConsumerWidget {
               ],
             ),
           ),
-          HollowIconButton(
-            icon: LucideIcons.messageSquare,
-            label: chatOpen ? 'Hide the chat' : 'Show the chat',
-            selected: chatOpen,
-            onPressed: () =>
-                ref.read(vcChatPanelOpenProvider.notifier).state = !chatOpen,
-          ),
+          if (hasChat)
+            HollowIconButton(
+              icon: LucideIcons.messageSquare,
+              label: chatOpen ? 'Hide the chat' : 'Show the chat',
+              selected: chatOpen,
+              onPressed: () =>
+                  ref.read(vcChatPanelOpenProvider.notifier).state = !chatOpen,
+            ),
         ],
       ),
     );

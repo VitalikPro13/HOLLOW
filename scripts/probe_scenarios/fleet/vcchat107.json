@@ -1,0 +1,74 @@
+{
+  "_": [
+    "#107: text chat in voice rooms. e owns a server with a voice room, f joins.",
+    "Both open the room; the chat sits beside it. e turns the server switch off",
+    "in Server settings, Channels; f's chat panel and its Chat button go. e then",
+    "sets the room's own Text chat to On; f's chat comes back.",
+    "run: powershell -File scripts/fleet.ps1 -Scenario vcchat107 -Attach -Peers e,f"
+  ],
+  "peers": ["e", "f"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+
+    { "peer": "e", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "e", "op": "enter_text", "target": "hint:My Awesome Server", "value": "fleet-vc107" },
+    { "peer": "e", "op": "tap", "target": "text:Create", "index": 0 },
+    { "peer": "e", "op": "wait_for", "target": "server:fleet-vc107", "timeout_ms": 30000 },
+    { "peer": "e", "op": "open_server", "name": "fleet-vc107" },
+    { "peer": "e", "op": "wait_for", "target": "channel:general", "timeout_ms": 30000 },
+    { "peer": "e", "op": "tap", "target": "semantics:Create channel", "index": 0 },
+    { "peer": "e", "op": "tap", "target": "dialog > text:Voice", "index": 0 },
+    { "peer": "e", "op": "enter_text", "target": "dialog > type:TextField", "value": "vc107" },
+    { "peer": "e", "op": "tap", "target": "dialog > text:Create", "index": 0 },
+    { "peer": "e", "op": "wait_for", "target": "channel:vc107", "timeout_ms": 30000 },
+
+    { "peer": "e", "op": "right_click", "target": "server:fleet-vc107" },
+    { "peer": "e", "op": "tap", "target": "menu > text:Invite people" },
+    { "peer": "e", "op": "wait_for", "target": "type:HollowCopyField", "timeout_ms": 20000 },
+    { "peer": "e", "op": "capture", "target": "type:HollowCopyField", "as": "INVITE" },
+    { "peer": "e", "op": "key", "value": "escape" },
+
+    { "peer": "f", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "f", "op": "enter_text", "target": "hint:Invite link", "value": "${INVITE}" },
+    { "peer": "f", "op": "tap", "target": "text:Join", "index": 0 },
+    { "peer": "f", "op": "wait_for", "target": "server:fleet-vc107", "timeout_ms": 90000 },
+    { "peer": "f", "op": "open_server", "name": "fleet-vc107" },
+    { "peer": "f", "op": "wait_for", "target": "channel:vc107", "timeout_ms": 30000 },
+
+    { "peer": "f", "op": "open_channel", "name": "vc107" },
+    { "peer": "f", "op": "wait_for", "target": "semantics:Hide the chat", "timeout_ms": 30000 },
+    { "peer": "f", "op": "shot", "name": "f_before_chat_on" },
+
+    { "peer": "e", "op": "tap", "target": "tooltip:Close", "index": 0, "why": "Escape leaves the invite dialog open." },
+    { "peer": "e", "op": "tap", "target": "semantics:Server settings", "index": 0 },
+    { "peer": "e", "op": "wait", "ms": 600, "why": "The settings place opens on its default page." },
+    { "peer": "e", "op": "tap", "target": "text:Channels", "index": 0 },
+    { "peer": "e", "op": "reveal", "target": "text:Text chat in voice rooms", "index": 0 },
+    { "peer": "e", "op": "shot", "name": "e_settings_switch_on" },
+    { "peer": "e", "op": "tap", "target": "semantics:Text chat in voice rooms", "index": 0 },
+    { "peer": "e", "op": "wait", "ms": 800, "why": "The switch flips at once; the op leaves on the next loop turn." },
+    { "peer": "e", "op": "shot", "name": "e_settings_switch_off" },
+
+    { "peer": "f", "op": "wait_for", "gone": "semantics:Hide the chat", "timeout_ms": 30000 },
+    { "peer": "f", "op": "shot", "name": "f_after_chat_off" },
+
+    { "peer": "e", "op": "reveal", "target": "text:vc107", "index": 0 },
+    { "peer": "e", "op": "tap", "target": "semantics:vc107", "index": 0 },
+    { "peer": "e", "op": "reveal", "target": "semantics:Text chat in #vc107", "index": 0 },
+    { "peer": "e", "op": "shot", "name": "e_channel_follows_server" },
+    { "peer": "e", "op": "tap", "target": "semantics:Text chat in #vc107", "index": 0 },
+    { "peer": "e", "op": "tap", "target": "menu > text:On", "index": 0 },
+    { "peer": "e", "op": "shot", "name": "e_channel_override_on" },
+
+    { "peer": "f", "op": "wait_for", "target": "semantics:Hide the chat", "timeout_ms": 30000 },
+    { "peer": "f", "op": "shot", "name": "f_override_on_chat_back" }
+  ],
+  "cleanup": [
+    { "peer": "e", "op": "tap", "target": "text:Overview", "index": 0 },
+    { "peer": "e", "op": "reveal", "target": "text:Delete server", "index": 0 },
+    { "peer": "e", "op": "tap", "target": "text:Delete server", "index": 0 },
+    { "peer": "e", "op": "tap", "target": "dialog > text:Delete server", "index": 0 },
+    { "peer": "e", "op": "wait_for", "gone": "server:fleet-vc107", "timeout_ms": 30000 },
+    { "peer": "f", "op": "wait_for", "gone": "server:fleet-vc107", "timeout_ms": 90000 }
+  ]
+}

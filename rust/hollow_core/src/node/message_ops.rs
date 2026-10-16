@@ -986,7 +986,7 @@ async fn channel_send_gate_error(
     if !server.can_post_in_channel(local_peer_str, channel_id) {
         return Some("You don't have permission to post in this channel".to_string());
     }
-    if let Some(message) = muted_send_error(server, local_peer_str) {
+    if let Some(message) = change_send_error(server, local_peer_str, channel_id) {
         return Some(message);
     }
     if server.is_channel_media_only(channel_id) {
@@ -1003,17 +1003,21 @@ async fn channel_send_gate_error(
     ).await
 }
 
-/// Send-side mute gate (master-keyed, lazy expiry): `Some(error)` when we are
-/// muted on this server. Shared by the new-message, edit and add-reaction paths.
-/// Deletes and reaction removals are deliberately NOT gated, because removing your
-/// own content is always allowed, and slow mode never applies to them.
-fn muted_send_error(server: &ServerState, local_peer_str: &str) -> Option<String> {
+/// Send-side mute and closed-chat gate, the send twin of `live_channel_change_refusal`:
+/// `Some(error)` when we are muted on this server or `channel_id`'s chat is off.
+/// Shared by the new-message, edit, card and add-reaction paths. Deletes and
+/// reaction removals are deliberately NOT gated, because removing your own content
+/// is always allowed, and slow mode never applies to them.
+pub(crate) fn change_send_error(server: &ServerState, local_peer_str: &str, channel_id: &str) -> Option<String> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
     if server.is_muted(local_peer_str, now_ms) {
         return Some("You are muted on this server".to_string());
+    }
+    if !server.channel_chat_open(channel_id) {
+        return Some("Text chat is off in this voice room".to_string());
     }
     None
 }
@@ -1375,7 +1379,7 @@ pub(crate) async fn handle_edit_channel_message(
     // Moderation gate: mute blocks edits exactly like the new-message send gate,
     // and receivers drop a muted member's edits too. Deletes stay allowed, and
     // slow mode / media-only do not apply to edits.
-    if let Some(message) = muted_send_error(server, local_peer_str) {
+    if let Some(message) = change_send_error(server, local_peer_str, &channel_id) {
         let _ = event_tx.send(NetworkEvent::Error { message }).await;
         return;
     }
@@ -1840,7 +1844,7 @@ pub(crate) async fn handle_attach_channel_link_preview(
 
     // Muted members can't author content through this path either — same gate
     // the edit handler applies, for the same reason.
-    if let Some(message) = muted_send_error(server, local_peer_str) {
+    if let Some(message) = change_send_error(server, local_peer_str, &channel_id) {
         let _ = event_tx.send(NetworkEvent::Error { message }).await;
         return;
     }
@@ -2234,7 +2238,7 @@ pub(crate) async fn handle_add_channel_reaction(
 
     // Moderation gate: mute blocks adding reactions, like the new-message send
     // gate. Removals stay allowed, and slow mode does not apply to reactions.
-    if let Some(message) = muted_send_error(server, local_peer_str) {
+    if let Some(message) = change_send_error(server, local_peer_str, &channel_id) {
         let _ = event_tx.send(NetworkEvent::Error { message }).await;
         return;
     }
@@ -2684,8 +2688,9 @@ pub(crate) fn live_channel_post_refusal(
 
 /// Why a LIVE edit, card or reaction by `sender` (a MASTER) on a row in `cid` must
 /// be dropped, judged by OUR state, or `None`: the sender must still be a member who
-/// can see the channel and is not muted. The first rungs of the post ladder; deletes
-/// and unreactions never ask, nor does sync backfill.
+/// can see the channel, is not muted, and the channel's chat is open (a voice room's
+/// can be off, #107). The first rungs of the post ladder; deletes and unreactions
+/// never ask, nor does sync backfill.
 pub(crate) fn live_channel_change_refusal(
     state: &ServerState,
     sender: &str,
@@ -2698,6 +2703,8 @@ pub(crate) fn live_channel_change_refusal(
         Some("cannot see the channel")
     } else if state.is_muted(sender, now_ms) {
         Some("muted")
+    } else if !state.channel_chat_open(cid) {
+        Some("text chat is off in this voice room")
     } else {
         None
     }

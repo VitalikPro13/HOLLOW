@@ -31,6 +31,14 @@ class ChannelInfo {
   final bool meCanSee;
   final bool meCanPost;
 
+  /// False for a voice channel while the server has text chat in voice rooms
+  /// turned off (#107): its chat is hidden, and Rust refuses posts into it.
+  final bool chatOpen;
+
+  /// A voice channel's own text chat setting: 'server' (follow it), 'on' or
+  /// 'off'. Only for the settings control; visibility reads [chatOpen].
+  final String voiceChat;
+
   /// Whether only some members may see it. Mirrors Rust `ChannelInfo::restricted`:
   /// a restricted channel is never public.
   bool get restricted =>
@@ -55,6 +63,8 @@ class ChannelInfo {
     this.postingLabels = const [],
     this.meCanSee = true,
     this.meCanPost = true,
+    this.chatOpen = true,
+    this.voiceChat = 'server',
   });
 
   ChannelInfo copyWith({
@@ -71,6 +81,8 @@ class ChannelInfo {
     List<String>? postingLabels,
     bool? meCanSee,
     bool? meCanPost,
+    bool? chatOpen,
+    String? voiceChat,
   }) {
     return ChannelInfo(
       channelId: channelId ?? this.channelId,
@@ -86,6 +98,8 @@ class ChannelInfo {
       postingLabels: postingLabels ?? this.postingLabels,
       meCanSee: meCanSee ?? this.meCanSee,
       meCanPost: meCanPost ?? this.meCanPost,
+      chatOpen: chatOpen ?? this.chatOpen,
+      voiceChat: voiceChat ?? this.voiceChat,
     );
   }
 }

@@ -41,6 +41,8 @@ class ChannelListNotifier extends Notifier<Map<String, ChannelInfo>> {
         postingLabels: ch.postingLabels,
         meCanSee: ch.meCanSee,
         meCanPost: ch.meCanPost,
+        chatOpen: ch.chatOpen,
+        voiceChat: ch.voiceChat,
       );
     }
     return map;
@@ -126,6 +128,21 @@ final canPostInChannelProvider =
     Provider.family<bool, ({String serverId, String channelId})>((ref, args) {
   final channels = ref.watch(channelListProvider);
   return channels[args.channelId]?.meCanPost ?? true;
+});
+
+/// Whether this channel's text chat shows: false for a voice room whose chat is
+/// off, by its own setting or the server's (#107). Rust decides. A channel the
+/// loaded list does not hold (a call on another server) is read from its own
+/// server's list. Never watches the selection, which a split pane overrides.
+final channelChatOpenProvider =
+    Provider.family<bool, ({String serverId, String channelId})>((ref, args) {
+  final listed = ref.watch(channelListProvider)[args.channelId];
+  if (listed != null) return listed.chatOpen;
+  return ref
+          .watch(serverChannelsProvider(args.serverId))
+          .valueOrNull?[args.channelId]
+          ?.chatOpen ??
+      true;
 });
 
 /// Active mutes for a server. Invalidated on ServerUpdated via the event

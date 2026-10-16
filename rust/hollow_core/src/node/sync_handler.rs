@@ -1430,6 +1430,8 @@ pub(crate) async fn handle_update_server_setting(
     // applies the op locally, the network rejects it, and our state diverges.
     let denied = if key.starts_with("retention_") {
         "Only the server owner can change how long things are kept"
+    } else if key == crate::crdt::server_state::VOICE_TEXT_CHAT_KEY {
+        "Permission denied: cannot manage channels"
     } else {
         "Permission denied: changing server settings needs the Manage Server permission"
     };
@@ -2896,6 +2898,34 @@ pub(crate) async fn handle_set_channel_media_only(
     ).await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_set_channel_voice_chat(
+    server_states: &mut ServerStates,
+    mls: &mut Option<MlsManager>,
+    event_tx: &EventTx,
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    gossip_overlays: &mut GossipOverlays,
+    local_peer_str: &str,
+    server_id: String,
+    channel_id: String,
+    mode: crate::crdt::server_state::VoiceChat,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    author_broadcast_op(
+        server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+        &server_id,
+        OpGate::Perm(Permission::MANAGE_CHANNELS),
+        Some("Permission denied: cannot manage channels"),
+        CrdtPayload::ChannelVoiceChatChanged { channel_id: channel_id.clone(), mode },
+        &format!("Setting voice_chat={mode:?} on {channel_id}"),
+        NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+        OpBroadcast::MlsFirst { mls, crypto_store },
+        crdt_store,
+    ).await
+}
+
 // ── 10e. Label operations ────────────────────────────────────────────
 
 pub(crate) async fn handle_label_op(
@@ -3972,6 +4002,7 @@ async fn emit_crdt_apply_event(
             | CrdtPayload::ChannelPostingChanged { .. }
             | CrdtPayload::ChannelSlowModeChanged { .. }
             | CrdtPayload::ChannelMediaOnlyChanged { .. }
+            | CrdtPayload::ChannelVoiceChatChanged { .. }
             | CrdtPayload::ChannelVisibilityLabelsChanged { .. }
             | CrdtPayload::ChannelPostingLabelsChanged { .. }
             | CrdtPayload::ChannelGrantSet { .. }

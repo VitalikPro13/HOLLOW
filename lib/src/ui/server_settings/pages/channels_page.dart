@@ -23,6 +23,8 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/server_settings/delete_channel_confirm.dart';
+import 'package:hollow/src/ui/server_settings/server_settings_widgets.dart';
+import 'package:hollow/src/ui/server_settings/voice_chat_setting.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
 import 'package:hollow/src/ui/settings/category_bulk_access_dialog.dart';
 import 'package:hollow/src/ui/settings/channel_access_pickers.dart';
@@ -277,6 +279,7 @@ class _ChannelsPageState extends ConsumerState<ChannelsPage> {
               ),
           ],
         ),
+        VoiceRoomsChatSection(serverId: _sid),
       ],
     );
   }
@@ -737,6 +740,24 @@ class _ChannelPanel extends ConsumerWidget {
               onCustomPressed: () => _pickLabels(context, ref, see: true),
             ),
           ),
+          if (voice)
+            SettingsRow(
+              title: 'Text chat',
+              subtitle: 'Follows the server setting unless you choose on or '
+                  'off here',
+              trailing: SettingsMenuPicker<String>(
+                value: channel.voiceChat,
+                semanticLabel: 'Text chat in #${channel.name}',
+                options: kVoiceChatModes,
+                onChanged: (m) => _commit(
+                  context,
+                  ref,
+                  (ch) => ch.copyWith(voiceChat: m),
+                  () => crdt_api.setChannelVoiceChat(
+                      serverId: serverId, channelId: _id, mode: m),
+                ),
+              ),
+            ),
           // Posting, slow mode, media-only and public are text-only: Rust
           // never consults them for a voice join, and rejects a public one.
           if (!voice) ...[

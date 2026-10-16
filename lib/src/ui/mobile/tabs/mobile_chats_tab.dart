@@ -331,24 +331,28 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
         vcState.currentChannelId == channel.channelId) {
       if (!mounted) return;
       final nav = Navigator.of(context, rootNavigator: true);
-      ref.read(selectedServerProvider.notifier).state = serverId;
-      ref.read(selectedChannelProvider.notifier).state = channel.channelId;
-      nav.push(
-        hollowMobileRoute(
-          settings: const RouteSettings(name: MobileChatRoute.routeName),
-          builder: (_) => MobileChatRoute(
-            serverId: serverId,
-            channelId: channel.channelId,
-            channelName: channel.name,
+      // No chat under the call while the room's text chat is off (#107).
+      if (channel.chatOpen) {
+        ref.read(selectedServerProvider.notifier).state = serverId;
+        ref.read(selectedChannelProvider.notifier).state = channel.channelId;
+        nav.push(
+          hollowMobileRoute(
+            settings: const RouteSettings(name: MobileChatRoute.routeName),
+            builder: (_) => MobileChatRoute(
+              serverId: serverId,
+              channelId: channel.channelId,
+              channelName: channel.name,
+            ),
           ),
-        ),
-      ).then((_) {
-        // Guarded: a notification tap may have replaced this chat already.
-        if (mounted && ref.read(selectedChannelProvider) == channel.channelId) {
-          ref.read(selectedServerProvider.notifier).state = null;
-          ref.read(selectedChannelProvider.notifier).state = null;
-        }
-      });
+        ).then((_) {
+          // Guarded: a notification tap may have replaced this chat already.
+          if (mounted &&
+              ref.read(selectedChannelProvider) == channel.channelId) {
+            ref.read(selectedServerProvider.notifier).state = null;
+            ref.read(selectedChannelProvider.notifier).state = null;
+          }
+        });
+      }
       nav.push(hollowMobileRoute(
         transition: HollowRouteTransition.slideUp,
         builder: (_) => MobileVoiceChannelRoute(
@@ -382,24 +386,27 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     });
     if (!mounted) return;
     final nav = Navigator.of(context, rootNavigator: true);
-    ref.read(selectedServerProvider.notifier).state = serverId;
-    ref.read(selectedChannelProvider.notifier).state = channel.channelId;
-    nav.push(
-      hollowMobileRoute(
-        settings: const RouteSettings(name: MobileChatRoute.routeName),
-        builder: (_) => MobileChatRoute(
-          serverId: serverId,
-          channelId: channel.channelId,
-          channelName: channel.name,
+    // No chat under the call while the room's text chat is off (#107).
+    if (channel.chatOpen) {
+      ref.read(selectedServerProvider.notifier).state = serverId;
+      ref.read(selectedChannelProvider.notifier).state = channel.channelId;
+      nav.push(
+        hollowMobileRoute(
+          settings: const RouteSettings(name: MobileChatRoute.routeName),
+          builder: (_) => MobileChatRoute(
+            serverId: serverId,
+            channelId: channel.channelId,
+            channelName: channel.name,
+          ),
         ),
-      ),
-    ).then((_) {
-      // Guarded: a notification tap may have replaced this chat already.
-      if (mounted && ref.read(selectedChannelProvider) == channel.channelId) {
-        ref.read(selectedServerProvider.notifier).state = null;
-        ref.read(selectedChannelProvider.notifier).state = null;
-      }
-    });
+      ).then((_) {
+        // Guarded: a notification tap may have replaced this chat already.
+        if (mounted && ref.read(selectedChannelProvider) == channel.channelId) {
+          ref.read(selectedServerProvider.notifier).state = null;
+          ref.read(selectedChannelProvider.notifier).state = null;
+        }
+      });
+    }
     nav.push(hollowMobileRoute(
       transition: HollowRouteTransition.slideUp,
       builder: (_) => MobileVoiceChannelRoute(

@@ -44,6 +44,10 @@ pub struct ChannelFfi {
     pub posting_labels: Vec<String>,
     pub me_can_see: bool,
     pub me_can_post: bool,
+    /// False for a voice channel whose text chat is off (#107): hide its chat.
+    pub chat_open: bool,
+    /// A voice channel's own setting: "server" (follow it), "on" or "off".
+    pub voice_chat: String,
 }
 
 /// A temporary channel access grant for FFI (Dart-visible). `permanent` =
@@ -344,7 +348,7 @@ fn channels_from_state(state: &crate::crdt::server_state::ServerState) -> Vec<Ch
         .channels_list()
         .into_iter()
         .map(|ch| {
-            use crate::crdt::server_state::{ChannelType, ChannelVisibility, ChannelPosting};
+            use crate::crdt::server_state::{ChannelType, ChannelVisibility, ChannelPosting, VoiceChat};
             ChannelFfi {
                 channel_id: ch.channel_id.clone(),
                 name: ch.name.clone(),
@@ -375,7 +379,15 @@ fn channels_from_state(state: &crate::crdt::server_state::ServerState) -> Vec<Ch
                     .unwrap_or(false),
                 me_can_post: me.as_deref()
                     .map(|m| state.can_post_in_channel_at(m, &ch.channel_id, now_ms))
-                    .unwrap_or(false),
+                    .unwrap_or(false)
+                    && state.channel_chat_open(&ch.channel_id),
+                chat_open: state.channel_chat_open(&ch.channel_id),
+                voice_chat: match ch.voice_chat {
+                    VoiceChat::Server => "server",
+                    VoiceChat::On => "on",
+                    VoiceChat::Off => "off",
+                }
+                .to_string(),
             }
         })
         .collect()
@@ -1467,6 +1479,31 @@ pub fn set_channel_media_only(server_id: String, channel_id: String, media_only:
             channel_id,
             media_only,
         }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Set a voice channel's text chat (#107): `mode` is "server" (follow the
+/// server's setting), "on" or "off".
+#[frb]
+pub fn set_channel_voice_chat(server_id: String, channel_id: String, mode: String) -> Result<(), String> {
+    use crate::crdt::server_state::VoiceChat;
+    let mode = match mode.as_str() {
+        "server" => VoiceChat::Server,
+        "on" => VoiceChat::On,
+        "off" => VoiceChat::Off,
+        _ => return Err(format!("Unknown voice chat mode {mode}")),
+    };
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+
+    let rt = get_runtime();
+    rt.block_on(
+        cmd_tx.send(node::NodeCommand::SetChannelVoiceChat { server_id, channel_id, mode }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 

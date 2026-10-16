@@ -2209,6 +2209,15 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
+                    NodeCommand::SetChannelVoiceChat { server_id, channel_id, mode } => {
+                        if sync_handler::handle_set_channel_voice_chat(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &mut gossip_overlays, &local_peer_str,
+                            server_id, channel_id, mode,
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
                     // -- Guest sync commands (Public Channels Phase 3) --
                     NodeCommand::RequestPublicChannels { server_id } => {
                         hollow_log!("[HOLLOW-GUEST] RequestPublicChannels for {server_id}, is_member={}", server_states.contains_key(&server_id));
@@ -9061,6 +9070,17 @@ async fn handle_incoming_request_inner(
                             .as_millis() as u64;
                         if state.is_muted(&peer_str, now_ms) {
                             hollow_log!("[HOLLOW-MOD] DROPPED FileHeader from muted member {peer_str}");
+                            return;
+                        }
+                        // An unasked card counts as a post: a member who cannot see the
+                        // channel, or a voice room with its chat off (#107), drops it.
+                        if !explicitly_requested
+                            && let Some(c) = &cid
+                            && let Some(reason) = message_ops::live_channel_change_refusal(
+                                state, &super::resolver::resolve(peer_str), c, now_ms,
+                            )
+                        {
+                            hollow_log!("[HOLLOW-MOD] DROPPED FileHeader from {peer_str} in {c}: {reason}");
                             return;
                         }
                         if let Some(c) = &cid {

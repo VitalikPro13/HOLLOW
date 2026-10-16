@@ -48731,3 +48731,214 @@ async fn overlay_field_announces_coalesce() {
     assert!((1..=2).contains(&sent), "{sent} profile announces for five toggles");
     drop((a, b));
 }
+
+// r1-vcchat107
+
+/// A live post into `channel_id` that `signer_tag`'s client signs and puts on the wire.
+fn signed_live_post(signer_tag: u8, server_id: &str, channel_id: &str, mid: &str, text: &str) -> super::types::MessageEnvelope {
+    use base64::Engine as _;
+    let kp = NativeKeypair::from_secret_bytes(&seed_bytes(signer_tag));
+    let pk_b64 = base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf());
+    let ts = super::types::now_ms();
+    let order_us = ts * 1000;
+    let extras = super::crypto_handler::SignedExtras {
+        mid: Some(mid),
+        reply_to: None,
+        file_id: None,
+        order_us: Some(order_us),
+        lp_digest: None,
+        album: None,
+    };
+    let (sig, pk) = super::crypto_handler::sign_message_versioned(
+        &kp, &pk_b64, "ch", &format!("{server_id}:{channel_id}"), &kp.peer_id(), ts, &extras, text,
+    );
+    super::types::MessageEnvelope::ChannelMessage {
+        inner: Box::new(super::types::ChannelMessagePayload {
+            sid: server_id.to_string(),
+            cid: channel_id.to_string(),
+            text: text.to_string(),
+            ts,
+            sig,
+            pk,
+            mid: Some(mid.to_string()),
+            reply_to: None,
+            file_id: None,
+            link_preview: None,
+            order_us: Some(order_us),
+            album: None,
+        }),
+    }
+}
+
+/// #107: text chat in voice rooms, server-wide with a per-voice-channel override.
+/// Receivers refuse a member's own post into a voice room whose chat is off, on the
+/// MLS lane and on the carried Olm lane, while a text channel and a voice room whose
+/// chat is on take it, and posts from before stay stored. Server off + a channel on
+/// lets posts into that channel only; server on + a channel off refuses there only.
+/// Only Manage Channels flips either: a plain member's client refuses, and its forged
+/// ops are refused by `op_allowed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn voice_text_chat_off_refuses_voice_posts_on_both_lanes() {
+    use crate::crdt::operations::{CrdtPayload, MemberRole};
+    use crate::crdt::server_state::VoiceChat;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const V: u8 = 234;
+    const A: u8 = 235;
+    let (mut o, mut v, a, server_id) = setup_epoch_race_trio(&relay, 233, V, A).await;
+    let general = general_channel_of(&server_id);
+    let voice = crate::node::new_channel_id(&server_id);
+    let stage = crate::node::new_channel_id(&server_id);
+    for (cid, name) in [(&voice, "lounge"), (&stage, "stage")] {
+        o.cmd_tx
+            .send(NodeCommand::CreateChannel {
+                server_id: server_id.clone(), channel_id: cid.clone(), name: name.into(), category: None, channel_type: "voice".into(),
+            })
+            .await
+            .unwrap();
+    }
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: a.master_id.clone(), new_role: "admin".into() })
+        .await
+        .unwrap();
+    for node in [&o, &v, &a] {
+        assert!(
+            wait_until(20, async || node.live_server_state(&server_id).await.is_some_and(|s| {
+                s.channels.contains_key(&voice) && s.channels.contains_key(&stage) && s.get_role(&a.master_id) == MemberRole::Admin
+            }))
+            .await,
+            "every node holds both voice channels and A as an admin",
+        );
+    }
+    let holds = |node: &TestNode, cid: &str, text: &str| node.channel_messages(&server_id, cid).iter().any(|m| m.text == text);
+    let open_at = async |node: &TestNode, cid: &str| {
+        node.live_server_state(&server_id).await.is_some_and(|s| s.channel_chat_open(cid))
+    };
+    let set_chat = |on: bool| NodeCommand::UpdateServerSetting {
+        server_id: server_id.clone(), key: "voice_text_chat".into(), value: on.to_string(),
+    };
+    let set_channel = |cid: &str, mode: VoiceChat| NodeCommand::SetChannelVoiceChat {
+        server_id: server_id.clone(), channel_id: cid.to_string(), mode,
+    };
+    // A post tagged `tag` on both lanes (a mid holds no spaces).
+    let post_both = async |v: &TestNode, o: &TestNode, cid: &str, tag: &str| {
+        mls_envelope_as(v, &server_id, signed_live_post(V, &server_id, cid, &format!("{}-mls", tag.replace(' ', "-")), &format!("{tag} over mls"))).await;
+        olm_envelope_as(v, o, signed_live_post(V, &server_id, cid, &format!("{}-olm", tag.replace(' ', "-")), &format!("{tag} over olm"))).await;
+    };
+    let both_held = |node: &TestNode, cid: &str, tag: &str| {
+        holds(node, cid, &format!("{tag} over mls")) && holds(node, cid, &format!("{tag} over olm"))
+    };
+    let none_held = |node: &TestNode, cid: &str, tag: &str| {
+        !holds(node, cid, &format!("{tag} over mls")) && !holds(node, cid, &format!("{tag} over olm"))
+    };
+
+    post_both(&v, &o, &voice, "on").await;
+    assert!(wait_until(15, async || both_held(&o, &voice, "on")).await, "control: voice posts land on both lanes while chat is on");
+
+    // A plain member may change neither setting: its own client refuses, and its
+    // signed ops are refused by every receiver.
+    drain_events(&mut v);
+    v.cmd_tx.send(set_chat(false)).await.unwrap();
+    assert!(
+        wait_event(&mut v, std::time::Duration::from_secs(5), |ev| matches!(ev, NetworkEvent::Error { .. })).await,
+        "a plain member's own client refuses to turn voice chat off",
+    );
+    drain_events(&mut v);
+    v.cmd_tx.send(set_channel(&voice, VoiceChat::Off)).await.unwrap();
+    assert!(
+        wait_event(&mut v, std::time::Duration::from_secs(5), |ev| matches!(ev, NetworkEvent::Error { .. })).await,
+        "a plain member's own client refuses to turn a voice room's chat off",
+    );
+    // One op per forge: two forged in the same millisecond share a clock and dedup.
+    for payload in [
+        CrdtPayload::ServerSettingChanged { key: "voice_text_chat".into(), value: "false".into() },
+        CrdtPayload::ChannelVoiceChatChanged { channel_id: voice.clone(), mode: VoiceChat::Off },
+    ] {
+        let forged = forge_crdt_op(&server_id, &v.master_id, payload, 0, Some(&v.master_kp));
+        carry_as(&v, &o, crdt_broadcast(&server_id, &forged)).await;
+        carried_barrier(&v, &mut o).await;
+        assert!(open_at(&o, &voice).await, "a plain member's signed op closed a voice room's chat");
+    }
+
+    // Server off, stage overridden on.
+    a.cmd_tx.send(set_chat(false)).await.unwrap();
+    a.cmd_tx.send(set_channel(&stage, VoiceChat::On)).await.unwrap();
+    for node in [&o, &v] {
+        assert!(
+            wait_until(20, async || !open_at(node, &voice).await && open_at(node, &stage).await).await,
+            "the admin's changes reach every member",
+        );
+    }
+    drain_events(&mut v);
+    v.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(), channel_id: voice.clone(), text: "honest".into(),
+            message_id: "vc-off-honest".into(), reply_to_mid: None, link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut v, std::time::Duration::from_secs(5), |ev| matches!(ev, NetworkEvent::Error { .. })).await,
+        "an honest client refuses its own post into a closed voice room",
+    );
+    post_both(&v, &o, &voice, "off").await;
+    post_both(&v, &o, &general, "text").await;
+    post_both(&v, &o, &stage, "stage on").await;
+    assert!(
+        wait_until(15, async || both_held(&o, &general, "text") && both_held(&o, &stage, "stage on")).await,
+        "a text channel and a voice room overridden on take posts on both lanes while the server has voice chat off",
+    );
+    carried_barrier(&v, &mut o).await;
+    assert!(none_held(&o, &voice, "off"), "a voice post landed in a closed voice room");
+    assert!(!holds(&a, &voice, "off over mls"), "the admin stored a voice post over MLS in a closed voice room");
+    assert!(both_held(&o, &voice, "on"), "turning voice chat off erased the posts from before");
+
+    // Server on, voice overridden off; stage back to following the server.
+    a.cmd_tx.send(set_chat(true)).await.unwrap();
+    a.cmd_tx.send(set_channel(&voice, VoiceChat::Off)).await.unwrap();
+    a.cmd_tx.send(set_channel(&stage, VoiceChat::Server)).await.unwrap();
+    for node in [&o, &v] {
+        assert!(
+            wait_until(20, async || {
+                node.live_server_state(&server_id).await.is_some_and(|s| {
+                    s.voice_text_chat_default() && !s.channel_chat_open(&voice) && s.channel_chat_open(&stage)
+                })
+            })
+            .await,
+            "the server back on with the lounge overridden off reaches every member",
+        );
+    }
+    post_both(&v, &o, &voice, "lounge off").await;
+    post_both(&v, &o, &stage, "stage follows").await;
+    assert!(wait_until(15, async || both_held(&o, &stage, "stage follows")).await, "a voice room following the server takes posts");
+    carried_barrier(&v, &mut o).await;
+    assert!(none_held(&o, &voice, "lounge off"), "a post landed in a voice room overridden off");
+
+    // An unasked file card over Olm counts as a post too: refused in the closed room,
+    // taken in the open one (review MED 1).
+    let header = |fid: &str, cid: &str| {
+        let payload: super::types::FileHeaderPayload = serde_json::from_value(serde_json::json!({
+            "fid": fid, "name": "pic.png", "ext": "png", "mime": "image/png", "size": 10, "chunks": 1,
+            "img": true, "mid": format!("{fid}-m"), "sid": server_id, "cid": cid, "ts": super::types::now_ms(),
+        }))
+        .expect("a header");
+        super::types::MessageEnvelope::FileHeader { inner: Box::new(payload) }
+    };
+    olm_envelope_as(&v, &o, header("vc107-card-closed", &voice)).await;
+    olm_envelope_as(&v, &o, header("vc107-card-open", &stage)).await;
+    let card = |node: &TestNode, fid: &str| node.store().get_file_metadata(fid).ok().flatten().is_some();
+    assert!(wait_until(15, async || card(&o, "vc107-card-open")).await, "control: a card into an open voice room lands over Olm");
+    assert!(!card(&o, "vc107-card-closed"), "a card landed over Olm in a voice room overridden off");
+
+    // Back to following the server: posts land again.
+    a.cmd_tx.send(set_channel(&voice, VoiceChat::Server)).await.unwrap();
+    for node in [&o, &v] {
+        assert!(wait_until(20, async || open_at(node, &voice).await).await, "following the server again reaches every member");
+    }
+    post_both(&v, &o, &voice, "again").await;
+    assert!(wait_until(15, async || both_held(&o, &voice, "again")).await, "voice posts land again once the room follows the server");
+    drop((o, v, a));
+}

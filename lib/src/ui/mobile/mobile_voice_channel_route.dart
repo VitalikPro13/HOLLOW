@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -202,8 +203,13 @@ class _MobileVoiceChannelRouteState
                   ],
                 ),
                 onMinimise: () => Navigator.of(context).maybePop(),
-                // A meeting's chat lives with the meeting, not in a channel.
-                onOpenChat: conference
+                // A meeting's chat lives with the meeting, not in a channel;
+                // a voice room's can be turned off (#107).
+                onOpenChat: conference ||
+                        !ref.watch(channelChatOpenProvider((
+                          serverId: widget.serverId,
+                          channelId: widget.channelId,
+                        )))
                     ? null
                     : () => openMobileCallChat(
                           context,

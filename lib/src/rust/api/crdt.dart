@@ -544,6 +544,18 @@ Future<void> setChannelMediaOnly({
   mediaOnly: mediaOnly,
 );
 
+/// Set a voice channel's text chat (#107): `mode` is "server" (follow the
+/// server's setting), "on" or "off".
+Future<void> setChannelVoiceChat({
+  required String serverId,
+  required String channelId,
+  required String mode,
+}) => RustLib.instance.api.crateApiCrdtSetChannelVoiceChat(
+  serverId: serverId,
+  channelId: channelId,
+  mode: mode,
+);
+
 /// Change the permissions bitmask for a role. Owner-only.
 Future<void> changeRolePermissions({
   required String serverId,
@@ -667,6 +679,12 @@ class ChannelFfi {
   final bool meCanSee;
   final bool meCanPost;
 
+  /// False for a voice channel whose text chat is off (#107): hide its chat.
+  final bool chatOpen;
+
+  /// A voice channel's own setting: "server" (follow it), "on" or "off".
+  final String voiceChat;
+
   const ChannelFfi({
     required this.channelId,
     required this.name,
@@ -681,6 +699,8 @@ class ChannelFfi {
     required this.postingLabels,
     required this.meCanSee,
     required this.meCanPost,
+    required this.chatOpen,
+    required this.voiceChat,
   });
 
   @override
@@ -697,7 +717,9 @@ class ChannelFfi {
       visibilityLabels.hashCode ^
       postingLabels.hashCode ^
       meCanSee.hashCode ^
-      meCanPost.hashCode;
+      meCanPost.hashCode ^
+      chatOpen.hashCode ^
+      voiceChat.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -716,7 +738,9 @@ class ChannelFfi {
           visibilityLabels == other.visibilityLabels &&
           postingLabels == other.postingLabels &&
           meCanSee == other.meCanSee &&
-          meCanPost == other.meCanPost;
+          meCanPost == other.meCanPost &&
+          chatOpen == other.chatOpen &&
+          voiceChat == other.voiceChat;
 }
 
 /// A temporary channel access grant for FFI (Dart-visible). `permanent` =
