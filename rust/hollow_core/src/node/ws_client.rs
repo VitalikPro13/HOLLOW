@@ -586,6 +586,25 @@ pub(crate) fn with_test_away<F: Future>(away: Arc<AtomicBool>, event_loop: F) ->
     TEST_AWAY.scope(away, event_loop)
 }
 
+tokio::task_local! {
+    /// The relay this node's socket dials (`relay_auth_domain`), which ring control names.
+    static RELAY_DOMAIN: String;
+}
+
+/// Run a node's event loop knowing the relay it dials.
+pub(crate) fn with_relay_domain<F: Future>(domain: String, event_loop: F) -> impl Future<Output = F::Output> {
+    RELAY_DOMAIN.scope(domain, event_loop)
+}
+
+/// The relay this node dials, outside a node's event loop none.
+pub(crate) fn relay_domain() -> Option<String> {
+    RELAY_DOMAIN.try_with(|d| d.clone()).ok().filter(|d| !d.is_empty())
+}
+
+/// The relay every harness node dials.
+#[cfg(test)]
+pub(crate) const HARNESS_RELAY_DOMAIN: &str = "relay.harness.test";
+
 /// Flush, wait briefly for the relay's ack, close cleanly into the session's grace and
 /// stay closed until the next nudge. Returns once every client closed.
 pub async fn suspend() {
@@ -2028,6 +2047,7 @@ fn command_frame(cmd: &WsCommand) -> Option<Frame> {
             });
             if let Some(auth) = auth {
                 msg["owner"] = auth.owner.clone().into();
+                msg["v"] = 2.into();
                 msg["ts"] = auth.ts_ms.into();
                 msg["sig"] = auth.sig.clone().into();
             }
@@ -2995,6 +3015,12 @@ mod tests {
         assert!(command_frame(&WsCommand::SetPushPrefs { prefs_json: "not json".into() }).is_none(), "malformed prefs write nothing");
         assert_eq!(text(WsCommand::KillAck { signal: None }), kill_ack_frame(None));
         assert!(command_frame(&WsCommand::SetDoor { room_code: "r".into(), door: None }).is_none());
+        let auth = super::super::ring_auth::RingAuth { owner: "o".into(), ts_ms: 5, sig: "s".into() };
+        assert_eq!(
+            text(WsCommand::SetTopicBuffer { room_code: "r".into(), channels: vec!["c".into()], retention_secs: 60, clear: false, auth: Some(auth) }),
+            serde_json::json!({ "type": "set_topic_buffer", "room": "r", "channels": ["c"], "retention_secs": 60, "clear": false, "owner": "o", "v": 2, "ts": 5, "sig": "s" }),
+            "a signed control says it is ring2"
+        );
         for frame in [
             command_frame(&WsCommand::SendToRoom { room_code: "r".into(), data: vec![1] }).unwrap(),
             command_frame(&WsCommand::GetTurnCredentials).unwrap(),

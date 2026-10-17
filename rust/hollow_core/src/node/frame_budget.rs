@@ -303,6 +303,11 @@ impl FrameBudget {
         self.outbox.push(device, [item], now);
     }
 
+    /// Whether our paced bulk to `device` still holds anything.
+    pub(crate) fn lane_holds(&self, device: &str) -> bool {
+        self.outbox.lanes.get(device).is_some_and(|lane| !lane.items.is_empty())
+    }
+
     /// What may go out now, per device.
     pub(crate) fn ready(&mut self, now: Instant) -> Vec<(String, Vec<Paced>)> {
         let due: Vec<String> = self.held.iter().filter(|(_, (at, _))| *at <= now).map(|(d, _)| d.clone()).collect();
@@ -362,6 +367,24 @@ pub(crate) fn pace_carried(
         super::olm_lane::carry(ws_cmd_tx, device, None, msg, super::olm_lane::NoSession::Queue);
     } else if let Some(item) = Paced::carried(msg) {
         budget.pace(device, item, Instant::now());
+    }
+}
+
+/// [`pace_carried`] for our answer to `device`'s ask: lost when it cannot go, as the
+/// device asks again.
+pub(crate) fn pace_answer(
+    budget: &mut FrameBudget,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    us: &str,
+    device: &str,
+    msg: &HavenMessage,
+) {
+    if super::resolver::same_identity(device, us) {
+        super::olm_lane::carry(ws_cmd_tx, device, None, msg, super::olm_lane::NoSession::Drop);
+    } else if let Some(json) = super::olm_lane::carried_json(msg) {
+        #[cfg(test)]
+        budget.note_carried(device, &json);
+        budget.pace(device, Paced::Answer(json), Instant::now());
     }
 }
 
@@ -780,7 +803,7 @@ mod tests {
         let rooms = HashMap::from([("room".to_string(), std::collections::HashSet::from(in_room))]);
         let (ws_cmd_tx, mut ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut b = FrameBudget::default();
-        let ask = HavenMessage::SyncRequest { server_id: "s".into(), state_vector_json: "{}".into(), mls_epoch: None, nonce: None };
+        let ask = HavenMessage::SyncRequest { server_id: "s".into(), state_vector_json: "{}".into(), mls_epoch: None, nonce: None, full: None };
         let key_ask = HavenMessage::MlsKeyPackageRequest { server_id: "s".into(), channel_id: None };
         pace_carried(&mut b, &ws_cmd_tx, "pace-me", "pace-friend-a", &ask);
         pace_carried(&mut b, &ws_cmd_tx, "pace-me", "pace-sibling", &ask);

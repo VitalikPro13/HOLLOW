@@ -625,16 +625,21 @@ static json base_link(const std::string& server, const Door& door, const Ident& 
     return join_lock::links_to_json({l});
 }
 
+// A ring control signed as ring2 for `domain` (this relay's when empty), or as ring1.
 static json ring_control(const std::string& room, const std::string& owner, const std::vector<std::string>& channels,
-                         const Ident& signer) {
+                         const Ident& signer, int version = 2, const std::string& domain = "") {
     ring_auth::Control c;
     c.room = room;
     c.owner = owner;
     c.ts_ms = wall_ms();
     c.retention_secs = 3600;
     c.channels = channels;
-    return {{"type", "set_topic_buffer"}, {"room", room},           {"owner", owner}, {"channels", channels},
-            {"retention_secs", 3600},     {"clear", false},         {"ts", c.ts_ms},  {"sig", signer.sign(ring_auth::payload(c))}};
+    const std::string payload = version == 2 ? ring_auth::payload_ring2(c, domain.empty() ? auth_domain(g_domain) : domain)
+                                             : ring_auth::payload_ring1(c);
+    json j = {{"type", "set_topic_buffer"}, {"room", room},           {"owner", owner}, {"channels", channels},
+              {"retention_secs", 3600},     {"clear", false},         {"ts", c.ts_ms},  {"sig", signer.sign(payload)}};
+    if (version == 2) j["v"] = 2;
+    return j;
 }
 
 static json unsigned_ring_control(const std::string& room, const std::vector<std::string>& channels) {
@@ -747,7 +752,7 @@ static void test_nicknames() {
 }
 
 static void test_rings() {
-    printf("rings (ACCEPT_UNSIGNED_RING_CONTROL %s)\n", g_legacy ? "on" : "off");
+    printf("rings (ACCEPT_UNSIGNED_RING_CONTROL, ACCEPT_RING1_CONTROL %s)\n", g_legacy ? "on" : "off");
     const std::string room = room_name("ring");
     auto a = login(Ident());
     auto b = login(Ident());
@@ -783,15 +788,31 @@ static void test_rings() {
     const std::string forged = owner.peer + ".c3";
     a->send(ring_control(server, owner.peer, {forged}, owner));
     a->send_bin(frame(0x07, {server, forged}, "ring-forged"));
+    const std::string ring1 = owner.peer + ".c4";
+    a->send(ring_control(server, owner.peer, {ring1}, change, 1));
+    a->send_bin(frame(0x07, {server, ring1}, "ring-one"));
+    const std::string elsewhere = owner.peer + ".c5";
+    a->send(ring_control(server, owner.peer, {elsewhere}, change, 2, "another.relay"));
+    a->send_bin(frame(0x07, {server, elsewhere}, "ring-elsewhere"));
     settle({a.get(), late.get()});
     late->ws.inbox.clear();  // the live copies
     late->send(catchup(server, topic));
     late->send(catchup(server, forged));
+    late->send(catchup(server, ring1));
+    late->send(catchup(server, elsewhere));
     settle({late.get()});
-    check("a control the change key signed opens a ring in either build",
+    check("a ring2 control the change key signed opens a ring in either build",
           got(*late, bin(frame(0x08, {server, topic, a->id.peer}, "ring-signed"))));
     check("a control signed by another key opens none",
           !got(*late, bin(frame(0x08, {server, forged, a->id.peer}, "ring-forged"))));
+    check("a ring2 control signed for another relay opens none",
+          !got(*late, bin(frame(0x08, {server, elsewhere, a->id.peer}, "ring-elsewhere"))));
+    const bool one = got(*late, bin(frame(0x08, {server, ring1, a->id.peer}, "ring-one")));
+    if (g_legacy) {
+        check("a ring1 control opens a ring while ACCEPT_RING1_CONTROL is on", one);
+    } else {
+        check("a ring1 control opens none once ACCEPT_RING1_CONTROL is off", !one);
+    }
 }
 
 // Every frame up to and including the first that matches `pred`, in arrival order.

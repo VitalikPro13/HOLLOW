@@ -293,6 +293,8 @@ pub(crate) fn spawn_sealer(
             // An Olm frame waits here for its session save, and so does all that follows it.
             let mut relay_gone = false;
             for cmd in out {
+                #[cfg(test)]
+                super::test_harness::g1_probe::note_olm(&cmd);
                 if let Some(cmd) = super::olm_lane::released(cmd, &carry_tx).await
                     && relay.send(seal_command(&keypair, cmd)).is_err()
                 {

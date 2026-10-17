@@ -2411,6 +2411,14 @@ impl MessageStore {
         }
     }
 
+    /// Delete one blob of a server.
+    pub fn delete_server_blob(&self, server_id: &str, key: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM server_blobs WHERE server_id = ?1 AND key = ?2", params![server_id, key])
+            .map_err(|e| format!("Failed to delete server blob: {e}"))?;
+        Ok(())
+    }
+
     /// Delete all blobs for a server.
     pub fn delete_server_blobs(&self, server_id: &str) -> Result<(), String> {
         self.conn

@@ -1221,6 +1221,7 @@ impl RelayInner {
         if let Some(tap) = inner.tap.as_mut() {
             tap.record(from, &cmd);
         }
+        g1_probe::note_cmd(from, &cmd);
         match cmd {
             WsCommand::JoinRoom { room_code } => {
                 inner.join(from, &room_code, false);
@@ -1365,10 +1366,10 @@ impl RelayInner {
                 }
             }
             WsCommand::SetTopicBuffer { room_code, channels, retention_secs, clear, auth } => {
-                // The relay as 0.12 runs it (ring_auth.h): only a control signed by the
-                // change key of the newest lock it holds makes or stops rings; an
-                // unsigned one only keeps existing rings from idling out, which the mock
-                // does not model.
+                // The relay as 0.12.2 runs it (ring_auth.h): only a ring2 control naming
+                // this relay and signed by the change key of the newest lock it holds makes
+                // or stops rings; an unsigned one only keeps existing rings from idling
+                // out, which the mock does not model.
                 let Some(auth) = auth else { return };
                 if !inner.peer_in_room(&room_code, from) {
                     return;
@@ -1379,7 +1380,7 @@ impl RelayInner {
                     .cloned()
                     .unwrap_or_default();
                 let now_ms = wall_now_ms();
-                if !super::ring_auth::relay_accepts(&room_code, &auth, retention_secs, clear, &channels, &chain, now_ms) {
+                if !super::ring_auth::relay_accepts(super::ws_client::HARNESS_RELAY_DOMAIN, &room_code, &auth, retention_secs, clear, &channels, &chain, now_ms) {
                     return;
                 }
                 if clear {
@@ -2269,6 +2270,7 @@ impl RelayInner {
         let Some(session) = self.sessions.get_mut(dev) else {
             // Online with no session: a device back without rejoining anything.
             if conn.online {
+                g1_probe::note_delivery(&ev);
                 let _ = conn.event_tx.send(ev);
                 return true;
             }
@@ -2280,6 +2282,7 @@ impl RelayInner {
                 // A healthy device acks at once, so its ring stays empty.
                 session.acked = session.out_h;
                 conn.client.in_h += 1;
+                g1_probe::note_delivery(&ev);
                 let _ = conn.event_tx.send(ev);
                 true
             }
@@ -2299,6 +2302,7 @@ impl RelayInner {
         let live = self.sessions.get(dev).is_none_or(|s| s.socket == Socket::Live);
         match self.conns.get(dev).filter(|c| c.online && live) {
             Some(conn) => {
+                g1_probe::note_delivery(&ev);
                 let _ = conn.event_tx.send(ev);
                 true
             }
@@ -3889,6 +3893,7 @@ fn sync_response(server_id: &str, ops: &[crate::crdt::operations::CrdtOp]) -> su
         server_id: server_id.to_string(),
         ops_json: serde_json::to_string(ops).expect("serialize ops"),
         nonce: None,
+        page: None,
     }
 }
 
@@ -15254,7 +15259,7 @@ async fn authz_only_the_servers_authority_changes_its_rings() {
         .unwrap();
     let junk = vec!["junk".to_string()];
     let forged_link = super::join_lock::mint_base(&server_id, 99, &stranger_kp, Some("00")).unwrap();
-    let forged = super::ring_auth::sign(&server_id, "", 604800, false, &junk, &forged_link.link, &forged_link.change)
+    let forged = super::ring_auth::sign(super::ws_client::HARNESS_RELAY_DOMAIN, &server_id, "", 604800, false, &junk, &forged_link.link, &forged_link.change)
         .expect("a key it holds signs");
     stranger
         .cmd_tx
@@ -15266,7 +15271,7 @@ async fn authz_only_the_servers_authority_changes_its_rings() {
             auth: Some(forged.clone()),
         })
         .unwrap();
-    let forged_clear = super::ring_auth::sign(&server_id, "", 0, true, &[], &forged_link.link, &forged_link.change).unwrap();
+    let forged_clear = super::ring_auth::sign(super::ws_client::HARNESS_RELAY_DOMAIN, &server_id, "", 0, true, &[], &forged_link.link, &forged_link.change).unwrap();
     stranger
         .cmd_tx
         .send(WsCommand::SetTopicBuffer {
@@ -15351,7 +15356,7 @@ async fn authz_a_legacy_servers_rings_follow_its_owner_not_the_first_signer() {
     let squat = |channel: &str| super::ring_auth::ring_topic(&server_id, Some(&s_id), channel);
     let owner_topic = |channel: &str| super::ring_auth::ring_topic(&server_id, Some(&ids[0]), channel);
     let own = vec![squat(&general), squat(super::types::JOIN_TOPIC)];
-    let signed = super::ring_auth::sign(&server_id, &s_id, 604800, false, &own, &lock.link, &lock.change).unwrap();
+    let signed = super::ring_auth::sign(super::ws_client::HARNESS_RELAY_DOMAIN, &server_id, &s_id, 604800, false, &own, &lock.link, &lock.change).unwrap();
     stranger
         .cmd_tx
         .send(WsCommand::SetTopicBuffer {
@@ -15367,7 +15372,7 @@ async fn authz_a_legacy_servers_rings_follow_its_owner_not_the_first_signer() {
         "a stranger's lock makes rings of its own",
     );
     let reach = vec![owner_topic(&general)];
-    let signed = super::ring_auth::sign(&server_id, &s_id, 604800, false, &reach, &lock.link, &lock.change).unwrap();
+    let signed = super::ring_auth::sign(super::ws_client::HARNESS_RELAY_DOMAIN, &server_id, &s_id, 604800, false, &reach, &lock.link, &lock.change).unwrap();
     stranger
         .cmd_tx
         .send(WsCommand::SetTopicBuffer {
@@ -15404,7 +15409,7 @@ async fn authz_a_legacy_servers_rings_follow_its_owner_not_the_first_signer() {
     assert!(!relay.topic_registered(&server_id, &general), "members name the owner in every topic");
 
     // The stranger's signed clear stops its own rings and nothing else.
-    let clear = super::ring_auth::sign(&server_id, &s_id, 0, true, &[], &lock.link, &lock.change).unwrap();
+    let clear = super::ring_auth::sign(super::ws_client::HARNESS_RELAY_DOMAIN, &server_id, &s_id, 0, true, &[], &lock.link, &lock.change).unwrap();
     stranger
         .cmd_tx
         .send(WsCommand::SetTopicBuffer {
@@ -16833,182 +16838,6 @@ async fn blocked_peer_dm_and_friend_request_dropped() {
     drop(c);
     drop(d);
 }
-
-// SCALING BENCHMARK (large-server MLS viability). Measures the two O(N) fan-out
-// points on the real join/commit/message code so the slope is fact rather than
-// estimate, then extrapolates to 1k and 50k members. The metric source is the
-// MockRelay load meter, which counts what the production relay would copy to sockets
-// plus the coordinator's targeted fan-out. Ignored, since it spawns many real nodes
-// and waits on MLS batch timers:
-//   cargo test --lib scaling_benchmark_mls_fanout -- --nocapture --ignored
-
-/// One measured data point: the relay/coordinator load for a server that grew
-/// to `members` total members.
-#[derive(Debug, Clone)]
-struct ScalePoint {
-    members: usize,
-    /// SendDirect commands issued for the joins in THIS round (commit + welcome
-    /// + sync targeted fan-out â€” the O(N) coordinator path).
-    join_direct_cmds: u64,
-    /// Total relay deliveries for the joins in this round.
-    join_deliveries: u64,
-    /// Relay deliveries for ONE channel message broadcast at this size (the
-    /// steady-state O(N) egress per post).
-    per_msg_deliveries: u64,
-    /// SendToRoom/topic broadcast commands the sender issued for that one
-    /// message (should stay O(1) regardless of size â€” the good path).
-    per_msg_broadcast_cmds: u64,
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "scaling benchmark: spawns many real nodes, sleeps for MLS batch timers. Run with --ignored --nocapture."]
-#[allow(clippy::await_holding_lock)]
-async fn scaling_benchmark_mls_fanout() {
-    let _g = test_guard();
-    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
-    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
-
-    let relay = MockRelay::new();
-
-    const O_MASTER: u8 = 100;
-    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
-
-    // Checkpoints where we snapshot the meter. Kept modest â€” each real node runs
-    // a full event loop + Olm handshake + MLS batch commit. Three checkpoints
-    // confirm linearity and give the slope.
-    let checkpoints = [4usize, 8, 12];
-    let max_joiners = *checkpoints.iter().max().unwrap();
-
-    let joiner_masters: Vec<String> = (0..max_joiners)
-        .map(|i| NativeKeypair::from_secret_bytes(&seed_bytes(101 + i as u8)).peer_id())
-        .collect();
-    let joiner_master_refs: Vec<&str> = joiner_masters.iter().map(|s| s.as_str()).collect();
-
-    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &joiner_master_refs).await;
-    sleep_ms(1500).await;
-
-    let server_id = create_server_and_wait(&mut o, "Scale Server").await;
-    let general = general_channel_of(&server_id);
-    sleep_ms(300).await;
-    println!("\n=== MLS SCALING BENCHMARK ===");
-    println!("server={} channel={}", &server_id[..8], &general);
-
-    let mut points: Vec<ScalePoint> = Vec::new();
-    let mut joiners: Vec<TestNode> = Vec::new();
-
-    for target in checkpoints {
-        let round_start = joiners.len();
-        while joiners.len() < target {
-            let i = joiners.len();
-            let tag = 101 + i as u8;
-            let mut j = spawn_node_with_friends(&relay, tag, tag, &[o_master.as_str()]).await;
-            sleep_ms(1200).await;
-            drain_events(&mut j);
-            joiners.push(j);
-        }
-
-        // Meter the commit/welcome fan-out for the joiners added THIS round.
-        relay.reset_meter();
-        for j in joiners.iter_mut().skip(round_start) {
-            j.cmd_tx
-                .send(NodeCommand::JoinServer {
-                    server_id: server_id.clone(),
-                    twitch_proof_json: None,
-                    nsfw_confirmed: false,
-                    owner_pin: None,
-                    join_key: invite_key(&server_id),
-                })
-                .await
-                .unwrap();
-            sleep_ms(400).await;
-        }
-        sleep_ms(7000).await;
-        let join_meter = relay.meter().expect("meter enabled");
-        let members = target + 1; // + owner
-
-        for j in joiners.iter_mut() { drain_events(j); }
-        drain_events(&mut o);
-        relay.reset_meter();
-        o.cmd_tx
-            .send(NodeCommand::SendChannelMessage {
-                server_id: server_id.clone(),
-                channel_id: general.clone(),
-                text: format!("scale-msg-at-{}", members),
-                message_id: format!("scale-{}", members),
-                reply_to_mid: None,
-                link_preview: None,
-            })
-            .await
-            .unwrap();
-        sleep_ms(2500).await;
-        let msg_meter = relay.meter().expect("meter enabled");
-
-        let point = ScalePoint {
-            members,
-            join_direct_cmds: join_meter.send_direct_cmds,
-            join_deliveries: join_meter.deliveries,
-            per_msg_deliveries: msg_meter.deliveries,
-            per_msg_broadcast_cmds: msg_meter.send_to_room_cmds + msg_meter.send_topic_cmds,
-        };
-        println!(
-            "[checkpoint] members={:>3} | this-round joins: SendDirect_cmds={:>5} deliveries={:>5} | \
-             1 msg: deliveries={:>4} broadcast_cmds={:>3}",
-            point.members, point.join_direct_cmds, point.join_deliveries,
-            point.per_msg_deliveries, point.per_msg_broadcast_cmds,
-        );
-        points.push(point);
-    }
-
-    println!("\n--- PER-MESSAGE EGRESS (the steady-state bottleneck) ---");
-    for p in &points {
-        let per_member = p.per_msg_deliveries as f64 / (p.members.saturating_sub(1)).max(1) as f64;
-        println!(
-            "  members={:>3}: {:>4} relay deliveries/msg  ({:.2} per other-member)  broadcast_cmds={}",
-            p.members, p.per_msg_deliveries, per_member, p.per_msg_broadcast_cmds,
-        );
-    }
-
-    if let Some(last) = points.last() {
-        assert!(
-            last.per_msg_broadcast_cmds <= 2,
-            "sender should issue ~1 broadcast command per message regardless of size (got {})",
-            last.per_msg_broadcast_cmds,
-        );
-        let others = (last.members - 1) as u64;
-        assert!(
-            last.per_msg_deliveries >= others / 2,
-            "relay egress should scale O(N) with members (got {} deliveries for {} others)",
-            last.per_msg_deliveries, others,
-        );
-    }
-
-    let slope = points
-        .last()
-        .map(|p| p.per_msg_deliveries as f64 / (p.members.saturating_sub(1)).max(1) as f64)
-        .unwrap_or(1.0);
-    println!("\n--- EXTRAPOLATION (measured slope = {:.3} relay deliveries per other-member) ---", slope);
-    for &n in &[1_000usize, 10_000, 50_000] {
-        let deliveries = slope * (n as f64 - 1.0);
-        let mb_per_msg = deliveries * 2_048.0 / 1_048_576.0;
-        // Relay uplink line rate. OVH lifted the production box from 400 Mbps
-        // (50 MB/s) to 1 Gbps on 2026-08-04; measured ~854 Mbps, so this is an
-        // optimistic ceiling by ~15%. Bump alongside `bandwidth_cap_mbps` in
-        // relay-uws/src/http_handlers.cpp if the port changes again.
-        const RELAY_UPLINK_MB_S: f64 = 125.0;
-        let secs_per_msg = mb_per_msg / RELAY_UPLINK_MB_S;
-        let max_msgs_per_sec = if secs_per_msg > 0.0 { 1.0 / secs_per_msg } else { f64::INFINITY };
-        println!(
-            "  {:>6} members: {:>8.0} deliveries/msg = {:>7.1} MB egress/msg  |  \
-             1 hot channel saturates 1Gbps at ~{:.2} msg/s",
-            n, deliveries, mb_per_msg, max_msgs_per_sec,
-        );
-    }
-    println!("=== END BENCHMARK ===\n");
-
-    drop(o);
-    for j in joiners { drop(j); }
-}
-
 
 // Custom emotes: EmojiAdded replicates the (name, hash) metadata via the CRDT, the
 // member pulls the content-addressed BYTES on demand and verifies them, a member
@@ -27295,7 +27124,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // total 817.8 s).
     // 2026-10-15: so-core-fix proves five overlay toggles send no late announce per
     // toggle after the coalesced one (1.5 s, total 819.3 s).
-    const BUDGET_MS: u64 = 819_300;
+    // 2026-10-17: b1-crdt-resync proves four absences, a legacy replica asking for no
+    // whole log, a server with nobody online asking no one, junk over MLS marking
+    // nothing and a former member getting no page (4.2 s, total 823.5 s).
+    const BUDGET_MS: u64 = 823_500;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -34249,6 +34081,7 @@ async fn authz_only_a_member_is_served_the_op_log() {
         state_vector_json: serde_json::to_string(&empty).unwrap(),
         mls_epoch: None,
         nonce: None,
+        full: None,
     })
     .await;
     assert!(wait_until(10, async || to_o() > before).await, "the request reaches the relay");
@@ -34263,6 +34096,7 @@ async fn authz_only_a_member_is_served_the_op_log() {
         state_vector_json: serde_json::to_string(&empty).unwrap(),
         mls_epoch: None,
         nonce: None,
+        full: None,
     })
     .await;
     assert!(
@@ -34908,7 +34742,7 @@ async fn sync_ops_carried(from: &TestNode, to: &TestNode, server_id: &str) -> Ve
         .into_iter()
         .filter_map(|msg| match msg {
             super::types::HavenMessage::SyncResponse { server_id: sid, ops_json, .. } if sid == server_id => {
-                Some(crate::crdt::operations::parse_ops_tolerant(&ops_json))
+                Some(crate::crdt::operations::parse_ops_tolerant(&ops_json).ops)
             }
             _ => None,
         })
@@ -35077,6 +34911,7 @@ async fn authz_a_member_banned_while_away_learns_it_from_its_sync() {
         state_vector_json: serde_json::to_string(&nothing_held).unwrap(),
         mls_epoch: None,
         nonce: None,
+        full: None,
     })
     .await;
     carried_barrier(&j, &mut o).await;
@@ -35819,7 +35654,7 @@ async fn sync_answers_a_member_that_misses_nothing() {
             .await
             .into_iter()
             .filter_map(|msg| match msg {
-                super::types::HavenMessage::SyncResponse { server_id: sid, ops_json, nonce } if sid == server_id => Some((ops_json, nonce)),
+                super::types::HavenMessage::SyncResponse { server_id: sid, ops_json, nonce, .. } if sid == server_id => Some((ops_json, nonce)),
                 _ => None,
             })
             .collect()
@@ -35837,6 +35672,7 @@ async fn sync_answers_a_member_that_misses_nothing() {
         state_vector_json: serde_json::to_string(&all_of_it).unwrap(),
         mls_epoch: None,
         nonce: Some(7),
+        full: None,
     })
     .await;
     assert!(
@@ -48941,4 +48777,1193 @@ async fn voice_text_chat_off_refuses_voice_posts_on_both_lanes() {
     post_both(&v, &o, &voice, "again").await;
     assert!(wait_until(15, async || both_held(&o, &voice, "again")).await, "voice posts land again once the room follows the server");
     drop((o, v, a));
+}
+
+// b1-crdt-resync
+
+/// What a build that could not read `lost`'s op left on disk: the op absent from the
+/// log and its effect undone (`rewind`), while later ops of the same author stay.
+fn b1_forget_op(
+    db: &str,
+    pass: &str,
+    server_id: &str,
+    lost: impl Fn(&crate::crdt::operations::CrdtOp) -> bool,
+    rewind: impl FnOnce(&mut ServerState),
+) {
+    let store = crate::storage::MessageStore::open(db, pass).unwrap();
+    let mut ops = store.load_ops_for_server(server_id, None).unwrap();
+    let before = ops.len();
+    ops.retain(|op| !lost(op));
+    assert_eq!(ops.len() + 1, before, "exactly one op is forgotten");
+    let mut state: ServerState = serde_json::from_str(&store.load_server_state(server_id).unwrap().unwrap()).unwrap();
+    rewind(&mut state);
+    store.delete_server_state(server_id).unwrap();
+    for op in &ops {
+        store.insert_crdt_op(op).unwrap();
+    }
+    store.save_server_state(server_id, &serde_json::to_string(&state).unwrap()).unwrap();
+}
+
+/// `node`'s resync marks and asks, as its loop holds them.
+async fn b1_resync(node: &TestNode) -> (HashMap<String, super::crdt_resync::Mark>, HashMap<String, String>) {
+    let snap = node.debug_snapshot().await.expect("the loop answers");
+    (snap.resync_marks, snap.resync_asks)
+}
+
+/// The whole-log asks `node` aimed at `device` for `server_id`.
+async fn b1_full_asks(node: &TestNode, device: &str, server_id: &str) -> Vec<(u64, Option<super::crdt_resync::PageCursor>)> {
+    node.carried_to(device)
+        .await
+        .into_iter()
+        .filter_map(|msg| match msg {
+            super::types::HavenMessage::SyncRequest { server_id: sid, nonce: Some(n), full: Some(full), .. } if sid == server_id => {
+                Some((n, full.after))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The owner opens a voice room, closes its text chat (the op a 0.12.0 member skipped),
+/// then writes `more` channels after it. Every node holds all of it.
+async fn b1_close_a_voice_room_then_write(owner: &TestNode, all: &[&TestNode], server_id: &str, more: usize) -> String {
+    use crate::crdt::server_state::VoiceChat;
+    let voice = crate::node::new_channel_id(server_id);
+    owner
+        .cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.to_string(), channel_id: voice.clone(), name: "lounge".into(), category: None, channel_type: "voice".into(),
+        })
+        .await
+        .unwrap();
+    owner
+        .cmd_tx
+        .send(NodeCommand::SetChannelVoiceChat { server_id: server_id.to_string(), channel_id: voice.clone(), mode: VoiceChat::Off })
+        .await
+        .unwrap();
+    let mut channels = Vec::new();
+    for i in 0..more {
+        let cid = crate::node::new_channel_id(server_id);
+        owner
+            .cmd_tx
+            .send(NodeCommand::CreateChannel {
+                server_id: server_id.to_string(), channel_id: cid.clone(), name: format!("after-{i}"), category: None, channel_type: "text".into(),
+            })
+            .await
+            .unwrap();
+        channels.push(cid);
+    }
+    for node in all {
+        assert!(
+            wait_until(30, async || {
+                node.live_server_state(server_id).await.is_some_and(|s| {
+                    !s.channel_chat_open(&voice) && channels.iter().all(|c| s.channels.contains_key(c))
+                })
+            })
+            .await,
+            "every node holds the closed voice room and the channels after it",
+        );
+    }
+    voice
+}
+
+fn b1_is_voice_chat_op(op: &crate::crdt::operations::CrdtOp) -> bool {
+    matches!(op.payload, crate::crdt::operations::CrdtPayload::ChannelVoiceChatChanged { .. })
+}
+
+/// B1: deltas run per author by newest stamp, so an op an older build skipped never
+/// comes back by sync once a later op of its author arrived. On the first start of this
+/// build the sweep marks the server; the member asks the OWNER's device, and only it,
+/// for the whole log a page at a time, gets the op back and stores it, and the mark
+/// clears.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b1_an_op_skipped_before_a_later_one_comes_back_after_the_upgrade() {
+    use crate::crdt::server_state::VoiceChat;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 241;
+    const M: u8 = 242;
+    const X: u8 = 243;
+    let (o, m, x, server_id) = three_member_server(&relay, O, M, X).await;
+    let voice = b1_close_a_voice_room_then_write(&o, &[&m, &x], &server_id, 24).await;
+
+    let m = restart_node_with(&relay, m, M, M, |db, pass| {
+        b1_forget_op(db, pass, &server_id, b1_is_voice_chat_op, |s| {
+            s.channels.get_mut(&voice).unwrap().voice_chat = VoiceChat::Server;
+        });
+        let store = crate::storage::MessageStore::open(db, pass).unwrap();
+        store.delete_setting(super::crdt_resync::SWEEP_KEY).unwrap();
+    })
+    .await;
+
+    assert!(
+        wait_until(60, async || {
+            m.live_server_state(&server_id).await.is_some_and(|s| !s.channel_chat_open(&voice))
+                && !b1_resync(&m).await.0.contains_key(&server_id)
+        })
+        .await,
+        "the op skipped before later ones came back and the mark cleared",
+    );
+    let held = |n: &TestNode| n.store().load_ops_for_server(&server_id, None).unwrap();
+    assert!(wait_until(10, async || held(&m).iter().any(b1_is_voice_chat_op)).await, "the op came back to disk");
+    assert!(m.store().load_server_blob(&server_id, super::crdt_resync::MARK_KEY).unwrap().is_none(), "the stored mark is gone");
+    let asks = b1_full_asks(&m, &o.device_id, &server_id).await;
+    assert!(asks.len() >= 3, "a log of many ops comes a page at a time, got {} asks", asks.len());
+    assert!(asks.windows(2).all(|w| w[0].0 != w[1].0), "every page has its own nonce");
+    assert!(b1_full_asks(&m, &x.device_id, &server_id).await.is_empty(), "only the owner's device was asked");
+    drop((o, x));
+}
+
+/// B1: a legacy-anchored replica applies ops in arrival order (AR-10), so a whole log
+/// would replay drained ops over newer state: it never asks, and its mark waits for the
+/// owner's checkpoint. The members see each other, so nothing but the anchor holds the
+/// ask back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b1_a_legacy_server_is_never_fetched_whole() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 244;
+    const M: u8 = 245;
+    const X: u8 = 246;
+    let ids: Vec<String> = [O, M, X].iter().map(|t| keys(*t).peer_id()).collect();
+    let m = spawn_node_with_friends(&relay, M, M, &[&ids[2]]).await;
+    let x = spawn_node_with_friends(&relay, X, X, &[&ids[1]]).await;
+    expect_dm_pair_ready(&relay, &m, &x, 15).await;
+
+    // A pre-0.12 server whose owner never ran 0.12: no checkpoint ever reaches it.
+    let server_id = "b1b1".repeat(8);
+    let mut legacy = ServerState::new(server_id.clone(), "Old Server".into(), ids[0].clone());
+    super::swarm::install_op_signer(&mut legacy, &keys(O));
+    let mut ops = Vec::new();
+    for (tag, id) in [(M, &ids[1]), (X, &ids[2])] {
+        ops.push(legacy.author_checked(crate::crdt::operations::CrdtPayload::MemberAdded {
+            peer_id: id.clone(), display_name: "m".into(), follow: None, ask: join_ask(&server_id, 1, &keys(tag)),
+        }).unwrap());
+    }
+    legacy.owner_pin = None;
+    let json = serde_json::to_string(&legacy).unwrap();
+    let stage = |db: &str, pass: &str| {
+        let store = crate::storage::MessageStore::open(db, pass).unwrap();
+        store.save_server_state(&server_id, &json).unwrap();
+        for op in &ops {
+            store.insert_crdt_op(op).unwrap();
+        }
+        store.delete_setting(super::crdt_resync::SWEEP_KEY).unwrap();
+    };
+    let m = restart_node_with(&relay, m, M, M, stage).await;
+    let x = restart_node_with(&relay, x, X, X, stage).await;
+    for (node, other) in [(&m, &x), (&x, &m)] {
+        assert!(wait_until(20, async || node.sees_peer(&other.device_id).await).await, "the members share the room");
+        assert!(
+            node.live_server_state(&server_id).await.is_some_and(|s| s.anchor() == crate::crdt::server_state::Anchor::Legacy),
+            "the server stays legacy",
+        );
+    }
+    // Absence proof: five resync ticks in which nothing may be asked.
+    sleep_ms(1500).await;
+    for (node, other) in [(&m, &x), (&x, &m)] {
+        let (marks, asks) = b1_resync(node).await;
+        assert!(marks.get(&server_id).is_some_and(|mk| mk.due), "the mark waits for the owner's checkpoint");
+        assert!(asks.is_empty(), "a legacy replica asked for a whole log");
+        assert!(b1_full_asks(node, &other.device_id, &server_id).await.is_empty(), "a legacy replica asked for a whole log");
+    }
+
+    // A page nobody asked for is never folded in; the same op as a plain answer is
+    // (the arrival-order apply AR-10 accepts).
+    let mut m = m;
+    expect_olm_confirmed(&x, &m, 20).await;
+    let mut owner = legacy.clone();
+    let mut rename = |name: &str| {
+        owner.author_checked(crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: name.into() }).unwrap()
+    };
+    let (paged, plain) = (rename("Paged"), rename("Plain"));
+    let page = super::crdt_resync::FullPage::default();
+    let answer = |op: crate::crdt::operations::CrdtOp, page: Option<super::crdt_resync::FullPage>| super::types::HavenMessage::SyncResponse {
+        server_id: server_id.clone(), ops_json: serde_json::to_string(&[op]).unwrap(), nonce: None, page,
+    };
+    carry_as(&x, &m, answer(paged, Some(page))).await;
+    carried_barrier(&x, &mut m).await;
+    assert_eq!(m.live_server_name(&server_id).await, "Old Server", "an unasked page was folded into a legacy replica");
+    carry_as(&x, &m, answer(plain, None)).await;
+    assert!(wait_until(10, async || m.live_server_name(&server_id).await == "Plain").await, "control: a plain answer applies");
+}
+
+/// B1: only the asked device's answer to the asked page moves a resync. A member that
+/// was not asked hands the asker a last page carrying the right nonce: it is dropped
+/// and the mark stays; the owner's real pages, held until then, clear it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b1_an_unasked_answer_never_clears_the_mark() {
+    use crate::crdt::server_state::VoiceChat;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 247;
+    const M: u8 = 248;
+    const X: u8 = 249;
+    let (o, m, x, server_id) = three_member_server(&relay, O, M, X).await;
+    let voice = b1_close_a_voice_room_then_write(&o, &[&m, &x], &server_id, 4).await;
+
+    relay.hold_direct(&o.device_id, &m.device_id);
+    let mut m = restart_node_with(&relay, m, M, M, |db, pass| {
+        b1_forget_op(db, pass, &server_id, b1_is_voice_chat_op, |s| {
+            s.channels.get_mut(&voice).unwrap().voice_chat = VoiceChat::Server;
+        });
+        crate::storage::MessageStore::open(db, pass).unwrap().delete_setting(super::crdt_resync::SWEEP_KEY).unwrap();
+    })
+    .await;
+    assert!(
+        wait_until(20, async || b1_resync(&m).await.1.get(&server_id) == Some(&o.device_id)).await,
+        "the owner's device is asked",
+    );
+    expect_olm_confirmed(&x, &m, 20).await;
+    let (nonce, _) = *b1_full_asks(&m, &o.device_id, &server_id).await.last().unwrap();
+    let last = super::crdt_resync::FullPage::default();
+    carry_as(&x, &m, super::types::HavenMessage::SyncResponse {
+        server_id: server_id.clone(), ops_json: "[]".into(), nonce: Some(nonce), page: Some(last),
+    })
+    .await;
+    carried_barrier(&x, &mut m).await;
+    let (marks, asks) = b1_resync(&m).await;
+    assert!(marks.get(&server_id).is_some_and(|mk| mk.due), "an unasked device's last page cleared the mark");
+    assert_eq!(asks.get(&server_id), Some(&o.device_id), "an unasked device's answer moved the ask");
+    assert!(m.live_server_state(&server_id).await.is_some_and(|s| s.channel_chat_open(&voice)), "control: the op is still missing");
+
+    relay.release_held(&o.device_id, &m.device_id);
+    assert!(
+        wait_until(60, async || {
+            m.live_server_state(&server_id).await.is_some_and(|s| !s.channel_chat_open(&voice))
+                && !b1_resync(&m).await.0.contains_key(&server_id)
+        })
+        .await,
+        "the asked pages bring the op back and clear the mark",
+    );
+    drop((o, x));
+}
+
+/// B1: a mark is stored the moment it is set, so a server with nobody online to answer
+/// keeps it across restarts, blocks nothing, and is fetched once a member appears. The
+/// mark here is the first start's sweep, which runs only once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b1_a_mark_with_nobody_to_answer_survives_restarts() {
+    use crate::crdt::server_state::VoiceChat;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 250;
+    const M: u8 = 251;
+    const X: u8 = 252;
+    let (o, m, x, server_id) = three_member_server(&relay, O, M, X).await;
+    let voice = b1_close_a_voice_room_then_write(&o, &[&m, &x], &server_id, 4).await;
+
+    relay.set_online(&o.device_id, false);
+    relay.set_online(&x.device_id, false);
+    let m = restart_node_with(&relay, m, M, M, |db, pass| {
+        b1_forget_op(db, pass, &server_id, b1_is_voice_chat_op, |s| {
+            s.channels.get_mut(&voice).unwrap().voice_chat = VoiceChat::Server;
+        });
+        crate::storage::MessageStore::open(db, pass).unwrap().delete_setting(super::crdt_resync::SWEEP_KEY).unwrap();
+    })
+    .await;
+    // Absence proof: resync ticks with nobody online to ask.
+    sleep_ms(1200).await;
+    let stored = || -> Option<super::crdt_resync::Mark> {
+        let json = m.store().load_server_blob(&server_id, super::crdt_resync::MARK_KEY).ok().flatten()?;
+        serde_json::from_str(&json).ok()
+    };
+    assert!(b1_resync(&m).await.0.get(&server_id).is_some_and(|mk| mk.due), "the sweep marked the server");
+    assert!(stored().is_some_and(|mk| mk.due), "the due mark is stored while nobody can answer");
+
+    let m = restart_node(&relay, m, M, M).await;
+    assert!(b1_resync(&m).await.0.get(&server_id).is_some_and(|mk| mk.due), "the mark survived a restart with nobody to answer");
+    assert!(m.live_server_state(&server_id).await.is_some_and(|s| s.channel_chat_open(&voice)), "control: the op is still missing");
+
+    relay.set_online(&o.device_id, true);
+    assert!(
+        wait_until(60, async || {
+            m.live_server_state(&server_id).await.is_some_and(|s| !s.channel_chat_open(&voice))
+                && !b1_resync(&m).await.0.contains_key(&server_id)
+        })
+        .await,
+        "a member coming online answers and the mark clears",
+    );
+    assert!(
+        wait_until(10, async || m.store().load_server_blob(&server_id, super::crdt_resync::MARK_KEY).unwrap().is_none()).await,
+        "the stored mark is gone",
+    );
+    drop((o, x));
+}
+
+/// A signed op of a payload this build does not know, by `author`, as its JSON; junk
+/// (signed by someone else) when `signer` is not the author's key.
+fn b1_unread_op(server_id: &str, author: &str, signer: &NativeKeypair) -> String {
+    use base64::Engine as _;
+    let op = forge_crdt_op(
+        server_id, author, crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "later".into() }, 0, Some(signer),
+    );
+    let mut v = serde_json::to_value(&op).unwrap();
+    v["payload"] = serde_json::json!({ "VoiceStageQueue": { "channel_id": "x", "mode": 7 } });
+    let payload_json = serde_json::to_string(&v["payload"]).unwrap();
+    let signed = crate::crdt::operations::signing_payload(&op.server_id, &op.hlc, &op.author, &payload_json);
+    v["auth"]["sig"] = base64::engine::general_purpose::STANDARD.encode(signer.sign(signed.as_bytes())).into();
+    serde_json::to_string(&v).unwrap()
+}
+
+/// B1: a member's signed op this build cannot read marks the server on every path it
+/// can arrive by (a sync answer, the carried broadcast, MLS), dormant until a newer
+/// build runs: nothing is asked now. Junk signed by anyone but its author marks nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b1_a_signed_op_this_build_cannot_read_marks_the_server() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 253;
+    const M: u8 = 254;
+    const X: u8 = 255;
+    let (o, mut m, x, server_id) = three_member_server(&relay, O, M, X).await;
+    expect_olm_confirmed(&x, &m, 20).await;
+    let unread = |signer: &NativeKeypair| b1_unread_op(&server_id, &x.master_id, signer);
+    let sync = |op: String| super::types::HavenMessage::SyncResponse {
+        server_id: server_id.clone(), ops_json: format!("[{op}]"), nonce: None, page: None,
+    };
+    let broadcast = |op: String| super::types::HavenMessage::CrdtOpBroadcast { server_id: server_id.clone(), op_json: op };
+    let over_mls = |op: String| super::types::MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op };
+    let marked = async |node: &TestNode| b1_resync(node).await.0.get(&server_id).cloned();
+    let this_build = Some(super::crdt_resync::Mark { lacks: Some(crate::api::updater::APP_VERSION.to_string()), ..Default::default() });
+
+    assert!(
+        wait_until(30, async || {
+            let (xe, me) = (x.mls_epoch(&server_id).await, m.mls_epoch(&server_id).await);
+            xe.is_some() && xe == me && m.mls_members(&server_id).await.contains(&x.device_id)
+        })
+        .await,
+        "X and M share the server group",
+    );
+    let junk = keys(9);
+    carry_as(&x, &m, sync(unread(&junk))).await;
+    carry_as(&x, &m, broadcast(unread(&junk))).await;
+    mls_envelope_as(&x, &server_id, over_mls(unread(&junk))).await;
+    carried_barrier(&x, &mut m).await;
+    // Absence proof: the MLS copy has no barrier of its own.
+    sleep_ms(1000).await;
+    assert_eq!(marked(&m).await, None, "junk an author did not sign marked the server");
+
+    let unmark = |db: &str, pass: &str| {
+        let store = crate::storage::MessageStore::open(db, pass).unwrap();
+        store.delete_server_blob(&server_id, super::crdt_resync::MARK_KEY).unwrap();
+        store.delete_server_blob(&server_id, super::crdt_resync::KEPT_KEY).unwrap();
+    };
+    for (path, step) in ["mls", "sync answer", "carried broadcast"].into_iter().enumerate() {
+        match path {
+            0 => mls_envelope_as(&x, &server_id, over_mls(unread(&x.master_kp))).await,
+            1 => carry_as(&x, &m, sync(unread(&x.master_kp))).await,
+            _ => carry_as(&x, &m, broadcast(unread(&x.master_kp))).await,
+        }
+        assert!(wait_until(15, async || marked(&m).await == this_build).await, "a member's unreadable op over the {step} marked nothing");
+        assert!(
+            m.store().load_server_blob(&server_id, super::crdt_resync::MARK_KEY).unwrap().is_some(),
+            "the {step} mark is stored at once",
+        );
+        assert!(b1_resync(&m).await.1.is_empty(), "this build asked for ops it cannot read either");
+        m = restart_node_with(&relay, m, M, M, unmark).await;
+        expect_olm_confirmed(&x, &m, 20).await;
+        assert_eq!(marked(&m).await, None);
+    }
+    drop((o, x));
+}
+
+/// B1: a whole log goes to members only. A member kicked a moment ago asks for one and
+/// gets no page: only what the delta path tells a former member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b1_a_former_member_gets_no_page() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 238;
+    const M: u8 = 239;
+    const X: u8 = 240;
+    let (mut o, m, x, server_id) = three_member_server(&relay, O, M, X).await;
+    expect_olm_confirmed(&x, &o, 20).await;
+    let full_ask = || super::types::HavenMessage::SyncRequest {
+        server_id: server_id.clone(), state_vector_json: "{}".into(), mls_epoch: None, nonce: Some(7),
+        full: Some(super::crdt_resync::FullAsk::default()),
+    };
+    let pages_to = async |o: &TestNode, device: &str| {
+        o.carried_to(device)
+            .await
+            .into_iter()
+            .filter(|msg| matches!(msg, super::types::HavenMessage::SyncResponse { page: Some(_), .. }))
+            .count()
+    };
+    carry_as(&x, &o, full_ask()).await;
+    assert!(wait_until(10, async || pages_to(&o, &x.device_id).await == 1).await, "control: a member gets a page");
+
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: x.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&x.master_id))).await,
+        "the owner kicked X",
+    );
+    carry_as(&x, &o, full_ask()).await;
+    carried_barrier(&x, &mut o).await;
+    // Absence proof: the barrier orders the ask, not the record of an answer to it.
+    sleep_ms(500).await;
+    assert_eq!(pages_to(&o, &x.device_id).await, 1, "a former member got a page of the whole log");
+    drop(m);
+}
+
+// b1-crdt-resync-fix
+
+/// A signed op of a KNOWN variant carrying a field this build does not know, by `author`,
+/// as its JSON: what a newer build that added a defaulted field sends.
+fn b1_newer_field_op(server_id: &str, author: &str, signer: &NativeKeypair, ahead_ms: u64) -> String {
+    use base64::Engine as _;
+    let op = forge_crdt_op(
+        server_id, author, crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "later".into() }, ahead_ms, Some(signer),
+    );
+    let mut v = serde_json::to_value(&op).unwrap();
+    v["payload"]["ServerRenamed"]["later_field"] = serde_json::json!({ "x": 1 });
+    let payload_json = serde_json::to_string(&v["payload"]).unwrap();
+    let signed = crate::crdt::operations::signing_payload(&op.server_id, &op.hlc, &op.author, &payload_json);
+    v["auth"]["sig"] = base64::engine::general_purpose::STANDARD.encode(signer.sign(signed.as_bytes())).into();
+    serde_json::to_string(&v).unwrap()
+}
+
+/// The skipped ops `node` keeps for `server_id`, as stored.
+fn b1_kept(node: &TestNode, server_id: &str) -> Vec<super::crdt_resync::Kept> {
+    node.store()
+        .load_server_blob(server_id, super::crdt_resync::KEPT_KEY)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+/// B1 H1: the sweep marks every replica of this build, the owner's too, and a swept
+/// owner may lack the very op. A member that folded in the owner's whole log stays
+/// marked and asks a second identity; that second marked log clears the mark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b1_a_swept_owners_log_alone_clears_no_mark() {
+    use crate::crdt::server_state::VoiceChat;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 232;
+    const M: u8 = 233;
+    const X: u8 = 234;
+    let (o, m, x, server_id) = three_member_server(&relay, O, M, X).await;
+    let voice = b1_close_a_voice_room_then_write(&o, &[&m, &x], &server_id, 4).await;
+    let unsweep = |db: &str, pass: &str| {
+        crate::storage::MessageStore::open(db, pass).unwrap().delete_setting(super::crdt_resync::SWEEP_KEY).unwrap();
+    };
+    // X's pages reach neither O nor M until released: O stays marked with one identity
+    // at most, and M's second identity is held.
+    relay.hold_direct(&x.device_id, &o.device_id);
+    relay.hold_direct(&x.device_id, &m.device_id);
+    // M and X go down before O restarts: an unmarked replica still running would hand O
+    // a whole log, and O's would then clear M's mark alone.
+    for node in [&m, &x] {
+        relay.set_online(&node.device_id, false);
+    }
+    let o = restart_node_with(&relay, o, O, O, unsweep).await;
+    let x = restart_node_with(&relay, x, X, X, unsweep).await;
+    let m = restart_node_with(&relay, m, M, M, |db, pass| {
+        b1_forget_op(db, pass, &server_id, b1_is_voice_chat_op, |s| {
+            s.channels.get_mut(&voice).unwrap().voice_chat = VoiceChat::Server;
+        });
+        unsweep(db, pass);
+    })
+    .await;
+
+    assert!(
+        wait_until(60, async || {
+            let (marks, asks) = b1_resync(&m).await;
+            marks.get(&server_id).is_some_and(|mk| mk.due && mk.partial_from == vec![o.master_id.clone()])
+                && asks.get(&server_id) == Some(&x.device_id)
+        })
+        .await,
+        "the swept owner's whole log left the mark due and a second identity is asked",
+    );
+    assert!(
+        m.live_server_state(&server_id).await.is_some_and(|s| !s.channel_chat_open(&voice)),
+        "control: the owner's log brought the op back",
+    );
+    relay.release_held(&x.device_id, &m.device_id);
+    assert!(
+        wait_until(60, async || !b1_resync(&m).await.0.contains_key(&server_id)).await,
+        "a second identity's marked log clears the mark",
+    );
+    relay.release_held(&x.device_id, &o.device_id);
+    drop((o, x));
+}
+
+/// B1 H2: an op of a KNOWN variant with a field this build drops fails its signature once
+/// re-serialized. Signed by a member, it is kept for a newer build and marks the server
+/// on the live single-op paths (MLS, the carried broadcast) as an unknown variant does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b1_a_known_op_with_a_newer_field_is_kept_on_the_live_paths() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 229;
+    const M: u8 = 230;
+    const X: u8 = 231;
+    let (o, mut m, x, server_id) = three_member_server(&relay, O, M, X).await;
+    expect_olm_confirmed(&x, &m, 20).await;
+    assert!(
+        wait_until(30, async || {
+            let (xe, me) = (x.mls_epoch(&server_id).await, m.mls_epoch(&server_id).await);
+            xe.is_some() && xe == me && m.mls_members(&server_id).await.contains(&x.device_id)
+        })
+        .await,
+        "X and M share the server group",
+    );
+    let this_build = Some(super::crdt_resync::Mark { lacks: Some(crate::api::updater::APP_VERSION.to_string()), ..Default::default() });
+    let over_mls = super::types::MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: b1_newer_field_op(&server_id, &x.master_id, &x.master_kp, 0) };
+    mls_envelope_as(&x, &server_id, over_mls).await;
+    assert!(
+        wait_until(15, async || b1_resync(&m).await.0.get(&server_id).cloned() == this_build && b1_kept(&m, &server_id).len() == 1).await,
+        "a member's op with a newer field over MLS was not kept",
+    );
+    let broadcast = super::types::HavenMessage::CrdtOpBroadcast {
+        server_id: server_id.clone(), op_json: b1_newer_field_op(&server_id, &x.master_id, &x.master_kp, 1),
+    };
+    carry_as(&x, &m, broadcast).await;
+    carried_barrier(&x, &mut m).await;
+    assert!(wait_until(15, async || b1_kept(&m, &server_id).len() == 2).await, "a member's op with a newer field over the carried broadcast was not kept");
+    assert_eq!(m.live_server_name(&server_id).await, o.live_server_name(&server_id).await, "control: neither op applied");
+    drop((o, x));
+}
+
+/// B1 M2: what an older build kept comes back on the next build's start with nobody
+/// online to ask: read again, folded in and stored, and nothing is marked or asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b1_a_kept_op_folds_in_at_start_with_nobody_online() {
+    use crate::crdt::server_state::VoiceChat;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 226;
+    const M: u8 = 227;
+    const X: u8 = 228;
+    let (o, m, x, server_id) = three_member_server(&relay, O, M, X).await;
+    let voice = b1_close_a_voice_room_then_write(&o, &[&m, &x], &server_id, 4).await;
+    relay.set_online(&o.device_id, false);
+    relay.set_online(&x.device_id, false);
+    let m = restart_node_with(&relay, m, M, M, |db, pass| {
+        let store = crate::storage::MessageStore::open(db, pass).unwrap();
+        let op = store.load_ops_for_server(&server_id, None).unwrap().into_iter().find(b1_is_voice_chat_op).unwrap();
+        let older = "0.0.1".to_string();
+        let kept = vec![super::crdt_resync::Kept {
+            author: op.author.clone(), hlc: op.hlc.clone(), build: older.clone(), raw: serde_json::to_string(&op).unwrap(),
+        }];
+        let mark = super::crdt_resync::Mark { lacks: Some(older), ..Default::default() };
+        store.save_server_blob(&server_id, super::crdt_resync::KEPT_KEY, &serde_json::to_string(&kept).unwrap()).unwrap();
+        store.save_server_blob(&server_id, super::crdt_resync::MARK_KEY, &serde_json::to_string(&mark).unwrap()).unwrap();
+        drop(store);
+        b1_forget_op(db, pass, &server_id, b1_is_voice_chat_op, |s| {
+            s.channels.get_mut(&voice).unwrap().voice_chat = VoiceChat::Server;
+        });
+    })
+    .await;
+    assert!(m.live_server_state(&server_id).await.is_some_and(|s| !s.channel_chat_open(&voice)), "the kept op folded in at start");
+    let (marks, asks) = b1_resync(&m).await;
+    assert!(!marks.contains_key(&server_id) && asks.is_empty(), "a kept op that reads now still marked or asked: {marks:?} {asks:?}");
+    assert!(m.store().load_ops_for_server(&server_id, None).unwrap().iter().any(b1_is_voice_chat_op), "the op is stored");
+    assert!(b1_kept(&m, &server_id).is_empty(), "the kept row is gone");
+    drop((o, x));
+}
+
+// g1-scale-probe
+
+/// Per-kind relay accounting for the scale probe: which wire kinds the relay copies to
+/// sockets and which nodes ask for them. Off unless a probe turns it on, so every other
+/// test pays one atomic load per frame.
+pub(crate) mod g1_probe {
+    use std::collections::{BTreeMap, HashMap};
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::super::ws_client::{WsCommand, WsEvent};
+
+    static ON: AtomicBool = AtomicBool::new(false);
+    static BOOK: Mutex<Option<Book>> = Mutex::new(None);
+    /// Ciphertext body hash -> the plaintext kind inside it. The relay reads only
+    /// ciphertext, so the sending side names what it encrypted.
+    static INNER: Mutex<Option<HashMap<u64, String>>> = Mutex::new(None);
+
+    #[derive(Default, Clone, Debug)]
+    pub(crate) struct Tally {
+        /// Frames nodes handed the relay.
+        pub cmds: u64,
+        /// Frames the relay wrote to a socket (egress).
+        pub deliveries: u64,
+        /// Egress bytes; presence events are estimated from their JSON shape.
+        pub bytes_out: u64,
+        /// Sending device -> frames it handed the relay.
+        pub senders: BTreeMap<String, u64>,
+    }
+
+    #[derive(Default, Clone, Debug)]
+    pub(crate) struct Book {
+        /// `bcast:<kind>` (0x03, topic, public), `direct:<kind>`, `presence:<event>`,
+        /// `binary`, `ctl:<command>`. An encrypted kind reads `outer>inner`.
+        pub kinds: BTreeMap<String, Tally>,
+        /// Every command by its relay route (`cmd_kind`).
+        pub routes: BTreeMap<&'static str, u64>,
+        pub cmds: u64,
+        pub deliveries: u64,
+        pub bytes_out: u64,
+    }
+
+    pub(crate) fn start() {
+        *BOOK.lock().unwrap() = Some(Book::default());
+        *INNER.lock().unwrap() = Some(HashMap::new());
+        ON.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn stop() {
+        ON.store(false, Ordering::SeqCst);
+        *BOOK.lock().unwrap() = None;
+        *INNER.lock().unwrap() = None;
+    }
+
+    /// The book since the last take, and a fresh one from now.
+    pub(crate) fn take() -> Book {
+        BOOK.lock().unwrap().as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// Frames moved so far, the settle signal.
+    pub(crate) fn activity() -> u64 {
+        BOOK.lock().unwrap().as_ref().map(|b| b.cmds + b.deliveries).unwrap_or(0)
+    }
+
+    fn hash(body: &[u8]) -> u64 {
+        let mut h = DefaultHasher::new();
+        body.hash(&mut h);
+        h.finish()
+    }
+
+    fn wire_type(body: &[u8]) -> String {
+        if let Some(rest) = body.strip_prefix(b"{\"type\":\"")
+            && let Some(end) = rest.iter().position(|&b| b == b'"')
+        {
+            return String::from_utf8_lossy(&rest[..end]).into_owned();
+        }
+        if body.first() == Some(&b'{') {
+            return serde_json::from_slice::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+                .unwrap_or_else(|| "json".into());
+        }
+        "binary".into()
+    }
+
+    fn envelope_kind(plaintext: &str) -> String {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(plaintext) else { return "text".into() };
+        let t = v.get("t").and_then(|t| t.as_str()).unwrap_or("?");
+        let nested = match t {
+            "carried" => v.get("msg"),
+            "call_sig" => v.get("signal"),
+            _ => None,
+        };
+        match nested.and_then(|m| m.get("type")).and_then(|t| t.as_str()) {
+            Some(inner) => format!("{t}/{inner}"),
+            None => t.to_string(),
+        }
+    }
+
+    fn payload_kind(data: &[u8]) -> String {
+        let body = super::super::frame_auth::unchecked_body(data);
+        let outer = wire_type(body);
+        if outer == "encrypted" || outer == "mls_msg" {
+            let inner = INNER
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|m| m.get(&hash(body)).cloned())
+                .unwrap_or_else(|| "?".into());
+            return format!("{outer}>{inner}");
+        }
+        outer
+    }
+
+    /// An Olm frame on its way to the sealer, with the plaintext it encrypts.
+    pub(crate) fn note_olm(cmd: &WsCommand) {
+        if !ON.load(Ordering::Relaxed) {
+            return;
+        }
+        if let WsCommand::AfterSave { frame, plaintext, .. } = cmd
+            && let WsCommand::SendDirect { data, .. } | WsCommand::SendDirectImage { data, .. } = frame.as_ref()
+        {
+            note_inner(data, plaintext);
+        }
+    }
+
+    /// `body` (unsealed) carries the envelope `plaintext`.
+    pub(crate) fn note_inner(body: &[u8], plaintext: &str) {
+        if !ON.load(Ordering::Relaxed) {
+            return;
+        }
+        let kind = envelope_kind(plaintext);
+        if let Some(map) = INNER.lock().unwrap().as_mut() {
+            map.insert(hash(body), kind);
+        }
+    }
+
+    fn with_book(f: impl FnOnce(&mut Book)) {
+        if let Some(book) = BOOK.lock().unwrap().as_mut() {
+            f(book);
+        }
+    }
+
+    pub(crate) fn note_cmd(from: &str, cmd: &WsCommand) {
+        if !ON.load(Ordering::Relaxed) {
+            return;
+        }
+        let key = match cmd {
+            WsCommand::SendToRoom { data, .. }
+            | WsCommand::SendPublic { data, .. }
+            | WsCommand::SendToRoomTopic { data, .. } => format!("bcast:{}", payload_kind(data)),
+            WsCommand::SendDirect { data, .. }
+            | WsCommand::SendDirectImage { data, .. }
+            | WsCommand::SendChannelDirect { data, .. } => format!("direct:{}", payload_kind(data)),
+            WsCommand::SendBinaryDirect { .. } => "binary".into(),
+            other => format!("ctl:{}", super::cmd_kind(other)),
+        };
+        let route = super::cmd_kind(cmd);
+        with_book(|book| {
+            book.cmds += 1;
+            *book.routes.entry(route).or_default() += 1;
+            let t = book.kinds.entry(key).or_default();
+            t.cmds += 1;
+            *t.senders.entry(from.to_string()).or_default() += 1;
+        });
+    }
+
+    fn list_bytes(items: &[String]) -> usize {
+        items.iter().map(|p| p.len() + 3).sum()
+    }
+
+    pub(crate) fn note_delivery(ev: &WsEvent) {
+        if !ON.load(Ordering::Relaxed) {
+            return;
+        }
+        let (key, bytes) = match ev {
+            WsEvent::Message { data, .. } => (format!("bcast:{}", payload_kind(data)), data.len()),
+            WsEvent::DirectMessage { data, .. } => (format!("direct:{}", payload_kind(data)), data.len()),
+            WsEvent::BinaryDirect { data, .. } => ("binary".into(), data.len()),
+            WsEvent::PeerJoined { room, peer_id } => ("presence:peer_joined".into(), 40 + room.len() + peer_id.len()),
+            WsEvent::PeerLeft { room, peer_id } => ("presence:peer_left".into(), 40 + room.len() + peer_id.len()),
+            WsEvent::RoomMembers { room, peers } => ("presence:room_members".into(), 40 + room.len() + list_bytes(peers)),
+            WsEvent::DiscoveredPeers { room, peers } => ("presence:discovered_peers".into(), 40 + room.len() + list_bytes(peers)),
+            WsEvent::PeerStatus { online, active_rooms } => {
+                ("presence:peer_status".into(), 40 + list_bytes(online) + list_bytes(active_rooms))
+            }
+            WsEvent::DoorStatus { room, .. } => ("presence:door_status".into(), 40 + room.len()),
+            WsEvent::TopicCatchupDone { room, channel } => ("presence:topic_catchup_done".into(), 40 + room.len() + channel.len()),
+            WsEvent::LockChain { links, .. } => ("presence:lock_chain".into(), 40 + 400 * links.len()),
+            WsEvent::KillSignal { blob, .. } => ("presence:kill_signal".into(), 40 + blob.len()),
+            _ => ("presence:other".into(), 40),
+        };
+        with_book(|book| {
+            book.deliveries += 1;
+            book.bytes_out += bytes as u64;
+            let t = book.kinds.entry(key).or_default();
+            t.deliveries += 1;
+            t.bytes_out += bytes as u64;
+        });
+    }
+}
+
+/// One measured phase of the scale probe.
+struct G1Phase {
+    phase: &'static str,
+    /// Server members (owner included) while the phase ran.
+    members: usize,
+    book: g1_probe::Book,
+    secs: f64,
+    settled: bool,
+}
+
+fn g1_env_list(name: &str, default: &[usize]) -> Vec<usize> {
+    let mut v: Vec<usize> = std::env::var(name)
+        .ok()
+        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .filter(|v: &Vec<usize>| !v.is_empty())
+        .unwrap_or_else(|| default.to_vec());
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+fn g1_env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(default)
+}
+
+fn g1_drain_all(nodes: &mut [TestNode]) {
+    for n in nodes.iter_mut() {
+        drain_events(n);
+    }
+}
+
+/// Wait until at most `allowed` frames moved in the last `window_ms` (the idle
+/// background, so a big room still settles), draining every node's events meanwhile (a
+/// full event channel would stall its node). Returns (seconds until the quiet window
+/// began, whether it settled within `max_secs`).
+async fn g1_quiet(nodes: &mut [TestNode], window_ms: u64, max_secs: u64, allowed: u64) -> (f64, bool) {
+    let start = std::time::Instant::now();
+    let window = std::time::Duration::from_millis(window_ms);
+    let mut samples: std::collections::VecDeque<(std::time::Instant, u64)> = std::collections::VecDeque::new();
+    samples.push_back((start, g1_probe::activity()));
+    loop {
+        g1_drain_all(nodes);
+        sleep_ms(200).await;
+        let now = std::time::Instant::now();
+        samples.push_back((now, g1_probe::activity()));
+        while samples.len() > 1 && now.duration_since(samples[1].0) >= window {
+            samples.pop_front();
+        }
+        let (oldest_at, oldest) = samples[0];
+        if now.duration_since(oldest_at) >= window && samples.back().map(|s| s.1).unwrap_or(0) - oldest <= allowed {
+            return ((oldest_at - start).as_secs_f64(), true);
+        }
+        if start.elapsed() >= std::time::Duration::from_secs(max_secs) {
+            return (start.elapsed().as_secs_f64(), false);
+        }
+    }
+}
+
+/// Wait until the owner (`nodes[0]`) and each of `idxs` hold `idxs`' leaves in the
+/// server group (`seated`), or until the owner no longer holds them (`!seated`).
+async fn g1_wait_seated(nodes: &mut [TestNode], server_id: &str, idxs: &[usize], seated: bool, max_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_secs);
+    loop {
+        g1_drain_all(nodes);
+        let owner_leaves = nodes[0].mls_members(server_id).await;
+        let mut ok = true;
+        for &i in idxs {
+            let dev = nodes[i].device_id.clone();
+            let on_owner = owner_leaves.contains(&dev);
+            ok &= if seated { on_owner && nodes[i].mls_members(server_id).await.contains(&dev) } else { !on_owner };
+            if !ok {
+                break;
+            }
+        }
+        if ok {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        sleep_ms(300).await;
+    }
+}
+
+fn g1_join_cmd(server_id: &str) -> NodeCommand {
+    NodeCommand::JoinServer {
+        server_id: server_id.to_string(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        owner_pin: None,
+        join_key: invite_key(server_id),
+    }
+}
+
+fn g1_send_cmd(server_id: &str, channel: &str, mid: String) -> NodeCommand {
+    NodeCommand::SendChannelMessage {
+        server_id: server_id.to_string(),
+        channel_id: channel.to_string(),
+        text: format!("scale probe {mid}"),
+        message_id: mid,
+        reply_to_mid: None,
+        link_preview: None,
+    }
+}
+
+struct G1Run {
+    relay: MockRelay,
+    nodes: Vec<TestNode>,
+    server_id: String,
+    general: String,
+    next_tag: u8,
+    owner_friend: Option<String>,
+    quiet_ms: u64,
+    max_secs: u64,
+    /// Frames per quiet window that still count as settled: the idle background.
+    allowed: u64,
+    phases: Vec<G1Phase>,
+}
+
+impl G1Run {
+    async fn spawn(&mut self) -> usize {
+        let tag = self.next_tag;
+        assert!(tag < u8::MAX, "the probe ran out of identity tags");
+        self.next_tag += 1;
+        let friends: Vec<&str> = self.owner_friend.iter().map(String::as_str).collect();
+        let node = spawn_node_with_friends(&self.relay, tag, tag, &friends).await;
+        self.nodes.push(node);
+        self.nodes.len() - 1
+    }
+
+    /// Grow the server to `members` (owner included), `batch` joins at a time.
+    async fn grow(&mut self, members: usize, batch: usize) {
+        while self.nodes.len() < members {
+            let n = batch.min(members - self.nodes.len());
+            let mut idxs = Vec::new();
+            for _ in 0..n {
+                idxs.push(self.spawn().await);
+            }
+            g1_quiet(&mut self.nodes, 1500, 30, self.allowed).await;
+            for &i in &idxs {
+                self.nodes[i].cmd_tx.send(g1_join_cmd(&self.server_id)).await.unwrap();
+            }
+            let sid = self.server_id.clone();
+            assert!(
+                g1_wait_seated(&mut self.nodes, &sid, &idxs, true, self.max_secs).await,
+                "growth joins never all took their seats at {} members",
+                self.nodes.len(),
+            );
+        }
+        g1_quiet(&mut self.nodes, self.quiet_ms, self.max_secs, self.allowed).await;
+    }
+
+    /// Settle, then file what moved since the last take as `phase`.
+    async fn record(&mut self, phase: &'static str, members: usize, started: std::time::Instant) {
+        let waited = started.elapsed().as_secs_f64();
+        let (settle, settled) = g1_quiet(&mut self.nodes, self.quiet_ms, self.max_secs, self.allowed).await;
+        let secs = waited + settle;
+        let book = g1_probe::take();
+        println!(
+            "[g1] {phase:<10} members={members:>4} cmds={:>7} deliveries={:>8} bytes_out={:>11} secs={secs:>6.1}{}",
+            book.cmds,
+            book.deliveries,
+            book.bytes_out,
+            if settled { "" } else { " (did not settle)" },
+        );
+        self.phases.push(G1Phase { phase, members, book, secs, settled });
+    }
+
+    /// Start a metered phase: settle first, then drop whatever moved before it.
+    async fn begin(&mut self) -> std::time::Instant {
+        g1_quiet(&mut self.nodes, self.quiet_ms, self.max_secs, self.allowed).await;
+        g1_probe::take();
+        std::time::Instant::now()
+    }
+
+    async fn checkpoint(&mut self, members: usize) {
+        let sid = self.server_id.clone();
+        // members - 1 seated now; the probe joiner makes `members`.
+        let start = self.begin().await;
+        sleep_ms(10_000).await;
+        g1_drain_all(&mut self.nodes);
+        self.record_idle(members - 1, start).await;
+
+        let p = self.spawn().await;
+        let start = self.begin().await;
+        self.nodes[p].cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+        assert!(g1_wait_seated(&mut self.nodes, &sid, &[p], true, self.max_secs).await, "probe join at {members}");
+        self.record("join", members, start).await;
+
+        let start = self.begin().await;
+        self.nodes[0].cmd_tx.send(g1_send_cmd(&sid, &self.general, format!("g1-o-{members}"))).await.unwrap();
+        self.record("msg_owner", members, start).await;
+
+        let start = self.begin().await;
+        self.nodes[1].cmd_tx.send(g1_send_cmd(&sid, &self.general, format!("g1-m-{members}"))).await.unwrap();
+        self.record("msg_member", members, start).await;
+
+        let dev = self.nodes[1].device_id.clone();
+        let start = self.begin().await;
+        self.relay.set_online(&dev, false);
+        sleep_ms(1000).await;
+        self.relay.set_online(&dev, true);
+        self.record("reconnect", members, start).await;
+
+        let start = self.begin().await;
+        self.nodes[p].cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+        assert!(g1_wait_seated(&mut self.nodes, &sid, &[p], false, self.max_secs).await, "probe leave at {members}");
+        self.record("leave", members, start).await;
+
+        let q = self.spawn().await;
+        let start = self.begin().await;
+        self.nodes[q].cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+        assert!(g1_wait_seated(&mut self.nodes, &sid, &[q], true, self.max_secs).await, "second probe join at {members}");
+        self.record("join2", members, start).await;
+
+        let q_master = self.nodes[q].master_id.clone();
+        let start = self.begin().await;
+        self.nodes[0].cmd_tx.send(NodeCommand::KickMember { server_id: sid.clone(), peer_id: q_master }).await.unwrap();
+        assert!(g1_wait_seated(&mut self.nodes, &sid, &[q], false, self.max_secs).await, "probe kick at {members}");
+        self.record("kick", members, start).await;
+
+        // Retire both probes: offline at the relay first, so nothing lingers in a room.
+        for i in [q, p] {
+            let node = self.nodes.remove(i);
+            self.relay.set_online(&node.device_id, false);
+            drop(node);
+        }
+        g1_quiet(&mut self.nodes, self.quiet_ms, self.max_secs, self.allowed).await;
+        g1_probe::take();
+    }
+
+    async fn record_idle(&mut self, members: usize, start: std::time::Instant) {
+        let secs = start.elapsed().as_secs_f64();
+        let book = g1_probe::take();
+        println!("[g1] idle       members={members:>4} cmds={:>7} deliveries={:>8} over {secs:.1}s", book.cmds, book.deliveries);
+        let per_window = (book.cmds + book.deliveries) as f64 / secs.max(1.0) * self.quiet_ms as f64 / 1000.0;
+        self.allowed = (per_window * 1.5).ceil() as u64;
+        self.phases.push(G1Phase { phase: "idle", members, book, secs, settled: true });
+    }
+}
+
+fn g1_report(phases: &[G1Phase], out: Option<&str>) {
+    let mut names: Vec<&'static str> = phases.iter().map(|p| p.phase).collect();
+    names.dedup();
+    names.sort_unstable();
+    names.dedup();
+    println!("\n=== G1 SCALE PROBE: per phase, every kind, deliveries (cmds) per size ===");
+    for name in &names {
+        let rows: Vec<&G1Phase> = phases.iter().filter(|p| p.phase == *name).collect();
+        let mut kinds: Vec<String> = rows.iter().flat_map(|p| p.book.kinds.keys().cloned()).collect();
+        kinds.sort();
+        kinds.dedup();
+        let last = rows.last().expect("one row");
+        kinds.sort_by_key(|k| std::cmp::Reverse(last.book.kinds.get(k).map(|t| t.deliveries + t.cmds).unwrap_or(0)));
+        let header: Vec<String> = rows.iter().map(|p| format!("{:>14}", format!("N={}", p.members))).collect();
+        println!("\n--- {name} ---\n{:<48}{}  exp", "kind", header.join(""));
+        let totals: Vec<String> = rows.iter().map(|p| format!("{:>14}", format!("{}({})", p.book.deliveries, p.book.cmds))).collect();
+        println!("{:<48}{}", "TOTAL", totals.join(""));
+        for k in kinds {
+            let cells: Vec<String> = rows
+                .iter()
+                .map(|p| {
+                    let t = p.book.kinds.get(&k).cloned().unwrap_or_default();
+                    format!("{:>14}", format!("{}({})", t.deliveries, t.cmds))
+                })
+                .collect();
+            let first = rows.first().and_then(|p| p.book.kinds.get(&k)).map(|t| t.deliveries + t.cmds).unwrap_or(0);
+            let lastv = last.book.kinds.get(&k).map(|t| t.deliveries + t.cmds).unwrap_or(0);
+            let n0 = rows.first().map(|p| p.members).unwrap_or(1) as f64;
+            let n1 = last.members as f64;
+            let exp = if first > 0 && lastv > 0 && n1 > n0 {
+                format!("{:.2}", (lastv as f64 / first as f64).ln() / (n1 / n0).ln())
+            } else {
+                "-".into()
+            };
+            println!("{:<48}{}  {exp}", k, cells.join(""));
+        }
+    }
+    if let Some(path) = out {
+        g1_write_csv(phases, path);
+        println!("\n[g1] csv written to {path}");
+    }
+}
+
+/// Rewritten after every checkpoint, so a run that dies at a large size keeps the rest.
+fn g1_write_csv(phases: &[G1Phase], path: &str) {
+    let mut csv = String::from("phase,members,secs,settled,kind,cmds,deliveries,bytes_out,senders,max_sender_cmds\n");
+    for p in phases {
+        csv.push_str(&format!(
+            "{},{},{:.2},{},TOTAL,{},{},{},,\n",
+            p.phase, p.members, p.secs, p.settled, p.book.cmds, p.book.deliveries, p.book.bytes_out
+        ));
+        for (k, t) in &p.book.kinds {
+            let max_sender = t.senders.values().max().copied().unwrap_or(0);
+            csv.push_str(&format!(
+                "{},{},{:.2},{},{},{},{},{},{},{}\n",
+                p.phase, p.members, p.secs, p.settled, k, t.cmds, t.deliveries, t.bytes_out, t.senders.len(), max_sender
+            ));
+        }
+        for (r, n) in &p.book.routes {
+            csv.push_str(&format!("{},{},{:.2},{},route:{},{},0,0,,\n", p.phase, p.members, p.secs, p.settled, r, n));
+        }
+    }
+    std::fs::write(path, csv).expect("write the probe csv");
+}
+
+/// The relay and coordinator cost of one join, one message, one reconnect, one leave and
+/// one kick on the real node code, at every server size in `HOLLOW_SCALE_SIZES`, broken
+/// down by wire kind. Members are strangers to each other unless
+/// `HOLLOW_SCALE_FRIENDS=owner` makes each one the owner's friend.
+///   HOLLOW_SCALE_SIZES=5,9,13 HOLLOW_SCALE_OUT=/path/g1.csv \
+///   cargo test --lib scaling_benchmark_mls_fanout -- --ignored --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "scale probe: spawns up to hundreds of real nodes. Run with --ignored --nocapture."]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn scaling_benchmark_mls_fanout() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let sizes = g1_env_list("HOLLOW_SCALE_SIZES", &[5, 9, 13]);
+    assert!(sizes[0] >= 3, "the smallest size needs an owner, a member and the probe");
+    let batch = g1_env_u64("HOLLOW_SCALE_BATCH", 4) as usize;
+    let quiet_ms = g1_env_u64("HOLLOW_SCALE_QUIET_MS", 4000);
+    let max_secs = g1_env_u64("HOLLOW_SCALE_MAX_SECS", 240);
+    let owner_friend = std::env::var("HOLLOW_SCALE_FRIENDS").ok().filter(|v| v == "owner");
+    let out = std::env::var("HOLLOW_SCALE_OUT").ok();
+
+    const OWNER_TAG: u8 = 1;
+    let relay = MockRelay::new();
+    let probe_tags = sizes.len() * 2;
+    let last_tag = 1 + sizes.last().copied().unwrap_or(0) + probe_tags;
+    assert!(last_tag < 255, "sizes need {last_tag} identity tags, the harness has 254");
+    let friends: Vec<String> = if owner_friend.is_some() {
+        (2..=last_tag as u8).map(|t| NativeKeypair::from_secret_bytes(&seed_bytes(t)).peer_id()).collect()
+    } else {
+        Vec::new()
+    };
+    let friend_refs: Vec<&str> = friends.iter().map(String::as_str).collect();
+
+    g1_probe::start();
+    let mut owner = spawn_node_with_friends(&relay, OWNER_TAG, OWNER_TAG, &friend_refs).await;
+    sleep_ms(1000).await;
+    let server_id = create_server_and_wait(&mut owner, "Scale Probe").await;
+    let general = general_channel_of(&server_id);
+    println!("\n=== G1 SCALE PROBE sizes={sizes:?} friends={} batch={batch} quiet_ms={quiet_ms} ===", owner_friend.is_some());
+
+    let mut run = G1Run {
+        relay: relay.clone(),
+        nodes: vec![owner],
+        server_id,
+        general,
+        next_tag: 2,
+        owner_friend: owner_friend.map(|_| NativeKeypair::from_secret_bytes(&seed_bytes(OWNER_TAG)).peer_id()),
+        quiet_ms,
+        max_secs,
+        allowed: 0,
+        phases: Vec::new(),
+    };
+    for &members in &sizes {
+        let grow_start = std::time::Instant::now();
+        run.grow(members - 1, batch).await;
+        println!("[g1] grew to {} members in {:.0}s", members - 1, grow_start.elapsed().as_secs_f64());
+        run.checkpoint(members).await;
+        if let Some(path) = out.as_deref() {
+            g1_write_csv(&run.phases, path);
+        }
+    }
+    g1_report(&run.phases, out.as_deref());
+    g1_probe::stop();
+    println!("=== G1 SCALE PROBE END ===\n");
 }

@@ -700,4 +700,47 @@ mod tests {
         assert!(base.was_member_at(&id(4), 4_000), "an author the owner holds posts by");
         assert!(!base.was_member_at(&id(4), 5_000 + 2 * hour), "only up to the checkpoint");
     }
+
+    /// M1: after a restart the store hands the log in clock order, where a checkpoint
+    /// sits at its own clock. A late op of an admin, stamped before its demotion but
+    /// after what the checkpoint covers, is judged at its point on a replica that
+    /// restarted exactly as on one that did not.
+    #[test]
+    fn a_restarted_log_with_a_checkpoint_folds_a_late_op_at_its_point() {
+        let hour = 3_600_000;
+        let t = crate::crdt::hlc::wall_clock_ms() - 3 * hour;
+        let sid = crate::crdt::anchor::derive_server_id(&id(1), "n");
+        let ch = format!("{}-general", &sid[..8]);
+        let history = vec![
+            op_at(1, &sid, t, P::ServerCreated { name: "S".into(), owner_peer_id: id(1), nonce: "n".into() }),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, P::RoleChanged { peer_id: id(2), role: MemberRole::Admin, priority: 3 }),
+        ];
+        let mut owner = joiner(&sid, 1);
+        owner.ingest_remote(&history);
+        let covers = owner.horizon();
+        let json = owner.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
+        let checkpoint = owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
+        let demoted = op_at(1, &sid, t + hour, P::RoleChanged { peer_id: id(2), role: MemberRole::Member, priority: 4 });
+        let mut live = joiner(&sid, 3);
+        live.ingest_remote(&history);
+        live.ingest_remote(&[checkpoint, demoted]);
+        assert_eq!(live.anchor(), Anchor::Checkpoint);
+
+        let mut restarted = live.clone();
+        let mut stored = restarted.op_log.clone();
+        stored.sort_by(|a, b| (a.hlc.physical_ms, a.hlc.counter, &a.author).cmp(&(b.hlc.physical_ms, b.hlc.counter, &b.author)));
+        assert!(matches!(stored.last().unwrap().payload, P::ServerCheckpoint { .. }), "control: the checkpoint is the store's newest op");
+        restarted.restore_op_log(stored);
+        assert!(restarted.op_log.is_sorted_by(|a, b| fold_order(a, b) != std::cmp::Ordering::Greater), "a restored log is not in fold order");
+
+        let late = op_at(2, &sid, t + hour / 2, P::ChannelRenamed { channel_id: ch.clone(), new_name: "while an admin".into() });
+        for s in [&mut live, &mut restarted] {
+            s.ingest_remote(std::slice::from_ref(&late));
+        }
+        assert_eq!(live.channels[&ch].name, "while an admin", "control: the op is judged at its point");
+        assert_eq!(restarted.channels[&ch].name, live.channels[&ch].name, "a restarted replica judged a late op against its newest state");
+        let keys_of = |s: &ServerState| s.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect::<Vec<_>>();
+        assert_eq!(keys_of(&restarted), keys_of(&live), "the logs differ after the late op");
+    }
 }

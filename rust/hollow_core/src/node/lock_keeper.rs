@@ -329,9 +329,9 @@ impl LockKeeper {
     }
 }
 
-/// Our signature on a ring control (`ring_auth`), when we hold the change key of the
-/// newest lock our state has. The relay checks it against the newest lock it holds;
-/// the two differ only while a move is on its way.
+/// Our signature on a ring control (`ring_auth`) for the relay this node dials, when
+/// we hold the change key of the newest lock our state has. The relay checks it against
+/// the newest lock it holds; the two differ only while a move is on its way.
 pub(crate) fn sign_ring_control(
     server_id: &str,
     state: &ServerState,
@@ -340,9 +340,15 @@ pub(crate) fn sign_ring_control(
     clear: bool,
     channels: &[String],
 ) -> Option<super::ring_auth::RingAuth> {
+    let Some(domain) = super::ws_client::relay_domain() else {
+        // Outside the event loop's scope the control would leave unsigned, so rings stop
+        // being made with no other sign.
+        hollow_log!("[HOLLOW-CRDT] Ring control of {server_id} unsigned: no relay domain in this task");
+        return None;
+    };
     let tip = state.join_lock.chain().last()?.clone();
     let change = open_change(server_id, state, &tip, master)?;
-    super::ring_auth::sign(server_id, &lookup_owner(state)?, retention_secs, clear, channels, &tip, &change)
+    super::ring_auth::sign(&domain, server_id, &lookup_owner(state)?, retention_secs, clear, channels, &tip, &change)
 }
 
 /// The change key of `link` from a grant sealed to us.

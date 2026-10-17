@@ -1860,6 +1860,13 @@ static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
 #endif
 static constexpr bool ACCEPT_UNSIGNED_RING_CONTROL = HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL;
 
+// 0.12.1 and older clients sign `hollow-ring1`, which names no relay; newer ones sign
+// `hollow-ring2`. Off once those clients are gone.
+#ifndef HOLLOW_ACCEPT_RING1_CONTROL
+#define HOLLOW_ACCEPT_RING1_CONTROL 1
+#endif
+static constexpr bool ACCEPT_RING1_CONTROL = HOLLOW_ACCEPT_RING1_CONTROL;
+
 // A new ring for `key` charged to `share`, within its server's cap. Past the
 // relay-wide cap the share that created the most rings loses its least recently
 // used one: refusing would let whoever filled the table first keep every new
@@ -1924,7 +1931,7 @@ static void apply_ring_control(RelayState& state, const ring_auth::Control& c, c
 // Register, set or stop a server room's catch-up rings (ring_auth.h), or, unsigned,
 // keep the room's existing rings from idling out.
 // {"type":"set_topic_buffer","room":..,"owner":..,"channels":[..],"retention_secs":N,
-//  "clear":bool,"ts":ms,"sig":..}
+//  "clear":bool,"v":2,"ts":ms,"sig":..}
 static void handle_set_topic_buffer(PerSocketData* data, const json& j, RelayState& state) {
     if (data->is_guest || data->is_fetch) return;
     ring_auth::Control c;
@@ -1945,7 +1952,7 @@ static void handle_set_topic_buffer(PerSocketData* data, const json& j, RelaySta
         const int64_t now_ms = static_cast<int64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
-        if (!ring_auth::authorized(c, chain, now_ms, lock_crypto())) return;
+        if (!ring_auth::authorized(c, chain, now_ms, lock_crypto(), {state.door_domain, ACCEPT_RING1_CONTROL})) return;
         apply_ring_control(state, c, prefix + ring_auth::topic_prefix(c.room, c.owner), socket_share(state, data));
         return;
     }
@@ -2823,22 +2830,11 @@ static void note_link_resolve_failure(PerSocketData* data, RelayState& state) {
     if (per_conn.count() > 0) data->link_resolve_block_until = now + per_conn;
 
     if (data->ip_key.empty()) return;
-    auto it = state.link_guesses.find(data->ip_key);
-    if (it == state.link_guesses.end()) {
-        // Oldest-inserted first. The loop (rather than a single pop) covers a
-        // fifo entry whose map row a successful resolve already cleared.
-        while (state.link_guesses.size() >= MAX_LINK_GUESS_KEYS &&
-               !state.link_guess_fifo.empty()) {
-            state.link_guesses.erase(state.link_guess_fifo.front());
-            state.link_guess_fifo.pop_front();
-        }
-        it = state.link_guesses.emplace(data->ip_key, RelayState::LinkGuessState{}).first;
-        state.link_guess_fifo.push_back(data->ip_key);
-    }
-    it->second.failures++;
-    it->second.last_failure = now;
-    auto per_ip = link_block_duration(it->second.failures);
-    if (per_ip.count() > 0) it->second.block_until = now + per_ip;
+    auto& guess = state.link_guesses.note(data->ip_key, socket_share(state, data));
+    guess.failures++;
+    guess.last_failure = now;
+    auto per_ip = link_block_duration(guess.failures);
+    if (per_ip.count() > 0) guess.block_until = now + per_ip;
 }
 
 // True while either the connection or its IP is inside a guessing block.
@@ -2846,8 +2842,8 @@ static bool link_resolve_blocked(const PerSocketData* data, const RelayState& st
     auto now = std::chrono::steady_clock::now();
     if (now < data->link_resolve_block_until) return true;
     if (data->ip_key.empty()) return false;
-    auto it = state.link_guesses.find(data->ip_key);
-    return it != state.link_guesses.end() && now < it->second.block_until;
+    const LinkGuess* guess = state.link_guesses.find(data->ip_key);
+    return guess && now < guess->block_until;
 }
 
 // Resolving a link code is a GUESS AT A SECRET, not a message.
@@ -2931,27 +2927,10 @@ void sweep_link_codes(RelayState& state) {
 // clean slate. Called from the offline-buffer sweep timer.
 void sweep_link_guesses(RelayState& state) {
     auto now = std::chrono::steady_clock::now();
-    for (auto it = state.link_guesses.begin(); it != state.link_guesses.end(); ) {
-        auto idle = std::chrono::duration_cast<std::chrono::seconds>(
-            now - it->second.last_failure).count();
-        if (idle >= LINK_GUESS_EXPIRE_SECS && now >= it->second.block_until) {
-            it = state.link_guesses.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    // Keep the eviction order in step with the map (and free of duplicates a
-    // cleared-then-re-armed key would leave behind).
-    if (state.link_guess_fifo.size() > state.link_guesses.size()) {
-        std::deque<std::string> kept;
-        std::unordered_set<std::string> seen;
-        for (auto& k : state.link_guess_fifo) {
-            if (state.link_guesses.count(k) && seen.insert(k).second) {
-                kept.push_back(std::move(k));
-            }
-        }
-        state.link_guess_fifo.swap(kept);
-    }
+    state.link_guesses.erase_if([now](const std::string&, const LinkGuess& g) {
+        auto idle = std::chrono::duration_cast<std::chrono::seconds>(now - g.last_failure).count();
+        return idle >= LINK_GUESS_EXPIRE_SECS && now >= g.block_until;
+    });
 }
 
 // Session control (section 9.4 to 9.7). Returns true when `type` was one; the socket

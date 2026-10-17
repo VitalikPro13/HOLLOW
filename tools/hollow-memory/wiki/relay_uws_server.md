@@ -43,7 +43,10 @@ Binary name: `hollow-relay`
   held roster is protected or for a device it removed. Crypto: `roster_crypto.h`
   (`peer_id_key` = base58 decode, refuses ids over 64 chars; `verify_ed25519_raw`).
 - **Rings** (`ring_auth.h`, `ring_evict.h`): control signed by the change key of the
-  newest join-lock link (`hollow-ring1`), legacy rooms' topics carry the owner (below),
+  newest join-lock link as `hollow-ring2` (`"v":2`), which names the relay's
+  `auth_domain` (the same `state.door_domain` auth v2 binds), because the client stamps
+  it with relay time; `hollow-ring1` (0.12.1 clients) only while `ACCEPT_RING1_CONTROL`
+  (default 1, the one switch still ON); legacy rooms' topics carry the owner (below),
   unsigned = refresh only once `ACCEPT_UNSIGNED_RING_CONTROL` is off; eviction by the
   address share holding the most bytes, `MAX_RING_FRAME_BYTES` 256 KB, 512 rings per
   server, the heaviest share's least recently used ring at the global cap, per-frame
@@ -56,7 +59,8 @@ Binary name: `hollow-relay`
   with `FRAME_OVERHEAD_BYTES` (1 KB), exact (`OfflineIndex::released(seq)` on every
   removal); the old per-sender key caps are gone. Rings (65,536), join lock chains (128 MB,
   `JoinLocks::record_bytes`), destroy orders, device-list marks and push registrations
-  (128 MB, `charge_registrations`) all ride it; per-target slots and a ring's frames evict
+  (128 MB, `charge_registrations`) and failed link-code guess records (`link_guess.h`,
+  65,536 per-/64 records, not in the snapshot) all ride it; per-target slots and a ring's frames evict
   the heaviest share. Subscriptions: 1,024 rooms / 16,384 topics per socket, past it that
   room goes unfiltered. Channel-push throttle: 256 servers per target. Snapshot codec v6
   carries every share.
@@ -70,7 +74,9 @@ Binary name: `hollow-relay`
 - **The 0.11 switches are OFF since 0.12 (deployed 2026-10-05)**: `ACCEPT_AUTH_V1`,
   `ACCEPT_UNSIGNED_RING_CONTROL`, `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`,
   `ACCEPT_DEVICE_LIST_INBOX_PROOF`. Each is `HOLLOW_ACCEPT_<NAME>` (default 0,
-  overridable with `-D`); `test/run_live.sh` still builds both settings. The live
+  overridable with `-D`); `test/run_live.sh` still builds both settings. The 0.12.2
+  switch `ACCEPT_RING1_CONTROL` defaults to 1 (0.12.1 clients sign ring1) and goes to 0
+  once those clients are gone; run_live.sh builds it with the others. The live
   probes on the box (`~/relay-next/relay_probe.py`, `inbox_probe.py`) expect the
   refusals.
 - **Live handler tests (session 32)**: `test/run_live.sh` (called last by `run_tests.sh`)

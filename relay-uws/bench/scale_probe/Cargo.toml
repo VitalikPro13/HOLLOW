@@ -1,0 +1,23 @@
+[package]
+name = "relay_scale_probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Protocol-speaking load clients for a LOCAL relay (auth v3, one room, presence,
+# 0x03 and 0x07 fan-out). Never point it at a production relay.
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+futures-util = "0.3"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+base64 = "0.22"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+debug = false

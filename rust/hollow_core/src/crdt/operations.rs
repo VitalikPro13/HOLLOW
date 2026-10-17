@@ -79,15 +79,7 @@ impl CrdtOp {
     /// no `CrdtPayload` variant carries a map or a set.
     pub fn signing_payload(&self) -> String {
         let payload_json = serde_json::to_string(&self.payload).unwrap_or_default();
-        format!(
-            "hollow-crdt1:{}:{}:{}:{}:{}:{}",
-            self.server_id,
-            self.hlc.physical_ms,
-            self.hlc.counter,
-            self.hlc.actor,
-            self.author,
-            payload_json,
-        )
+        signing_payload(&self.server_id, &self.hlc, &self.author, &payload_json)
     }
 
     /// Sign this op with the MASTER keypair: `author` and the state's maps are
@@ -104,28 +96,88 @@ impl CrdtOp {
     /// must name it, and the signature must verify over the signing payload. REJECTS,
     /// never logs and continues.
     pub fn verify_author(&self) -> Result<(), OpReject> {
-        let auth = self.auth.as_ref().ok_or(OpReject::MissingSignature)?;
-        let b64 = base64::engine::general_purpose::STANDARD;
-        let pk_bytes = b64.decode(&auth.pk).map_err(|_| OpReject::AuthorMismatch)?;
-        let derived = NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes)
-            .ok_or(OpReject::AuthorMismatch)?;
-        if derived != self.author {
-            return Err(OpReject::AuthorMismatch);
+        verify_signed(&self.author, &self.hlc, self.auth.as_deref(), &self.signing_payload())
+    }
+}
+
+/// `CrdtOp::signing_payload` over a payload's exact JSON, which an op this build cannot
+/// parse still carries.
+pub(crate) fn signing_payload(server_id: &str, hlc: &HlcTimestamp, author: &str, payload_json: &str) -> String {
+    format!(
+        "hollow-crdt1:{}:{}:{}:{}:{}:{}",
+        server_id, hlc.physical_ms, hlc.counter, hlc.actor, author, payload_json,
+    )
+}
+
+fn verify_signed(author: &str, hlc: &HlcTimestamp, auth: Option<&CrdtAuth>, signed: &str) -> Result<(), OpReject> {
+    let auth = auth.ok_or(OpReject::MissingSignature)?;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let pk_bytes = b64.decode(&auth.pk).map_err(|_| OpReject::AuthorMismatch)?;
+    let derived = NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes)
+        .ok_or(OpReject::AuthorMismatch)?;
+    if derived != author {
+        return Err(OpReject::AuthorMismatch);
+    }
+    // Every honest op is stamped by its author's own clock (`create_op`), and the
+    // actor breaks LWW ties and keys the dedup set.
+    if hlc.actor != author {
+        return Err(OpReject::ActorMismatch);
+    }
+    let sig_bytes = b64.decode(&auth.sig).map_err(|_| OpReject::BadSignature)?;
+    match NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, signed.as_bytes()) {
+        Ok(true) => Ok(()),
+        _ => Err(OpReject::BadSignature),
+    }
+}
+
+/// A signed op this build cannot read whole: a newer client's variant, or a field of a
+/// known variant this build drops (the re-serialized payload would fail its signature).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadOp {
+    pub server_id: String,
+    pub author: String,
+    pub hlc: HlcTimestamp,
+    /// The op's exact JSON, which a later build may read.
+    pub raw: String,
+}
+
+/// One op's JSON as this build reads it.
+#[derive(Debug)]
+pub enum ReadOp {
+    Op(CrdtOp),
+    /// Its author signed these exact bytes, and this build cannot read them whole.
+    Unread(UnreadOp),
+    /// Not an op, or an unknown payload nobody signed.
+    Junk,
+}
+
+/// Read one op. An op whose payload re-serializes to other bytes than it came with lost
+/// something in the parse: when the author's signature covers the bytes it came with,
+/// it is unread, never handed to the fold as a forgery.
+pub fn read_op(item: &str) -> ReadOp {
+    #[derive(Deserialize)]
+    struct Shape<'a> {
+        server_id: String,
+        hlc: HlcTimestamp,
+        author: String,
+        #[serde(borrow)]
+        payload: &'a serde_json::value::RawValue,
+        #[serde(default)]
+        auth: Option<Box<CrdtAuth>>,
+    }
+    let Ok(shape) = serde_json::from_str::<Shape>(item) else { return ReadOp::Junk };
+    let raw = shape.payload.get();
+    let parsed = serde_json::from_str::<CrdtPayload>(raw).ok();
+    let whole = parsed.as_ref().is_some_and(|p| serde_json::to_string(p).is_ok_and(|again| again == raw));
+    if !whole {
+        let signed = signing_payload(&shape.server_id, &shape.hlc, &shape.author, raw);
+        if verify_signed(&shape.author, &shape.hlc, shape.auth.as_deref(), &signed).is_ok() {
+            return ReadOp::Unread(UnreadOp { server_id: shape.server_id, author: shape.author, hlc: shape.hlc, raw: item.to_string() });
         }
-        // Every honest op is stamped by its author's own clock (`create_op`), and the
-        // actor breaks LWW ties and keys the dedup set.
-        if self.hlc.actor != self.author {
-            return Err(OpReject::ActorMismatch);
-        }
-        let sig_bytes = b64.decode(&auth.sig).map_err(|_| OpReject::BadSignature)?;
-        match NativeKeypair::verify_peer_signature(
-            &pk_bytes,
-            &sig_bytes,
-            self.signing_payload().as_bytes(),
-        ) {
-            Ok(true) => Ok(()),
-            _ => Err(OpReject::BadSignature),
-        }
+    }
+    match parsed {
+        Some(payload) => ReadOp::Op(CrdtOp { server_id: shape.server_id, hlc: shape.hlc, author: shape.author, payload, auth: shape.auth }),
+        None => ReadOp::Junk,
     }
 }
 
@@ -446,17 +498,34 @@ pub enum CrdtPayload {
     },
 }
 
+/// What a tolerant parse kept and what it skipped.
+#[derive(Debug, Default)]
+pub struct TolerantParse {
+    pub ops: Vec<CrdtOp>,
+    /// Skipped ops their author signed: the ones a later build may read (`read_op`).
+    pub unread: Vec<UnreadOp>,
+    /// The batch is not a JSON array at all.
+    pub malformed: bool,
+}
+
 /// Tolerant sync-batch parse: each op deserializes INDIVIDUALLY, so a batch carrying a
 /// NEWER client's payload variant skips just that op instead of poisoning the whole
-/// Vec, which permanently wedged older clients' server sync.
-pub fn parse_ops_tolerant(json: &str) -> Vec<CrdtOp> {
-    match serde_json::from_str::<Vec<serde_json::Value>>(json) {
-        Ok(vals) => vals
-            .into_iter()
-            .filter_map(|v| serde_json::from_value::<CrdtOp>(v).ok())
-            .collect(),
-        Err(_) => Vec::new(),
+/// Vec, which permanently wedged older clients' server sync. The signed ops it skipped
+/// are reported, so the server is fetched again whole once a build that reads them
+/// runs (`node::crdt_resync`).
+pub fn parse_ops_tolerant(json: &str) -> TolerantParse {
+    let Ok(items) = serde_json::from_str::<Vec<&serde_json::value::RawValue>>(json) else {
+        return TolerantParse { malformed: true, ..TolerantParse::default() };
+    };
+    let mut out = TolerantParse::default();
+    for item in items {
+        match read_op(item.get()) {
+            ReadOp::Op(op) => out.ops.push(op),
+            ReadOp::Unread(op) => out.unread.push(op),
+            ReadOp::Junk => {}
+        }
     }
+    out
 }
 
 /// Member roles with hierarchical priority.
@@ -758,7 +827,7 @@ mod tests {
         // …and an op serialized before signatures existed parses into exactly
         // that shape, rather than failing the tolerant batch parse.
         let legacy = r#"[{"server_id":"srv-1","hlc":{"physical_ms":1,"counter":0,"actor":"a"},"author":"a","payload":{"ServerRenamed":{"new_name":"x"}}}]"#;
-        let ops = parse_ops_tolerant(legacy);
+        let ops = parse_ops_tolerant(legacy).ops;
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].verify_author(), Err(OpReject::MissingSignature));
     }

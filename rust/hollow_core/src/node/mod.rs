@@ -4,6 +4,7 @@ pub(crate) mod at_rest_server;
 pub(crate) mod blocklist;
 pub(crate) mod call_book;
 pub(crate) mod conference;
+pub(crate) mod crdt_resync;
 pub(crate) mod crdt_store;
 pub(crate) mod crypto_handler;
 pub(crate) mod destroy;

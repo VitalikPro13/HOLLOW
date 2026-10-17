@@ -1664,6 +1664,10 @@ pub(crate) struct DebugSnapshotReply {
     pub mls_lapsed_commits: Vec<String>,
     /// Group keys holding a staged Welcome for a retry.
     pub mls_held_welcomes: Vec<String>,
+    /// server_id -> its whole-log resync mark (`crdt_resync`).
+    pub resync_marks: std::collections::HashMap<String, super::crdt_resync::Mark>,
+    /// server_id -> the device asked for its whole log now.
+    pub resync_asks: std::collections::HashMap<String, String>,
 }
 
 // -- Wire protocol types (v2: encrypted) --
@@ -1745,6 +1749,10 @@ pub(crate) enum HavenMessage {
         /// Echoed by the answer: tells it from an answer to an older ask the relay kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nonce: Option<u64>,
+        /// An ask for one page of the WHOLE log (`crdt_resync`), not a delta. An older
+        /// client ignores it and answers the state vector without a `page`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full: Option<super::crdt_resync::FullAsk>,
     },
 
     #[serde(rename = "sync_response")]
@@ -1754,6 +1762,9 @@ pub(crate) enum HavenMessage {
         /// The `nonce` of the ask this answers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nonce: Option<u64>,
+        /// Set on the answer to a `full` ask.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<super::crdt_resync::FullPage>,
     },
 
     /// Full server state snapshot, sent alongside the op log when serving a join.
@@ -5306,7 +5317,7 @@ mod epoch_catchup_wire_tests {
     fn sync_request_without_epoch_parses_to_none() {
         let json = r#"{"type":"sync_request","server_id":"srv1","state_vector_json":"{}"}"#;
         match serde_json::from_str::<HavenMessage>(json) {
-            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce: None }) => {
+            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce: None, full: None }) => {
                 assert_eq!(server_id, "srv1");
                 assert_eq!(state_vector_json, "{}");
                 assert!(mls_epoch.is_none());
@@ -5324,6 +5335,7 @@ mod epoch_catchup_wire_tests {
             state_vector_json: "{}".into(),
             mls_epoch: None,
             nonce: None,
+            full: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"sync_request","server_id":"s","state_vector_json":"{}"}"#);
@@ -5336,6 +5348,7 @@ mod epoch_catchup_wire_tests {
             state_vector_json: "{}".into(),
             mls_epoch: Some(6),
             nonce: None,
+            full: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""mls_epoch":6"#), "epoch missing from wire: {json}");

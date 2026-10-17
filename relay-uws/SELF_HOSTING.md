@@ -316,6 +316,18 @@ docker compose up -d
 This restarts the relay, which empties the offline buffers. Anything waiting for
 a member who is offline is lost, so pick a quiet moment.
 
+### Moving to 0.12.2
+
+Update the relay before anyone on it updates the app. From 0.12.2 the app signs your
+relay's address into the requests that make it keep channel messages for offline
+members, and an older relay can't check that signature. Until the relay is updated,
+new servers and channels on it keep nothing for offline members, joining a server
+where nobody is online can fail, and the server setting Offline catch-up does nothing.
+
+Update it as above, or as in [Without Docker](#without-docker). Apps from 0.12.1 keep
+working on the updated relay, so nobody has to rush. Nothing in `.env` changes, and no
+new ports open.
+
 ### Moving to 0.12
 
 0.12 can't talk to 0.11, and the two can't share a relay either. The 0.12 app

@@ -694,8 +694,11 @@ impl ServerState {
         changed
     }
 
-    /// Restore op_log from DB-persisted ops, at startup.
-    pub fn restore_op_log(&mut self, ops: Vec<CrdtOp>) {
+    /// Restore op_log from DB-persisted ops, at startup. The store hands them in clock
+    /// order, where a checkpoint sits at its own clock; the log keeps fold order, which
+    /// the fold's tail check and every search over the log assume.
+    pub fn restore_op_log(&mut self, mut ops: Vec<CrdtOp>) {
+        ops.sort_by(fold_order);
         self.op_log = ops;
         self.op_log_dedup.clear();
         for op in &self.op_log {
@@ -2178,13 +2181,15 @@ impl ServerState {
 /// Where an op sits in the fold: its clock, except a checkpoint, which sits at what it
 /// covers and after any op at that same clock (the op it covered).
 pub(super) fn fold_order(a: &CrdtOp, b: &CrdtOp) -> std::cmp::Ordering {
-    fn key(op: &CrdtOp) -> (&HlcTimestamp, bool) {
-        match &op.payload {
-            CrdtPayload::ServerCheckpoint { covers, .. } => (covers, true),
-            _ => (&op.hlc, false),
-        }
+    fold_key(a).cmp(&fold_key(b))
+}
+
+/// An op's place in the fold: a checkpoint sits at what it covers.
+pub(crate) fn fold_key(op: &CrdtOp) -> (&HlcTimestamp, bool) {
+    match &op.payload {
+        CrdtPayload::ServerCheckpoint { covers, .. } => (covers, true),
+        _ => (&op.hlc, false),
     }
-    key(a).cmp(&key(b))
 }
 
 /// Current wall clock in epoch ms (the time base for mute + grant expiry).

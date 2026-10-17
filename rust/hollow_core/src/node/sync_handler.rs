@@ -1226,6 +1226,7 @@ async fn ask_peers_to_fill(
                     state_vector_json,
                     mls_epoch: mls.and_then(|m| m.epoch(sid).ok()),
                     nonce: Some(nonce),
+                    full: None,
                 },
             );
         }
@@ -3897,6 +3898,7 @@ pub(crate) async fn flush_pending_sync_requests(
 /// Handle `MessageEnvelope::CrdtOp` (MLS path) — permission-checked CRDT op application.
 pub(crate) async fn handle_envelope_crdt_op(
     server_states: &mut ServerStates,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &EventTx,
     sid: String,
@@ -3905,7 +3907,7 @@ pub(crate) async fn handle_envelope_crdt_op(
     ws_cmd_tx: &WsCmdTx,
 ) {
     let Some(state) = server_states.get_mut(&sid) else { return };
-    let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) else { return };
+    let Some(op) = super::crdt_resync::read_live_op(crdt_resync, Some(state), &sid, &op_json) else { return };
     // The ONE ingest (ServerState::ingest_remote): the author's
     // signature, the clock bound, then the shared permission matrix. It
     // validates op.author (the creator), never the transport sender.

@@ -2595,6 +2595,8 @@ pub(crate) fn send_mls_broadcast_in(
         channel_id: channel.map(str::to_string),
     };
     let data = serde_json::to_vec(&msg).map_err(|e| format!("serialize msg: {e}"))?;
+    #[cfg(test)]
+    super::test_harness::g1_probe::note_inner(&data, &json);
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
         room_code: server_id.to_string(),
         data,
@@ -2670,6 +2672,8 @@ pub(crate) fn send_mls_broadcast_topic(
         channel_id,
     };
     let data = serde_json::to_vec(&msg).map_err(|e| format!("serialize msg: {e}"))?;
+    #[cfg(test)]
+    super::test_harness::g1_probe::note_inner(&data, &json);
     hollow_log!("[HOLLOW-TOPIC] Broadcast room={server_id} topic={ring} group={group_key} ({} bytes)", data.len());
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
         room_code: server_id.to_string(),
@@ -3123,6 +3127,7 @@ pub(crate) async fn handle_mls_commit_frame(
                         state_vector_json: sv,
                         mls_epoch: None,
                         nonce: None,
+                        full: None,
                     },
                     super::olm_lane::NoSession::Queue,
                 );

@@ -8,6 +8,10 @@
 //! A legacy (32-hex) id names no owner, so anyone may file a lock under one in its
 //! own name. Its ring topics therefore carry the owner (`ring_topic`), and the relay
 //! lets a control touch only the topics of the owner it is signed for.
+//!
+//! A control names the relay it is for (`hollow-ring2`): it carries the relay's own
+//! time, so a relay could otherwise stamp one of its choosing and replay what it
+//! collected at another relay holding the same lock chain.
 
 use base64::Engine;
 
@@ -38,10 +42,10 @@ pub(crate) fn topic(state: &crate::crdt::server_state::ServerState, channel: &st
     ring_topic(&state.server_id, state.anchor_owner().as_deref(), channel)
 }
 
-/// The exact bytes a ring control signs.
-pub(crate) fn payload(room: &str, owner: &str, ts_ms: i64, retention_secs: i64, clear: bool, channels: &[String]) -> String {
+/// The exact bytes a ring control signs; `domain` is the relay's (`relay_auth_domain`).
+pub(crate) fn payload(domain: &str, room: &str, owner: &str, ts_ms: i64, retention_secs: i64, clear: bool, channels: &[String]) -> String {
     let mut p = format!(
-        "hollow-ring1\n{room}\n{owner}\n{ts_ms}\n{retention_secs}\n{}",
+        "hollow-ring2\n{domain}\n{room}\n{owner}\n{ts_ms}\n{retention_secs}\n{}",
         if clear { "clear" } else { "keep" }
     );
     for c in channels {
@@ -51,8 +55,11 @@ pub(crate) fn payload(room: &str, owner: &str, ts_ms: i64, retention_secs: i64, 
     p
 }
 
-/// A control signed with the change key of `link`, when `change_secret` is that key.
+/// A control for the relay at `domain`, signed with the change key of `link`, when
+/// `change_secret` is that key.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sign(
+    domain: &str,
     room: &str,
     owner: &str,
     retention_secs: i64,
@@ -61,13 +68,16 @@ pub(crate) fn sign(
     link: &LockLink,
     change_secret: &[u8; 32],
 ) -> Option<RingAuth> {
+    if domain.is_empty() {
+        return None;
+    }
     let signer = NativeKeypair::from_secret_bytes(change_secret);
     if base64::engine::general_purpose::STANDARD.encode(signer.public_key_protobuf()) != link.change {
         return None;
     }
     // Only the relay judges ring control, so it carries the relay's time.
     let ts_ms = super::relay_clock::now_ms();
-    let bytes = payload(room, owner, ts_ms, retention_secs, clear, channels);
+    let bytes = payload(domain, room, owner, ts_ms, retention_secs, clear, channels);
     Some(RingAuth {
         owner: owner.to_string(),
         ts_ms,
@@ -75,11 +85,13 @@ pub(crate) fn sign(
     })
 }
 
-/// The relay's rule (`ring_auth::authorized`): fresh within ten minutes, every
-/// channel newline-free and inside its owner's topics, signed by the change key of
-/// the newest link it holds.
+/// The rule of the relay at `domain` (`ring_auth::authorized`): fresh within ten
+/// minutes, every channel newline-free and inside its owner's topics, signed by the
+/// change key of the newest link it holds, for this relay.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn relay_accepts(
+    domain: &str,
     room: &str,
     auth: &RingAuth,
     retention_secs: i64,
@@ -109,7 +121,7 @@ pub(crate) fn relay_accepts(
     ) else {
         return false;
     };
-    let bytes = payload(room, &auth.owner, auth.ts_ms, retention_secs, clear, channels);
+    let bytes = payload(domain, room, &auth.owner, auth.ts_ms, retention_secs, clear, channels);
     NativeKeypair::verify_peer_signature(&key, &sig, bytes.as_bytes()).unwrap_or(false)
 }
 
@@ -117,15 +129,31 @@ pub(crate) fn relay_accepts(
 mod tests {
     use super::*;
 
+    const RELAY: &str = "relay.example.com";
+
     /// Pinned against relay-uws/test/test_ring_auth.cpp.
     #[test]
     fn ring_control_payload_matches_the_relays_pinned_vector() {
         let channels = vec!["3f2c9a8e-1b4d-4e6f-9a0b-1c2d3e4f5a6b".to_string(), "~join".to_string()];
         assert_eq!(
-            payload("0123456789abcdef0123456789abcdef01234567", "", 1790000000000, 86400, false, &channels),
-            "hollow-ring1\n0123456789abcdef0123456789abcdef01234567\n\n1790000000000\n86400\nkeep\n\
-             3f2c9a8e-1b4d-4e6f-9a0b-1c2d3e4f5a6b\n~join"
+            payload(RELAY, "0123456789abcdef0123456789abcdef01234567", "", 1790000000000, 86400, false, &channels),
+            "hollow-ring2\nrelay.example.com\n0123456789abcdef0123456789abcdef01234567\n\n1790000000000\n\
+             86400\nkeep\n3f2c9a8e-1b4d-4e6f-9a0b-1c2d3e4f5a6b\n~join"
         );
+    }
+
+    /// A relay that stamps a future time collects controls only it can use.
+    #[test]
+    fn a_ring_control_counts_only_at_the_relay_it_names() {
+        let server = "0123456789abcdef0123456789abcdef01234567";
+        let owner = NativeKeypair::from_secret_bytes(&[7; 32]);
+        let lock = super::super::join_lock::mint_base(server, 1, &owner, Some("00")).unwrap();
+        let chain = vec![lock.link.clone()];
+        let channels = vec!["general".to_string()];
+        let auth = sign(RELAY, server, "", 3600, false, &channels, &lock.link, &lock.change).unwrap();
+        assert!(relay_accepts(RELAY, server, &auth, 3600, false, &channels, &chain, auth.ts_ms));
+        assert!(!relay_accepts("relay.other.net", server, &auth, 3600, false, &channels, &chain, auth.ts_ms), "another relay");
+        assert!(sign("", server, "", 3600, false, &channels, &lock.link, &lock.change).is_none(), "no relay named, nothing signed");
     }
 
     #[test]
@@ -137,18 +165,18 @@ mod tests {
         let chain = vec![first.link.clone(), second.link.clone()];
         let channels = vec!["general".to_string(), "~join".to_string()];
 
-        let auth = sign(server, "", 3600, false, &channels, &second.link, &second.change).unwrap();
+        let auth = sign(RELAY, server, "", 3600, false, &channels, &second.link, &second.change).unwrap();
         let now = auth.ts_ms;
-        assert!(relay_accepts(server, &auth, 3600, false, &channels, &chain, now));
-        assert!(!relay_accepts(server, &auth, 7 * 86400, false, &channels, &chain, now), "retention is signed");
-        assert!(!relay_accepts(server, &auth, 3600, true, &channels, &chain, now), "clear is signed");
-        assert!(!relay_accepts(server, &auth, 3600, false, &channels[..1], &chain, now), "channels are signed");
-        assert!(!relay_accepts(server, &auth, 3600, false, &channels, &chain[..1], now), "an older lock's key does not match");
-        assert!(!relay_accepts(server, &auth, 3600, false, &channels, &chain, now + 11 * 60 * 1000), "stale");
+        assert!(relay_accepts(RELAY, server, &auth, 3600, false, &channels, &chain, now));
+        assert!(!relay_accepts(RELAY, server, &auth, 7 * 86400, false, &channels, &chain, now), "retention is signed");
+        assert!(!relay_accepts(RELAY, server, &auth, 3600, true, &channels, &chain, now), "clear is signed");
+        assert!(!relay_accepts(RELAY, server, &auth, 3600, false, &channels[..1], &chain, now), "channels are signed");
+        assert!(!relay_accepts(RELAY, server, &auth, 3600, false, &channels, &chain[..1], now), "an older lock's key does not match");
+        assert!(!relay_accepts(RELAY, server, &auth, 3600, false, &channels, &chain, now + 11 * 60 * 1000), "stale");
 
-        let stale_key = sign(server, "", 3600, false, &channels, &first.link, &first.change).unwrap();
-        assert!(!relay_accepts(server, &stale_key, 3600, false, &channels, &chain, now), "a moved lock's key no longer counts");
-        assert!(sign(server, "", 3600, false, &channels, &second.link, &first.change).is_none(), "a key that is not the link's");
+        let stale_key = sign(RELAY, server, "", 3600, false, &channels, &first.link, &first.change).unwrap();
+        assert!(!relay_accepts(RELAY, server, &stale_key, 3600, false, &channels, &chain, now), "a moved lock's key no longer counts");
+        assert!(sign(RELAY, server, "", 3600, false, &channels, &second.link, &first.change).is_none(), "a key that is not the link's");
     }
 
     /// Pinned against relay-uws/test/test_ring_auth.cpp (`topic_prefix`).
@@ -169,16 +197,16 @@ mod tests {
         let lock = super::super::join_lock::mint_base(server, 1, &owner, None).unwrap();
         let chain = vec![lock.link.clone()];
         let own = vec![ring_topic(server, Some(&owner_id), "general")];
-        let auth = sign(server, &owner_id, 3600, false, &own, &lock.link, &lock.change).unwrap();
-        assert!(relay_accepts(server, &auth, 3600, false, &own, &chain, auth.ts_ms));
+        let auth = sign(RELAY, server, &owner_id, 3600, false, &own, &lock.link, &lock.change).unwrap();
+        assert!(relay_accepts(RELAY, server, &auth, 3600, false, &own, &chain, auth.ts_ms));
 
         let plain = vec!["general".to_string()];
-        let auth = sign(server, &owner_id, 3600, false, &plain, &lock.link, &lock.change).unwrap();
-        assert!(!relay_accepts(server, &auth, 3600, false, &plain, &chain, auth.ts_ms), "a plain channel id");
+        let auth = sign(RELAY, server, &owner_id, 3600, false, &plain, &lock.link, &lock.change).unwrap();
+        assert!(!relay_accepts(RELAY, server, &auth, 3600, false, &plain, &chain, auth.ts_ms), "a plain channel id");
 
         let other = vec![ring_topic(server, Some("12D3KooWSomeoneElse"), "general")];
-        let auth = sign(server, &owner_id, 3600, false, &other, &lock.link, &lock.change).unwrap();
-        assert!(!relay_accepts(server, &auth, 3600, false, &other, &chain, auth.ts_ms), "another owner's topic");
+        let auth = sign(RELAY, server, &owner_id, 3600, false, &other, &lock.link, &lock.change).unwrap();
+        assert!(!relay_accepts(RELAY, server, &auth, 3600, false, &other, &chain, auth.ts_ms), "another owner's topic");
     }
 
     /// Issue #72: only the relay judges ring control, so a device whose clock is
@@ -193,8 +221,8 @@ mod tests {
         let _clock = super::super::relay_clock::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let relay_ms = super::super::relay_clock::local_ms() + 20 * 60 * 1000;
         super::super::relay_clock::observe((relay_ms / 1000) as u64);
-        let auth = sign(server, "", 3600, false, &channels, &lock.link, &lock.change).unwrap();
+        let auth = sign(RELAY, server, "", 3600, false, &channels, &lock.link, &lock.change).unwrap();
         super::super::relay_clock::forget_for_test();
-        assert!(relay_accepts(server, &auth, 3600, false, &channels, &chain, relay_ms), "stamp {} vs relay {relay_ms}", auth.ts_ms);
+        assert!(relay_accepts(RELAY, server, &auth, 3600, false, &channels, &chain, relay_ms), "stamp {} vs relay {relay_ms}", auth.ts_ms);
     }
 }

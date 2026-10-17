@@ -607,6 +607,7 @@ pub(crate) async fn spawn_node(
     let (ws_cmd_tx, ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (ws_event_tx, ws_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let ws_relay_url = format!("wss://{relay_domain}/ws");
+    let ring_domain = super::ws_client::relay_auth_domain(&ws_relay_url).unwrap_or_default();
     let _ws_handle = super::ws_client::spawn_ws_client(
         ws_relay_url, device_peer_id.clone(), ws_proto, ws_pub_b64,
         license_key, false, ws_cmd_rx, ws_event_tx,
@@ -621,11 +622,11 @@ pub(crate) async fn spawn_node(
         hex::encode(&proto[..32.min(proto.len())])
     };
 
-    let handle = tokio::spawn(super::olm_lane::with_carry_book(super::door_room::with_heard_routes(Box::pin(run_event_loop(
+    let handle = tokio::spawn(super::ws_client::with_relay_domain(ring_domain, super::olm_lane::with_carry_book(super::door_room::with_heard_routes(Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    )))));
+    ))))));
 
     // The app's "my peer id" (friendships, display) is the MASTER id.
     Ok((master_peer_id, handle))
@@ -671,11 +672,11 @@ pub(crate) async fn spawn_node_mock(
 
     // This node's own `relay_set_background` flag, which the test sets.
     let away = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(Box::pin(run_event_loop(
+    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::ws_client::with_relay_domain(super::ws_client::HARNESS_RELAY_DOMAIN.to_string(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    ))))));
+    )))))));
 
     Ok((master_peer_id, handle, ws_cmd_rx, ws_event_tx, away))
 }
@@ -1047,6 +1048,14 @@ async fn run_event_loop(
             }
         }
     }
+
+    // Ops an older build skipped: read again from what we kept, or fetched again whole.
+    let mut crdt_resync = match crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+        Ok(store) => super::crdt_resync::CrdtResync::load(
+            &store, &mut server_states, crdt_store.clone(), crate::api::updater::APP_VERSION,
+        ),
+        Err(_) => super::crdt_resync::CrdtResync::load_none(crdt_store.clone(), crate::api::updater::APP_VERSION),
+    };
 
     // -- MLS state --
     let mut mls: Option<MlsManager> = {
@@ -1503,7 +1512,7 @@ async fn run_event_loop(
                 #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
                 let fwd_bridge: FwdBridge = std::marker::PhantomData;
                 Box::pin(handle_incoming_request(
-                    &mut olm, &crypto_store, &crdt_store, &event_tx,
+                    &mut olm, &crypto_store, &crdt_store, &mut crdt_resync, &event_tx,
                     &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                     &mut server_states, &bundle_keypair,
                     &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
@@ -3356,7 +3365,7 @@ async fn run_event_loop(
                             #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
                             let fwd_bridge: FwdBridge = std::marker::PhantomData;
                             handle_incoming_request(
-                                &mut olm, &crypto_store, &crdt_store, &event_tx,
+                                &mut olm, &crypto_store, &crdt_store, &mut crdt_resync, &event_tx,
                                 &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                                 &mut server_states, &bundle_keypair,
                                 &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
@@ -3577,6 +3586,7 @@ async fn run_event_loop(
                         snap.synced_peers = synced_peers.iter().cloned().collect();
                         snap.ws_transfers = pending_ws_transfers.keys().cloned().collect();
                         snap.rate_dropped = frame_budget.limiter.dropped_totals();
+                        (snap.resync_marks, snap.resync_asks) = crdt_resync.debug();
                         let _ = reply.send(snap);
                     }
                 }
@@ -4175,6 +4185,7 @@ async fn run_event_loop(
                                                         // us (or itself) stale on first contact.
                                                         mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
                                                         nonce: Some(join_hold.ask()),
+                                                        full: None,
                                                     },
                                                 );
                                             }
@@ -4753,6 +4764,7 @@ async fn run_event_loop(
                                                         // us (or itself) stale on first contact.
                                                         mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
                                                         nonce: Some(join_hold.ask()),
+                                                        full: None,
                                                     },
                                                 );
                                             }
@@ -5088,7 +5100,7 @@ async fn run_event_loop(
                             #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
                             let fwd_bridge: FwdBridge = std::marker::PhantomData;
                             handle_incoming_request(
-                                &mut olm, &crypto_store, &crdt_store, &event_tx,
+                                &mut olm, &crypto_store, &crdt_store, &mut crdt_resync, &event_tx,
                                 &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                                 &mut server_states, &bundle_keypair,
                                 &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
@@ -5607,7 +5619,7 @@ async fn run_event_loop(
                                         let fwd_bridge: FwdBridge = std::marker::PhantomData;
                                         let synced = join_hold.sync_mark(&msg, &from, &server_states);
                                         handle_incoming_request(
-                                            &mut olm, &crypto_store, &crdt_store, &event_tx,
+                                            &mut olm, &crypto_store, &crdt_store, &mut crdt_resync, &event_tx,
                                             &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                                             &mut server_states, &bundle_keypair,
                                             &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
@@ -6252,6 +6264,14 @@ async fn run_event_loop(
                 }
 
                 sync_coordinator.cleanup_stale();
+
+                let resync_asks = crdt_resync.tick(
+                    std::time::Instant::now(), &server_states, &ws_room_peers, &local_peer_str, &device_peer_id,
+                    &|device| frame_budget.lane_holds(device),
+                );
+                for (device, ask) in resync_asks {
+                    super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &ask);
+                }
 
                 // A sender whose frames the rate limit dropped and that stopped: ask it
                 // again, and send it the DM copies we hold, as the ask it sent us may have
@@ -7060,6 +7080,72 @@ pub(crate) fn install_op_signer(
     state.set_signer(master.clone(), pk_b64);
 }
 
+/// One page of a server's whole log we asked for (`crdt_resync`): folded in on a
+/// blocking thread, persisted exactly as admitted, then the next page is asked. What the
+/// page brought back can be anything a sync answer brings, our removal included.
+#[allow(clippy::too_many_arguments)]
+async fn take_resync_page(
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
+    server_states: &mut HashMap<String, ServerState>,
+    crdt_store: &super::crdt_store::CrdtStore,
+    frame_budget: &mut super::frame_budget::FrameBudget,
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    peer_str: &str,
+    server_id: String,
+    ops_json: String,
+    next: Option<super::crdt_resync::PageCursor>,
+) {
+    let took = super::crdt_resync::ingest_page(server_states, &server_id, ops_json, local_peer_str).await;
+    crdt_resync.note_skipped(&server_id, took.unread);
+    if (!took.admitted.is_empty() || took.rebuilt)
+        && let Some(state) = server_states.get(&server_id)
+    {
+        hollow_log!("[HOLLOW-CRDT] A page of {server_id}'s op log from {peer_str} brought back {} op(s)", took.admitted.len());
+        crdt_store.persist_admitted(took.admitted, state.checkpoint_hlc.clone());
+        crdt_store.save_state_snapshot(server_id.clone(), state);
+        let deleted = state.is_deleted();
+        let evicted = took.was_member
+            && !deleted
+            && !state.is_member(local_peer_str)
+            && !pending_server_joins.contains_key(&server_id);
+        voice_handler::auto_leave_invisible_voice_channels(
+            mls, ws_cmd_tx, ws_room_peers, server_states,
+            bundle_keypair, crypto_store,
+            voice_channel_participants, voice_channel_gossip_mode,
+            gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
+        ).await;
+        if deleted {
+            if let Some(mls_mgr) = mls.as_mut()
+                && mls_mgr.has_group(&server_id)
+            {
+                mls_mgr.remove_group(&server_id);
+                persist_mls_state(mls_mgr, crypto_store);
+            }
+            let _ = event_tx.send(NetworkEvent::ServerDeleted { server_id: server_id.clone() }).await;
+        } else if evicted {
+            leave_evicted_server(server_states, mls, crypto_store, crdt_store, ws_cmd_tx, event_tx, &server_id).await;
+        } else {
+            let _ = event_tx.send(NetworkEvent::ServerUpdated { server_id: server_id.clone() }).await;
+        }
+    }
+    if let Some((device, ask)) =
+        crdt_resync.paged(&server_id, took.ok, next, server_states, local_peer_str, std::time::Instant::now())
+    {
+        super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, device_peer_id, &device, &ask);
+    }
+}
+
 /// Drop a server our own state no longer lists us in: the state and its stored
 /// rows, the MLS group and its channel subgroups, the room, and the UI's entry.
 async fn leave_evicted_server(
@@ -7109,6 +7195,7 @@ async fn leave_evicted_server(
 #[allow(clippy::too_many_arguments)]
 async fn apply_remote_crdt_op(
     server_states: &mut HashMap<String, ServerState>,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -7131,7 +7218,7 @@ async fn apply_remote_crdt_op(
 ) {
     let sid = server_id.clone();
     let may_take_our_seat = Box::pin(apply_remote_crdt_op_inner(
-        server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
+        server_states, crdt_resync, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
         mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
         pending_server_joins, db_path, db_passphrase, local_peer_str, peer_str,
         server_id, op_json,
@@ -7153,6 +7240,7 @@ async fn apply_remote_crdt_op(
 #[allow(clippy::too_many_arguments)]
 async fn apply_remote_crdt_op_inner(
     server_states: &mut HashMap<String, ServerState>,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -7177,7 +7265,8 @@ async fn apply_remote_crdt_op_inner(
         return false;
     }
 
-    if let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) {
+    let parsed = super::crdt_resync::read_live_op(crdt_resync, server_states.get(&server_id), &server_id, &op_json);
+    if let Some(op) = parsed {
         // SECURITY: Log author mismatch but don't reject — the op may be
         // legitimately relayed by another peer during join/sync fan-out.
         // The per-payload permission check below validates the author's role.
@@ -7617,6 +7706,7 @@ async fn after_welcome_joined(
                         // Freshly Welcomed — current by construction.
                         mls_epoch: mls_mgr.epoch(server_id).ok(),
                         nonce: None,
+                        full: None,
                     },
                     super::olm_lane::NoSession::Queue,
                 );
@@ -7653,6 +7743,7 @@ async fn handle_incoming_request(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     crdt_store: &super::crdt_store::CrdtStore,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
     event_tx: &mpsc::Sender<NetworkEvent>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     frame_budget: &mut super::frame_budget::FrameBudget,
@@ -7726,7 +7817,7 @@ async fn handle_incoming_request(
     carried_out: &mut Option<(Box<HavenMessage>, i64)>,
 ) {
     Box::pin(handle_incoming_request_inner(
-        olm, crypto_store, crdt_store, event_tx, pending_messages, frame_budget, key_request_in_flight,
+        olm, crypto_store, crdt_store, crdt_resync, event_tx, pending_messages, frame_budget, key_request_in_flight,
         server_states, bundle_keypair, master_keypair, device_keypair, master_peer_str, device_peer_id,
         pending_server_joins, join_request_seen, join_resolutions, awaiting_mls_after_parked_join,
         crdt_store_actor, pending_sync_requests, mls, mls_bootstrap_requested, mls_welcome_grace,
@@ -7750,6 +7841,7 @@ async fn handle_incoming_request_inner(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     crdt_store: &super::crdt_store::CrdtStore,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
     event_tx: &mpsc::Sender<NetworkEvent>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     frame_budget: &mut super::frame_budget::FrameBudget,
@@ -9904,8 +9996,22 @@ async fn handle_incoming_request_inner(
 
         // -- CRDT sync message handlers --
 
-        HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce } => {
+        HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce, full } => {
             hollow_log!("[HOLLOW-CRDT] SyncRequest from {peer_str} for server {server_id}");
+
+            // A member asking for one page of our whole log, to get back ops its older
+            // build skipped (`crdt_resync`).
+            if let Some(ask) = &full
+                && let Some(state) = server_states.get(&server_id)
+                && state.is_member(peer_str)
+            {
+                let (ops_json, page) = crdt_resync.serve(state, ask, peer_str, std::time::Instant::now());
+                super::frame_budget::pace_answer(
+                    frame_budget, ws_cmd_tx, device_peer_id, peer_str,
+                    &HavenMessage::SyncResponse { server_id: server_id.clone(), ops_json, nonce, page: Some(page) },
+                );
+                return;
+            }
 
             // The op log is the whole server (names, roles, bans, restricted channels), so
             // only a member gets it. A tombstone has no members left: anyone asking gets
@@ -9935,7 +10041,7 @@ async fn handle_incoming_request_inner(
                     hollow_log!("[HOLLOW-CRDT] Sending {} delta ops to {peer_str}", delta.len());
                     super::olm_lane::carry(
                         ws_cmd_tx, peer_str, None,
-                        &HavenMessage::SyncResponse { server_id: server_id.clone(), ops_json, nonce },
+                        &HavenMessage::SyncResponse { server_id: server_id.clone(), ops_json, nonce, page: None },
                         super::olm_lane::NoSession::Queue,
                     );
                 }
@@ -10008,9 +10114,31 @@ async fn handle_incoming_request_inner(
             }
         }
 
-        HavenMessage::SyncResponse { server_id, ops_json, .. } => {
+        HavenMessage::SyncResponse { server_id, ops_json, nonce, page } => {
             hollow_log!("[HOLLOW-CRDT] SyncResponse from {peer_str} for server {server_id}");
-            
+
+            // A page of a whole log counts only as the answer to the page we asked that
+            // device for; any other is dropped, never taken as a delta.
+            match crdt_resync.claim(&server_id, peer_str, nonce, page.as_ref(), std::time::Instant::now()) {
+                super::crdt_resync::Claim::Page(next) => {
+                    Box::pin(take_resync_page(
+                        crdt_resync, server_states, crdt_store, frame_budget, mls, crypto_store,
+                        ws_cmd_tx, ws_room_peers, event_tx, bundle_keypair,
+                        voice_channel_participants, voice_channel_gossip_mode, gossip_overlays,
+                        pending_server_joins, local_peer_str, device_peer_id, peer_str,
+                        server_id, ops_json, next,
+                    ))
+                    .await;
+                    return;
+                }
+                super::crdt_resync::Claim::Unrelated if page.is_some() => {
+                    hollow_log!("[HOLLOW-SECURITY] Dropped a page of {server_id}'s op log from {peer_str} that answers no ask of ours");
+                    return;
+                }
+                // A refusal or a busy answer carries no ops.
+                _ if page.is_some() => return,
+                _ => {}
+            }
 
             // Room gating: only accept sync for servers we already know about
             // or are actively trying to join.
@@ -10023,7 +10151,9 @@ async fn handle_incoming_request_inner(
 
             // Tolerant parse: a NEWER client's op variant skips just that op,
             // never the whole batch.
-            let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
+            let crate::crdt::operations::TolerantParse { ops: incoming_ops, unread, .. } =
+                crate::crdt::operations::parse_ops_tolerant(&ops_json);
+            let unread_in = (!unread.is_empty()).then(|| server_id.clone());
             if !incoming_ops.is_empty() {
                 let state = server_states.entry(server_id.clone()).or_insert_with(|| {
                     // Skeleton for a pending join: ownerless, so only the anchor can
@@ -10351,12 +10481,18 @@ async fn handle_incoming_request_inner(
                     _ => {}
                 }
             }
+            if let Some(sid) = unread_in
+                && let Some(state) = server_states.get(&sid)
+            {
+                let vouched = unread.into_iter().filter(|u| super::crdt_resync::vouched(u, state)).collect();
+                crdt_resync.note_skipped(&sid, vouched);
+            }
         }
 
         HavenMessage::CrdtOpBroadcast { server_id, op_json } => {
             hollow_log!("[HOLLOW-CRDT] CrdtOpBroadcast from {peer_str} for server {server_id}");
             apply_remote_crdt_op(
-                server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
+                server_states, crdt_resync, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
                 mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
                 voice_channel_participants, voice_channel_gossip_mode,
                 pending_server_joins, bundle_keypair,
@@ -10833,6 +10969,7 @@ async fn handle_incoming_request_inner(
                         server_id: server_id.clone(),
                         ops_json,
                         nonce: None,
+                        page: None,
                     });
                 }
 
@@ -10934,7 +11071,7 @@ async fn handle_incoming_request_inner(
             // own event). Never a second, weaker apply.
             if let Some(op_json) = op_json {
                 apply_remote_crdt_op(
-                    server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
+                    server_states, crdt_resync, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
                     mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
                     voice_channel_participants, voice_channel_gossip_mode,
                     pending_server_joins, bundle_keypair,
@@ -10968,7 +11105,7 @@ async fn handle_incoming_request_inner(
             // ingest, which judges its author, and we leave only once our own state no
             // longer lists us. A removal from before a rejoin folds before the rejoin.
             apply_remote_crdt_op(
-                server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
+                server_states, crdt_resync, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
                 mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
                 voice_channel_participants, voice_channel_gossip_mode,
                 pending_server_joins, bundle_keypair,
@@ -11473,7 +11610,7 @@ async fn handle_incoming_request_inner(
                                     .unwrap_or(false);
 
                                 sync_handler::handle_envelope_crdt_op(
-                                    server_states, bundle_keypair, event_tx,
+                                    server_states, crdt_resync, bundle_keypair, event_tx,
                                     sid.clone(), op_json,
                                     crdt_store,
                                     ws_cmd_tx,
@@ -11845,6 +11982,7 @@ async fn handle_incoming_request_inner(
                                                 // let the responder catch us up.
                                                 mls_epoch: mls_mgr.epoch(&server_id).ok(),
                                                 nonce: None,
+                                                full: None,
                                             },
                                             super::olm_lane::NoSession::Queue,
                                         );

@@ -1,4 +1,6 @@
 mod mls_manager;
+#[cfg(test)]
+mod mls_scale_probe;
 mod olm_manager;
 pub(crate) mod safety_number;
 mod store;

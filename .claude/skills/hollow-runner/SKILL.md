@@ -171,6 +171,26 @@ section after the Windows fleet); these rules hold for every command that runs O
   log is `D:\dev\wt\<name>\.team\agent-pc-win.log`.
 - C: on the PC is nearly full (about 13 GB free): builds and worktrees go on D:.
 
+### Full Rust suite on the PC (the default for every full nextest run)
+1. `bash scripts/pc_sync.sh <name> <worktree>` (first run creates `D:\dev\wt\<name>`, later runs
+   ship only the changes).
+2. First run only, a warm target: `ssh pc "powershell -File D:\dev\wt\<name>\scripts\dev_cache.ps1
+   -SeedWorktree D:\dev\wt\<name> -From C:\Users\Jabun\Documents\Coding\HOLLOW"` (reads the main
+   checkout, never writes it).
+3. `ssh -o ServerAliveInterval=15 pc "cd D:\dev\wt\<name>\rust\hollow_core; $env:PATH =
+   'C:\Program Files\OpenSSL-Win64\bin;' + $env:PATH; cargo nextest run --lib -j 6 *>
+   D:\dev\wt\<name>\nextest.log"` (without OpenSSL on PATH every test binary dies with
+   STATUS_DLL_NOT_FOUND 0xc0000135), then `scp pc:D:/dev/wt/<name>/nextest.log` into your `.team`
+   dir and report from it. The PC is shared: one full suite there at a time; if another is
+   running (`ssh pc "Get-Process cargo-nextest"`), wait for it.
+4. Report the summary line and every failure verbatim. Over ssh the 7 real-keystore tests
+   (`keychain_tests::*`, `wipe::tests::a_wipe_*` / `erasing_another_profile_*`,
+   `platform_keystore::tests::the_real_keystore_*`) fail with `CredWriteW failed`: Credential
+   Manager needs an interactive logon. List them separately as environmental. The lead deletes
+   `D:\dev\wt\<name>\rust\hollow_core\target` when the track merges.
+- If `pc` (LAN) times out, use `pc-ts` (Tailscale) for every step, and `PC_HOST=pc-ts` for
+  pc_sync.sh.
+
 ## Mac mini (iOS Simulators, macOS app, Android emulators)
 
 - ALL mobile runs happen on the mini. Default backend is the iOS Simulator; Android

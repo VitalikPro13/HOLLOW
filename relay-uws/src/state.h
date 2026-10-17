@@ -14,6 +14,7 @@
 #include "door_room.h"
 #include "join_lock.h"
 #include "kill_list.h"
+#include "link_guess.h"
 #include "license.h"
 #include "conn_rate.h"
 #include "fair_share.h"
@@ -435,23 +436,15 @@ struct RelayState {
     // Per-peer floor across ALL channel pushes (multi-server burst guard).
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_channel_push_any;
 
-    // Failed link-code guesses per ip_limit_key (RELAY-5).
+    // Failed link-code guesses per ip_limit_key (RELAY-5, link_guess.h).
     //
     // This is a DELIBERATE, DOCUMENTED EXCEPTION to "per-IP RAM = connection
-    // caps only": it counts FAILED guesses of a secret, never traffic. A link
-    // code is six characters over a 36^6 keyspace and it is the passphrase of a
-    // full identity backup, so an unthrottled resolve is a remote brute force
-    // of somebody's whole identity; the per-connection counter alone is worth
-    // nothing because reconnecting resets it. Nothing here counts, delays or
-    // drops a message, and a correct guess clears the entry.
-    struct LinkGuessState {
-        uint32_t failures = 0;
-        std::chrono::steady_clock::time_point block_until{};
-        std::chrono::steady_clock::time_point last_failure{};
-    };
-    std::unordered_map<std::string, LinkGuessState> link_guesses;
-    // Insertion order, for O(1) eviction at MAX_LINK_GUESS_KEYS.
-    std::deque<std::string> link_guess_fifo;
+    // caps only": it counts FAILED link-code guesses, never traffic. A link
+    // code is the rendezvous half of a device link (not its secret, HOL-SEC-002), so an unthrottled resolve
+    // lets anyone probe for links in progress; the per-connection counter alone
+    // is worth nothing because reconnecting resets it. Nothing here counts,
+    // delays or drops a message, and a correct guess clears the entry.
+    LinkGuesses link_guesses{MAX_LINK_GUESS_KEYS};
 
     // Destroy signals waiting for devices that are not connected. The relay
     // holds an opaque blob per target device id and hands it over on that
@@ -460,7 +453,7 @@ struct RelayState {
     // Join lock chains (join_lock.h): public halves only, re-checked by every reader.
     JoinLocks join_locks;
     // What a door proof is made for (door_room.h): this process's key, and the domain
-    // auth v2 binds.
+    // auth v2 binds, which ring control names too (ring_auth.h).
     DoorKey door_key;
     std::string door_domain;
     // Rooms with a prover in its grace, for sweep_door_grace.

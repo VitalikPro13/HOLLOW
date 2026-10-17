@@ -273,7 +273,7 @@ impl DoorRooms {
             ws_cmd_tx,
             asker,
             Some(room),
-            &HavenMessage::SyncResponse { server_id: room.to_string(), ops_json, nonce: None },
+            &HavenMessage::SyncResponse { server_id: room.to_string(), ops_json, nonce: None, page: None },
             super::olm_lane::NoSession::Drop,
         );
         true
@@ -393,7 +393,7 @@ mod tests {
                 assert_eq!((device.as_str(), room.as_deref()), ("kicked-device", Some(sid.as_str())));
                 let ops = match serde_json::from_str(&json) {
                     Ok(super::super::types::MessageEnvelope::Carried { msg, .. }) => match *msg {
-                        HavenMessage::SyncResponse { ops_json, .. } => crate::crdt::operations::parse_ops_tolerant(&ops_json),
+                        HavenMessage::SyncResponse { ops_json, .. } => crate::crdt::operations::parse_ops_tolerant(&ops_json).ops,
                         other => panic!("not a sync answer: {other:?}"),
                     },
                     other => panic!("not a carried envelope: {other:?}"),

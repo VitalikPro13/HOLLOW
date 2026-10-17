@@ -90,7 +90,10 @@ in YOUR context costs far more than in a runner's.
 - `HOLLOW_TEST_TMP` is set machine-wide; never `tempfile::` in tests; a test that touches storage
   sets its own data dir.
 - Targeted tests while you work; ONE full `cargo nextest run --lib -j 6` at the end (via a runner)
-  if you changed Rust. Clippy: no new warnings in your code. Never `eprintln!`/`println!` in
+  if you changed Rust. The full suite runs on the Windows PC, not the Mac: the mini is shared by
+  every builder and its parallel runs fail with "No buffer space available". Your runner ships the
+  worktree there itself (`hollow-runner`, "Full Rust suite on the PC"); a Mac failure that passes
+  singly is noise, a PC failure is real. Clippy: no new warnings in your code. Never `eprintln!`/`println!` in
   hollow_core.
 - A new field on a persisted struct gets `#[serde(default)]`; a schema change is an additive
   migration an existing database survives (test it on a copy).

@@ -254,7 +254,7 @@ mod tests {
     }
 
     fn answer(nonce: u64) -> HavenMessage {
-        HavenMessage::SyncResponse { server_id: "srv".into(), ops_json: "[]".into(), nonce: Some(nonce) }
+        HavenMessage::SyncResponse { server_id: "srv".into(), ops_json: "[]".into(), nonce: Some(nonce), page: None }
     }
 
     #[test]
@@ -365,9 +365,9 @@ mod tests {
         hold.went_away(&states);
         assert!(hold.ask() > before, "every connection asks with a new nonce");
         assert_eq!(hold.sync_mark(&answer(before), "x", &states), None, "an answer to an earlier ask");
-        let unasked = HavenMessage::SyncResponse { server_id: "srv".into(), ops_json: "[]".into(), nonce: None };
+        let unasked = HavenMessage::SyncResponse { server_id: "srv".into(), ops_json: "[]".into(), nonce: None, page: None };
         assert_eq!(hold.sync_mark(&unasked, "x", &states), None, "an answer to no ask");
-        let ask = HavenMessage::SyncRequest { server_id: "srv".into(), state_vector_json: "{}".into(), mls_epoch: None, nonce: None };
+        let ask = HavenMessage::SyncRequest { server_id: "srv".into(), state_vector_json: "{}".into(), mls_epoch: None, nonce: None, full: None };
         assert_eq!(hold.sync_mark(&ask, "x", &states), None, "an ask proves nothing");
     }
 }

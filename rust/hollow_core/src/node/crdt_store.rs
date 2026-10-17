@@ -12,6 +12,7 @@ pub(crate) enum CrdtStoreCmd {
     /// ops costs N cheap clones and exactly ONE serialize per server.
     SaveStateSnapshot { server_id: String, state: Box<crate::crdt::server_state::ServerState> },
     SaveBlob { server_id: String, key: String, value: String },
+    DeleteBlob { server_id: String, key: String },
     DeleteServer(String),
     /// Insert-or-replace one parked-join row (pending joins, rung 1). Through
     /// the actor for the same reason every other CRDT write is: the join handler
@@ -191,6 +192,12 @@ impl CrdtStore {
             CrdtStoreCmd::SaveBlob { server_id, key, value } => {
                 pending_blobs.insert((server_id, key), value);
             }
+            CrdtStoreCmd::DeleteBlob { server_id, key } => {
+                pending_blobs.remove(&(server_id.clone(), key.clone()));
+                if let Err(e) = store.delete_server_blob(&server_id, &key) {
+                    hollow_log!("CrdtStore: failed to delete blob {key} for {server_id}: {e}");
+                }
+            }
             CrdtStoreCmd::UpsertPendingJoin(row) => {
                 if let Err(e) = store.upsert_pending_join(&row) {
                     hollow_log!("CrdtStore: failed to upsert pending join {}: {e}", row.server_id);
@@ -246,6 +253,11 @@ impl CrdtStore {
     /// Fire-and-forget: persist a key-value blob for a server.
     pub fn save_blob(&self, server_id: String, key: String, value: String) {
         let _ = self.cmd_tx.send(CrdtStoreCmd::SaveBlob { server_id, key, value });
+    }
+
+    /// Fire-and-forget: forget one key-value blob of a server.
+    pub fn delete_blob(&self, server_id: String, key: String) {
+        let _ = self.cmd_tx.send(CrdtStoreCmd::DeleteBlob { server_id, key });
     }
 
     /// Fire-and-forget: insert a CRDT op.

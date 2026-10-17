@@ -1,7 +1,7 @@
 #!/bin/bash
 # Live tests of the relay's dispatch gates (test_relay_live.cpp): builds the real relay
-# twice, with the four release-day switches on (the binary today) and off (once 0.12
-# ships), runs each on 127.0.0.1 with a throwaway certificate and drives it over TLS.
+# twice, with every compatibility switch on and every one off, runs each on 127.0.0.1
+# with a throwaway certificate and drives it over TLS.
 # run_tests.sh calls it with its scratch directory; SANITIZE=1 builds the relay and the
 # client with ASan and UBSan. Skips, saying why, when the vendored uWebSockets/uSockets
 # sources or the openssl tool are missing.
@@ -74,7 +74,7 @@ relay_cxx="g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -DHOLLOW_RELAY_TEST_LOOPBAC
 # Both builds set every switch, so flipping a default on release day changes neither.
 switches() {
     local s
-    for s in AUTH_V1 UNSIGNED_RING_CONTROL UNSIGNED_NICKNAME_CLAIMS DEVICE_LIST_INBOX_PROOF; do
+    for s in AUTH_V1 UNSIGNED_RING_CONTROL UNSIGNED_NICKNAME_CLAIMS DEVICE_LIST_INBOX_PROOF RING1_CONTROL; do
         printf -- "-DHOLLOW_ACCEPT_%s=%s " "$s" "$1"
     done
 }

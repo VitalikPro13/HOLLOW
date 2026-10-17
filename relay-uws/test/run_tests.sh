@@ -45,6 +45,7 @@ run test_join_lock ../src/crypto.cpp $LIBS
 run test_kill_list
 run test_kill_order ../src/crypto.cpp $LIBS
 run test_license_pool
+run test_link_guess
 run test_push_queue -pthread
 run test_relay_validators ../src/crypto.cpp $LIBS
 run test_reports ../src/reports.cpp ../src/crypto.cpp $LIBS
