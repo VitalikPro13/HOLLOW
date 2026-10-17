@@ -12,10 +12,10 @@
       "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.12.1-linux.tar.gz",
       "url_android": "https://anonlisten.com/hollow/releases/hollow-0.12.1-android.apk",
       "notes": "Resumable Connections, OBS Stream Overlay, Device Linking & Voice Room Chat",
-      "sha256_windows": "ca3cdfda3b65c2c6b3a29a539d9b48a774855dbbb47330002939c65b4a460a7c",
+      "sha256_windows": "a62fd4da22b01fbda4ba98357c1f522a2374924176a67bf5fb6382fad8352ca8",
       "sha256_macos": "ead551c743cbccb92ff4fa905c262849d2b922c7e7792cc2d1becc2cfca688b7",
-      "sha256_linux": "a3fc4ee220240a377f8cbd9b54cf0a59256e09810d8b5b0ed1a1c743dd12fd23",
-      "sha256_linux_targz": "3dac957a29ac936b27426d256f4568dee6e03bef93bae30d3b18e5d18cf1caf1"
+      "sha256_linux": "28a1f4ee355f58722280c76d5bf2e17899d5385099ae24595ca1bf38b675609d",
+      "sha256_linux_targz": "11bcb15925f5405abc32d6f65cabc303755972ef27850b9c5d3dcfe3d9b242d5"
     }
   ]
 }
