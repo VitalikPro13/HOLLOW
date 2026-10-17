@@ -967,12 +967,29 @@ fn try_decrypt_dm(
                 Ok(MessageEnvelope::FileHeader { inner }) => {
                     handle_file_header(&convo, local_master, *inner, db_path, db_passphrase)
                 }
+                // A roster trade the app would answer (AR-29): its key is spent here, so
+                // keep what verifies and leave the answer to the app.
+                Ok(MessageEnvelope::Carried { msg, .. }) => {
+                    if let HavenMessage::RosterSync { roster, reply, .. } = *msg {
+                        persist_olm_read(olm, crypto_store, from, sealed_at);
+                        crate::node::roster_reach::fetch_roster(
+                            db_path, db_passphrase, local_master, local_peer_id, from, roster, reply,
+                        );
+                    }
+                    None
+                }
                 Err(e) => {
                     hollow_log!("[HOLLOW-FETCH] Decrypted envelope from {from} failed MessageEnvelope parse ({} B) — dropped: {e}", text.len());
                     None
                 }
                 Ok(_) => None, // Other envelope types — ignore in fetch mode.
             }
+        }
+        HavenMessage::RosterNotice { roster } => {
+            crate::node::roster_reach::fetch_roster(
+                db_path, db_passphrase, local_master, local_peer_id, from, roster, false,
+            );
+            None
         }
         _ => None,
     }
@@ -1083,6 +1100,7 @@ fn handle_direct_message(
         link_preview,
         order_us,
         album,
+        rd,
         ..
     } = inner;
 
@@ -1101,11 +1119,16 @@ fn handle_direct_message(
         return None;
     }
 
+    let fresh = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .is_ok_and(|store| crate::node::roster_reach::first_signed_copy(&store, mid.as_deref()));
     persist_direct_message(
         from, convo, &msg_text, ts, mid.as_deref(), reply_to.as_deref(), file_id.as_deref(),
         order_us, album.as_deref(), sig.as_deref(), pk.as_deref(), link_preview.as_ref(),
         db_path, db_passphrase,
     );
+    if fresh && let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        crate::node::roster_reach::fetch_on_dm(&store, local_master, from, convo, rd.as_ref());
+    }
 
     Some(FetchedDm {
         from_peer: convo.to_string(),
@@ -1762,6 +1785,7 @@ mod tests {
             inner: Box::new(DirectMessagePayload {
                 text: "hi".into(), ts: 1_000, sig, pk, mid: Some("k2".into()), reply_to: None,
                 file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None,
+                rd: None,
             }),
         })
         .unwrap();
@@ -1808,6 +1832,7 @@ mod tests {
             inner: Box::new(DirectMessagePayload {
                 text: "hi".into(), ts: 1_000, sig, pk, mid: Some("mark".into()), reply_to: None,
                 file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None,
+                rd: None,
             }),
         })
         .unwrap();
@@ -1836,6 +1861,157 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert_eq!(marks, vec![(b.clone(), sealed_ms)], "the push fetch left the read mark behind");
+        crate::node::resolver::clear_all();
+    }
+
+    /// AR-29 (b3-fix H1): the identity Bob (master `bm`, devices `b1`, `b2`) as Alice's
+    /// store holds it, plus an Olm session `b1` -> Alice for frames from `b1`.
+    struct B3Push {
+        _tmp: crate::test_tmp::TestDir,
+        path: String,
+        pass: String,
+        a: String,
+        a_dev: String,
+        a2: NativeKeypair,
+        own: crate::identity::roster::Roster,
+        bm: NativeKeypair,
+        b1: NativeKeypair,
+        b2: NativeKeypair,
+        roster: crate::identity::roster::Roster,
+        alice_olm: OlmManager,
+        b1_olm: OlmManager,
+    }
+
+    fn b3_push() -> B3Push {
+        use crate::identity::roster::{self, Roster};
+        let (_tmp, path, pass) = temp_store();
+        let (alice, alice_dev, bm, brec, b1, b2) = (kp(191), kp(192), kp(193), kp(194), kp(195), kp(196));
+        let (a, a_dev) = (alice.peer_id(), alice_dev.peer_id());
+        let (arec, a2) = (kp(197), kp(198));
+        crate::node::resolver::seed_self(&a, &[a_dev.clone(), a2.peer_id()]);
+        let now = crate::node::roster_book::now_ms();
+        let mut own = Roster::new(&a);
+        for d in [&alice_dev, &a2] {
+            own.add_consent(roster::sign_consent(d, &a));
+        }
+        let keep = [a_dev.clone(), a2.peer_id()];
+        own.add_phrase_statement(&roster::r_pub_of(&arec), Some(roster::sign_recovery(&alice, &arec, now - 60_000, &keep, false)), None)
+            .unwrap();
+        let mut r = Roster::new(&bm.peer_id());
+        for d in [&b1, &b2] {
+            r.add_consent(roster::sign_consent(d, &bm.peer_id()));
+        }
+        let keep = [b1.peer_id(), b2.peer_id()];
+        r.add_phrase_statement(&roster::r_pub_of(&brec), Some(roster::sign_recovery(&bm, &brec, now - 60_000, &keep, false)), None)
+            .unwrap();
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        crate::node::roster_book::merge_for_test(&store, &own, &a, &a_dev);
+        let own = crate::node::roster_book::load(&store, &a).expect("our own roster");
+        crate::node::roster_book::merge_for_test(&store, &r, &a, &a_dev);
+        assert!(crate::node::resolver::is_device_of(&b2.peer_id(), &bm.peer_id()), "precondition: Alice counts b2");
+        let mut alice_olm = OlmManager::new();
+        let otk = alice_olm.generate_one_time_key();
+        let mut b1_olm = OlmManager::new();
+        crate::node::crypto_handler::bind_olm_identity(&mut b1_olm, &b1);
+        b1_olm.create_outbound_session(&a_dev, &alice_olm.identity_key_base64(), &otk).unwrap();
+        B3Push { _tmp, path, pass, a, a_dev, a2, own, bm, b1, b2, roster: r.verified(now), alice_olm, b1_olm }
+    }
+
+    impl B3Push {
+        /// `envelope` from `b1`, read by the push fetch as Alice.
+        fn fetch(&mut self, envelope: &MessageEnvelope) -> Option<FetchedDm> {
+            let json = serde_json::to_string(envelope).unwrap();
+            let (message_type, ciphertext) = self.b1_olm.encrypt(&self.a_dev, json.as_bytes()).unwrap();
+            let frame = serde_json::to_string(
+                &crate::node::crypto_handler::encrypted_frame(&self.b1_olm, message_type, &ciphertext),
+            )
+            .unwrap();
+            let crypto_store = CryptoStore::open(self.path.clone(), self.pass.clone()).unwrap();
+            let (path, pass, a, a_dev) = (self.path.clone(), self.pass.clone(), self.a.clone(), self.a_dev.clone());
+            try_decrypt_dm(
+                &self.b1.peer_id(), &frame, crate::node::frame_auth::now_ms(), &mut self.alice_olm, &crypto_store,
+                &path, &pass, &a_dev, &a,
+            )
+        }
+
+        fn store(&self) -> crate::storage::MessageStore {
+            crate::storage::MessageStore::open(&self.path, &self.pass).unwrap()
+        }
+
+        fn dm(&self, mid: &str, rd: Option<crate::node::types::RosterDigests>) -> MessageEnvelope {
+            let extras = SignedExtras { mid: Some(mid), order_us: Some(1_000_000), ..SignedExtras::default() };
+            let (sig, pk) = sign_message_versioned(&self.bm, &pk_b64(&self.bm), "dm", &self.a, &self.bm.peer_id(), 1_000, &extras, "hi");
+            MessageEnvelope::DirectMessage {
+                inner: Box::new(DirectMessagePayload {
+                    text: "hi".into(), ts: 1_000, sig, pk, mid: Some(mid.into()), reply_to: None,
+                    file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None, rd,
+                }),
+            }
+        }
+    }
+
+    /// The push fetch spends the Olm key of a roster trade, so it keeps the removal the
+    /// trade carries at once and leaves the answer to the app.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn b3_fix_the_push_fetch_keeps_a_removal_a_roster_trade_carries() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let mut push = b3_push();
+        let mut removed = push.roster.clone();
+        let base = removed.base();
+        removed.add_removal(crate::identity::roster::sign_removal(&push.b1, &push.bm.peer_id(), &base, &push.b2.peer_id(), &[]));
+        let sync = MessageEnvelope::Carried {
+            msg: Box::new(HavenMessage::RosterSync { roster: removed, reply: true, waiting: false }),
+            at_ms: crate::node::frame_auth::now_ms(),
+        };
+        assert!(push.fetch(&sync).is_none(), "a roster trade is no notification");
+        let b2 = push.b2.peer_id();
+        assert!(crate::node::resolver::is_revoked(&b2), "the fetch must keep the removal it decrypted");
+        assert!(push.store().get_all_revoked_devices().unwrap().contains(&b2), "and store it for the app");
+        assert_eq!(
+            push.store().take_roster_asks_due(),
+            [(push.bm.peer_id(), push.b1.peer_id())],
+            "the answer b1 asked for waits for the app",
+        );
+
+        // Our own roster: only the node acts on it (it alone tells this device it was
+        // removed), so the fetch keeps none of it and notes an ask instead.
+        let own = push.own.clone();
+        let mut own_removed = own.clone();
+        let base = own_removed.base();
+        own_removed.add_removal(crate::identity::roster::sign_removal(&push.a2, &push.a, &base, &push.a_dev, &[]));
+        crate::node::roster_reach::fetch_roster(&push.path, &push.pass, &push.a, &push.a_dev, &push.b1.peer_id(), own_removed, false);
+        assert_eq!(crate::node::roster_book::load(&push.store(), &push.a), Some(own), "the fetch changed our own roster");
+        assert_eq!(push.store().take_roster_asks_due(), [(push.a.clone(), push.b1.peer_id())]);
+        crate::node::resolver::clear_all();
+    }
+
+    /// A DM the push fetch reads carries the sender's roster digest: one that differs
+    /// notes an ask for the app, one that matches stamps the sender's slot, and a DM
+    /// read before does neither.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn b3_fix_the_push_fetch_reads_a_dms_roster_digest() {
+        use crate::node::types::RosterDigests;
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let mut push = b3_push();
+        let (bm, b1) = (push.bm.peer_id(), push.b1.peer_id());
+        let held = push.roster.digest();
+        let differs = || Some(RosterDigests { own: Some("ab".repeat(16)), peer: None });
+
+        assert!(push.fetch(&push.dm("b3p-1", differs())).is_some(), "precondition: the DM opens");
+        assert_eq!(push.store().take_roster_asks_due(), [(bm.clone(), b1.clone())], "a digest that differs notes an ask");
+        assert!(push.fetch(&push.dm("b3p-1", differs())).is_some());
+        assert!(push.store().take_roster_asks_due().is_empty(), "a DM read before notes nothing");
+
+        assert_eq!(push.store().roster_confirmed_at(&bm, &b1), None);
+        assert!(push.fetch(&push.dm("b3p-2", Some(RosterDigests { own: Some(held), peer: None }))).is_some());
+        assert!(push.store().roster_confirmed_at(&bm, &b1).is_some(), "a digest that matches stamps b1's slot");
+        assert_eq!(push.store().roster_confirmed_at(&bm, &push.b2.peer_id()), None, "and no other");
         crate::node::resolver::clear_all();
     }
 
@@ -2021,6 +2197,7 @@ mod tests {
             let inner = DirectMessagePayload {
                 text: text.into(), ts: 1_000, sig, pk, mid: Some(mid.into()), reply_to: None,
                 file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None,
+                rd: None,
             };
             handle_direct_message(&b, &b, &a, inner, &path, &pass)
         };
@@ -2058,6 +2235,7 @@ mod tests {
             inner: Box::new(DirectMessagePayload {
                 text: "hi".into(), ts: 1_000, sig, pk, mid: Some("t02".into()), reply_to: None,
                 file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None,
+                rd: None,
             }),
         })
         .unwrap();

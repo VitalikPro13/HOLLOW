@@ -467,7 +467,7 @@ pub(crate) async fn handle_send_file(
         None, voice, album, order_us,
         event_tx, server_states, bundle_keypair, device_keypair, pub_key_b64, local_peer_str,
         device_peer_id, olm, crypto_store, mls,
-        ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
+        ws_cmd_tx, cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
         peer_auto_dl, gossip_overlays, db_path, db_passphrase,
     ).await;
 }
@@ -837,6 +837,7 @@ pub(crate) async fn finish_send_file(
     crypto_store: &CryptoStore,
     mls: &mut Option<MlsManager>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    cmd_tx: &mpsc::Sender<super::types::NodeCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
@@ -987,11 +988,14 @@ pub(crate) async fn finish_send_file(
             total_chunks,
             device_keypair,
             device_peer_id,
+            rd: super::roster_reach::for_dm(
+                local_peer_str, &super::resolver::resolve(&peer_str), db_path, db_passphrase,
+            ),
         };
         send_dm_file_fanout(
             &peer_str, &msg, device_peer_id,
-            olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
-            webrtc_peers, pending_webrtc_sends, peer_auto_dl,
+            olm, crypto_store, event_tx, ws_cmd_tx, cmd_tx, ws_room_peers,
+            webrtc_peers, pending_webrtc_sends, peer_auto_dl, db_path, db_passphrase,
         ).await;
     } else if let (Some(sid), Some(cid)) = (server_id, channel_id) {
         // Channel path — broadcast via MLS.
@@ -1157,6 +1161,130 @@ struct DmFileMsg<'a> {
     // targets a device we have no session with (Fix B).
     device_keypair: &'a crate::identity::native_identity::NativeKeypair,
     device_peer_id: &'a str,
+    rd: Option<super::types::RosterDigests>,
+}
+
+/// A DM file fan-out kept back while a stale roster is asked for (AR-29), owning what
+/// [`DmFileMsg`] borrows.
+pub(crate) struct HeldFileDm {
+    peer_str: String,
+    signing_payload_text: String,
+    timestamp: i64,
+    sig: Option<String>,
+    pk: Option<String>,
+    message_id: String,
+    file_id: String,
+    order_us: i64,
+    album: Option<String>,
+    final_data: Vec<u8>,
+    original_name: String,
+    final_ext: String,
+    final_mime: String,
+    file_size: u64,
+    is_image: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+    vthumb: Option<VideoThumbRef>,
+    thumb: Option<String>,
+    voice: bool,
+    share_ref: Option<super::types::ShareRef>,
+    message_text: String,
+    local_peer_str: String,
+    sha256: String,
+    total_chunks: u32,
+    device_keypair: crate::identity::native_identity::NativeKeypair,
+    device_peer_id: String,
+    rd: Option<super::types::RosterDigests>,
+}
+
+impl HeldFileDm {
+    fn keep(peer_str: &str, m: &DmFileMsg<'_>) -> Self {
+        Self {
+            peer_str: peer_str.to_string(),
+            signing_payload_text: m.signing_payload_text.to_string(),
+            timestamp: m.timestamp,
+            sig: m.sig.clone(),
+            pk: m.pk.clone(),
+            message_id: m.message_id.to_string(),
+            file_id: m.file_id.to_string(),
+            order_us: m.order_us,
+            album: m.album.map(str::to_string),
+            final_data: m.final_data.to_vec(),
+            original_name: m.original_name.to_string(),
+            final_ext: m.final_ext.to_string(),
+            final_mime: m.final_mime.to_string(),
+            file_size: m.file_size,
+            is_image: m.is_image,
+            width: m.width,
+            height: m.height,
+            vthumb: m.vthumb.clone(),
+            thumb: m.thumb.clone(),
+            voice: m.voice,
+            share_ref: m.share_ref.clone(),
+            message_text: m.message_text.to_string(),
+            local_peer_str: m.local_peer_str.to_string(),
+            sha256: m.sha256.to_string(),
+            total_chunks: m.total_chunks,
+            device_keypair: m.device_keypair.clone(),
+            device_peer_id: m.device_peer_id.to_string(),
+            rd: m.rd.clone(),
+        }
+    }
+
+    fn msg(&self) -> DmFileMsg<'_> {
+        DmFileMsg {
+            signing_payload_text: &self.signing_payload_text,
+            timestamp: self.timestamp,
+            sig: &self.sig,
+            pk: &self.pk,
+            message_id: &self.message_id,
+            file_id: &self.file_id,
+            order_us: self.order_us,
+            album: self.album.as_deref(),
+            final_data: &self.final_data,
+            original_name: &self.original_name,
+            final_ext: &self.final_ext,
+            final_mime: &self.final_mime,
+            file_size: self.file_size,
+            is_image: self.is_image,
+            width: self.width,
+            height: self.height,
+            vthumb: &self.vthumb,
+            thumb: &self.thumb,
+            voice: self.voice,
+            share_ref: &self.share_ref,
+            message_text: &self.message_text,
+            local_peer_str: &self.local_peer_str,
+            sha256: &self.sha256,
+            total_chunks: self.total_chunks,
+            device_keypair: &self.device_keypair,
+            device_peer_id: &self.device_peer_id,
+            rd: self.rd.clone(),
+        }
+    }
+}
+
+/// Send a DM file the stale-roster hold kept back, judged against the roster as it is now.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn release_held_file(
+    held: &HeldFileDm,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    cmd_tx: &mpsc::Sender<super::types::NodeCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    peer_auto_dl: &HashMap<String, u32>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    send_dm_file_fanout(
+        &held.peer_str, &held.msg(), &held.device_peer_id,
+        olm, crypto_store, event_tx, ws_cmd_tx, cmd_tx, ws_room_peers,
+        webrtc_peers, pending_webrtc_sends, peer_auto_dl, db_path, db_passphrase,
+    ).await;
 }
 
 /// Shared DM FileHeader builder — every DM header uses chunks=0 (streamed),
@@ -1219,10 +1347,13 @@ async fn send_dm_file_fanout(
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    cmd_tx: &mpsc::Sender<super::types::NodeCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
     peer_auto_dl: &HashMap<String, u32>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let recipient_master = crate::node::resolver::resolve(peer_str);
     // Self-DM ("Saved messages"): local store + FileCompleted already
@@ -1234,6 +1365,15 @@ async fn send_dm_file_fanout(
         peer_str, device_peer_id, &recipient_master, self_dm, &dm_room_f,
         msg.local_peer_str, ws_room_peers, olm,
     );
+    if !self_dm
+        && super::roster_reach::hold_for_stale_roster(
+            ws_cmd_tx, cmd_tx, ws_room_peers, device_peer_id, &recipient_master, &file_targets, &dm_room_f,
+            db_path, db_passphrase,
+            || super::roster_reach::HeldDm::File(Box::new(HeldFileDm::keep(peer_str, msg))),
+        ) == super::roster_reach::Gate::Held
+    {
+        return;
+    }
     hollow_log!(
         "[HOLLOW-MULTIDEV] DM file fan-out for master {peer_str}: {} target device(s)",
         file_targets.len()
@@ -1367,6 +1507,7 @@ async fn send_dm_file_to_device(
             convo: if is_sibling_target { Some(recipient_master.to_string()) } else { None },
             order_us: Some(msg.order_us),
             album: msg.album.map(str::to_owned),
+            rd: msg.rd.clone(),
         }),
     };
     let envelope_json = serde_json::to_string(&envelope)

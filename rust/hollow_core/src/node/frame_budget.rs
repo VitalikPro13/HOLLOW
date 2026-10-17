@@ -534,6 +534,7 @@ mod tests {
                 convo: None,
                 order_us: None,
                 album: None,
+                rd: None,
             }),
         })
         .unwrap()

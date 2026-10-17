@@ -1597,7 +1597,7 @@ async fn run_event_loop(
                     NodeCommand::SendMessage { peer_id: peer_id_str, text, message_id, reply_to_mid, link_preview } => {
                         last_message_traffic = std::time::Instant::now();
                         message_ops::handle_send_message(
-                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
                             &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, text, message_id, reply_to_mid, link_preview,
@@ -2424,7 +2424,7 @@ async fn run_event_loop(
 
                     NodeCommand::EditDmMessage { peer_id: peer_id_str, message_id, new_text } => {
                         message_ops::handle_edit_dm_message(
-                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                             &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id, new_text,
@@ -2442,7 +2442,7 @@ async fn run_event_loop(
                     }
                     NodeCommand::AttachDmLinkPreview { peer_id: peer_id_str, message_id, preview } => {
                         message_ops::handle_attach_dm_link_preview(
-                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                             &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id, preview,
@@ -2462,7 +2462,7 @@ async fn run_event_loop(
 
                     NodeCommand::DeleteDmMessage { peer_id: peer_id_str, message_id } => {
                         message_ops::handle_delete_dm_message(
-                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
                             &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id,
@@ -2482,7 +2482,7 @@ async fn run_event_loop(
 
                     NodeCommand::AddDmReaction { peer_id: peer_id_str, message_id, emoji } => {
                         message_ops::handle_add_dm_reaction(
-                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
                             &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id, emoji,
@@ -2502,7 +2502,7 @@ async fn run_event_loop(
 
                     NodeCommand::RemoveDmReaction { peer_id: peer_id_str, message_id, emoji } => {
                         message_ops::handle_remove_dm_reaction(
-                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
                             &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id, emoji,
@@ -2873,7 +2873,7 @@ async fn run_event_loop(
                             &event_tx, &server_states, &bundle_keypair, &device_keypair, &pub_key_b64, &local_peer_str,
                             &device_peer_id,
                             &mut olm, &crypto_store, &mut mls,
-                            &ws_cmd_tx, &ws_room_peers, &webrtc_peers, &mut pending_webrtc_sends,
+                            &ws_cmd_tx, &cmd_tx, &ws_room_peers, &webrtc_peers, &mut pending_webrtc_sends,
                             &peer_auto_dl,
                             &mut gossip_overlays,
                             &db_path, &db_passphrase,
@@ -3277,6 +3277,30 @@ async fn run_event_loop(
                         );
                     }
 
+                    // DMs a stale roster kept back (AR-29), in the order they were sent.
+                    NodeCommand::ReleaseHeldDms { master } => {
+                        for held in super::roster_reach::release(&device_peer_id, &master) {
+                            match held {
+                                super::roster_reach::HeldDm::Envelope { envelope_json, sibling_json } => {
+                                    message_ops::fan_out_dm_envelope(
+                                        &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
+                                        &mut pending_messages, &mut key_request_in_flight,
+                                        &local_peer_str, &device_keypair, &device_peer_id, &master, &envelope_json,
+                                        sibling_json.as_deref(),
+                                        &db_path, &db_passphrase,
+                                    ).await;
+                                }
+                                super::roster_reach::HeldDm::File(file) => {
+                                    file_handler::release_held_file(
+                                        &file, &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
+                                        &webrtc_peers, &mut pending_webrtc_sends, &peer_auto_dl,
+                                        &db_path, &db_passphrase,
+                                    ).await;
+                                }
+                            }
+                        }
+                    }
+
                     // -- Parked joins: user actions on the pending tile --
                     NodeCommand::DiscardPendingJoin { server_id } => {
                         sync_handler::handle_discard_pending_join(
@@ -3657,6 +3681,11 @@ async fn run_event_loop(
                                 );
                             }
                         }
+                        // Roster asks the push fetch noted while the app was away (AR-29).
+                        super::roster_reach::send_due_asks(
+                            &ws_cmd_tx, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
+                            &|to| social::profile_audience(&server_states, &local_peer_str, to, &db_path, &db_passphrase),
+                        );
                         // ASYNC FRIENDING: re-deposit every still-pending outgoing request into the
                         // target's master-keyed mailbox. A target we hold no DEVICE for is unreachable
                         // by any targeted send, so the presence drains never fire for them and the
@@ -7915,6 +7944,14 @@ async fn handle_incoming_request_inner(
     carried_out: &mut Option<(Box<HavenMessage>, i64)>,
 ) {
 
+    let roster_ask = match &request {
+        HavenMessage::RosterSync { roster, reply: true, waiting } => Some((roster.master.clone(), *waiting)),
+        _ => None,
+    };
+    let roster_heard = match &request {
+        HavenMessage::RosterNotice { roster } | HavenMessage::RosterSync { roster, .. } => Some(roster.master.clone()),
+        _ => None,
+    };
     match request {
         HavenMessage::KeyRequest { to, ts, sig, pk } => {
             // SECURITY: this handler TEARS DOWN a working Olm session, so an
@@ -8389,7 +8426,7 @@ async fn handle_incoming_request_inner(
                     }
                 }
                 Ok(MessageEnvelope::DirectMessage { inner }) => {
-                    let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, convo, order_us, album } = *inner;
+                    let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, convo, order_us, album, rd } = *inner;
 
                     // Multi-device: attribute the DM to the sender's MASTER, so messages from any
                     // of a friend's devices land in the single DM thread and our own other-device
@@ -8460,6 +8497,7 @@ async fn handle_incoming_request_inner(
                     let mut is_new = true;
                     {
                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                            let roster_news = super::roster_reach::first_signed_copy(&store, mid.as_deref());
                             // Dedup by message_id (reconnect resend, pending drain,
                             // relay buffer). The content UNIQUE index is legacy-only
                             // now: it used to swallow distinct identical-text messages.
@@ -8485,6 +8523,13 @@ async fn handle_incoming_request_inner(
                                         let _ = store.update_link_preview(message_id, &lp_json);
                                     }
                                 }
+                            }
+                            if roster_news {
+                                super::roster_reach::on_dm(
+                                    ws_cmd_tx, &store, master_peer_str, device_peer_id, peer_str, is_own_device,
+                                    &convo_peer, rd.as_ref(),
+                                    &|to| social::profile_audience(server_states, master_peer_str, to, db_path, db_passphrase),
+                                );
                             }
                         }
                     }
@@ -14525,7 +14570,7 @@ async fn handle_incoming_request_inner(
             );
         }
 
-        HavenMessage::RosterNotice { roster } => {
+        HavenMessage::RosterNotice { roster } | HavenMessage::RosterSync { roster, .. } => {
             let outcome = super::roster_book::ingest(
                 event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
                 Some(roster), db_path, db_passphrase,
@@ -14546,6 +14591,16 @@ async fn handle_incoming_request_inner(
                 &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
                 local_peer_str, ws_room_peers, pending_mls_removals,
             );
+            if let Some(subject) = roster_heard {
+                super::roster_reach::note_answer(device_peer_id, peer_str, &subject);
+            }
+            if let Some((subject, waiting)) = roster_ask {
+                super::roster_reach::answer(
+                    ws_cmd_tx, master_peer_str, device_peer_id, peer_str, &subject, waiting,
+                    || social::profile_audience(server_states, master_peer_str, peer_str, db_path, db_passphrase),
+                    db_path, db_passphrase,
+                );
+            }
         }
 
         HavenMessage::EmoteRequest { hashes } => {

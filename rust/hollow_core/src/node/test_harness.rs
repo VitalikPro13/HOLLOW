@@ -25,6 +25,7 @@ use super::ws_client::{WsCommand, WsEvent};
 pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     let g = super::resolver::test_lock();
     super::resolver::clear_for_test();
+    super::roster_reach::clear_for_test();
     g
 }
 
@@ -27127,7 +27128,11 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-10-17: b1-crdt-resync proves four absences, a legacy replica asking for no
     // whole log, a server with nobody online asking no one, junk over MLS marking
     // nothing and a former member getting no page (4.2 s, total 823.5 s).
-    const BUDGET_MS: u64 = 823_500;
+    // 2026-10-17: b3-ar29 (roster reach) adds absence proofs (asks and answers that must
+    // never leave, a withheld return exchange, an edited DM that teaches nothing) and three
+    // settles for the connect-time roster exchange before a test stages the 35-day clock;
+    // g1-scale-probe's rewrite of the old benchmark gave some back (total 826.6 s).
+    const BUDGET_MS: u64 = 826_600;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -49966,4 +49971,731 @@ async fn scaling_benchmark_mls_fanout() {
     g1_report(&run.phases, out.as_deref());
     g1_probe::stop();
     println!("=== G1 SCALE PROBE END ===\n");
+}
+
+// b3-ar29
+
+/// The AR-29 cast: owner O with devices D1 and S in its phrase-rooted roster, and a
+/// single-device friend F that holds that roster. Every pair has a confirmed session.
+async fn ar29_cast(relay: &MockRelay, tags: [u8; 4]) -> (TestNode, TestNode, TestNode) {
+    let [o_tag, d1_tag, s_tag, f_tag] = tags;
+    let (o_master, f_master, f_dev) = (tag_kp(o_tag).peer_id(), tag_kp(f_tag).peer_id(), tag_kp(f_tag).peer_id());
+    let roster = protected_roster(o_tag, &[d1_tag, s_tag], super::roster_book::now_ms() - 60_000);
+    let d1 = spawn_node_seeded(relay, o_tag, d1_tag, &[&f_master], Some(roster.clone())).await;
+    let s = spawn_node_seeded(relay, o_tag, s_tag, &[&f_master], Some(roster.clone())).await;
+    let f = spawn_node_staged(relay, tag_kp(f_tag), f_tag, &[&o_master], |st| {
+        super::roster_book::merge_for_test(st, &roster, &f_master, &f_dev);
+    })
+    .await;
+    expect_dm_pair_ready(relay, &d1, &f, 25).await;
+    expect_dm_pair_ready(relay, &s, &f, 25).await;
+    let both = [d1.device_id.clone(), s.device_id.clone()];
+    assert!(
+        wait_until(15, async || both.iter().all(|d| f.known_devices(&o_master).contains(d))).await,
+        "precondition: F counts both of O's devices, got {:?}",
+        f.known_devices(&o_master),
+    );
+    (d1, s, f)
+}
+
+/// D1 removes S while F is away, S never hears it, and the relay withholds everything
+/// D1 tells F when F is back: F still counts S, as a contact that missed the removal.
+async fn ar29_remove_behind_fs_back(relay: &MockRelay, d1: &TestNode, s: &TestNode, f: &TestNode) {
+    let o_master = d1.master_id.clone();
+    relay.set_online(&f.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&f.device_id)).await);
+    relay.swallow_direct(&d1.device_id, &s.device_id);
+    relay.set_broadcast_deaf(&s.device_id, true);
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "precondition: D1 removed S",
+    );
+    // The harness resolver is shared: put back what F's process still believes.
+    super::resolver::unmark_revoked(std::slice::from_ref(&s.device_id));
+    super::resolver::update_many(&o_master, [s.device_id.as_str()]);
+
+    relay.swallow_direct(&d1.device_id, &f.device_id);
+    relay.set_broadcast_deaf(&f.device_id, true);
+    relay.set_online(&f.device_id, true);
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    assert!(wait_until(15, async || relay.room_devices(&room).contains(&f.device_id)).await, "F is back");
+    // ABSENCE: the return exchange has no end signal of its own.
+    sleep_ms(2000).await;
+    relay.release_direct(&d1.device_id, &f.device_id);
+    relay.set_broadcast_deaf(&f.device_id, false);
+    assert!(
+        f.revoked_devices(&o_master).is_empty(),
+        "precondition: F missed the removal, got {:?}",
+        f.revoked_devices(&o_master),
+    );
+}
+
+async fn ar29_dm(from: &TestNode, to_master: &str, mid: &str, text: &str) {
+    from.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: to_master.to_string(),
+            text: text.to_string(),
+            message_id: mid.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+}
+
+async fn ar29_got(node: &mut TestNode, text: &str, secs: u64) -> bool {
+    wait_event(node, std::time::Duration::from_secs(secs), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text: t, .. } if t == text)
+    })
+    .await
+}
+
+/// A DM `from`'s master signs to `to_master`, carrying `rd` as given.
+fn ar29_signed_dm(from: &TestNode, to_master: &str, mid: &str, text: &str, rd: Option<super::types::RosterDigests>) -> super::types::MessageEnvelope {
+    use base64::Engine as _;
+    let pk_b64 = base64::engine::general_purpose::STANDARD.encode(from.master_kp.public_key_protobuf());
+    let ts = super::roster_book::now_ms();
+    let order_us = ts * 1000;
+    let extras = super::crypto_handler::SignedExtras { mid: Some(mid), order_us: Some(order_us), ..Default::default() };
+    let (sig, pk) = super::crypto_handler::sign_message_versioned(
+        &from.master_kp, &pk_b64, "dm", to_master, &from.master_id, ts, &extras, text,
+    );
+    super::types::MessageEnvelope::DirectMessage {
+        inner: Box::new(super::types::DirectMessagePayload {
+            text: text.to_string(),
+            ts,
+            sig,
+            pk,
+            mid: Some(mid.to_string()),
+            reply_to: None,
+            file_id: None,
+            link_preview: None,
+            convo: None,
+            order_us: Some(order_us),
+            album: None,
+            rd,
+        }),
+    }
+}
+
+/// Roster asks `from` carried to `to` so far.
+async fn ar29_asks(from: &TestNode, to: &str) -> usize {
+    from.carried_to(to)
+        .await
+        .iter()
+        .filter(|m| matches!(m, super::types::HavenMessage::RosterSync { reply: true, .. }))
+        .count()
+}
+
+/// AR-29 (a): a DM from the owner's device carries its roster digest; the friend that
+/// missed the removal sees it differ, fetches the roster and stops sending to S.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_ar29_a_dm_from_the_owner_heals_a_friend_that_missed_a_removal() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, mut s, mut f) = ar29_cast(&relay, [221, 222, 223, 224]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+
+    ar29_dm(&d1, &f.master_id, "ar29-a-1", "hello from D1").await;
+    assert!(ar29_got(&mut f, "hello from D1", 20).await, "F gets D1's DM");
+    assert!(
+        wait_until(20, async || f.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "F must fetch O's roster once a DM shows it differs, got removed {:?}",
+        f.revoked_devices(&o_master),
+    );
+
+    drain_events(&mut s);
+    ar29_dm(&f, &o_master, "ar29-a-2", "after the fetch").await;
+    assert!(ar29_got(&mut d1, "after the fetch", 20).await, "control: O's current device gets F's DM");
+    // ABSENCE: a frame that never comes.
+    assert!(!ar29_got(&mut s, "after the fetch", 4).await, "F must not fan its DM out to the removed device");
+}
+
+/// AR-29 (b): the relay withheld the removal and every frame D1 sent F on its return;
+/// F's own DM carries its view of O, D1 sees it differ and hands F the roster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_ar29_a_dm_to_the_owner_heals_a_friend_the_relay_kept_behind() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, mut s, f) = ar29_cast(&relay, [225, 226, 227, 228]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+
+    ar29_dm(&f, &o_master, "ar29-b-1", "from F, still behind").await;
+    assert!(ar29_got(&mut d1, "from F, still behind", 20).await, "D1 gets F's DM");
+    assert!(
+        wait_until(20, async || f.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "D1 must hand F the roster F's DM showed it lacks, got removed {:?}",
+        f.revoked_devices(&o_master),
+    );
+
+    drain_events(&mut s);
+    ar29_dm(&f, &o_master, "ar29-b-2", "after the hand-over").await;
+    assert!(ar29_got(&mut d1, "after the hand-over", 20).await, "control: O's current device gets F's DM");
+    // ABSENCE: a frame that never comes.
+    assert!(!ar29_got(&mut s, "after the hand-over", 4).await, "F must not fan its DM out to the removed device");
+}
+
+/// AR-29 (c): a DM without digests (a 0.12.1 sender) asks nothing, even while the
+/// views differ; one with a digest that differs asks once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_ar29_a_dm_without_digests_asks_nothing() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, _s, mut f) = ar29_cast(&relay, [229, 230, 231, 232]).await;
+    let before = ar29_asks(&f, &d1.device_id).await;
+
+    olm_envelope_as(&d1, &f, ar29_signed_dm(&d1, &f.master_id, "ar29-c-1", "from 0.12.1", None)).await;
+    assert!(ar29_got(&mut f, "from 0.12.1", 20).await, "F takes a DM with no digests");
+    // ABSENCE: an ask that never leaves.
+    sleep_ms(1500).await;
+    assert_eq!(ar29_asks(&f, &d1.device_id).await, before, "a DM without digests must ask nothing");
+
+    let differs = super::types::RosterDigests { own: Some("ab".repeat(16)), peer: None };
+    olm_envelope_as(&d1, &f, ar29_signed_dm(&d1, &f.master_id, "ar29-c-2", "with a digest", Some(differs))).await;
+    assert!(ar29_got(&mut f, "with a digest", 20).await, "F takes the DM");
+    assert!(
+        wait_until(10, async || ar29_asks(&f, &d1.device_id).await == before + 1).await,
+        "control: a digest that differs asks the sender",
+    );
+}
+
+/// AR-29 (d): the digest rides inside the sender's Olm ciphertext. A relay that edits
+/// a DM to change or strip it loses the whole DM: no row, no ask, nothing learned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_ar29_a_relay_cannot_edit_a_dms_digest() {
+    use base64::Engine as _;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, s, mut f) = ar29_cast(&relay, [233, 234, 235, 236]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    let asks = ar29_asks(&f, &d1.device_id).await;
+
+    relay.set_recording(&d1.device_id, true);
+    relay.hold_direct(&d1.device_id, &f.device_id);
+    ar29_dm(&d1, &f.master_id, "ar29-d-1", "edited on the way").await;
+    let to_f = |frame: &Vec<u8>| {
+        super::frame_auth::open(
+            frame, &d1.device_id, &room,
+            super::frame_auth::Delivery::Direct { device: &f.device_id, master: &f.master_id },
+            super::frame_auth::now_ms(),
+        )
+        .is_ok()
+    };
+    assert!(
+        wait_until(10, async || relay.recorded_frames(&d1.device_id).iter().any(to_f)).await,
+        "precondition: D1's DM to F is on the wire",
+    );
+    for kind in relay.held_kinds(&d1.device_id, &f.device_id) {
+        relay.discard_held_kind(&d1.device_id, &f.device_id, &kind);
+    }
+    relay.release_held(&d1.device_id, &f.device_id);
+    relay.set_recording(&d1.device_id, false);
+    let frame = relay.recorded_frames(&d1.device_id).into_iter().rfind(to_f).unwrap();
+    let mut body: serde_json::Value = serde_json::from_slice(super::frame_auth::unchecked_body(&frame)).expect("an Olm frame");
+    let mut ct = base64::engine::general_purpose::STANDARD.decode(body["body"].as_str().expect("ciphertext")).unwrap();
+    let mid = ct.len() / 2;
+    ct[mid] ^= 0x01;
+    body["body"] = serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(&ct));
+    let edited = serde_json::to_vec(&body).unwrap();
+
+    // What a relay can send: the edit under D1's old seal, which no longer matches. (An
+    // edit sealed anew would also fail the Olm MAC; that refusal re-keys, and D1 then
+    // re-sends the genuine DM, so it shows nothing about the digest.)
+    let header_len = frame.len() - super::frame_auth::unchecked_body(&frame).len();
+    let mut raw = frame[..header_len].to_vec();
+    raw.extend_from_slice(&edited);
+    relay.inject_raw_direct(&room, &d1.device_id, &f.device_id, raw);
+    // ABSENCE: nothing that reaches F has a signal.
+    sleep_ms(1500).await;
+    assert_eq!(ar29_asks(&f, &d1.device_id).await, asks, "an edited DM must ask nothing");
+    assert!(f.revoked_devices(&o_master).is_empty(), "nor teach F anything");
+
+    ar29_dm(&d1, &f.master_id, "ar29-d-2", "the next one, untouched").await;
+    assert!(ar29_got(&mut f, "the next one, untouched", 20).await, "control: D1's next DM lands");
+    assert!(
+        wait_until(20, async || f.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "control: the untouched DM heals F",
+    );
+}
+
+/// AR-29 (e): a contact device that has not confirmed our view of its roster for 35
+/// days is asked for it before the next DM, and the DM still goes out; at 34 days
+/// nothing is asked. Each device confirms only its own slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_ar29_a_stale_roster_is_asked_for_before_the_next_dm() {
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, s, mut f) = ar29_cast(&relay, [237, 238, 239, 240]).await;
+    // A settle with no signal: the connect-time profile exchanges confirm O's roster
+    // at F, and must land before the test stages the clock.
+    sleep_ms(1000).await;
+    let o_master = d1.master_id.clone();
+    let asks = ar29_asks(&f, &d1.device_id).await;
+    let confirmed = |f: &TestNode, device: &str| f.store().roster_confirmed_at(&o_master, device);
+
+    // A device never stamped (held from before this check) starts its clock, unasked.
+    f.store().set_roster_confirmed_for_test(&o_master, None);
+    ar29_dm(&f, &o_master, "ar29-e-0", "never stamped").await;
+    assert!(ar29_got(&mut d1, "never stamped", 20).await, "the DM goes out");
+    assert_eq!(ar29_asks(&f, &d1.device_id).await, asks, "a device never stamped is not asked");
+    assert!(confirmed(&f, &d1.device_id).is_some(), "its clock starts");
+
+    let now = super::roster_book::now_ms();
+    f.store().set_roster_confirmed_for_test(&o_master, Some(now - 34 * DAY_MS));
+    ar29_dm(&f, &o_master, "ar29-e-1", "34 days").await;
+    assert!(ar29_got(&mut d1, "34 days", 20).await, "the DM goes out");
+    assert_eq!(ar29_asks(&f, &d1.device_id).await, asks, "a device confirmed 34 days ago is not asked");
+
+    // Someone who is none of O's devices hands F O's roster: that confirms nothing.
+    let stranger = tag_kp(245);
+    relay.register_key(&stranger);
+    f.store().set_roster_confirmed_for_test(&o_master, Some(now - 36 * DAY_MS));
+    drain_events(&mut f);
+    let notice = super::types::HavenMessage::RosterNotice {
+        roster: super::roster_book::load(&d1.store(), &o_master).expect("O's roster"),
+    };
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    relay.inject(&room, &stranger.peer_id(), &f.device_id, serde_json::to_vec(&notice).unwrap());
+    assert!(
+        wait_event(&mut f, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::DeviceListUpdated { master_peer_id } if *master_peer_id == o_master)
+        })
+        .await,
+        "precondition: F took the stranger's copy",
+    );
+    assert!(confirmed(&f, &d1.device_id).is_some_and(|at| at <= now - 36 * DAY_MS), "a stranger's copy confirms nothing");
+
+    ar29_dm(&f, &o_master, "ar29-e-2", "36 days").await;
+    assert!(ar29_got(&mut d1, "36 days", 20).await, "the DM still goes out");
+    assert_eq!(ar29_asks(&f, &d1.device_id).await, asks + 1, "a device unconfirmed 36 days is asked");
+    assert!(
+        wait_until(20, async || confirmed(&f, &d1.device_id).is_some_and(|at| at >= now)).await,
+        "D1's answer confirms its slot again, got {:?}",
+        confirmed(&f, &d1.device_id),
+    );
+
+    // A DM whose digest matches confirms its sender's slot, and no other. S stays
+    // quiet, so nothing of its own stamps its slot meanwhile.
+    relay.swallow_direct(&s.device_id, &f.device_id);
+    let aged = super::roster_book::now_ms() - 36 * DAY_MS;
+    f.store().set_roster_confirmed_for_test(&o_master, Some(aged));
+    let later = super::roster_book::now_ms();
+    ar29_dm(&d1, &f.master_id, "ar29-e-3", "a matching digest").await;
+    assert!(ar29_got(&mut f, "a matching digest", 20).await, "F gets D1's DM");
+    assert!(
+        wait_until(10, async || confirmed(&f, &d1.device_id).is_some_and(|at| at >= later)).await,
+        "a matching digest from D1 confirms D1's slot, got {:?}",
+        confirmed(&f, &d1.device_id),
+    );
+    assert_eq!(confirmed(&f, &s.device_id), Some(aged), "and leaves S's slot alone");
+    assert_eq!(ar29_asks(&f, &d1.device_id).await, asks + 1, "and asks nothing");
+}
+
+/// AR-29 (f): asks are rate-bounded while no answer comes: one expiry ask per device per
+/// 35 days however many DMs find it stale, one mismatch ask per device per 10 minutes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_ar29_roster_asks_are_rate_bounded() {
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, s, mut f) = ar29_cast(&relay, [241, 242, 243, 244]).await;
+    // A settle with no signal: the connect-time profile exchanges confirm O's roster
+    // at F, and must land before the test stages the clock.
+    sleep_ms(1000).await;
+    let o_master = d1.master_id.clone();
+    // No answer ever comes back, so nothing settles the mismatch or the clock.
+    relay.swallow_direct(&d1.device_id, &f.device_id);
+    relay.swallow_direct(&s.device_id, &f.device_id);
+    let (to_d1, to_s) = (ar29_asks(&f, &d1.device_id).await, ar29_asks(&f, &s.device_id).await);
+
+    f.store().set_roster_confirmed_for_test(&o_master, Some(super::roster_book::now_ms() - 40 * DAY_MS));
+    for i in 0..3 {
+        let text = format!("stale {i}");
+        ar29_dm(&f, &o_master, &format!("ar29-f-s{i}"), &text).await;
+        assert!(ar29_got(&mut d1, &text, 20).await, "DM {i} goes out");
+    }
+    assert_eq!(ar29_asks(&f, &d1.device_id).await, to_d1 + 1, "three DMs to a stale roster ask D1 once");
+    assert_eq!(ar29_asks(&f, &s.device_id).await, to_s + 1, "and S once");
+
+    // A mismatch has a gate of its own: one ask, then it waits out its gap.
+    let differs = || Some(super::types::RosterDigests { own: Some("cd".repeat(16)), peer: None });
+    relay.release_direct(&d1.device_id, &f.device_id);
+    for i in 0..3 {
+        let text = format!("mismatch {i}");
+        olm_envelope_as(&d1, &f, ar29_signed_dm(&d1, &f.master_id, &format!("ar29-f-m{i}"), &text, differs())).await;
+        assert!(ar29_got(&mut f, &text, 20).await, "F takes DM {i}");
+    }
+    // ABSENCE: an ask that never leaves.
+    sleep_ms(1000).await;
+    assert_eq!(ar29_asks(&f, &d1.device_id).await, to_d1 + 2, "one mismatch ask per device per gap");
+}
+
+/// AR-29 (g): an ask is answered only about the asker's own identity, ours, or to our
+/// own sibling, once a minute; never about a third identity's roster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_ar29_a_roster_ask_is_answered_only_about_the_asker_or_us() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, s, f) = ar29_cast(&relay, [246, 247, 248, 249]).await;
+    let o_master = d1.master_id.clone();
+    // A third identity F holds a roster for.
+    let third = legacy_roster(250, &[251], None);
+    super::roster_book::merge_for_test(&f.store(), &third, &f.master_id, &f.device_id);
+    let answers = async || {
+        f.carried_to(&d1.device_id)
+            .await
+            .into_iter()
+            .filter_map(|m| match m {
+                super::types::HavenMessage::RosterSync { roster, reply: false, .. } => Some(roster.master),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let ask = |master: &str| super::types::HavenMessage::RosterSync {
+        roster: crate::identity::roster::Roster::new(master),
+        reply: true,
+        waiting: false,
+    };
+    let before = answers().await;
+    let count = |v: &[String], m: &str| v.iter().filter(|x| *x == m).count();
+
+    carry_as(&d1, &f, ask(&third.master)).await;
+    carry_as(&d1, &f, ask(&o_master)).await;
+    carry_as(&d1, &f, ask(&o_master)).await;
+    carry_as(&d1, &f, ask(&f.master_id)).await;
+    assert!(
+        wait_until(15, async || {
+            let now = answers().await;
+            count(&now, &o_master) > count(&before, &o_master) && count(&now, &f.master_id) > count(&before, &f.master_id)
+        })
+        .await,
+        "F answers about the asker's own identity and about F's",
+    );
+    // ABSENCE: an answer that never leaves.
+    sleep_ms(1500).await;
+    let after = answers().await;
+    assert_eq!(count(&after, &third.master), count(&before, &third.master), "never about a third identity");
+    assert_eq!(count(&after, &o_master), count(&before, &o_master) + 1, "one answer a minute per roster");
+
+    // The same ask in the clear, as a relay could forge it: dropped, never answered.
+    let to_s = |m: &super::types::HavenMessage| matches!(m, super::types::HavenMessage::RosterSync { reply: false, .. });
+    let s_before = f.carried_to(&s.device_id).await.iter().filter(|m| to_s(m)).count();
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    relay.inject(&room, &s.device_id, &f.device_id, serde_json::to_vec(&ask(&o_master)).unwrap());
+    carry_as(&s, &f, ask(&f.master_id)).await;
+    assert!(
+        wait_until(15, async || f.carried_to(&s.device_id).await.iter().filter(|m| to_s(m)).count() > s_before).await,
+        "control: S's ask over Olm is answered",
+    );
+    // ABSENCE: an answer that never leaves.
+    sleep_ms(1000).await;
+    assert_eq!(
+        f.carried_to(&s.device_id).await.iter().filter(|m| to_s(m)).count(),
+        s_before + 1,
+        "a roster ask in the clear must never be answered",
+    );
+}
+
+// b3-review
+
+/// AR-29 review: S, removed by D1 while F was away, is alive and still counted by F. Its
+/// stale roster (an answer-shaped `RosterSync`, then a DM whose `own` digest matches F's
+/// stale view) must not count as O confirming its roster, or F's 35-day ask never reaches
+/// D1, the device that holds the removal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_review_a_removed_device_cannot_keep_a_stale_contacts_clock_fresh() {
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, s, mut f) = ar29_cast(&relay, [252, 253, 254, 255]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+    let stale = super::roster_book::load(&s.store(), &o_master).expect("S's roster");
+    assert_eq!(
+        Some(stale.digest()),
+        super::roster_book::load(&f.store(), &o_master).map(|r| r.digest()),
+        "precondition: S and F hold the same stale view of O",
+    );
+    let asks = ar29_asks(&f, &d1.device_id).await;
+    f.store().set_roster_confirmed_for_test(&o_master, Some(super::roster_book::now_ms() - 40 * DAY_MS));
+
+    carry_as(&s, &f, super::types::HavenMessage::RosterSync { roster: stale.clone(), reply: false, waiting: false }).await;
+    let rd = super::types::RosterDigests { own: Some(stale.digest()), peer: None };
+    olm_envelope_as(&s, &f, ar29_signed_dm(&s, &f.master_id, "b3r-1", "from the removed device", Some(rd))).await;
+    assert!(ar29_got(&mut f, "from the removed device", 20).await, "precondition: F still takes S's DM");
+
+    ar29_dm(&f, &o_master, "b3r-2", "after 40 quiet days").await;
+    assert!(ar29_got(&mut d1, "after 40 quiet days", 20).await, "the DM goes out");
+    assert_eq!(
+        ar29_asks(&f, &d1.device_id).await,
+        asks + 1,
+        "S, the removed device, kept F's 35-day clock fresh: F never asked D1 for O's roster",
+    );
+}
+
+// b3-fix
+
+/// Age every slot F holds for O's devices to `days` ago.
+fn b3_age(f: &TestNode, o_master: &str, days: i64) {
+    let at = super::roster_book::now_ms() - days * 24 * 60 * 60 * 1000;
+    f.store().set_roster_confirmed_for_test(o_master, Some(at));
+}
+
+/// The texts `node` takes from now until `secs` pass with nothing more, in order.
+async fn b3_texts(node: &mut TestNode, want: usize, secs: u64) -> Vec<String> {
+    let mut got = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while got.len() < want && tokio::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let mut text = None;
+        if !wait_event(node, left, |ev| match ev {
+            NetworkEvent::MessageReceived { text: t, .. } => {
+                text = Some(t.clone());
+                true
+            }
+            _ => false,
+        })
+        .await
+        {
+            break;
+        }
+        got.extend(text);
+    }
+    got
+}
+
+/// M2: a DM to a roster gone stale waits while O's devices are asked; D1's answer
+/// carries the removal F missed, so the DM, and the one sent behind it, reach D1 and
+/// never S.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_fix_a_dm_to_a_stale_roster_waits_for_the_answer_and_skips_the_removed_device() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, mut s, f) = ar29_cast(&relay, [185, 186, 187, 188]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+    b3_age(&f, &o_master, 40);
+    drain_events(&mut s);
+    drain_events(&mut d1);
+
+    let sent = std::time::Instant::now();
+    ar29_dm(&f, &o_master, "b3f-a-1", "after 40 days").await;
+    ar29_dm(&f, &o_master, "b3f-a-2", "and right behind it").await;
+    assert_eq!(
+        b3_texts(&mut d1, 2, 20).await,
+        ["after 40 days", "and right behind it"],
+        "both DMs reach D1, in the order sent",
+    );
+    let max = std::time::Duration::from_millis(super::roster_reach::DM_HOLD_MAX_MS as u64);
+    assert!(sent.elapsed() < max / 2, "the DMs waited {:?}: the answers did not end the hold", sent.elapsed());
+    assert!(f.revoked_devices(&o_master).contains(&s.device_id), "D1's answer taught F the removal");
+    // ABSENCE: a frame that never comes.
+    assert!(b3_texts(&mut s, 1, 4).await.is_empty(), "a DM held for D1's answer must never reach the removed device");
+}
+
+/// M2: nobody answers, so the held DM goes out once the hold runs out, and is never
+/// reported as failed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_fix_a_held_dm_goes_out_when_the_hold_runs_out() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, s, mut f) = ar29_cast(&relay, [189, 190, 191, 192]).await;
+    // A settle with no signal: the connect-time profile exchanges stamp O's slots.
+    sleep_ms(1000).await;
+    let o_master = d1.master_id.clone();
+    relay.swallow_direct(&d1.device_id, &f.device_id);
+    relay.swallow_direct(&s.device_id, &f.device_id);
+    b3_age(&f, &o_master, 40);
+    drain_events(&mut d1);
+    drain_events(&mut f);
+
+    let sent = std::time::Instant::now();
+    ar29_dm(&f, &o_master, "b3f-b-1", "nobody answers").await;
+    assert!(ar29_got(&mut d1, "nobody answers", 20).await, "the DM goes out after the hold");
+    let held = sent.elapsed();
+    let max = std::time::Duration::from_millis(super::roster_reach::DM_HOLD_MAX_MS as u64);
+    assert!(held >= max - std::time::Duration::from_millis(500), "the DM waited {held:?}, not the hold");
+    assert!(held < max + std::time::Duration::from_secs(5), "the DM waited {held:?}, past the hold");
+    // ABSENCE: an event that never comes.
+    assert!(
+        !wait_event(&mut f, std::time::Duration::from_millis(500), |ev| matches!(ev, NetworkEvent::MessageSendFailed { .. })).await,
+        "a held DM is never reported as failed",
+    );
+}
+
+/// M2, file DMs: a photo to a roster gone stale waits the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_fix_a_photo_dm_to_a_stale_roster_waits_too() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, mut s, f) = ar29_cast(&relay, [194, 195, 197, 198]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+    b3_age(&f, &o_master, 40);
+    drain_events(&mut s);
+    drain_events(&mut d1);
+
+    let src = global_tmp.path().join("b3-photo.txt");
+    std::fs::write(&src, b"a photo, as far as the fan-out cares").expect("write src file");
+    f.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(o_master.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "b3f-c-1".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let header = |ev: &NetworkEvent| matches!(ev, NetworkEvent::FileHeaderReceived { file_name, .. } if file_name.starts_with("b3-photo"));
+    assert!(wait_event(&mut d1, std::time::Duration::from_secs(20), header).await, "the file reaches D1");
+    assert!(f.revoked_devices(&o_master).contains(&s.device_id), "D1's answer taught F the removal");
+    // ABSENCE: a frame that never comes.
+    assert!(
+        !wait_event(&mut s, std::time::Duration::from_secs(4), header).await,
+        "a file held for D1's answer must never reach the removed device",
+    );
+}
+
+/// M1: S, removed but still counted by F, sends F a DM whose digest differs. F asks S,
+/// and that ask must not stand in for the expiry ask D1 is owed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_fix_a_mismatch_ask_to_one_device_leaves_the_expiry_ask_to_another() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, s, mut f) = ar29_cast(&relay, [199, 208, 209, 210]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+    b3_age(&f, &o_master, 40);
+    let (to_d1, to_s) = (ar29_asks(&f, &d1.device_id).await, ar29_asks(&f, &s.device_id).await);
+
+    let rd = super::types::RosterDigests { own: Some("ef".repeat(16)), peer: None };
+    olm_envelope_as(&s, &f, ar29_signed_dm(&s, &f.master_id, "b3f-d-1", "a digest that differs", Some(rd))).await;
+    assert!(ar29_got(&mut f, "a digest that differs", 20).await, "precondition: F takes S's DM");
+    assert!(wait_until(10, async || ar29_asks(&f, &s.device_id).await > to_s).await, "precondition: F asks S");
+
+    ar29_dm(&f, &o_master, "b3f-d-2", "after 40 days").await;
+    assert!(ar29_got(&mut d1, "after 40 days", 20).await, "the DM goes out");
+    assert_eq!(ar29_asks(&f, &d1.device_id).await, to_d1 + 1, "F still asks D1 its expiry ask");
+}
+
+/// M1: a DM F has read before asks nothing, whatever digest a copy of it carries (the
+/// digest is not signed), so a device cannot replay old signed DMs to stir F up. The
+/// same check keeps such a copy from stamping a slot (unit `b3_fix_only_a_first_signed_copy_counts`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_fix_a_dm_read_before_asks_nothing() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, s, mut f) = ar29_cast(&relay, [211, 212, 213, 214]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+    let rd = |own: String| Some(super::types::RosterDigests { own: Some(own), peer: None });
+
+    olm_envelope_as(&s, &f, ar29_signed_dm(&s, &f.master_id, "b3f-e-1", "first copy", None)).await;
+    assert!(ar29_got(&mut f, "first copy", 20).await, "precondition: F takes S's DM");
+    let asks = ar29_asks(&f, &s.device_id).await;
+    olm_envelope_as(&s, &f, ar29_signed_dm(&s, &f.master_id, "b3f-e-1", "first copy", rd("ab".repeat(16)))).await;
+    assert!(ar29_got(&mut f, "first copy", 20).await, "precondition: F reads the copy again");
+    // ABSENCE: an ask that never leaves.
+    sleep_ms(1000).await;
+    assert_eq!(ar29_asks(&f, &s.device_id).await, asks, "a DM read before asked S");
+
+    olm_envelope_as(&s, &f, ar29_signed_dm(&s, &f.master_id, "b3f-e-2", "a new one", rd("ab".repeat(16)))).await;
+    assert!(ar29_got(&mut f, "a new one", 20).await, "precondition: F takes S's next DM");
+    assert!(
+        wait_until(10, async || ar29_asks(&f, &s.device_id).await == asks + 1).await,
+        "control: a new DM whose digest differs asks S",
+    );
+    let _ = o_master;
+}
+
+/// H1: an ask the push fetch noted goes out on the node's next relay session, once,
+/// and only to a device that may hear it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_fix_asks_the_push_fetch_noted_go_out_on_the_next_session() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, _s, f) = ar29_cast(&relay, [215, 216, 217, 218]).await;
+    let o_master = d1.master_id.clone();
+    let third = legacy_roster(219, &[220], None);
+    super::roster_book::merge_for_test(&f.store(), &third, &f.master_id, &f.device_id);
+    let asks = ar29_asks(&f, &d1.device_id).await;
+    let about = async |master: &str| {
+        f.carried_to(&d1.device_id)
+            .await
+            .iter()
+            .filter(|m| matches!(m, super::types::HavenMessage::RosterSync { roster, reply: true, .. } if roster.master == master))
+            .count()
+    };
+    let third_before = about(&third.master).await;
+
+    relay.set_online(&f.device_id, false);
+    let now = super::roster_book::now_ms();
+    let cap = super::roster_reach::ASKS_DUE_CAP;
+    f.store().add_roster_ask_due(&o_master, &d1.device_id, now, cap).unwrap();
+    f.store().add_roster_ask_due(&third.master, &d1.device_id, now, cap).unwrap();
+    relay.set_online(&f.device_id, true);
+
+    assert!(wait_until(15, async || ar29_asks(&f, &d1.device_id).await > asks).await, "F asks D1 what the fetch noted");
+    assert!(f.store().take_roster_asks_due().is_empty(), "and forgets the note");
+    // ABSENCE: an ask that never leaves.
+    sleep_ms(1000).await;
+    assert_eq!(ar29_asks(&f, &d1.device_id).await, asks + 1, "once");
+    assert_eq!(about(&third.master).await, third_before, "never about a third identity's roster");
 }

@@ -49,6 +49,7 @@ pub(crate) mod relay_session;
 pub(crate) mod resolver;
 pub(crate) mod ring_auth;
 pub(crate) mod roster_book;
+pub(crate) mod roster_reach;
 pub(crate) mod sealed_box;
 pub(crate) mod security_alerts;
 pub(crate) mod share_handler;

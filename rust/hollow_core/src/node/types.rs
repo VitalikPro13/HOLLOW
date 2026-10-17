@@ -1335,6 +1335,9 @@ pub(crate) enum NodeCommand {
     /// members' election that named a coordinator already gone (presence skew).
     /// `opened_at` names the ask that armed it ([`PendingJoin::opened_at`]).
     RetryPendingJoin { server_id: String, opened_at: i64 },
+    /// Internal: the DMs held for `master` while its devices were asked for its roster
+    /// (AR-29) go out now, answered or not ([`super::roster_reach::DM_HOLD_MAX_MS`]).
+    ReleaseHeldDms { master: String },
     /// User action: drop a persisted pending or rejected join row. Also leaves the
     /// server room, so a late admission's buffered answer never replays. Nothing is
     /// sent to the relay; the ring copy ages out.
@@ -1588,6 +1591,7 @@ impl NodeCommand {
             Self::StoreShardOnPeer { .. } => "StoreShardOnPeer",
             Self::CheckPendingJoinTimeout { .. } => "CheckPendingJoinTimeout",
             Self::RetryPendingJoin { .. } => "RetryPendingJoin",
+            Self::ReleaseHeldDms { .. } => "ReleaseHeldDms",
             Self::DiscardPendingJoin { .. } => "DiscardPendingJoin",
             Self::RequestPendingJoinAgain { .. } => "RequestPendingJoinAgain",
             Self::WebRtcPingReport { .. } => "WebRtcPingReport",
@@ -3036,6 +3040,19 @@ pub(crate) enum HavenMessage {
         roster: crate::identity::roster::Roster,
     },
 
+    /// The sender's view of `roster.master`'s roster, over Olm only (AR-29): sent when a
+    /// DM's roster digest showed the two views differ, or the one we hold went unconfirmed
+    /// too long. `reply` asks for the receiver's view back; `waiting` says a DM waits for
+    /// it, so the answer goes at once. Every statement verifies alone.
+    #[serde(rename = "roster_sync")]
+    RosterSync {
+        roster: crate::identity::roster::Roster,
+        #[serde(default)]
+        reply: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        waiting: bool,
+    },
+
     // -- Voice channel coordination (plaintext for MLS epoch resilience) --
     // Plaintext rather than an MLS `MessageEnvelope`, so they survive epoch
     // staleness after a reconnect. SDP and ICE carry IPs and stay MLS-encrypted
@@ -3264,6 +3281,21 @@ pub(crate) struct DirectMessagePayload {
     /// Album grouping id (hyphenated UUID), bound by the v3 message signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album: Option<String>,
+    /// Roster digests (AR-29), inside the Olm plaintext so no relay can strip or swap
+    /// them. `None` from a 0.12.1 sender: unknown, never a mismatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rd: Option<RosterDigests>,
+}
+
+/// What a DM's sender holds of the two rosters in its conversation: `own` its own
+/// identity's, `peer` the other party's. Whose roster each is follows from the
+/// authenticated sender and the conversation, never from the wire.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RosterDigests {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4215,6 +4247,7 @@ impl HavenMessage {
             | Self::PublicChannelSyncResponse { .. }
             | Self::ProfileCard { .. }
             | Self::RosterNotice { .. }
+            | Self::RosterSync { .. }
             // An absent sibling hears it from the relay's buffer hours later. Late, it only starts
             // a join members serve while our identity is a member; it carries no `JoinAsk`.
             | Self::SiblingServerAnnounce { .. }
@@ -4364,6 +4397,7 @@ impl HavenMessage {
             | Self::ProfileRequestFor { .. }
             | Self::ProfileRelay { .. }
             | Self::ProfileCard { .. }
+            | Self::RosterSync { .. }
             | Self::IdentityDestroyed { .. }
             | Self::SyncResponse { .. } => Lane::Carried,
             Self::ServerJoinRequest { .. }

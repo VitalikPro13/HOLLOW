@@ -4685,6 +4685,7 @@ mod tests {
             text: "t".into(), ts: 1, sig: None, pk: None, mid: Some("m".into()),
             reply_to: None, file_id: None, link_preview: None, convo: None,
             order_us: Some(5), album: Some(ALBUM.into()),
+            rd: None,
         };
         let json = serde_json::to_string(&new_dm).unwrap();
         let old_view: PreAlbumDm = serde_json::from_str(&json).expect("an old struct ignores album");

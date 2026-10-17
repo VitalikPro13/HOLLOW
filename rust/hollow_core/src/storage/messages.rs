@@ -1245,6 +1245,26 @@ impl MessageStore {
                 PRIMARY KEY (master_peer_id, base, device_peer_id)
             )")?;
 
+        // When each device of a contact identity last showed us a roster we hold all of,
+        // and when we last asked it for one because it had not (AR-29). Local; never synced.
+        ddl(conn, "roster_confirms table",
+            "CREATE TABLE IF NOT EXISTS roster_confirms (
+                master_peer_id TEXT NOT NULL,
+                device_peer_id TEXT NOT NULL,
+                confirmed_ms   INTEGER NOT NULL,
+                asked_ms       INTEGER,
+                PRIMARY KEY (master_peer_id, device_peer_id)
+            )")?;
+        // Roster asks the push fetch could not send (it never talks back): the node sends
+        // them on its next relay session.
+        ddl(conn, "roster_asks_due table",
+            "CREATE TABLE IF NOT EXISTS roster_asks_due (
+                subject_master TEXT NOT NULL,
+                device_peer_id TEXT NOT NULL,
+                due_ms         INTEGER NOT NULL,
+                PRIMARY KEY (subject_master, device_peer_id)
+            )")?;
+
         // Local-only, unsigned human labels for devices (Step 8 Devices panel). NOT
         // synced or master-signed — each device names its own view of the device set.
         ddl(conn, "device_labels table",
@@ -3266,6 +3286,107 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to stamp roster_pending_seen: {e}"))?;
         Ok(())
+    }
+
+    /// Each stamped device of `master`: when it last confirmed our roster for it, and
+    /// when we last asked it to.
+    pub fn roster_confirm_slots(&self, master_peer_id: &str) -> std::collections::HashMap<String, (i64, Option<i64>)> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT device_peer_id, confirmed_ms, asked_ms FROM roster_confirms WHERE master_peer_id = ?1",
+        ) else {
+            return Default::default();
+        };
+        stmt.query_map([master_peer_id], |row| Ok((row.get::<_, String>(0)?, (row.get(1)?, row.get(2)?))))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// When `device` last confirmed our roster for `master`.
+    pub fn roster_confirmed_at(&self, master_peer_id: &str, device_peer_id: &str) -> Option<i64> {
+        self.conn
+            .query_row(
+                "SELECT confirmed_ms FROM roster_confirms WHERE master_peer_id = ?1 AND device_peer_id = ?2",
+                [master_peer_id, device_peer_id],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    /// `device` confirmed our roster for `master` at `at_ms`, our clock's now. It
+    /// replaces any older stamp outright, so one our clock wrote ahead never sticks.
+    pub fn stamp_roster_confirmed(&self, master_peer_id: &str, device_peer_id: &str, at_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO roster_confirms (master_peer_id, device_peer_id, confirmed_ms) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(master_peer_id, device_peer_id) DO UPDATE SET confirmed_ms = excluded.confirmed_ms",
+                rusqlite::params![master_peer_id, device_peer_id, at_ms],
+            )
+            .map_err(|e| format!("Failed to stamp roster_confirms: {e}"))?;
+        Ok(())
+    }
+
+    /// We asked `device` for `master`'s roster at `at_ms` because its stamp ran out.
+    pub fn mark_roster_expiry_asked(&self, master_peer_id: &str, device_peer_id: &str, at_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE roster_confirms SET asked_ms = ?3 WHERE master_peer_id = ?1 AND device_peer_id = ?2",
+                rusqlite::params![master_peer_id, device_peer_id, at_ms],
+            )
+            .map_err(|e| format!("Failed to mark roster_confirms: {e}"))?;
+        Ok(())
+    }
+
+    /// Note a roster ask about `subject` for `device` that is to go out later. Only
+    /// the newest `cap` are kept.
+    pub fn add_roster_ask_due(&self, subject: &str, device_peer_id: &str, at_ms: i64, cap: usize) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO roster_asks_due (subject_master, device_peer_id, due_ms) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(subject_master, device_peer_id) DO UPDATE SET due_ms = excluded.due_ms",
+                rusqlite::params![subject, device_peer_id, at_ms],
+            )
+            .map_err(|e| format!("Failed to note a roster ask: {e}"))?;
+        self.conn
+            .execute(
+                "DELETE FROM roster_asks_due WHERE rowid NOT IN
+                 (SELECT rowid FROM roster_asks_due ORDER BY due_ms DESC, rowid DESC LIMIT ?1)",
+                [cap as i64],
+            )
+            .map_err(|e| format!("Failed to trim roster asks: {e}"))?;
+        Ok(())
+    }
+
+    /// Every roster ask noted for later, oldest first, removed as they are read. A row
+    /// another process noted again meanwhile stays for the next read.
+    pub fn take_roster_asks_due(&self) -> Vec<(String, String)> {
+        let due: Vec<(String, String, i64)> = self
+            .conn
+            .prepare("SELECT subject_master, device_peer_id, due_ms FROM roster_asks_due ORDER BY due_ms, rowid")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap_or_default();
+        for (subject, device, at) in &due {
+            let _ = self.conn.execute(
+                "DELETE FROM roster_asks_due WHERE subject_master = ?1 AND device_peer_id = ?2 AND due_ms = ?3",
+                rusqlite::params![subject, device, at],
+            );
+        }
+        due.into_iter().map(|(subject, device, _)| (subject, device)).collect()
+    }
+
+    /// Stamp every member device of `master` at `at_ms`, or drop every stamp. Tests
+    /// only: it ages a roster.
+    #[cfg(test)]
+    pub fn set_roster_confirmed_for_test(&self, master_peer_id: &str, at_ms: Option<i64>) {
+        self.conn
+            .execute("DELETE FROM roster_confirms WHERE master_peer_id = ?1", [master_peer_id])
+            .expect("clear roster_confirms");
+        if let Some(at) = at_ms {
+            for device in self.device_links_for(master_peer_id).unwrap_or_default() {
+                self.stamp_roster_confirmed(master_peer_id, &device, at).expect("set roster_confirms");
+            }
+        }
     }
 
     /// Every first-sight stamp for one master's pending joins in `base`.
@@ -7385,6 +7506,51 @@ mod tests {
         assert!(store.save_stream_overlay("friend", "{}", 5, false).unwrap());
         assert_eq!(store.load_stream_overlay("friend").unwrap(), Some(("{}".to_string(), 5)));
         assert_eq!(store.overlay_add_person("friend", 1).unwrap(), 1);
+    }
+
+    /// AR-29 (b3-fix): the roster freshness and ask tables arrive by additive migration,
+    /// so a database from before them opens with its rows intact.
+    #[test]
+    fn b3_fix_an_existing_database_takes_the_roster_reach_tables() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let key = "ab".repeat(32);
+        let old = tmp.path().join("old.db").to_string_lossy().into_owned();
+        {
+            let store = MessageStore::open(&old, &key).unwrap();
+            assert!(store.save_profile_card("friend", "Fern", 10, "", None).unwrap());
+            store.conn.execute_batch(
+                "DROP TABLE roster_confirms;
+                 DROP TABLE roster_asks_due;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            ).unwrap();
+        }
+        let copy = tmp.path().join("copy.db").to_string_lossy().into_owned();
+        std::fs::copy(&old, &copy).unwrap();
+        let store = MessageStore::open(&copy, &key).unwrap();
+        assert_eq!(store.load_profile("friend").unwrap().map(|p| p.display_name).as_deref(), Some("Fern"));
+        assert_eq!(store.roster_confirmed_at("m", "d"), None);
+        store.stamp_roster_confirmed("m", "d", 5).unwrap();
+        assert_eq!(store.roster_confirm_slots("m").get("d"), Some(&(5, None)));
+        store.add_roster_ask_due("m", "d", 5, 8).unwrap();
+        assert_eq!(store.take_roster_asks_due(), [("m".to_string(), "d".to_string())]);
+    }
+
+    /// AR-29 (b3-fix L5): a stamp is our clock's now and replaces the one before it, so
+    /// one written while the clock ran ahead never sticks; asks are noted at most `cap`.
+    #[test]
+    fn b3_fix_roster_stamps_replace_and_noted_asks_stay_bounded() {
+        let store = mem_store();
+        store.stamp_roster_confirmed("m", "d", 9_000_000).unwrap();
+        store.stamp_roster_confirmed("m", "d", 1_000).unwrap();
+        assert_eq!(store.roster_confirmed_at("m", "d"), Some(1_000), "a stamp from ahead of the clock stuck");
+        store.mark_roster_expiry_asked("m", "d", 2_000).unwrap();
+        assert_eq!(store.roster_confirm_slots("m").get("d"), Some(&(1_000, Some(2_000))));
+        for i in 0..10 {
+            store.add_roster_ask_due("m", &format!("d{i}"), i, 4).unwrap();
+        }
+        let due = store.take_roster_asks_due();
+        assert_eq!(due.iter().map(|(_, d)| d.as_str()).collect::<Vec<_>>(), ["d6", "d7", "d8", "d9"], "the newest few, oldest first");
+        assert!(store.take_roster_asks_due().is_empty(), "taken once");
     }
 
     #[test]

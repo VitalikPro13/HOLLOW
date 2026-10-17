@@ -916,6 +916,54 @@ impl Roster {
     }
 }
 
+/// Length of a [`Roster::digest`] in hex characters.
+pub(crate) const DIGEST_HEX_LEN: usize = 32;
+
+impl Roster {
+    /// A short fingerprint of what this roster says, the same for every holder of the
+    /// same statements whatever order they arrived in. Pending joins are left out: each
+    /// holder keeps its own few of a flood by first sight, so they would keep two holders
+    /// apart forever, and a missed one costs reach, never a removal. So is a consent no
+    /// other statement names, which anyone can mint.
+    pub(crate) fn digest(&self) -> String {
+        fn sorted_all<T: Ord + Clone>(v: &[T]) -> Vec<T> {
+            let mut s = v.to_vec();
+            s.sort();
+            s.dedup();
+            s
+        }
+        let named: BTreeSet<&str> = self
+            .recoveries
+            .iter()
+            .flat_map(|r| r.keep.iter().map(String::as_str))
+            .chain(self.phrase_admits.iter().map(|p| p.device.as_str()))
+            .chain(self.vouches.iter().flat_map(|v| [v.device.as_str(), v.by.as_str()]))
+            .chain(self.legacy.iter().map(|l| l.device.as_str()))
+            .chain(self.removals.iter().flat_map(|r| [r.device.as_str(), r.by.as_str()]))
+            .collect();
+        let consents: Vec<Consent> =
+            sorted_all(&self.consents).into_iter().filter(|c| named.contains(c.device.as_str())).collect();
+        let canonical = serde_json::json!([
+            "hollow-roster-digest1",
+            self.master,
+            self.r_pub,
+            sorted_all(&self.recoveries),
+            sorted_all(&self.phrase_admits),
+            consents,
+            sorted_all(&self.vouches),
+            sorted_all(&self.legacy),
+            sorted_all(&self.removals),
+        ]);
+        let hash = Sha256::digest(canonical.to_string().as_bytes());
+        hex::encode(&hash[..DIGEST_HEX_LEN / 2])
+    }
+}
+
+/// Whether `s` has the shape of a [`Roster::digest`].
+pub(crate) fn is_digest_shape(s: &str) -> bool {
+    s.len() == DIGEST_HEX_LEN && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 #[cfg(test)]
 impl Roster {
     /// A legacy roster whose master claims each device, every device consenting.
@@ -1594,5 +1642,69 @@ mod tests {
         // Under the ceiling nothing changes.
         let few = low_asks(&id, &held, &real.peer_id(), 3).verified(NOW);
         assert_eq!(held.merged_by_first_sight(&few, |_, _| None), held.merged(&few));
+    }
+
+    // b3-ar29: the roster digest DMs carry.
+
+    #[test]
+    fn b3_ar29_digest_ignores_order_and_unnamed_consents_but_not_a_removal() {
+        let id = Id::new();
+        let (d1, d2, stranger) = (kp(10), kp(11), kp(12));
+        let mut r = Roster::genesis(&id.m, &id.r, &d1, NOW);
+        let base = r.verified(NOW).base();
+        with_consent(&mut r, &d2);
+        r.add_vouch(sign_vouch(&d1, &id.master(), &base, &d2.peer_id()));
+        let r = r.verified(NOW);
+        let d = r.digest();
+        assert!(is_digest_shape(&d), "{d}");
+
+        let mut shuffled = r.clone();
+        shuffled.consents.reverse();
+        assert_eq!(shuffled.digest(), d, "the order statements arrived in changes nothing");
+
+        let mut junk = r.clone();
+        junk.add_consent(sign_consent(&stranger, &id.master()));
+        assert_eq!(junk.verified(NOW).digest(), d, "an unnamed consent anyone can mint changes nothing");
+
+        let mut removed = r.clone();
+        removed.add_removal(sign_removal(&d1, &id.master(), &base, &d2.peer_id(), &[]));
+        assert_ne!(removed.verified(NOW).digest(), d, "a removal moves the digest");
+        assert_ne!(Roster::new(&id.master()).digest(), d);
+    }
+
+    #[test]
+    fn b3_ar29_digest_shape_is_strict() {
+        assert!(is_digest_shape(&"0a".repeat(16)));
+        for bad in ["", "0A0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a", "zz0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a", &"0a".repeat(17)] {
+            assert!(!is_digest_shape(bad), "{bad}");
+        }
+    }
+
+    // b3-review: two holders that kept different asks of one flood must still agree
+    // once they traded views, or every DM between their owners asks forever.
+    #[test]
+    fn b3_review_holders_of_one_pending_flood_converge_on_one_digest() {
+        let id = Id::new();
+        let owner = kp(10);
+        let held = Roster::genesis(&id.m, &id.r, &owner, NOW - 30 * 24 * 3_600_000).verified(NOW);
+        let base = held.base();
+        let flood = |from: u32| {
+            let mut r = held.clone();
+            let devices: Vec<String> = (from..from + MAX_PENDING as u32).map(junk_kp).map(|p| {
+                r.consents.push(sign_consent(&p, &id.master()));
+                r.pendings.push(sign_pending(&id.m, &base, &p.peer_id()));
+                p.peer_id()
+            }).collect();
+            (r.verified(NOW), devices)
+        };
+        let ((fa, seen_by_a), (fb, seen_by_b)) = (flood(0), flood(1000));
+        let first_sight = |seen: Vec<String>| move |_: &str, d: &str| seen.contains(&d.to_string()).then_some(NOW - 1_000);
+        let (sa, sb) = (first_sight(seen_by_a), first_sight(seen_by_b));
+        let a = held.merged_by_first_sight(&fa, &sa);
+        let b = held.merged_by_first_sight(&fb, &sb);
+        let a2 = a.merged_by_first_sight(&b, &sa);
+        let b2 = b.merged_by_first_sight(&a, &sb);
+        assert_eq!(a2.merged_by_first_sight(&b2, &sa), a2, "precondition: A's view is settled");
+        assert_eq!(a2.digest(), b2.digest(), "two holders of one identity's roster never agree on its digest");
     }
 }

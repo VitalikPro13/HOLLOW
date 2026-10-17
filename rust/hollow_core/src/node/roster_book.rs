@@ -810,6 +810,43 @@ async fn ingest_inner(
     }
 }
 
+/// [`ingest`] for a process with no node (the push fetch): what verifies is kept, a
+/// removal included, and the new-device alerts are stored for the app to show. Never our
+/// own roster, whose changes only the node acts on. Returns whether it was kept.
+pub(crate) fn ingest_stored(
+    db_path: &str,
+    db_passphrase: &str,
+    local_master: &str,
+    local_device: &str,
+    sender: &str,
+    incoming: Roster,
+) -> bool {
+    if serde_json::to_vec(&incoming).map(|b| b.len()).unwrap_or(usize::MAX) > MAX_ROSTER_BYTES {
+        hollow_log!("[HOLLOW-SECURITY] Dropped an oversized roster from {sender}");
+        return false;
+    }
+    let incoming = incoming.verified(now_ms());
+    let master = incoming.master.clone();
+    if master.is_empty() || master == local_master {
+        return false;
+    }
+    let Some(Folded { prev, now, upgrade_admitted, .. }) =
+        fold_in(db_path, db_passphrase, &incoming, sender, local_master, local_device, false)
+    else {
+        return false;
+    };
+    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return true };
+    if now.members.difference(&prev.members).next().is_some() {
+        super::destroy::note_identity_reappeared_stored(&store, &master);
+    }
+    if !prev.members.is_empty() {
+        let before: Vec<String> = prev.members.iter().chain(&upgrade_admitted).cloned().collect();
+        let after: Vec<String> = now.members.iter().cloned().collect();
+        super::security_alerts::store_new_devices(&store, local_master, &master, &before, &after);
+    }
+    true
+}
+
 /// What [`fold_in`] did, for the async half to report.
 struct Folded {
     /// Members as last saved, with the stored roster's fold.
@@ -916,6 +953,12 @@ fn fold_in(
         super::resolver::update_many(master, now.members.iter().map(String::as_str));
     }
 
+    // One of the identity's own devices showed us its roster and we now hold all of it
+    // (AR-29): that confirms its own slot, never another device's. A sibling sharing a
+    // friend's roster is not one of the friend's devices.
+    if master != local_master && now.is_member(sender) && !super::resolver::is_revoked(sender) {
+        super::roster_reach::stamp(&store, master, sender);
+    }
     for dev in now.members.iter().map(String::as_str).chain(std::iter::once(sender)) {
         if super::resolver::resolve(dev) == master
             && let Ok(true) = store.migrate_friend_to_master(dev, master)

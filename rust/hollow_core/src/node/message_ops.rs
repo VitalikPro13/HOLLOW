@@ -270,6 +270,7 @@ pub(crate) async fn handle_send_message(
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    cmd_tx: &mpsc::Sender<NodeCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
@@ -311,6 +312,7 @@ pub(crate) async fn handle_send_message(
         dm_timestamp, &extras, &text,
     );
     let recipient_master = super::resolver::resolve(&peer_id_str);
+    let rd = super::roster_reach::for_dm(&local_peer, &recipient_master, db_path, db_passphrase);
     let build_dm = |convo: Option<String>| MessageEnvelope::DirectMessage {
         inner: Box::new(DirectMessagePayload {
             text: text.clone(),
@@ -324,6 +326,7 @@ pub(crate) async fn handle_send_message(
             convo,
             order_us: Some(dm_order_us),
             album: None,
+            rd: rd.clone(),
         }),
     };
     let envelope_json = serde_json::to_string(&build_dm(None))
@@ -359,10 +362,11 @@ pub(crate) async fn handle_send_message(
     // appears live on the sibling; the local insert above already keyed the
     // sending device's UI on the master.
     fan_out_dm_envelope(
-        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        olm, crypto_store, event_tx, ws_cmd_tx, cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
         local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         Some(&sibling_envelope_json),
+        db_path, db_passphrase,
     ).await;
 
     // Hydrate the optimistic Dart entry with sig/pk so the
@@ -384,11 +388,12 @@ pub(crate) async fn handle_send_message(
 /// `pending_messages` is keyed per DEVICE, so a queued envelope drains to the
 /// right device. The caller owns the local DB write and UI event, both master-keyed.
 #[allow(clippy::too_many_arguments)]
-async fn fan_out_dm_envelope(
+pub(crate) async fn fan_out_dm_envelope(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    cmd_tx: &mpsc::Sender<NodeCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
@@ -402,6 +407,8 @@ async fn fan_out_dm_envelope(
     // delivered to OUR OWN siblings so they file the echo under the right
     // conversation. `None` for edit/delete/reaction, which resolve it by mid.
     sibling_envelope_json: Option<&str>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     // The recipient's devices always get the plain envelope. The target set is the
     // persisted device list UNION the devices CURRENTLY in the DM room that resolve
@@ -420,6 +427,18 @@ async fn fan_out_dm_envelope(
             ws_room_peers, Some(olm), &dm_room, recipient_master, recipient_master, /*exclude*/ None,
         )
     };
+    if !self_dm
+        && super::roster_reach::hold_for_stale_roster(
+            ws_cmd_tx, cmd_tx, ws_room_peers, device_peer_id, recipient_master, &recipient_devices, &dm_room,
+            db_path, db_passphrase,
+            || super::roster_reach::HeldDm::Envelope {
+                envelope_json: envelope_json.to_string(),
+                sibling_json: sibling_envelope_json.map(str::to_string),
+            },
+        ) == super::roster_reach::Gate::Held
+    {
+        return;
+    }
     for device_peer in &recipient_devices {
         send_dm_to_device(
             olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
@@ -1453,6 +1472,7 @@ pub(crate) async fn handle_edit_dm_message(
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    cmd_tx: &mpsc::Sender<NodeCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     frame_budget: &mut super::frame_budget::FrameBudget,
@@ -1520,10 +1540,11 @@ pub(crate) async fn handle_edit_dm_message(
     // device with no session yet gets the edited conversation via backfill.
     let recipient_master = super::resolver::resolve(&peer_id_str);
     fan_out_dm_envelope(
-        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        olm, crypto_store, event_tx, ws_cmd_tx, cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
         local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         None, // edit/delete/reaction: sibling resolves convo by mid on receive
+        db_path, db_passphrase,
     ).await;
 
     // Include sig/pk so the in-memory message matches the canonical payload. The
@@ -1585,6 +1606,7 @@ fn rewrite_pending_entry_if_edited(
             convo: inner.convo.clone(),
             order_us: inner.order_us, // preserve original ordering on edit
             album: inner.album.clone(),
+            rd: inner.rd.clone(),
         }),
     };
     if let Ok(json) = serde_json::to_string(&updated) {
@@ -1924,6 +1946,7 @@ pub(crate) async fn handle_attach_dm_link_preview(
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    cmd_tx: &mpsc::Sender<NodeCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     frame_budget: &mut super::frame_budget::FrameBudget,
@@ -1989,10 +2012,11 @@ pub(crate) async fn handle_attach_dm_link_preview(
     // on the copy sitting on our phone too.
     let recipient_master = super::resolver::resolve(&peer_id_str);
     fan_out_dm_envelope(
-        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        olm, crypto_store, event_tx, ws_cmd_tx, cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
         local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         None, // siblings resolve the convo by mid on receive, same as edits
+        db_path, db_passphrase,
     ).await;
 
     let _ = event_tx.send(NetworkEvent::DmLinkPreviewUpdated {
@@ -2135,6 +2159,7 @@ pub(crate) async fn handle_delete_dm_message(
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    cmd_tx: &mpsc::Sender<NodeCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
@@ -2190,10 +2215,11 @@ pub(crate) async fn handle_delete_dm_message(
     // recipient + our own siblings (offline devices get it buffered/queued).
     let recipient_master = super::resolver::resolve(&peer_id_str);
     fan_out_dm_envelope(
-        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        olm, crypto_store, event_tx, ws_cmd_tx, cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
         local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         None, // edit/delete/reaction: sibling resolves convo by mid on receive
+        db_path, db_passphrase,
     ).await;
 
     // The DM thread key is the peer's MASTER id (no-op single-device).
@@ -2300,6 +2326,7 @@ pub(crate) async fn handle_add_dm_reaction(
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    cmd_tx: &mpsc::Sender<NodeCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
@@ -2351,10 +2378,11 @@ pub(crate) async fn handle_add_dm_reaction(
     // Multi-device fan-out (Step 3): every device of the recipient + our siblings.
     let recipient_master = super::resolver::resolve(&peer_id_str);
     fan_out_dm_envelope(
-        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        olm, crypto_store, event_tx, ws_cmd_tx, cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
         local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         None, // edit/delete/reaction: sibling resolves convo by mid on receive
+        db_path, db_passphrase,
     ).await;
 
     let _ = event_tx.send(NetworkEvent::DmReactionAdded {
@@ -2461,6 +2489,7 @@ pub(crate) async fn handle_remove_dm_reaction(
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    cmd_tx: &mpsc::Sender<NodeCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
@@ -2511,10 +2540,11 @@ pub(crate) async fn handle_remove_dm_reaction(
     // Multi-device fan-out (Step 3): every device of the recipient + our siblings.
     let recipient_master = super::resolver::resolve(&peer_id_str);
     fan_out_dm_envelope(
-        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        olm, crypto_store, event_tx, ws_cmd_tx, cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
         local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         None, // edit/delete/reaction: sibling resolves convo by mid on receive
+        db_path, db_passphrase,
     ).await;
 
     let _ = event_tx.send(NetworkEvent::DmReactionRemoved {

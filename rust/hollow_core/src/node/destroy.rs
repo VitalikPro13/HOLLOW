@@ -267,6 +267,16 @@ pub(crate) async fn note_identity_reappeared(
     ).await;
 }
 
+/// [`note_identity_reappeared`] for a process with no node to tell (the push fetch).
+pub(crate) fn note_identity_reappeared_stored(store: &MessageStore, master: &str) {
+    if identity_destroyed_at(store, master).is_none() {
+        return;
+    }
+    let _ = store.save_setting(&destroyed_key(master), "");
+    let at = super::roster_book::now_ms();
+    let _ = store.record_security_alert(master, super::security_alerts::KIND_IDENTITY_REAPPEARED, master, at);
+}
+
 // -- Receive lanes --
 
 pub(crate) async fn handle_envelope_destroy_identity(

@@ -126,20 +126,43 @@ pub(crate) async fn note_new_devices(
     previously_known: &[String],
     now_known: &[String],
 ) {
-    if master_peer_id == local_master_peer_id {
-        return; // our own device set — the user is the actor
-    }
-    if previously_known.is_empty() {
-        return; // first contact establishes the baseline, it is not a change
-    }
-    for device in now_known {
-        if previously_known.iter().any(|d| d == device) {
-            continue;
-        }
+    for device in new_devices(local_master_peer_id, master_peer_id, previously_known, now_known) {
         record(
             event_tx, db_path, db_passphrase, master_peer_id, KIND_NEW_DEVICE, device,
         )
         .await;
+    }
+}
+
+/// The devices [`note_new_devices`] warns about.
+fn new_devices<'a>(
+    local_master_peer_id: &str,
+    master_peer_id: &str,
+    previously_known: &[String],
+    now_known: &'a [String],
+) -> Vec<&'a String> {
+    if master_peer_id == local_master_peer_id {
+        return Vec::new(); // our own device set — the user is the actor
+    }
+    if previously_known.is_empty() {
+        return Vec::new(); // first contact establishes the baseline, it is not a change
+    }
+    now_known.iter().filter(|device| !previously_known.contains(device)).collect()
+}
+
+/// [`note_new_devices`] for a process with no node to tell (the push fetch): the alerts
+/// are stored, and the app shows them from the store.
+pub(crate) fn store_new_devices(
+    store: &crate::storage::MessageStore,
+    local_master_peer_id: &str,
+    master_peer_id: &str,
+    previously_known: &[String],
+    now_known: &[String],
+) {
+    for device in new_devices(local_master_peer_id, master_peer_id, previously_known, now_known) {
+        if let Err(e) = store.record_security_alert(master_peer_id, KIND_NEW_DEVICE, device, now_ms()) {
+            hollow_log!("[HOLLOW-SECURITY] Failed to record alert: {e}");
+        }
     }
 }
 
