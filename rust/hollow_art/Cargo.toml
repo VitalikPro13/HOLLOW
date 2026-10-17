@@ -36,7 +36,7 @@ sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["webp", "png", "jpeg", "gif", "bmp"] }
 webp-animation = "0.9"
 libwebp-sys2 = { version = "0.1", features = ["0_5", "0_6", "1_2", "demux", "mux"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Support credentials: the exact crate and version hollow_core pins, so the
 # shop signs blind with the implementation the app unblinds and verifies with.
 blind-rsa-signatures = "=0.17.2"

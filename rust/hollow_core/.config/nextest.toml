@@ -61,7 +61,8 @@ failure-output = "immediate-final"
 # failed outright and a dozen only passed on retry (2026-10-06). nextest runs
 # tests in name order, so the harness mostly competes with itself; capping it
 # keeps the unit tests at full width. A local 4-core replay at 6 went green with
-# four harness retries, so 4 buys margin for a slower runner.
+# four harness retries, so 4 buys margin for a slower runner. The cap is per
+# runner, which is why ci.yml splits the suite over parallel runners.
 [test-groups.harness]
 max-threads = 4
 

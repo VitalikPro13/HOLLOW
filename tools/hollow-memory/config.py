@@ -1,11 +1,13 @@
 import os
+import re
 from pathlib import Path
 
-PROJECT_ROOT = Path("C:/Users/Jabun/Documents/Coding/HOLLOW")
-TOOL_DIR = Path(__file__).parent
+TOOL_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = TOOL_DIR.parents[1]
 
-# Doc sources
-MEMORY_DIR = Path("C:/Users/Jabun/.claude/projects/C--Users-Jabun-Documents-Coding-HOLLOW/memory")
+# Doc sources. Claude Code names a project's folder after its absolute path, every other character a dash.
+MEMORY_DIR = Path(os.environ.get("HOLLOW_MEMORY_DIR") or
+                  Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(PROJECT_ROOT)) / "memory")
 HOLLOW_PLAN_PATH = PROJECT_ROOT / "HOLLOW_PLAN.md"
 WHITEPAPER_PATH = PROJECT_ROOT / "WHITEPAPER.md"
 CLAUDE_MD_PATH = PROJECT_ROOT / "CLAUDE.md"

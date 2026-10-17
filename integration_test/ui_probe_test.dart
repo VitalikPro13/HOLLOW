@@ -128,6 +128,15 @@ void main() {
     if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
       try {
         await windowManager.ensureInitialized();
+        if (Platform.isMacOS) {
+          // The Mac a fleet runs on is someone's desktop: the window goes behind
+          // every other one and lets clicks through. It keeps drawing there, as
+          // a fully covered peer does. The size is the desktop shell every
+          // scenario was written against (the nib's own is 800x600).
+          await windowManager.setSize(const Size(1280, 800));
+          await windowManager.blur();
+          await windowManager.setIgnoreMouseEvents(true);
+        }
       } catch (e) {
         debugPrint('[ui-probe] window_manager init failed: $e');
       }

@@ -1084,7 +1084,10 @@ fn extract_zip_to(zip_path: &str, staging_dir: &std::path::Path) -> Result<(), S
             .by_index(i)
             .map_err(|e| format!("Failed to read zip entry {i}: {e}"))?;
 
-        let raw_name = entry.name().replace('\\', "/");
+        let raw_name = entry
+            .name()
+            .map_err(|e| format!("Failed to read zip entry {i} name: {e}"))?
+            .replace('\\', "/");
         let name = if let Some(ref p) = prefix {
             raw_name.strip_prefix(p.as_str()).unwrap_or(&raw_name).to_string()
         } else {
@@ -1124,10 +1127,7 @@ fn extract_zip_to(zip_path: &str, staging_dir: &std::path::Path) -> Result<(), S
 fn detect_common_prefix(archive: &mut zip::ZipArchive<fs::File>) -> Option<String> {
     let mut common: Option<String> = None;
     for i in 0..archive.len() {
-        let name = match archive.by_index_raw(i) {
-            Ok(entry) => entry.name().replace('\\', "/"),
-            Err(_) => return None,
-        };
+        let name = archive.by_index_raw(i).ok()?.name().ok()?.replace('\\', "/");
         let first_part = match name.find('/') {
             Some(idx) => &name[..=idx],
             None => return None,

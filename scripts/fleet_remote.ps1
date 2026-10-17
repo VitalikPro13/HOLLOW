@@ -1,13 +1,15 @@
-# Peers on OTHER machines in one journey: a Windows driver talks to an Android
-# emulator or iOS Simulator on the Mac mini, a macOS desktop copy there, or a
-# headless Linux copy on the build VM, exactly as it talks to its own exe
-# copies. Dot-sourced by fleet_lib.ps1.
+# Peers on OTHER machines in one journey: the Mac lead drives exe copies on the
+# Windows PC, a Windows driver an Android emulator or iOS Simulator on the Mac
+# mini or a macOS desktop copy there, either one a headless Linux copy on the
+# build VM, exactly as each drives its own copies. Dot-sourced by fleet_lib.ps1.
 #
-# A remote peer is named `<platform>:<letter>` (android:a, ios:b, macos:c,
-# linux:d); a bare letter is a peer of this machine. Send-FleetStep routes a
-# remote name to an AGENT: one detached server per machine and backend
-# (fleet_remote_agent.ps1 -Serve), which runs the same fleet_lib code there, reached
-# through one ssh connection (scripts/fleet_agent_attach.sh). The server outlives the
+# A remote peer is named `<platform>:<letter>` (windows:a, android:a, ios:b,
+# macos:c, linux:d); a bare letter, or a platform this machine's backend runs, is
+# a peer of this machine. Send-FleetStep routes a remote name to an AGENT: one
+# detached server per machine and backend (fleet_remote_agent.ps1 -Serve), which
+# runs the same fleet_lib code there, reached through one ssh connection
+# (scripts/fleet_agent_attach.sh, fleet_agent_attach.ps1 on the PC); on the mini
+# itself a mini agent is the same server reached without ssh. The server outlives the
 # connection: a dropped one is re-opened with backoff and the request in flight sent
 # again under the same key, which the server answers from its record when it already
 # ran it, so a tap or a send never repeats. Values a step captures come back and
@@ -19,11 +21,14 @@
 # evidence off) is ONE command vocabulary, Invoke-FleetPeerCommand, run locally
 # for a local peer and by the agent for a remote one.
 #
-# The remote tree is ~/wt/<this worktree's folder name> unless FLEET_MINI_TREE,
-# FLEET_VM_TREE or FLEET_REMOTE_TREE names another; ship it first with scripts/mini_sync.sh (the mini) or
-# scripts/vm_sync.sh (the VM). Hosts: FLEET_MINI_SSH (default
-# jabun@192.168.18.36, checked against the mini's own host key) and FLEET_VM_SSH
-# (default hollowvm).
+# The remote tree has this worktree's folder name: D:\dev\wt\<name> on the PC
+# (FLEET_PC_TREE), ~/wt/<name> on the mini and the VM (FLEET_MINI_TREE,
+# FLEET_VM_TREE, FLEET_REMOTE_TREE for all three); ship it first with
+# scripts/pc_sync.sh, scripts/mini_sync.sh or scripts/vm_sync.sh. Hosts:
+# FLEET_PC_SSH (default pc, the LAN alias; pc-ts is Tailscale), FLEET_MINI_SSH
+# (default jabun@100.80.56.79, its Tailscale address: the LAN lease moves; checked
+# against the mini's own host key) and
+# FLEET_VM_SSH (default hollowvm).
 
 $script:FleetRemotePeers = @{}
 $script:FleetAgents = @{}
@@ -173,16 +178,28 @@ function Invoke-FleetPeerCommand($request) {
 # Naming peers across machines
 # --------------------------------------------------------------------------
 
-# 'android:a' -> the agent that owns it and its letter there; 'win:a' or 'a'
-# -> a peer of this machine.
-function Register-FleetPeer($spec) {
-    if ($spec -notmatch '^(?:(win|android|ios|macos|linux):)?([a-z])$') {
-        throw "a peer is <platform>:<letter> with platform win, android, ios, macos or linux (got '$spec')"
+# Whether this machine's own backend runs `platform` for `letter`.
+function Test-LocalPlatform($platform, $letter) {
+    switch ($platform) {
+        'windows' { return (Test-WindowsBackend) }
+        'macos' { return (Test-MacBackend) }
+        'ios' { return (Test-SimBackend $letter) }
+        'android' { return (Test-AndroidBackend $letter) }
+        'linux' { return (Test-LinuxBackend) }
     }
-    $platform = if ($Matches[1]) { $Matches[1] } else { 'win' }
+    return $false
+}
+
+# 'android:a' -> the agent that owns it and its letter there; 'a', or a platform
+# this machine's backend runs ('windows:a' on a Windows driver), -> a peer of this machine.
+function Register-FleetPeer($spec) {
+    if ($spec -notmatch '^(?:(win|windows|android|ios|macos|linux):)?([a-z])$') {
+        throw "a peer is <platform>:<letter> with platform windows, android, ios, macos or linux (got '$spec')"
+    }
+    $platform = if ($Matches[1]) { $Matches[1] -replace '^win$', 'windows' } else { '' }
     $letter = $Matches[2]
-    if ($platform -eq 'win') { return $letter }
-    $agent = switch ($platform) { 'android' { 'mini-phone' } 'ios' { 'mini-phone' } 'macos' { 'mini-macos' } 'linux' { 'vm-linux' } }
+    if (-not $platform -or (Test-LocalPlatform $platform $letter)) { return $letter }
+    $agent = switch ($platform) { 'windows' { 'pc-win' } 'android' { 'mini-phone' } 'ios' { 'mini-phone' } 'macos' { 'mini-macos' } 'linux' { 'vm-linux' } }
     $key = "${platform}:$letter"
     $script:FleetRemotePeers[$key] = [pscustomobject]@{ Key = $key; Platform = $platform; Letter = $letter; Agent = $agent }
     return $key
@@ -192,8 +209,17 @@ function Test-RemotePeer($peer) { return $script:FleetRemotePeers.ContainsKey("$
 
 function Get-RemotePeer($peer) { return $script:FleetRemotePeers["$peer"] }
 
-# FLEET_VM_TREE / FLEET_MINI_TREE name one machine's tree, FLEET_REMOTE_TREE both.
+# A mini agent on the mini itself (the Mac lead) runs without ssh, in this very tree.
+function Test-LocalAgent($agent) { return [bool]($IsMacOS -and $agent -like 'mini-*') }
+
+# FLEET_PC_TREE / FLEET_VM_TREE / FLEET_MINI_TREE name one machine's tree, FLEET_REMOTE_TREE all.
 function Get-FleetRemoteTree($agent = '') {
+    if (Test-LocalAgent $agent) { return $script:FleetRepo }
+    if ($agent -eq 'pc-win') {
+        if ($env:FLEET_PC_TREE) { return $env:FLEET_PC_TREE }
+        if ($env:FLEET_REMOTE_TREE) { return $env:FLEET_REMOTE_TREE }
+        return 'D:\dev\wt\' + (Split-Path -Leaf $script:FleetRepo)
+    }
     if ($agent -eq 'vm-linux' -and $env:FLEET_VM_TREE) { return $env:FLEET_VM_TREE }
     if ($agent -like 'mini-*' -and $env:FLEET_MINI_TREE) { return $env:FLEET_MINI_TREE }
     if ($env:FLEET_REMOTE_TREE) { return $env:FLEET_REMOTE_TREE }
@@ -213,22 +239,31 @@ function Get-FleetAgentLaunch($agent) {
             if ($android.Count -gt 0 -and $ios.Count -gt 0) { $prefix = "FLEET_ANDROID_PEERS=$($android -join ',') " }
             elseif ($android.Count -gt 0) { $prefix = 'FLEET_BACKEND=android ' }
             $sshArgs += @('-o', 'HostKeyAlias=192.168.18.39')
-            $target = if ($env:FLEET_MINI_SSH) { $env:FLEET_MINI_SSH } else { 'jabun@192.168.18.36' }
+            $target = if ($env:FLEET_MINI_SSH) { $env:FLEET_MINI_SSH } else { 'jabun@100.80.56.79' }
         }
         'mini-macos' {
             $prefix = 'FLEET_BACKEND=macos '
             $sshArgs += @('-o', 'HostKeyAlias=192.168.18.39')
-            $target = if ($env:FLEET_MINI_SSH) { $env:FLEET_MINI_SSH } else { 'jabun@192.168.18.36' }
+            $target = if ($env:FLEET_MINI_SSH) { $env:FLEET_MINI_SSH } else { 'jabun@100.80.56.79' }
         }
         'vm-linux' {
             $prefix = 'FLEET_LINUX_HEADLESS=1 PATH=$HOME/.local/bin:$HOME/Documents/flutter/bin:$HOME/.cargo/bin:$PATH '
             $target = if ($env:FLEET_VM_SSH) { $env:FLEET_VM_SSH } else { 'hollowvm' }
         }
+        'pc-win' {
+            # The PC's login shell is PowerShell: the attach runs in it, in-process.
+            $target = if ($env:FLEET_PC_SSH) { $env:FLEET_PC_SSH } else { 'pc' }
+            $set = ''
+            if ($env:FLEET_LAUNCH_BUDGET) { $set = "`$env:FLEET_LAUNCH_BUDGET='$($env:FLEET_LAUNCH_BUDGET)'; " }
+            $line = "Set-Location '$tree'; New-Item -ItemType Directory -Force .team | Out-Null; ${set}& .\scripts\fleet_agent_attach.ps1 $agent $($script:FleetAgentSession) 2>> .team\agent-$agent.err"
+            return [pscustomobject]@{ Ssh = $sshArgs + @($target); Line = $line; Target = $target; Local = $false }
+        }
         default { throw "unknown agent $agent" }
     }
     if ($env:FLEET_LAUNCH_BUDGET) { $prefix += "FLEET_LAUNCH_BUDGET=$($env:FLEET_LAUNCH_BUDGET) " }
     $line = "cd $tree && mkdir -p .team && ${prefix}bash scripts/fleet_agent_attach.sh $agent $($script:FleetAgentSession) 2>>.team/agent-$agent.err"
-    return [pscustomobject]@{ Ssh = $sshArgs + @($target); Line = $line; Target = $target }
+    if (Test-LocalAgent $agent) { $target = 'localhost' }
+    return [pscustomobject]@{ Ssh = $sshArgs + @($target); Line = $line; Target = $target; Local = (Test-LocalAgent $agent) }
 }
 
 # --------------------------------------------------------------------------
@@ -247,9 +282,17 @@ function Start-FleetAgent($agent) {
     }
     $launch = Get-FleetAgentLaunch $agent
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'ssh'
-    $quoted = @($launch.Ssh | ForEach-Object { if ("$_" -match '\s') { '"' + $_ + '"' } else { "$_" } })
-    $psi.Arguments = (($quoted -join ' ') + ' "' + $launch.Line + '"')
+    if ($launch.Local) {
+        $psi.FileName = '/bin/bash'
+        $psi.ArgumentList.Add('-c')
+        $psi.ArgumentList.Add($launch.Line)
+        # The agent's backend is its own prefix, never this driver's.
+        foreach ($name in 'FLEET_BACKEND', 'FLEET_ANDROID_PEERS') { [void]$psi.Environment.Remove($name) }
+    } else {
+        $psi.FileName = 'ssh'
+        $quoted = @($launch.Ssh | ForEach-Object { if ("$_" -match '\s') { '"' + $_ + '"' } else { "$_" } })
+        $psi.Arguments = (($quoted -join ' ') + ' "' + $launch.Line + '"')
+    }
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
@@ -259,7 +302,7 @@ function Start-FleetAgent($agent) {
     $process.StandardInput.AutoFlush = $true
     $state = [pscustomobject]@{ Name = $agent; Process = $process; Pending = $null; Target = $launch.Target }
     $script:FleetAgents[$agent] = $state
-    Write-Host "[fleet] agent $agent on $($launch.Target) connecting (ssh pid $($process.Id))" -ForegroundColor Cyan
+    Write-Host "[fleet] agent $agent on $($launch.Target) connecting ($(if ($launch.Local) { "local" } else { "ssh" }) pid $($process.Id))" -ForegroundColor Cyan
     $hello = Read-FleetAgentLine $state 150
     if (-not $hello.ok) { throw "agent $agent did not start: $($hello.error)" }
     Write-Host "[fleet] agent $agent ready ($($hello.result.backend) on $($hello.result.host))" -ForegroundColor Cyan
@@ -297,21 +340,41 @@ function ConvertTo-AsciiJson($value) {
     return [regex]::Replace($json, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
 }
 
-function Invoke-FleetAgent($agent, $request, $timeoutSeconds = 240) {
+function New-FleetAgentRequest($agent, $request) {
     $script:FleetAgentNext++
     $key = "$($script:FleetAgentSession)-$($script:FleetAgentNext)"
     $request['id'] = $key
-    $line = "$key " + (ConvertTo-AsciiJson $request)
+    return [pscustomobject]@{ Agent = $agent; Key = $key; Cmd = "$($request.cmd)"; Line = "$key " + (ConvertTo-AsciiJson $request); Process = $null }
+}
+
+# Writes the request now and leaves its answer to Complete-FleetAgentRequest, so a
+# remote build runs while this machine builds; a lost link is Complete's to retry.
+function Send-FleetAgentRequest($pending) {
+    try {
+        $state = Start-FleetAgent $pending.Agent
+        $state.Process.StandardInput.WriteLine($pending.Line)
+        $pending.Process = $state.Process
+    } catch { $pending.Process = $null }
+    return $pending
+}
+
+function Complete-FleetAgentRequest($pending, $timeoutSeconds = 240) {
+    $agent = $pending.Agent
+    $key = $pending.Key
     $lostAt = $null
     $attempt = 0
     while ($true) {
         try {
             $state = Start-FleetAgent $agent
-            $state.Process.StandardInput.WriteLine($line)
+            if ($pending.Process -ne $state.Process) {
+                $state.Process.StandardInput.WriteLine($pending.Line)
+                $pending.Process = $state.Process
+            }
             do { $answer = Read-FleetAgentLine $state ($timeoutSeconds + 30) } while ("$($answer.id)" -ne $key)
             break
         } catch {
             $why = "$($_.Exception.Message)"
+            $pending.Process = $null
             # A write into a dead connection fails as an IO error, not as our marker.
             $lost = $why.StartsWith($script:FleetAgentLinkError) -or ($_.Exception -is [System.IO.IOException]) -or
                 ($_.Exception.InnerException -is [System.IO.IOException])
@@ -319,10 +382,10 @@ function Invoke-FleetAgent($agent, $request, $timeoutSeconds = 240) {
             Close-FleetAgentConnection $agent
             if (-not $lostAt) { $lostAt = Get-Date }
             $waited = [int]((Get-Date) - $lostAt).TotalSeconds
-            if ($waited -ge $script:FleetAgentRetrySeconds) { throw "[$agent] $($request.cmd): no connection for ${waited}s ($why)" }
+            if ($waited -ge $script:FleetAgentRetrySeconds) { throw "[$agent] $($pending.Cmd): no connection for ${waited}s ($why)" }
             $attempt++
             $pause = [Math]::Min(30, [Math]::Pow(2, $attempt))
-            $note = "$((Get-Date).ToString('HH:mm:ss')) $agent lost during $($request.cmd) $key ($why); retry $attempt in ${pause}s"
+            $note = "$((Get-Date).ToString('HH:mm:ss')) $agent lost during $($pending.Cmd) $key ($why); retry $attempt in ${pause}s"
             $script:FleetAgentReconnects++
             [void]$script:FleetAgentReconnectLog.Add($note)
             Write-Host "[fleet] RECONNECT $note" -ForegroundColor Yellow
@@ -330,8 +393,12 @@ function Invoke-FleetAgent($agent, $request, $timeoutSeconds = 240) {
         }
     }
     if ($lostAt) { Write-Host "[fleet] agent $agent back after $([int]((Get-Date) - $lostAt).TotalSeconds)s; $key answered once" -ForegroundColor Yellow }
-    if (-not $answer.ok) { throw "[$agent] $($request.cmd) failed: $($answer.error)" }
+    if (-not $answer.ok) { throw "[$agent] $($pending.Cmd) failed: $($answer.error)" }
     return $answer.result
+}
+
+function Invoke-FleetAgent($agent, $request, $timeoutSeconds = 240) {
+    return (Complete-FleetAgentRequest (New-FleetAgentRequest $agent $request) $timeoutSeconds)
 }
 
 # A per-peer command on whichever machine the peer is.

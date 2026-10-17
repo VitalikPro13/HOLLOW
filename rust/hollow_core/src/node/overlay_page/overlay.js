@@ -49,8 +49,12 @@
     else delete e.dataset[key];
   }
 
+  function unitRandom() {
+    return crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
+  }
+
   function textOn(hex) {
-    var n = parseInt(hex.slice(1), 16);
+    var n = Number.parseInt(hex.slice(1), 16);
     var lum = 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
     return lum > 150 ? '#111111' : '#ffffff';
   }
@@ -210,7 +214,7 @@
     }
     if (this.blinkTimer) return;
     var me = this;
-    var wait = fx.blink_every_s * 1000 * (0.6 + Math.random() * 0.8);
+    var wait = fx.blink_every_s * 1000 * (0.6 + unitRandom() * 0.8);
     this.blinkTimer = setTimeout(function () {
       me.blinkTimer = 0;
       me.blinking = true;

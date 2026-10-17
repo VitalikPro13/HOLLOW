@@ -6,12 +6,11 @@
 # sonar.yml triggered on everything, so a pure-Dart commit paid for a full
 # Rust run and got no Dart checks at all.
 #
-# Now: the `rust` job runs the suite ONCE under nextest and publishes
-# lcov.info + clippy-report.json as an artifact; Sonar consumes them. The
-# path filter is gone on purpose. Every push runs Rust so that every Sonar
-# analysis carries a fresh coverage report (skipping it makes Sonar report
-# the Rust core as having no coverage data at all), and with nextest that
-# costs ~3 minutes warm instead of ~20.
+# Now: the Rust suite runs ONCE under nextest, sharded over parallel jobs,
+# and publishes lcov.info and clippy-report.json as artifacts; Sonar consumes
+# them. The path filter is gone on purpose. Every push runs Rust so that every
+# Sonar analysis carries a fresh coverage report (skipping it makes Sonar
+# report the Rust core as having no coverage data at all).
 #
 # Every third-party action is pinned to a commit SHA, not a tag. A tag is a
 # mutable pointer: whoever can move `v4` can run their code with this
@@ -44,11 +43,19 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  rust:
-    # DO NOT RENAME. "Test & Coverage" is the required status check on main
-    # (branch protection matches by context name, not by workflow file).
-    name: Test & Coverage
+  # The Rust suite: one instrumented build, the tests split over parallel
+  # shards, one coverage report merged from all of them. Its time is the
+  # multi-node harness, ~550 CPU-bound tests capped at 4 at once per runner
+  # (the `harness` group in rust/hollow_core/.config/nextest.toml), so one
+  # runner cannot go faster and each added shard divides it.
+  rust-build:
+    name: Rust test build
     runs-on: ubuntu-latest
+    env:
+      # Coverage reads the instrumentation's own mapping, not DWARF, and
+      # backtraces keep file:line. Full debuginfo for hollow_core only made
+      # the archive every shard downloads several times larger.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
     steps:
       # persist-credentials: false — checkout otherwise leaves GITHUB_TOKEN in
@@ -63,60 +70,167 @@ jobs:
       # (zizmor: impostor-commit), and a commit no ref holds can be collected.
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component llvm-tools-preview --component clippy --no-self-update
+          rustup toolchain install stable --profile minimal --component llvm-tools-preview --no-self-update
           rustup default stable
 
-      - name: Cache cargo registry & build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Keeps the built dependencies (hollow_core itself always rebuilds),
+      # keyed per job. Pull requests restore but never save: they used to
+      # write 4 GB caches that pushed main's out of the repository's 10 GB,
+      # and main then rebuilt every dependency on every push.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            rust/hollow_core/target
-          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('rust/hollow_core/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-ci-
-            ${{ runner.os }}-cargo-
+          workspaces: rust/hollow_core -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Install cargo-llvm-cov & cargo-nextest
         uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
-      # Sonar imports this instead of invoking cargo itself (Cargo.toml is not
-      # at the repo root). Runs before the coverage build because llvm-cov
-      # rebuilds instrumented anyway.
-      - name: Generate Clippy report for Sonar
+      - name: Build the instrumented test archive
         working-directory: rust/hollow_core
-        run: cargo clippy --lib --message-format=json > ../../clippy-report.json
+        run: cargo llvm-cov nextest-archive --lib --archive-file "$RUNNER_TEMP/hollow-tests.tar.zst"
 
-      # nextest runs each test in its own process. The multi-node harness is
-      # ~830s of deliberate sleeps and every one of its tests holds
-      # `resolver::test_lock()`, a process-wide mutex, so under `cargo test`
-      # those sleeps are strictly additive (~950s). One process per test lets
-      # them overlap: ~80s locally.
-      #
-      # `--profile ci` selects the [profile.ci] block in
-      # rust/hollow_core/.config/nextest.toml (retries, no fail-fast, pinned
-      # test-threads, and the single-threaded os-keychain test group).
-      #
-      # The ignore-regex is the Codecov scoping. Sonar drops the same paths
-      # via `sonar.coverage.exclusions` in sonar-project.properties, so ONE
-      # lcov.info serves both consumers.
-      - name: Tests & coverage (nextest)
-        working-directory: rust/hollow_core
-        run: >-
-          cargo llvm-cov nextest --lib --profile ci
-          --lcov --output-path lcov.info
-          --ignore-filename-regex "(frb_generated|/api/|/node/|/storage/|/archive/)"
-
-      - name: Publish reports for the Sonar job
+      - name: Publish the test archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rust-reports
-          path: |
-            rust/hollow_core/lcov.info
-            clippy-report.json
+          name: rust-test-archive
+          path: ${{ runner.temp }}/hollow-tests.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  rust-test:
+    name: Rust tests (${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: rust-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    steps:
+      # The tests read the source tree at run time (source scans, vectors),
+      # at the same path the archive was built from.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component llvm-tools-preview --no-self-update
+          rustup default stable
+
+      - name: Install cargo-llvm-cov & cargo-nextest
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      - name: Download the test archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-test-archive
+          path: ${{ runner.temp }}
+
+      # `--profile ci` selects [profile.ci] in rust/hollow_core/.config/
+      # nextest.toml (retries, pinned test-threads, the harness and os-keychain
+      # groups). `slice` deals the name-sorted tests out round-robin, so every
+      # shard gets an even share of the harness, which sorts as one block.
+      - name: Tests (nextest)
+        working-directory: rust/hollow_core
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+        run: |
+          mkdir -p target/llvm-cov-target
+          cargo llvm-cov nextest --profile ci --no-report \
+            --archive-file "$RUNNER_TEMP/hollow-tests.tar.zst" \
+            --partition "slice:$SHARD/$SHARDS"
+
+      # One profile per test process, ~2 MB each, merged here to one small
+      # indexed profile. It keeps the .profraw name because `cargo llvm-cov
+      # report` collects only that name, and llvm-profdata merges indexed
+      # inputs exactly as raw ones (the report is byte-identical).
+      - name: Merge this shard's coverage profiles
+        working-directory: rust/hollow_core/target/llvm-cov-target
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          profdata="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
+          "$profdata" merge -sparse ./*.profraw -o "$RUNNER_TEMP/shard-$SHARD.profraw"
+
+      - name: Publish this shard's coverage profile
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-profile-${{ matrix.shard }}
+          path: ${{ runner.temp }}/shard-${{ matrix.shard }}.profraw
+          retention-days: 1
+          if-no-files-found: error
+
+  rust:
+    # DO NOT RENAME. "Test & Coverage" is the required status check on main
+    # (branch protection matches by context name, not by workflow file). It
+    # runs even after a failed build or shard and then fails itself: a job
+    # skipped for a failed `needs` counts as passing for branch protection.
+    name: Test & Coverage
+    needs: [rust-build, rust-test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Every shard passed
+        env:
+          BUILD: ${{ needs.rust-build.result }}
+          TESTS: ${{ needs.rust-test.result }}
+        run: |
+          echo "build: $BUILD, tests: $TESTS"
+          [ "$BUILD" = success ] && [ "$TESTS" = success ]
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component llvm-tools-preview --no-self-update
+          rustup default stable
+
+      - name: Install cargo-llvm-cov & cargo-nextest
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      - name: Download the test archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-test-archive
+          path: ${{ runner.temp }}
+
+      - name: Download every shard's coverage profile
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rust-profile-*
+          merge-multiple: true
+          path: rust/hollow_core/target/llvm-cov-target
+
+      # The report reads the instrumented binary where a shard's run unpacks
+      # it. The ignore-regex is the Codecov scoping. Sonar drops the same
+      # paths via `sonar.coverage.exclusions` in sonar-project.properties, so
+      # ONE lcov.info serves both consumers.
+      - name: Coverage report
+        working-directory: rust/hollow_core
+        run: |
+          tar --zstd -xf "$RUNNER_TEMP/hollow-tests.tar.zst" -C target/llvm-cov-target
+          cargo llvm-cov report --nextest-archive-file "$RUNNER_TEMP/hollow-tests.tar.zst" \
+            --lcov --output-path lcov.info \
+            --ignore-filename-regex "(frb_generated|/api/|/node/|/storage/|/archive/)"
+
+      - name: Publish coverage for the Sonar job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage
+          path: rust/hollow_core/lcov.info
           retention-days: 1
           if-no-files-found: error
 
@@ -127,6 +241,40 @@ jobs:
           flags: rust
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  # Sonar imports this instead of invoking cargo itself (Cargo.toml is not at
+  # the repo root). Its own job, so it builds beside the tests.
+  clippy:
+    name: Clippy report
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          rustup default stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: rust/hollow_core -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Generate Clippy report for Sonar
+        working-directory: rust/hollow_core
+        run: cargo clippy --lib --message-format=json > ../../clippy-report.json
+
+      - name: Publish the report for the Sonar job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-clippy
+          path: clippy-report.json
+          retention-days: 1
+          if-no-files-found: error
 
   supply-chain:
     # Dependencies, secrets and these workflows (SECURITY_AUDIT_PLAN.md 2.8,
@@ -264,7 +412,7 @@ jobs:
 
   sonar:
     name: Analyze
-    needs: rust
+    needs: [rust, clippy]
     # Neither a Dependabot run nor a pull request from a fork receives
     # repository secrets, so SONAR_TOKEN is empty and the scan can only fail
     # with "Not authorized". A fork's commits are analysed when they land on
@@ -282,13 +430,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # lcov.info and clippy-report.json, produced once by the rust job. The
-      # artifact keeps its repo-relative layout, so these land exactly where
-      # sonar-project.properties expects them.
-      - name: Download Rust reports
+      # Both land exactly where sonar-project.properties expects them.
+      - name: Download Rust coverage
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: rust-reports
+          name: rust-coverage
+          path: rust/hollow_core
+
+      - name: Download the Clippy report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-clippy
 
       - name: Install Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2

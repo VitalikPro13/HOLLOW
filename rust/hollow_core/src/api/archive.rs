@@ -641,7 +641,7 @@ pub fn import_server_shards(archive_path: String) -> Result<ShardImportResultFfi
     // Collect shard file names first (ZipArchive needs index-based access).
     let shard_entries: Vec<(String, usize)> = (0..archive.len())
         .filter_map(|i| {
-            let name = archive.by_index(i).ok()?.name().to_string();
+            let name = archive.by_index(i).ok()?.name().ok()?.into_owned();
             if name.starts_with("shards/") && name.ends_with(".shard") {
                 Some((name, i))
             } else {

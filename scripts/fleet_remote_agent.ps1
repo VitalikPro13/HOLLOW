@@ -1,6 +1,6 @@
 # The far end of a cross-machine fleet journey (fleet_remote.ps1): a server, started
-# DETACHED by scripts/fleet_agent_attach.sh, that runs fleet_lib's per-peer commands for
-# the peers of THIS machine. It outlives any one ssh connection: a dropped connection
+# DETACHED by scripts/fleet_agent_attach.sh (fleet_agent_attach.ps1 on Windows), that
+# runs fleet_lib's per-peer commands for the peers of THIS machine. It outlives any one ssh connection: a dropped connection
 # loses no device, process or probe read position, and the driver reconnects.
 #
 # Requests are files in <dir>/req/<key>.json. Each is claimed by a rename to run/,
@@ -15,13 +15,25 @@ param(
     [Parameter(Mandatory = $true)][string]$Serve,
     [int]$IdleMinutes = 30,
     # Answers kept for re-sent requests.
-    [int]$KeepAnswers = 300
+    [int]$KeepAnswers = 300,
+    # Windows (fleet_agent_attach.ps1): the attach cannot learn the pid of a server a
+    # scheduled task started, so the server writes it.
+    [switch]$WritePid,
+    # KEY=VALUE lines applied before fleet_lib loads: a scheduled task inherits none
+    # of the connection's environment.
+    [string]$EnvFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 $dir = (Resolve-Path $Serve).Path
+if ($WritePid) { [System.IO.File]::WriteAllText((Join-Path $dir 'pid'), "$PID") }
+if ($EnvFile -and (Test-Path $EnvFile)) {
+    foreach ($line in [System.IO.File]::ReadAllLines($EnvFile)) {
+        if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] }
+    }
+}
 
 $script:FleetRepo = $repoRoot
 $script:FleetStageRoot = Join-Path (Join-Path $repoRoot 'build') 'fleet'

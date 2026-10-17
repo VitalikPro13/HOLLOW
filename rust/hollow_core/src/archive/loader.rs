@@ -134,7 +134,7 @@ fn collect_entry_bytes(archive: &mut ZipReader<'_>, budget: u64) -> Result<Archi
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)
             .map_err(|e| format!("Failed to read zip entry {i}: {e}"))?;
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| format!("Failed to read zip entry {i} name: {e}"))?.into_owned();
         let landing = attachment_landing(&entry);
 
         let mut buf = Vec::new();

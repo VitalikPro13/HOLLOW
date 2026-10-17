@@ -17,7 +17,7 @@ def _load():
     import torch
     from sentence_transformers import SentenceTransformer
 
-    _device = "cuda" if torch.cuda.is_available() else "cpu"
+    _device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     kwargs = {"model_kwargs": {"torch_dtype": torch.float16}} if _device == "cuda" else {}
     t = time.time()
     _model = SentenceTransformer(MODEL_ID, device=_device, processor_kwargs={"padding_side": "left"}, **kwargs)
@@ -32,9 +32,15 @@ def _unload_when_idle():
         with _lock:
             if _model is not None and time.time() - _last_used > IDLE_UNLOAD_SECS:
                 _model = None
-                if _device == "cuda":
-                    import torch
-                    torch.cuda.empty_cache()
+                _empty_cache()
+
+
+def _empty_cache():
+    import torch
+    if _device == "cuda":
+        torch.cuda.empty_cache()
+    elif _device == "mps":
+        torch.mps.empty_cache()
 
 
 threading.Thread(target=_unload_when_idle, daemon=True).start()
@@ -56,8 +62,7 @@ def embed(texts: list[str], prompt: str = "") -> np.ndarray:
             except RuntimeError as e:
                 if "out of memory" not in str(e).lower() or batch == 1:
                     raise
-                import torch
-                torch.cuda.empty_cache()
+                _empty_cache()
                 batch //= 2
         _last_used = time.time()
         return vecs.astype(np.float32)

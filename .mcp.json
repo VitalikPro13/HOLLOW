@@ -1,11 +1,11 @@
 {
   "mcpServers": {
     "hollow-memory": {
-      "command": "D:/dev/venvs/hollow-embed/Scripts/python.exe",
-      "args": ["-u", "C:/Users/Jabun/Documents/Coding/HOLLOW/tools/hollow-memory/server.py"],
+      "command": "${HOLLOW_MEMORY_PYTHON:-D:/dev/venvs/hollow-embed/Scripts/python.exe}",
+      "args": ["-u", "${HOLLOW_REPO:-C:/Users/Jabun/Documents/Coding/HOLLOW}/tools/hollow-memory/server.py"],
       "env": {
         "PYTHONUNBUFFERED": "1",
-        "HF_HOME": "D:/dev/hf-cache",
+        "HF_HOME": "${HF_HOME:-D:/dev/hf-cache}",
         "HF_HUB_OFFLINE": "1"
       }
     }

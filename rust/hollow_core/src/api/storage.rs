@@ -2954,7 +2954,7 @@ mod tests {
         let names: Vec<String> = zip::ZipArchive::new(std::io::Cursor::new(&with_files[..]))
             .unwrap()
             .file_names()
-            .map(str::to_string)
+            .map(|n| n.unwrap().into_owned())
             .collect();
         assert!(names.contains(&"files/ab12.png".to_string()), "{names:?}");
         assert!(!names.iter().any(|n| n.ends_with(".tmp")), "a temp file travels: {names:?}");

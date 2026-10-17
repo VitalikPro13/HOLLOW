@@ -129,6 +129,19 @@
 #   FLEET_ANDROID_PEERS=a,b pwsh scripts/fleet.ps1 -Build -Peers a,b,c,d   # builds the app and the APK
 #   FLEET_ANDROID_PEERS=a,b pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b,c,d
 #   FLEET_ANDROID_PEERS=a,b pwsh scripts/fleet_send.ps1 -Command '[{"peer":"c","op":"look"}]'
+#
+# ## Peers on other machines (fleet_remote.ps1)
+#
+# -Peers may name `<platform>:<letter>` peers of another machine (windows:f from
+# the Mac, macos:c from the PC); fleet.ps1 runs there through that machine's agent
+# (build, onboard, boot, stop), at the same time as this machine's, and the steps
+# reach them over the agent. `role=peer` hands a scenario's peer to another letter,
+# its `probe-<role>` names with it, so any scenario runs on your own letters:
+#
+#   bash scripts/pc_sync.sh <tree>      # ship this tree to D:\dev\wt\<tree> on the PC first
+#   FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Build -Peers e,windows:f
+#   FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers e,windows:f
+#   FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario friend_dm -Peers a=e,b=windows:f
 
 param(
     # A file in scripts\probe_scenarios\fleet (without .json).
@@ -295,9 +308,51 @@ function Stop-Fleet($onlyPeers = @()) {
     }
 }
 
+# -Peers may name peers of other machines (`windows:f`, fleet_remote.ps1), run by
+# fleet.ps1 on THEIR machine through its agent, and may give a scenario's peer to
+# another letter (`a=e`): the steps' peer and every `probe-a` in them follow it,
+# since a peer's display name is probe-<its letter>. $Peers keeps this machine's.
+$peersGiven = [bool]$Peers
+$roleMap = @{}
+$remotePeers = @()
+if ($Peers) {
+    $here = @()
+    foreach ($entry in @($Peers -split '[,\s]+' | Where-Object { $_ })) {
+        $role = $null
+        $name = $entry
+        if ($entry -match '^([a-z])=(.+)$') { $role = $Matches[1]; $name = $Matches[2] }
+        $name = Register-FleetPeer $name
+        if ($role) { $roleMap[$role] = $name }
+        if (Test-RemotePeer $name) { $remotePeers += $name } else { $here += $name }
+    }
+    $Peers = $here -join ','
+}
+
+# fleet.ps1 with these arguments on each remote peer's machine, each agent at once;
+# Wait-RemoteFleet collects the answers.
+function Start-RemoteFleet($fleetArgs) {
+    $groups = @{}
+    foreach ($peer in $remotePeers) {
+        $remote = Get-RemotePeer $peer
+        if (-not $groups.ContainsKey($remote.Agent)) { $groups[$remote.Agent] = @() }
+        $groups[$remote.Agent] += $remote.Letter
+    }
+    $pending = @()
+    foreach ($agent in $groups.Keys) {
+        $all = @($fleetArgs) + @('-IdleMinutes', "$IdleMinutes", '-Peers', ($groups[$agent] -join ','))
+        Write-Step "on $agent ($($groups[$agent] -join ',')): fleet.ps1 $($all -join ' ')"
+        $pending += Send-FleetAgentRequest (New-FleetAgentRequest $agent @{ cmd = 'fleet'; args = $all })
+    }
+    return $pending
+}
+function Wait-RemoteFleet($pending, $timeoutSeconds = 900) {
+    foreach ($request in @($pending)) { Complete-FleetAgentRequest $request $timeoutSeconds | Out-Null }
+}
+
 if ($Stop) {
-    Stop-Fleet @($Peers -split '[,\s]+' | Where-Object { $_ })
+    if ($Peers -or -not $peersGiven) { Stop-Fleet @($Peers -split '[,\s]+' | Where-Object { $_ }) }
     Stop-FleetProxy
+    if ($remotePeers.Count -gt 0) { Wait-RemoteFleet (Start-RemoteFleet @('-Stop')); Stop-FleetAgents }
     Write-Step 'fleet stopped'
     exit 0
 }
@@ -348,6 +403,35 @@ if ($ScenarioFile -or $Scenario) {
     Write-Step "scenario $path ($($scenarioSteps.Count) steps, $($scenarioCleanup.Count) cleanup)"
 }
 
+function Convert-ScenarioRoles($value) {
+    if ($null -eq $value) { return $null }
+    if ($value -is [string]) {
+        return [regex]::Replace($value, '(?<![A-Za-z0-9])probe-([a-z])(?![A-Za-z0-9])', {
+            param($m)
+            $to = $roleMap[$m.Groups[1].Value]
+            if ($to) { return 'probe-' + ("$to" -split ':')[-1] }
+            return $m.Value
+        })
+    }
+    if ($value -is [System.Array]) { return , @($value | ForEach-Object { Convert-ScenarioRoles $_ }) }
+    if ($value -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($property in $value.PSObject.Properties) {
+            if ($property.Name -eq 'peer') {
+                if ($roleMap.ContainsKey("$($property.Value)")) { $property.Value = $roleMap["$($property.Value)"] }
+            } else {
+                $property.Value = Convert-ScenarioRoles $property.Value
+            }
+        }
+    }
+    return $value
+}
+if ($roleMap.Count -gt 0) {
+    $scenarioSteps = @($scenarioSteps | ForEach-Object { Convert-ScenarioRoles $_ })
+    $scenarioCleanup = @($scenarioCleanup | ForEach-Object { Convert-ScenarioRoles $_ })
+    $scenarioPeers = @($scenarioPeers | ForEach-Object { if ($roleMap.ContainsKey("$_")) { $roleMap["$_"] } else { $_ } })
+    Write-Step "roles: $(($roleMap.Keys | Sort-Object | ForEach-Object { "$_=$($roleMap[$_])" }) -join ', ')"
+}
+
 # Peers: what is already up when attaching, else the scenario's own list, else
 # -Peers, else what the steps mention, else a and b.
 $peerList = @()
@@ -356,7 +440,7 @@ if ($Attach) {
     if ($peerList.Count -eq 0) {
         throw "-Attach found no running instances. Start some with: powershell -File scripts\fleet.ps1 -Live"
     }
-} elseif ($Peers) {
+} elseif ($peersGiven) {
     $peerList = $Peers -split '[,\s]+' | Where-Object { $_ }
 } elseif ($scenarioPeers.Count -gt 0) {
     $peerList = $scenarioPeers
@@ -364,11 +448,13 @@ if ($Attach) {
     $peerList = $scenarioSteps | ForEach-Object { $_.peer } |
         Where-Object { $_ -and $_ -ne 'all' } | Select-Object -Unique
 }
-if ($peerList.Count -eq 0) { $peerList = @('a', 'b') }
+if ($peerList.Count -eq 0 -and -not $peersGiven) { $peerList = @('a', 'b') }
 $peerList = @($peerList | Sort-Object)
+# This machine's peers ($peerList) and the other machines' (each run there by its agent).
+$fleetPeers = @($peerList) + @($remotePeers)
 $attachNote = ''
 if ($Attach) { $attachNote = ' (attached)' }
-Write-Step "peers: $($peerList -join ', ')$attachNote"
+Write-Step "peers: $($fleetPeers -join ', ')$attachNote"
 
 # --------------------------------------------------------------------------
 # Build and stage
@@ -446,7 +532,8 @@ function Test-PeerStaged($peer) {
             Write-Step "$peer's staged copy differs from the last build" 'Yellow'
             return $false
         }
-        return $true
+        $agentApp = "$(& plutil -extract LSUIElement raw (Join-Path (Get-MacPeerBundle $peer) 'Contents/Info.plist') 2>$null)".Trim()
+        return $agentApp -eq 'true'
     }
     $exe =if (Test-LinuxBackend) { 'hollow' } else { 'hollow.exe' }
     return (Test-Path (Join-Path (Join-Path $stageRoot $peer) $exe))
@@ -487,6 +574,15 @@ function Stage-Peer($peer) {
         # N peers cost no disk and a restage takes under a second.
         & cp -cR $buildOutput $bundle
         if ($LASTEXITCODE -ne 0) { throw "cloning $buildOutput -> $bundle failed with $LASTEXITCODE" }
+        # An agent app (LSUIElement): AppKit makes a regular app the front one as
+        # it finishes launching, which takes the person's keyboard whenever the
+        # system lets it (an alert or a remote-control window in front, or the
+        # terminal that started it). Only this clone's Info.plist changes, so the
+        # clone is signed again, ad hoc like the build.
+        & plutil -replace LSUIElement -bool YES (Join-Path $bundle 'Contents/Info.plist')
+        if ($LASTEXITCODE -ne 0) { throw "marking $bundle an agent app failed with $LASTEXITCODE" }
+        $signed = "$(& codesign --force --sign - --preserve-metadata=entitlements,flags,runtime $bundle 2>&1)"
+        if ($LASTEXITCODE -ne 0) { throw "signing $bundle again failed: $signed" }
         return
     }
     if (Test-LinuxBackend) {
@@ -513,9 +609,20 @@ function Stage-Peer($peer) {
 
 if ($Build) {
     if ($env:FLEET_LANE -and $env:FLEET_LANE -ne '0') { throw "-Build in lane $($env:FLEET_LANE): build in lane 0, fleet_all.ps1 stages the lanes from it" }
-    Stop-Fleet
-    Invoke-Build
-    foreach ($peer in $peerList) { Stage-Peer $peer }
+    $remoteBuild = @()
+    if ($remotePeers.Count -gt 0) { $remoteBuild = Start-RemoteFleet @('-Build') }
+    if ($peerList.Count -gt 0) {
+        $localStarted = Get-Date
+        Stop-Fleet
+        Invoke-Build
+        foreach ($peer in $peerList) { Stage-Peer $peer }
+        Write-Step ("this machine's build took {0:mm\:ss}" -f ((Get-Date) - $localStarted))
+    }
+    if ($remoteBuild.Count -gt 0) {
+        $remoteStarted = Get-Date
+        Wait-RemoteFleet $remoteBuild 5400
+        Write-Step ("remote builds done ({0:mm\:ss} after this machine's)" -f ((Get-Date) - $remoteStarted))
+    }
 }
 
 if (-not $Attach) {
@@ -720,25 +827,48 @@ function Start-Peer($peer) {
     $env:UI_PROBE_STEPS = ''
 
     if (Test-MacBackend) {
-        # The binary itself, never `open` (Test-MacBackend), with stdio in
-        # files as on Linux: a pipe held by this process would outlive it.
-        # `-NSAppSleepDisabled YES` lands in NSUserDefaults' argument domain,
-        # for this process only: an instance nobody looks at must not be App
-        # Napped, or its timers and the relay keepalive slow to a crawl.
-        # HOME is the peer's own: Dart reads it for profiles.json, the
-        # recordings folder and Save as, which would otherwise be the person's.
+        # The binary itself, never `open` (Test-MacBackend), from a launcher
+        # that carries the environment and puts stdio in files: a pipe held by
+        # this process would outlive it. `-NSAppSleepDisabled YES` lands in
+        # NSUserDefaults' argument domain, for this process only: an instance
+        # nobody looks at must not be App Napped, or its timers and the relay
+        # keepalive slow to a crawl. HOME is the peer's own: Dart reads it for
+        # profiles.json, the recordings folder and Save as, which would
+        # otherwise be the person's.
         $peerHome = Join-Path (Get-MacHomeRoot) $peer
         New-Item -ItemType Directory -Path $peerHome -Force | Out-Null
+        $vars = [ordered]@{ HOME = $peerHome }
+        foreach ($item in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'UI_PROBE_*' -or $_.Name -like 'HOLLOW_*' -or $_.Name -like 'RUST_*' })) {
+            $vars[$item.Name] = $item.Value
+        }
         $launcher = Join-Path $out 'launch.sh'
-        $lines = @(
-            '#!/bin/sh',
-            ('export HOME="{0}"' -f $peerHome),
-            ('exec "{0}" -NSAppSleepDisabled YES >"{1}" 2>"{2}" </dev/null' -f (Get-MacPeerBinary $peer),
-                (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
-        )
+        $lines = @('#!/bin/sh')
+        foreach ($name in $vars.Keys) { $lines += ("export {0}='{1}'" -f $name, ("$($vars[$name])" -replace "'", "'\''")) }
+        $lines += ('exec "{0}" -NSAppSleepDisabled YES >"{1}" 2>"{2}" </dev/null' -f (Get-MacPeerBinary $peer),
+            (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
         [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
         & chmod +x $launcher
-        $proc = Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
+        if ($env:SSH_CONNECTION -or $env:FLEET_MAC_DIRECT -eq '1') {
+            $proc = Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
+        } else {
+            # Started under the person's own terminal, the app is that
+            # terminal's privacy client, so its microphone ask (a WebRTC
+            # connection makes one) can put a dialog for the terminal in front
+            # of the person. From an ssh session there is no console to ask on,
+            # as on every run the PC drove.
+            $self = if ($env:FLEET_MAC_SELF_SSH) { $env:FLEET_MAC_SELF_SSH } else { 'localhost' }
+            $said = "$(& ssh -o BatchMode=yes -o ConnectTimeout=5 $self "nohup /bin/sh '$launcher' >/dev/null 2>&1 </dev/null &" 2>&1)"
+            if ($LASTEXITCODE -ne 0) {
+                throw "macOS peers start from an ssh session to this Mac, so their microphone ask never raises a dialog, and 'ssh $self' failed: $said. Once: add this Mac's own key to ~/.ssh/authorized_keys and run 'ssh $self true' to accept its host key (FLEET_MAC_SELF_SSH names another alias). FLEET_MAC_DIRECT=1 starts them directly instead, at the risk of that dialog."
+            }
+            $proc = $null
+            $deadline = (Get-Date).AddSeconds(30)
+            while (-not $proc -and (Get-Date) -lt $deadline) {
+                $proc = @(Get-MacFleetProcesses @($peer)) | ForEach-Object { $_.Process } | Select-Object -First 1
+                if (-not $proc) { Start-Sleep -Milliseconds 200 }
+            }
+            if (-not $proc) { throw "launching $peer over ssh $self started no process; see $(Join-Path $out 'native-stderr.log')" }
+        }
         $script:processes[$peer] = $proc
         Write-Step "launched $peer (pid $($proc.Id)) data=$data"
         return
@@ -938,11 +1068,11 @@ function Invoke-Steps($steps, $label, $alwaysSoft = $false) {
     foreach ($step in $steps) {
         $index++
         $peer = $step.peer
-        if (-not $peer) { $peer = $peerList[0] }
-        $targets = if ($peer -eq 'all') { $peerList } else { @($peer) }
+        if (-not $peer) { $peer = $fleetPeers[0] }
+        $targets = if ($peer -eq 'all') { $fleetPeers } else { @($peer) }
         foreach ($target in $targets) {
-            if ($peerList -notcontains $target) {
-                throw "step $index names peer '$target', which is not in the fleet ($($peerList -join ', '))"
+            if ($fleetPeers -notcontains $target) {
+                throw "step $index names peer '$target', which is not in the fleet ($($fleetPeers -join ', '))"
             }
             $description = "$($step.op) $($step.target)$($step.name)"
             Write-Host ("  {0,-3} {1,-4} {2}" -f $index, $target, $description) -ForegroundColor Gray
@@ -1048,11 +1178,30 @@ if ($Relay) {
 
 $stopOnly = @()
 if ($KeepOthers) {
-    if (-not $Peers) { throw '-KeepOthers needs -Peers: it restarts only those peers' }
+    if (-not $peersGiven) { throw '-KeepOthers needs -Peers: it restarts only those peers' }
     $stopOnly = $peerList
 }
 
-if (-not $Attach) {
+# The remote peers boot (or onboard) on their machines while this machine's do.
+$remotePending = @()
+$remoteUp = $false
+# A remote -Build already booted and stopped its peers, as this machine's boot does.
+$buildOnly = $Build -and -not ($Onboard -or $Live -or $Keep -or $scenarioSteps.Count -gt 0)
+if ($remotePeers.Count -gt 0 -and -not $Attach -and -not $buildOnly) {
+    if ($Onboard) {
+        $remoteArgs = @('-Onboard')
+        if ($Fresh) { $remoteArgs += '-Fresh' }
+        if ($Relay) { $remoteArgs += @('-Relay', $Relay) }
+    } else {
+        $remoteArgs = @('-Live')
+        foreach ($flag in 'ReuseData', 'Empty', 'KeepOthers', 'NetProxy') {
+            if ((Get-Variable $flag -ValueOnly)) { $remoteArgs += "-$flag" }
+        }
+    }
+    $remotePending = Start-RemoteFleet $remoteArgs
+}
+
+if (-not $Attach -and $peerList.Count -gt 0) {
     Stop-Fleet $stopOnly
     foreach ($peer in $peerList) { Reset-PeerData $peer }
     if ($NetProxy) {
@@ -1071,9 +1220,11 @@ try {
     if ($Attach) {
         Write-Step 'attached: no reboot, no fixture restore'
     } else {
-        Wait-Ready $peerList
-        Start-Sleep -Milliseconds 500
-        Set-FleetWindows $peerList
+        if ($peerList.Count -gt 0) {
+            Wait-Ready $peerList
+            Start-Sleep -Milliseconds 500
+            Set-FleetWindows $peerList
+        }
     }
 
     if ($Onboard) {
@@ -1086,6 +1237,13 @@ try {
             $script:phrases[$peer] = $script:FleetVars['PHRASE']
         }
         $script:onboardOk = $true
+    }
+
+    if ($remotePending.Count -gt 0) {
+        Wait-RemoteFleet $remotePending 1800
+        $remotePending = @()
+        if ($Onboard -and $scenarioSteps.Count -gt 0) { Wait-RemoteFleet (Start-RemoteFleet @('-Live')) 900 }
+        $remoteUp = (-not $Onboard) -or $scenarioSteps.Count -gt 0
     }
 
     if ($scenarioSteps.Count -gt 0) {
@@ -1144,6 +1302,16 @@ try {
     }
     foreach ($peer in $peerList) {
         try { Sync-PeerOut $peer } catch { Write-Step "could not copy $peer's output off its emulator: $_" 'Yellow' }
+    }
+    if ($remotePeers.Count -gt 0) {
+        try {
+            if ($remotePending.Count -gt 0) { Wait-RemoteFleet $remotePending 1800; $remoteUp = -not $Onboard }
+            if ($remoteUp -and ($Onboard -or -not ($Attach -or $Live -or $Keep -or $scenarioFailed))) {
+                Wait-RemoteFleet (Start-RemoteFleet @('-Stop'))
+            }
+        } catch { Write-Step "remote peers: $_" 'Yellow'; $exitCode = 1 }
+        Write-Step "remote peers' artifacts stay on their machines: build/fleet_out/<letter> in each agent's tree"
+        Stop-FleetAgents
     }
 }
 

@@ -33,9 +33,13 @@ NOTES: anything odd (a flake TRY 1 FAIL / TRY 2 PASS, a non-empty refusals file,
 
 ## Windows host and shell
 
+Since 2026-10-17 you run on the Mac mini (the lead's machine) and reach the PC over ssh (next
+section after the Windows fleet); these rules hold for every command that runs ON the PC.
+
 - Anything with backslashes or quotes goes in a script FILE written with the Write tool under your
   scratch dir (`<worktree>\.team\` or `D:\dev\tmp\`), never an inline heredoc or `python -c`.
-- `pwsh` is NOT installed on Windows: run scripts with `powershell -File scripts\x.ps1` (5.1).
+- The fleet and build scripts run under Windows PowerShell 5.1 there: `powershell -File
+  scripts\x.ps1`. pwsh 7 is only the PC's ssh login shell (remote commands are pwsh syntax).
 - Never pass JSON through `powershell -File x.ps1 -Command '<json>'` (inner quotes are stripped);
   write it to a file the script reads, or call in-process.
 - Native builds: `cmd /c "<cmd> > out.txt 2>&1"`, then read the exit code. robocopy exit 0 to 7 is
@@ -146,12 +150,33 @@ NOTES: anything odd (a flake TRY 1 FAIL / TRY 2 PASS, a non-empty refusals file,
 - Never resize a fleet window below 960 logical px, never launch an instance with redirected
   stdout or stderr, never add a focus call.
 
+## The Windows PC from the Mac (`ssh pc`, `ssh pc-ts` over Tailscale)
+
+- The Mac is the source of truth. Ship your worktree with `bash scripts/pc_sync.sh <name>
+  <worktree>` to `D:\dev\wt\<name>` on the PC (git's bytes, uncommitted and untracked
+  included, every file hash-checked). NEVER write to `C:\Users\Jabun\Documents\Coding\HOLLOW`.
+- Drive Windows peers from the Mac as `windows:<letter>`, never by hand over ssh:
+  `FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Build -Peers e,windows:f` (both
+  builds at once), `-Onboard -Fresh -Peers e,windows:f`, `-Scenario friend_dm -Peers
+  a=e,b=windows:f` (role=peer), `-Stop -Peers windows:f`. A Windows-only run is just
+  `-Peers windows:e,windows:f`.
+- A process started in an ssh session dies with it (OpenSSH for Windows). The fleet agent
+  survives by starting through a one-shot scheduled task, hidden, in Vitalik's desktop session
+  (`HollowFleet-*`, deleted at once). A long build you run by hand over ssh dies if the
+  connection drops: run it through `fleet.ps1 -Build` or keep the connection alive
+  (`-o ServerAliveInterval=15`).
+- The Windows peers' shots, dumps and logs stay on the PC
+  (`D:\dev\wt\<name>\build\fleet_out\<letter>`): copy them off with
+  `scp 'pc:D:/dev/wt/<name>/build/fleet_out/<letter>/*.png' <your .team dir>`. The agent's own
+  log is `D:\dev\wt\<name>\.team\agent-pc-win.log`.
+- C: on the PC is nearly full (about 13 GB free): builds and worktrees go on D:.
+
 ## Mac mini (iOS Simulators, macOS app, Android emulators)
 
 - ALL mobile runs happen on the mini. Default backend is the iOS Simulator; Android
   (`FLEET_BACKEND=android`, or `FLEET_ANDROID_PEERS=a,b` for a mixed fleet) when the job says so.
-- Ship a worktree with `bash scripts/mini_sync.sh <name> <worktree>` to `~/wt/<name>` and work only
-  there; never write to, reset or commit in the mini's main tree.
+- Work in your own worktree (`~/dev/wt/<name>`); never write to, reset or commit in the lead's
+  tree `~/src/HOLLOW`. `scripts/mini_sync.sh` is only for a driver on the PC.
 - On the mini the fleet runs with `pwsh scripts/fleet.ps1 ...` (same flags), always with your own
   `-Peers`.
 - Before staging simulators check someone is logged in at the GUI (`stat -f %Su /dev/console`); if
@@ -170,10 +195,17 @@ NOTES: anything odd (a flake TRY 1 FAIL / TRY 2 PASS, a non-empty refusals file,
 - macOS desktop fleet: `FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 ...` from
   `~/wt/<name>` (same flags and scenarios as Windows, desktop onboarding), every run redirected to
   a file. Needs a GUI login at the console (a locked screen is fine). `-Stop -Peers ...` kills only
-  that tree's peers by pid; check with `pgrep -fl "Hollow.app/Contents/MacOS/Hollow"`. Never
-  launch a peer with `open`, never touch `~/Library/Application Support/hollow` (the real data).
+  that tree's peers by pid; check with `pgrep -fl "Hollow.app/Contents/MacOS/Hollow"`. Vitalik
+  works at this Mac: each peer is an agent app started from an ssh session to the Mac itself
+  (`ssh localhost`), its window behind every other one, so it never takes his keyboard or raises
+  a microphone dialog. If fleet.ps1 refuses because `ssh localhost` fails, report STUCK; never
+  set `FLEET_MAC_DIRECT=1` unless your parent says so, never `open` a peer or run its binary
+  yourself, never touch `~/Library/Application Support/hollow` (the real data).
+- A macOS peer's microphone, camera and screen capture are denied (silently): a voice channel
+  joins without audio, a 1:1 call is torn down at the offer ("Cancelled call"). Report that as a
+  known limit, never as a bug; calls and media run on Windows peers or phones.
   Shots are in `build/fleet_out/<peer>`; scp them off before the next run.
-- Before reporting: delete `~/wt/<name>` and shut down your simulators and emulators.
+- Before reporting: stop your peers and shut down your simulators and emulators.
 
 ## Linux machines
 

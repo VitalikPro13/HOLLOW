@@ -1177,6 +1177,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[cfg_attr(target_os = "macos", ignore = "macOS loopback answers only on 127.0.0.1")]
         async fn a_redirect_into_loopback_is_never_followed() {
             let http = build_http(test_policy).unwrap();
             let (target, target_hits) = serve("127.0.0.1", Arc::new(|_: &str| page("router admin"))).await;

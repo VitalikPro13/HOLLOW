@@ -251,9 +251,10 @@ fn make_writable(path: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         perms.set_mode(perms.mode() | 0o200);
     }
+    // Windows: this clears the read-only attribute and grants nobody else access.
     #[cfg(not(unix))]
     #[allow(clippy::permissions_set_readonly_false)]
-    perms.set_readonly(false);
+    perms.set_readonly(false); // NOSONAR
     std::fs::set_permissions(path, perms)
 }
 

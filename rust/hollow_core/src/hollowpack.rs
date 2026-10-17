@@ -1193,7 +1193,7 @@ mod tests {
     ) -> Vec<u8> {
         use std::io::Write;
         let mut src = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("open");
-        let names: Vec<String> = src.file_names().map(|n| n.to_string()).collect();
+        let names: Vec<String> = src.file_names().map(|n| n.unwrap().into_owned()).collect();
         let mut out = Vec::new();
         {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut out));

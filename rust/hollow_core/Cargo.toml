@@ -71,7 +71,7 @@ zeroize = { version = "1", features = ["derive"] }
 # Pinned exactly: the shop signs with the same crate through the hollowpack binary.
 blind-rsa-signatures = "=0.17.2"
 bs58 = "0.5"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 argon2 = "0.5"
 # Meeting knock proofs (node/conference.rs); already in the tree through openmls.
 hmac = "0.12"

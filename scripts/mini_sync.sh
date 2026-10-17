@@ -1,7 +1,9 @@
 #!/bin/bash
-# Ship a worktree to its own folder on the Mac mini (~/wt/<name>) for iOS Simulator,
-# Android emulator and macOS checks. The mini's own checkout (~/src/HOLLOW) is never
-# written: Windows is the source of truth, and several agents share the mini. Files go
+# Ship a worktree from the Windows PC to its own folder on the Mac mini (~/wt/<name>)
+# for iOS Simulator, Android emulator and macOS checks, when the PC drives the fleet.
+# The mini's own checkout (~/src/HOLLOW, the lead's tree since 2026-10-17) is never
+# written. A Mac lead needs none of this: its worktrees are on the mini already, and
+# scripts/pc_sync.sh ships them the other way. Files go
 # over as git would store them (LF), uncommitted changes included; the gitignored
 # platform files (Firebase configs, iOS signing) are copied from ~/src/HOLLOW once.
 # Every shipped file is checked against its git hash on the mini.
@@ -19,12 +21,12 @@ src=${2:-$(pwd)}
 dest="wt/$name"
 ssh_opts=(-o HostKeyAlias=192.168.18.39 -o ConnectTimeout=4 -o BatchMode=yes)
 
-# The mini's DHCP lease moves; its host key does not.
+# The mini's DHCP lease moves (Tailscale first); its host key does not.
 host=${MINI_HOST:-}
 if [ -z "$host" ]; then
-    for ip in 36 2 37 38 39 40 41; do
-        if ssh "${ssh_opts[@]}" "jabun@192.168.18.$ip" true 2> /dev/null; then
-            host="jabun@192.168.18.$ip"
+    for addr in 100.80.56.79 192.168.18.8 192.168.18.36 192.168.18.2 192.168.18.37 192.168.18.38; do
+        if ssh "${ssh_opts[@]}" "jabun@$addr" true 2> /dev/null; then
+            host="jabun@$addr"
             break
         fi
     done

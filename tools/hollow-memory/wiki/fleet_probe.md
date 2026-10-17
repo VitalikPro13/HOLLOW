@@ -25,7 +25,8 @@ powershell -File scripts/fleet_send.ps1 -Command '[{"peer":"a","op":"look"}]'
 (`fleet/nav_map.json` on peer `a`, its own server deleted in cleanup), never through the
 single-peer probe, whose default mirrors Vitalik's real identity.
 
-`pwsh` is NOT installed on this machine: use `powershell -File`. Both scripts are 5.1-compatible.
+On Windows the fleet runs under Windows PowerShell 5.1 (`powershell -File`); every script is
+5.1-compatible. pwsh 7 on the PC (since 2026-10-17) is only its ssh login shell.
 
 ## The fast loop, and what each part of it costs
 
@@ -926,11 +927,48 @@ Redirect every run to a file (`> .team/x.log 2>&1`), as on Linux.
   and restages a stale copy by itself (the session 42 "stale staged build" trap cannot happen
   here).
 - **The binary is run directly**, `Hollow.app/Contents/MacOS/Hollow`, from a per-peer
-  `build/fleet_out/<peer>/launch.sh` that sets HOME and sends stdout/stderr to
-  `native-stdout.log` / `native-stderr.log` (never a pipe this process holds). NEVER `open`:
-  LaunchServices drops the environment and hands a second launch of the bundle to the first.
-  Launched directly, each copy is its own app (own ASN, `lsappinfo list`) and boots on its own
-  data dir; the probe never runs `main()`, so the Dart single-instance lock never runs either.
+  `build/fleet_out/<peer>/launch.sh` that exports HOME, `HOLLOW_*`, `UI_PROBE_*` and `RUST_*` and
+  sends stdout/stderr to `native-stdout.log` / `native-stderr.log` (never a pipe this process
+  holds). NEVER `open`: LaunchServices drops the environment, hands a second launch of the bundle
+  to the first, and makes the copy its own privacy client, so the microphone ask a WebRTC
+  connection makes (`AVAUVoiceIO` as the first friend's data channel opens) became a system
+  dialog in front of everything (measured 2026-10-17 with `open -g`). Each copy is its own app
+  (own ASN, `lsappinfo list`) and boots on its own data dir; the probe never runs `main()`, so
+  the Dart single-instance lock never runs either.
+- **Never the person's foreground (2026-10-17, the Mac is the lead's desk now).** Three parts:
+  1. Each clone is an AGENT app: Stage-Peer sets `LSUIElement` in the clone's Info.plist and
+     signs the clone again (ad hoc, entitlements kept). A regular app asks to be the front one as
+     it finishes launching (`SetFrontProcessWithWindowIDAndCPSOptions` right after
+     `SignalReady` in `log show`), and macOS granted it when the front app was the terminal that
+     started it, an alert or AnyDesk; an agent app checks in with `foreground=0` and never asks.
+     It has no Dock icon or menu bar, which the probe never uses.
+  2. The probe sizes the window 1280x800 (the nib's own is 800x600), orders it behind every other
+     window (`windowManager.blur()` = `orderBack`) and lets clicks through
+     (`setIgnoreMouseEvents(true)`); it keeps drawing there like a covered peer. Measured: never
+     above the front window, at the back within 0.3 s of launch.
+  3. Peers start from an ssh session to the Mac itself (`FLEET_MAC_SELF_SSH`, default
+     `localhost`) unless fleet.ps1 already runs in one (`SSH_CONNECTION`, every agent the PC
+     drives). Started under the person's terminal, a peer is THAT terminal's privacy client (tccd
+     `responsible=com.mitchellh.ghostty`) and its microphone ask can raise a dialog for the
+     terminal; from ssh tccd attributes it to `sshd-keygen-wrapper`, a platform binary it never
+     prompts for ("Platform binary prompting is 'Deny'"), and nothing is shown. The mini lets
+     itself in for this (its own key in `~/.ssh/authorized_keys` with `from="127.0.0.1,::1"`,
+     2026-10-17). Without a working `ssh localhost` fleet.ps1 refuses and says how to enable it;
+     `FLEET_MAC_DIRECT=1` starts peers directly instead.
+  **What a macOS peer cannot cover, then:** the microphone (and so camera and screen capture)
+  is denied without a prompt (2026-10-17, two macOS peers). A voice CHANNEL still works
+  without audio: `voice_channel` passed, both joined, the VC peer connection reached Connected,
+  and the log says `[HOLLOW-VC] Failed to capture audio: Unable to getUserMedia: NotAllowedError`
+  and `no audio reports`. A 1:1 CALL does not: the caller logs `[HOLLOW-VOICE] createOffer
+  failed, tearing down: Unable to getUserMedia: NotAllowedError` and the call ends as "Cancelled
+  call". `dm_call_seam` still reported passed (its steps never assert a connected call; only its
+  cleanup's "Leave the call" failed). So on a macOS peer: VC UI and signalling yes, DM calls,
+  audio, camera and screen share no (`calls_after`, `calls_record`, `regress_voice3`,
+  `regress_media`, `dm_call_seam` for real): run those on Windows peers (`windows:<letter>` from
+  the Mac) or the phones.
+  Checked with `lsappinfo front` every 0.25 s and the on-screen window order
+  (`CGWindowListCopyWindowInfo`, layer 0, no Screen Recording grant needed) every 0.2 s, plus
+  `log show` for `SETFRONT` and tccd `AUTHREQ_ATTRIBUTION`.
 - **Per-peer paths:** data `~/hollow_fleet/run-macos/<peer>` (the app log
   `hollow_debug.log` is inside it), HOME `~/hollow_fleet/home-macos/<peer>`, fixtures
   `~/hollow_fleet/fixtures-macos/<peer>`, apart from the iOS (`fixtures`) and Android
@@ -983,11 +1021,10 @@ s42's voice-leave freeze, the link import's file locking, Win32 window and focus
 rendering (macOS runs Impeller), and the hand-written journeys that still launch `hollow.exe`
 themselves (`fleet_multidevice_dm_gap.ps1`, `fleet_friend_offline.ps1`, `fleet_pending_join.ps1`,
 `fleet_owner_offline.ps1`, ...): on this backend use the scenario JSONs and the scripts built
-on `Start-FreshFleet` / `fleet_send.ps1`. Media scenarios are untested here: the first call
-would meet the microphone and camera TCC prompts for `com.anonlisten.hollow`, which only
-Vitalik can answer at the screen, and the screen-share audio helper is not built by `-Build`
-(`scripts/build_screen_audio.sh`). Whether a peer launched while someone USES the mini's
-desktop comes to the front is untested (all proofs ran with the screen locked).
+on `Start-FreshFleet` / `fleet_send.ps1`. Media: see "What a macOS peer cannot cover" above
+(no prompt, no captured audio); the screen-share audio helper is not built by `-Build`
+(`scripts/build_screen_audio.sh`). A launch while someone USES the mini: "Never the person's
+foreground" above (2026-10-17; every earlier proof ran with the screen locked).
 
 ## The device-link journey (`fleet_device_link.ps1`, 2026-09-10)
 
@@ -1176,7 +1213,8 @@ Traps, each of which cost a rerun:
 ## Several agents on the Mac mini at once (2026-10-06)
 
 The mini runs phone checks for parallel agents. Each agent gets its own folder and its own
-peer letters; nobody touches `~/src/HOLLOW` (Windows is the source of truth).
+peer letters; nobody touches `~/src/HOLLOW` (the lead's tree: since 2026-10-17 the mini is
+the source of truth and the main workstation, the Windows PC the second worker).
 
 - `bash scripts/mini_sync.sh <name> [worktree]` ships a worktree to `~/wt/<name>` as git
   would store it (LF, uncommitted changes included), copies the gitignored Firebase and iOS
@@ -1374,3 +1412,74 @@ built there by hand. `fleet_link_matrix.ps1 -KeepUp` leaves a cell's peers up; a
   cells; `Ignoring ServerJoinResolved from non-member <owner device> for <server>` seconds after
   that server was DELETED (the join ring replays the old resolution; a live server counts its
   owner's devices, harness `a_join_resolved_from_an_owners_second_device_counts`).
+
+## The Mac lead drives the Windows PC (`windows:` peers, 2026-10-17)
+
+Since 2026-10-17 the mini is the lead's machine and the source of truth; the PC is the second
+worker. A Mac driver names a Windows peer `windows:<letter>` and fleet.ps1 runs the PC's half
+through an agent there, at the same time as its own half:
+
+```
+bash scripts/pc_sync.sh fleet-port                                      # this tree -> D:\dev\wt\fleet-port
+FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Build -Peers e,windows:f
+FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Onboard -Fresh -Peers e,windows:f
+FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Scenario friend_dm -Peers a=e,b=windows:f
+FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Stop -Peers e,windows:f
+```
+
+- **`pc_sync.sh <name> [worktree]`** ships the tree as git would store it (LF, uncommitted and
+  untracked files included, `tmp*.txt` and `.team` left out) to `D:\dev\wt\<name>`, later runs
+  only the change (marker `.pc_sync_tree`), deletions too. Regular files only (Windows tar cannot
+  make the iOS plugin's symlinks without admin). Every shipped file is hashed on the PC with
+  `git hash-object --no-filters` (the PC's git converts line endings) against the tree. The first
+  run copies the gitignored build inputs from the PC's main checkout, read only: the cargo config,
+  google-services.json, `vendor\ffmpeg`, the screen audio capturer. The main checkout
+  (`C:\Users\Jabun\Documents\Coding\HOLLOW`) is never written. First sync 17 s (2639 files), a
+  few changed files about 5 s. Host `PC_HOST`, default `pc` then `pc-ts`.
+- **`-Peers`** takes `<platform>:<letter>` for another machine's peer and `role=peer` to hand a
+  scenario's peer to another letter: the steps' `peer` and every `probe-<role>` in them follow
+  (a display name is `probe-<letter>`), so any scenario runs on your own letters. A platform this
+  machine runs is local (`windows:f` on a Windows driver, `macos:e` under
+  `FLEET_BACKEND=macos`); on the mini a `macos:`/`ios:`/`android:` peer of a driver with another
+  backend goes to a mini agent started without ssh.
+- **What runs where.** `-Build`, `-Onboard [-Fresh]`, the boot (`-Live`, with `-ReuseData`,
+  `-Empty`, `-KeepOthers`, `-NetProxy` passed on) and `-Stop` run as fleet.ps1 on the PC, sent
+  before this machine starts its own half and collected after it, so the two builds and the two
+  onboardings overlap. Steps go over the agent. The Windows peers' shots, dumps and logs stay on
+  the PC (`D:\dev\wt\<name>\build\fleet_out\<letter>`, scp them off); the agent's log is
+  `.team\agent-pc-win.log` there.
+- **The PC agent.** The ssh login shell there is PowerShell 7 (since 2026-10-17), so the attach
+  side is `scripts/fleet_agent_attach.ps1`, run in-process by that shell (same protocol and
+  req/run/ans files as `fleet_agent_attach.sh`). OpenSSH for Windows kills every process of a
+  session when it ends (measured: a `Start-Process`'d sleeper died with its ssh), and the ssh
+  token cannot use WMI. So the server (`fleet_remote_agent.ps1 -Serve -WritePid -EnvFile`, under
+  Windows PowerShell 5.1 like the whole Windows fleet) starts through a one-shot scheduled task
+  (`schtasks /create /it /sc once`, run, deleted at once) that runs `wscript` on a `start.vbs`
+  with window style 0: it lands in Vitalik's desktop session 1, hidden, exactly where a fleet the
+  PC started itself runs, and its `FLEET_*` variables come from `env.txt`.
+- **Never the foreground on the PC either.** A sampler in session 1 logged
+  `GetForegroundWindow` every 150 ms through two full proofs (build, onboarding, friend_dm) and
+  a `-Live`/`look`/`-Stop`: it never named a Hollow or fleet process (VS Code, then no foreground
+  window, then Explorer, all Vitalik's). The fleet windows stay hidden as before (the probe never
+  runs `main()`).
+- **A PC-side driver** (the PC lead, scripts run in its desktop session) still drives the mini:
+  `FLEET_MINI_SSH` now defaults to the mini's Tailscale address (the LAN lease moved to .8), and
+  `mini_sync.sh` tries it first. A driver started INSIDE an ssh session to the PC hung waiting
+  for the mini agent's hello (Windows ssh.exe under sshd); from the desktop session it works.
+- **Not covered yet:** `fleet_link_gate.ps1` and `fleet_sibling_gate.ps1` `-Build` still assume
+  a PC driver (they call `mini_sync.sh` and build Windows locally); the hand-written Windows
+  journeys run on the PC only. The relay's 10 new sockets per minute per address is shared by
+  both machines (same house address) while each keeps its own launch ledger
+  (`FLEET_LAUNCH_BUDGET=0` on the mini, set in `~/.zshenv`, is passed to the PC agent).
+
+**Measured 2026-10-17** (M4 mini + the PC, tree `fleet-port`, peers e on macOS and f on Windows):
+
+| step | time |
+|---|---|
+| first `pc_sync` (2639 files) | 17 s |
+| cold macOS probe build (fresh tree, pods) | 6:05 |
+| first Windows probe build in a fresh `D:\dev\wt` tree (shared Rust cache) | 6:22 |
+| `-Build -Peers e,windows:f` after a Dart change, both at once, incl. boot checks | 1:55 wall (Mac build 0:37, Windows build 1:17 in parallel) |
+| the same with nothing changed | 0:58 wall (Mac 0:28, the PC 0:13 later) |
+| `-Onboard -Fresh -Peers e,windows:f`, both at once | 0:42 / 0:43 |
+| `friend_dm -Peers a=e,b=windows:f` | 0:51 wall, steps 0:32 / 0:33 (twice) |

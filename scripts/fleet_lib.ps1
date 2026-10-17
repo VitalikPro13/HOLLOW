@@ -81,9 +81,11 @@ function Test-WindowsBackend { return $script:FleetBackend -eq 'windows' }
 function Test-LinuxHeadless { return (Test-LinuxBackend) -and $env:FLEET_LINUX_HEADLESS -eq '1' }
 
 # The macOS desktop backend: a clone of the probe's Hollow.app per peer under
-# build/fleet/<peer>, its binary run DIRECTLY with the peer's environment
-# (`open` would hand the launch to LaunchServices, which drops the environment
-# and forwards a second launch of the same bundle to the first).
+# build/fleet/<peer>, its binary run DIRECTLY with the peer's environment, from
+# an ssh session to this Mac (Start-Peer says why). Never `open`: LaunchServices
+# drops the environment, forwards a second launch of the bundle to the first, and
+# makes the copy its own privacy client, so a WebRTC connection raises a
+# microphone prompt on the person's screen.
 function Test-MacBackend { return $script:FleetBackend -eq 'macos' }
 
 # FLEET_LANE=1..9 gives a fleet its own copy of every per-peer place, so
