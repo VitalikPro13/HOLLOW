@@ -632,7 +632,15 @@ void FlutterWebRTC::HandleMethodCall(
       return;
     }
 
-    scoped_refptr<RTCMediaTrack> track = MediaTrackForId(trackId);
+    // The receiver's own connection first: a received track can carry the
+    // same id as a local one (libwebrtc names it after the sender's track).
+    scoped_refptr<RTCMediaTrack> track;
+    const std::string pcId = findString(params, "peerConnectionId");
+    if (!pcId.empty()) {
+      auto observer = PeerConnectionObserversForId(pcId);
+      if (observer) track = observer->MediaTrackForId(trackId);
+    }
+    if (nullptr == track.get()) track = MediaTrackForId(trackId);
     if (nullptr == track.get()) {
       result->Error("setVolume", "setVolume() Unable to find provided track");
       return;

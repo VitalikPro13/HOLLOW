@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:hollow/src/core/services/remote_track_volume.dart';
 
 /// Keeps our capture running while nobody else is carrying our microphone.
 ///
@@ -62,6 +61,14 @@ class LocalMeterLoopback {
     final toSender = _CandidateGate(_sender);
     _sender.onIceCandidate = toReceiver.add;
     _receiver.onIceCandidate = toSender.add;
+    // The native side registers a received track before it sends onTrack;
+    // a receiver read straight after setRemoteDescription can beat that.
+    final received = Completer<MediaStreamTrack>();
+    _receiver.onTrack = (event) {
+      if (event.track.kind == 'audio' && !received.isCompleted) {
+        received.complete(event.track);
+      }
+    };
     _sender.onConnectionState = (state) {
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
         log?.call('[HOLLOW-VC] Meter loopback failed to connect');
@@ -78,15 +85,18 @@ class LocalMeterLoopback {
     );
     final offer = await _sender.createOffer();
     await _sender.setLocalDescription(offer);
-    await _receiver.setRemoteDescription(offer);
+    await _receiver.setRemoteDescription(RTCSessionDescription(
+        meterReceiverSdp(offer.sdp ?? '', track.id ?? ''), offer.type));
     await toReceiver.open();
 
     // Silence the receiving end while the sender still lacks an answer: no
     // packet can flow before that, so not one frame of our voice is played.
-    for (final r in await _receiver.getReceivers()) {
-      final t = r.track;
-      if (t != null && t.kind == 'audio') await setRemoteTrackVolume(0.0, t);
+    // Any doubt closes the pair: a dark self ring beats hearing ourselves.
+    final copy = await received.future.timeout(const Duration(seconds: 3));
+    if (copy.id == track.id) {
+      throw StateError('meter receiver shares the mic track id');
     }
+    await Helper.setVolume(0.0, copy);
 
     final answer = await _receiver.createAnswer();
     await _receiver.setLocalDescription(answer);
@@ -113,6 +123,17 @@ class LocalMeterLoopback {
       debugPrint('[HOLLOW-VC] Meter loopback dispose: $e');
     }
   }
+}
+
+/// The offer as the receiving end reads it, with our mic's track id renamed.
+///
+/// libwebrtc names a received track after the sender's track id, and the
+/// native `setVolume` resolves local tracks first, so with the ids equal the
+/// volume 0 landed on our own mic and the copy played at full volume (#97).
+@visibleForTesting
+String meterReceiverSdp(String sdp, String micTrackId) {
+  if (micTrackId.isEmpty) return sdp;
+  return sdp.replaceAll(micTrackId, 'hollow-meter-$micTrackId');
 }
 
 class _CandidateGate {

@@ -130,4 +130,15 @@ void main() {
     expect(src, isNot(contains('turn:')));
     expect(src, isNot(contains('stun:')));
   });
+
+  test('the receiving end never names our mic track (#97 hearing ourselves)',
+      () {
+    const mic = '3f2a9c1e-mic';
+    const offer = 'a=msid:stream-1 $mic\r\n'
+        'a=ssrc:1234 msid:stream-1 $mic\r\n';
+    final seen = meterReceiverSdp(offer, mic);
+    expect(seen, isNot(matches(RegExp(r'(?<!hollow-meter-)3f2a9c1e-mic'))));
+    expect(seen, contains('a=msid:stream-1 hollow-meter-$mic'));
+    expect(seen, contains('a=ssrc:1234 msid:stream-1 hollow-meter-$mic'));
+  });
 }
