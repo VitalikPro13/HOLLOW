@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/privacy_screen.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -31,11 +34,20 @@ class UnlockDialog extends ConsumerStatefulWidget {
   final bool hasBiometric;
   final bool wrong;
 
+  /// Seconds before Rust tries another typed secret, after too many misses.
+  /// Unlock waits until they have run out.
+  final int waitSeconds;
+
+  /// Why the last try was not checked, when it was neither wrong nor waiting.
+  final String? problem;
+
   const UnlockDialog({
     super.key,
     required this.isPin,
     required this.hasBiometric,
     this.wrong = false,
+    this.waitSeconds = 0,
+    this.problem,
   });
 
   @override
@@ -45,7 +57,22 @@ class UnlockDialog extends ConsumerStatefulWidget {
 class _UnlockDialogState extends ConsumerState<UnlockDialog> {
   final _controller = TextEditingController();
   late bool _wrong = widget.wrong;
+  late String? _problem = widget.problem;
   bool _ending = false;
+  late int _wait = widget.waitSeconds;
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_wait > 0) {
+      _tick = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!mounted) return;
+        setState(() => _wait = _wait > 0 ? _wait - 1 : 0);
+        if (_wait == 0) t.cancel();
+      });
+    }
+  }
 
   Future<void> _endCall() async {
     setState(() => _ending = true);
@@ -63,11 +90,13 @@ class _UnlockDialogState extends ConsumerState<UnlockDialog> {
 
   @override
   void dispose() {
+    _tick?.cancel();
     _controller.dispose();
     super.dispose();
   }
 
   void _submit() {
+    if (_wait > 0) return;
     final secret = _controller.text.trim();
     if (secret.isNotEmpty) Navigator.of(context).pop(secret);
   }
@@ -94,9 +123,16 @@ class _UnlockDialogState extends ConsumerState<UnlockDialog> {
             autofocus: true,
             hintText: widget.isPin ? 'PIN' : 'Password',
             keyboardType: widget.isPin ? TextInputType.number : null,
-            errorText: _wrong ? 'Wrong $label. Try again.' : null,
+            errorText: _wait > 0
+                ? appLockWaitText(_wait)
+                : (_wrong ? 'Wrong $label. Try again.' : _problem),
             onChanged: (_) {
-              if (_wrong) setState(() => _wrong = false);
+              if (_wrong || _problem != null) {
+                setState(() {
+                  _wrong = false;
+                  _problem = null;
+                });
+              }
             },
             onSubmitted: (_) => _submit(),
           ),
@@ -117,7 +153,7 @@ class _UnlockDialogState extends ConsumerState<UnlockDialog> {
       ],
       actions: [
         HollowButton.filled(
-          onPressed: _submit,
+          onPressed: _wait > 0 ? null : _submit,
           child: const Text('Unlock'),
         ),
       ],

@@ -23,6 +23,7 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        HollowHwKey.register()
         registerPrivacyChannel(flutterEngine)
 
         val relayTriggers =

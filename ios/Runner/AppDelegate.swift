@@ -1,5 +1,7 @@
 import AVFoundation
+import CryptoKit
 import Flutter
+import Security
 import UIKit
 import UniformTypeIdentifiers
 import UserNotifications
@@ -189,6 +191,13 @@ final class RelayBackgroundTask {
 
   private var relayTriggers: RelayTriggers?
   private var relayBackgroundTask: RelayBackgroundTask?
+
+  /// The hardware key registers before the storyboard starts the Flutter engine,
+  /// so Dart's first unlock can never run without it.
+  override init() {
+    super.init()
+    HollowHwKey.register()
+  }
 
   override func application(
     _ application: UIApplication,
@@ -391,4 +400,127 @@ final class RelayBackgroundTask {
     window.addSubview(cover)
     privacyCover = cover
   }
+}
+
+/// The Secure Enclave key that ties the app lock's wrap to this iPhone
+/// (`identity/hw_key.rs`). Rust calls these four C functions; Swift only runs the
+/// enclave. The key is usable while the phone is unlocked, on this device only, and
+/// asks for neither the passcode nor Face ID, so a new face or finger never strands
+/// the identity. The extension registers nothing and binds nothing.
+enum HollowHwKey {
+  typealias AliasFn = @convention(c) (UnsafePointer<CChar>?) -> Int32
+  typealias ApplyFn = @convention(c) (
+    UnsafePointer<CChar>?, UnsafePointer<UInt8>?, Int, UnsafeMutablePointer<UInt8>?
+  ) -> Int32
+  typealias DeleteFn = @convention(c) (UnsafePointer<CChar>?) -> Void
+  typealias RegisterFn = @convention(c) (AliasFn, AliasFn, ApplyFn, DeleteFn) -> Void
+
+  /// No enclave, nothing registers, and the wrap stays Argon2id. (An Apple silicon
+  /// simulator reports one and binds like a phone.)
+  static func register() {
+    guard SecureEnclave.isAvailable else { return }
+    // RTLD_DEFAULT: the symbol lives in the hollow_core framework.
+    guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "hollow_hw_key_register")
+    else {
+      NSLog("[HOLLOW-HWKEY] register symbol missing")
+      return
+    }
+    unsafeBitCast(sym, to: RegisterFn.self)(hwCreate, hwExists, hwApply, hwDelete)
+    NSLog("[HOLLOW-HWKEY] registered")
+  }
+
+  static func tag(_ alias: UnsafePointer<CChar>?) -> Data? {
+    guard let alias = alias else { return nil }
+    return Data("hollow.applock.hw.\(String(cString: alias))".utf8)
+  }
+
+  /// The key under [tag], and the keychain's status: `errSecItemNotFound` is the only
+  /// answer that means the key is gone.
+  static func lookup(_ tag: Data) -> (SecKey?, OSStatus) {
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassKey,
+      kSecAttrApplicationTag as String: tag,
+      kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+      kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+      kSecReturnRef as String: true,
+    ]
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    guard status == errSecSuccess, let found = item, CFGetTypeID(found) == SecKeyGetTypeID()
+    else { return (nil, status == errSecSuccess ? errSecInternalError : status) }
+    return ((found as! SecKey), status)
+  }
+
+  static func find(_ tag: Data) -> SecKey? { lookup(tag).0 }
+
+  static func remove(_ tag: Data) {
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassKey,
+      kSecAttrApplicationTag as String: tag,
+    ]
+    SecItemDelete(query as CFDictionary)
+  }
+}
+
+private let hwCreate: HollowHwKey.AliasFn = { alias in
+  guard let tag = HollowHwKey.tag(alias) else { return 0 }
+  HollowHwKey.remove(tag)
+  guard
+    let access = SecAccessControlCreateWithFlags(
+      nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .privateKeyUsage, nil)
+  else { return 0 }
+  let attributes: [String: Any] = [
+    kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+    kSecAttrKeySizeInBits as String: 256,
+    kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+    kSecPrivateKeyAttrs as String: [
+      kSecAttrIsPermanent as String: true,
+      kSecAttrApplicationTag as String: tag,
+      kSecAttrAccessControl as String: access,
+    ] as [String: Any],
+  ]
+  var error: Unmanaged<CFError>?
+  guard SecKeyCreateRandomKey(attributes as CFDictionary, &error) != nil else {
+    NSLog("[HOLLOW-HWKEY] key not made")
+    return 0
+  }
+  NSLog("[HOLLOW-HWKEY] key made, level=secure enclave")
+  return 1
+}
+
+/// 1 the key is there, 0 the keychain says it is not, -1 it failed to say (locked,
+/// busy): Rust must never take that for a lost key.
+private let hwExists: HollowHwKey.AliasFn = { alias in
+  guard let tag = HollowHwKey.tag(alias) else { return -1 }
+  let (key, status) = HollowHwKey.lookup(tag)
+  if key != nil { return 1 }
+  if status == errSecItemNotFound { return 0 }
+  NSLog("[HOLLOW-HWKEY] keychain did not answer: %d", status)
+  return -1
+}
+
+/// ECDH between the enclave key and the uncompressed P-256 point Rust hashed the
+/// stretched secret onto: 32 bytes, the shared point's x coordinate.
+private let hwApply: HollowHwKey.ApplyFn = { alias, input, length, out in
+  guard let tag = HollowHwKey.tag(alias), let input = input, let out = out,
+    let key = HollowHwKey.find(tag)
+  else { return 0 }
+  let point = Data(bytes: input, count: length)
+  let peerAttributes: [String: Any] = [
+    kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+    kSecAttrKeyClass as String: kSecAttrKeyClassPublic,
+    kSecAttrKeySizeInBits as String: 256,
+  ]
+  guard
+    let peer = SecKeyCreateWithData(point as CFData, peerAttributes as CFDictionary, nil),
+    let shared = SecKeyCopyKeyExchangeResult(
+      key, .ecdhKeyExchangeStandard, peer, [:] as CFDictionary, nil) as Data?,
+    shared.count == 32
+  else { return 0 }
+  shared.copyBytes(to: out, count: 32)
+  return 1
+}
+
+private let hwDelete: HollowHwKey.DeleteFn = { alias in
+  if let tag = HollowHwKey.tag(alias) { HollowHwKey.remove(tag) }
 }

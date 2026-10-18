@@ -6,9 +6,9 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `code_is_the_password`, `database_opens_with`, `db_key_of`, `debug_defaults_hook`, `default_eligible_for`, `default_eligible`, `duress_available`, `forget_duress_code`, `is_running_root`, `keychain_key_that_decrypts_at`, `keychain_key_that_decrypts`, `lands_as`, `lock_to_keychain`, `open_typed_secret`, `owner_gate`, `phrase_is_this_identitys`, `protection_status_of`, `read_plain_key_file`, `refuse_short_pin`, `refused`, `save_duress_settings`, `seal_for_keychain`, `switch_to_keychain`, `switch_to_plaintext`, `this_os`, `unlock_identity_with`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DesktopOs`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `eq`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `bound_key`, `code_is_the_password`, `database_opens_with`, `db_key_of`, `debug_defaults_hook`, `default_eligible_for`, `default_eligible`, `duress_available`, `duress_slot_left_unbound`, `forget_duress_code`, `forget_missed_tries`, `is_running_root`, `keychain_key_that_decrypts_at`, `keychain_key_that_decrypts`, `lands_as`, `lock_to_keychain`, `open_secret`, `open_typed_secret`, `owner_gate`, `password_keychain_allowed`, `phrase_is_this_identitys`, `protection_status_of`, `read_plain_key_file`, `refuse_short_pin`, `refused`, `repair_device_file`, `save_duress_settings`, `seal_for_keychain`, `switch_to_keychain`, `switch_to_plaintext`, `this_os`, `tie_to_hardware`, `unlock_identity_with`, `unlock_logged`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DesktopOs`, `Secret`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `eq`, `fmt`
 
 /// Set the data directory path (Android/iOS: pass app documents dir).
 /// Must be called before load_or_create_identity() or start_node().
@@ -35,18 +35,57 @@ Future<IdentityInfo> restoreIdentityFromMnemonic({required String phrase}) =>
 
 /// Unlock the identity file for this session, before `open_message_store()` or
 /// `start_node()`. A plaintext identity loads directly and ignores `password`; an
-/// encrypted one decrypts with the password and/or the OS keychain.
+/// encrypted one decrypts with the password and/or the OS keychain. A typed
+/// `password` is paced (`too_many_attempts: <seconds>` while a wait is due).
 Future<IdentityInfo> unlockIdentity({String? password}) =>
     RustLib.instance.api.crateApiIdentityUnlockIdentity(password: password);
+
+/// Unlock with the secret the OS keystore handed back (the launch secret, or the
+/// copy a biometric releases): never paced and never counted as a miss, since no one
+/// typed it. Only `person_present` (a biometric just passed) clears the count, or a
+/// relaunch would reset it every time.
+Future<IdentityInfo> unlockIdentityWithStoredSecret({
+  required String secret,
+  required bool personPresent,
+}) => RustLib.instance.api.crateApiIdentityUnlockIdentityWithStoredSecret(
+  secret: secret,
+  personPresent: personPresent,
+);
 
 /// Clear the session wrapping key. After this, all identity operations
 /// will fail until unlock_identity() is called again.
 Future<void> lockIdentity() =>
     RustLib.instance.api.crateApiIdentityLockIdentity();
 
+/// The id naming this profile's app-lock entries in the OS secure storage, `None`
+/// while it has none (`create` makes one). Never derived from the folder's path.
+String? appLockProfileId({required bool create}) =>
+    RustLib.instance.api.crateApiIdentityAppLockProfileId(create: create);
+
+/// The id of ANOTHER profile, read before that profile is erased; never creates.
+String? appLockProfileIdAt({required String dataDir}) =>
+    RustLib.instance.api.crateApiIdentityAppLockProfileIdAt(dataDir: dataDir);
+
+/// Whether `secret` opens THIS profile's identity: how an app-lock entry from before
+/// the entries were per profile proves which profile it belongs to. It is not a
+/// prompt, so it is not paced and never probes the duress slot (the other profile's
+/// stored PIN may be this one's duress code).
+Future<bool> appLockSecretOpensIdentity({required String secret}) => RustLib
+    .instance
+    .api
+    .crateApiIdentityAppLockSecretOpensIdentity(secret: secret);
+
+/// Seconds before the next typed secret is tried; 0 when it may go now.
+int appLockWaitSecs() => RustLib.instance.api.crateApiIdentityAppLockWaitSecs();
+
+/// Whether this profile's password wrap needs this device's secure hardware.
+bool appLockDeviceBound() =>
+    RustLib.instance.api.crateApiIdentityAppLockDeviceBound();
+
 /// Enable password protection. With `require_on_launch` the password is needed every
-/// launch; without it the password-derived key is also stored in the OS keychain, so
-/// the identity is encrypted but the app opens normally on this device.
+/// launch; without it, on the OS's own data root, the password-derived key is also
+/// stored in the OS keychain, so the identity is encrypted but the app opens normally
+/// on this device.
 Future<void> enablePasswordProtection({
   required String password,
   required bool requireOnLaunch,
@@ -99,7 +138,8 @@ Future<DuressStatus> duressStatus() =>
     RustLib.instance.api.crateApiIdentityDuressStatus();
 
 /// Toggle whether the password is required on each launch: on means a prompt every
-/// time, off caches the password-derived key in the OS keychain for a silent unlock.
+/// time, off caches the password-derived key in the OS keychain for a silent unlock
+/// where `password_keychain_allowed` (elsewhere it changes nothing here).
 /// The identity must already be password-protected and unlocked.
 Future<void> setRequirePasswordOnLaunch({required bool require}) => RustLib
     .instance
@@ -167,8 +207,9 @@ Future<ProtectionStatus> identityProtectionStatusAt({
 /// A GATE, not an unlock: it never touches the session key and never heals the keystore
 /// slots, so asking about another profile cannot disturb the running one. A plaintext
 /// identity answers true, a wrong password is `Ok(false)`, and only a missing or
-/// malformed file errors, or the running profile's duress code, which wipes as at
-/// every prompt.
+/// malformed file errors, or, for the running profile, whatever its prompt answers
+/// besides a miss (a wait, a busy or missing hardware key, a duress code, which
+/// wipes as at every prompt).
 Future<bool> verifyIdentityPasswordAt({
   required String dataDir,
   String? password,
@@ -194,11 +235,16 @@ class DuressStatus {
   /// install has none; a silent-unlock one still prompts at a re-lock.
   final bool available;
 
+  /// The code was set before this identity was tied to the device's hardware, so
+  /// its slot still opens with Argon2id alone: setting it again binds it too.
+  final bool rebindDue;
+
   const DuressStatus({
     required this.enabled,
     required this.scope,
     required this.notifyFriends,
     required this.available,
+    required this.rebindDue,
   });
 
   @override
@@ -206,7 +252,8 @@ class DuressStatus {
       enabled.hashCode ^
       scope.hashCode ^
       notifyFriends.hashCode ^
-      available.hashCode;
+      available.hashCode ^
+      rebindDue.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -216,7 +263,8 @@ class DuressStatus {
           enabled == other.enabled &&
           scope == other.scope &&
           notifyFriends == other.notifyFriends &&
-          available == other.available;
+          available == other.available &&
+          rebindDue == other.rebindDue;
 }
 
 /// Result of creating or loading an identity.

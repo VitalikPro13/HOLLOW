@@ -8,7 +8,10 @@ const MAGIC: &[u8; 6] = b"HKEYV1";
 const PROTOBUF_HEADER: [u8; 4] = [0x08, 0x01, 0x12, 0x40];
 
 const FLAG_PASSWORD: u8 = 0x01;
-const FLAG_OS_KEYCHAIN: u8 = 0x02;
+pub(crate) const FLAG_OS_KEYCHAIN: u8 = 0x02;
+/// The password's wrap also needs this device's hardware key (`hw_key`). A build
+/// older than the flag reads it as a plain password file and cannot open it.
+pub(crate) const FLAG_DEVICE_BOUND: u8 = 0x04;
 
 static SESSION_KEY: OnceLock<Mutex<Option<[u8; 32]>>> = OnceLock::new();
 
@@ -82,6 +85,10 @@ pub(crate) fn flags_has_os_keychain(flags: u8) -> bool {
     flags & FLAG_OS_KEYCHAIN != 0
 }
 
+pub(crate) fn flags_has_device_bound(flags: u8) -> bool {
+    flags & FLAG_DEVICE_BOUND != 0
+}
+
 /// Argon2id derivations run since the counter was last read. The duress design
 /// stands on "both slots, every time", and that is a property of the COUNT, not of
 /// any output a test could inspect.
@@ -109,6 +116,28 @@ pub(crate) fn derive_wrapping_key_from_password(
     Ok(key)
 }
 
+/// The wrapping key of one password slot (`identity.key` or `identity.duress`) for a
+/// typed secret. With `hw` it ALWAYS runs one hardware operation, whatever the slot's
+/// flags, so the work for a slot never shows how it is wrapped. `None` = a device-bound
+/// slot and no hardware key; a key that failed its operation is `hw_key::BUSY`.
+pub(crate) fn slot_key(
+    secret: &str,
+    salt: &[u8; 16],
+    flags: u8,
+    hw: Option<&super::hw_key::Bound>,
+) -> Result<Option<[u8; 32]>, String> {
+    let stretched = zeroize::Zeroizing::new(derive_wrapping_key_from_password(secret, salt)?);
+    let answer = match hw {
+        Some(b) => Some(b.apply(&stretched).ok_or(super::hw_key::BUSY)?),
+        None => None,
+    };
+    if flags_has_device_bound(flags) {
+        Ok(answer.map(|h| super::hw_key::combine(&stretched, &h, salt)))
+    } else {
+        Ok(Some(*stretched))
+    }
+}
+
 pub(crate) fn encrypt_identity(
     plaintext: &[u8],
     wrapping_key: &[u8; 32],
@@ -123,7 +152,15 @@ pub(crate) fn encrypt_identity(
     if os_keychain_used {
         flags |= FLAG_OS_KEYCHAIN;
     }
+    encrypt_with_flags(plaintext, wrapping_key, salt, flags)
+}
 
+pub(crate) fn encrypt_with_flags(
+    plaintext: &[u8],
+    wrapping_key: &[u8; 32],
+    salt: &[u8; 16],
+    flags: u8,
+) -> Result<Vec<u8>, String> {
     let mut nonce_bytes = [0u8; 12];
     getrandom::fill(&mut nonce_bytes).map_err(|e| format!("RNG error: {e}"))?;
 

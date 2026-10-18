@@ -63,10 +63,25 @@ fn random(buf: &mut [u8]) -> Result<(), String> {
     getrandom::fill(buf).map_err(|e| format!("RNG error: {e}"))
 }
 
-fn write_slot(plaintext: &[u8], key: &[u8; 32], salt: &[u8; 16]) -> Result<(), String> {
-    let blob = encryption::encrypt_identity(plaintext, key, salt, true, false)?;
+fn write_slot(plaintext: &[u8], key: &[u8; 32], salt: &[u8; 16], flags: u8) -> Result<(), String> {
+    let blob = encryption::encrypt_with_flags(plaintext, key, salt, flags)?;
     std::fs::write(slot_path()?, &blob)
         .map_err(|e| format!("Failed to write the duress slot: {e}"))
+}
+
+/// A slot written now is tied to the hardware exactly when the identity is, so the
+/// flags of a dummy and of a real code never differ. A slot written before the
+/// identity was tied keeps its own flags: re-wrapping it would need the code.
+fn slot_flags() -> u8 {
+    let bound = super::data_dir()
+        .ok()
+        .and_then(|d| std::fs::read(d.join("identity.key")).ok())
+        .and_then(|b| match encryption::detect_format(&b) {
+            Ok(encryption::IdentityFormat::Encrypted { flags, .. }) => Some(flags),
+            _ => None,
+        })
+        .is_some_and(encryption::flags_has_device_bound);
+    if bound { 0x01 | encryption::FLAG_DEVICE_BOUND } else { 0x01 }
 }
 
 pub(crate) fn set_code(
@@ -94,8 +109,11 @@ pub(crate) fn set_code(
 
     let mut salt = [0u8; 16];
     random(&mut salt)?;
-    let key = encryption::derive_wrapping_key_from_password(code, &salt)?;
-    write_slot(&plaintext, &key, &salt)
+    let flags = slot_flags();
+    let hw = super::hw_key::existing(&super::data_dir()?)?;
+    let key = encryption::slot_key(code, &salt, flags, hw.as_ref())?
+        .ok_or(super::hw_key::MISSING)?;
+    write_slot(&plaintext, &key, &salt, flags)
 }
 
 /// A slot nothing can ever open. Same size, same layout, random key.
@@ -106,7 +124,7 @@ pub(crate) fn set_dummy() -> Result<(), String> {
     random(&mut salt)?;
     let mut key = [0u8; 32];
     random(&mut key)?;
-    let out = write_slot(&plaintext, &key, &salt);
+    let out = write_slot(&plaintext, &key, &salt, slot_flags());
     key.fill(0);
     out
 }
@@ -120,17 +138,40 @@ pub(crate) fn remove() -> Result<(), String> {
     Ok(())
 }
 
-/// ALWAYS derives exactly once, slot present or not, opening or not: the cost of
-/// this call is what hides a duress code from a stopwatch.
-pub(crate) fn probe(code: &str) -> Option<DuressConfig> {
-    let blob = slot_path().ok().and_then(|p| std::fs::read(p).ok());
-    let salt = match blob.as_deref().map(encryption::detect_format) {
-        Some(Ok(encryption::IdentityFormat::Encrypted { salt, .. })) => salt,
-        // No slot, or an unreadable one: derive against a throwaway salt anyway.
-        _ => [0u8; 16],
+/// `Err` only when the hardware did not answer (`hw_key::BUSY`): the code may well be
+/// the duress code, so the caller must not take it for a wrong one.
+pub(crate) fn probe(code: &str) -> Result<Option<DuressConfig>, String> {
+    let hw = match super::data_dir() {
+        Ok(d) => super::hw_key::existing(&d)?,
+        Err(_) => None,
     };
-    let key = encryption::derive_wrapping_key_from_password(code, &salt).ok()?;
-    let plaintext = encryption::decrypt_blob(blob.as_deref()?, &key).ok()?;
+    probe_with(code, hw.as_ref())
+}
+
+/// ALWAYS derives exactly once, and with `hw` runs exactly one hardware operation,
+/// slot present or not, opening or not: the cost of this call is what hides a duress
+/// code from a stopwatch.
+pub(crate) fn probe_with(
+    code: &str,
+    hw: Option<&super::hw_key::Bound>,
+) -> Result<Option<DuressConfig>, String> {
+    let blob = slot_path().ok().and_then(|p| std::fs::read(p).ok());
+    let (salt, flags) = match blob.as_deref().map(encryption::detect_format) {
+        Some(Ok(encryption::IdentityFormat::Encrypted { salt, flags, .. })) => (salt, flags),
+        // No slot, or an unreadable one: derive against a throwaway salt anyway.
+        _ => ([0u8; 16], 0x01),
+    };
+    let key = match encryption::slot_key(code, &salt, flags, hw) {
+        Ok(Some(key)) => key,
+        Ok(None) => return Ok(None),
+        Err(e) if e == super::hw_key::BUSY => return Err(e),
+        Err(_) => return Ok(None),
+    };
+    Ok(open_slot(blob.as_deref(), &key))
+}
+
+fn open_slot(blob: Option<&[u8]>, key: &[u8; 32]) -> Option<DuressConfig> {
+    let plaintext = encryption::decrypt_blob(blob?, key).ok()?;
     if plaintext.len() != PLAINTEXT_LEN || plaintext[..8] != *TAG {
         return None;
     }
@@ -173,11 +214,11 @@ mod tests {
         let _tmp = temp_root();
         let perm = DestroyPermission { at_ms: 1_234, r_pub: [7u8; 32], sig_r: [9u8; 64] };
         set_code("burn it", SCOPE_IDENTITY, true, Some(&perm)).unwrap();
-        let cfg = probe("burn it").expect("the duress code must open its own slot");
+        let cfg = probe("burn it").unwrap().expect("the duress code must open its own slot");
         assert_eq!(cfg.scope, SCOPE_IDENTITY);
         assert!(cfg.notify_friends);
         assert_eq!(cfg.permission, Some(perm));
-        assert!(probe("something else").is_none());
+        assert!(probe("something else").unwrap().is_none());
     }
 
     #[test]
@@ -186,12 +227,12 @@ mod tests {
         let _tmp = temp_root();
         set_dummy().unwrap();
         let dummy_len = std::fs::metadata(slot_path().unwrap()).unwrap().len();
-        assert!(probe("anything").is_none());
+        assert!(probe("anything").unwrap().is_none());
 
         set_code("burn it", SCOPE_DEVICE, false, None).unwrap();
         let real_len = std::fs::metadata(slot_path().unwrap()).unwrap().len();
         assert_eq!(dummy_len, real_len, "the two slots must be byte-identical in size");
-        assert_eq!(probe("burn it").unwrap().permission, None);
+        assert_eq!(probe("burn it").unwrap().unwrap().permission, None);
 
         let perm = DestroyPermission { at_ms: 1, r_pub: [1u8; 32], sig_r: [2u8; 64] };
         set_code("burn it", SCOPE_IDENTITY, false, Some(&perm)).unwrap();

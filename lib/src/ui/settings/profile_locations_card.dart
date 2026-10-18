@@ -7,6 +7,7 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/core/single_instance_lock.dart';
+import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
@@ -321,8 +322,12 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     }
     setState(() => _busy = true);
     try {
+      // Read before the erase takes the id file: it names that profile's App
+      // Lock entries, which go with it and nobody else's.
+      final appLockId = identity_api.appLockProfileIdAt(dataDir: row.path);
       // The wipe routine itself, so this profile's recordings go with it.
       await wipe_api.eraseProfileAt(dataDir: row.path);
+      if (appLockId != null) await AppLockService().clearProfile(appLockId);
       await forgetWipedProfile(row.path);
       if (mounted) {
         setState(() {

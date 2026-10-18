@@ -11,7 +11,21 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/settings/duress_section.dart';
 
+import 'package:hollow/src/core/services/app_lock_service.dart';
+
 import '../helpers/test_app.dart';
+
+class _MapStore implements AppLockStore {
+  final items = <String, String>{};
+  @override
+  Future<String?> read(String key) async => items[key];
+  @override
+  Future<void> write(String key, String value) async => items[key] = value;
+  @override
+  Future<void> delete(String key) async => items.remove(key);
+  @override
+  Future<Map<String, String>> readAll() async => Map.of(items);
+}
 
 /// Rust as the dialogs see it: every call answers with [error] when set.
 class _DuressApi implements RustLibApi {
@@ -138,6 +152,7 @@ void main() {
           scope: 'device',
           notifyFriends: false,
           available: false,
+          rebindDue: false,
         ),
       );
 
@@ -155,6 +170,7 @@ void main() {
           scope: 'device',
           notifyFriends: false,
           available: false,
+          rebindDue: false,
         ),
         protectionStatus: protection(hasPassword: true, hasOsKeychain: true),
       );
@@ -174,6 +190,7 @@ void main() {
           scope: 'device',
           notifyFriends: false,
           available: true,
+          rebindDue: false,
         ),
         protectionStatus: protection(hasPassword: true),
       );
@@ -212,6 +229,7 @@ void main() {
           scope: 'device',
           notifyFriends: false,
           available: true,
+          rebindDue: false,
         ),
         protectionStatus: protection(hasPassword: true),
       );
@@ -242,6 +260,7 @@ void main() {
           scope: 'identity',
           notifyFriends: true,
           available: true,
+          rebindDue: false,
         ),
         protectionStatus: protection(hasPassword: true),
       );
@@ -302,6 +321,7 @@ void main() {
       scope: 'device',
       notifyFriends: false,
       available: true,
+      rebindDue: false,
     );
 
     testWidgets('a wrong app password lands on its field and keeps the input',
@@ -313,6 +333,7 @@ void main() {
             scope: 'device',
             notifyFriends: false,
             available: true,
+            rebindDue: false,
           ),
           protectionStatus: protection(hasPassword: true));
 
@@ -436,5 +457,62 @@ void main() {
     expect(api.destroys, 1);
     expect(find.text('Destroy your data'), findsOneWidget);
     expect(find.text("Couldn't destroy the data. Try again."), findsOneWidget);
+  });
+
+  // A duress code set before 0.12.2 sits beside an identity now tied to the
+  // phone: Settings says once, inside the duress row, that setting it again
+  // ties it too.
+  group('a duress code from before the hardware binding', () {
+    late _MapStore store;
+    setUp(() {
+      store = _MapStore();
+      AppLockService.debugReplace(
+        store: store,
+        profileId: (_) => 'aaaaaaaaaaaaaaaa',
+        opensIdentity: (_) async => false,
+        oneProfile: true,
+      );
+    });
+
+    identity_api.DuressStatus status({bool enabled = true, bool due = true}) =>
+        identity_api.DuressStatus(
+          enabled: enabled,
+          scope: 'device',
+          notifyFriends: false,
+          available: true,
+          rebindDue: due,
+        );
+
+    testWidgets('is offered once per profile', (tester) async {
+      await pumpCard(tester, const DuressCodeCard(wideScopes: true),
+          status: status(), protectionStatus: protection(hasPassword: true));
+      expect(find.text(kDuressRebindTitle), findsOneWidget);
+      expect(find.text('Set it again'), findsOneWidget);
+
+      // Settings closed and opened again later: the note is not repeated.
+      await tester.pumpWidget(const SizedBox());
+      await pumpCard(tester, const DuressCodeCard(wideScopes: true),
+          status: status(), protectionStatus: protection(hasPassword: true));
+      expect(find.text(kDuressRebindTitle), findsNothing);
+      expect(find.text('Change'), findsOneWidget, reason: 'the row itself stays');
+    });
+
+    testWidgets('Not now puts it away', (tester) async {
+      await pumpCard(tester, const DuressCodeCard(wideScopes: true),
+          status: status(), protectionStatus: protection(hasPassword: true));
+      await tester.tap(find.text('Not now'));
+      await tester.pumpAndSettle();
+      expect(find.text(kDuressRebindTitle), findsNothing);
+    });
+
+    testWidgets('never shows without an old code', (tester) async {
+      for (final s in [status(enabled: false, due: false), status(due: false)]) {
+        await tester.pumpWidget(const SizedBox());
+        await pumpCard(tester, const DuressCodeCard(wideScopes: true),
+            status: s, protectionStatus: protection(hasPassword: true));
+        expect(find.text(kDuressRebindTitle), findsNothing);
+      }
+      expect(store.items, isEmpty, reason: 'nothing shown, nothing marked');
+    });
   });
 }

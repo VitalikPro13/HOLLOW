@@ -51,6 +51,7 @@ void main() {
                 scope: 'device',
                 notifyFriends: false,
                 available: false,
+                rebindDue: false,
               )),
         ]),
         child: MaterialApp(

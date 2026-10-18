@@ -4,6 +4,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
     show AnyhowException, PanicException;
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:hollow/src/core/duress_result.dart';
+import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 
 /// An error whose message is already written for a person: [friendlyError]
@@ -26,6 +27,8 @@ class FriendlyException implements Exception {
 String friendlyError(Object error, {String? fallback}) {
   if (error is FriendlyException) return error.message;
   final raw = _rawMessage(error);
+  final wait = appLockWaitFrom(raw);
+  if (wait != null) return appLockWaitText(wait);
   _log(error, raw);
   final lower = raw.toLowerCase();
   for (final rule in _rules) {
@@ -96,6 +99,21 @@ class _Rule {
 // First match wins, so the specific shapes sit above the broad ones ("identity
 // is locked" before "not found", "disk full" before "permission denied").
 const _rules = <_Rule>[
+  _Rule(
+    ['hardware_key_busy'],
+    "Your phone's secure storage didn't respond. Nothing changed, so try "
+        'again in a moment.',
+  ),
+  _Rule(
+    ['attempt_not_recorded'],
+    "Hollow couldn't record this try on this device, so it didn't check "
+        'it. Free some space and try again.',
+  ),
+  _Rule(
+    ['hardware_key_missing'],
+    "This phone's security chip no longer holds the key to your app lock. "
+        'Your recovery phrase gets you back in.',
+  ),
   _Rule(
     ['identity is locked', 'identity locked', 'not unlocked',
         'provide a password', 'unlock_identity', 'wrapping key'],

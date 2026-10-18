@@ -47,6 +47,16 @@ device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
   flutter_secure_storage after `local_auth` (3.x named params); the lock-type marker is
   readable BEFORE identity unlock; MainActivity MUST extend `FlutterFragmentActivity`.
   `project_app_lock_pin_biometric`.
+- App Lock entries are PER PROFILE (`<key>.<app_lock.id>`, never a path hash: an iOS
+  container moves); a stored secret (launch, biometric) unlocks via
+  `unlock_identity_with_stored_secret`, never `unlock_identity` (that one is paced and a
+  relaunch would reset the count). The wrap is tied to the phone's hardware key
+  (`HollowHwKey.kt` registered in `MainActivity`, the enclave in `AppDelegate.swift`);
+  the key must never need user auth or biometry. `hardware_key_missing` (the keystore
+  says the key is gone) leads to the recovery phrase; `hardware_key_busy` (an op failed
+  or the keystore could not say) to `HardwareKeyBusyDialog`, Try again first, and a
+  stored secret (launch, biometric) is dropped ONLY on `isWrongSecret`. Wiki
+  `security_write_gates` §43.
 
 ## Notifications
 

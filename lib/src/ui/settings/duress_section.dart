@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
+import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
@@ -19,6 +20,13 @@ import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+
+/// The one-time note under a duress code set before App Lock was tied to this
+/// phone's hardware.
+const String kDuressRebindTitle = 'Set your duress code again';
+const String kDuressRebindBody =
+    'It was set before App Lock was tied to this phone. Setting it again '
+    'ties the code to this phone too.';
 
 /// Wire values of the destroy scope. They are persisted and read by Rust, so
 /// they are never derived from a label.
@@ -132,6 +140,17 @@ class DuressCodeCard extends ConsumerStatefulWidget {
 class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
   static const _title = 'Duress code';
 
+  /// Whether this visit shows the one-time note to set an old code again: null
+  /// until this profile's marker was read. Marked the first time it shows.
+  bool? _rebindShown;
+
+  Future<void> _claimRebindNote() async {
+    final appLock = AppLockService();
+    final show = !await appLock.duressRebindAsked();
+    if (show) await appLock.markDuressRebindAsked();
+    if (mounted) setState(() => _rebindShown = show);
+  }
+
   @override
   Widget build(BuildContext context) {
     final status = ref.watch(duressStatusProvider);
@@ -171,7 +190,7 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
       );
     }
 
-    return SettingsRow(
+    final row = SettingsRow(
       title: _title,
       subtitle: _setSummary(status),
       trailing: Row(
@@ -190,6 +209,39 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
           ),
         ],
       ),
+    );
+    if (!status.rebindDue) return row;
+    if (_rebindShown == null) {
+      _rebindShown = false;
+      _claimRebindNote();
+    }
+    if (_rebindShown != true) return row;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        row,
+        SettingsRow(
+          title: kDuressRebindTitle,
+          subtitle: kDuressRebindBody,
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              HollowButton.ghost(
+                compact: true,
+                onPressed: () => setState(() => _rebindShown = false),
+                child: const Text('Not now'),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              HollowButton.outline(
+                compact: true,
+                onPressed: _setCode,
+                child: const Text('Set it again'),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 

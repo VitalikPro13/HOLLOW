@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/services/android_version.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/core/services/overlay_publisher.dart';
 import 'package:hollow/src/core/providers/overlay_settings_provider.dart';
@@ -665,13 +666,30 @@ class _HollowShellState extends ConsumerState<HollowShell>
         final stored = await appLock.readLaunchSecret();
         if (stored != null) {
           try {
-            await identity_api.unlockIdentity(password: stored);
+            // Not typed: never paced, never counted (a relaunch must not reset
+            // the count of missed tries).
+            await identity_api.unlockIdentityWithStoredSecret(
+                secret: stored, personPresent: false);
             appLock.sessionSecret = stored;
             _silentStart = true;
             return true;
-          } catch (_) {
-            // Changed through recovery: the stored copy is stale.
-            await appLock.clearLaunchSecret();
+          } catch (e) {
+            if (isHardwareKeyMissing(e)) return _showHardwareKeyMissingDialog();
+            if (isHardwareKeyBusy(e)) {
+              final opened = await _whileHardwareBusy(
+                () => identity_api.unlockIdentityWithStoredSecret(
+                    secret: stored, personPresent: false),
+                isPin: await appLock.getLockType() == 'pin',
+              );
+              if (opened == true) {
+                appLock.sessionSecret = stored;
+                _silentStart = true;
+              }
+              if (opened != null) return opened;
+            } else if (isWrongSecret(e)) {
+              // Changed through recovery: the stored copy is stale.
+              await appLock.clearLaunchSecret();
+            }
           }
         }
         return _showPasswordUnlockDialog();
@@ -728,11 +746,73 @@ class _HollowShellState extends ConsumerState<HollowShell>
     return result == true;
   }
 
+  /// The PIN is tied to this phone's secure hardware and that key is gone (a
+  /// reset keystore, a restored phone). Nothing was deleted; only the recovery
+  /// phrase opens the identity now.
+  Future<bool> _showHardwareKeyMissingDialog() async {
+    _setUnlocking(false);
+    final result = await showHollowDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => RecoveryPhraseDialog(
+        title: 'Identity locked',
+        paragraphs: const [
+          "Your app lock is tied to this phone's security chip, and the chip no "
+              'longer holds its key. Nothing has been deleted.',
+          'Enter your 24-word recovery phrase to get back into your identity. '
+              'This turns off your app lock, and you can set a new one in '
+              'Settings.',
+        ],
+        confirmLabel: 'Recover identity',
+        cancellable: false,
+        onRecover: (phrase) async {
+          await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
+          await identity_api.unlockIdentity();
+          await AppLockService().clearAll();
+        },
+      ),
+    );
+    return result == true;
+  }
+
+  /// The phone's secure hardware did not answer: Try again first, the recovery
+  /// phrase as the way out. True once open, false when it ended without an
+  /// identity, null when a retry failed some other way and the caller's own
+  /// prompt takes over.
+  Future<bool?> _whileHardwareBusy(Future<void> Function() retry,
+      {required bool isPin}) async {
+    _setUnlocking(false);
+    while (true) {
+      if (!mounted) return false;
+      final choice = await showHollowDialog<Object>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) =>
+            HardwareKeyBusyDialog(retry: () => withTypedSecret(retry)),
+      );
+      if (choice == true) return true;
+      if (!mounted) return false;
+      if (choice == KeyMissingChoice.phrase) {
+        if (await _recoverWithMnemonic(isPin: isPin)) {
+          await AppLockService().clearAll();
+          return true;
+        }
+        continue;
+      }
+      if (choice != null && isHardwareKeyMissing(choice)) {
+        return _showHardwareKeyMissingDialog();
+      }
+      return null;
+    }
+  }
+
   Future<bool> _showPasswordUnlockDialog() async {
     final appLock = AppLockService();
     final lockType = await appLock.getLockType();
     final isPin = lockType == 'pin';
     final hasBiometric = await appLock.isBiometricEnabled();
+    var hardwareMissing = false;
+    String? hardwareBusySecret;
 
     /// One biometric round: OS prompt → stored secret → Rust unlock.
     Future<bool> tryBiometric() async {
@@ -742,24 +822,57 @@ class _HollowShellState extends ConsumerState<HollowShell>
       // so the spinner belongs here.
       _setUnlocking(true);
       try {
-        await identity_api.unlockIdentity(password: secret);
+        // A person just passed the biometric, so this clears missed tries.
+        await identity_api.unlockIdentityWithStoredSecret(
+            secret: secret, personPresent: true);
         appLock.sessionSecret = secret;
         _noteUnlockSecret(secret, isPin);
         return true;
-      } catch (_) {
+      } catch (e) {
         _setUnlocking(false);
+        if (isHardwareKeyMissing(e)) {
+          hardwareMissing = true;
+          return false;
+        }
+        if (isHardwareKeyBusy(e)) {
+          hardwareBusySecret = secret;
+          return false;
+        }
         // A stale stored secret (changed via recovery) would leave the user in
         // a failing biometric loop.
-        await appLock.disableBiometric();
+        if (isWrongSecret(e)) await appLock.disableBiometric();
         return false;
       }
+    }
+
+    /// The biometric passed but the hardware did not answer: the same stored
+    /// secret is tried again from the busy screen.
+    Future<bool?> biometricBusy() async {
+      final secret = hardwareBusySecret!;
+      hardwareBusySecret = null;
+      final opened = await _whileHardwareBusy(
+        () => identity_api.unlockIdentityWithStoredSecret(
+            secret: secret, personPresent: true),
+        isPin: isPin,
+      );
+      if (opened == true) {
+        appLock.sessionSecret = secret;
+        _noteUnlockSecret(secret, isPin);
+      }
+      return opened;
     }
 
     // Most unlocks end right here.
     if (hasBiometric && await tryBiometric()) return true;
     if (!mounted) return false;
+    if (hardwareMissing) return _showHardwareKeyMissingDialog();
+    if (hardwareBusySecret != null) {
+      final opened = await biometricBusy();
+      if (opened != null) return opened;
+    }
 
     var wrong = false;
+    String? problem;
     while (true) {
       // Statement-level, not just the loop condition, so the gap after the
       // previous iteration's awaits is covered.
@@ -771,6 +884,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
           isPin: isPin,
           hasBiometric: hasBiometric,
           wrong: wrong,
+          waitSeconds: _appLockWait(),
+          problem: problem,
         ),
       );
 
@@ -784,11 +899,17 @@ class _HollowShellState extends ConsumerState<HollowShell>
           return true;
         }
         wrong = false;
+        problem = null;
         continue;
       }
 
       if (result == kUnlockBiometric) {
         if (await tryBiometric()) return true;
+        if (hardwareMissing) return _showHardwareKeyMissingDialog();
+        if (hardwareBusySecret != null) {
+          final opened = await biometricBusy();
+          if (opened != null) return opened;
+        }
         continue;
       }
 
@@ -806,11 +927,38 @@ class _HollowShellState extends ConsumerState<HollowShell>
           // Welcome, never a hint that the code did anything.
           await endSessionAfterDuress();
         }
-        // Wrong secret: let the dialog re-prompt.
         _setUnlocking(false);
-        wrong = true;
+        if (isHardwareKeyMissing(e)) return _showHardwareKeyMissingDialog();
+        if (isHardwareKeyBusy(e)) {
+          final opened = await _whileHardwareBusy(
+            () => identity_api.unlockIdentity(password: result),
+            isPin: isPin,
+          );
+          if (opened == true) {
+            appLock.sessionSecret = result;
+            _noteUnlockSecret(result, isPin);
+          }
+          if (opened != null) return opened;
+          wrong = false;
+          problem = null;
+          continue;
+        }
+        // Only a wrong secret says so; a wait shows itself and no try was made.
+        wrong = isWrongSecret(e);
+        problem = wrong || appLockWaitFrom(e) != null
+            ? null
+            : friendlyError(e, fallback: "Hollow couldn't check that. Try again.");
         continue;
       }
+    }
+  }
+
+  /// Seconds before the next typed try, as Rust counts them; 0 when unknown.
+  int _appLockWait() {
+    try {
+      return identity_api.appLockWaitSecs();
+    } catch (_) {
+      return 0;
     }
   }
 

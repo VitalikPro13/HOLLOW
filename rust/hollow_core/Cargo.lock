@@ -1961,6 +1961,7 @@ dependencies = [
  "socket2",
  "spake2",
  "str0m",
+ "subtle",
  "symphonia",
  "tempfile",
  "tokio",

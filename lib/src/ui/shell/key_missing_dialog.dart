@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -21,6 +22,16 @@ import 'package:hollow/src/ui/shell/identity_unlock_dialogs.dart';
 /// again once the key is back.
 bool isKeychainKeyMissing(Object error) =>
     error.toString().contains('keychain_key_missing');
+
+const String kHardwareKeyBusyTitle = "Hollow couldn't unlock just now";
+const String kHardwareKeyBusyBody =
+    "Your phone's secure storage didn't respond this time. Nothing has "
+    "changed, and this try doesn't count as a wrong one.";
+const String kHardwareKeyBusyNext =
+    'Try again in a moment. If it keeps happening, restart your phone. Your '
+    'recovery phrase always gets you back in.';
+const String kHardwareKeyStillBusy =
+    "It still didn't respond. Nothing has changed.";
 
 /// What the key-missing screen lets the person do next.
 enum KeyMissingChoice { phrase, backup }
@@ -130,6 +141,74 @@ class _KeyMissingDialogState extends State<KeyMissingDialog>
           child: const Text('Restore a backup'),
         ),
       ],
+      actions: [
+        HollowButton.outline(
+          onPressed: actionRunning
+              ? null
+              : () => Navigator.of(context).pop(KeyMissingChoice.phrase),
+          child: const Text('Use recovery phrase'),
+        ),
+        HollowButton.filled(
+          onPressed: _retry,
+          loading: actionRunning,
+          child: const Text('Try again'),
+        ),
+      ],
+    );
+  }
+}
+
+/// The phone's secure hardware did not answer an unlock this once. Nothing was
+/// counted or changed, so Try again comes first; the recovery phrase stays the
+/// way out if it never answers. Pops `true` once [retry] opened the identity,
+/// [KeyMissingChoice.phrase], or the error of a retry that failed some other way.
+class HardwareKeyBusyDialog extends StatefulWidget {
+  final Future<void> Function() retry;
+
+  const HardwareKeyBusyDialog({super.key, required this.retry});
+
+  @override
+  State<HardwareKeyBusyDialog> createState() => _HardwareKeyBusyDialogState();
+}
+
+class _HardwareKeyBusyDialogState extends State<HardwareKeyBusyDialog>
+    with HollowDialogAction {
+  Future<void> _retry() async {
+    Object? other;
+    final ok = await runDialogAction(() async {
+      try {
+        await widget.retry();
+      } catch (e) {
+        if (isHardwareKeyBusy(e)) {
+          throw const FriendlyException(kHardwareKeyStillBusy);
+        }
+        other = e;
+      }
+    });
+    if (!mounted) return;
+    if (other != null) {
+      Navigator.of(context).pop(other);
+    } else if (ok) {
+      Navigator.of(context).pop(true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return HollowDialog(
+      title: kHardwareKeyBusyTitle,
+      width: 420,
+      busy: actionRunning,
+      error: actionError,
+      content: const Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          HollowDialogText(kHardwareKeyBusyBody),
+          SizedBox(height: HollowSpacing.md),
+          HollowDialogText(kHardwareKeyBusyNext),
+        ],
+      ),
       actions: [
         HollowButton.outline(
           onPressed: actionRunning

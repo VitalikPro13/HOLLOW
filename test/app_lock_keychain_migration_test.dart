@@ -62,7 +62,12 @@ void main() {
       _items[e.key] = (value: e.value, accessibility: 'unlocked');
     }
 
-    final appLock = AppLockService();
+    final appLock = AppLockService.debugReplace(
+      store: SecureAppLockStore(),
+      profileId: (_) => '0123456789abcdef',
+      opensIdentity: (_) async => true,
+      oneProfile: true,
+    );
     expect(await appLock.readLaunchSecret(), '1234');
     expect(await appLock.getLockType(), 'pin');
     expect(await appLock.isBiometricEnabled(), isTrue);

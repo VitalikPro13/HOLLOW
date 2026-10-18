@@ -360,7 +360,8 @@ void main() {
                   enabled: false,
                   scope: 'device',
                   notifyFriends: false,
-                  available: false)),
+                  available: false,
+                  rebindDue: false)),
         ]),
         child: MaterialApp(
           navigatorKey: hollowNavigatorKey,

@@ -133,6 +133,7 @@ void main() {
               scope: 'device',
               notifyFriends: false,
               available: true,
+              rebindDue: false,
             )),
       ]),
       child: RepaintBoundary(

@@ -80,9 +80,13 @@ hmac = "0.12"
 # Join-lane sealed boxes (node/sealed_box.rs); both already in the tree through openmls.
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 hkdf = "0.12"
-# Sealed FCM/APNs wakes (crypto/push_seal.rs, RFC 8291): 0.13 is the version already in
-# the tree through openmls; 0.14 would pull a second RustCrypto stack.
-p256 = { version = "0.13", features = ["ecdh"] }
+# Sealed FCM/APNs wakes (crypto/push_seal.rs, RFC 8291) and the app lock tied to the
+# phone's hardware (identity/hw_key.rs: the RFC 9380 hash onto P-256 the Secure Enclave
+# key agrees against): 0.13 is the version already in the tree through openmls; 0.14
+# would pull a second RustCrypto stack.
+p256 = { version = "0.13", features = ["ecdh", "hash2curve"] }
+# Constant-time compares of key material; already in the tree.
+subtle = "2.6"
 # Device-link handshake (node/link_handler.rs): the code's secret half keys a PAKE, so
 # the relay, which sees the other half, gets one guess per attempt (HOL-SEC-002).
 spake2 = "0.4"
@@ -117,7 +121,7 @@ socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Foundation"] }
+windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Foundation", "Win32_System_SystemInformation"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"

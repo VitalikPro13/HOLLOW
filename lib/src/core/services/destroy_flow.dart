@@ -78,6 +78,10 @@ Future<void> settleProfileAfterBootWipe() async {
 /// the background fetch ran never reached this clean-up, so its leftovers go
 /// now, without stopping anything the next identity will need.
 Future<void> clearTracesOfAGoneIdentity() async {
+  // Entries a gone identity's App Lock left would greet the next one.
+  try {
+    await AppLockService().clearAll();
+  } catch (_) {}
   if (!Platform.isAndroid && !Platform.isIOS) return;
   await forgetPushRegistration(quiet: false);
   try {

@@ -399,6 +399,7 @@ fn destroy_with(root: &Path, outside: &Outside) -> Result<(), String> {
     let identity_before = std::fs::read(root.join("identity.key")).ok();
     zero_keys(root);
     crate::identity::platform_keystore::forget_key_at(root, identity_before.as_deref());
+    crate::identity::hw_key::forget(root);
     // What a relink kept aside loses its keys now and its bulk after the root's, so
     // its size never holds up the root's erase.
     let kept = super::recovery::zero_kept_aside(root);
@@ -488,6 +489,7 @@ pub fn erase_profile_at(data_dir: String) -> Result<(), String> {
     let identity_before = std::fs::read(root.join("identity.key")).ok();
     zero_keys(&root);
     crate::identity::platform_keystore::forget_key_at(&root, identity_before.as_deref());
+    crate::identity::hw_key::forget(&root);
     let kept = super::recovery::zero_kept_aside(&root);
     drop(key_writes);
     let clean = sweep_root(&root);

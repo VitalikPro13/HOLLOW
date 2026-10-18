@@ -1,0 +1,758 @@
+{
+ "_": [
+  "NOT ON MACOS FLEET PEERS: 'Set password' on a desktop caches the password-derived key in",
+  "the OS keychain (enable_password_protection with require_on_launch false, flags 0x03). A macOS",
+  "peer started over ssh-to-self has no keychain, and macOS put a 'Keychain Not Found' modal",
+  "(Cancel / Reset To Defaults) on the person's screen (2026-10-18). Run it on Windows peers",
+  "(windows:<letter> from the Mac), after copying the flutter_secure_storage.dat aside as",
+  "regress_app_lock says.",
+  "",
+  "B4 + B5 on the macOS desktop backend, two THROWAWAY peers k and l: two profiles (two data",
+  "roots) on ONE macOS account, so they share the keychain flutter_secure_storage writes to.",
+  "k sets an app password and a wider-scope duress code; while k holds its launch secret, the",
+  "'this computer only' note stays away. l sets its own password and turns Ask before Hollow",
+  "starts ON, which deletes l's launch secret. Before B4 that was ONE shared entry, so k lost",
+  "its silent start and the note appeared on k. Then B5's pacing at k's lock prompt: four",
+  "misses say Wrong, the fifth makes the prompt wait 30 s, after which the password opens it.",
+  "Both passwords are turned off at the end, which clears each profile's entries.",
+  "run: from the Mac, Windows peers per the hollow-runner skill (never FLEET_BACKEND=macos)"
+ ],
+ "peers": [
+  "k",
+  "l"
+ ],
+ "steps": [
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "k",
+   "op": "log",
+   "message": "k: app password and a wider-scope duress code; with the launch secret held, no 'this computer only' note"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "type:SettingsPlace",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Security",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "type:SettingsPlace > text:Set password",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Set password",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Set app password",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "probe-k-lock-1"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "probe-k-lock-1"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Set password",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "type:SettingsPlace > text:Lock now",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "type:SettingsPlace > text:Set up",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Set up",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Set a duress code",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "probe-k-lock-1"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "probe-k-duress-1"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 2,
+   "value": "probe-k-duress-1"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:This device and unlink it",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Set code",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "type:SettingsPlace > text:Remove",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "expect_no_text",
+   "value": "A duress code typed at that prompt destroys this computer only."
+  },
+  {
+   "peer": "k",
+   "op": "shot",
+   "name": "b4-01-k-set"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Close settings",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "type:SettingsPlace",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "l",
+   "op": "log",
+   "message": "l, a second profile on the same account and keychain: its own password, then Ask before Hollow starts ON, which drops ITS launch secret"
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "target": "type:SettingsPlace",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Security",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "target": "type:SettingsPlace > text:Set password",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Set password",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "target": "dialog > text:Set app password",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "probe-l-lock-2"
+  },
+  {
+   "peer": "l",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "probe-l-lock-2"
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "dialog > text:Set password",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "target": "type:SettingsPlace > text:Lock now",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "semantics:Ask before Hollow starts",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "wait",
+   "ms": 3000
+  },
+  {
+   "peer": "l",
+   "op": "shot",
+   "name": "b4-02-l-ask-on"
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "semantics:Close settings",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "gone": "type:SettingsPlace",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "log",
+   "message": "k again: its launch secret must still be there, so still no 'this computer only' note (before B4 l's change deleted the one shared entry)"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "type:SettingsPlace",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Security",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "type:SettingsPlace > text:Remove",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "k",
+   "op": "expect_no_text",
+   "value": "A duress code typed at that prompt destroys this computer only."
+  },
+  {
+   "peer": "k",
+   "op": "shot",
+   "name": "b4-03-k-unchanged"
+  },
+  {
+   "peer": "k",
+   "op": "log",
+   "message": "B5 pacing on a desktop: five misses, then the prompt waits"
+  },
+  {
+   "peer": "k",
+   "op": "reveal",
+   "target": "type:SettingsPlace > text:Lock now"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Lock now",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "type:LockCoverScreen",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > hint:Password",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > hint:Password",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > hint:Password",
+   "value": "wrong-0-${RUN}"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Unlock",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:Wrong password. Try again.",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > hint:Password",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > hint:Password",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > hint:Password",
+   "value": "wrong-1-${RUN}"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Unlock",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:Wrong password. Try again.",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > hint:Password",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > hint:Password",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > hint:Password",
+   "value": "wrong-2-${RUN}"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Unlock",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:Wrong password. Try again.",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > hint:Password",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > hint:Password",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > hint:Password",
+   "value": "wrong-3-${RUN}"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Unlock",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:Wrong password. Try again.",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > hint:Password",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > hint:Password",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > hint:Password",
+   "value": "wrong-4-${RUN}"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Unlock",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:Too many tries. You can try again in",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "shot",
+   "name": "b5-04-k-waiting"
+  },
+  {
+   "peer": "k",
+   "op": "expect_count",
+   "target": "type:SettingsPlace",
+   "value": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 32000
+  },
+  {
+   "peer": "k",
+   "op": "expect_no_text",
+   "value": "Too many tries."
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > hint:Password",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > hint:Password",
+   "value": "probe-k-lock-1"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Unlock",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "type:LockCoverScreen",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "type:SettingsPlace",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "shot",
+   "name": "b5-05-k-unlocked"
+  },
+  {
+   "peer": "k",
+   "op": "log",
+   "message": "clean up: both passwords off, which clears each profile's own entries"
+  },
+  {
+   "peer": "k",
+   "op": "reveal",
+   "target": "type:SettingsPlace > text:Remove"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Remove",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Remove duress code",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > hint:App password",
+   "value": "probe-k-lock-1"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Remove",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "reveal",
+   "target": "type:SettingsPlace > text:Turn off"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Turn off",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Turn off the password",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "value": "probe-k-lock-1"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Turn off",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "type:SettingsPlace > text:Set password",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Close settings",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "type:SettingsPlace",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "target": "type:SettingsPlace",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Security",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "reveal",
+   "target": "type:SettingsPlace > text:Turn off"
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "type:SettingsPlace > text:Turn off",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "target": "dialog > text:Turn off the password",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "l",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "value": "probe-l-lock-2"
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "dialog > text:Turn off",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "target": "type:SettingsPlace > text:Set password",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "l",
+   "op": "tap",
+   "target": "semantics:Close settings",
+   "index": 0
+  },
+  {
+   "peer": "l",
+   "op": "wait_for",
+   "gone": "type:SettingsPlace",
+   "timeout_ms": 10000
+  }
+ ]
+}

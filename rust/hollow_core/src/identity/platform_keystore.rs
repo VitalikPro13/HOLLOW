@@ -69,12 +69,15 @@ pub(crate) fn is_available() -> bool {
 
 /// Runs keystore calls that must never put a prompt on screen and wait for an
 /// answer: a wipe (a duress code is typed at a prompt, and a stalled wipe shows it
-/// did something) and the scan of other slots. On macOS an item another build wrote
-/// asks the person before it opens; here the call fails instead. The switch is
-/// process-wide, so it is held only around these calls.
+/// did something), the scan of other slots, and every write (a session with no
+/// keychain, such as one started over ssh, must fail quietly, never ask). On macOS
+/// an item another build wrote asks the person before it opens; here the call fails
+/// instead. The switch is process-wide, so it is held only around these calls.
 fn without_prompts<T>(f: impl FnOnce() -> T) -> T {
     #[cfg(target_os = "macos")]
     let _quiet = security_framework::os::macos::keychain::SecKeychain::disable_user_interaction().ok();
+    #[cfg(test)]
+    let _quiet_test = test_support::Quiet::enter();
     f()
 }
 
@@ -427,6 +430,7 @@ mod backend {
             Mode::Fake => {
                 super::test_support::fake_put(name, Some(key.to_vec()));
                 super::test_support::count_write();
+                super::test_support::note_write_quiet();
                 Ok(())
             }
             Mode::Real => {
@@ -506,7 +510,7 @@ pub(crate) fn store_key_at(root: &Path, key: &[u8]) -> Result<(), String> {
     if !backend::available() {
         return Err("OS keychain not available on this platform".into());
     }
-    backend::write(&profile_slot(root), key)?;
+    without_prompts(|| backend::write(&profile_slot(root), key))?;
     if backend::has_blob()
         && let Ok(blob) = backend::protect(key)
     {
@@ -673,6 +677,35 @@ pub(crate) mod test_support {
         static WRITES: Cell<u32> = const { Cell::new(0) };
         static ARMED: Cell<bool> = const { Cell::new(false) };
         static READS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        static QUIET: Cell<u32> = const { Cell::new(0) };
+        static LOUD_WRITES: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Marks this thread as inside `without_prompts` while held.
+    pub(crate) struct Quiet;
+
+    impl Quiet {
+        pub(crate) fn enter() -> Self {
+            QUIET.with(|q| q.set(q.get() + 1));
+            Quiet
+        }
+    }
+
+    impl Drop for Quiet {
+        fn drop(&mut self) {
+            QUIET.with(|q| q.set(q.get() - 1));
+        }
+    }
+
+    pub(crate) fn note_write_quiet() {
+        if QUIET.with(Cell::get) == 0 {
+            LOUD_WRITES.with(|w| w.set(w.get() + 1));
+        }
+    }
+
+    /// Writes on this thread, since the last call, that were allowed to ask the person.
+    pub(crate) fn take_loud_writes() -> u32 {
+        LOUD_WRITES.with(|w| w.replace(0))
     }
 
     pub(crate) fn note_read(name: &str) {
@@ -818,6 +851,17 @@ mod tests {
         let root = Path::new("/somewhere/hollow");
         assert!(!profile_slot(root).starts_with("com.hollow.identity."));
         assert!(!legacy_slot().starts_with("com.hollow.identity"));
+    }
+
+    /// A store runs with prompts off: a session with no keychain (ssh) fails it
+    /// quietly instead of raising a dialog on someone's screen.
+    #[test]
+    fn a_keychain_store_never_asks_the_person() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let _ = take_loud_writes();
+        store_key_at(tmp.path(), &[0x5c; 32]).unwrap();
+        assert_eq!(read_profile_key_at(tmp.path()).unwrap(), Some(vec![0x5c; 32]));
+        assert_eq!(take_loud_writes(), 0, "a keychain write was allowed to ask");
     }
 
     /// The suffix names every existing per-profile slot, so it never changes.

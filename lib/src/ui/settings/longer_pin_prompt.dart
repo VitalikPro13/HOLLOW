@@ -1,5 +1,6 @@
 import 'package:flutter/widgets.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
+import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/security_section.dart';
@@ -12,16 +13,20 @@ Future<void> offerLongerPin(
   required bool isPin,
 }) async {
   final word = isPin ? 'PIN' : 'password';
+  // Tied to the phone's chip, a copy of the data cannot be guessed against, so
+  // the copy is not the reason to offer.
+  final where = _deviceBound()
+      ? ''
+      : ' if someone copies the data on this device';
   final wanted = await showHollowConfirm(
     context: context,
     title: 'Choose a longer $word?',
     message: isPin
         ? 'PINs now need at least $kMinPinDigits digits. Yours still works, '
-            'and a longer one is much harder to guess if someone copies the '
-            'data on this device.'
+            'and a longer one is much harder to guess$where.'
         : 'A password of only digits now needs at least $kMinPinDigits of '
             'them. Yours still works, and a longer one is much harder to '
-            'guess if someone copies the data on this device.',
+            'guess$where.',
     confirmLabel: 'Choose a new $word',
     cancelLabel: 'Not now',
   );
@@ -37,4 +42,12 @@ Future<void> offerLongerPin(
   if (next == null || !context.mounted) return;
   HollowToast.show(context, isPin ? 'PIN changed' : 'Password changed',
       type: HollowToastType.success);
+}
+
+bool _deviceBound() {
+  try {
+    return identity_api.appLockDeviceBound();
+  } catch (_) {
+    return false;
+  }
 }

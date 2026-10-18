@@ -77,10 +77,12 @@ fn stays_on_relink(name: &str) -> bool {
 }
 
 /// Root entries a repair leaves in place: everything a relink leaves, the identity and
-/// what belongs to it rather than to the database, and earlier repairs' folders.
+/// what belongs to it rather than to the database (the id naming its hardware key and
+/// App Lock entries too), and earlier repairs' folders.
 fn stays_on_repair(name: &str) -> bool {
     stays_on_relink(name)
         || is_key_file(name)
+        || name == crate::identity::hw_key::PROFILE_ID_FILE
         || name.starts_with("pending_link.")
         // The relay holds a token keyed by it for this same device id.
         || name == crate::crypto::push_seal::KEY_FILE
@@ -810,6 +812,7 @@ pub(crate) fn zero_kept_aside(root: &Path) -> Vec<PathBuf> {
         let identity_before = std::fs::read(dir.join("identity.key")).ok();
         super::wipe::zero_keys(dir);
         crate::identity::platform_keystore::forget_key_at(dir, identity_before.as_deref());
+        crate::identity::hw_key::forget(dir);
         for name in DB_SET {
             let _ = std::fs::remove_file(dir.join(name));
         }

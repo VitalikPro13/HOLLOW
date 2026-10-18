@@ -1,0 +1,607 @@
+{
+ "_": [
+  "B5 on a phone, ONE throwaway peer k: sets a PIN, then five wrong current PINs at",
+  "Change PIN, a sixth that the prompt refuses with the wait, and after 31 s the right PIN",
+  "changes it. On an iOS Simulator on Apple silicon the Secure Enclave is available, so the",
+  "wrap is device-bound (identity.key flag 05); on an Android emulator the keystore offers only",
+  "software keys, so the wrap stays Argon2id (flag 01). The PIN stays ON at the end (593104) so",
+  "the runner can read the file; the peer is throwaway.",
+  "run (Mac mini): pwsh scripts/fleet.ps1 -Scenario mobile_b5_applock -Peers k",
+  "(Android emulator: FLEET_BACKEND=android ...)"
+ ],
+ "peers": [
+  "k"
+ ],
+ "steps": [
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Security",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:Turn on",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "shot",
+   "name": "m-01-security"
+  },
+  {
+   "peer": "k",
+   "op": "log",
+   "message": "set a PIN (device-bound where the platform has secure hardware)"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Turn on",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:Choose a lock",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:PIN",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Set a PIN",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "482916"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "482916"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Turn on",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:Turn off",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "shot",
+   "name": "m-02-pin-on"
+  },
+  {
+   "peer": "k",
+   "op": "log",
+   "message": "pacing: five wrong current PINs at Change, then the prompt says to wait"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Change PIN",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "100000"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 2,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "k",
+   "op": "expect_text",
+   "value": "isn't right"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Cancel",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Change PIN",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "100001"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 2,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "k",
+   "op": "expect_text",
+   "value": "isn't right"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Cancel",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Change PIN",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "100002"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 2,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "k",
+   "op": "expect_text",
+   "value": "isn't right"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Cancel",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Change PIN",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "100003"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 2,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "k",
+   "op": "expect_text",
+   "value": "isn't right"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Cancel",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Change PIN",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "100004"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 2,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "k",
+   "op": "expect_text",
+   "value": "isn't right"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Cancel",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Change PIN",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "100005"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 2,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "k",
+   "op": "expect_text",
+   "value": "Too many tries. You can try again in"
+  },
+  {
+   "peer": "k",
+   "op": "shot",
+   "name": "m-03-waiting"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Cancel",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 31000
+  },
+  {
+   "peer": "k",
+   "op": "log",
+   "message": "after the wait, the right PIN changes it"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "dialog > text:Change PIN",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > type:TextField",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 0,
+   "value": "482916"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 1,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "index": 2,
+   "value": "593104"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "dialog > text:Change",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "shot",
+   "name": "m-04-changed"
+  },
+  {
+   "peer": "k",
+   "op": "dump",
+   "name": "m-final"
+  }
+ ]
+}
