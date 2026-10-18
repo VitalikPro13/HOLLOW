@@ -2,9 +2,62 @@
 
 End-to-end push notification system for mobile (Android + iOS). The guiding
 principle is **Signal-style empty wake-up**: the push payload carries ZERO
-message content — only `{type:'wake', sender:<peer_id>}`. Apple/Google never see
-who said what, the message size, or the text. All real content is resolved
-on-device by fetching the ciphertext from OUR relay (E2EE) and decrypting locally.
+message content, only the wake block `{type:'wake', sender:<peer_id>}` (or the
+channel form), and since 0.12.2 that block reaches Google and Apple only SEALED to
+the device (see "Sealed wakes" below). All real content is resolved on-device by
+fetching the ciphertext from OUR relay (E2EE) and decrypting locally.
+
+## Sealed wakes (AR-26 closed, track B6, 2026-10-18)
+
+- **Keys:** `rust/hollow_core/src/crypto/push_seal.rs`. One RFC 8291 key set per
+  data root (`push_seal.key`: `HPS1` + bind tag + P-256 scalar + 16-byte auth, 0600,
+  tmp + rename), made at the first FCM/APNs registration, re-made when the node's
+  `local_peer_id` changes (a landing that replaced the identity). Outside the
+  identity unlock ON PURPOSE: a password-locked install must still open a wake to
+  show its neutral banner. In the wipe's `KEY_FILES` (zeroed first). Never in a
+  backup or link snapshot (those carry only identity.key + messages.db).
+- **Registration:** `api::network::register_push_token` runs
+  `push_seal::token_for_relay`: android/ios tokens leave as
+  `{"v":2,"fcm":<native>,"p256dh","auth"}`; unifiedpush tokens unchanged; a key
+  that cannot be stored falls back to the bare token and deletes the key file (so
+  plain wakes stay readable). A WIPED root (destroyed in this process, wipe marker,
+  or no `identity.key`; checked under `key_file_lock()`) registers NOTHING:
+  `register_push_token` errs. A repair keeps `push_seal.key` + `push_seen/`; a
+  relink moves them aside (the new device id rekeys anyway).
+- **Sidecar:** `push-sidecar/fcm.js` (see `relay_uws_server.md`, push sidecar
+  payload). Bare tokens get exactly the 0.12.1 payload.
+- **Opening:** `push_seal::open_wake(root, fields, Reader)`, ONE rule for every caller:
+  no key file = plain fields pass (legacy), a `sealed` field with no key = drop;
+  key file present = only a block sealed to it counts (plain, tampered, oversized
+  over 4096 b64 chars, multi-record, wrong keyid length, bad padding = drop), inner
+  fields shape-checked (`type` wake|channel_wake, ids `[A-Za-z0-9_:.#-]` up to 160,
+  mention 0|1, `ts` REQUIRED integer seconds); a broken key file drops everything.
+  **Replay:** App and Extension readers drop a block sealed > 24 h + 10 min ago
+  (relay `OFFLINE_BUFFER_TTL_SECS`) or as far ahead (`WINDOW_SECS`, symmetric: phones
+  behind the sidecar are real, #107), and one that reader opened
+  before: `push_seen/{ts:011}-{salt hex}.{a|n}`, `create_new` (app and NSE are two
+  processes on one App Group root), pruned past the window, cap 2048 oldest-out.
+  The Tap reader only routes: no window, no record. Callers: Dart FFI
+  `api::push::open_push_wake(fields, tap)` (`openFirebaseWake` in
+  push_notification_service.dart: the background handler, and the tap router
+  `_deliverFromRemote` with `tap: true`), iOS C-ABI `hollow_push_open_wake` (NSE
+  `openWake`; a refused wake keeps the generic "Hollow / New message", the NSE
+  cannot drop).
+- **iOS grouping lives on the phone:** a sealed APNs wake has NO
+  `apns-collapse-id` (Apple links nothing). The NSE sets `threadIdentifier` =
+  the person (hints `master`, written by `PushHintsCache`, else the sender
+  device) or `server:channel`, and its handler (`replacingOlder`) removes the
+  older DELIVERED banners of that thread before delivering. Dart clears the same
+  threads (`iosDmThreads`, `iosChannelThread`) through `hollow/app_group`
+  `removeDeliveredInThreads` (AppDelegate; skips the plugin's own posts, which
+  Dart replaces by id) before it posts, plus the FNV id for a plain wake. Swift
+  logic proven in the Simulator harness (`conversationThread`, `olderBanners`);
+  NOT yet on a real iPhone.
+- **Proof tools:** sidecar `test/sealed_wake.test.js` writes
+  `test/sealed_wake_vectors.json` (`HOLLOW_WRITE_PUSH_VECTORS=1`, with
+  `sealed_at`), which Rust opens at that time
+  (`push_seal_opens_the_sidecars_dm_and_channel_wakes`). Debug builds log
+  `[HOLLOW-PUSH] FCM data fields: {sealed: N}` (names and sizes only).
 
 Why pushes at all: mobile OSes kill background processes, so no persistent WS is
 possible when the app is closed. FCM (Android) / APNs (iOS) are the only way to
@@ -62,17 +115,19 @@ ONLY — E2EE preserved).
 `push-sidecar/index.js` (Node, on the VPS, `hollow-push` systemd service, port
 3001 localhost). Receives `POST /push {token, platform, sender}`.
 
-- Data block is always `{type:'wake', sender}` — **no content**.
+- Data block is `{type:'wake', sender}` for a bare (0.12.1) token and one
+  `sealed` field for a keyed token (see "Sealed wakes") — **no content** either way.
 - **Logging (2026-09-29):** no token (not even a prefix), no per-push "sent" line;
   errors carry only platform, status and code. `feedback_relay_no_metadata_logging`.
 - **Android:** `android: {priority:'high'}`.
 - **iOS:** a VISIBLE ALERT push (NOT a pure silent/background push — Apple
   throttles those to ~2-3/hr). Headers: `apns-priority:10`, `apns-push-type:alert`,
-  `apns-collapse-id: iosCollapseId(sender)`. Payload aps: generic
+  `apns-collapse-id: iosCollapseId(sender)` for a BARE token only (a keyed token
+  gets none, see "Sealed wakes"). Payload aps: generic
   `alert:{title:'Hollow', body:'New message'}`, `sound:'default'`,
   `mutable-content:1` (triggers the NSE), `content-available:1`.
 - `iosCollapseId(peerId)`: deterministic FNV-1a 31-bit hash → used as the APNs
-  notification identifier so a new push REPLACES the peer's banner. **Must match
+  notification identifier of a plain (0.12.1-style) wake so a new push REPLACES the peer's banner. **Must match
   the Dart `_iosCollapseId` byte-for-byte** (push_notification_service.dart).
 
 ## UnifiedPush — Android alternative to FCM (#75, 2026-09-17)
@@ -316,8 +371,9 @@ replayed as 0x06 on room join exactly like DMs) and calls
    across all servers (`last_channel_push_any`). Mentions bypass the long window.
 
 Sidecar: `channel_wake` data type (FCM data values must be STRINGS — mention is
-'1'/'0'); iOS `apns-collapse-id = iosCollapseId("server:channel")` → one
-replaceable banner per channel; same generic alert body.
+'1'/'0'); for a bare token iOS `apns-collapse-id = iosCollapseId("server:channel")`
+→ one replaceable banner per channel; a keyed token's banner is replaced on the
+phone (thread `server:channel`); same generic alert body.
 
 ### Fetch + MLS decrypt (fetch.rs)
 `run_fetch` gained `server_room: Option<&str>` + `mls: &mut Option<MlsManager>`.

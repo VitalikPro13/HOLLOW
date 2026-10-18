@@ -509,6 +509,8 @@ Future<List<FetchedMessage>> startFetchNode({
 );
 
 /// Register an FCM/APNs push token with the relay for offline wake-up notifications.
+/// FCM and APNs tokens leave with this install's wake key set, so the sidecar seals
+/// every wake to it (AR-26).
 Future<void> registerPushToken({
   required String token,
   required String platform,

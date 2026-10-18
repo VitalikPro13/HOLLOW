@@ -2,9 +2,9 @@
 
 Moved out of CLAUDE.md on 2026-09-29, when the file was split by area. CLAUDE.md sends
 every session here BEFORE it touches `lib/src/ui/mobile/`, local notifications, push
-taps, UnifiedPush or App Lock. The push PRIVACY rules (payload `{wake, sender}`, device
-targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki `push_notifications`
-has the whole pipeline.
+taps, UnifiedPush or App Lock. The push PRIVACY rules (the wake block sealed to the
+device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
+`push_notifications` has the whole pipeline.
 
 ## Mobile UI and lifecycle
 
@@ -55,6 +55,16 @@ has the whole pipeline.
   `MobileInChatBanner` only. macOS toasts = `MacOSFlutterLocalNotificationsPlugin`
   (NEVER `local_notifier`, dead on macOS 26), Linux = `local_notifier`.
   `project_local_notifications_desktop_mobile`.
+- Every FCM/APNs wake goes through `openFirebaseWake` (Rust `open_push_wake`) before
+  anything reads it, the tap router included; the NSE through `hollow_push_open_wake`.
+  Never read `message.data[...]` directly: a phone with a key set drops what is not
+  sealed to it, stale (`ts` past 24 h) or already opened by that reader (AR-26). The
+  tap router passes `tap: true` (routes only, never spends the blob). Guard:
+  `test/push_wake_seal_test.dart`.
+- iOS banners of a sealed wake group and replace ON THE PHONE (no
+  `apns-collapse-id`): NSE thread = person (hints `master`) or `server:channel`,
+  matching Dart's `iosDmThreads`/`iosChannelThread`; a new thread key must change
+  both sides and the AppDelegate `removeDeliveredInThreads` call.
 - Push tap -> chat: all 3 entry points (onMessageOpenedApp / getInitialMessage /
   local-notif payload + launch); `plugin.show()` MUST set `payload: sender`; cold-start
   taps are buffered. `feedback_push_tap_navigation`.

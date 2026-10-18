@@ -8,6 +8,7 @@ pub mod identity;
 pub mod network;
 pub mod overlay;
 pub mod overlay_server;
+pub mod push;
 pub mod recovery;
 pub mod roster;
 pub mod screen_audio;

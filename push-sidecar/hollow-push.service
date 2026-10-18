@@ -1,4 +1,4 @@
-# The official relay's push sender. index.js, unifiedpush.js, package*.json
+# The official relay's push sender. index.js, fcm.js, unifiedpush.js, package*.json
 # and node_modules live in /opt/hollow-push, owned by root.
 #   /etc/hollow-push/service-account.json  Firebase Admin credential, root 0600
 #   /etc/hollow-push/push.env              PUSH_TOKEN=<the relay's HOLLOW_PUSH_TOKEN>, root 0600

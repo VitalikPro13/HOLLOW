@@ -2980,12 +2980,17 @@ pub fn start_fetch_node(
 }
 
 /// Register an FCM/APNs push token with the relay for offline wake-up notifications.
+/// FCM and APNs tokens leave with this install's wake key set, so the sidecar seals
+/// every wake to it (AR-26).
 #[frb]
 pub fn register_push_token(token: String, platform: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    let running = guard.as_ref().ok_or("Node is not running")?;
+    let (cmd_tx, local_peer_id) = (running.cmd_tx.clone(), running.local_peer_id.clone());
     drop(guard);
+    let root = crate::identity::data_dir()?;
+    let token = crate::crypto::push_seal::token_for_relay(&root, &platform, token, &local_peer_id)?;
 
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::RegisterPushToken { token, platform }))

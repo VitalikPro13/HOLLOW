@@ -46,7 +46,15 @@ char *hollow_push_fetch_and_decrypt(const char *data_dir,
                                     uint32_t timeout_secs,
                                     const char *server_room);
 
-// Free a string returned by hollow_push_fetch_and_decrypt.
+// The wake a push carries, as a JSON object of strings ("type", "sender",
+// "server", "channel", "mention"), or NULL when it must name nobody: once the
+// install registered its wake key set, only a fresh block sealed to it counts,
+// and the extension acts on each block once.
+// fields_json is a JSON object of the push's userInfo string fields; data_dir as
+// above. Free the result with hollow_push_string_free.
+char *hollow_push_open_wake(const char *data_dir, const char *fields_json);
+
+// Free a string returned by hollow_push_fetch_and_decrypt or hollow_push_open_wake.
 void hollow_push_string_free(char *ptr);
 
 #ifdef __cplusplus

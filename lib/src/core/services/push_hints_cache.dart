@@ -147,9 +147,11 @@ class PushHintsCache {
         }
 
         if (name != null || avatarPath != null) {
+          // `master` threads the NSE's banners per person, as Dart's are.
           final entry = {
             'name': ?name,
             'avatar': ?avatarPath,
+            'master': peerId,
           };
           // Keyed under the master AND every known device id of this friend,
           // so `map[sender]` in the NSE hits whichever device sent it.

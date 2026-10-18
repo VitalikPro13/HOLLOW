@@ -9,10 +9,9 @@ import Foundation  // Mach task_info / task_vm_info for the footprint measuremen
 // app's private encrypted DB. Instead it reads a tiny "push hints" cache that the main
 // app writes into the shared App Group container (friend peer_id -> name + avatar path).
 //
-// Privacy: Apple/APNs only ever saw the generic "New message" + an opaque `sender`
-// peer_id. The name/avatar are resolved here, on-device, from app-private data. The
-// message TEXT is intentionally NOT shown — decrypting it would require linking the full
-// crypto core into the extension (deferred). Body stays generic.
+// Privacy: Apple/APNs only ever saw the generic "New message" and one blob sealed to
+// this install (AR-26); Rust opens it here. The name, avatar and text are resolved
+// on-device, from app-private data and our own relay.
 //
 // Must never drop a push: any failure (no App Group, missing/corrupt cache, unknown
 // sender) falls through to delivering the original content unchanged.
@@ -43,26 +42,36 @@ class NotificationService: UNNotificationServiceExtension {
       return
     }
 
-    // Channel pushes (type=channel_wake) take a separate path: server-room
-    // fetch + MLS decrypt, "Server • #channel" banner.
-    if (request.content.userInfo["type"] as? String) == "channel_wake" {
-      handleChannelWake(request, content: content, contentHandler: contentHandler)
+    // A wake not sealed to this install names nobody: the generic banner stays,
+    // since without the filtering entitlement the extension cannot drop it.
+    guard
+      let groupRoot = FileManager.default
+        .containerURL(forSecurityApplicationGroupIdentifier: appGroupId),
+      let wake = openWake(request.content.userInfo, groupRoot)
+    else {
+      contentHandler(content)
       return
     }
 
-    // The sidecar puts the sender peer_id in the FCM `data` block; FCM surfaces
-    // data fields at the top level of userInfo.
-    let senderId = request.content.userInfo["sender"] as? String
+    // From here on each banner replaces the older ones of its conversation.
+    // The expiry path keeps the plain handler: it must deliver at once.
+    let contentHandler = replacingOlder(request.identifier, contentHandler)
 
-    // Thread by sender so iOS groups per-peer natively (mirrors Android's
-    // groupKey-per-peer) AND so the Dart bg handler's local notification — which
-    // sets the SAME threadIdentifier (= sender) — collapses onto this banner
-    // instead of stacking a second one. Set it before any early return so even
-    // the generic-fallback banner threads correctly. The matching
-    // apns-collapse-id (set by the sidecar) is what lets the OS replace rather
-    // than add across the APNs banner / NSE rewrite / Dart content update.
-    if let sender = senderId, !sender.isEmpty {
-      content.threadIdentifier = sender
+    // Channel pushes (type=channel_wake) take a separate path: server-room
+    // fetch + MLS decrypt, "Server • #channel" banner.
+    if wake["type"] == "channel_wake" {
+      handleChannelWake(request, wake: wake, content: content, contentHandler: contentHandler)
+      return
+    }
+
+    let senderId = wake["sender"]
+
+    // Thread by person so iOS groups per conversation, on the phone: a sealed
+    // wake carries no collapse id, so Apple links none of them. The Dart
+    // handler posts under the same thread. Set before any early return so even
+    // the generic banner threads correctly.
+    if let thread = Self.conversationThread(wake, hintMaster: hintMaster(senderId, groupRoot)) {
+      content.threadIdentifier = thread
     }
 
     guard
@@ -145,6 +154,85 @@ class NotificationService: UNNotificationServiceExtension {
     contentHandler(identityPresent() ? content : request.content)
   }
 
+  /// The wake this push carries, opened by Rust: nil when it must name nobody,
+  /// because the install registered its wake key set and this push is not sealed
+  /// to it (AR-26). Only string fields are handed over.
+  func openWake(_ info: [AnyHashable: Any], _ groupRoot: URL) -> [String: String]? {
+    var fields: [String: String] = [:]
+    for (key, value) in info {
+      if let key = key as? String, let value = value as? String { fields[key] = value }
+    }
+    guard
+      let data = try? JSONSerialization.data(withJSONObject: fields),
+      let json = String(data: data, encoding: .utf8)
+    else { return nil }
+    let dataDir = groupRoot.appendingPathComponent("hollow_data").path
+    guard let cstr = hollow_push_open_wake(dataDir, json) else { return nil }
+    defer { hollow_push_string_free(cstr) }
+    guard
+      let out = String(cString: cstr).data(using: .utf8),
+      let wake = (try? JSONSerialization.jsonObject(with: out)) as? [String: String]
+    else { return nil }
+    return wake
+  }
+
+  // MARK: - Conversation threads
+
+  /// The thread a wake's banners share, on this phone only: the person for a DM
+  /// (the hints name the master behind a device), the channel for a channel
+  /// wake. Dart posts under the same keys (`iosDmThreads`, `iosChannelThread`).
+  static func conversationThread(_ wake: [String: String], hintMaster: String?) -> String? {
+    if wake["type"] == "channel_wake" {
+      guard let server = wake["server"], !server.isEmpty else { return nil }
+      return "\(server):\(wake["channel"] ?? "")"
+    }
+    guard let sender = wake["sender"], !sender.isEmpty else { return nil }
+    if let master = hintMaster, !master.isEmpty { return master }
+    return sender
+  }
+
+  /// The delivered banners a new one in `thread` replaces: every other banner of
+  /// that conversation, ours or the app's.
+  static func olderBanners(
+    _ delivered: [(id: String, thread: String)], thread: String, own: String
+  ) -> [String] {
+    guard !thread.isEmpty else { return [] }
+    return delivered.filter { $0.thread == thread && $0.id != own }.map { $0.id }
+  }
+
+  /// The master the hints name for a sending device, if any.
+  private func hintMaster(_ sender: String?, _ groupRoot: URL) -> String? {
+    guard
+      let sender, !sender.isEmpty,
+      let data = try? Data(contentsOf: groupRoot.appendingPathComponent("push_hints/hints.json")),
+      let map = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+      let entry = map[sender] as? [String: Any]
+    else { return nil }
+    return entry["master"] as? String
+  }
+
+  /// Wraps the handler so the banner it delivers first removes the older ones of
+  /// its conversation; a banner with no thread replaces nothing.
+  private func replacingOlder(
+    _ own: String, _ handler: @escaping (UNNotificationContent) -> Void
+  ) -> (UNNotificationContent) -> Void {
+    return { content in
+      let thread = content.threadIdentifier
+      guard !thread.isEmpty else {
+        handler(content)
+        return
+      }
+      let center = UNUserNotificationCenter.current()
+      center.getDeliveredNotifications { notes in
+        let ids = Self.olderBanners(
+          notes.map { (id: $0.request.identifier, thread: $0.request.content.threadIdentifier) },
+          thread: thread, own: own)
+        if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
+        handler(content)
+      }
+    }
+  }
+
   // MARK: - Channel wake (channel push)
 
   /// Rewrite a channel push: fetch the buffered channel ciphertext from the
@@ -153,19 +241,17 @@ class NotificationService: UNNotificationServiceExtension {
   /// channel banner — never drop the push.
   private func handleChannelWake(
     _ request: UNNotificationRequest,
+    wake: [String: String],
     content: UNMutableNotificationContent,
     contentHandler: @escaping (UNNotificationContent) -> Void
   ) {
-    let info = request.content.userInfo
-    let server = info["server"] as? String ?? ""
-    let channel = info["channel"] as? String ?? ""
-    let sender = info["sender"] as? String ?? ""
+    let server = wake["server"] ?? ""
+    let channel = wake["channel"] ?? ""
+    let sender = wake["sender"] ?? ""
 
-    // Thread by server so iOS groups one server's channel banners natively;
-    // the apns-collapse-id (server:channel hash) makes newer pushes REPLACE
-    // the per-channel banner instead of stacking.
-    if !server.isEmpty {
-      content.threadIdentifier = server
+    // One thread per channel: newer wakes replace its banner on the phone.
+    if let thread = Self.conversationThread(wake, hintMaster: nil) {
+      content.threadIdentifier = thread
     }
     content.title = "Hollow"
     // The push's mention flag is the SENDER's claim. Only the posts decrypted
@@ -326,9 +412,8 @@ class NotificationService: UNNotificationServiceExtension {
   /// [{"text","message_id","timestamp","has_image"}].
   ///
   /// Mirrors Android's per-peer card: show the LAST 3 messages as a multi-line
-  /// body + an "N new messages" subtitle. `apns-collapse-id` (= sender hash) means
-  /// the next push for this peer REPLACES this banner, so it reads as a single
-  /// accumulating per-peer card. Image-only / sentinel texts render as "📷 Image".
+  /// body + an "N new messages" subtitle. The next push for this person REPLACES
+  /// this banner (`replacingOlder`), so it reads as a single accumulating card. Image-only / sentinel texts render as "📷 Image".
   /// (Cross-PUSH accumulation beyond one fetch — e.g. messages from two separate
   /// wakeups — is not kept here; each fetch drains the relay buffer, so a single
   /// fetch usually already holds the whole unread burst.)

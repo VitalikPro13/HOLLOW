@@ -55,6 +55,11 @@ fn is_key_file(name: &str) -> bool {
     name.starts_with("identity.")
 }
 
+/// Key material a wipe must find wherever a relink or repair moved it.
+fn holds_key(name: &str) -> bool {
+    is_key_file(name) || name.starts_with("pending_link.") || name.starts_with(crate::crypto::push_seal::KEY_FILE)
+}
+
 /// Root entries a relink leaves behind: the registry, instance locks, the logs, what a
 /// destroy of this root must still find (`recordings.list`, push hints), and its own marks.
 /// A root that is itself old data keeps the mark naming its origin: moved, the next
@@ -77,6 +82,9 @@ fn stays_on_repair(name: &str) -> bool {
     stays_on_relink(name)
         || is_key_file(name)
         || name.starts_with("pending_link.")
+        // The relay holds a token keyed by it for this same device id.
+        || name == crate::crypto::push_seal::KEY_FILE
+        || name == crate::crypto::push_seal::SEEN_DIR
         || name == crate::node::roster_book::BOOTSTRAP_FILE
         || name.starts_with(ASIDE_PREFIX)
         || name.starts_with(SET_ASIDE_FILE)
@@ -818,7 +826,7 @@ fn remove_kept_entry(entry: &std::fs::DirEntry) -> bool {
     match entry.file_type() {
         Ok(t) if t.is_symlink() => std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir(&path)).is_ok(),
         Ok(t) if t.is_dir() => super::wipe::remove_dir_zeroing_keys(&path).is_ok(),
-        _ if is_key_file(&name) || name.starts_with("pending_link.") => {
+        _ if holds_key(&name) => {
             super::wipe::zero_and_remove(&path);
             !present(&path)
         }
@@ -864,7 +872,7 @@ pub(crate) fn kept_keys_gone(kept: &[PathBuf]) -> bool {
     let holds_keys = |dir: &Path| {
         std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            is_key_file(&name) || name.starts_with("pending_link.") || DB_SET.contains(&name.as_str())
+            holds_key(&name) || DB_SET.contains(&name.as_str())
         })
     };
     let landing_holds_keys = |dir: &Path| {
@@ -1500,6 +1508,33 @@ mod tests {
         let store = MessageStore::open(root.join("messages.db").to_str().unwrap(), &pass_of(0x33)).unwrap();
         let stamp: i64 = store.load_setting(&crate::node::destroy::link_key("dev")).unwrap().unwrap().parse().unwrap();
         assert!(stamp > 0 && stamp <= now_ms(), "the link time is carried from the identity files, got {stamp}");
+    }
+
+    /// The relay holds a token keyed by this file for the same device id, so a repair
+    /// that moved it would leave every later wake unopenable.
+    #[test]
+    fn a_repair_keeps_the_push_key() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        root_with(&root, 0x37, 0x38, "the old one");
+        let key = root.join(crate::crypto::push_seal::KEY_FILE);
+        put(&key, b"HPS1 push key bytes");
+        let seen = root.join("push_seen").join("00000000001-aa.a");
+        put(&seen, b"");
+        let out = repair_at(&root, &pass_of(0x37), "dev", DAY).unwrap();
+        assert_eq!(std::fs::read(&key).unwrap(), b"HPS1 push key bytes");
+        assert!(seen.exists(), "the wakes already opened stay with the key that opened them");
+        assert!(!root.join(&out.folder).join(crate::crypto::push_seal::KEY_FILE).exists());
+    }
+
+    /// A relink keeps the push key aside with the old identity; the boot wipe must
+    /// wait for it like any key.
+    #[test]
+    fn a_kept_folder_holding_only_the_push_key_still_holds_keys() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let kept = tmp.path().join("data-old-1");
+        put(&kept.join(crate::crypto::push_seal::KEY_FILE), b"HPS1 push key bytes");
+        assert!(!kept_keys_gone(std::slice::from_ref(&kept)));
     }
 
     #[test]

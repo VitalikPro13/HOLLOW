@@ -216,6 +216,23 @@ final class RelayBackgroundTask {
           // registers again at the next launch, for whichever identity comes next.
           UIApplication.shared.unregisterForRemoteNotifications()
           result(nil)
+        } else if call.method == "removeDeliveredInThreads" {
+          // The extension's banners of these conversations, before Dart posts
+          // the populated one (a sealed wake has no collapse id to cancel by).
+          // flutter_local_notifications' own posts are skipped: Dart replaces
+          // those in place by id, and a removal racing that post would drop it.
+          let threads = Set(call.arguments as? [String] ?? [])
+          let center = UNUserNotificationCenter.current()
+          center.getDeliveredNotifications { notes in
+            let ids = notes
+              .filter {
+                threads.contains($0.request.content.threadIdentifier)
+                  && $0.request.content.userInfo["NotificationId"] == nil
+              }
+              .map { $0.request.identifier }
+            if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
+            DispatchQueue.main.async { result(nil) }
+          }
         } else {
           result(FlutterMethodNotImplemented)
         }

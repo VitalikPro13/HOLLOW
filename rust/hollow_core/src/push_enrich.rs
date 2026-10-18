@@ -80,6 +80,45 @@ pub unsafe extern "C" fn hollow_push_fetch_and_decrypt(
     }
 }
 
+/// The longest userInfo the extension hands over: FCM and APNs carry at most 4 KB.
+const MAX_FIELDS_JSON: usize = 16 * 1024;
+
+/// iOS NSE: the wake a push carries, as a JSON object of strings (`type`, `sender`,
+/// `server`, `channel`, `mention`), or NULL when the push must name nobody. Once this
+/// install registered its wake key set, only a fresh block sealed to it counts, once
+/// (AR-26), and the extension shows the generic banner for anything else.
+///
+/// `fields_json` is a JSON object of the push's userInfo string fields. Free the
+/// result with [`hollow_push_string_free`].
+///
+/// # Safety
+/// Both pointers must be valid NUL-terminated C strings for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hollow_push_open_wake(data_dir: *const c_char, fields_json: *const c_char) -> *mut c_char {
+    let (Some(dir), Some(fields)) = (unsafe { cstr(data_dir) }, unsafe { cstr(fields_json) }) else {
+        return ptr::null_mut();
+    };
+    open_wake_json(&dir, &fields)
+        .and_then(|json| CString::new(json).ok())
+        .map_or(ptr::null_mut(), CString::into_raw)
+}
+
+fn open_wake_json(data_dir: &str, fields_json: &str) -> Option<String> {
+    if data_dir.is_empty() || fields_json.len() > MAX_FIELDS_JSON {
+        return None;
+    }
+    let serde_json::Value::Object(obj) = serde_json::from_str(fields_json).ok()? else {
+        return None;
+    };
+    let fields = obj.into_iter().filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_owned()))).collect();
+    let wake = crate::crypto::push_seal::open_wake(
+        std::path::Path::new(data_dir),
+        &fields,
+        crate::crypto::push_seal::Reader::Extension,
+    )?;
+    serde_json::to_string(&wake).ok()
+}
+
 /// Pure-Rust core of the NSE fetch path: like `api::network::start_fetch_node` but with
 /// an explicit `data_dir` (the App Group container) and its own single-threaded
 /// runtime, since the extension process has no Dart isolate.
@@ -285,6 +324,39 @@ unsafe fn cstr(p: *const c_char) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{CStr, CString};
+
+    /// The extension's entry point opens the sidecar's sealed wake and refuses a plain
+    /// one once the install holds its key set.
+    #[test]
+    fn nse_open_wake_opens_sealed_and_refuses_plain() {
+        let dir = crate::crypto::push_seal::fixture_root_for_test();
+        let root = CString::new(dir.path().to_str().unwrap()).unwrap();
+        let open = |fields: &str| {
+            let fields = CString::new(fields).unwrap();
+            let out = unsafe { super::hollow_push_open_wake(root.as_ptr(), fields.as_ptr()) };
+            if out.is_null() {
+                return None;
+            }
+            let json = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_owned();
+            unsafe { super::hollow_push_string_free(out) };
+            Some(serde_json::from_str::<serde_json::Value>(&json).unwrap())
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let wake = serde_json::json!({"type": "channel_wake", "sender": "d1", "server": "s1", "channel": "c1", "mention": "1"});
+        let mut inner = wake.clone();
+        inner["ts"] = now.into();
+        let mut user_info = serde_json::json!({"sealed": crate::crypto::push_seal::seal_to_fixture_for_test(&inner.to_string())});
+        // What FCM adds beside the data block on iOS.
+        user_info["gcm.message_id"] = "1700000000000000".into();
+        user_info["aps"] = serde_json::json!({"alert": {"title": "Hollow"}, "mutable-content": 1});
+        assert_eq!(open(&user_info.to_string()), Some(wake));
+        assert_eq!(open(&user_info.to_string()), None, "the extension acts on a blob once");
+        assert_eq!(open(r#"{"type":"wake","sender":"12D3KooWAbc"}"#), None);
+        assert_eq!(open("not json"), None);
+        assert_eq!(open(&format!(r#"{{"sealed":"{}"}}"#, "A".repeat(super::MAX_FIELDS_JSON))), None);
+    }
+
     /// The extension's fetch as a process of its own, for a simulator, where a pushed
     /// notification never starts the extension (`xcrun simctl push` skips it): spawned
     /// inside the simulator against the App Group data dir, it leaves a count of what it

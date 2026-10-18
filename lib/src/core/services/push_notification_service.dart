@@ -15,6 +15,7 @@ import 'package:hollow/src/core/services/relay_triggers.dart' show kPushNudge;
 import 'package:hollow/src/core/services/unified_push_service.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/rust/api/push.dart' as push_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 
@@ -381,8 +382,58 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
   try {
     await Firebase.initializeApp();
   } catch (_) {}
-  await handlePushWake(message.data);
+  if (kDebugMode) {
+    // What Google delivered, as field names and sizes only.
+    debugPrint('[HOLLOW-PUSH] FCM data fields: '
+        '${message.data.map((k, v) => MapEntry(k, '$v'.length))}');
+  }
+  final data = await openFirebaseWake(message.data,
+      rustReady: await _initRustForBackground());
+  if (data == null) return;
+  await handlePushWake(data);
 }
+
+/// The wake a Firebase data block carries, or null to drop it. Once this
+/// install registered its wake key set, only a fresh block sealed to it counts,
+/// once (AR-26): Google and Apple read no ids, and a plain, tampered or
+/// replayed wake is never acted on. [tap] only asks which chat a tapped banner
+/// opens. With Rust down nothing can be judged, so the wake names nobody.
+@visibleForTesting
+Future<Map<String, dynamic>?> openFirebaseWake(Map<String, dynamic> data,
+    {required bool rustReady, bool tap = false}) async {
+  if (!rustReady) return const {'type': 'wake'};
+  try {
+    final opened = await push_api.openPushWake(fields: {
+      for (final e in data.entries)
+        if (e.value is String) e.key: e.value as String,
+    }, tap: tap);
+    if (opened == null) {
+      debugPrint('[HOLLOW-PUSH] Wake dropped: not sealed to this install');
+    }
+    return opened;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// The iOS threads a DM's banners sit in: ours under the person, the
+/// extension's under the person it found in the hints, else the sending device.
+/// A sealed wake carries no collapse id, so the phone groups and replaces them.
+@visibleForTesting
+Set<String> iosDmThreads(String sender, String personKey) =>
+    {personKey, sender};
+
+/// The iOS thread of one channel's banners, the extension's and ours.
+@visibleForTesting
+String iosChannelThread(String server, String channel) => '$server:$channel';
+
+/// Removes the banners iOS still shows in [threads] that we did not post
+/// ourselves (ours are replaced in place by id), before the populated banner
+/// takes their place.
+@visibleForTesting
+Future<void> removeIosThreadBanners(Iterable<String> threads) =>
+    const MethodChannel('hollow/app_group').invokeMethod<void>(
+        'removeDeliveredInThreads', threads.toSet().toList());
 
 /// One wake, whichever provider carried it: Firebase's data block or a
 /// decrypted UnifiedPush message, both the sidecar's
@@ -577,14 +628,14 @@ String _clipPreview(String s) =>
 
 /// iOS happy path: the APNs alert banner rewritten by the NSE is ALREADY on
 /// screen, so remove it and post ONE silent content banner in its place,
-/// leaving a single per-peer notification rather than two stacked. Cancel by
-/// the exact integer the sidecar used as apns-collapse-id. The content post is
-/// silent because the alert already sounded; on Android this is simply the
-/// first alerting post.
+/// leaving a single per-peer notification rather than two stacked. A plain
+/// wake's banner went by the sender hash. The content post is silent because
+/// the alert already sounded; on Android this is simply the first alerting
+/// post.
 Future<void> _cancelIosDmApnsBanner(String sender, String personKey) async {
   try {
-    await FlutterLocalNotificationsPlugin()
-        .cancel(_iosCollapseId(sender));
+    await removeIosThreadBanners(iosDmThreads(sender, personKey));
+    await FlutterLocalNotificationsPlugin().cancel(_iosCollapseId(sender));
     await _pushLog('iOS: cancelled the APNs banner');
   } catch (e) {
     await _pushLog('iOS: cancel APNs banner failed: $e');
@@ -892,6 +943,7 @@ Future<void> _handleChannelWake(
       profileNames: profileNames,
     );
   }
+  await _pushLog('Handler complete');
 }
 
 /// Resolve (serverName, channelName, notifLevel) for the wake's triggering
@@ -1001,11 +1053,11 @@ String _channelWakePreviewText(String text) =>
     _clipPreview(messagePreviewText(text));
 
 /// iOS: replaces the APNs/NSE banner with one silent populated banner,
-/// mirroring the DM swap flow.
-Future<void> _cancelIosChannelApnsBanner(String server, String cid) async {
+/// mirroring the DM swap flow. Our own banner shares the plain wake's id, so
+/// posting replaces that one.
+Future<void> _cancelIosChannelApnsBanner(String server, String channel) async {
   try {
-    await FlutterLocalNotificationsPlugin()
-        .cancel(_iosCollapseId('$server:$cid'));
+    await removeIosThreadBanners({iosChannelThread(server, channel)});
   } catch (_) {}
 }
 
@@ -1115,9 +1167,9 @@ String _truncatePeerId(String peerId) {
 /// Deterministic 31-bit FNV-1a hash of a peer_id. MUST match the sidecar's
 /// `iosCollapseId` byte-for-byte: the sidecar sets it as the
 /// `apns-collapse-id`, iOS uses that as the delivered notification's
-/// identifier, and `cancel(id)` removes it by that stringified integer, which
-/// is how the background isolate drops the NSE banner with no MethodChannel
-/// available. NOT security-relevant.
+/// identifier, and `cancel(id)` removes it by that stringified integer. Only a
+/// plain wake (a token registered without its key set) carries one; a sealed
+/// wake's banner goes by its thread. NOT security-relevant.
 int _iosCollapseId(String peerId) {
   var h = 0x811c9dc5; // FNV offset basis
   for (final c in peerId.codeUnits) {
@@ -1358,7 +1410,7 @@ Future<void> _showChannelNotification({
         groupAlertBehavior: GroupAlertBehavior.children,
       ),
       iOS: DarwinNotificationDetails(
-        threadIdentifier: server,
+        threadIdentifier: iosChannelThread(server, channel),
         // Same decoupling as the DM path: silent = no re-buzz, but STILL a
         // visible heads-up banner, since this post replaces the NSE one.
         presentSound: !silent,
@@ -1524,14 +1576,18 @@ class PushNotificationService {
 
   /// Routes an FCM tap (a banner tapped while backgrounded or at cold start)
   /// to the right chat, based on the push type.
-  static void _deliverFromRemote(RemoteMessage? message) {
+  static Future<void> _deliverFromRemote(RemoteMessage? message) async {
     if (message == null) return;
-    if (message.data['type'] == 'channel_wake') {
-      _deliverOpenChannel(message.data['server'] as String? ?? '',
-          message.data['channel'] as String? ?? '');
+    // A sealed wake is opened here too; one we cannot open just opens the app.
+    final data =
+        await openFirebaseWake(message.data, rustReady: true, tap: true);
+    if (data == null) return;
+    if (data['type'] == 'channel_wake') {
+      _deliverOpenChannel(data['server'] as String? ?? '',
+          data['channel'] as String? ?? '');
       return;
     }
-    _deliverOpenChat(message.data['sender'] as String?);
+    _deliverOpenChat(data['sender'] as String?);
   }
 
   Future<void> initialize() async {
@@ -1621,7 +1677,7 @@ class PushNotificationService {
     // Cold start: app launched by tapping a push notification.
     try {
       final initial = await _messaging.getInitialMessage();
-      _deliverFromRemote(initial);
+      await _deliverFromRemote(initial);
     } catch (_) {}
     // Cold start from a flutter_local_notifications banner, which the Android
     // background fetch posts; the payload is the sender id.

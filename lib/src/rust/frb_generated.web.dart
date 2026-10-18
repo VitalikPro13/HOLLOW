@@ -16,6 +16,7 @@ import 'api/identity.dart';
 import 'api/network.dart';
 import 'api/overlay.dart';
 import 'api/overlay_server.dart';
+import 'api/push.dart';
 import 'api/recovery.dart';
 import 'api/roster.dart';
 import 'api/screen_audio.dart';
@@ -45,6 +46,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  Map<String, String> dco_decode_Map_String_String_None(dynamic raw);
 
   @protected
   RustStreamSink<DownloadProgress> dco_decode_StreamSink_download_progress_Sse(
@@ -388,6 +392,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<(String, PlatformInt64)> dco_decode_list_record_string_i_64(dynamic raw);
 
   @protected
+  List<(String, String)> dco_decode_list_record_string_string(dynamic raw);
+
+  @protected
   List<RemoteReadMarker> dco_decode_list_remote_read_marker(dynamic raw);
 
   @protected
@@ -465,6 +472,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   NetworkEvent dco_decode_network_event(dynamic raw);
+
+  @protected
+  Map<String, String>? dco_decode_opt_Map_String_String_None(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
@@ -586,6 +596,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   (String, PlatformInt64) dco_decode_record_string_i_64(dynamic raw);
+
+  @protected
+  (String, String) dco_decode_record_string_string(dynamic raw);
 
   @protected
   RedeemLookup dco_decode_redeem_lookup(dynamic raw);
@@ -730,6 +743,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  Map<String, String> sse_decode_Map_String_String_None(
+    SseDeserializer deserializer,
+  );
 
   @protected
   RustStreamSink<DownloadProgress> sse_decode_StreamSink_download_progress_Sse(
@@ -1159,6 +1177,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<(String, String)> sse_decode_list_record_string_string(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<RemoteReadMarker> sse_decode_list_remote_read_marker(
     SseDeserializer deserializer,
   );
@@ -1260,6 +1283,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   NetworkEvent sse_decode_network_event(SseDeserializer deserializer);
+
+  @protected
+  Map<String, String>? sse_decode_opt_Map_String_String_None(
+    SseDeserializer deserializer,
+  );
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -1413,6 +1441,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   (String, PlatformInt64) sse_decode_record_string_i_64(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  (String, String) sse_decode_record_string_string(
     SseDeserializer deserializer,
   );
 
@@ -1586,6 +1619,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_AnyhowException(
     AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_Map_String_String_None(
+    Map<String, String> self,
     SseSerializer serializer,
   );
 
@@ -2157,6 +2196,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_record_string_string(
+    List<(String, String)> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_remote_read_marker(
     List<RemoteReadMarker> self,
     SseSerializer serializer,
@@ -2293,6 +2338,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_network_event(NetworkEvent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_Map_String_String_None(
+    Map<String, String>? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
@@ -2507,6 +2558,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_record_string_i_64(
     (String, PlatformInt64) self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_record_string_string(
+    (String, String) self,
     SseSerializer serializer,
   );
 

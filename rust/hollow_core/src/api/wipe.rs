@@ -13,7 +13,7 @@ use crate::node::NodeCommand;
 /// The wipe runs regardless when this elapses: an offline device still erases.
 const SIGNAL_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
 
-const MARKER: &str = "pending_wipe.marker";
+pub(crate) const MARKER: &str = "pending_wipe.marker";
 
 /// What a destroy writes in the marker, so the boot wipe that finishes it can tell
 /// an ended identity (the profile list forgets it) from a cancelled link's throwaway.
@@ -36,6 +36,8 @@ const KEY_FILES: &[&str] = &[
     "identity.device.locked",
     "pending_link.code",
     "pending_link.device",
+    crate::crypto::push_seal::KEY_FILE,
+    crate::crypto::push_seal::KEY_FILE_TMP,
 ];
 
 /// Plaintext the root holds beside the encrypted store: zeroed before unlinking.
@@ -442,6 +444,11 @@ pub(crate) fn destroyed_in_this_process(root: &Path) -> bool {
     DESTROYED_HERE.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|r| r == root)
 }
 
+#[cfg(test)]
+pub(crate) fn mark_destroyed_for_test(root: &Path) {
+    DESTROYED_HERE.lock().unwrap_or_else(|e| e.into_inner()).push(root.to_path_buf());
+}
+
 /// Scope (a), and the tail of every other. Leaves the node RUNNING for Dart's step 5.
 #[frb]
 pub fn destroy_local() -> Result<(), String> {
@@ -629,6 +636,27 @@ mod tests {
         std::fs::write(root.join("hollow.lock"), b"").unwrap();
         std::fs::create_dir_all(root.join("files")).unwrap();
         std::fs::write(root.join("files").join("a.bin"), b"HFE1 ciphertext").unwrap();
+    }
+
+    /// The push wake key opens what Google and Apple carried for this install.
+    #[test]
+    fn push_wake_keys_are_wiped_like_any_key() {
+        for name in [crate::crypto::push_seal::KEY_FILE, crate::crypto::push_seal::KEY_FILE_TMP] {
+            assert!(KEY_FILES.contains(&name), "{name} would outlive a wipe");
+        }
+    }
+
+    /// Dart's step 5 still runs with the node up: a token registered then must not
+    /// leave a fresh wake key in the root the wipe just emptied.
+    #[test]
+    fn a_registration_after_destroy_mints_no_push_key() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        seed_root(&root);
+        destroy_data_root(&root).unwrap();
+        let _ = crate::crypto::push_seal::token_for_relay(&root, "android", "t".into(), "dev1");
+        assert!(!root.join(crate::crypto::push_seal::KEY_FILE).exists(), "a wake key outlived the wipe");
     }
 
     /// Keys a phrase restore set aside are key material like any other.

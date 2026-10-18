@@ -56,8 +56,9 @@ For voice and video calls where a direct peer-to-peer connection cannot be estab
 
 On Android and iOS, Hollow uses Firebase Cloud Messaging (Google) and the Apple Push Notification service to wake the app when a message arrives while it is closed. What this means for your data:
 
-- Push payloads **never contain message content**. A wake carries the sender's device ID and, for a server message, the server and channel IDs and whether you were mentioned. The actual message is fetched in encrypted form and decrypted on your device.
-- Google and Apple can see that your device received a push notification and when, and the IDs above, but never what a message says. The IDs are random and contain no names, but they do not change, so Google or Apple could tell that several phones are in the same server or hear from the same device, and connect that to the accounts they already know. If you use UnifiedPush on Android, the IDs are encrypted and the push service sees only that a wake arrived. We plan to encrypt them for Google and Apple as well.
+- Push payloads **never contain message content**. A wake tells your device who wrote and, for a server message, which server and channel and whether you were mentioned. All of that is encrypted to a key only your device holds. The actual message is fetched in encrypted form and decrypted on your device.
+- Google and Apple can see that your device received a push notification and when. They cannot see who it is from, which server or channel it is about, or whether you were mentioned. They also cannot tell which notifications belong to the same conversation, because your phone groups them and replaces older banners itself. With UnifiedPush on Android, the push service likewise sees only that a wake arrived.
+- If a push is not encrypted to your device, is a copy of one your device already received, or is more than a day old, Hollow ignores it. On iPhone such a push shows only a plain "New message" banner. On a device still running Hollow 0.12.1, wakes carry these IDs unencrypted until the app updates.
 - The relay holds your device's push token in memory only; it is never written to disk.
 
 Desktop platforms do not use any push service. Notifications on desktop are generated entirely locally.

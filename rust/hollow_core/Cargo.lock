@@ -1949,6 +1949,7 @@ dependencies = [
  "openmls_memory_storage",
  "openmls_rust_crypto",
  "openmls_traits",
+ "p256",
  "reed-solomon-erasure",
  "reqwest",
  "rusqlite",

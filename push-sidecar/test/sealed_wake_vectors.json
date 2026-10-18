@@ -1,0 +1,31 @@
+{
+  "ua_private": "q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94",
+  "ua_public": "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+  "auth": "BTBZMqHH6r4Tts7J_aSIgg",
+  "sealed_at": 1792324800,
+  "cases": [
+    {
+      "platform": "android",
+      "data": {
+        "sealed": "fvkDSloIISvFAdVU62yyhAAAEABBBEOTkdgp-rhGHRBxDgAM-zTOpIeGWq__9h_aGO7zjWzCvRDtHp-47HTqUODv61dDJllbVYmJcYsX0IQPubdXI5Bqmp8JBnebv9ooFoOHPs9uSVVqjXEYzFpGIKaI2rSfxWIszD7BiqV9irUFSa6rVIyR6dIiIN3AsJGD0k0vMu7AOr-85TtnxnhJ9kwkI8wUrWUck8TIU4PPJHJdxlOjYW1ytlpbp9q2dQ1wTvI34OYd4bGVWLTYnHCNl4fgovu6ZW-kAYAJJuFmADpSLPBc2twcoJAZTqLCV1ibqsj7NOjddS0qJVmdipELzXRCgHhCP2oZZgMuaas1sjmt70tjMHeLvbukHVCTyZwA-K3LSoduOgTzrBRvysiEzMAyrpGiBuNIjOVhnPAwXumksVnPEZfXTiCGo7oHaMKfwp0kJh0le3NaPBmBX8bNv7qHW2-x9bhrgu_d1NJmAc5-t_iQwM4BZhj9MRUEvEHJb918dyN6_pcM1iiV4o_rNmK4iGSc7Xz27giOJQldjTbK5LOqCmNCU8v-oxDGirYQgQik0Yu9KrxBfpu7mPjPfinpBav0YEuMc4xnBEGcKaZJ4HsPfy4qBW2wAEe4AJnSAyOoPled04q4Tu18tMo9Jto0BQg_a3LeiU-micCKaK0F0QN_O7nRaCn_Mqwuuj7BCp66PQqaHASwZk57roPep5Far6H3GkwU3aieTXyLJj6CFkW8sXU5p2vu29utL11h-dGa9Qptek2Rc4PnUt6iBW0CQ0xz6QuaB7RTHnW38cwlJx1CgY-q"
+      },
+      "wake": {
+        "type": "wake",
+        "sender": "12D3KooWDmSenderDevice"
+      }
+    },
+    {
+      "platform": "ios",
+      "data": {
+        "sealed": "12jKYovT_LDhcrdwRqKJBgAAEABBBPXzt132i_E7N54EMBI7CVwZksG5Y8KeXDLCZ0U9KVXl55hQI-qPtfLiMasg_Io5n30Ug7KayX1LiNbt6ik_iGDpyCl6cpvt5vNo7NfYuJXYOSB2Hlu-cVzLDrf6JxCD54NR4il1fZCPSrq8CjFT4Y10_5D0oKbKXq0WE-AZUmrFzz-qiCPVwwZ96-WsDCexrfLQZOAwhUL-OWUrMoTdQyrQQzf1ibXAv8Bta-_pYNyi0KR1K3cnuQQm82zH3D9Y5rOGb9wSC2hqxyw_q2R5Z4oKoy2qesTQq8h3yLY__fSiDwGjtsu_lKUWFp-31MTElx9vYmur_XpIcIl-DAl-w6SQiFcjH-Zu7NyeEmG6l0_a8pO1Mm---QXS4J112N8KUm-NF6c74MWbXN5eRMQVRSrseTgCP7uYBY9JNoSPSxhSE1A2od9PXzDR-ol79tmOvNX2lshvKU6mNqI6SfAbFB0lat6sNlx9-6NTVGEDY8Qv3o3SQW9vT2BNCKOhL8HbJh0L-a_I_BZF2rB6mwfHKVLx359UWvdOpKGuHNhZicwY-a-FU1Ow59XS1dDoFfCCTQUAkYr3AioJk_p3mCeIJxA8Zaqjf1iVJ49PY03vm5mny_EK-WztxtazVGrgkWD4yHQP0Yu1qTXeUhWspvk4um-FYiMFxjnOaTONm8mT5h49gv2JbYtb5yqYVHVntyBYYPKXzfwAWPi96zbtZC41bri32vCZgJW4CeBz0m-lb0bydYIL-wdd0GxJwOg2_wOTFELWyJIPvIaQ0BLwZYQAuV8w"
+      },
+      "wake": {
+        "type": "channel_wake",
+        "sender": "12D3KooWChSenderDevice",
+        "server": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        "channel": "general-0001",
+        "mention": "1"
+      }
+    }
+  ]
+}
