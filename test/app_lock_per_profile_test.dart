@@ -10,14 +10,29 @@ import 'package:hollow/src/core/services/app_lock_service.dart';
 
 class _MapStore implements AppLockStore {
   final items = <String, String>{};
+  final reads = <String>[];
+  var calls = 0;
   @override
-  Future<String?> read(String key) async => items[key];
+  Future<String?> read(String key) async {
+    calls++;
+    reads.add(key);
+    return items[key];
+  }
   @override
-  Future<void> write(String key, String value) async => items[key] = value;
+  Future<void> write(String key, String value) async {
+    calls++;
+    items[key] = value;
+  }
   @override
-  Future<void> delete(String key) async => items.remove(key);
+  Future<void> delete(String key) async {
+    calls++;
+    items.remove(key);
+  }
   @override
-  Future<Map<String, String>> readAll() async => Map.of(items);
+  Future<Map<String, String>> readAll() async {
+    calls++;
+    return Map.of(items);
+  }
 }
 
 /// One profile's view of the machine: its id file and what its identity opens.
@@ -30,7 +45,8 @@ class _Profile {
   _Profile(this.idOnCreate, {this.opens = const {}, this.hasIdentity = true});
 
   /// A launch of the app in this profile.
-  AppLockService launch(_MapStore store, {bool oneProfile = false}) =>
+  AppLockService launch(_MapStore store,
+          {bool oneProfile = false, bool launchSecretAllowed = true}) =>
       AppLockService.debugReplace(
         store: store,
         profileId: (create) => id ??= create ? idOnCreate : null,
@@ -40,6 +56,7 @@ class _Profile {
           return opens.contains(secret);
         },
         oneProfile: oneProfile,
+        launchSecretAllowed: launchSecretAllowed,
       );
 }
 
@@ -67,6 +84,28 @@ void main() {
     final backInA = a.launch(store);
     expect(await backInA.readLaunchSecret(), '111111', reason: 'b clobbered a');
     expect(await b.launch(store).readLaunchSecret(), '222222');
+  });
+
+  // On a computer the launch secret lives in the OS keychain only on the OS's
+  // own data root: an override, portable or pinned root never writes or reads
+  // it, so a session with no keychain (ssh) gets no dialog.
+  test('a root outside the OS default keeps no launch secret', () async {
+    final store = _MapStore();
+    final a = _Profile('aaaaaaaaaaaaaaaa');
+    final elsewhere = a.launch(store, launchSecretAllowed: false);
+    await elsewhere.storeLaunchSecret('111111');
+    expect(store.items.keys.where((k) => k.startsWith(_legacyLaunch)), isEmpty,
+        reason: 'an override root wrote the launch secret');
+    store.items['$_legacyLaunch.aaaaaaaaaaaaaaaa'] = '111111';
+    expect(await elsewhere.readLaunchSecret(), isNull);
+    expect(await elsewhere.hasLaunchSecret(), isFalse);
+    expect(store.reads.where((k) => k.startsWith(_legacyLaunch)), isEmpty,
+        reason: 'an override root read the keychain for it');
+
+    final onDefault = a.launch(_MapStore());
+    await onDefault.storeLaunchSecret('222222');
+    expect(await onDefault.readLaunchSecret(), '222222',
+        reason: 'the OS root lost its silent start');
   });
 
   test('legacy entries move once into the profile they open, never into another',
@@ -282,5 +321,84 @@ void main() {
     expect(busyScreen.substring(0, 1200), contains('HardwareKeyBusyDialog('));
     expect(busyScreen.substring(0, 1200), contains('withTypedSecret(retry)'),
         reason: 'a duress code typed into the retry still ends the session');
+  });
+
+  // f-applock-followups fix round
+
+  // An upgrade of a profile whose launch secret was stored before the gate (or a
+  // HOLLOW_DATA_DIR run of the OS root): the old copy must not stay behind a PIN
+  // change or a clear, where the next allowed run would read it.
+  test('a secret stored before the gate never outlives a change or a clear',
+      () async {
+    const id = 'aaaaaaaaaaaaaaaa';
+    for (final step in ['store', 'change', 'clear']) {
+      final store = _MapStore()..items['$_legacyLaunch.$id'] = 'old-pin';
+      final a = _Profile(id)..id = id;
+      final elsewhere = a.launch(store, launchSecretAllowed: false);
+      switch (step) {
+        case 'store':
+          await elsewhere.storeLaunchSecret('new-pin');
+        case 'change':
+          await elsewhere.followSecretChange('new-pin');
+        case 'clear':
+          await elsewhere.clearLaunchSecret();
+      }
+      expect(store.items.containsKey('$_legacyLaunch.$id'), isFalse,
+          reason: '$step left a stale launch secret in the OS secure storage');
+      expect(store.items.values, isNot(contains('new-pin')), reason: step);
+    }
+    // Where it is kept, a change carries it along.
+    final store = _MapStore()..items['$_legacyLaunch.$id'] = 'old-pin';
+    final kept = (_Profile(id)..id = id).launch(store);
+    await kept.followSecretChange('new-pin');
+    expect(await kept.readLaunchSecret(), 'new-pin');
+  });
+
+  test('the legacy migration writes no launch secret where none is allowed',
+      () async {
+    for (final phone in [false, true]) {
+      final store = _MapStore()
+        ..items[_legacyLaunch] = '424242'
+        ..items[_legacyType] = 'pin';
+      final a = _Profile('aaaaaaaaaaaaaaaa', opens: {'424242'});
+      final svc =
+          a.launch(store, oneProfile: phone, launchSecretAllowed: false);
+      await svc.getLockType();
+      expect(
+          store.items.keys.where((k) => k.startsWith('$_legacyLaunch.')),
+          isEmpty,
+          reason: 'phone: $phone, the migration stored a launch secret');
+      if (phone) {
+        expect(store.items.containsKey(_legacyLaunch), isFalse,
+            reason: 'the global copy outlived the migration');
+        expect(await svc.getLockType(), 'pin',
+            reason: 'the markers still move');
+      }
+    }
+  });
+
+  // A computer whose root keeps no launch secret starts with the typed prompt
+  // and asks the OS secure storage nothing at all, an older build's entries
+  // and the global ones included.
+  test('a locked launch on a root that keeps nothing asks the secure storage nothing',
+      () async {
+    const id = 'aaaaaaaaaaaaaaaa';
+    final store = _MapStore()
+      ..items['$_legacyLaunch.$id'] = '111111'
+      ..items[_legacyLaunch] = '111111'
+      ..items[_legacyBio] = '111111';
+    final a = _Profile(id, opens: {'111111'})..id = id;
+    final svc = a.launch(store, launchSecretAllowed: false);
+    expect(await svc.readLaunchSecret(), isNull);
+    expect(await svc.hasLaunchSecret(), isFalse);
+    expect(await svc.getLockType(), isNull);
+    expect(await svc.isBiometricEnabled(), isFalse);
+    expect(await svc.authenticateAndGetSecret(), isNull);
+    expect(await svc.longerPinAsked(), isTrue);
+    await svc.markLongerPinAsked();
+    expect(await svc.duressRebindAsked(), isTrue);
+    await svc.markDuressRebindAsked();
+    expect(store.calls, 0, reason: 'reads: ${store.reads}');
+    expect(a.checks, 0, reason: 'the global entries were judged');
   });
 }

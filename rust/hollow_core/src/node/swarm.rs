@@ -3282,6 +3282,7 @@ async fn run_event_loop(
                         for held in super::roster_reach::release(&device_peer_id, &master) {
                             match held {
                                 super::roster_reach::HeldDm::Envelope { envelope_json, sibling_json } => {
+                                    message_ops::log_released_fan_out(&olm, &ws_room_peers, &local_peer_str, &master);
                                     message_ops::fan_out_dm_envelope(
                                         &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
                                         &mut pending_messages, &mut key_request_in_flight,
@@ -3626,6 +3627,7 @@ async fn run_event_loop(
                     WsEvent::Connected => {
                         hollow_log!("[HOLLOW-WS] Fresh relay session: joining inbox, server and DM rooms");
                         mls_turn.on_session(true);
+                        super::roster_reach::on_session_up(&ws_cmd_tx, &cmd_tx, &device_peer_id, true, &db_path, &db_passphrase);
                         crypto_handler::ask_for_newer_olm_sessions(&mut olm, &crypto_store);
                         // `RelayConnected` waits for the relay's answer to the inbox join.
                         awaiting_inbox_answer = Some(format!("inbox:{local_peer_str}"));
@@ -3800,6 +3802,7 @@ async fn run_event_loop(
                     WsEvent::Suspended => {
                         hollow_log!("[HOLLOW-WS] Relay socket lost, session held: keeping every room and peer");
                         mls_turn.on_session(false);
+                        super::roster_reach::on_session_down(&device_peer_id, false);
                         let _ = event_tx.send(NetworkEvent::RelaySuspended).await;
                     }
                     // Nothing was rejoined and nothing needs to be: the relay replayed what we
@@ -3807,6 +3810,7 @@ async fn run_event_loop(
                     WsEvent::Resumed { gap } => {
                         hollow_log!("[HOLLOW-WS] Relay session resumed (gap: {gap})");
                         mls_turn.on_session(true);
+                        super::roster_reach::on_session_up(&ws_cmd_tx, &cmd_tx, &device_peer_id, false, &db_path, &db_passphrase);
                         crypto_handler::ask_for_newer_olm_sessions(&mut olm, &crypto_store);
                         awaiting_inbox_answer = None;
                         if gap {
@@ -3823,6 +3827,7 @@ async fn run_event_loop(
                     WsEvent::SessionLost => {
                         hollow_log!("[HOLLOW-WS] Relay session lost: purging, a fresh one follows");
                         mls_turn.on_session(false);
+                        super::roster_reach::on_session_down(&device_peer_id, true);
                         pending_nickname_resolve = None;
                         nick_hold.on_disconnected();
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
@@ -4361,6 +4366,7 @@ async fn run_event_loop(
                         if ws_room_peers.remove(&room).is_some() {
                             hollow_log!("[HOLLOW-WS] Left room {room} — purged its peer snapshot from routing");
                         }
+                        super::roster_reach::on_room_left(&device_peer_id, &room);
                     }
                     WsEvent::PeerLeft { room, peer_id } => {
                         hollow_log!("[HOLLOW-WS] Peer {peer_id} left room {room}");
@@ -4532,6 +4538,9 @@ async fn run_event_loop(
                             }
                         }
                         ws_room_peers.insert(room.clone(), room_set);
+                        super::roster_reach::on_room_listed(
+                            &ws_cmd_tx, &cmd_tx, &ws_room_peers, &device_peer_id, &room, &db_path, &db_passphrase,
+                        );
 
                         // The authoritative roster is the FIRST moment after a boot at which
                         // anyone is known to be reachable, and the relay's offline ring replays
@@ -8373,16 +8382,19 @@ async fn handle_incoming_request_inner(
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let _ = store.begin_transaction();
                         let mut pk_cache = PkCache::new();
+                        let mut events = Vec::new();
                         for msg in &messages {
-                            let (inserted, events) = super::sync_handler::ingest_synced_channel_item(
+                            let (inserted, item_events) = super::sync_handler::ingest_synced_channel_item(
                                 &store, &sid, &cid, msg, &local_peer, &mut pk_cache,
                             );
                             new_count += inserted;
-                            for ev in events {
-                                let _ = event_tx.send(ev).await;
-                            }
+                            events.extend(item_events);
                         }
                         let _ = store.commit_transaction();
+                        // After the commit: Dart re-reads the rows these name.
+                        for ev in events {
+                            let _ = event_tx.send(ev).await;
+                        }
 
                         if has_more == Some(true) {
                             match page_end {
@@ -8522,7 +8534,7 @@ async fn handle_incoming_request_inner(
                             if roster_news {
                                 super::roster_reach::on_dm(
                                     ws_cmd_tx, &store, master_peer_str, device_peer_id, peer_str, is_own_device,
-                                    &convo_peer, rd.as_ref(),
+                                    &convo_peer, ts, rd.as_ref(),
                                     &|to| social::profile_audience(server_states, master_peer_str, to, db_path, db_passphrase),
                                 );
                             }
@@ -8576,6 +8588,7 @@ async fn handle_incoming_request_inner(
                     let mut new_count = 0u32;
 
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        let mut events: Vec<NetworkEvent> = Vec::new();
                         let _ = store.begin_transaction();
                         let mut pk_cache = PkCache::new();
                         for msg in &messages {
@@ -8646,14 +8659,14 @@ async fn handle_incoming_request_inner(
                             if reconciled {
                                 hollow_log!("[HOLLOW-SYNC] reconciled dm mid={:?} into existing row", msg.mid);
                                 if let Some(mid) = &msg.mid {
-                                    let _ = event_tx.send(NetworkEvent::DmMessageEdited {
+                                    events.push(NetworkEvent::DmMessageEdited {
                                         peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
                                         new_text: msg.t.clone(),
                                         edited_at: msg.edited_at.unwrap_or(msg.ts),
                                         signature: msg.sig.clone(),
                                         public_key: msg.pk.clone(),
-                                    }).await;
+                                    });
                                 }
                             }
 
@@ -8681,14 +8694,14 @@ async fn handle_incoming_request_inner(
                                     msg.pk.as_deref(),
                                 );
                                 if edit_result.unwrap_or(false) {
-                                    let _ = event_tx.send(NetworkEvent::DmMessageEdited {
+                                    events.push(NetworkEvent::DmMessageEdited {
                                         peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
                                         new_text: msg.t.clone(),
                                         edited_at: edit_ts,
                                         signature: msg.sig.clone(),
                                         public_key: msg.pk.clone(),
-                                    }).await;
+                                    });
                                 } else {
                                     // Text already matches (pending drain delivered edited text)
                                     // but edited_at may be missing — stamp it.
@@ -8706,11 +8719,11 @@ async fn handle_incoming_request_inner(
                                     lp, msg.sig.as_deref(), msg.pk.as_deref(),
                                 )
                             {
-                                let _ = event_tx.send(NetworkEvent::DmLinkPreviewUpdated {
+                                events.push(NetworkEvent::DmLinkPreviewUpdated {
                                     peer_id: convo_peer.clone(),
                                     message_id: mid.clone(),
                                     preview: Some(lp.clone()),
-                                }).await;
+                                });
                             }
 
                             // Apply deletion if the message was hidden on the syncing peer —
@@ -8721,11 +8734,11 @@ async fn handle_incoming_request_inner(
                                     msg.hidden_sig.as_deref(), msg.hidden_pk.as_deref(),
                                     &mut pk_cache,
                                 ) {
-                                    let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
+                                    events.push(NetworkEvent::DmMessageDeleted {
                                         peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
                                         deleted_at: hidden_ts,
-                                    }).await;
+                                    });
                                 }
                             }
 
@@ -8745,7 +8758,7 @@ async fn handle_incoming_request_inner(
                                     file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime).as_deref(),
                                     fm.sha256.as_deref(),
                                 );
-                                let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
+                                events.push(NetworkEvent::FileHeaderReceived {
                                     file_id: fm.fid.clone(),
                                     file_name: fm.name.clone(),
                                     size_bytes: fm.size,
@@ -8759,7 +8772,7 @@ async fn handle_incoming_request_inner(
                                     video_thumb: fm.vthumb.clone(),
                                     share_ref: None,
                                     thumb_b64: file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime),
-                                }).await;
+                                });
                             }
 
                             if let Some(mid) = &msg.mid {
@@ -8767,6 +8780,10 @@ async fn handle_incoming_request_inner(
                             }
                         }
                         let _ = store.commit_transaction();
+                        // After the commit: Dart re-reads the rows these name.
+                        for ev in events {
+                            let _ = event_tx.send(ev).await;
+                        }
 
                         // Pagination. Carry the multi-device both-direction mode forward, or the
                         // next page reverts to is_mine=0-only and re-strands our own sends.
@@ -8819,6 +8836,7 @@ async fn handle_incoming_request_inner(
                     let mut new_count = 0u32;
 
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        let mut events: Vec<NetworkEvent> = Vec::new();
                         let _ = store.begin_transaction();
                         let mut pk_cache = PkCache::new();
                         for msg in &messages {
@@ -8874,14 +8892,14 @@ async fn handle_incoming_request_inner(
                                 ).unwrap_or(false);
                             if reconciled {
                                 if let Some(mid) = &msg.mid {
-                                    let _ = event_tx.send(NetworkEvent::DmMessageEdited {
+                                    events.push(NetworkEvent::DmMessageEdited {
                                         peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
                                         new_text: msg.t.clone(),
                                         edited_at: msg.edited_at.unwrap_or(msg.ts),
                                         signature: msg.sig.clone(),
                                         public_key: msg.pk.clone(),
-                                    }).await;
+                                    });
                                 }
                             }
 
@@ -8913,14 +8931,14 @@ async fn handle_incoming_request_inner(
                                     msg.pk.as_deref(),
                                 );
                                 if edit_result.unwrap_or(false) {
-                                    let _ = event_tx.send(NetworkEvent::DmMessageEdited {
+                                    events.push(NetworkEvent::DmMessageEdited {
                                         peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
                                         new_text: msg.t.clone(),
                                         edited_at: edit_ts,
                                         signature: msg.sig.clone(),
                                         public_key: msg.pk.clone(),
-                                    }).await;
+                                    });
                                 } else {
                                     let _ = store.set_dm_message_edited_at(mid, edit_ts);
                                 }
@@ -8936,11 +8954,11 @@ async fn handle_incoming_request_inner(
                                     lp, msg.sig.as_deref(), msg.pk.as_deref(),
                                 )
                             {
-                                let _ = event_tx.send(NetworkEvent::DmLinkPreviewUpdated {
+                                events.push(NetworkEvent::DmLinkPreviewUpdated {
                                     peer_id: convo_peer.clone(),
                                     message_id: mid.clone(),
                                     preview: Some(lp.clone()),
-                                }).await;
+                                });
                             }
 
                             // Apply deletion if hidden on the sibling — ONLY with the
@@ -8951,11 +8969,11 @@ async fn handle_incoming_request_inner(
                                     msg.hidden_sig.as_deref(), msg.hidden_pk.as_deref(),
                                     &mut pk_cache,
                                 ) {
-                                    let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
+                                    events.push(NetworkEvent::DmMessageDeleted {
                                         peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
                                         deleted_at: hidden_ts,
-                                    }).await;
+                                    });
                                 }
                             }
 
@@ -8972,7 +8990,7 @@ async fn handle_incoming_request_inner(
                                     file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime).as_deref(),
                                     fm.sha256.as_deref(),
                                 );
-                                let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
+                                events.push(NetworkEvent::FileHeaderReceived {
                                     file_id: fm.fid.clone(),
                                     file_name: fm.name.clone(),
                                     size_bytes: fm.size,
@@ -8986,7 +9004,7 @@ async fn handle_incoming_request_inner(
                                     video_thumb: fm.vthumb.clone(),
                                     share_ref: None,
                                     thumb_b64: file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime),
-                                }).await;
+                                });
                             }
 
                             if let Some(mid) = &msg.mid {
@@ -8994,6 +9012,10 @@ async fn handle_incoming_request_inner(
                             }
                         }
                         let _ = store.commit_transaction();
+                        // After the commit: Dart re-reads the rows these name.
+                        for ev in events {
+                            let _ = event_tx.send(ev).await;
+                        }
 
                         // Pagination: this convo has more, from where the page ended.
                         if has_more == Some(true) {
@@ -11211,6 +11233,12 @@ async fn handle_incoming_request_inner(
             let convo_peer = super::resolver::resolve(peer_str);
 
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                // A device its own roster removed serves no history: what it holds is for
+                // its person until the wipe, and a contact that missed the removal asks it.
+                if super::roster_book::own_removal(&store).is_some() {
+                    hollow_log!("[HOLLOW-SECURITY] Left a DmSyncRequest from {peer_str} unanswered: this device was removed");
+                    return;
+                }
                 // Multi-device peer-fallback: a multi-device requester sets
                 // `both_directions` so we re-serve the requester's OWN messages
                 // (stored here as is_mine=0) alongside ours, which are otherwise
@@ -14490,6 +14518,12 @@ async fn handle_incoming_request_inner(
 
         // -- Profile request --
         HavenMessage::ProfileRequest => {
+            if crate::storage::MessageStore::open(db_path, db_passphrase)
+                .is_ok_and(|store| super::roster_book::own_removal(&store).is_some())
+            {
+                hollow_log!("[HOLLOW-SECURITY] Left a ProfileRequest from {peer_str} unanswered: this device was removed");
+                return;
+            }
             if social::profile_audience(server_states, master_peer_str, peer_str, db_path, db_passphrase) == social::Audience::None {
                 // A co-member's device our resolver cannot place yet still gets the
                 // pull half, on the strength of its leaf in our server group.

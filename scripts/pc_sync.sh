@@ -40,7 +40,7 @@ git rev-parse --git-dir > /dev/null
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cp "$(git rev-parse --git-path index)" "$work/index"
-GIT_INDEX_FILE=$work/index git add -A -- . ':(exclude)tmp*.txt' ':(exclude).team'
+GIT_INDEX_FILE=$work/index git add -A -- . ':(exclude)tmp*.txt' ':(exclude).team' ':(exclude)target'
 tree=$(GIT_INDEX_FILE=$work/index git write-tree)
 export_git() { git -c core.autocrlf=false -c core.eol=lf "$@"; }
 

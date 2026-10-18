@@ -2114,9 +2114,11 @@ async fn a_login_after_a_refusal_clears_it() {
 /// be a new address), and only one until a login succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_a_refusal_one_network_change_retries_at_once() {
+    // The ladder's full jitter can draw any wait down to zero: a long base keeps its own
+    // dials out of the counts, which measure only what the network changes dial.
     let t = Timing {
-        backoff_base: Duration::from_secs(2),
-        backoff_cap: Duration::from_secs(4),
+        backoff_base: Duration::from_secs(30),
+        backoff_cap: Duration::from_secs(60),
         resume_backoff_cap: Duration::from_millis(100),
         nudge_quiet: Duration::from_millis(50),
         ..quick()
@@ -2124,17 +2126,20 @@ async fn after_a_refusal_one_network_change_retries_at_once() {
     let ms = Duration::from_millis;
     let relay = FakeRelay::start(true).await;
     relay.with(|r| r.refuse_auth = true);
-    let c = spawn_client(&relay.url(), t);
+    let c = spawn_client(&relay.url(), t.clone());
     relay.wait("the first refusal", T, |r| r.auths_seen >= 1).await;
     tokio::time::sleep(ms(300)).await;
     let network = || {
         let _ = c.ctl.send(Control::Nudge { reason: "network".into(), external: true });
     };
-    let before = relay.with(|r| r.tcp_accepts);
+    let nudged = Instant::now();
     network();
     tokio::time::sleep(ms(300)).await;
-    let after_first = relay.with(|r| r.tcp_accepts);
-    assert!(after_first > before, "the first network change after a refusal dials at once");
+    // A connect younger than the quiet window stands for the nudge (nudges coalesce).
+    let (after_first, dialled) = relay.with(|r| {
+        (r.tcp_accepts, r.accept_times.iter().any(|at| *at + t.nudge_quiet >= nudged))
+    });
+    assert!(dialled, "the first network change after a refusal dials at once");
     for _ in 0..20 {
         network();
         tokio::time::sleep(ms(100)).await;

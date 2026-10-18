@@ -1751,11 +1751,14 @@ pub(crate) const PROTECTION_OFFER_DUE: &str = "protection_offer_due";
 // program holds, so the move aside also proves nothing holds the old set.
 
 /// Everything that belongs to one identity. The database goes first: it is the file
-/// another program may hold, and nothing else has moved when it refuses.
-const IDENTITY_SET: [&str; 5] = [
+/// another program may hold, and nothing else has moved when it refuses. A snapshot
+/// never carries a duress slot, so the old one leaves with its identity: a code set
+/// for it must never fire beside the identity that replaced it.
+const IDENTITY_SET: [&str; 6] = [
     "messages.db",
     "messages.db-wal",
     "messages.db-shm",
+    "identity.duress",
     "identity.device",
     "identity.key",
 ];
@@ -2117,10 +2120,14 @@ fn land_snapshot(snapshot: CheckedSnapshot<'_>, device: Option<&[u8]>) -> Result
     let aside = data_dir.join(LANDING_ASIDE);
     let deadline = std::time::Instant::now() + HELD_FILE_WAIT;
     let flag = LandingFlag::raise();
+    // A key write (a duress code set, a lock changed) between the move aside and the
+    // commit would land beside the wrong identity: every key write holds this lock.
+    let key_writes = crate::identity::encryption::key_file_lock();
     let swapped = set_aside_old_set(&data_dir, &aside, deadline)
         .and_then(|()| commit_new_set(&data_dir, &stage));
     if let Err(e) = swapped {
         let undone = roll_back_landing(&data_dir, &aside);
+        drop(key_writes);
         drop(flag);
         let _ = remove_landing_dir(&stage);
         return Err(match undone {
@@ -2128,6 +2135,7 @@ fn land_snapshot(snapshot: CheckedSnapshot<'_>, device: Option<&[u8]>) -> Result
             Err(u) => format!("{e}; the old identity is not back yet ({u})"),
         });
     }
+    drop(key_writes);
     drop(flag);
 
     crate::log::init();
@@ -5410,5 +5418,65 @@ mod landing_tests {
         assert_eq!(pair_in_root().as_deref(), Ok("source"));
         let store = MessageStore::open(root.join("messages.db").to_str().unwrap(), &pass).unwrap();
         assert_eq!(store.load_olm_account().unwrap(), None, "the source's account landed");
+    }
+
+    /// A landing replaces the identity a duress slot was made for. The slot goes with
+    /// the old set, zeroed, so a code meant for the old identity can never fire beside
+    /// the new one; a landing that fails puts it back with the old pair.
+    #[test]
+    fn a_landing_drops_the_old_duress_slot() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let code = "5d".repeat(32);
+        let blob = link_blob(tmp.path(), 0x96, &code);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x97, "throwaway");
+        let slot = root.join("identity.duress");
+        std::fs::write(&slot, [0xa5u8; 96]).unwrap();
+        let device = NativeKeypair::from_secret_bytes(&[0x98; 32]).to_protobuf_encoding().unwrap();
+
+        *FAIL_COMMIT_AT.lock().unwrap() = Some("messages.db");
+        stash_pending_link(&blob, &code, &device).unwrap();
+        assert!(import_pending_link().is_err());
+        *FAIL_COMMIT_AT.lock().unwrap() = None;
+        assert_eq!(pair_in_root().as_deref(), Ok("throwaway"));
+        assert_eq!(std::fs::read(&slot).ok(), Some(vec![0xa5u8; 96]), "a failed landing lost the old identity's duress slot");
+
+        // A second name for the slot's bytes shows whether they were zeroed before the unlink.
+        let peek = tmp.path().join("peek");
+        std::fs::hard_link(&slot, &peek).unwrap();
+        stash_pending_link(&blob, &code, &device).unwrap();
+        import_pending_link().unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("linked"));
+        assert!(!present(&slot), "the replaced identity's duress slot stayed beside the landed one");
+        assert!(std::fs::read(&peek).unwrap().iter().all(|b| *b == 0), "the old duress slot was unlinked unzeroed");
+    }
+
+    /// A landing moves the key files only while no key write is in flight: a write
+    /// between the move aside and the commit would land beside the wrong identity.
+    #[test]
+    fn a_landing_waits_for_a_key_write_in_flight() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        identity_in(&tmp.path().join("source"), 0x99, "linked");
+        let snapshot = build_snapshot_bytes(false, false).unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0x9a, "throwaway");
+        let before = std::fs::read(root.join("identity.key")).unwrap();
+
+        let held = crate::identity::encryption::key_file_lock();
+        let landing = std::thread::spawn(move || import_snapshot_bytes(&snapshot));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !landing_in_progress() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(landing_in_progress(), "the landing never reached its swap");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(std::fs::read(root.join("identity.key")).ok(), Some(before), "the landing moved keys under a key write");
+        drop(held);
+        landing.join().unwrap().unwrap();
+        assert_eq!(pair_in_root().as_deref(), Ok("linked"));
     }
 }

@@ -71,6 +71,8 @@ mod kill_vectors;
 #[cfg(test)]
 mod resume_e2e;
 #[cfg(test)]
+mod store_open_floor;
+#[cfg(test)]
 mod test_harness;
 
 pub(crate) use crdt_store::CrdtStore;

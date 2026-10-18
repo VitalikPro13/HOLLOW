@@ -279,9 +279,7 @@ Future<void> changeAppLockSecret({
       identity_api.changePassword(oldPassword: current, newPassword: next));
   final appLock = AppLockService();
   appLock.sessionSecret = next;
-  if (await appLock.hasLaunchSecret()) {
-    await appLock.storeLaunchSecret(next);
-  }
+  await appLock.followSecretChange(next);
   // The biometric releases the secret it holds, so it follows the change.
   if (await appLock.isBiometricEnabled()) {
     await appLock.enableBiometric(next);
@@ -496,6 +494,10 @@ class _SecurityAppLockSectionState
   bool _hasLaunchSecret = false;
   bool _protectionLoading = true;
 
+  /// False on a computer whose profile lives outside the OS's own data folder:
+  /// nothing keeps the secret there, so Hollow always asks before it starts.
+  bool _launchSecretAllowed = true;
+
   /// Windows or macOS on the OS's own data root: where locking the identity to
   /// this computer's keychain is offered at all.
   bool _keychainEligible = false;
@@ -518,6 +520,11 @@ class _SecurityAppLockSectionState
   /// a silent start.
   bool get _askBeforeStart => !_hasOsKeychain && !_hasLaunchSecret;
 
+  /// Nothing here may hold the secret for a silent start. A password key an
+  /// older build cached in the keychain still can, until the person turns the
+  /// prompt on.
+  bool get _askForced => !_launchSecretAllowed && !_hasOsKeychain;
+
   @override
   void initState() {
     super.initState();
@@ -529,6 +536,7 @@ class _SecurityAppLockSectionState
       final status = await identity_api.getIdentityProtectionStatus();
       final appLock = AppLockService();
       final launchSecret = await appLock.hasLaunchSecret();
+      final launchSecretAllowed = _phone || appLock.launchSecretAllowed;
       var keychainEligible = false;
       if (!_phone) {
         try {
@@ -550,6 +558,7 @@ class _SecurityAppLockSectionState
         _hasPassword = status.hasPassword;
         _hasOsKeychain = status.hasOsKeychain;
         _hasLaunchSecret = launchSecret;
+        _launchSecretAllowed = launchSecretAllowed;
         _keychainEligible = keychainEligible;
         _protectionLoading = false;
         _protectionFailed = false;
@@ -939,9 +948,13 @@ class _SecurityAppLockSectionState
         AppLockCard(hasPassword: _hasPassword),
         SettingsSwitchRow(
           title: 'Ask before Hollow starts',
-          subtitle: 'Hollow stays offline until you type the $_secretWord',
+          subtitle: _askForced
+              ? "Always on, since this profile isn't in Hollow's usual "
+                  'folder. Hollow stays offline until you type the '
+                  '$_secretWord'
+              : 'Hollow stays offline until you type the $_secretWord',
           value: _askBeforeStart,
-          onChanged: _toggleRequireOnLaunch,
+          onChanged: _askForced ? null : _toggleRequireOnLaunch,
         ),
       ];
 }

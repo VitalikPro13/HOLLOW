@@ -753,13 +753,19 @@ fn in_use(dir: &Path) -> bool {
     crate::identity::data_dir().is_ok_and(|root| same_folder(&root, dir)) || instance_lock_held(dir)
 }
 
+/// The folder name a path ends in, however it was written.
+fn last_component(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("")
+}
+
 /// Every folder a relink kept aside from `root`, at any depth: a `<root>-old-<day>`
-/// sibling whose origin mark names `root`, then what was kept aside from that. A
-/// folder some profile runs in is a live profile now, so it and what it kept stay.
+/// sibling whose origin mark names a folder of `root`'s name, then what was kept
+/// aside from that. The mark's path is not compared whole: a root's path can move
+/// (an iOS container) with its kept folders beside it. A folder some profile runs in
+/// is a live profile now, so it and what it kept stay.
 fn kept_aside_of(root: &Path, out: &mut Vec<PathBuf>) {
     let (Some(parent), Some(base)) = (root.parent(), root.file_name()) else { return };
     let base = base.to_string_lossy().into_owned();
-    let root_text = root.to_string_lossy().into_owned();
     for entry in std::fs::read_dir(parent).into_iter().flatten().flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -769,12 +775,41 @@ fn kept_aside_of(root: &Path, out: &mut Vec<PathBuf>) {
         let origin = std::fs::read(path.join(RELINK_ORIGIN))
             .ok()
             .and_then(|b| serde_json::from_slice::<Origin>(&b).ok());
-        if !origin.is_some_and(|o| same_path(&o.root, &root_text)) || in_use(&path) {
+        if !origin.is_some_and(|o| same_path(last_component(&o.root), &base)) || in_use(&path) {
             continue;
         }
         kept_aside_of(&path, out);
         out.push(path);
     }
+}
+
+/// Every `<root>-old-<day>` folder beside `root`, at any depth, marked or not and
+/// whatever its mark says: what a sweep of keys must keep. `None` when a folder or a
+/// mark could not be read, so nothing can tell what is spare.
+pub(crate) fn kept_named(root: &Path) -> Option<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    kept_named_of(root, &mut out)?;
+    Some(out)
+}
+
+fn kept_named_of(root: &Path, out: &mut Vec<PathBuf>) -> Option<()> {
+    let (parent, base) = (root.parent()?, root.file_name()?.to_string_lossy().into_owned());
+    for entry in std::fs::read_dir(parent).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_kept_name(&name, &base) || !entry.file_type().ok()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::read(path.join(RELINK_ORIGIN)) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+        kept_named_of(&path, out)?;
+        out.push(path);
+    }
+    Some(())
 }
 
 /// A relink cut short between making its folder and marking it leaves an unmarked
@@ -1720,6 +1755,18 @@ mod tests {
         let origin = serde_json::to_vec(&Origin { root: origin.to_string_lossy().into() }).unwrap();
         put(&dir.join(RELINK_ORIGIN), &origin);
         dir
+    }
+
+    /// The origin mark is an absolute path, and a root whose path moved (an iOS
+    /// container) still finds its kept old data by the folder's own name.
+    #[test]
+    fn a_destroy_after_the_root_path_moved_still_erases_kept_old_data() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        root_with(&root, 0x44, 0x44, "ours");
+        let mine = kept(tmp.path(), "data-old-2025-10-10", &tmp.path().join("OLD-CONTAINER").join("data"));
+        let erased = erase_kept_aside(&root);
+        assert!(!mine.join("identity.key").exists(), "old data kept aside outlived the destroy ({} erased)", erased.len());
     }
 
     #[test]

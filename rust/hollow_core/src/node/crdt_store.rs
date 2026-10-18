@@ -89,7 +89,8 @@ impl CrdtStore {
                 // `begin_transaction` is BEGIN IMMEDIATE, a RESERVED write lock,
                 // and on iOS the DB is in the App Group container where being
                 // suspended holding a lock is what RunningBoard kills the process
-                // for (EXC_CRASH 0xdead10cc). An all-read batch opens none.
+                // for (EXC_CRASH 0xdead10cc). An all-read batch opens none. A read
+                // commits the writes queued before it first, so it sees them.
                 let mut writes = Vec::new();
                 let mut barriers = Vec::new();
                 let mut queued = Some(cmd);
@@ -97,6 +98,15 @@ impl CrdtStore {
                     let Some(cmd) = queued.take().or_else(|| cmd_rx.try_recv().ok()) else {
                         break;
                     };
+                    let is_read = matches!(
+                        cmd,
+                        CrdtStoreCmd::ChannelWatermarks { .. }
+                            | CrdtStoreCmd::ChannelAuthors { .. }
+                            | CrdtStoreCmd::LoadPendingJoin { .. }
+                    );
+                    if is_read && !writes.is_empty() {
+                        Self::flush(&store, std::mem::take(&mut writes), &mut pending_states, &mut pending_blobs);
+                    }
                     match cmd {
                         CrdtStoreCmd::ChannelWatermarks { server_id, channel_ids, reply } => {
                             let mut out: HashMap<String, i64> = HashMap::new();
@@ -126,42 +136,9 @@ impl CrdtStore {
                         other => writes.push(other),
                     }
                 }
-                if writes.is_empty() {
-                    for done in barriers {
-                        let _ = done.send(());
-                    }
-                    continue;
+                if !writes.is_empty() {
+                    Self::flush(&store, writes, &mut pending_states, &mut pending_blobs);
                 }
-
-                let _ = store.begin_transaction();
-
-                for cmd in writes {
-                    Self::process_cmd(&store, cmd, &mut pending_states, &mut pending_blobs);
-                }
-
-                // One write per server; snapshots serialize HERE, on this thread.
-                for (sid, pending) in pending_states.drain() {
-                    let json = match pending {
-                        PendingState::Json(j) => j,
-                        PendingState::Snapshot(s) => match serde_json::to_string(&*s) {
-                            Ok(j) => j,
-                            Err(e) => {
-                                hollow_log!("CrdtStore: failed to serialize state for {sid}: {e}");
-                                continue;
-                            }
-                        },
-                    };
-                    if let Err(e) = store.save_server_state(&sid, &json) {
-                        hollow_log!("CrdtStore: failed to save state for {sid}: {e}");
-                    }
-                }
-                for ((sid, key), value) in pending_blobs.drain() {
-                    if let Err(e) = store.save_server_blob(&sid, &key, &value) {
-                        hollow_log!("CrdtStore: failed to save blob {key} for {sid}: {e}");
-                    }
-                }
-
-                let _ = store.commit_transaction();
                 for done in barriers {
                     let _ = done.send(());
                 }
@@ -169,6 +146,43 @@ impl CrdtStore {
         });
 
         Ok(CrdtStore { cmd_tx })
+    }
+
+    /// Apply `writes` in one transaction, one state and blob write per server.
+    fn flush(
+        store: &MessageStore,
+        writes: Vec<CrdtStoreCmd>,
+        pending_states: &mut HashMap<String, PendingState>,
+        pending_blobs: &mut HashMap<(String, String), String>,
+    ) {
+        let _ = store.begin_transaction();
+
+        for cmd in writes {
+            Self::process_cmd(store, cmd, pending_states, pending_blobs);
+        }
+
+        // One write per server; snapshots serialize HERE, on this thread.
+        for (sid, pending) in pending_states.drain() {
+            let json = match pending {
+                PendingState::Json(j) => j,
+                PendingState::Snapshot(s) => match serde_json::to_string(&*s) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        hollow_log!("CrdtStore: failed to serialize state for {sid}: {e}");
+                        continue;
+                    }
+                },
+            };
+            if let Err(e) = store.save_server_state(&sid, &json) {
+                hollow_log!("CrdtStore: failed to save state for {sid}: {e}");
+            }
+        }
+        for ((sid, key), value) in pending_blobs.drain() {
+            if let Err(e) = store.save_server_blob(&sid, &key, &value) {
+                hollow_log!("CrdtStore: failed to save blob {key} for {sid}: {e}");
+            }
+        }
+        let _ = store.commit_transaction();
     }
 
     fn process_cmd(
@@ -503,6 +517,31 @@ mod tests {
         actor.committed().await;
         assert_eq!(direct.load_server_blob("gone", "crdt_resync").unwrap(), None, "a blob outlived its server's delete");
         assert!(direct.load_server_blob("kept", "crdt_resync").unwrap().is_some(), "another server's blob went with it");
+    }
+
+
+    /// A read queued after a write sees that write: "Request again" right after the
+    /// row changed must not re-ask with the row as it was.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pending_join_read_sees_the_upsert_queued_before_it() {
+        let (_dir, actor, _direct, read) = busy_actor(20_000).await;
+        actor.upsert_pending_join(crate::storage::messages::PendingJoinRow {
+            server_id: "srv".into(),
+            requested_at: 1,
+            nsfw_confirmed: false,
+            twitch_proof_json: None,
+            state: "pending".into(),
+            reason: String::new(),
+            last_deposited_at: 0,
+            created_at: 1,
+            key_package: None,
+            owner_pin: None,
+            join_key: Some("k".into()),
+            reply_secret: None,
+        });
+        let row = actor.load_pending_join("srv".into()).await;
+        let _ = read.await;
+        assert!(row.is_some(), "the read was answered before the upsert queued ahead of it");
     }
 
     /// Server rows have ONE writer, this actor: a direct write on another connection

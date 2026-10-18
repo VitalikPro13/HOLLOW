@@ -1243,6 +1243,7 @@ host (other agents and SSH ride them).
 | foreground | restore without activating, bottom of the z-order + probe `lifecycle resumed` | `simctl launch <udid> com.anonlisten.hollow` (same pid, else it fails) | `am start -n .../.MainActivity`, BACK once if the battery prompt is on top |
 | pause / resume | `NtSuspendProcess` / `NtResumeProcess` on the peer's pid | `kill -STOP` / `-CONT` (sim pids are host pids) | `run-as ... kill -STOP` / `-CONT` |
 | net_off / net_on | zombie proxy route (needs the client's connect override) | zombie proxy route (same) | `svc wifi` + `svc data` disable / enable |
+| kill | refuses | refuses | `am kill` (background first): the OS dropping an app; FCM still wakes it, `am force-stop` would block every push. Back with `fleet.ps1 -Live -ReuseData` |
 
 Linux and the macOS desktop: pause/resume (`kill`) and the proxy route only; background/foreground refuse.
 
@@ -1483,3 +1484,32 @@ FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Stop -Peers e,windo
 | the same with nothing changed | 0:58 wall (Mac 0:28, the PC 0:13 later) |
 | `-Onboard -Fresh -Peers e,windows:f`, both at once | 0:42 / 0:43 |
 | `friend_dm -Peers a=e,b=windows:f` | 0:51 wall, steps 0:32 / 0:33 (twice) |
+
+## A removal reaching a phone woken by push (`roster_push`, AR-29, 2026-10-18)
+
+`fleet_link_matrix.ps1 -Condition roster_push -Presenter windows:t -Receiver android:s -Friend
+android:r [-FriendDmOffline] [-DeadSeconds 150]` proves the phone half of AR-29 after a normal
+link: the friend (Android only) goes HOME, is `kill`ed and stays dead past the relay's 120 s
+session grace; the presenter removes the receiver in Settings > Devices and DMs the friend,
+whose push fetch stores it (P2 checks every logcat `FCM data fields` line is only
+`{sealed: N}`); the friend reopens (`-Live -ReuseData`) and DMs the identity at once. PASS =
+the presenter gets it and the removed receiver neither shows it nor appears in the friend's
+`[HOLLOW-DM] Held DM fan-out to` / `Sent encrypted DM to offline` lines after the reopen
+(`F-sends-to-removed.txt`). `-FriendDmOffline` reopens with `net_off`, writes the DM before
+any relay session exists and turns the network back after 5 s: the earliest a person can send.
+`F-roster-path.txt` stamps the connect, the DM and the moment the open app learned the removal.
+
+- **The removed receiver's app hides what it gets.** Its honest app may never show a DM it
+  could decrypt, so a gate on its screen alone proves nothing: the sender's own log is the
+  gate (why `[HOLLOW-DM] Held DM fan-out to` exists: logged only when a DM a stale roster
+  held goes out, so an online receiver's copy shows; a DM never held reached nobody the
+  friend knew to be removed).
+- **Emulator clocks drift.** hollow-s ran 57 s behind the mini (2026-10-18); its log stamps and
+  logcat are in its own time. Compare by `adb shell date` before reading two devices' logs side by side.
+- **Run it with the presenter on the PC**: a `windows:` peer through the agent. The agent server
+  is Windows PowerShell 5.1, whose `ConvertTo-Json -Depth 24` walks the PSProvider note
+  properties `Get-Content` puts on each line and never finishes: `log_grep` must return plain
+  strings (`Get-PeerLogMatches` casts them). The hung server keeps `agent-pc-win.err` open, so
+  every reconnect after it fails on that lock: kill the server by the pid in
+  `.team\agent-pc-win\pid`.
+- Measured: about 11 min a cell (dead 150 s, fetch wait, 45 s absence window).

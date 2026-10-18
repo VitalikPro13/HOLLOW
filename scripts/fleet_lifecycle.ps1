@@ -25,6 +25,11 @@
 # | resume     | NtResumeProcess             | kill -CONT                | run-as kill -CONT             | kill -CONT        |
 # | net_off    | zombie proxy: freeze route  | zombie proxy: freeze      | svc wifi + svc data disable   | zombie proxy      |
 # | net_on     | zombie proxy: thaw or drop  | zombie proxy: thaw / drop | svc wifi + svc data enable    | zombie proxy      |
+# | kill       | not supported               | not supported             | am kill (background only)     | not supported     |
+#
+# `kill` is the OS dropping a backgrounded app: the process dies but the app is not
+# stopped, so FCM still wakes it (`am force-stop` would block every push). Send
+# `background` first; bring the peer back with `fleet.ps1 -Live -ReuseData`.
 #
 # Windows never activates a fleet window: an activation hands the person at this
 # machine's keyboard to the probe (wiki fleet_probe, "The probe never takes the
@@ -42,7 +47,7 @@
 # have yet (see Start-FleetProxy); until it does, net_off refuses with the reason
 # instead of silently cutting nothing.
 
-$script:FleetHostOps = @('background', 'foreground', 'pause', 'resume', 'net_off', 'net_on')
+$script:FleetHostOps = @('background', 'foreground', 'pause', 'resume', 'net_off', 'net_on', 'kill')
 # What each peer was last sent to, for reports and for Restore-FleetPeer.
 $script:FleetPeerAway = @{}
 
@@ -251,6 +256,14 @@ function Invoke-AndroidLifecycle($peer, $proc, $op) {
             Invoke-Adb $peer 'shell' 'svc wifi enable; svc data enable' | Out-Null
             return 'emulator Wi-Fi and mobile data on'
         }
+        'kill' {
+            if ((Get-AndroidTop $peer) -match [regex]::Escape("$package/")) { throw 'Hollow is on top: send background first' }
+            Invoke-Adb $peer 'shell' "am kill $package" | Out-Null
+            if (-not (Wait-Condition { -not (Get-AndroidAppPid $peer) } 10 250)) {
+                throw "pid $($proc.Id) still runs after am kill"
+            }
+            return "am kill: pid $($proc.Id) is gone, the app is not stopped"
+        }
     }
     throw "no $op on Android"
 }
@@ -423,6 +436,7 @@ function Invoke-FleetHostOp($peer, $step) {
         'resume' { $away.Remove('paused') }
         'net_off' { $away['net_off'] = $true }
         'net_on' { $away.Remove('net_off') }
+        'kill' { $away.Remove('background'); $away['killed'] = $true }
     }
     return (New-HostAnswer $op $true $message $started)
 }

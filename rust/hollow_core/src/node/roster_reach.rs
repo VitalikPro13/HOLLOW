@@ -74,10 +74,21 @@ fn jitter_range() -> (u64, u64) {
     MISMATCH_JITTER_MS
 }
 
-/// The harness waits for these, so they stay short there.
+/// The harness waits for these, so they stay short there unless a test sets them.
+#[cfg(test)]
+static TEST_JITTER: Mutex<Option<(u64, u64)>> = Mutex::new(None);
+
 #[cfg(test)]
 fn jitter_range() -> (u64, u64) {
-    (20, 200)
+    TEST_JITTER.lock().ok().and_then(|j| *j).unwrap_or((20, 200))
+}
+
+/// A test that needs the trade's real delay sets it; `clear_for_test` resets it.
+#[cfg(test)]
+pub(crate) fn set_jitter_for_test(range: (u64, u64)) {
+    if let Ok(mut j) = TEST_JITTER.lock() {
+        *j = Some(range);
+    }
 }
 
 fn pick_jitter((lo, hi): (u64, u64), random: u64) -> Duration {
@@ -147,6 +158,19 @@ pub(crate) fn stamp(store: &MessageStore, master: &str, device: &str) {
     let _ = store.stamp_roster_confirmed(master, device, super::roster_book::now_ms());
 }
 
+/// A DM `device` sent at `sent_ms` showed us `master`'s roster and we hold all of it.
+/// A DM sent before one that showed a difference confirms nothing.
+fn stamp_from_dm(store: &MessageStore, master: &str, device: &str, sent_ms: i64) {
+    let _ = store.stamp_roster_confirmed_by_dm(master, device, super::roster_book::now_ms(), sent_ms);
+}
+
+/// A DM `device` of `master` sent at `sent_ms` showed a roster we do not hold: until
+/// it answers, the next DM to `master` waits for it (`hold_for_stale_roster`), else
+/// that DM could reach a device the roster it showed has removed.
+fn unconfirm(store: &MessageStore, master: &str, device: &str, sent_ms: i64) {
+    let _ = store.unconfirm_roster(master, device, sent_ms);
+}
+
 /// How one device's confirmation of our view of its roster stands.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Slot {
@@ -187,7 +211,7 @@ pub(crate) fn may_answer(
 }
 
 /// A verified DM from `sender` (never a removed device: the DM arm drops those) that
-/// we had not read before carried `rd`. `own` is about the identity the sender belongs
+/// we had not read before, signed as sent at `sent_ms`, carried `rd`. `own` is about the identity the sender belongs
 /// to, `peer` about ours (on an echo from our own sibling, about the friend
 /// `convo_peer`). A match on `own` confirms the sender's own slot; a mismatch either
 /// way asks the sender for its view.
@@ -200,6 +224,7 @@ pub(crate) fn on_dm(
     sender: &str,
     is_own_device: bool,
     convo_peer: &str,
+    sent_ms: i64,
     rd: Option<&RosterDigests>,
     audience: &dyn Fn(&str) -> Audience,
 ) {
@@ -211,8 +236,11 @@ pub(crate) fn on_dm(
     let (own_subject, peer_subject) = if is_own_device { (local_master, convo_peer) } else { (convo_peer, local_master) };
     let now = super::roster_book::now_ms();
     match judge(held_digest(store, own_subject).as_deref(), rd.own.as_deref()) {
-        Seen::Same if !is_own_device => stamp(store, own_subject, sender),
+        Seen::Same if !is_own_device => stamp_from_dm(store, own_subject, sender, sent_ms),
         Seen::Differs => {
+            if !is_own_device {
+                unconfirm(store, own_subject, sender, sent_ms);
+            }
             mismatch_ask(ws_cmd_tx, store, local_master, local_device, own_subject, sender, now, audience);
         }
         _ => {}
@@ -269,7 +297,10 @@ pub(crate) fn answer(
         return;
     }
     let now = super::roster_book::now_ms();
-    if !pass_gate(format!("{local_device}|answer|{asker}|{subject}"), ROSTER_ANSWER_GAP_MS, now) {
+    // A waiting ask has its own gate: an answer still sitting out its jitter must not
+    // leave a held DM to run out first.
+    let kind = if waiting { "answer-waiting" } else { "answer" };
+    if !pass_gate(format!("{local_device}|{kind}|{asker}|{subject}"), ROSTER_ANSWER_GAP_MS, now) {
         return;
     }
     let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
@@ -284,17 +315,26 @@ pub(crate) fn answer(
 
 // -- The push fetch: it never talks back, so what it cannot do waits for the node --
 
-/// A DM the push fetch read carried `rd`: stamp the sender's slot on a match, and note
-/// an ask for the node to send on a mismatch. The fetch never reads our own echoes.
-pub(crate) fn fetch_on_dm(store: &MessageStore, local_master: &str, sender: &str, convo: &str, rd: Option<&RosterDigests>) {
+/// A DM the push fetch read, signed as sent at `sent_ms`, carried `rd`: stamp the
+/// sender's slot on a match, and note an ask for the node to send on a mismatch. The
+/// fetch never reads our own echoes.
+pub(crate) fn fetch_on_dm(
+    store: &MessageStore,
+    local_master: &str,
+    sender: &str,
+    convo: &str,
+    sent_ms: i64,
+    rd: Option<&RosterDigests>,
+) {
     let Some(rd) = rd else { return };
     if !super::resolver::is_device_of(sender, convo) {
         return;
     }
     let now = super::roster_book::now_ms();
     match judge(held_digest(store, convo).as_deref(), rd.own.as_deref()) {
-        Seen::Same => stamp(store, convo, sender),
+        Seen::Same => stamp_from_dm(store, convo, sender, sent_ms),
         Seen::Differs => {
+            unconfirm(store, convo, sender, sent_ms);
             let _ = store.add_roster_ask_due(convo, sender, now, ASKS_DUE_CAP);
         }
         Seen::Unknown => {}
@@ -354,6 +394,16 @@ struct Hold {
     /// Devices asked that are online, so may answer within the hold.
     waiting: HashSet<String>,
     queue: Vec<HeldDm>,
+    /// Set while the relay has not listed the DM room this session: the asks wait for
+    /// the listing, and the hold's clock with them.
+    unplaced: Option<Unplaced>,
+}
+
+struct Unplaced {
+    /// Tells this wait from a later one under the same key.
+    id: u64,
+    dm_room: String,
+    asks: Vec<String>,
 }
 
 /// Holds by `"{our device}|{master}"`.
@@ -361,6 +411,34 @@ static HOLDS: OnceLock<Mutex<HashMap<String, Hold>>> = OnceLock::new();
 
 fn holds() -> std::sync::MutexGuard<'static, HashMap<String, Hold>> {
     HOLDS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Our relay session as the hold sees it.
+#[derive(Default)]
+struct Session {
+    up: bool,
+    /// Moves with every session that comes up, so a backstop armed for an earlier one
+    /// leaves the wait to the backstop the new one arms.
+    epoch: u64,
+    /// Rooms the relay listed (RoomMembers) this session. A room whose last peer left
+    /// stays: `ws_room_peers` drops it, but its presence is still known.
+    listed: HashSet<String>,
+}
+
+/// Sessions by our device id.
+static SESSIONS: OnceLock<Mutex<HashMap<String, Session>>> = OnceLock::new();
+
+fn sessions() -> std::sync::MutexGuard<'static, HashMap<String, Session>> {
+    SESSIONS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn listed(local_device: &str, room: &str) -> bool {
+    sessions().get(local_device).is_some_and(|s| s.listed.contains(room))
+}
+
+fn next_wait_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether the fan-out goes now or was kept back.
@@ -410,22 +488,56 @@ pub(crate) fn hold_for_stale_roster(
     if asks.is_empty() {
         return Gate::Go;
     }
-    // Loaded only now: a load verifies every statement again.
-    let Some(roster) = super::roster_book::load(&store, master) else { return Gate::Go };
-    hollow_log!("[HOLLOW-ROSTER] {master}'s roster went unconfirmed too long: asking {} device(s) before the DM", asks.len());
-    let msg = HavenMessage::RosterSync { roster, reply: true, waiting: true };
-    for device in &asks {
-        let _ = store.mark_roster_expiry_asked(master, device, now);
-        olm_lane::carry(ws_cmd_tx, device, Some(dm_room), &msg, NoSession::Queue);
+    // Before the relay lists the DM room this session, a DM would go out the moment
+    // the socket opens, ahead of any answer: it waits for the listing
+    // (`on_room_listed`), or DM_HOLD_MAX_MS of a session that never lists it.
+    if !listed(local_device, dm_room) {
+        hollow_log!("[HOLLOW-ROSTER] {master}'s roster is unconfirmed and the DM room is not listed yet: holding the DM");
+        let id = next_wait_id();
+        let unplaced = Unplaced { id, dm_room: dm_room.to_string(), asks };
+        holds().insert(key.clone(), Hold { waiting: HashSet::new(), queue: vec![dm()], unplaced: Some(unplaced) });
+        let epoch = sessions().get(local_device).filter(|s| s.up).map(|s| s.epoch);
+        if let Some(epoch) = epoch {
+            arm_backstop(ws_cmd_tx, cmd_tx, local_device, key, id, epoch, db_path, db_passphrase);
+        }
+        return Gate::Held;
     }
-    let waiting: HashSet<String> = asks
-        .into_iter()
-        .filter(|d| super::crypto_handler::ws_room_for_peer(ws_room_peers, d).is_some())
-        .collect();
+    hollow_log!("[HOLLOW-ROSTER] {master}'s roster is unconfirmed: asking {} device(s) before the DM", asks.len());
+    send_asks(ws_cmd_tx, &store, master, &asks, dm_room, now);
+    let waiting = online(ws_room_peers, &asks);
     if waiting.is_empty() {
         return Gate::Go;
     }
-    holds().insert(key.clone(), Hold { waiting, queue: vec![dm()] });
+    holds().insert(key.clone(), Hold { waiting, queue: vec![dm()], unplaced: None });
+    run_hold(key, master, cmd_tx);
+    Gate::Held
+}
+
+/// Ask each of `asks` for `master`'s roster for a waiting DM. Each is marked asked
+/// even when the roster no longer loads, so a released DM never waits again.
+fn send_asks(ws_cmd_tx: &WsCmdTx, store: &MessageStore, master: &str, asks: &[String], dm_room: &str, now: i64) {
+    for device in asks {
+        let _ = store.mark_roster_expiry_asked(master, device, now);
+    }
+    // Loaded only now: a load verifies every statement again.
+    let Some(roster) = super::roster_book::load(store, master) else { return };
+    let msg = HavenMessage::RosterSync { roster, reply: true, waiting: true };
+    for device in asks {
+        olm_lane::carry(ws_cmd_tx, device, Some(dm_room), &msg, NoSession::Queue);
+    }
+}
+
+/// The ones of `asks` that are online, so may answer within the hold.
+fn online(ws_room_peers: &WsRoomPeers, asks: &[String]) -> HashSet<String> {
+    asks.iter()
+        .filter(|d| super::crypto_handler::ws_room_for_peer(ws_room_peers, d).is_some())
+        .cloned()
+        .collect()
+}
+
+/// Release the hold `key` once every device it waits on answered, or after
+/// [`DM_HOLD_MAX_MS`].
+fn run_hold(key: String, master: &str, cmd_tx: &tokio::sync::mpsc::Sender<NodeCommand>) {
     let (cmd_tx, master) = (cmd_tx.clone(), master.to_string());
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(DM_HOLD_MAX_MS as u64);
@@ -441,7 +553,126 @@ pub(crate) fn hold_for_stale_roster(
         }
         let _ = cmd_tx.send(NodeCommand::ReleaseHeldDms { master }).await;
     });
-    Gate::Held
+}
+
+/// A session up for [`DM_HOLD_MAX_MS`] that never listed the DM room the wait `id`
+/// is for: send its asks and the DM, which then waits no more.
+#[allow(clippy::too_many_arguments)]
+fn arm_backstop(
+    ws_cmd_tx: &WsCmdTx,
+    cmd_tx: &tokio::sync::mpsc::Sender<NodeCommand>,
+    local_device: &str,
+    key: String,
+    id: u64,
+    epoch: u64,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+    let (ws_cmd_tx, cmd_tx) = (ws_cmd_tx.clone(), cmd_tx.clone());
+    let (local_device, db_path, db_passphrase) = (local_device.to_string(), db_path.to_string(), db_passphrase.to_string());
+    rt.spawn(async move {
+        tokio::time::sleep(Duration::from_millis(DM_HOLD_MAX_MS as u64)).await;
+        if !sessions().get(&local_device).is_some_and(|s| s.up && s.epoch == epoch) {
+            return;
+        }
+        let taken = holds()
+            .get_mut(&key)
+            .filter(|hold| hold.unplaced.as_ref().is_some_and(|u| u.id == id))
+            .and_then(|hold| hold.unplaced.take());
+        let Some(unplaced) = taken else { return };
+        let master = key[local_device.len() + 1..].to_string();
+        hollow_log!("[HOLLOW-ROSTER] DM room for {master} never listed this session: the held DM goes out");
+        if let Ok(store) = MessageStore::open(&db_path, &db_passphrase) {
+            send_asks(&ws_cmd_tx, &store, &master, &unplaced.asks, &unplaced.dm_room, super::roster_book::now_ms());
+        }
+        let _ = cmd_tx.send(NodeCommand::ReleaseHeldDms { master }).await;
+    });
+}
+
+/// A relay session came up: `fresh` when nothing of an earlier one carried over
+/// (`WsEvent::Connected`), else a resume. Every wait for a listing starts its backstop.
+pub(crate) fn on_session_up(
+    ws_cmd_tx: &WsCmdTx,
+    cmd_tx: &tokio::sync::mpsc::Sender<NodeCommand>,
+    local_device: &str,
+    fresh: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let epoch = {
+        let mut sessions = sessions();
+        let session = sessions.entry(local_device.to_string()).or_default();
+        session.up = true;
+        session.epoch += 1;
+        if fresh {
+            session.listed.clear();
+        }
+        session.epoch
+    };
+    let prefix = format!("{local_device}|");
+    let waits: Vec<(String, u64)> = holds()
+        .iter()
+        .filter(|(key, _)| key.starts_with(&prefix))
+        .filter_map(|(key, hold)| hold.unplaced.as_ref().map(|u| (key.clone(), u.id)))
+        .collect();
+    for (key, id) in waits {
+        arm_backstop(ws_cmd_tx, cmd_tx, local_device, key, id, epoch, db_path, db_passphrase);
+    }
+}
+
+/// The relay socket went away: `lost` when the session went with it
+/// (`WsEvent::SessionLost`), so every listing is void.
+pub(crate) fn on_session_down(local_device: &str, lost: bool) {
+    let mut sessions = sessions();
+    let session = sessions.entry(local_device.to_string()).or_default();
+    session.up = false;
+    if lost {
+        session.listed.clear();
+    }
+}
+
+/// We left `room`: the relay lists it again only on a rejoin.
+pub(crate) fn on_room_left(local_device: &str, room: &str) {
+    if let Some(session) = sessions().get_mut(local_device) {
+        session.listed.remove(room);
+    }
+}
+
+/// The relay listed `room`: a hold that waited for it sends its asks now and runs.
+pub(crate) fn on_room_listed(
+    ws_cmd_tx: &WsCmdTx,
+    cmd_tx: &tokio::sync::mpsc::Sender<NodeCommand>,
+    ws_room_peers: &WsRoomPeers,
+    local_device: &str,
+    room: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    sessions().entry(local_device.to_string()).or_default().listed.insert(room.to_string());
+    let prefix = format!("{local_device}|");
+    let placed: Vec<(String, Vec<String>)> = holds()
+        .iter_mut()
+        .filter(|(key, hold)| key.starts_with(&prefix) && hold.unplaced.as_ref().is_some_and(|u| u.dm_room == room))
+        .filter_map(|(key, hold)| hold.unplaced.take().map(|u| (key.clone(), u.asks)))
+        .collect();
+    if placed.is_empty() {
+        return;
+    }
+    let store = MessageStore::open(db_path, db_passphrase).ok();
+    let now = super::roster_book::now_ms();
+    for (key, asks) in placed {
+        let master = key[prefix.len()..].to_string();
+        if let Some(store) = store.as_ref() {
+            send_asks(ws_cmd_tx, store, &master, &asks, room, now);
+        }
+        let waiting = online(ws_room_peers, &asks);
+        hollow_log!("[HOLLOW-ROSTER] DM room for {master} listed: the held DM waits on {} device(s)", waiting.len());
+        if let Some(hold) = holds().get_mut(&key) {
+            hold.waiting = waiting;
+        }
+        run_hold(key, &master, cmd_tx);
+    }
 }
 
 /// `device` showed us its view of `master`'s roster, now merged: a DM held for its
@@ -457,6 +688,18 @@ pub(crate) fn release(local_device: &str, master: &str) -> Vec<HeldDm> {
     holds().remove(&format!("{local_device}|{master}")).map(|hold| hold.queue).unwrap_or_default()
 }
 
+/// Whether the relay listed `room` to `local_device` this session. Tests only.
+#[cfg(test)]
+pub(crate) fn listed_for_test(local_device: &str, room: &str) -> bool {
+    listed(local_device, room)
+}
+
+/// DMs held for `master` on `local_device`. Tests only: live state a test can poll.
+#[cfg(test)]
+pub(crate) fn held_for_test(local_device: &str, master: &str) -> usize {
+    holds().get(&format!("{local_device}|{master}")).map_or(0, |hold| hold.queue.len())
+}
+
 /// Forget every gate and hold. Tests only: harness nodes reuse device ids.
 #[cfg(test)]
 pub(crate) fn clear_for_test() {
@@ -464,6 +707,10 @@ pub(crate) fn clear_for_test() {
         gates.0.clear();
     }
     holds().clear();
+    sessions().clear();
+    if let Ok(mut j) = TEST_JITTER.lock() {
+        *j = None;
+    }
 }
 
 #[cfg(test)]
@@ -630,15 +877,15 @@ mod tests {
             std::iter::from_fn(|| rx.try_recv().ok()).count()
         };
 
-        on_dm(&tx, &store, me, me_dev, lone, false, lone, Some(&differs(true)), &none);
+        on_dm(&tx, &store, me, me_dev, lone, false, lone, 1, Some(&differs(true)), &none);
         assert_eq!(asked(&mut rx), 0, "a device no roster counts asks nothing");
-        on_dm(&tx, &store, me, me_dev, lone, false, lone, Some(&differs(false)), &|_| Audience::Full);
+        on_dm(&tx, &store, me, me_dev, lone, false, lone, 1, Some(&differs(false)), &|_| Audience::Full);
         assert_eq!(asked(&mut rx), 0, "a device no roster counts is not told our roster, even in our audience");
-        on_dm(&tx, &store, me, me_dev, o_dev, false, o, Some(&differs(false)), &none);
+        on_dm(&tx, &store, me, me_dev, o_dev, false, o, 1, Some(&differs(false)), &none);
         assert_eq!(asked(&mut rx), 0, "our roster goes to no one outside our audience");
-        on_dm(&tx, &store, me, me_dev, o_dev, false, o, Some(&differs(false)), &|_| Audience::Full);
+        on_dm(&tx, &store, me, me_dev, o_dev, false, o, 1, Some(&differs(false)), &|_| Audience::Full);
         assert_eq!(asked(&mut rx), 1, "control: a friend's view of us that differs asks it");
-        on_dm(&tx, &store, me, me_dev, o_dev, false, o, Some(&differs(true)), &none);
+        on_dm(&tx, &store, me, me_dev, o_dev, false, o, 1, Some(&differs(true)), &none);
         assert_eq!(asked(&mut rx), 1, "control: its own roster needs no audience");
         clear_for_test();
         resolver::clear_for_test();
@@ -670,7 +917,7 @@ mod tests {
         let later = || tokio::time::sleep(Duration::from_millis(jitter_range().1 + 300));
 
         let rd = RosterDigests { own: Some("ab".repeat(16)), peer: None };
-        on_dm(&tx, &store, me, me_dev, &o_dev, false, &o_master, Some(&rd), &|_| Audience::Full);
+        on_dm(&tx, &store, me, me_dev, &o_dev, false, &o_master, 1, Some(&rd), &|_| Audience::Full);
         assert!(rx.try_recv().is_err(), "a mismatch ask left with the DM that caused it");
         later().await;
         assert!(rx.try_recv().is_ok(), "control: the ask leaves");
@@ -683,6 +930,244 @@ mod tests {
         clear_for_test();
         answer(&tx, me, me_dev, &o_dev, &o_master, true, || Audience::Full, &path, &pass);
         assert!(rx.try_recv().is_ok(), "an answer a DM waits for leaves at once");
+        clear_for_test();
+        resolver::clear_for_test();
+    }
+
+    // f-b3-phone: a differing digest voids the device's stamp AND an expiry ask made
+    // this span, so the next DM asks it again.
+    #[test]
+    fn b3_phone_a_differing_digest_makes_the_device_due_an_ask() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("b3u.db").to_string_lossy().into_owned();
+        let store = MessageStore::open(&path, &"ef".repeat(32)).unwrap();
+        let now = super::super::roster_book::now_ms();
+        store.stamp_roster_confirmed("m", "d", now).unwrap();
+        store.mark_roster_expiry_asked("m", "d", now).unwrap();
+        assert_eq!(slot(store.roster_confirm_slots("m").get("d").copied(), now), Slot::Fresh, "precondition");
+        unconfirm(&store, "m", "d", 1);
+        assert_eq!(slot(store.roster_confirm_slots("m").get("d").copied(), now), Slot::Stale { ask_due: true });
+        unconfirm(&store, "m", "e", 1);
+        assert_eq!(slot(store.roster_confirm_slots("m").get("e").copied(), now), Slot::Stale { ask_due: true }, "a device never stamped too");
+    }
+
+    // f-b3-phone: a DM to a roster a contact device showed differs waits while no DM
+    // room is listed (no relay session yet): no ask, no clock; the listing sends the ask
+    // and the answer releases it.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn b3_phone_a_dm_before_the_room_is_listed_waits_for_the_listing_and_the_answer() {
+        use super::super::resolver;
+        use crate::identity::native_identity::NativeKeypair;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        clear_for_test();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("b3p.db").to_string_lossy().into_owned();
+        let pass = "cd".repeat(32);
+        let store = MessageStore::open(&path, &pass).unwrap();
+        let kp = |t: u8| NativeKeypair::from_secret_bytes(&[t; 32]);
+        let (m, rec, dev) = (kp(241), kp(242), kp(243));
+        let (me, me_dev) = ("b3p-me", "b3p-me-dev");
+        resolver::seed_self(me, &[me_dev.to_string()]);
+        let now = super::super::roster_book::now_ms();
+        let o = Roster::genesis(&m, &rec, &dev, now - 60_000);
+        super::super::roster_book::merge_for_test(&store, &o, me, me_dev);
+        let (o_master, o_dev) = (m.peer_id(), dev.peer_id());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
+        let room = "b3p-dm-room";
+        let held = || HeldDm::Envelope { envelope_json: "{}".into(), sibling_json: None };
+
+        fetch_on_dm(&store, me, &o_dev, &o_master, 1, Some(&RosterDigests { own: Some("ab".repeat(16)), peer: None }));
+        let _ = store.take_roster_asks_due();
+        let mut peers = WsRoomPeers::new();
+        let targets = [o_dev.clone()];
+        let gate = hold_for_stale_roster(&tx, &cmd_tx, &peers, me_dev, &o_master, &targets, room, &path, &pass, held);
+        assert_eq!(gate, Gate::Held, "a DM before the room is listed went out on a roster its sender showed differs");
+        assert!(rx.try_recv().is_err(), "an ask left before anyone could answer it");
+        let gate = hold_for_stale_roster(&tx, &cmd_tx, &peers, me_dev, &o_master, &targets, room, &path, &pass, held);
+        assert_eq!(gate, Gate::Held, "a second DM overtook the held one");
+        tokio::time::sleep(Duration::from_millis(DM_HOLD_MAX_MS as u64 / 20)).await;
+        assert!(cmd_rx.try_recv().is_err(), "the hold ran while nothing was listed");
+
+        peers.insert(room.to_string(), std::iter::once(o_dev.clone()).collect());
+        on_room_listed(&tx, &cmd_tx, &peers, me_dev, room, &path, &pass);
+        assert!(rx.try_recv().is_ok(), "the listing sends the ask the DM waits for");
+        tokio::time::sleep(HOLD_POLL * 4).await;
+        assert!(cmd_rx.try_recv().is_err(), "released before the answer");
+        note_answer(me_dev, &o_dev, &o_master);
+        let released = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv()).await;
+        assert!(matches!(released, Ok(Some(NodeCommand::ReleaseHeldDms { .. }))), "the answer releases the DM");
+        assert_eq!(release(me_dev, &o_master).len(), 2, "both DMs go out, in order");
+        clear_for_test();
+        resolver::clear_for_test();
+    }
+
+    /// A roster test cast: our identity `me` and a contact O with one device whose
+    /// slot a differing digest voided.
+    struct VoidedCast {
+        _tmp: crate::test_tmp::TestDir,
+        path: String,
+        pass: String,
+        o_master: String,
+        o_dev: String,
+    }
+
+    fn voided_cast(tags: [u8; 3], me: &str, me_dev: &str) -> VoidedCast {
+        use crate::identity::native_identity::NativeKeypair;
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("b3v.db").to_string_lossy().into_owned();
+        let pass = "cd".repeat(32);
+        let store = MessageStore::open(&path, &pass).unwrap();
+        let kp = |t: u8| NativeKeypair::from_secret_bytes(&[t; 32]);
+        let (m, rec, dev) = (kp(tags[0]), kp(tags[1]), kp(tags[2]));
+        super::super::resolver::seed_self(me, &[me_dev.to_string()]);
+        let now = super::super::roster_book::now_ms();
+        super::super::roster_book::merge_for_test(&store, &Roster::genesis(&m, &rec, &dev, now - 60_000), me, me_dev);
+        let (o_master, o_dev) = (m.peer_id(), dev.peer_id());
+        fetch_on_dm(&store, me, &o_dev, &o_master, 1, Some(&RosterDigests { own: Some("ab".repeat(16)), peer: None }));
+        let _ = store.take_roster_asks_due();
+        VoidedCast { _tmp: tmp, path, pass, o_master, o_dev }
+    }
+
+    // f-b3-phone F1: a room the relay listed this session stays placed after its last
+    // peer left, so a DM to a contact gone offline asks at once and goes, never waits
+    // for a PeerJoined that may not come.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn b3_phone_a_room_listed_this_session_stays_placed_after_its_peers_left() {
+        use super::super::resolver;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        clear_for_test();
+        let me_dev = "b3l-me-dev";
+        let c = voided_cast([244, 245, 246], "b3l-me", me_dev);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(8);
+        let room = "b3l-dm-room";
+        let held = || HeldDm::Envelope { envelope_json: "{}".into(), sibling_json: None };
+        let mut peers = WsRoomPeers::new();
+        peers.insert(room.to_string(), std::iter::once(c.o_dev.clone()).collect());
+        on_session_up(&tx, &cmd_tx, me_dev, true, &c.path, &c.pass);
+        on_room_listed(&tx, &cmd_tx, &peers, me_dev, room, &c.path, &c.pass);
+        // PeerLeft for O's last device: `ws_room_peers` drops the room.
+        peers.remove(room);
+        let targets = [c.o_dev.clone()];
+        let gate = hold_for_stale_roster(&tx, &cmd_tx, &peers, me_dev, &c.o_master, &targets, room, &c.path, &c.pass, held);
+        assert_eq!(gate, Gate::Go, "a DM to a contact whose devices left waits for a listing that already came");
+        assert!(rx.try_recv().is_ok(), "the ask still goes out, for the device's return");
+
+        // Each way a listing ends, alone: the next DM waits for a new one.
+        let store = MessageStore::open(&c.path, &c.pass).unwrap();
+        let gate_after = |end: &dyn Fn(), why: &str| {
+            on_room_listed(&tx, &cmd_tx, &peers, me_dev, room, &c.path, &c.pass);
+            let _ = release(me_dev, &c.o_master);
+            unconfirm(&store, &c.o_master, &c.o_dev, 2);
+            end();
+            let gate = hold_for_stale_roster(&tx, &cmd_tx, &peers, me_dev, &c.o_master, &targets, room, &c.path, &c.pass, held);
+            assert_eq!(gate, Gate::Held, "{why}");
+        };
+        gate_after(&|| on_session_down(me_dev, true), "a listing outlived its lost session");
+        gate_after(&|| on_session_up(&tx, &cmd_tx, me_dev, true, &c.path, &c.pass), "a listing outlived a fresh session");
+        gate_after(&|| on_room_left(me_dev, room), "a listing outlived our leaving the room");
+        on_room_listed(&tx, &cmd_tx, &peers, me_dev, room, &c.path, &c.pass);
+        let _ = release(me_dev, &c.o_master);
+        unconfirm(&store, &c.o_master, &c.o_dev, 2);
+        on_session_down(me_dev, false);
+        on_session_up(&tx, &cmd_tx, me_dev, false, &c.path, &c.pass);
+        let gate = hold_for_stale_roster(&tx, &cmd_tx, &peers, me_dev, &c.o_master, &targets, room, &c.path, &c.pass, held);
+        assert_eq!(gate, Gate::Go, "a resumed session lost the listing it kept");
+        clear_for_test();
+        resolver::clear_for_test();
+    }
+
+    // f-b3-phone F1 backstop: a session up DM_HOLD_MAX_MS that never lists the DM room
+    // sends the asks and the DM, and the released DM never waits again.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn b3_phone_a_dm_waiting_for_a_listing_goes_out_after_the_session_is_up() {
+        use super::super::resolver;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        clear_for_test();
+        let me_dev = "b3b-me-dev";
+        let c = voided_cast([247, 248, 249], "b3b-me", me_dev);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
+        let room = "b3b-dm-room";
+        let held = || HeldDm::Envelope { envelope_json: "{}".into(), sibling_json: None };
+        let peers = WsRoomPeers::new();
+        let targets = [c.o_dev.clone()];
+        let hold_max = Duration::from_millis(DM_HOLD_MAX_MS as u64);
+
+        let gate = hold_for_stale_roster(&tx, &cmd_tx, &peers, me_dev, &c.o_master, &targets, room, &c.path, &c.pass, held);
+        assert_eq!(gate, Gate::Held, "precondition: no session, no listing");
+        // A suspended session's socket is down too: its backstop waits for the resume.
+        on_session_up(&tx, &cmd_tx, me_dev, true, &c.path, &c.pass);
+        tokio::time::sleep(hold_max / 2).await;
+        assert!(cmd_rx.try_recv().is_err(), "released before the backstop");
+        on_session_down(me_dev, false);
+        tokio::time::sleep(hold_max * 7 / 10).await;
+        assert!(cmd_rx.try_recv().is_err(), "a backstop of a session that went away released the DM");
+        on_session_up(&tx, &cmd_tx, me_dev, false, &c.path, &c.pass);
+        let released = tokio::time::timeout(hold_max * 2, cmd_rx.recv()).await;
+        assert!(matches!(released, Ok(Some(NodeCommand::ReleaseHeldDms { .. }))), "a DM waiting for a listing never went out");
+        assert!(rx.try_recv().is_ok(), "the backstop sends the asks too");
+        assert_eq!(release(me_dev, &c.o_master).len(), 1);
+        let gate = hold_for_stale_roster(&tx, &cmd_tx, &peers, me_dev, &c.o_master, &targets, room, &c.path, &c.pass, held);
+        assert_eq!(gate, Gate::Go, "the released DM waited again, forever");
+
+        // Held while the session is already up: the backstop starts with the hold.
+        let store = MessageStore::open(&c.path, &c.pass).unwrap();
+        unconfirm(&store, &c.o_master, &c.o_dev, 2);
+        let gate = hold_for_stale_roster(&tx, &cmd_tx, &peers, me_dev, &c.o_master, &targets, room, &c.path, &c.pass, held);
+        assert_eq!(gate, Gate::Held, "precondition: the room is still not listed");
+        let released = tokio::time::timeout(hold_max * 2, cmd_rx.recv()).await;
+        assert!(matches!(released, Ok(Some(NodeCommand::ReleaseHeldDms { .. }))), "a DM held on a live session that never lists the room never went out");
+        clear_for_test();
+        resolver::clear_for_test();
+    }
+
+    // f-b3-phone F3: a DM a device sent before the one whose digest differed never
+    // stamps its voided slot, however late it arrives; one sent after does.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn b3_phone_an_older_matching_dm_does_not_restamp_a_voided_slot() {
+        use super::super::resolver;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        clear_for_test();
+        let (me, me_dev) = ("b3o-me", "b3o-me-dev");
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("b3o.db").to_string_lossy().into_owned();
+        let store = MessageStore::open(&path, &"ef".repeat(32)).unwrap();
+        let kp = |t: u8| crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[t; 32]);
+        let (m, rec, dev) = (kp(250), kp(251), kp(252));
+        resolver::seed_self(me, &[me_dev.to_string()]);
+        let now = super::super::roster_book::now_ms();
+        let o = Roster::genesis(&m, &rec, &dev, now - 60_000);
+        super::super::roster_book::merge_for_test(&store, &o, me, me_dev);
+        let (o_master, o_dev) = (m.peer_id(), dev.peer_id());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let held = held_digest(&store, &o_master);
+        let differs = RosterDigests { own: Some("ab".repeat(16)), peer: None };
+        let matches = RosterDigests { own: held, peer: None };
+        let full = |_: &str| Audience::Full;
+
+        on_dm(&tx, &store, me, me_dev, &o_dev, false, &o_master, 2_000, Some(&differs), &full);
+        assert_eq!(store.roster_confirmed_at(&o_master, &o_dev), Some(0), "precondition: the slot is void");
+        on_dm(&tx, &store, me, me_dev, &o_dev, false, &o_master, 1_000, Some(&matches), &full);
+        assert_eq!(store.roster_confirmed_at(&o_master, &o_dev), Some(0), "an older DM that matches stamped a voided slot");
+        on_dm(&tx, &store, me, me_dev, &o_dev, false, &o_master, 2_000, Some(&matches), &full);
+        assert_eq!(store.roster_confirmed_at(&o_master, &o_dev), Some(0), "one sent the same moment proves no order");
+        on_dm(&tx, &store, me, me_dev, &o_dev, false, &o_master, 3_000, Some(&matches), &full);
+        assert!(store.roster_confirmed_at(&o_master, &o_dev).is_some_and(|at| at > 0), "a later DM that matches stamps it");
+        // A late copy of an older mismatch voids again without moving the mark back: a
+        // match older than the newest mismatch still confirms nothing.
+        on_dm(&tx, &store, me, me_dev, &o_dev, false, &o_master, 1_500, Some(&differs), &full);
+        on_dm(&tx, &store, me, me_dev, &o_dev, false, &o_master, 1_800, Some(&matches), &full);
+        assert_eq!(store.roster_confirmed_at(&o_master, &o_dev), Some(0), "a late old mismatch moved the mark back");
         clear_for_test();
         resolver::clear_for_test();
     }

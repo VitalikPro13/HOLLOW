@@ -2743,6 +2743,11 @@ pub fn nudge_live_dm_fetch(sender_peer_id: String) -> Result<bool, String> {
         Some(id) => id.peer_id,
         None => return Ok(false),
     };
+    // Only a running node registered our master key, which names DM rooms: without one
+    // the fetch node answers this wake.
+    if get_node().lock().map_err(|e| format!("Lock poisoned: {e}"))?.is_none() {
+        return Ok(false);
+    }
     let Some(room) = node::fetch::dm_wake_room(&open_local_store()?, &local_master, &sender_peer_id) else {
         hollow_log!("[HOLLOW-PUSH] nudge_live_dm_fetch: the wake names no friend of ours, ignored");
         return Ok(false);

@@ -101,6 +101,10 @@ function Save-PeerEvidence($peer, $dest) {
     if (Test-AndroidBackend $peer) {
         $text = @(Invoke-AppShell $peer "cat $($script:AndroidDocs)/hollow/hollow_debug.log 2>/dev/null")
         [System.IO.File]::WriteAllLines((Join-Path $target 'hollow_debug.log'), [string[]]$text)
+        # A push wake runs without the probe: its Dart lines reach only logcat and push_debug.log.
+        $push = @(Invoke-AppShell $peer "cat $($script:AndroidDocs)/hollow/push_debug.log 2>/dev/null")
+        [System.IO.File]::WriteAllLines((Join-Path $target 'push_debug.log'), [string[]]$push)
+        [System.IO.File]::WriteAllLines((Join-Path $target 'logcat.txt'), [string[]]@(Get-PeerLogcat $peer))
     } elseif (Test-WindowsBackend) {
         $log = Join-Path (Join-Path $script:FleetStageRoot $peer) 'hollow_debug.log'
     } else {
@@ -113,6 +117,12 @@ function Save-PeerEvidence($peer, $dest) {
     return $target
 }
 
+# An Android peer's logcat since the last clear (empty elsewhere).
+function Get-PeerLogcat($peer) {
+    if (-not (Test-AndroidBackend $peer)) { return @() }
+    return @(Invoke-Adb $peer 'logcat' '-d' '-v' 'time' 2>$null)
+}
+
 # The peer's own log lines that contain $pattern (a plain substring).
 function Get-PeerLogMatches($peer, $pattern) {
     if (Test-AndroidBackend $peer) {
@@ -123,7 +133,9 @@ function Get-PeerLogMatches($peer, $pattern) {
         if (-not (Test-Path $log)) { return @() }
         $lines = @(Get-Content $log -Encoding UTF8 -ErrorAction SilentlyContinue)
     }
-    return @($lines | Where-Object { "$_".Contains($pattern) })
+    # Plain strings: Windows PowerShell's ConvertTo-Json walks Get-Content's PSProvider
+    # note properties at the agent's depth and never finishes.
+    return @($lines | Where-Object { "$_".Contains($pattern) } | ForEach-Object { "$_" })
 }
 
 # One per-peer command; the same vocabulary for a local peer and for an agent.
@@ -136,6 +148,7 @@ function Get-PeerLogMatches($peer, $pattern) {
 #   evidence    peer, dest              Save-PeerEvidence
 #   sync_out    peer                    pull a phone's out dir to the host
 #   log_grep    peer, pattern           the app log's lines containing pattern
+#   logcat      peer, pattern, clear    an Android peer's logcat lines containing pattern; clear empties it
 #   proxy       peers                   start this machine's zombie proxy with a route per peer
 #   proxy_stop                          stop it
 function Invoke-FleetPeerCommand($request) {
@@ -168,6 +181,10 @@ function Invoke-FleetPeerCommand($request) {
         'evidence' { return @{ path = (Save-PeerEvidence $peer "$($request.dest)") } }
         'sync_out' { Sync-PeerOut $peer; return @{ done = $true } }
         'log_grep' { return @{ lines = @(Get-PeerLogMatches $peer "$($request.pattern)") } }
+        'logcat' {
+            if ($request.clear -and (Test-AndroidBackend $peer)) { Invoke-Adb $peer 'logcat' '-c' 2>$null | Out-Null; return @{ lines = @() } }
+            return @{ lines = @(Get-PeerLogcat $peer | Where-Object { "$_".Contains("$($request.pattern)") }) }
+        }
         'proxy' { Start-FleetProxy @($request.peers | ForEach-Object { "$_" }); return @{ done = $true } }
         'proxy_stop' { Stop-FleetProxy; return @{ done = $true } }
         default { throw "unknown fleet peer command '$($request.cmd)'" }

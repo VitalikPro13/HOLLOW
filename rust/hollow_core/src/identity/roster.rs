@@ -639,6 +639,11 @@ impl Roster {
     /// roots, tier 1 from pending joins, depth counts vouches from a root. A device
     /// always ranks below its best voucher.
     fn standing(&self) -> BTreeMap<String, Rank> {
+        self.ranked(true)
+    }
+
+    /// [`Self::standing`]; without `with_pending`, nothing a pending join seeds ranks.
+    fn ranked(&self, with_pending: bool) -> BTreeMap<String, Rank> {
         let consented: BTreeSet<&str> = self.consents.iter().map(|c| c.device.as_str()).collect();
         let (_, roots) = self.base_roots();
         let mut vouchees: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -647,7 +652,7 @@ impl Roster {
         }
         let seeds: [(u8, BTreeSet<&str>); 2] = [
             (0, roots.iter().map(String::as_str).filter(|d| consented.contains(d)).collect()),
-            (1, self.pendings.iter().map(|p| p.device.as_str()).filter(|d| consented.contains(d)).collect()),
+            (1, self.pendings.iter().map(|p| p.device.as_str()).filter(|d| with_pending && consented.contains(d)).collect()),
         ];
         let mut rank: BTreeMap<&str, (u8, u32)> = BTreeMap::new();
         for (tier, seed) in seeds {
@@ -923,8 +928,9 @@ impl Roster {
     /// A short fingerprint of what this roster says, the same for every holder of the
     /// same statements whatever order they arrived in. Pending joins are left out: each
     /// holder keeps its own few of a flood by first sight, so they would keep two holders
-    /// apart forever, and a missed one costs reach, never a removal. So is a consent no
-    /// other statement names, which anyone can mint.
+    /// apart forever, and a missed one costs reach, never a removal. So are the vouches
+    /// and removals of a signer that stands only through a pending join, for the same
+    /// reason, and a consent no other statement names, which anyone can mint.
     pub(crate) fn digest(&self) -> String {
         fn sorted_all<T: Ord + Clone>(v: &[T]) -> Vec<T> {
             let mut s = v.to_vec();
@@ -932,14 +938,18 @@ impl Roster {
             s.dedup();
             s
         }
+        let rooted = self.ranked(false);
+        let vouches: Vec<Vouch> = sorted_all(&self.vouches).into_iter().filter(|v| rooted.contains_key(&v.by)).collect();
+        let removals: Vec<Removal> =
+            sorted_all(&self.removals).into_iter().filter(|r| rooted.contains_key(&r.by)).collect();
         let named: BTreeSet<&str> = self
             .recoveries
             .iter()
             .flat_map(|r| r.keep.iter().map(String::as_str))
             .chain(self.phrase_admits.iter().map(|p| p.device.as_str()))
-            .chain(self.vouches.iter().flat_map(|v| [v.device.as_str(), v.by.as_str()]))
+            .chain(vouches.iter().flat_map(|v| [v.device.as_str(), v.by.as_str()]))
             .chain(self.legacy.iter().map(|l| l.device.as_str()))
-            .chain(self.removals.iter().flat_map(|r| [r.device.as_str(), r.by.as_str()]))
+            .chain(removals.iter().flat_map(|r| [r.device.as_str(), r.by.as_str()]))
             .collect();
         let consents: Vec<Consent> =
             sorted_all(&self.consents).into_iter().filter(|c| named.contains(c.device.as_str())).collect();
@@ -950,9 +960,9 @@ impl Roster {
             sorted_all(&self.recoveries),
             sorted_all(&self.phrase_admits),
             consents,
-            sorted_all(&self.vouches),
+            vouches,
             sorted_all(&self.legacy),
-            sorted_all(&self.removals),
+            removals,
         ]);
         let hash = Sha256::digest(canonical.to_string().as_bytes());
         hex::encode(&hash[..DIGEST_HEX_LEN / 2])
@@ -1693,6 +1703,9 @@ mod tests {
             let devices: Vec<String> = (from..from + MAX_PENDING as u32).map(junk_kp).map(|p| {
                 r.consents.push(sign_consent(&p, &id.master()));
                 r.pendings.push(sign_pending(&id.m, &base, &p.peer_id()));
+                // f-b3-phone F4: what a pending device signs stands only through its join.
+                r.vouches.push(sign_vouch(&p, &id.master(), &base, &owner.peer_id()));
+                r.removals.push(sign_removal(&p, &id.master(), &base, &owner.peer_id(), &[]));
                 p.peer_id()
             }).collect();
             (r.verified(NOW), devices)

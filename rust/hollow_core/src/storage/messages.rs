@@ -1253,8 +1253,12 @@ impl MessageStore {
                 device_peer_id TEXT NOT NULL,
                 confirmed_ms   INTEGER NOT NULL,
                 asked_ms       INTEGER,
+                voided_by_ms   INTEGER,
                 PRIMARY KEY (master_peer_id, device_peer_id)
             )")?;
+        // The send time of the newest DM from the device whose digest differed: an older
+        // DM that matches never stamps the slot again.
+        migrate(conn, "ALTER TABLE roster_confirms ADD COLUMN voided_by_ms INTEGER");
         // Roster asks the push fetch could not send (it never talks back): the node sends
         // them on its next relay session.
         ddl(conn, "roster_asks_due table",
@@ -3322,6 +3326,42 @@ impl MessageStore {
                 rusqlite::params![master_peer_id, device_peer_id, at_ms],
             )
             .map_err(|e| format!("Failed to stamp roster_confirms: {e}"))?;
+        Ok(())
+    }
+
+    /// A DM `device` sent at `sent_ms` (its own clock) showed a roster we hold all of:
+    /// stamped at `at_ms`, unless a DM it sent at or after `sent_ms` showed one that differs.
+    pub fn stamp_roster_confirmed_by_dm(
+        &self,
+        master_peer_id: &str,
+        device_peer_id: &str,
+        at_ms: i64,
+        sent_ms: i64,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO roster_confirms (master_peer_id, device_peer_id, confirmed_ms) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(master_peer_id, device_peer_id) DO UPDATE SET confirmed_ms = excluded.confirmed_ms
+                 WHERE roster_confirms.voided_by_ms IS NULL OR roster_confirms.voided_by_ms < ?4",
+                rusqlite::params![master_peer_id, device_peer_id, at_ms, sent_ms],
+            )
+            .map_err(|e| format!("Failed to stamp roster_confirms: {e}"))?;
+        Ok(())
+    }
+
+    /// A DM `device` sent at `sent_ms` showed a roster for `master` that differs from
+    /// ours: its stamp and any expiry ask are void, so the next DM to `master` asks it
+    /// first.
+    pub fn unconfirm_roster(&self, master_peer_id: &str, device_peer_id: &str, sent_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO roster_confirms (master_peer_id, device_peer_id, confirmed_ms, asked_ms, voided_by_ms)
+                 VALUES (?1, ?2, 0, NULL, ?3)
+                 ON CONFLICT(master_peer_id, device_peer_id) DO UPDATE SET confirmed_ms = 0, asked_ms = NULL,
+                 voided_by_ms = MAX(COALESCE(roster_confirms.voided_by_ms, excluded.voided_by_ms), excluded.voided_by_ms)",
+                rusqlite::params![master_peer_id, device_peer_id, sent_ms],
+            )
+            .map_err(|e| format!("Failed to unconfirm roster_confirms: {e}"))?;
         Ok(())
     }
 

@@ -4063,14 +4063,17 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     let _ = store.begin_transaction();
     let mut pk_cache = PkCache::new();
     let mut new_count = 0u32;
+    let mut events = Vec::new();
     for msg in &messages {
-        let (inserted, events) = ingest_synced_channel_item(&store, &sid, &cid, msg, local_peer, &mut pk_cache);
+        let (inserted, item_events) = ingest_synced_channel_item(&store, &sid, &cid, msg, local_peer, &mut pk_cache);
         new_count += inserted;
-        for ev in events {
-            let _ = event_tx.send(ev).await;
-        }
+        events.extend(item_events);
     }
     let _ = store.commit_transaction();
+    // After the commit: Dart re-reads the rows these name.
+    for ev in events {
+        let _ = event_tx.send(ev).await;
+    }
     if has_more == Some(true) {
         match page_end {
             Some(end) => super::olm_lane::carry(

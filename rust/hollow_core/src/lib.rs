@@ -106,9 +106,31 @@ pub(crate) mod log {
         STDERR.store(true, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
+    thread_local! {
+        static CAPTURED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Test only: this thread's lines from now on, until [`take_captured`].
+    #[cfg(test)]
+    pub(crate) fn capture_for_test() {
+        CAPTURED.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_captured() -> Vec<String> {
+        CAPTURED.with(|c| c.borrow_mut().take().unwrap_or_default())
+    }
+
     pub fn write(msg: &str) {
         // Every line, Rust's and Dart's alike, names no account folder.
         let msg = redact_line(msg);
+        #[cfg(test)]
+        CAPTURED.with(|c| {
+            if let Some(lines) = c.borrow_mut().as_mut() {
+                lines.push(msg.to_string());
+            }
+        });
         // Never eprintln!: it panics when stderr cannot be written, and on
         // Linux a closed terminal leaves the app alive (SIGHUP is ignored)
         // with a dead pty, so every log line would panic the task that logs.

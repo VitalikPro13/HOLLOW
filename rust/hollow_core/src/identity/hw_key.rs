@@ -88,6 +88,8 @@ pub(crate) trait Oracle: Send + Sync {
     fn exists(&self, alias: &str) -> Presence;
     fn apply(&self, alias: &str, input: &[u8]) -> Option<[u8; 32]>;
     fn delete(&self, alias: &str);
+    /// Every alias of an app-lock key the keystore holds, `None` when it could not say.
+    fn list(&self) -> Option<Vec<String>>;
 }
 
 static ORACLE: RwLock<Option<Arc<dyn Oracle>>> = RwLock::new(None);
@@ -107,6 +109,26 @@ pub(crate) fn install(oracle: Arc<dyn Oracle>) {
 pub(crate) fn install_for_test(oracle: Option<Arc<dyn Oracle>>) {
     TEST_ORACLE.with(|o| *o.borrow_mut() = oracle);
     TEST_REFUSED.with(|r| r.set(false));
+    TEST_ONE_PROFILE.with(|r| r.set(false));
+}
+
+#[cfg(test)]
+pub(crate) fn one_profile_for_test(one: bool) {
+    TEST_ONE_PROFILE.with(|r| r.set(one));
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ONE_PROFILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// An install that holds a single profile, so every app-lock key it keeps is that
+/// profile's or a gone one's. A computer can hold several profiles.
+fn one_profile() -> bool {
+    #[cfg(test)]
+    return TEST_ONE_PROFILE.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    cfg!(any(target_os = "android", target_os = "ios"))
 }
 
 fn oracle() -> Option<Arc<dyn Oracle>> {
@@ -164,8 +186,62 @@ pub(crate) fn profile_id(root: &Path, create: bool) -> Option<String> {
     Some(id)
 }
 
+const ALIAS_PREFIX: &str = "hollow_applock_hw.";
+
 fn alias_of(id: &str) -> String {
-    format!("hollow_applock_hw.{id}")
+    format!("{ALIAS_PREFIX}{id}")
+}
+
+/// The profile id an alias names, only for an alias of exactly our shape.
+fn id_of_alias(alias: &str) -> Option<&str> {
+    let id = alias.strip_prefix(ALIAS_PREFIX)?;
+    (id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))).then_some(id)
+}
+
+/// Most keys one sweep deletes; more wait for the next.
+const SWEEP_MAX: usize = 16;
+
+/// The id in `dir`, `Ok(None)` when it has none, `Err` when one is there but cannot
+/// be read as an id.
+fn id_in(dir: &Path) -> Result<Option<String>, ()> {
+    match std::fs::read_to_string(dir.join(PROFILE_ID_FILE)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+        Ok(text) => {
+            let id = text.trim();
+            (id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit())).then(|| Some(id.to_ascii_lowercase())).ok_or(())
+        }
+    }
+}
+
+/// Deletes the app-lock keys of profiles gone from this phone: a wipe run where no
+/// oracle is registered (the push fetch, the iOS extension) cannot delete its own.
+/// Kept are the live profile's key and that of every `<root>-old-*` folder beside it;
+/// with no readable live id, a kept folder that cannot be read, or a keystore that
+/// cannot list, nothing goes. The list comes first: a key is made after its id is
+/// written, so every key listed has an id to read by then. Returns how many went.
+pub(crate) fn sweep_orphans(root: &Path) -> usize {
+    let Some(oracle) = oracle().filter(|_| one_profile()) else { return 0 };
+    let Some(held) = oracle.list() else { return 0 };
+    let Ok(Some(live)) = id_in(root) else { return 0 };
+    let Some(kept) = crate::api::recovery::kept_named(root) else { return 0 };
+    let mut keep = vec![live];
+    for dir in &kept {
+        match id_in(dir) {
+            Ok(id) => keep.extend(id),
+            Err(()) => return 0,
+        }
+    }
+    let gone: Vec<&String> = held
+        .iter()
+        .filter(|alias| id_of_alias(alias).is_some_and(|id| !keep.iter().any(|k| k == id)))
+        .take(SWEEP_MAX)
+        .collect();
+    for alias in &gone {
+        oracle.delete(alias);
+    }
+    crate::hollow_log!("[HOLLOW-ID] App lock keys: {} held, {} of gone profiles removed", held.len(), gone.len());
+    gone.len()
 }
 
 /// The hardware key of one profile, ready to use.
@@ -268,7 +344,7 @@ mod android {
     //! `MainActivity` and answers these static calls; it catches every exception.
 
     use super::*;
-    use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JValue};
+    use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JObjectArray, JString, JValue};
     use jni::{JNIEnv, JavaVM};
 
     struct Keystore {
@@ -339,6 +415,26 @@ mod android {
                 env.call_static_method(class, "delete", "(Ljava/lang/String;)V", &[JValue::Object(&a)]).map(|_| ())
             });
         }
+
+        fn list(&self) -> Option<Vec<String>> {
+            self.call(|env, class| {
+                let prefix = env.new_string(ALIAS_PREFIX)?;
+                let obj = env
+                    .call_static_method(class, "list", "(Ljava/lang/String;)[Ljava/lang/String;", &[JValue::Object(&prefix)])?
+                    .l()?;
+                if obj.is_null() {
+                    return Ok(None);
+                }
+                let array = JObjectArray::from(obj);
+                let mut aliases = Vec::new();
+                for i in 0..env.get_array_length(&array)? {
+                    let item = env.get_object_array_element(&array, i)?;
+                    let text: String = env.get_string(&JString::from(item))?.into();
+                    aliases.push(text);
+                }
+                Ok(Some(aliases))
+            })?
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -350,7 +446,7 @@ mod android {
 
 #[cfg(target_os = "ios")]
 mod ios {
-    //! `AppDelegate.swift` registers four C functions over the Secure Enclave at
+    //! `AppDelegate.swift` registers five C functions over the Secure Enclave at
     //! launch. The extension never does, so it never binds anything.
 
     use super::*;
@@ -360,12 +456,19 @@ mod ios {
     type ExistsFn = unsafe extern "C" fn(*const c_char) -> i32;
     type ApplyFn = unsafe extern "C" fn(*const c_char, *const u8, usize, *mut u8) -> i32;
     type DeleteFn = unsafe extern "C" fn(*const c_char);
+    /// Writes the held aliases, newline-separated and NUL-terminated, into the buffer
+    /// of the given size; answers the bytes written before the NUL, or -1.
+    type ListFn = unsafe extern "C" fn(*mut c_char, usize) -> i32;
+
+    /// Room for far more keys than one phone's profiles ever leave.
+    const LIST_BUFFER: usize = 4096;
 
     struct Enclave {
         create: CreateFn,
         exists: ExistsFn,
         apply: ApplyFn,
         delete: DeleteFn,
+        list: ListFn,
     }
 
     fn c(alias: &str) -> Option<CString> {
@@ -411,6 +514,15 @@ mod ios {
                 unsafe { (self.delete)(a.as_ptr()) }
             }
         }
+
+        fn list(&self) -> Option<Vec<String>> {
+            let mut buf = vec![0u8; LIST_BUFFER];
+            // SAFETY: the callee writes at most `LIST_BUFFER` bytes into `buf`.
+            let n = unsafe { (self.list)(buf.as_mut_ptr().cast(), buf.len()) };
+            let n = usize::try_from(n).ok().filter(|n| *n < buf.len())?;
+            let text = std::str::from_utf8(&buf[..n]).ok()?;
+            Some(text.split('\n').filter(|a| !a.is_empty()).map(str::to_string).collect())
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -419,8 +531,9 @@ mod ios {
         exists: ExistsFn,
         apply: ApplyFn,
         delete: DeleteFn,
+        list: ListFn,
     ) {
-        install(Arc::new(Enclave { create, exists, apply, delete }));
+        install(Arc::new(Enclave { create, exists, apply, delete, list }));
     }
 }
 
@@ -453,6 +566,7 @@ pub(crate) mod stub {
         applies: std::sync::atomic::AtomicU32,
         /// The next this many `exists` calls cannot say.
         unknown_exists: std::sync::atomic::AtomicU32,
+        list_fails: std::sync::atomic::AtomicBool,
     }
 
     impl Stub {
@@ -464,6 +578,7 @@ pub(crate) mod stub {
                 busy_apply_at: 0.into(),
                 applies: 0.into(),
                 unknown_exists: 0.into(),
+                list_fails: false.into(),
             })
         }
 
@@ -475,6 +590,7 @@ pub(crate) mod stub {
                 busy_apply_at: 0.into(),
                 applies: 0.into(),
                 unknown_exists: 0.into(),
+                list_fails: false.into(),
             })
         }
 
@@ -493,6 +609,11 @@ pub(crate) mod stub {
         /// The next `n` `exists` calls cannot say.
         pub(crate) fn fail_exists(&self, n: u32) {
             self.unknown_exists.store(n, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Every `list` from now fails to say.
+        pub(crate) fn fail_list(&self) {
+            self.list_fails.store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
         /// The raw key under each alias, to tell a kept key from a replaced one.
@@ -571,6 +692,16 @@ pub(crate) mod stub {
 
         fn delete(&self, alias: &str) {
             self.keys.lock().unwrap().remove(alias);
+        }
+
+        fn list(&self) -> Option<Vec<String>> {
+            if self.list_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return None;
+            }
+            let mut v: Vec<String> =
+                self.keys.lock().unwrap().keys().filter(|a| a.starts_with(ALIAS_PREFIX)).cloned().collect();
+            v.sort();
+            Some(v)
         }
     }
 }
@@ -686,5 +817,152 @@ mod tests {
         assert!(!available());
         assert!(ensure(tmp.path(), true).unwrap().is_none());
         assert!(existing(tmp.path()).unwrap().is_none());
+    }
+
+    // f-applock-followups
+
+    const ORPHAN_A: &str = "hollow_applock_hw.aaaaaaaaaaaaaaaa";
+    const ORPHAN_B: &str = "hollow_applock_hw.bbbbbbbbbbbbbbbb";
+
+    /// A phone's root with its live key, plus the keys a wipe without an oracle left.
+    fn phone_with_orphans() -> (crate::test_tmp::TestDir, std::path::PathBuf, Arc<stub::Stub>, String) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("hollow");
+        std::fs::create_dir_all(&root).unwrap();
+        let s = stub::Stub::new(Kind::Hmac);
+        install_for_test(Some(s.clone()));
+        one_profile_for_test(true);
+        ensure(&root, true).unwrap().unwrap();
+        let live = alias_of(&profile_id(&root, false).unwrap());
+        for alias in [ORPHAN_A, ORPHAN_B, "someone_else.key", "hollow_applock_hw.not-an-id"] {
+            s.create(alias).unwrap();
+        }
+        (tmp, root, s, live)
+    }
+
+    fn aliases(s: &stub::Stub) -> Vec<String> {
+        s.snapshot().into_iter().map(|(a, _)| a).collect()
+    }
+
+    #[test]
+    fn a_sweep_takes_only_gone_profiles_keys() {
+        let (_tmp, root, s, live) = phone_with_orphans();
+        assert_eq!(sweep_orphans(&root), 2);
+        let left = aliases(&s);
+        assert!(left.contains(&live), "the live profile's key was swept");
+        assert!(!left.contains(&ORPHAN_A.to_string()) && !left.contains(&ORPHAN_B.to_string()), "an orphan stayed: {left:?}");
+        assert!(left.contains(&"someone_else.key".to_string()), "a key Hollow never named was swept");
+        assert!(left.contains(&"hollow_applock_hw.not-an-id".to_string()), "a key of no profile id's shape was swept");
+        install_for_test(None);
+    }
+
+    /// Old data a relink kept aside still opens with its own key, so its key stays.
+    #[test]
+    fn a_sweep_keeps_the_key_of_old_data_kept_aside() {
+        let (tmp, root, s, _live) = phone_with_orphans();
+        let kept = tmp.path().join("hollow-old-2026-10-18");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join("app_lock.id"), "aaaaaaaaaaaaaaaa").unwrap();
+        let origin = serde_json::json!({ "root": root.to_string_lossy() }).to_string();
+        std::fs::write(kept.join("relink_origin.json"), origin).unwrap();
+        sweep_orphans(&root);
+        let left = aliases(&s);
+        assert!(left.contains(&ORPHAN_A.to_string()), "the kept data's key was swept");
+        assert!(!left.contains(&ORPHAN_B.to_string()));
+        install_for_test(None);
+    }
+
+    /// A computer holds several profiles; a key no root here names may be another's.
+    #[test]
+    fn a_computer_never_sweeps_hardware_keys() {
+        let (_tmp, root, s, _live) = phone_with_orphans();
+        one_profile_for_test(false);
+        let before = s.snapshot();
+        assert_eq!(sweep_orphans(&root), 0);
+        assert_eq!(s.snapshot(), before);
+        install_for_test(None);
+    }
+
+    /// Without a readable id nothing can tell the live key from an orphan, and a
+    /// keystore that could not list says nothing either.
+    #[test]
+    fn a_sweep_that_cannot_tell_deletes_nothing() {
+        let (_tmp, root, s, _live) = phone_with_orphans();
+        let before = s.snapshot();
+        std::fs::write(root.join(PROFILE_ID_FILE), "garbled").unwrap();
+        assert_eq!(sweep_orphans(&root), 0);
+        assert_eq!(s.snapshot(), before, "a root with no readable id lost keys");
+        std::fs::remove_file(root.join(PROFILE_ID_FILE)).unwrap();
+        assert_eq!(sweep_orphans(&root), 0);
+        assert_eq!(s.snapshot(), before, "a root with no id lost keys");
+        install_for_test(None);
+    }
+
+    #[test]
+    fn a_keystore_that_cannot_list_loses_nothing() {
+        let (_tmp, root, s, _live) = phone_with_orphans();
+        let before = s.snapshot();
+        s.fail_list();
+        assert_eq!(sweep_orphans(&root), 0);
+        assert_eq!(s.snapshot(), before);
+        install_for_test(None);
+    }
+
+    #[test]
+    fn a_sweep_is_bounded() {
+        let (_tmp, root, s, live) = phone_with_orphans();
+        for i in 0..(SWEEP_MAX + 5) {
+            s.create(&format!("hollow_applock_hw.{i:016x}")).unwrap();
+        }
+        assert_eq!(sweep_orphans(&root), SWEEP_MAX);
+        assert!(sweep_orphans(&root) > 0, "the next sweep takes the rest");
+        assert!(aliases(&s).contains(&live));
+        install_for_test(None);
+    }
+
+    /// The kept folder's origin mark names the root by its absolute path; the root's
+    /// path moving (the case `app_lock.id` exists for) must not make the sweep take the
+    /// kept folder's key.
+    #[test]
+    fn a_sweep_keeps_the_kept_folders_key_after_the_root_path_moved() {
+        let (tmp, root, s, _live) = phone_with_orphans();
+        let kept = tmp.path().join("hollow-old-2026-10-18");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join("app_lock.id"), "aaaaaaaaaaaaaaaa").unwrap();
+        let old_root = tmp.path().join("OLD-CONTAINER").join("hollow");
+        let origin = serde_json::json!({ "root": old_root.to_string_lossy() }).to_string();
+        std::fs::write(kept.join("relink_origin.json"), origin).unwrap();
+        sweep_orphans(&root);
+        assert!(aliases(&s).contains(&ORPHAN_A.to_string()), "the kept data's key was swept once the root's path moved");
+        install_for_test(None);
+    }
+
+    /// A kept folder whose id cannot be read is no proof its key is spare: the live
+    /// root's unreadable id stops the sweep, and a kept folder's does too.
+    #[test]
+    fn a_kept_folder_with_an_unreadable_id_keeps_its_key() {
+        let (tmp, root, s, _live) = phone_with_orphans();
+        let kept = tmp.path().join("hollow-old-2026-10-18");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join("app_lock.id"), "aaaaaaaaaaaaaaa?").unwrap();
+        let origin = serde_json::json!({ "root": root.to_string_lossy() }).to_string();
+        std::fs::write(kept.join("relink_origin.json"), origin).unwrap();
+        let before = aliases(&s);
+        sweep_orphans(&root);
+        assert_eq!(aliases(&s), before, "a sweep that could not read a kept folder's id still deleted keys");
+        install_for_test(None);
+    }
+
+    /// A kept folder whose origin mark cannot be read stops the sweep the same way.
+    #[test]
+    fn a_kept_folder_with_an_unreadable_mark_stops_the_sweep() {
+        let (tmp, root, s, _live) = phone_with_orphans();
+        let kept = tmp.path().join("hollow-old-2026-10-18");
+        std::fs::create_dir_all(kept.join("relink_origin.json")).unwrap();
+        std::fs::write(kept.join("app_lock.id"), "aaaaaaaaaaaaaaaa").unwrap();
+        let before = aliases(&s);
+        sweep_orphans(&root);
+        assert_eq!(aliases(&s), before, "a sweep that could not read a kept folder's mark still deleted keys");
+        install_for_test(None);
     }
 }

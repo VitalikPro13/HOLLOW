@@ -65,6 +65,7 @@ fn random(buf: &mut [u8]) -> Result<(), String> {
 
 fn write_slot(plaintext: &[u8], key: &[u8; 32], salt: &[u8; 16], flags: u8) -> Result<(), String> {
     let blob = encryption::encrypt_with_flags(plaintext, key, salt, flags)?;
+    let _held = encryption::key_file_lock();
     std::fs::write(slot_path()?, &blob)
         .map_err(|e| format!("Failed to write the duress slot: {e}"))
 }
@@ -131,8 +132,10 @@ pub(crate) fn set_dummy() -> Result<(), String> {
 
 pub(crate) fn remove() -> Result<(), String> {
     let path = slot_path()?;
+    let _held = encryption::key_file_lock();
     if path.exists() {
-        std::fs::remove_file(&path)
+        crate::api::wipe::zero_in_place(&path)
+            .and_then(|()| std::fs::remove_file(&path))
             .map_err(|e| format!("Failed to remove the duress slot: {e}"))?;
     }
     Ok(())
@@ -243,5 +246,35 @@ mod tests {
     #[test]
     fn an_unknown_scope_is_refused() {
         assert!(scope_byte("everything").is_err());
+    }
+
+    // f-applock-followups
+
+    /// The slot is a key file: an unlink zeroes it first, like every key's.
+    #[test]
+    fn a_removed_duress_slot_is_zeroed_first() {
+        let _g = guard();
+        let tmp = temp_root();
+        set_dummy().unwrap();
+        let peek = tmp.path().join("peek");
+        std::fs::hard_link(slot_path().unwrap(), &peek).unwrap();
+        remove().unwrap();
+        assert!(!slot_path().unwrap().exists());
+        assert!(std::fs::read(&peek).unwrap().iter().all(|b| *b == 0), "the slot was unlinked unzeroed");
+    }
+
+    /// A slot write waits for a key-file operation in flight (a wipe zeroing the
+    /// keys, a landing moving them), so it never lands beside the wrong identity.
+    #[test]
+    fn a_slot_write_waits_for_the_key_file_lock() {
+        let _g = guard();
+        let _tmp = temp_root();
+        let held = encryption::key_file_lock();
+        let writer = std::thread::spawn(set_dummy);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!slot_path().unwrap().exists(), "the slot was written under another key operation");
+        drop(held);
+        writer.join().unwrap().unwrap();
+        assert!(slot_path().unwrap().exists());
     }
 }

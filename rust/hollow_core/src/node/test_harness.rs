@@ -3532,6 +3532,8 @@ async fn restart_node_with(
 ) -> TestNode {
     let device_id = node.device_id.clone();
     let passphrase = node.passphrase.clone();
+    // The new loop reads what the old one's actors were still writing.
+    node.crdt_committed().await;
     relay.set_online(&device_id, false);
     assert!(
         wait_until(10, async || !relay.online_devices().contains(&device_id)).await,
@@ -11088,6 +11090,7 @@ async fn server_create_auto_onboards_online_sibling() {
     assert!(c_onboarded, "sibling C must auto-onboard the newly-created server (ServerJoined)");
     expect_mls_leaf(&b, &server_id, &c.device_id, 15).await;
 
+    c.crdt_committed().await;
     assert!(
         c.servers().contains(&server_id),
         "sibling C's server list must include the auto-onboarded server, got {:?}",
@@ -11174,6 +11177,7 @@ async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
     );
     expect_mls_leaf(&b, &server_id, &c.device_id, 15).await;
 
+    c.crdt_committed().await;
     assert!(
         c.servers().contains(&server_id),
         "sibling C's server list must include the re-announced server, got {:?}",
@@ -11226,6 +11230,7 @@ async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
     })
     .await;
     assert!(!c_rejoined, "a reconnect must not replay ServerJoined for a server C already holds");
+    c.crdt_committed().await;
     assert!(c.servers().contains(&server_id), "C still lists the server, got {:?}", c.servers());
 }
 
@@ -15005,6 +15010,7 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
         !resurrected,
         "a reconnecting sibling must NOT re-onboard a server the identity LEFT"
     );
+    c.crdt_committed().await;
     assert!(
         !c.servers().contains(&server_id),
         "sibling C's list must stay empty of the left server after reconnect, got {:?}",
@@ -24219,6 +24225,7 @@ async fn parked_join_completes_with_zero_overlap() {
         parked && !failed,
         "a join into an empty server parks; it must never emit ServerJoinFailed"
     );
+    b.crdt_committed().await;
     assert_eq!(
         b.pending_joins(),
         vec![(server_id.clone(), "pending".to_string(), String::new())],
@@ -24706,6 +24713,8 @@ async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
         "create is epoch 0 and B's add is epoch 1; anything higher means the \
          restarted joiner could not use the KeyPackage it had deposited",
     );
+    b.crdt_committed().await;
+    a.crdt_committed().await;
     assert!(b.servers().contains(&server_id), "B holds the server");
     assert!(b.pending_joins().is_empty(), "a completed join deletes its row");
     assert!(
@@ -24771,6 +24780,7 @@ async fn empty_server_join_parks_on_the_full_window_behind_its_door() {
     // And it is a real park, not just an event: the request is in the ring for
     // whoever comes back.
     expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
+    b.crdt_committed().await;
     assert_eq!(
         b.pending_joins(),
         vec![(server_id.clone(), "pending".to_string(), String::new())],
@@ -25699,6 +25709,7 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
     // A question never ends the ask under it (a removed member can send one too):
     // the user's answer asks again, and until then the row and the room stay.
     assert!(!discarded, "a question does not discard the tile");
+    b.crdt_committed().await;
     assert_eq!(
         b.pending_joins(),
         vec![(server_id.clone(), "pending".to_string(), String::new())],
@@ -27147,7 +27158,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // g1-scale-probe's rewrite of the old benchmark gave some back (total 826.6 s).
     // 2026-10-18: d-small-items proves a removed sibling gets no answer and a deleted
     // server's rings stay quiet (one absence and a spawn stagger, 4.5 s, total 831.1 s).
-    const BUDGET_MS: u64 = 831_100;
+    // 2026-10-18: f-flakes holds a repaired device off the relay over two MLS ticks to
+    // prove the member keeps its sibling seated (one absence, 4.5 s, total 835.6 s).
+    const BUDGET_MS: u64 = 835_600;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -31875,6 +31888,7 @@ async fn join_lock_a_removed_members_door_neither_reads_nor_answers_a_join() {
         "the barrier arrives"
     );
     assert!(!moved, "nothing sealed from the removed member's door touches the join");
+    j.crdt_committed().await;
     assert!(!j.servers().contains(&server_id), "no server from it");
     assert!(
         wait_until(10, async || ring_copies_of(&relay, &server_id, &j.device_id).len() > copies.len()).await,
@@ -44821,6 +44835,7 @@ async fn t1_review_phone_foreground_does_not_replay_server_joined() {
     })
     .await;
     assert!(!replayed, "a phone brought to the foreground must not get ServerJoined for a server it already holds");
+    c.crdt_committed().await;
     assert!(c.servers().contains(&server_id), "the phone still lists the server");
 }
 
@@ -45068,7 +45083,10 @@ async fn review_pair(relay: &MockRelay, tag: u8) -> (TestNode, NativeKeypair, St
     relay.register_key(&p_key);
     let mut q = spawn_node_with_friends(relay, tag, tag, &[&p_id]).await;
     let room = super::types::dm_room_code(&q.master_id, &p_id);
-    // After Q's own joins settle, or their RoomMembers purge the injected presence.
+    // After Q's own join of the room is answered, or that RoomMembers purges the
+    // injected presence: a barrier alone races the join Q sends at connect.
+    let in_room = wait_until(10, async || relay.room_devices(&room).contains(&q.device_id)).await;
+    assert!(in_room, "Q joins its DM room with P");
     flush_frames(relay, &mut q).await;
     relay.inject_presence(&q.device_id, &room, &p_id);
     flush_frames(relay, &mut q).await;
@@ -45416,8 +45434,25 @@ async fn md_recovery_a_repaired_device_gets_its_server_back_from_its_sibling() {
 
     let master = d2.master_kp.clone();
     let device_id = d2.device_id.clone();
-    d2 = restart_node_with(&relay, d2, m_tag, d2_tag, |db, pass| md_break_and_repair(db, pass, &master, &device_id)).await;
+    // The nodes share one resolver, so the master-key claim a fresh database makes would
+    // unlink device 1 for the member too, and its sweep would commit device 1 out. The
+    // repaired device holds its sibling's roster as hearing it leaves it; relearning it
+    // is `md_recovery_a_repaired_device_keeps_its_seat_in_a_phrase_rooted_roster`'s.
+    let roster = super::roster_book::own_roster(&d1.master_id, &d1.db_path, &d1.passphrase).expect("device 1's roster");
+    d2 = restart_node_with(&relay, d2, m_tag, d2_tag, |db, pass| {
+        md_break_and_repair(db, pass, &master, &device_id);
+        let store = crate::storage::MessageStore::open(db, pass).expect("repaired store");
+        super::roster_book::merge_for_test(&store, &roster, &roster.master, &device_id);
+    })
+    .await;
     assert!(d2.servers().is_empty(), "the repaired device starts with an empty database");
+    // Started but not yet back on the relay, over two MLS batch ticks: the member's view
+    // of device 1 must not move. An absence with no signal to poll (counted in BUDGET_MS).
+    relay.set_online(&device_id, false);
+    sleep_ms(4500).await;
+    let leaves = x.mls_members(&server_id).await;
+    assert!(leaves.contains(&d1.device_id), "the member still seats device 1 while device 2 is away: {leaves:?}");
+    relay.set_online(&device_id, true);
 
     let back = wait_event(&mut d2, std::time::Duration::from_secs(30), |ev| {
         matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
@@ -51081,5 +51116,666 @@ async fn a_kick_learned_by_sync_stays_a_kick_after_restart() {
     y.crdt_committed().await;
     assert!(!y.servers().contains(&server_id), "a restart listed the server Y was kicked from");
     assert!(y.server_state(&server_id).is_none(), "a restart brought the kicked server's state back");
+    drop(o);
+}
+
+// f-b3-phone
+
+/// AR-29 on a phone: F's app was dead while D1 removed S, so the removal's room notice
+/// never reached it; its push fetch read D1's next DM, whose digest of O's roster
+/// differs. The first DM F sends once it opens must not reach S.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_phone_the_first_dm_after_a_push_wake_skips_a_device_removed_meanwhile() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, mut s, f) = ar29_cast(&relay, [221, 222, 223, 224]).await;
+    let o_master = d1.master_id.clone();
+    // The app's jitter (1 to 30 s each way): the noted ask and its answer take seconds.
+    super::roster_reach::set_jitter_for_test((5_000, 5_000));
+    relay.set_online(&f.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&f.device_id)).await);
+    // S never hears its own removal, so it stays a live device in the DM room.
+    relay.swallow_direct(&d1.device_id, &s.device_id);
+    relay.set_broadcast_deaf(&s.device_id, true);
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "precondition: D1 removed S",
+    );
+    // The harness resolver is shared: put back what F's process still believes.
+    super::resolver::unmark_revoked(std::slice::from_ref(&s.device_id));
+    super::resolver::update_many(&o_master, [s.device_id.as_str()]);
+
+    // The push fetch read D1's DM sent after the removal.
+    let rd = super::types::RosterDigests {
+        own: super::roster_book::load(&d1.store(), &o_master).map(|r| r.digest()),
+        peer: super::roster_book::load(&d1.store(), &f.master_id).map(|r| r.digest()),
+    };
+    super::roster_reach::fetch_on_dm(&f.store(), &f.master_id, &d1.device_id, &o_master, super::roster_book::now_ms(), Some(&rd));
+    assert!(f.revoked_devices(&o_master).is_empty(), "precondition: F still counts S");
+
+    // The exchange at F's return (profile answers, re-sent friend frames) is lost on a
+    // flaky link, so only the roster trade can heal F.
+    relay.swallow_direct(&d1.device_id, &f.device_id);
+    relay.set_broadcast_deaf(&f.device_id, true);
+    relay.set_online(&f.device_id, true);
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    assert!(wait_until(15, async || relay.room_devices(&room).contains(&f.device_id)).await, "F is back");
+    // The ask the push fetch noted leaves a jitter after the return, past its exchange.
+    let d1_dev = d1.device_id.clone();
+    assert!(wait_until(15, async || ar29_asks(&f, &d1_dev).await > 0).await, "precondition: F sent the noted ask");
+    relay.release_direct(&d1.device_id, &f.device_id);
+    relay.set_broadcast_deaf(&f.device_id, false);
+    assert!(f.revoked_devices(&o_master).is_empty(), "precondition: F's return taught it nothing");
+    drain_events(&mut s);
+    ar29_dm(&f, &o_master, "b3-phone-1", "first DM after the wake").await;
+    assert!(ar29_got(&mut d1, "first DM after the wake", 20).await, "control: O's current device gets F's DM");
+    // ABSENCE: a frame that never comes.
+    assert!(
+        !ar29_got(&mut s, "first DM after the wake", 4).await,
+        "F's first DM after the push wake reached the device removed while it was away",
+    );
+}
+
+/// AR-29, the open app: F missed the removal, then D1's DM shows a different roster.
+/// F's reply right after must not reach S while the roster trade is still under way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_phone_a_reply_right_after_a_differing_digest_skips_the_removed_device() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, mut s, mut f) = ar29_cast(&relay, [229, 230, 231, 232]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+    super::roster_reach::set_jitter_for_test((5_000, 5_000));
+
+    ar29_dm(&d1, &f.master_id, "b3-phone-2", "hello after the removal").await;
+    assert!(ar29_got(&mut f, "hello after the removal", 20).await, "F gets D1's DM");
+    assert!(f.revoked_devices(&o_master).is_empty(), "precondition: the trade has not answered yet");
+    drain_events(&mut s);
+    ar29_dm(&f, &o_master, "b3-phone-3", "a quick reply").await;
+    assert!(ar29_got(&mut d1, "a quick reply", 20).await, "control: O's current device gets F's reply");
+    // ABSENCE: a frame that never comes.
+    assert!(
+        !ar29_got(&mut s, "a quick reply", 4).await,
+        "F's reply reached the removed device while F was asking for the roster D1's DM showed",
+    );
+}
+
+/// AR-29: F's mismatch ask already reached D1, whose answer sits out its jitter; F's
+/// DM then waits on its own ask, which D1 must answer at once, not after the hold ran out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_phone_a_held_dm_is_answered_while_an_earlier_answer_still_waits() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, mut s, mut f) = ar29_cast(&relay, [233, 234, 235, 236]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+    // Longer than the hold: an answer that waits its jitter comes after a held DM left.
+    let jitter_ms = (super::roster_reach::DM_HOLD_MAX_MS + 4_000) as u64;
+    super::roster_reach::set_jitter_for_test((jitter_ms, jitter_ms));
+
+    ar29_dm(&d1, &f.master_id, "b3-phone-4", "hello again").await;
+    assert!(ar29_got(&mut f, "hello again", 20).await, "F gets D1's DM");
+    let d1_dev = d1.device_id.clone();
+    assert!(
+        wait_until(jitter_ms / 1000 + 10, async || ar29_asks(&f, &d1_dev).await > 0).await,
+        "precondition: F's mismatch ask went out",
+    );
+    assert!(f.revoked_devices(&o_master).is_empty(), "precondition: D1's answer still waits");
+    drain_events(&mut s);
+    ar29_dm(&f, &o_master, "b3-phone-5", "while the answer waits").await;
+    assert!(ar29_got(&mut d1, "while the answer waits", 20).await, "control: O's current device gets F's DM");
+    // ABSENCE: a frame that never comes.
+    assert!(
+        !ar29_got(&mut s, "while the answer waits", 4).await,
+        "F's held DM ran out before D1 answered and reached the removed device",
+    );
+}
+
+/// AR-29 on a phone that opens with no network: F's push fetch saw D1's roster differ,
+/// and F writes its DM before it has a relay session. The DM waits for the DM room's
+/// listing and D1's answer, then reaches D1 and never S.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_phone_a_dm_written_before_the_relay_session_waits_for_the_roster() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, mut s, f) = ar29_cast(&relay, [237, 238, 239, 240]).await;
+    let o_master = d1.master_id.clone();
+    super::roster_reach::set_jitter_for_test((5_000, 5_000));
+    relay.set_online(&f.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&f.device_id)).await);
+    relay.swallow_direct(&d1.device_id, &s.device_id);
+    relay.set_broadcast_deaf(&s.device_id, true);
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "precondition: D1 removed S",
+    );
+    super::resolver::unmark_revoked(std::slice::from_ref(&s.device_id));
+    super::resolver::update_many(&o_master, [s.device_id.as_str()]);
+    let rd = super::types::RosterDigests {
+        own: super::roster_book::load(&d1.store(), &o_master).map(|r| r.digest()),
+        peer: super::roster_book::load(&d1.store(), &f.master_id).map(|r| r.digest()),
+    };
+    super::roster_reach::fetch_on_dm(&f.store(), &f.master_id, &d1.device_id, &o_master, super::roster_book::now_ms(), Some(&rd));
+
+    drain_events(&mut s);
+    ar29_dm(&f, &o_master, "b3-phone-6", "written offline").await;
+    let f_dev = f.device_id.clone();
+    assert!(
+        wait_until(10, async || super::roster_reach::held_for_test(&f_dev, &o_master) == 1).await,
+        "the DM F wrote with no relay session must wait for the DM room's listing",
+    );
+    relay.set_online(&f.device_id, true);
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    assert!(
+        wait_until(5, async || super::roster_reach::listed_for_test(&f_dev, &room)).await,
+        "the relay's listing of the DM room never reached the roster gate (the hold waits for its backstop)",
+    );
+    assert!(ar29_got(&mut d1, "written offline", 25).await, "O's current device gets the DM once F is back");
+    // ABSENCE: a frame that never comes.
+    assert!(
+        !ar29_got(&mut s, "written offline", 4).await,
+        "the DM F wrote before its relay session reached the device removed while it was away",
+    );
+}
+
+/// A contact whose devices all left the DM room cleanly (PeerLeft drops an emptied
+/// room from `ws_room_peers`) still gets a DM whose target slot is void: the hold may
+/// wait, never past `DM_HOLD_MAX_MS`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_phone_a_dm_to_a_contact_that_left_is_not_held_forever() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, s, f) = ar29_cast(&relay, [201, 202, 203, 204]).await;
+    let o_master = d1.master_id.clone();
+    // D1 showed a roster F does not hold (any honest difference: F behind, or D1 behind).
+    let rd = super::types::RosterDigests { own: Some("ab".repeat(16)), peer: None };
+    super::roster_reach::fetch_on_dm(&f.store(), &f.master_id, &d1.device_id, &o_master, super::roster_book::now_ms(), Some(&rd));
+    let _ = f.store().take_roster_asks_due();
+    // Both of O's devices go offline cleanly: F hears PeerLeft for each.
+    relay.set_online(&d1.device_id, false);
+    relay.set_online(&s.device_id, false);
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    assert!(wait_until(10, async || relay.room_devices(&room) == std::iter::once(f.device_id.clone()).collect()).await);
+    assert!(wait_until(10, async || !f.sees_peer(&d1.device_id).await && !f.sees_peer(&s.device_id).await).await);
+    let buffered = relay.buffered_count(&d1.device_id);
+    ar29_dm(&f, &o_master, "rv-b3-1", "to an offline contact").await;
+    let f_dev = f.device_id.clone();
+    let past_the_hold = (super::roster_reach::DM_HOLD_MAX_MS / 1000 + 3) as u64;
+    // Well inside the backstop: the room was listed this session, so nothing waits for a listing.
+    assert!(
+        wait_until((super::roster_reach::DM_HOLD_MAX_MS / 2_000) as u64, async || relay.buffered_count(&d1.device_id) > buffered).await,
+        "a DM to a contact that left waited for a listing this session already had",
+    );
+    assert!(
+        wait_until(past_the_hold, async || super::roster_reach::held_for_test(&f_dev, &o_master) == 0).await,
+        "a DM to a contact whose devices left is still held past DM_HOLD_MAX_MS",
+    );
+    relay.set_online(&d1.device_id, true);
+    assert!(ar29_got(&mut d1, "to an offline contact", 25).await, "the DM never reached the contact once it was back");
+}
+
+/// The same with no digest at all, only a slot that ran out (35 days): the DM reaches
+/// the contact's device once it is back, without F reconnecting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_phone_a_dm_to_a_stale_contact_that_left_reaches_it_on_return() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, s, f) = ar29_cast(&relay, [205, 206, 207, 208]).await;
+    let o_master = d1.master_id.clone();
+    let old = super::roster_book::now_ms() - super::roster_reach::ROSTER_REFRESH_AFTER_MS - 60_000;
+    f.store().set_roster_confirmed_for_test(&o_master, Some(old));
+    relay.set_online(&d1.device_id, false);
+    relay.set_online(&s.device_id, false);
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    assert!(wait_until(10, async || relay.room_devices(&room) == std::iter::once(f.device_id.clone()).collect()).await);
+    assert!(wait_until(10, async || !f.sees_peer(&d1.device_id).await && !f.sees_peer(&s.device_id).await).await);
+    let buffered = relay.buffered_count(&d1.device_id);
+    ar29_dm(&f, &o_master, "rv-b3-2", "while you were away").await;
+    assert!(
+        wait_until(10, async || relay.buffered_count(&d1.device_id) > buffered).await,
+        "F's DM gate left nothing for the away device before its return",
+    );
+    relay.set_online(&d1.device_id, true);
+    assert!(ar29_got(&mut d1, "while you were away", 30).await, "a DM to a contact that left reached it only after OUR reconnect");
+}
+
+/// Residual (F2, planned for 0.13): D1's DM shows a roster F lacks, then D1 goes away
+/// before F replies. The hold waits only on online asked devices, so F's reply still
+/// reaches S until the removal rides inside the remover's DMs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "known residual: a reply after the remover went offline reaches the removed device (0.13)"]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_phone_a_reply_after_the_sender_left_skips_the_removed_device() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, mut s, mut f) = ar29_cast(&relay, [209, 210, 211, 212]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+    super::roster_reach::set_jitter_for_test((5_000, 5_000));
+    ar29_dm(&d1, &f.master_id, "rv-b3-3", "bye for now").await;
+    assert!(ar29_got(&mut f, "bye for now", 20).await, "F gets D1's DM");
+    relay.set_online(&d1.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&d1.device_id)).await);
+    assert!(f.revoked_devices(&o_master).is_empty(), "precondition: the trade has not answered yet");
+    drain_events(&mut s);
+    ar29_dm(&f, &o_master, "rv-b3-4", "a reply to a phone gone to sleep").await;
+    // ABSENCE: a frame that never comes.
+    assert!(
+        !ar29_got(&mut s, "a reply to a phone gone to sleep", 6).await,
+        "F's reply reached the removed device because the device that showed the newer roster was offline",
+    );
+}
+
+/// A device that learned its own removal serves a contact that missed it no DM history
+/// and no profile, whatever it still holds until the wipe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_a_removed_device_serves_no_dm_sync() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 245;
+    let (d1, s, mut f) = ar29_cast(&relay, [O, 246, 247, 248]).await;
+    let o_master = d1.master_id.clone();
+    let f_master = f.master_id.clone();
+    let ask = || carried(super::types::HavenMessage::DmSyncRequest { since_timestamp: 0, both_directions: true, gap: None });
+    let profiles = async |s: &TestNode, to: &str| {
+        s.carried_to(to).await.iter().filter(|m| matches!(m, super::types::HavenMessage::ProfileUpdate { .. })).count()
+    };
+    let now = super::roster_book::now_ms();
+
+    // Control: before the removal S serves F what only S holds, and its profile.
+    plant_signed_dm_rows(&s.store(), O, &f_master, &f_master, true, &[(now - 60_000, "rm-sync-1".to_string())]);
+    send_envelope_as(&f, &s, &ask()).await;
+    assert_eq!(expect_dms(&mut f, &o_master, &["rm-sync-1".to_string()], 20).await, 0, "control: S serves F's DM sync");
+    let before = profiles(&s, &f.device_id).await;
+    send_envelope_as(&f, &s, &carried(super::types::HavenMessage::ProfileRequest)).await;
+    let f_dev = f.device_id.clone();
+    assert!(wait_until(10, async || profiles(&s, &f_dev).await > before).await, "control: S answers F's ProfileRequest");
+
+    // D1 removes S while F is away; S hears it, F does not.
+    relay.set_online(&f.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&f.device_id)).await);
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || super::roster_book::own_removal(&s.store()).is_some()).await,
+        "precondition: S learned its own removal",
+    );
+    super::resolver::unmark_revoked(std::slice::from_ref(&s.device_id));
+    super::resolver::update_many(&o_master, [s.device_id.as_str()]);
+    relay.swallow_direct(&d1.device_id, &f.device_id);
+    relay.set_broadcast_deaf(&f.device_id, true);
+    relay.set_online(&f.device_id, true);
+    let room = super::types::dm_room_code(&o_master, &f_master);
+    assert!(wait_until(15, async || relay.room_devices(&room).contains(&f.device_id)).await, "F is back");
+    assert!(
+        wait_until(15, async || relay.room_devices(&room).contains(&s.device_id)).await,
+        "precondition: S is still in the DM room",
+    );
+
+    plant_signed_dm_rows(&s.store(), O, &f_master, &f_master, true, &[(now - 30_000, "rm-sync-2".to_string())]);
+    let before = profiles(&s, &f.device_id).await;
+    send_envelope_as(&f, &s, &ask()).await;
+    send_envelope_as(&f, &s, &carried(super::types::HavenMessage::ProfileRequest)).await;
+    // ABSENCE: an answer that never comes.
+    assert_eq!(
+        expect_dms(&mut f, &o_master, &["rm-sync-2".to_string()], 6).await,
+        1,
+        "a device that knows it was removed served its DM history",
+    );
+    assert_eq!(profiles(&s, &f.device_id).await, before, "a device that knows it was removed answered a ProfileRequest");
+}
+
+/// The responder's own gates, alone: a removal F refuses itself never lets F's asks
+/// reach S, so here only S's removal mark is set and the Olm lane stays open (proven by
+/// the same ask served once the mark is gone).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn b3_a_device_marked_removed_answers_no_sync_or_profile_ask() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 249;
+    let (d1, s, mut f) = ar29_cast(&relay, [O, 250, 251, 252]).await;
+    let o_master = d1.master_id.clone();
+    let f_master = f.master_id.clone();
+    let ask = || carried(super::types::HavenMessage::DmSyncRequest { since_timestamp: 0, both_directions: true, gap: None });
+    let profiles = async |s: &TestNode, to: &str| {
+        s.carried_to(to).await.iter().filter(|m| matches!(m, super::types::HavenMessage::ProfileUpdate { .. })).count()
+    };
+    let now = super::roster_book::now_ms();
+    let f_dev = f.device_id.clone();
+
+    plant_signed_dm_rows(&s.store(), O, &f_master, &f_master, true, &[(now - 60_000, "rm-mark-1".to_string())]);
+    send_envelope_as(&f, &s, &ask()).await;
+    assert_eq!(expect_dms(&mut f, &o_master, &["rm-mark-1".to_string()], 20).await, 0, "control: S serves F's DM sync");
+
+    super::roster_book::note_own_removal_for_test(&s.store(), Some(&d1.device_id));
+    plant_signed_dm_rows(&s.store(), O, &f_master, &f_master, true, &[(now - 30_000, "rm-mark-2".to_string())]);
+    let before = profiles(&s, &f_dev).await;
+    send_envelope_as(&f, &s, &carried(super::types::HavenMessage::ProfileRequest)).await;
+    send_envelope_as(&f, &s, &ask()).await;
+    // ABSENCE: answers that never come.
+    assert_eq!(
+        expect_dms(&mut f, &o_master, &["rm-mark-2".to_string()], 6).await,
+        1,
+        "a device that knows it was removed served its DM history",
+    );
+    assert_eq!(profiles(&s, &f_dev).await, before, "a device that knows it was removed answered a ProfileRequest");
+
+    super::roster_book::note_own_removal_for_test(&s.store(), None);
+    send_envelope_as(&f, &s, &ask()).await;
+    assert_eq!(
+        expect_dms(&mut f, &o_master, &["rm-mark-2".to_string()], 20).await,
+        0,
+        "control: the lane was open, S serves the same ask once the mark is gone",
+    );
+}
+
+// f-actor-sweep
+
+/// A sibling's DM backfill reports a row only once that row is committed: Dart answers
+/// the event by reading the row, so an event from inside the batch transaction showed it
+/// a row that was not there yet. The card's message is the batch's first item, and the
+/// rest of the page keeps the transaction open behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_sibling_backfill_event_reports_a_committed_row() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, m_tag, b_tag, c_tag) = (238u8, 239u8, 240u8, 241u8);
+    let a_master = keys(a_tag).peer_id();
+    let m_master = keys(m_tag).peer_id();
+    let (b_dev, c_dev) = (keys(b_tag).peer_id(), keys(c_tag).peer_id());
+    super::resolver::seed_self(&m_master, std::slice::from_ref(&b_dev));
+    super::resolver::update_many(&m_master, [b_dev.as_str()]);
+
+    let a = spawn_node_with_friends(&relay, a_tag, a_tag, &[&m_master]).await;
+    let b = spawn_node_with_friends(&relay, m_tag, b_tag, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+
+    const MID: &str = "sweep-card-1";
+    const TRAILING: usize = 180;
+    let send = |mid: String, text: String| NodeCommand::SendMessage {
+        peer_id: a_master.clone(),
+        text,
+        message_id: mid,
+        reply_to_mid: None,
+        link_preview: None,
+    };
+    b.cmd_tx.send(send(MID.to_string(), "see https://example.com/sweep".to_string())).await.unwrap();
+    for i in 0..TRAILING {
+        b.cmd_tx.send(send(format!("sweep-{i}"), format!("filler {i}"))).await.unwrap();
+    }
+    // A send stores its row before it answers anything, so a round trip through the
+    // sender's loop means every row is stored.
+    assert!(b.debug_snapshot().await.is_some(), "the sender has stored every message");
+    let preview = crate::node::LinkPreviewRef {
+        url: "https://example.com/sweep".to_string(),
+        title: "Sweep".to_string(),
+        description: "a card".to_string(),
+        domain: "example.com".to_string(),
+        site_name: "Example".to_string(),
+        thumb_webp_b64: None,
+        thumb_w: None,
+        thumb_h: None,
+        rich: None,
+    };
+    b.cmd_tx
+        .send(NodeCommand::AttachDmLinkPreview {
+            peer_id: a_master.clone(),
+            message_id: MID.to_string(),
+            preview: Some(Box::new(preview)),
+        })
+        .await
+        .unwrap();
+    assert!(b.debug_snapshot().await.is_some(), "the sender has stored the card");
+
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+    super::resolver::update_many(&m_master, [b_dev.as_str(), c_dev.as_str()]);
+    let mut c = spawn_node_full(&relay, m_tag, c_tag, &[&a_master], Some(&[b_tag])).await;
+    // Opened before the event, so the read right after it costs no connection set-up.
+    let reader = c.store();
+    assert!(
+        wait_event(&mut c, std::time::Duration::from_secs(30), |ev| {
+            matches!(ev, NetworkEvent::DmLinkPreviewUpdated { message_id, .. } if message_id == MID)
+        })
+        .await,
+        "the linked device backfills the card from its sibling"
+    );
+    let row = reader.get_dm_message_sig_row(MID);
+    assert!(
+        row.as_ref().is_some_and(|r| r.link_preview.is_some()),
+        "the backfill reported the card before its row was committed"
+    );
+    drop(a);
+    drop(b);
+}
+
+/// A friend's DM backfill reports a card only once its row is committed (Dart answers
+/// DmLinkPreviewUpdated by reading the row). Same shape as
+/// a_sibling_backfill_event_reports_a_committed_row, but the linked device's only
+/// source is the FRIEND (the sibling is gone), so the friend DmSyncBatch arm serves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_friend_backfill_event_reports_a_committed_row() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, m_tag, b_tag, c_tag) = (242u8, 243u8, 244u8, 245u8);
+    let a_master = keys(a_tag).peer_id();
+    let m_master = keys(m_tag).peer_id();
+    let (b_dev, c_dev) = (keys(b_tag).peer_id(), keys(c_tag).peer_id());
+    super::resolver::seed_self(&m_master, std::slice::from_ref(&b_dev));
+    super::resolver::update_many(&m_master, [b_dev.as_str()]);
+
+    let a = spawn_node_with_friends(&relay, a_tag, a_tag, &[&m_master]).await;
+    let b = spawn_node_with_friends(&relay, m_tag, b_tag, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+
+    const MID: &str = "friend-card-1";
+    const TRAILING: usize = 180;
+    let send = |mid: String, text: String| NodeCommand::SendMessage {
+        peer_id: a_master.clone(),
+        text,
+        message_id: mid,
+        reply_to_mid: None,
+        link_preview: None,
+    };
+    b.cmd_tx.send(send(MID.to_string(), "see https://example.com/friend".to_string())).await.unwrap();
+    for i in 0..TRAILING {
+        b.cmd_tx.send(send(format!("friend-{i}"), format!("filler {i}"))).await.unwrap();
+    }
+    assert!(b.debug_snapshot().await.is_some());
+    let preview = crate::node::LinkPreviewRef {
+        url: "https://example.com/friend".to_string(),
+        title: "Friend".to_string(),
+        description: "a card".to_string(),
+        domain: "example.com".to_string(),
+        site_name: "Example".to_string(),
+        thumb_webp_b64: None,
+        thumb_w: None,
+        thumb_h: None,
+        rich: None,
+    };
+    b.cmd_tx
+        .send(NodeCommand::AttachDmLinkPreview {
+            peer_id: a_master.clone(),
+            message_id: MID.to_string(),
+            preview: Some(Box::new(preview)),
+        })
+        .await
+        .unwrap();
+    let a_store = a.store();
+    assert!(
+        wait_until(20, async || {
+            a_store.get_dm_message_sig_row(MID).is_some_and(|r| r.link_preview.is_some())
+                && a_store.dm_message_exists(&format!("friend-{}", TRAILING - 1))
+        })
+        .await,
+        "the friend holds the card and the whole page"
+    );
+    let b_id = b.device_id.clone();
+    relay.set_online(&b_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&b_id)).await, "B is gone");
+
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+    super::resolver::update_many(&m_master, [b_dev.as_str(), c_dev.as_str()]);
+    let mut c = spawn_node_full(&relay, m_tag, c_tag, &[&a_master], Some(&[b_tag])).await;
+    let reader = c.store();
+    assert!(
+        wait_event(&mut c, std::time::Duration::from_secs(30), |ev| {
+            matches!(ev, NetworkEvent::DmLinkPreviewUpdated { message_id, .. } if message_id == MID)
+        })
+        .await,
+        "the linked device backfills the card from the friend"
+    );
+    let row = reader.get_dm_message_sig_row(MID);
+    assert!(
+        row.as_ref().is_some_and(|r| r.link_preview.is_some()),
+        "the friend backfill reported the card before its row was committed"
+    );
+    drop(a);
+    drop(b);
+}
+
+/// Both channel batch arms report a card only once its row is committed, the channel
+/// twin of the DM tests above: the card's message opens the page and the rest of the
+/// page keeps the batch transaction open behind it. The joiner's backfill rides Olm;
+/// the same page then comes again over MLS, which only an older or modified client sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_channel_backfill_event_reports_a_committed_row() {
+    use super::types::HavenMessage;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_tag, j_tag) = (250u8, 251u8);
+    let o_master = keys(o_tag).peer_id();
+    let j_master = keys(j_tag).peer_id();
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&j_master]).await;
+    let mut j = spawn_node_with_friends(&relay, j_tag, j_tag, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Committed Rows").await;
+    let general = general_channel_of(&server_id);
+
+    const MID: &str = "channel-card-1";
+    const TRAILING: usize = 180;
+    let post = |mid: String, text: String| NodeCommand::SendChannelMessage {
+        server_id: server_id.clone(),
+        channel_id: general.clone(),
+        text,
+        message_id: mid,
+        reply_to_mid: None,
+        link_preview: None,
+    };
+    o.cmd_tx.send(post(MID.to_string(), "see https://example.com/channel".to_string())).await.unwrap();
+    for i in 0..TRAILING {
+        o.cmd_tx.send(post(format!("channel-{i}"), format!("filler {i}"))).await.unwrap();
+    }
+    assert!(o.debug_snapshot().await.is_some(), "the poster has stored every message");
+    let preview = crate::node::LinkPreviewRef {
+        url: "https://example.com/channel".to_string(),
+        title: "Channel".to_string(),
+        description: "a card".to_string(),
+        domain: "example.com".to_string(),
+        site_name: "Example".to_string(),
+        thumb_webp_b64: None,
+        thumb_w: None,
+        thumb_h: None,
+        rich: None,
+    };
+    o.cmd_tx
+        .send(NodeCommand::AttachChannelLinkPreview {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            message_id: MID.to_string(),
+            preview: Some(Box::new(preview)),
+        })
+        .await
+        .unwrap();
+    let o_store = o.store();
+    assert!(
+        wait_until(20, async || o_store.get_channel_message_sig_row(MID).is_some_and(|r| r.link_preview.is_some())).await,
+        "the poster holds the card"
+    );
+
+    let reader = j.store();
+    drain_events(&mut j);
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(&server_id),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(30), |ev| {
+            matches!(ev, NetworkEvent::ChannelLinkPreviewUpdated { message_id, .. } if message_id == MID)
+        })
+        .await,
+        "the joiner backfills the card"
+    );
+    let row = reader.get_channel_message_sig_row(MID);
+    assert!(
+        row.as_ref().is_some_and(|r| r.link_preview.is_some()),
+        "the Olm channel backfill reported the card before its row was committed"
+    );
+
+    // The joiner loses the rows, and the owner's leaf serves the page again over MLS.
+    assert!(reader.prune_channel_messages_in_range(&server_id, 0, i64::MAX).unwrap() > TRAILING as u32, "the joiner drops its rows");
+    drain_events(&mut j);
+    let batch = super::sync_handler::build_channel_sync_batch(&o.store(), &server_id, &general, 0, &HashMap::new(), None)
+        .expect("a batch")
+        .0;
+    let mut hostile = hostile_mls_copy(&o, o_tag, &server_id).await;
+    let ct = hostile.encrypt(&server_id, serde_json::to_string(&batch).unwrap().as_bytes()).expect("encrypts");
+    relay.inject_direct(
+        &server_id, &o.device_id, &j.device_id,
+        frame(&HavenMessage::MlsChannelMessage { server_id: server_id.clone(), body: b64(&ct), channel_id: None }),
+    );
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(30), |ev| {
+            matches!(ev, NetworkEvent::ChannelLinkPreviewUpdated { message_id, .. } if message_id == MID)
+        })
+        .await,
+        "the joiner takes the card again over MLS"
+    );
+    let row = reader.get_channel_message_sig_row(MID);
+    assert!(
+        row.as_ref().is_some_and(|r| r.link_preview.is_some()),
+        "the MLS channel backfill reported the card before its row was committed"
+    );
     drop(o);
 }

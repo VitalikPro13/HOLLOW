@@ -33,6 +33,13 @@
 #   cancel_retry    the presenter declines the first ask; the receiver tries
 #                   again with a fresh code and links
 #   third_device    after the link, -Third (empty) links from the presenter too
+#   roster_push     (Android friend, AR-29 on a phone) after the link the friend goes
+#                   to the background and its process is killed; the presenter
+#                   removes the receiver and DMs the friend, whose push fetch runs;
+#                   the friend opens again and DMs the identity at once: the
+#                   presenter gets it, the removed receiver never does.
+#                   -FriendDmOffline: the friend opens with no network and
+#                   writes the DM before it has a relay session
 #
 # Seeding goes through the app's own providers (`seed_*` probe ops) so every
 # platform starts from the same populated identity; the LINK is driven through
@@ -45,7 +52,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Receiver,
     [string]$Friend = 'win:c',
     [string]$Third = '',
-    [ValidateSet('clean', 'background', 'relay_resume', 'relay_lost', 'transfer_drop', 'held_db', 'cancel_retry', 'third_device')]
+    [ValidateSet('clean', 'background', 'relay_resume', 'relay_lost', 'transfer_drop', 'held_db', 'cancel_retry', 'third_device', 'roster_push')]
     [string]$Condition = 'clean',
     # Leave every peer running at the end, PASS or not.
     [switch]$KeepUp,
@@ -53,6 +60,12 @@ param(
     # 120 s session grace, which starts only once the relay finds the socket
     # dead (135 s still resumed in the 2026-10-10 run).
     [int]$LostSeconds = 240,
+    # roster_push: seconds the friend stays dead before the removal, past the relay's
+    # 120 s session grace, so what follows reaches it only through the offline buffer.
+    [int]$DeadSeconds = 150,
+    # roster_push: the friend reopens with its network off and writes the DM before
+    # it has a relay session; the network returns 5 s later.
+    [switch]$FriendDmOffline,
     [string]$EvidenceRoot = ''
 )
 
@@ -85,6 +98,9 @@ if (@($letters | Select-Object -Unique).Count -ne $letters.Count) {
     throw "every peer needs its own letter (got $($all -join ', ')): build\fleet_out is per letter on every machine"
 }
 if ($Condition -eq 'held_db' -and (Test-RemotePeer $R)) { throw 'held_db holds a file the Windows way: the receiver must be win:<letter>' }
+if ($Condition -eq 'roster_push' -and -not ((Test-RemotePeer $F) -and (Get-RemotePeer $F).Platform -eq 'android')) {
+    throw 'roster_push wakes the friend through FCM: the friend must be android:<letter>'
+}
 
 function Get-Platform($peer) { if (Test-RemotePeer $peer) { return (Get-RemotePeer $peer).Platform } return 'win' }
 function Test-Mobile($peer) { return (Get-Platform $peer) -in @('android', 'ios') }
@@ -134,6 +150,13 @@ switch ($Condition) {
     'held_db' { $script:Gates['X  held messages.db: first landing refused and kept the stash, the next landed'] = 'SKIP' }
     'cancel_retry' { $script:Gates['X  declined first ask failed cleanly, a fresh code linked'] = 'SKIP' }
     'third_device' { $script:Gates['X  third device linked: three members, traffic reaches it'] = 'SKIP' }
+    'roster_push' {
+        $script:Gates['P1 friend backgrounded and killed, the presenter removed the receiver'] = 'SKIP'
+        $script:Gates['P2 the friend woke by push only, every FCM data block just {sealed: N}'] = 'SKIP'
+        $script:Gates['P3 the push fetch stored the presenter''s DM before the app opened'] = 'SKIP'
+        $script:Gates['P4 the friend''s first DM after opening reaches the presenter'] = 'SKIP'
+        $script:Gates['X  ...and never the removed receiver (nothing encrypted for it), which got the friend''s DMs before'] = 'SKIP'
+    }
 }
 $script:Gates['C  cleanup: the server deleted'] = 'SKIP'
 $script:Notes = New-Object System.Collections.ArrayList
@@ -218,6 +241,13 @@ function Get-PeerStatus($peer) { return (Invoke-PeerCommand $peer 'status') }
 function Get-StashSize($peer) { return [int64](Invoke-PeerCommand $peer 'data_file' @{ name = 'pending_link.hollow' }).size }
 
 function Get-LogLines($peer, $pattern) { return @((Invoke-PeerCommand $peer 'log_grep' @{ pattern = $pattern }).lines) }
+
+# The app log's lines containing $pattern stamped at or after epoch second $since.
+function Get-LogSince($peer, $pattern, [int64]$since) {
+    return @(Get-LogLines $peer $pattern | Where-Object { "$_" -match '^\[(\d{9,})\]' -and [int64]$Matches[1] -ge $since })
+}
+
+function Get-Epoch { return [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
 
 function Shot($peer, $name) { Soft $peer @{ op = 'shot'; name = "mx-$runTag-$name" } | Out-Null }
 
@@ -728,6 +758,112 @@ try {
             $r3b = Wait-State $R @{} { param($s) (Get-Members $s).Count -ge 3 } 60 'three members on the receiver'
             $ok = ("$($sT.master)" -eq $masterP) -and (Get-Members $sT).Count -ge 3 -and (Test-Texts $t3.dm @("dm F to three $runTag")) -and (Get-Members $r3b).Count -ge 3
             Set-Gate 'X ' $(if ($ok) { 'PASS' } else { 'FAIL' })
+        }
+        'roster_push' {
+            $devR = "$($sR.device)"
+            $nameDevR = 'Phone'
+            # ---- the friend goes away the way a phone drops an app -------------------
+            Invoke-PeerCommand $F 'logcat' @{ clear = $true } | Out-Null
+            Step $F @{ op = 'background' } | Out-Null
+            Start-Sleep -Seconds 15
+            Step $F @{ op = 'kill' } | Out-Null
+            $killedAt = Get-Epoch
+            Say "friend killed; dead ${DeadSeconds}s before the removal"
+            Start-Sleep -Seconds $DeadSeconds
+            # ---- the presenter removes the receiver ------------------------------------
+            Open-Devices $P
+            Step $P @{ op = 'tap'; target = "semantics:More options for $nameDevR"; index = 0 } | Out-Null
+            Step $P @{ op = 'tap'; target = 'text:Remove device'; index = 0 } | Out-Null
+            Step $P @{ op = 'tap'; target = 'dialog > text:Remove device'; index = 0 } | Out-Null
+            $removedAt = Get-Epoch
+            $gone = Soft $R @{ op = 'wait_for'; target = 'text:This device was removed'; timeout_ms = 90000 } 120
+            Shot $R 'R-removed'
+            $sP5 = Wait-State $P @{} { param($s) (Get-Members $s).Count -eq 1 } 60 'one member on the presenter'
+            Shot $P 'P-devices-after-removal'
+            Close-Devices $P
+            $deadStill = (Get-PeerStatus $F).pid -eq 0 -or -not (Get-PeerStatus $F).live
+            Set-Gate 'P1' $(if ($gone.ok -and (Get-Members $sP5).Count -eq 1) { 'PASS' } else { 'FAIL' })
+            # The removal's own wake and fetch, then the DM's (the relay waits 10 s between wakes).
+            Start-Sleep -Seconds 30
+            # ---- the presenter DMs the dead friend --------------------------------------
+            $dmSentAt = Get-Epoch
+            Step $P @{ op = 'seed_dm'; contact = $masterF; text = "dm P while F away $runTag" } | Out-Null
+            $deadline = (Get-Date).AddSeconds(120)
+            $fetched = @()
+            while ((Get-Date) -lt $deadline) {
+                $fetched = @(Get-LogSince $F '[HOLLOW-FETCH] Fetch complete' $dmSentAt)
+                if ($fetched.Count -gt 0) { break }
+                Start-Sleep -Seconds 3
+            }
+            Start-Sleep -Seconds 10
+            $fields = @((Invoke-PeerCommand $F 'logcat' @{ pattern = 'FCM data fields' }).lines)
+            $fetchLines = @(Get-LogSince $F '[HOLLOW-FETCH]' $killedAt)
+            Save-Evidence $F 'pushed'
+            $fields | Set-Content (Join-Path $evidence 'F-fcm-data-fields.txt') -Encoding UTF8
+            $fetchLines | Set-Content (Join-Path $evidence 'F-fetch-lines.txt') -Encoding UTF8
+            $sealedOnly = $fields.Count -gt 0 -and -not @($fields | Where-Object { "$_" -notmatch 'FCM data fields: \{sealed: \d+\}\s*$' })
+            Say "friend's FCM data blocks: $($fields.Count), fetch lines since the kill: $($fetchLines.Count)"
+            Set-Gate 'P2' $(if ($sealedOnly -and $fetched.Count -gt 0) { 'PASS' } else { 'FAIL' })
+            # ---- the friend opens and DMs the identity at once ---------------------------
+            # -FriendDmOffline: the phone opens with no network and the DM is written
+            # before its relay session exists, the earliest a person can send.
+            if ($FriendDmOffline) { Step $F @{ op = 'net_off' } | Out-Null }
+            $openAt = Get-Epoch
+            try {
+                Invoke-PeerFleet @($F) @('-Live', '-ReuseData', '-KeepOthers')
+                if (-not $FriendDmOffline) { Wait-Connected $F }
+                Step $F @{ op = 'seed_dm'; contact = $masterP; text = "dm F after removal $runTag" } | Out-Null
+                if ($FriendDmOffline) { Start-Sleep -Seconds 5 }
+            } finally {
+                if ($FriendDmOffline) { Step $F @{ op = 'net_on' } | Out-Null }
+            }
+            Wait-Connected $F
+            $sF6 = Get-State $F @{ dm = $masterP }
+            Set-Gate 'P3' $(if ((Test-Texts $sF6.dm @("dm P while F away $runTag")) -and $fetched.Count -gt 0) { 'PASS' } else { 'FAIL' })
+            $p6 = Wait-State $P @{ dm = $masterF } { param($s) Test-Texts $s.dm @("dm F after removal $runTag") } 90 'the friend DM after the removal'
+            Set-Gate 'P4' $(if (Test-Texts $p6.dm @("dm F after removal $runTag")) { 'PASS' } else { 'FAIL' })
+            # Long enough for a buffered copy, a sibling echo or a DM sync to land too.
+            Start-Sleep -Seconds 45
+            $rUp = Get-PeerStatus $R
+            $rConn = Soft $R @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 5000 } 30
+            $r6 = Get-State $R @{ dm = $masterF }
+            $r6 | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $evidence 'receiver-after-removal.json') -Encoding UTF8
+            $missed = -not (Test-Texts $r6.dm @("dm F after removal $runTag"))
+            $heardBefore = Test-Texts $r6.dm @("dm F after $runTag")
+            Say "removed receiver: pid $($rUp.pid), connected $($rConn.ok), holds the friend's DM from before: $heardBefore, the one after: $(-not $missed)"
+            # When the open app learned the removal (a revocation it learns logs
+            # [HOLLOW-REVOKE]; one the push fetch stored is not new to it) against its
+            # first relay session and its DM. A digest-trade answer comes 1 to 30 s after
+            # the ask; anything sooner is the exchange every return starts.
+            $stamp = { param($lines) if (@($lines).Count -gt 0 -and "$(@($lines)[0])" -match '^\[(\d{9,})\]') { [int64]$Matches[1] } else { $null } }
+            $revokedLive = @(Get-LogSince $F "[HOLLOW-REVOKE] Dropped Olm session to revoked device $devR" $openAt)
+            $asks = @(Get-LogSince $F '[HOLLOW-ROSTER] Asking' $openAt)
+            $connects = @(Get-LogSince $F '[HOLLOW-WS] Connected and authenticated' $openAt)
+            $sends = @(Get-LogSince $F "[HOLLOW-SWARM] SendMessage received for $masterP" $openAt)
+            $holds = @(Get-LogSince $F '[HOLLOW-ROSTER]' $openAt | Where-Object { "$_" -match 'unconfirmed|before the DM' })
+            $revokeAt, $connectAt, $sendAt = (& $stamp $revokedLive), (& $stamp $connects), (& $stamp $sends)
+            @("removed device $devR", "killed $killedAt removed $removedAt dm $dmSentAt opened $openAt",
+              "connected $connectAt friend DM $sendAt removal learned $revokeAt", '--- revoke after open') + $revokedLive +
+                @('--- asks after open') + $asks + @('--- holds after open') + $holds |
+                Set-Content (Join-Path $evidence 'F-roster-path.txt') -Encoding UTF8
+            $path = if ($null -eq $revokeAt) { 'the push fetch (the open app already held it)' }
+                    elseif ($null -ne $connectAt -and $revokeAt - $connectAt -le 1) { 'the exchange at its return' }
+                    elseif ($asks.Count -gt 0) { 'the digest trade after the app opened' }
+                    else { 'a roster heard live after the app opened' }
+            $order = if ($null -eq $revokeAt -or $null -eq $sendAt) { '' }
+                     elseif ($revokeAt -le $sendAt) { ", $($sendAt - $revokeAt) s before its DM" }
+                     else { ", $($revokeAt - $sendAt) s AFTER its DM" }
+            Add-Note "the removal reached the friend through $path$order"
+            if ($holds.Count -gt 0) { Add-Note "the friend held a DM for the roster: $($holds.Count) line(s)" }
+            if (-not $deadStill) { Add-Note 'the friend had a live process again before its app was opened' }
+            Shot $F 'F-after-open'
+            # The removed device may hold a copy it never shows: the friend's own log says
+            # whether it encrypted anything for it after it opened.
+            $toRemoved = @(Get-LogSince $F '[HOLLOW-DM] Held DM fan-out to' $openAt | Where-Object { "$_".Contains($devR) }) +
+                @(Get-LogSince $F "[HOLLOW-PUSH] Sent encrypted DM to offline $devR" $openAt)
+            Set-Content (Join-Path $evidence 'F-sends-to-removed.txt') -Value ([string[]]$toRemoved) -Encoding UTF8
+            if ($toRemoved.Count -gt 0) { Add-Note "the friend encrypted $($toRemoved.Count) DM fan-out(s) for the removed device after it opened" }
+            Set-Gate 'X ' $(if ($missed -and $heardBefore -and $rUp.pid -ne 0 -and $toRemoved.Count -eq 0) { 'PASS' } else { 'FAIL' })
         }
     }
 } catch {

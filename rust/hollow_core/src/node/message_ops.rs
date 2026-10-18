@@ -483,6 +483,19 @@ pub(crate) async fn fan_out_dm_envelope(
     }
 }
 
+/// Log the devices a DM that a stale roster held goes to once released: the one fan-out
+/// whose targets a roster trade may have changed.
+pub(crate) fn log_released_fan_out(
+    olm: &OlmManager,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    local_peer_str: &str,
+    recipient_master: &str,
+) {
+    let dm_room = dm_room_code(local_peer_str, recipient_master);
+    let devices = collect_target_devices(ws_room_peers, Some(olm), &dm_room, recipient_master, recipient_master, None);
+    hollow_log!("[HOLLOW-DM] Held DM fan-out to {recipient_master}: {}", devices.join(", "));
+}
+
 /// Build the set of device peer_ids to fan a DM out to for one master identity.
 ///
 /// LIVENESS-FILTERED: a stored device id is targeted ONLY if it is reachable, so

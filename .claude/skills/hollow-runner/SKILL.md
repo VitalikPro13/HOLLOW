@@ -187,7 +187,11 @@ section after the Windows fleet); these rules hold for every command that runs O
    (`keychain_tests::*`, `wipe::tests::a_wipe_*` / `erasing_another_profile_*`,
    `platform_keystore::tests::the_real_keystore_*`) fail with `CredWriteW failed`: Credential
    Manager needs an interactive logon. List them separately as environmental. The lead deletes
-   `D:\dev\wt\<name>\rust\hollow_core\target` when the track merges.
+   `D:\dev\wt\<name>\rust\hollow_core\target` when the track merges. A run whose Summary is far
+   above normal (about 600 s) and whose short tests show about +30 s durations was STALLED (machine
+   or stderr pipe): rerun it before reporting any timing failure from it.
+- A process started over ssh dies when the session ends: keep the ssh session open for the whole
+  run (a background Bash on the Mac); never a scheduled task or other persistence on the PC.
 - If `pc` (LAN) times out, use `pc-ts` (Tailscale) for every step, and `PC_HOST=pc-ts` for
   pc_sync.sh.
 

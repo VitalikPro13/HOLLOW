@@ -35,7 +35,7 @@ object HollowHwKey {
     @JvmStatic
     private external fun nativeRegister()
 
-    /** Hands Rust the four calls below. Before Dart's first unlock. */
+    /** Hands Rust the calls below. Before Dart's first unlock. */
     fun register() {
         try {
             // FRB opens the library from Dart; ART needs its own load to bind JNI.
@@ -124,5 +124,14 @@ object HollowHwKey {
             keyStore().deleteEntry(alias)
         } catch (_: Throwable) {
         }
+    }
+
+    /** Every alias this app's keystore holds under [prefix], null when it failed to say. */
+    @JvmStatic
+    fun list(prefix: String): Array<String>? = try {
+        keyStore().aliases().toList().filter { it.startsWith(prefix) }.toTypedArray()
+    } catch (t: Throwable) {
+        Log.w(TAG, "keystore did not list: ${t.javaClass.simpleName}")
+        null
     }
 }

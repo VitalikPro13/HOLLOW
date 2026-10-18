@@ -492,6 +492,13 @@ pub(crate) fn own_removal(store: &MessageStore) -> Option<(String, i64)> {
     Some((by, at))
 }
 
+/// Mark (or clear) this device's own removal with nobody else revoking it. Tests only:
+/// the harness resolver is process-global, so a real removal reaches every node.
+#[cfg(test)]
+pub(crate) fn note_own_removal_for_test(store: &MessageStore, by: Option<&str>) {
+    note_own_removal(store, by);
+}
+
 fn note_own_removal(store: &MessageStore, by: Option<&str>) {
     match by {
         Some(by) => {

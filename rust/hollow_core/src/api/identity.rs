@@ -177,7 +177,7 @@ fn open_typed_secret(secret: &str, bytes: &[u8], salt: &[u8; 16]) -> Result<[u8;
     use crate::identity::attempts;
     let root = crate::identity::data_dir()?;
     let charge = attempts::charge(&root, attempts::Clock::now())?;
-    let opened = open_secret(secret, bytes, salt);
+    let opened = open_secret(secret, bytes, salt, Duress::Fires);
     match &opened {
         Ok(_) => attempts::succeeded(&root),
         // A wipe leaves nothing to write the count into.
@@ -187,10 +187,19 @@ fn open_typed_secret(secret: &str, bytes: &[u8], salt: &[u8; 16]) -> Result<[u8;
     opened
 }
 
+/// What a duress match does: a typed secret fires the code; a stored copy nobody
+/// typed (the launch secret, a biometric's) can be a stale PIN that a duress code
+/// reused, so there it opens nothing, the same answer as any other stale copy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Duress {
+    Fires,
+    Inert,
+}
+
 /// Both slots for one secret, each with one hardware operation where this device has
 /// the profile's key, whatever either slot's flags say. A busy keystore is
 /// `hw_key::BUSY`, never a miss, and never keeps a duress code from firing.
-fn open_secret(secret: &str, bytes: &[u8], salt: &[u8; 16]) -> Result<[u8; 32], String> {
+fn open_secret(secret: &str, bytes: &[u8], salt: &[u8; 16], on_duress: Duress) -> Result<[u8; 32], String> {
     use crate::identity::{encryption, hw_key};
     let flags = match encryption::detect_format(bytes)? {
         encryption::IdentityFormat::Encrypted { flags, .. } => flags,
@@ -202,6 +211,7 @@ fn open_secret(secret: &str, bytes: &[u8], salt: &[u8; 16]) -> Result<[u8; 32], 
     let duress = crate::identity::duress::probe_with(secret, hw.as_ref());
     match (identity_key, identity_opens, duress) {
         (Ok(Some(key)), true, _) => Ok(key),
+        (_, _, Ok(Some(_))) if on_duress == Duress::Inert => Err(WRONG_SECRET.into()),
         (_, _, Ok(Some(cfg))) => {
             crate::api::wipe::run_duress(&cfg);
             Err("duress".into())
@@ -222,9 +232,9 @@ pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>
 }
 
 /// Unlock with the secret the OS keystore handed back (the launch secret, or the
-/// copy a biometric releases): never paced and never counted as a miss, since no one
-/// typed it. Only `person_present` (a biometric just passed) clears the count, or a
-/// relaunch would reset it every time.
+/// copy a biometric releases): never paced, never counted as a miss and never a
+/// duress wipe, since no one typed it. Only `person_present` (a biometric just
+/// passed) clears the count, or a relaunch would reset it every time.
 #[frb]
 pub fn unlock_identity_with_stored_secret(
     secret: String,
@@ -251,6 +261,9 @@ fn unlock_logged(password: Option<String>, how: Secret) -> Result<IdentityInfo, 
     });
     if unlocked.is_ok() {
         crate::identity::reclaim_after_unlock();
+        if let Ok(root) = crate::identity::data_dir() {
+            crate::identity::hw_key::sweep_orphans(&root);
+        }
     }
     unlocked
 }
@@ -279,7 +292,7 @@ fn unlock_identity_with(password: Option<String>, how: Secret) -> Result<Identit
                 match how {
                     Secret::Typed => open_typed_secret(secret, &bytes, &salt)?,
                     Secret::Stored { person_present } => {
-                        let key = open_secret(secret, &bytes, &salt)?;
+                        let key = open_secret(secret, &bytes, &salt, Duress::Inert)?;
                         if person_present {
                             crate::identity::attempts::succeeded(&dir);
                         }
@@ -313,6 +326,7 @@ fn unlock_identity_with(password: Option<String>, how: Secret) -> Result<Identit
             encryption::decrypt_identity(&bytes, &wrapping_key)?;
             encryption::set_session_key(wrapping_key);
             if let Some(secret) = typed {
+                let bytes = drop_cached_key_off_os_root(&dir, flags, &bytes, &wrapping_key).unwrap_or(bytes);
                 if encryption::flags_has_device_bound(flags) {
                     repair_device_file(secret, &salt, &wrapping_key);
                 } else {
@@ -330,6 +344,44 @@ fn unlock_identity_with(password: Option<String>, how: Secret) -> Result<Identit
     })
 }
 
+/// A password key an older build cached in the keychain of a root where no key may be
+/// cached any more (an override, portable, a pinned profile elsewhere) leaves it at the
+/// first unlock with the password in hand: the file drops the flag, then the keychain
+/// forgets the key, with no keychain write. Returns the rewritten file.
+fn drop_cached_key_off_os_root(
+    root: &std::path::Path,
+    flags: u8,
+    bytes: &[u8],
+    key: &[u8; 32],
+) -> Option<Vec<u8>> {
+    use crate::identity::{encryption, platform_keystore};
+    if !encryption::flags_has_os_keychain(flags) || password_keychain_allowed(root) {
+        return None;
+    }
+    let dropped = (|| -> Result<Vec<u8>, String> {
+        let encryption::IdentityFormat::Encrypted { salt, .. } = encryption::detect_format(bytes)? else {
+            return Err("File is not encrypted".into());
+        };
+        let plaintext = encryption::decrypt_identity(bytes, key)?;
+        let device = identity::device_key::load_device_keypair_with_key(key)?;
+        let encrypted = encryption::encrypt_with_flags(&plaintext, key, &salt, flags & !encryption::FLAG_OS_KEYCHAIN)?;
+        encryption::write_key_file(&root.join("identity.key"), &encrypted)?;
+        identity::device_key::rewrite_device_key_protection(&device, Some(key), true, false)?;
+        platform_keystore::forget_key_at(root, Some(bytes));
+        Ok(encrypted)
+    })();
+    match dropped {
+        Ok(encrypted) => {
+            hollow_log!("[HOLLOW-ID] The password key left this folder's keychain cache");
+            Some(encrypted)
+        }
+        Err(e) => {
+            hollow_log!("[HOLLOW-ID] The keychain cache stays for now: {e}");
+            None
+        }
+    }
+}
+
 /// A password-wrapped identity from before the hardware binding moves onto it at its
 /// next unlock, quietly, under the same salt: the identity file first, then the
 /// device file. Any failure leaves the old wrap, which still opens.
@@ -343,7 +395,8 @@ fn tie_to_hardware(root: &std::path::Path, bytes: &[u8], key: &[u8; 32]) {
         return;
     }
     let moved = (|| -> Result<(), String> {
-        let hw = hw_key::ensure(root, false)?.ok_or(hw_key::MISSING)?;
+        // No key made (the keystore refused, and said so once): the old wrap stays.
+        let Some(hw) = hw_key::ensure(root, false)? else { return Ok(()) };
         let new_key = bound_key(key, &salt, &hw)?;
         let plaintext = encryption::decrypt_identity(bytes, key)?;
         let device = identity::device_key::load_device_keypair_with_key(key)?;
@@ -543,6 +596,7 @@ pub fn enable_password_protection(
 
     encryption::set_session_key(wrapping_key);
     forget_missed_tries();
+    crate::identity::hw_key::sweep_orphans(&dir);
 
     // A duress slot exists for the life of password protection, so its presence
     // never reveals whether a duress code is set.
@@ -1131,14 +1185,50 @@ fn default_eligible_for(
     os_default_root: Option<&std::path::Path>,
     debug_hook: bool,
 ) -> bool {
-    if !matches!(os, DesktopOs::Windows | DesktopOs::MacOs) {
-        return false;
-    }
+    matches!(os, DesktopOs::Windows | DesktopOs::MacOs)
+        && is_os_default_root(env_override, root, os_default_root, debug_hook)
+}
+
+/// Whether `root` is the OS's own data root and no override chose it.
+fn is_os_default_root(
+    env_override: Option<&str>,
+    root: &std::path::Path,
+    os_default_root: Option<&std::path::Path>,
+    debug_hook: bool,
+) -> bool {
     if env_override.is_some_and(|v| !v.is_empty()) {
         return debug_hook;
     }
     let canon = |p: &std::path::Path| std::fs::canonicalize(p).ok();
     os_default_root.is_some_and(|d| canon(d).is_some() && canon(d) == canon(root))
+}
+
+fn launch_secret_allowed_for(
+    phone: bool,
+    env_override: Option<&str>,
+    root: &std::path::Path,
+    os_default_root: Option<&std::path::Path>,
+    debug_hook: bool,
+) -> bool {
+    phone || is_os_default_root(env_override, root, os_default_root, debug_hook)
+}
+
+/// Whether App Lock may keep its launch secret in the OS secure storage: always on a
+/// phone; on a computer only on the OS's own data root, since a root elsewhere can
+/// move to another machine or account and a session with no keychain (ssh) would
+/// only fail or ask. Elsewhere the person types the secret at launch.
+#[frb(sync)]
+pub fn app_lock_launch_secret_allowed() -> bool {
+    let Ok(root) = crate::identity::data_dir() else { return false };
+    let env = std::env::var("HOLLOW_DATA_DIR").ok();
+    let os_default = dirs::data_dir().map(|d| d.join("hollow"));
+    launch_secret_allowed_for(
+        cfg!(any(target_os = "android", target_os = "ios")),
+        env.as_deref(),
+        &root,
+        os_default.as_deref(),
+        debug_defaults_hook(),
+    )
 }
 
 fn default_eligible() -> bool {
@@ -1414,6 +1504,8 @@ mod profile_erase_gate_tests {
     /// profile must not set, clear or otherwise disturb it.
     #[test]
     fn verify_leaves_the_session_key_alone() {
+        // The session key and the derive count are process-wide: no unlock elsewhere meanwhile.
+        let _g = crate::node::resolver::test_lock();
         let tmp = crate::test_tmp::tempdir().unwrap();
         write_password_protected(tmp.path(), "correct horse");
         let dir = tmp.path().to_string_lossy().to_string();
@@ -1913,6 +2005,35 @@ mod keychain_tests {
         assert_eq!(protect_new_identity_by_default(PHRASE.into()), Ok(false));
         assert_eq!(fx.files(), before);
         assert_eq!(profile_value(fx.root()), None);
+    }
+
+    /// App Lock's launch secret follows the root on every computer, Linux too: on an
+    /// override, portable or pinned root it stays out of the OS secure storage, so a
+    /// session with no keychain (ssh) never fails or asks. A phone always keeps it.
+    #[test]
+    fn a_launch_secret_is_kept_only_on_the_os_root_or_a_phone() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let os_root = tmp.path().join("hollow");
+        let elsewhere = tmp.path().join("stick").join("hollow_data");
+        for d in [&os_root, &elsewhere] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let allowed = |phone, env: Option<&str>, root: &Path, hook| {
+            launch_secret_allowed_for(phone, env, root, Some(&os_root), hook)
+        };
+        assert!(allowed(false, None, &os_root, false));
+        assert!(!allowed(false, None, &elsewhere, false), "portable or a pinned profile elsewhere");
+        let env = os_root.to_string_lossy().to_string();
+        assert!(!allowed(false, Some(&env), &os_root, false), "HOLLOW_DATA_DIR is an override");
+        assert!(allowed(false, Some(&env), &os_root, true), "the debug hook lets a fleet peer see the default");
+        assert!(allowed(true, Some(&env), &elsewhere, false), "a phone keeps it wherever its root is");
+        assert!(!launch_secret_allowed_for(false, None, &os_root, None, false), "no OS root known");
+    }
+
+    #[test]
+    fn an_override_root_keeps_no_launch_secret() {
+        let _fx = plaintext_identity();
+        assert!(!app_lock_launch_secret_allowed());
     }
 
     /// Rule 1, the Rust layer: the default needs this identity's phrase (Dart passes
@@ -2742,6 +2863,9 @@ mod b5_device_bound_tests {
         fn delete(&self, alias: &str) {
             self.inner.delete(alias)
         }
+        fn list(&self) -> Option<Vec<String>> {
+            self.inner.list()
+        }
     }
 
     fn fx_with(oracle: Arc<dyn hw_key::Oracle>) -> Fx {
@@ -2980,13 +3104,15 @@ mod b5_device_bound_tests {
     /// set, only while its slot predates the binding, gone once it is set again.
     #[test]
     fn an_old_duress_code_is_due_to_be_set_again_once_bound() {
-        let _s = crate::api::storage::store_test_lock();
         for with_code in [true, false] {
+            // The data-dir lock first, then the store's, as every test takes them: the
+            // store set before it would take another test's duress settings meanwhile.
+            let fx = fx(None);
+            let _s = crate::api::storage::store_test_lock();
             crate::api::storage::set_test_store(
                 crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap(),
             );
             let stub = Stub::new(Kind::Hmac);
-            let fx = fx(None);
             legacy_lock(&fx);
             if with_code {
                 set_duress_code(PIN.into(), CODE.into(), duress::SCOPE_DEVICE.into(), false, None).expect("code");
@@ -3002,8 +3128,118 @@ mod b5_device_bound_tests {
                 assert!(!duress_status().rebind_due, "set again, it is bound");
                 assert!(duress_status().enabled);
             }
+            *crate::api::storage::get_store().lock().unwrap() = None;
+            drop(_s);
             drop(fx);
         }
-        *crate::api::storage::get_store().lock().unwrap() = None;
+    }
+
+    // f-applock-followups
+
+    const GONE: &str = "hollow_applock_hw.0123456789abcdef";
+
+    /// A wipe the push fetch or the iOS extension ran (no oracle there) leaves its
+    /// profile's key in the keystore; the next lock on the phone takes it.
+    #[test]
+    fn a_lock_on_a_phone_sweeps_orphaned_hardware_keys() {
+        let stub = Stub::new(Kind::Hmac);
+        let _fx = fx(Some(stub.clone()));
+        hw_key::one_profile_for_test(true);
+        hw_key::Oracle::create(&*stub, GONE).unwrap();
+        enable_password_protection(PIN.into(), true).expect("enable");
+        let live = format!("hollow_applock_hw.{}", app_lock_profile_id(false).unwrap());
+        let left: Vec<String> = stub.snapshot().into_iter().map(|(a, _)| a).collect();
+        assert_eq!(left, vec![live], "the gone profile's key outlived the new lock, or the live one went");
+        encryption::clear_session_key();
+        unlock_identity(Some(PIN.into())).expect("the live key still opens the new lock");
+    }
+
+    /// A phone that already has its lock takes a gone profile's key at its next start.
+    #[test]
+    fn an_unlock_on_a_phone_sweeps_orphaned_hardware_keys() {
+        let stub = Stub::new(Kind::EcdhP256);
+        let _fx = fx(Some(stub.clone()));
+        hw_key::one_profile_for_test(true);
+        enable_password_protection(PIN.into(), true).expect("enable");
+        hw_key::Oracle::create(&*stub, GONE).unwrap();
+        encryption::clear_session_key();
+        unlock_identity(Some(PIN.into())).expect("unlock");
+        let live = format!("hollow_applock_hw.{}", app_lock_profile_id(false).unwrap());
+        let left: Vec<String> = stub.snapshot().into_iter().map(|(a, _)| a).collect();
+        assert_eq!(left, vec![live]);
+        encryption::clear_session_key();
+        unlock_identity(Some(PIN.into())).expect("the live key survived its own sweep");
+    }
+
+    /// A launch secret is a STORED copy: gone stale (a PIN change it missed), it can
+    /// equal a duress code set later. Nobody typed it, so it never wipes: it opens
+    /// nothing, like any stale copy, and the typed prompt takes over.
+    #[test]
+    fn a_stale_stored_secret_never_fires_the_duress_code() {
+        const LATER: &str = "905731";
+        let fx = fx(Some(Stub::new(Kind::Hmac)));
+        enable_password_protection(PIN.into(), true).expect("enable");
+        change_password(PIN.into(), LATER.into()).expect("change");
+        set_duress_code(LATER.into(), PIN.into(), duress::SCOPE_DEVICE.into(), false, None)
+            .expect("the old PIN is accepted as a duress code");
+        encryption::clear_session_key();
+        let _ = encryption::take_derive_count();
+        let out = unlock_identity_with_stored_secret(PIN.into(), false);
+        assert_eq!(out.err().as_deref(), Some(WRONG_SECRET), "a stored secret nobody typed fired the duress code");
+        assert_eq!(encryption::take_derive_count(), 2, "the stored secret still costs both slots");
+        assert!(fx.root().join("identity.key").exists() && fx.root().join("identity.duress").exists());
+        assert_eq!(unlock_identity(Some(PIN.into())).err().as_deref(), Some("duress"), "typed, the code still fires");
+    }
+
+    /// A 0.12.1 profile off the OS's own root still has its password key cached in
+    /// the keychain. The first typed unlock there takes it off, once, writing nothing
+    /// to the keychain; on the OS's own root the cache stays.
+    #[test]
+    fn a_typed_unlock_off_the_os_root_drops_the_cached_key_once() {
+        use crate::identity::platform_keystore::test_support as ks;
+        let fx = fx(None);
+        let salt = [0x23u8; 16];
+        let key = encryption::derive_wrapping_key_from_password(PIN, &salt).unwrap();
+        let plain = NativeKeypair::from_secret_bytes(&[0x61; 32]).to_protobuf_encoding().unwrap();
+        let cached = encryption::encrypt_identity(&plain, &key, &salt, true, true).unwrap();
+        let device = NativeKeypair::from_secret_bytes(&[0x62; 32]).to_protobuf_encoding().unwrap();
+        let lay_down = || {
+            std::fs::write(fx.root().join("identity.key"), &cached).unwrap();
+            std::fs::write(fx.root().join("identity.device"), &device).unwrap();
+            ks::set_profile(fx.root(), &key);
+            encryption::clear_session_key();
+            let _ = ks::take_writes();
+        };
+
+        lay_down();
+        keychain_root_for_test(Some(true));
+        unlock_identity(Some(PIN.into())).expect("opens");
+        assert_ne!(fx.flags() & 0x02, 0, "the OS root lost its silent start");
+        keychain_root_for_test(None);
+
+        lay_down();
+        unlock_identity(Some(PIN.into())).expect("opens");
+        assert_eq!(fx.flags() & 0x02, 0, "still told to open from the keychain");
+        assert_eq!(ks::profile_value(fx.root()), None, "the cached key stayed in the keychain");
+        assert_eq!(ks::take_writes(), 0, "a keychain write off the OS root");
+        encryption::clear_session_key();
+        unlock_identity(Some(PIN.into())).expect("the PIN still opens");
+        assert!(unlock_identity(None).is_err(), "it still starts silently");
+    }
+
+    /// A keystore that refuses to make a key leaves the old wrap, quietly: no
+    /// "missing key" line at every unlock.
+    #[test]
+    fn a_refused_keystore_logs_no_missing_key() {
+        let fx = fx(None);
+        legacy_lock(&fx);
+        hw_key::install_for_test(Some(Stub::software_only()));
+        encryption::clear_session_key();
+        crate::log::capture_for_test();
+        unlock_identity_with_stored_secret(PIN.into(), false).expect("opens");
+        unlock_identity(Some(PIN.into())).expect("opens");
+        let lines = crate::log::take_captured();
+        assert!(!lines.iter().any(|l| l.contains("hardware_key_missing")), "{lines:?}");
+        assert_eq!(fx.flags() & encryption::FLAG_DEVICE_BOUND, 0);
     }
 }

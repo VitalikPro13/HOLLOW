@@ -1127,7 +1127,7 @@ fn handle_direct_message(
         db_path, db_passphrase,
     );
     if fresh && let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        crate::node::roster_reach::fetch_on_dm(&store, local_master, from, convo, rd.as_ref());
+        crate::node::roster_reach::fetch_on_dm(&store, local_master, from, convo, ts, rd.as_ref());
     }
 
     Some(FetchedDm {
@@ -1939,12 +1939,17 @@ mod tests {
         }
 
         fn dm(&self, mid: &str, rd: Option<crate::node::types::RosterDigests>) -> MessageEnvelope {
-            let extras = SignedExtras { mid: Some(mid), order_us: Some(1_000_000), ..SignedExtras::default() };
-            let (sig, pk) = sign_message_versioned(&self.bm, &pk_b64(&self.bm), "dm", &self.a, &self.bm.peer_id(), 1_000, &extras, "hi");
+            self.dm_at(mid, 1_000, rd)
+        }
+
+        fn dm_at(&self, mid: &str, ts: i64, rd: Option<crate::node::types::RosterDigests>) -> MessageEnvelope {
+            let order_us = ts * 1_000;
+            let extras = SignedExtras { mid: Some(mid), order_us: Some(order_us), ..SignedExtras::default() };
+            let (sig, pk) = sign_message_versioned(&self.bm, &pk_b64(&self.bm), "dm", &self.a, &self.bm.peer_id(), ts, &extras, "hi");
             MessageEnvelope::DirectMessage {
                 inner: Box::new(DirectMessagePayload {
-                    text: "hi".into(), ts: 1_000, sig, pk, mid: Some(mid.into()), reply_to: None,
-                    file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None, rd,
+                    text: "hi".into(), ts, sig, pk, mid: Some(mid.into()), reply_to: None,
+                    file_id: None, link_preview: None, convo: None, order_us: Some(order_us), album: None, rd,
                 }),
             }
         }
@@ -2008,9 +2013,12 @@ mod tests {
         assert!(push.fetch(&push.dm("b3p-1", differs())).is_some());
         assert!(push.store().take_roster_asks_due().is_empty(), "a DM read before notes nothing");
 
-        assert_eq!(push.store().roster_confirmed_at(&bm, &b1), None);
-        assert!(push.fetch(&push.dm("b3p-2", Some(RosterDigests { own: Some(held), peer: None }))).is_some());
-        assert!(push.store().roster_confirmed_at(&bm, &b1).is_some(), "a digest that matches stamps b1's slot");
+        assert_eq!(push.store().roster_confirmed_at(&bm, &b1), Some(0), "a digest that differs voids b1's slot");
+        let matches = || Some(RosterDigests { own: Some(held.clone()), peer: None });
+        assert!(push.fetch(&push.dm_at("b3p-0", 500, matches())).is_some());
+        assert_eq!(push.store().roster_confirmed_at(&bm, &b1), Some(0), "a DM b1 sent before the one that differed confirms nothing");
+        assert!(push.fetch(&push.dm_at("b3p-2", 2_000, matches())).is_some());
+        assert!(push.store().roster_confirmed_at(&bm, &b1).is_some_and(|at| at > 0), "a digest that matches stamps b1's slot");
         assert_eq!(push.store().roster_confirmed_at(&bm, &push.b2.peer_id()), None, "and no other");
         crate::node::resolver::clear_all();
     }

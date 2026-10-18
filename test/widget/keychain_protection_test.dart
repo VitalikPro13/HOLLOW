@@ -36,6 +36,10 @@ class _Api implements RustLibApi {
   bool password = false;
   String? storedPhrase;
   bool keyBack = false;
+  bool launchAllowed = true;
+
+  @override
+  bool crateApiIdentityAppLockLaunchSecretAllowed() => launchAllowed;
 
   @override
   Future<bool> crateApiIdentityProtectNewIdentityByDefault(
@@ -424,6 +428,30 @@ void main() {
       await pumpSection(tester);
       expect(find.text('Lock to this computer'), findsNothing);
       expect(find.text('Ask before Hollow starts'), findsOneWidget);
+      SettingsSwitchRow coldStart() => tester.widget<SettingsSwitchRow>(
+          find.widgetWithText(SettingsSwitchRow, 'Ask before Hollow starts'));
+      expect(coldStart().onChanged, isNotNull);
+
+      // A profile outside the OS's own folder keeps no launch secret, so the
+      // prompt is always on and says why.
+      api.launchAllowed = false;
+      await pumpSection(tester);
+      expect(coldStart().value, isTrue);
+      expect(coldStart().onChanged, isNull);
+      expect(coldStart().subtitle, contains("isn't in Hollow's usual folder"));
+
+      // A 0.12.1 profile here still has its password key cached in the keychain
+      // (flags 0x03): the switch shows the silent start and can turn the prompt
+      // on.
+      api.eligible = false;
+      api.password = true;
+      api.encrypted = true;
+      await pumpSection(tester);
+      expect(coldStart().value, isFalse);
+      expect(coldStart().onChanged, isNotNull,
+          reason: 'disabled, saying "${coldStart().subtitle}"');
+      expect(coldStart().subtitle,
+          isNot(contains("isn't in Hollow's usual folder")));
     });
   });
 }

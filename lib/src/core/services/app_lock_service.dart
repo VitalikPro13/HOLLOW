@@ -102,6 +102,7 @@ class AppLockService {
     store: SecureAppLockStore(),
     profileId: _rustProfileId,
     opensIdentity: _rustOpensIdentity,
+    launchSecretAllowed: _rustLaunchSecretAllowed,
   );
   factory AppLockService() => _instance;
 
@@ -109,25 +110,30 @@ class AppLockService {
     required AppLockStore store,
     required String? Function(bool create) profileId,
     required Future<bool> Function(String secret) opensIdentity,
+    required bool Function() launchSecretAllowed,
     bool? oneProfile,
   })  : _store = store,
         _profileIdOf = profileId,
         _opensIdentity = opensIdentity,
+        _launchSecretAllowedOf = launchSecretAllowed,
         _oneProfile = oneProfile ?? (Platform.isAndroid || Platform.isIOS);
 
   /// A fresh service over fakes, in place of the app's one. [oneProfile]: the
-  /// install can hold only one profile, as a phone.
+  /// install can hold only one profile, as a phone. [launchSecretAllowed]: the
+  /// data root may keep a launch secret in the OS secure storage.
   @visibleForTesting
   static AppLockService debugReplace({
     required AppLockStore store,
     required String? Function(bool create) profileId,
     required Future<bool> Function(String secret) opensIdentity,
     bool oneProfile = false,
+    bool launchSecretAllowed = true,
   }) =>
       _instance = AppLockService._(
           store: store,
           profileId: profileId,
           opensIdentity: opensIdentity,
+          launchSecretAllowed: () => launchSecretAllowed,
           oneProfile: oneProfile);
 
   static String? _rustProfileId(bool create) =>
@@ -135,6 +141,15 @@ class AppLockService {
 
   static Future<bool> _rustOpensIdentity(String secret) =>
       identity_api.appLockSecretOpensIdentity(secret: secret);
+
+  static bool _rustLaunchSecretAllowed() {
+    try {
+      return identity_api.appLockLaunchSecretAllowed();
+    } catch (e) {
+      debugPrint('[HOLLOW-APPLOCK] launch secret rule unknown: $e');
+      return Platform.isAndroid || Platform.isIOS;
+    }
+  }
 
   static const _kLockType = 'hollow_app_lock_type'; // 'pin' | 'password'
   static const _kBiometricSecret = 'hollow_app_lock_secret';
@@ -172,6 +187,7 @@ class AppLockService {
   final AppLockStore _store;
   final String? Function(bool create) _profileIdOf;
   final Future<bool> Function(String secret) _opensIdentity;
+  final bool Function() _launchSecretAllowedOf;
   final bool _oneProfile;
 
   /// Held once known: a wipe deletes the id file, and its clean-up still has to
@@ -223,7 +239,11 @@ class AppLockService {
       for (final entry in legacy.entries) {
         if (!_secrets.contains(entry.key)) continue;
         if (await _opensIdentity(entry.value)) {
-          adopt[entry.key] = entry.value;
+          // Proof of whose entries these are, but never kept where no launch
+          // secret may be: it goes with the rest of the global entries.
+          if (entry.key != _kLaunchSecret || launchSecretAllowed) {
+            adopt[entry.key] = entry.value;
+          }
           proven = true;
         }
       }
@@ -280,6 +300,17 @@ class AppLockService {
     await _store.delete(_scoped(base, id));
   }
 
+  /// Deletes this profile's [base] entry without settling the global entries
+  /// first: the one call a root that keeps nothing here still makes, and only
+  /// when the person changes the lock in Settings.
+  Future<void> _deleteNow(String base) async {
+    final id = _profileId();
+    if (id == null) return;
+    try {
+      await _store.delete(_scoped(base, id));
+    } catch (_) {}
+  }
+
   late final _localAuth = LocalAuthentication();
 
   /// The secret the user typed when enabling/unlocking App Lock this session.
@@ -291,6 +322,7 @@ class AppLockService {
   /// 'pin', 'password', or null when no marker is stored (defaults to
   /// password-style entry for locks created before this marker existed).
   Future<String?> getLockType() async {
+    if (_storeOff) return null;
     try {
       return await _read(_kLockType);
     } catch (_) {
@@ -299,6 +331,7 @@ class AppLockService {
   }
 
   Future<void> setLockType(String? type) async {
+    if (_storeOff) return;
     try {
       if (type == null) {
         await _delete(_kLockType);
@@ -324,6 +357,7 @@ class AppLockService {
 
   /// Whether a biometric-released secret is stored.
   Future<bool> isBiometricEnabled() async {
+    if (_storeOff) return false;
     try {
       final v = await _read(_kBiometricSecret);
       return v != null && v.isNotEmpty;
@@ -333,16 +367,31 @@ class AppLockService {
   }
 
   Future<void> enableBiometric(String secret) async {
+    if (_storeOff) return;
     await _write(_kBiometricSecret, secret);
   }
 
   Future<void> disableBiometric() async {
+    if (_storeOff) return;
     try {
       await _delete(_kBiometricSecret);
     } catch (_) {}
   }
 
+  /// Whether this profile keeps a launch secret at all: on a computer only on the
+  /// OS's own data root (Rust's rule). Elsewhere the OS secure storage is never
+  /// touched for it, so a session without a keychain (ssh) gets no dialog, and the
+  /// person types the secret at launch.
+  bool get launchSecretAllowed => _launchSecretAllowedOf();
+
+  /// A computer whose root keeps no launch secret keeps nothing here at all: the
+  /// lock-type marker and the biometric are a phone's, so every read answers its
+  /// default and the OS secure storage is never asked (an ssh session gets no
+  /// keychain dialog at launch).
+  bool get _storeOff => !_oneProfile && !launchSecretAllowed;
+
   Future<String?> readLaunchSecret() async {
+    if (!launchSecretAllowed) return null;
     try {
       final v = await _read(_kLaunchSecret);
       return (v == null || v.isEmpty) ? null : v;
@@ -353,7 +402,10 @@ class AppLockService {
 
   Future<bool> hasLaunchSecret() async => (await readLaunchSecret()) != null;
 
+  /// Where no launch secret may be kept this deletes the copy an older build
+  /// left, so it can never go stale beside a newer PIN.
   Future<void> storeLaunchSecret(String secret) async {
+    if (!launchSecretAllowed) return _deleteNow(_kLaunchSecret);
     try {
       await _write(_kLaunchSecret, secret);
     } catch (e) {
@@ -362,12 +414,23 @@ class AppLockService {
   }
 
   Future<void> clearLaunchSecret() async {
+    if (!launchSecretAllowed) return _deleteNow(_kLaunchSecret);
     try {
       await _delete(_kLaunchSecret);
     } catch (_) {}
   }
 
+  /// Gate for the one-time longer-PIN offer. Answers true (asked) wherever
+  /// nothing here is kept: never asking beats asking at every unlock.
+  /// A PIN or password change: the launch secret follows it where it is kept
+  /// and is deleted where none may be, so no stale copy outlives the change.
+  Future<void> followSecretChange(String next) async {
+    if (!launchSecretAllowed) return _deleteNow(_kLaunchSecret);
+    if (await hasLaunchSecret()) await storeLaunchSecret(next);
+  }
+
   Future<bool> longerPinAsked() async {
+    if (_storeOff) return true;
     try {
       return await _read(_kLongerPinAsked) != null;
     } catch (_) {
@@ -377,6 +440,7 @@ class AppLockService {
   }
 
   Future<void> markLongerPinAsked() async {
+    if (_storeOff) return;
     try {
       await _write(_kLongerPinAsked, '1');
     } catch (e) {
@@ -386,6 +450,7 @@ class AppLockService {
 
   /// Whether the one-time note about setting an old duress code again was shown.
   Future<bool> duressRebindAsked() async {
+    if (_storeOff) return true;
     try {
       return await _read(_kDuressRebindAsked) != null;
     } catch (_) {
@@ -394,6 +459,7 @@ class AppLockService {
   }
 
   Future<void> markDuressRebindAsked() async {
+    if (_storeOff) return;
     try {
       await _write(_kDuressRebindAsked, '1');
     } catch (e) {

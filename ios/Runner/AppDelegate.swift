@@ -403,7 +403,7 @@ final class RelayBackgroundTask {
 }
 
 /// The Secure Enclave key that ties the app lock's wrap to this iPhone
-/// (`identity/hw_key.rs`). Rust calls these four C functions; Swift only runs the
+/// (`identity/hw_key.rs`). Rust calls these five C functions; Swift only runs the
 /// enclave. The key is usable while the phone is unlocked, on this device only, and
 /// asks for neither the passcode nor Face ID, so a new face or finger never strands
 /// the identity. The extension registers nothing and binds nothing.
@@ -413,7 +413,8 @@ enum HollowHwKey {
     UnsafePointer<CChar>?, UnsafePointer<UInt8>?, Int, UnsafeMutablePointer<UInt8>?
   ) -> Int32
   typealias DeleteFn = @convention(c) (UnsafePointer<CChar>?) -> Void
-  typealias RegisterFn = @convention(c) (AliasFn, AliasFn, ApplyFn, DeleteFn) -> Void
+  typealias ListFn = @convention(c) (UnsafeMutablePointer<CChar>?, Int) -> Int32
+  typealias RegisterFn = @convention(c) (AliasFn, AliasFn, ApplyFn, DeleteFn, ListFn) -> Void
 
   /// No enclave, nothing registers, and the wrap stays Argon2id. (An Apple silicon
   /// simulator reports one and binds like a phone.)
@@ -425,13 +426,38 @@ enum HollowHwKey {
       NSLog("[HOLLOW-HWKEY] register symbol missing")
       return
     }
-    unsafeBitCast(sym, to: RegisterFn.self)(hwCreate, hwExists, hwApply, hwDelete)
+    unsafeBitCast(sym, to: RegisterFn.self)(hwCreate, hwExists, hwApply, hwDelete, hwList)
     NSLog("[HOLLOW-HWKEY] registered")
   }
 
+  static let tagPrefix = "hollow.applock.hw."
+
   static func tag(_ alias: UnsafePointer<CChar>?) -> Data? {
     guard let alias = alias else { return nil }
-    return Data("hollow.applock.hw.\(String(cString: alias))".utf8)
+    return Data("\(tagPrefix)\(String(cString: alias))".utf8)
+  }
+
+  /// The alias of every app-lock key the keychain holds, nil when it failed to say.
+  static func aliases() -> [String]? {
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassKey,
+      kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+      kSecMatchLimit as String: kSecMatchLimitAll,
+      kSecReturnAttributes as String: true,
+    ]
+    var items: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &items)
+    if status == errSecItemNotFound { return [] }
+    guard status == errSecSuccess, let found = items as? [[String: Any]] else {
+      NSLog("[HOLLOW-HWKEY] keychain did not list: %d", status)
+      return nil
+    }
+    return found.compactMap { attributes in
+      guard let tag = attributes[kSecAttrApplicationTag as String] as? Data,
+        let text = String(data: tag, encoding: .utf8), text.hasPrefix(tagPrefix)
+      else { return nil }
+      return String(text.dropFirst(tagPrefix.count))
+    }
   }
 
   /// The key under [tag], and the keychain's status: `errSecItemNotFound` is the only
@@ -523,4 +549,23 @@ private let hwApply: HollowHwKey.ApplyFn = { alias, input, length, out in
 
 private let hwDelete: HollowHwKey.DeleteFn = { alias in
   if let tag = HollowHwKey.tag(alias) { HollowHwKey.remove(tag) }
+}
+
+/// The held aliases, newline-separated and NUL-terminated, as many whole ones as fit
+/// in [capacity]: the bytes written before the NUL, or -1 when the keychain failed.
+private let hwList: HollowHwKey.ListFn = { out, capacity in
+  guard let out = out, capacity > 0, let aliases = HollowHwKey.aliases() else { return -1 }
+  var bytes = [UInt8]()
+  for alias in aliases {
+    let line = Array((bytes.isEmpty ? alias : "\n\(alias)").utf8)
+    if bytes.count + line.count + 1 > capacity { break }
+    bytes += line
+  }
+  bytes.withUnsafeBufferPointer { buffer in
+    if let base = buffer.baseAddress {
+      out.withMemoryRebound(to: UInt8.self, capacity: capacity) { $0.update(from: base, count: buffer.count) }
+    }
+  }
+  out[bytes.count] = 0
+  return Int32(bytes.count)
 }

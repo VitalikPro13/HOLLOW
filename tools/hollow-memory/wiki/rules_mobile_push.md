@@ -52,7 +52,9 @@ device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
   `unlock_identity_with_stored_secret`, never `unlock_identity` (that one is paced and a
   relaunch would reset the count). The wrap is tied to the phone's hardware key
   (`HollowHwKey.kt` registered in `MainActivity`, the enclave in `AppDelegate.swift`);
-  the key must never need user auth or biometry. `hardware_key_missing` (the keystore
+  the key must never need user auth or biometry. Keys of gone profiles (a wipe in the
+  push fetch or the NSE, no oracle there) go at the next lock or unlock
+  (`hw_key::sweep_orphans`, phones only, never the live id or any `<root>-old-*` folder's, nothing when one cannot be read). A stored secret (launch, biometric) never fires a duress code: a match opens nothing (`Duress::Inert`). `hardware_key_missing` (the keystore
   says the key is gone) leads to the recovery phrase; `hardware_key_busy` (an op failed
   or the keystore could not say) to `HardwareKeyBusyDialog`, Try again first, and a
   stored secret (launch, biometric) is dropped ONLY on `isWrongSecret`. Wiki
