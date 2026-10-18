@@ -177,11 +177,11 @@ final class RelayBackgroundTask {
 // See flutter/flutter#185048.
 @main
 @objc class AppDelegate: FlutterAppDelegate {
-  // App Group shared with the Notification Service Extension. The extension reads
-  // the push-hints cache (friend name + avatar) the main app writes here so it can
-  // show rich push banners. Must match the group id in both entitlements files and
-  // PushHintsCache (Dart).
-  private let appGroupId = "group.com.anonlisten.hollow"
+  // App Group shared with the Notification Service Extension, which reads the
+  // push-hints cache and the data root the app keeps here. It comes from the build
+  // variant (HOLLOW_APP_GROUP) via Info.plist; a missing key means no group, never
+  // a production id, and Dart then keeps its data in the private sandbox.
+  private let appGroupId = Bundle.main.object(forInfoDictionaryKey: "HollowAppGroup") as? String ?? ""
 
   // Held here: the notification center and firebase_messaging keep it weakly.
   // Set before launch finishes, which is when firebase adopts it.

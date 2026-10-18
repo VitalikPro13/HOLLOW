@@ -197,3 +197,6 @@ gifs/m/
 
 # Cert Renewal state
 .relay-cert-renewed
+
+# Firebase config of the iOS dev variant (com.anonlisten.hollow.dev)
+ios/GoogleService-Info-dev.plist

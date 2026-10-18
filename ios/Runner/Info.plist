@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Hollow</string>
+	<string>$(HOLLOW_DISPLAY_NAME)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -42,9 +42,13 @@
 	     picker and (b) locate the App-Group unix socket the extension streams
 	     frames + app audio through. -->
 	<key>RTCScreenSharingExtension</key>
-	<string>com.anonlisten.hollow.BroadcastExtension</string>
+	<string>$(HOLLOW_BUNDLE_ID).BroadcastExtension</string>
 	<key>RTCAppGroupIdentifier</key>
-	<string>group.com.anonlisten.hollow</string>
+	<string>$(HOLLOW_APP_GROUP)</string>
+	<!-- The App Group this build shares with its extensions
+	     (HOLLOW_APP_GROUP, Flutter/Variant-*.xcconfig); Swift reads it here. -->
+	<key>HollowAppGroup</key>
+	<string>$(HOLLOW_APP_GROUP)</string>
 	<!-- The loopback media server is the only cleartext destination: video and
 	     audio players cannot open an encrypted file, so they fetch it over plain
 	     HTTP from 127.0.0.1. NSAllowsLocalNetworking covers exactly that and
@@ -59,10 +63,10 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>com.anonlisten.hollow</string>
+			<string>$(HOLLOW_BUNDLE_ID)</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>hollow</string>
+				<string>$(HOLLOW_URL_SCHEME)</string>
 			</array>
 		</dict>
 	</array>

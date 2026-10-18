@@ -1,0 +1,28 @@
+// "Hollow Dev": a debug variant that installs beside the TestFlight app with
+// its own bundle ids, App Group, keychain group and data (`--flavor dev`).
+// Set on the project-level Debug-dev/Release-dev/Profile-dev.
+HOLLOW_BUNDLE_ID = com.anonlisten.hollow.dev
+HOLLOW_APP_GROUP = group.$(HOLLOW_BUNDLE_ID)
+HOLLOW_DISPLAY_NAME = Hollow Dev
+// Its own scheme, so a hollow:// link never opens the dev build by accident.
+HOLLOW_URL_SCHEME = hollow-dev
+HOLLOW_APS_ENVIRONMENT = development
+// Firebase iOS app registered for com.anonlisten.hollow.dev (gitignored). When
+// it is missing the dev build ships no Firebase config at all and has no push.
+HOLLOW_FIREBASE_PLIST = GoogleService-Info-dev.plist
+
+// The team that signs the dev variant, never the production one: a different
+// team means a different AppIdentifierPrefix, so even the keychain cannot meet
+// the TestFlight app's. LocalSigning.xcconfig (gitignored) may override it; a
+// free Personal Team cannot grant App Groups or Push Notifications, so it also
+// sets HOLLOW_DEV_CAPABILITIES = personal.
+HOLLOW_DEV_TEAM = XMTJT2AV6F
+HOLLOW_DEV_CAPABILITIES = full
+HOLLOW_RUNNER_ENTITLEMENTS_full = Runner/Runner.entitlements
+HOLLOW_RUNNER_ENTITLEMENTS_personal = Runner/RunnerPersonalTeam.entitlements
+HOLLOW_NSE_ENTITLEMENTS_full = NotificationService/NotificationService.entitlements
+HOLLOW_NSE_ENTITLEMENTS_personal =
+HOLLOW_BROADCAST_ENTITLEMENTS_full = BroadcastExtension/BroadcastExtension.entitlements
+HOLLOW_BROADCAST_ENTITLEMENTS_personal =
+
+#include? "LocalSigning.xcconfig"

@@ -20,6 +20,10 @@
 	<string>$(FLUTTER_BUILD_NAME)</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<!-- The App Group this build shares with its extensions
+	     (HOLLOW_APP_GROUP, Flutter/Variant-*.xcconfig); Swift reads it here. -->
+	<key>HollowAppGroup</key>
+	<string>$(HOLLOW_APP_GROUP)</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionPointIdentifier</key>

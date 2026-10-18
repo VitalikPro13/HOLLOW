@@ -16,3 +16,11 @@ HOLLOW_DEVELOPMENT_TEAM =
 // Automatic signing is recommended for development. Leave as-is unless you
 // manage provisioning profiles manually.
 CODE_SIGN_STYLE = Automatic
+
+// The "Hollow Dev" variant (`flutter run --flavor dev`) signs with its own team
+// (default in Variant-dev.xcconfig) so it installs beside the TestFlight app.
+// Uncomment to sign it with another team. A free Personal Team cannot grant App
+// Groups or Push Notifications: also uncomment HOLLOW_DEV_CAPABILITIES and the
+// dev build signs without them (no push, no rich banners, no screen share).
+// HOLLOW_DEV_TEAM = ABCDE12345
+// HOLLOW_DEV_CAPABILITIES = personal

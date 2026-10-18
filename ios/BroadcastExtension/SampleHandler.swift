@@ -30,7 +30,8 @@ import ReplayKit
 
 class SampleHandler: RPBroadcastSampleHandler {
     private enum Constants {
-        static let appGroupIdentifier = "group.com.anonlisten.hollow"
+        // From the build variant via Info.plist (HollowAppGroup).
+        static let appGroupIdentifier = Bundle.main.object(forInfoDictionaryKey: "HollowAppGroup") as? String ?? ""
         // Must match kRTCScreensharingSocketFD / kRTCScreensharingAudioSocketFD
         // in the flutter_webrtc fork.
         static let videoSocketFileName = "rtc_SSFD"

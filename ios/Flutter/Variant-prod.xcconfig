@@ -1,0 +1,10 @@
+// The production identity (TestFlight, App Store). The app, both extensions,
+// their entitlements and Info.plists take every id from here, so Variant-dev
+// can swap all of them at once. Set on the project-level Debug/Release/Profile.
+HOLLOW_BUNDLE_ID = com.anonlisten.hollow
+HOLLOW_APP_GROUP = group.$(HOLLOW_BUNDLE_ID)
+HOLLOW_DISPLAY_NAME = Hollow
+HOLLOW_URL_SCHEME = hollow
+HOLLOW_APS_ENVIRONMENT = production
+// Empty: Copy Bundle Resources ships ios/GoogleService-Info.plist as it is.
+HOLLOW_FIREBASE_PLIST =

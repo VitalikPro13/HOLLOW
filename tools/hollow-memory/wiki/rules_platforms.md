@@ -20,6 +20,17 @@ release pipeline is the `release` skill.
   name in every runner, the two Swift copies identical and the build entries.
   `RESUMABLE_SESSIONS_PLAN.md` 3.7, 9.6.
 
+## iOS on the real iPhone
+
+- The iPhone 13 mini on the Mac mini's USB carries Vitalik's REAL TestFlight Hollow
+  (`com.anonlisten.hollow`, his identity and data). Only the dev variant goes on it
+  (`flutter run --flavor dev`, `com.anonlisten.hollow.dev`, own team, App Group and keychain
+  group); never install, build to, launch or remove a `com.anonlisten.hollow` build there.
+  Before a first install, read the ids from the built `.app` and both `.appex`
+  (Info.plist + `codesign -d --entitlements`). Every iOS id comes from
+  `ios/Flutter/Variant-{prod,dev}.xcconfig`; a new id goes there, never as a literal.
+  BUILDING.md "iOS dev variant", `feedback_pixel8_debug_flutter_run_only`.
+
 ## Rendering
 
 - Windows + Linux run SKIA, not Impeller (`ImpellerSwitch::Disabled` /

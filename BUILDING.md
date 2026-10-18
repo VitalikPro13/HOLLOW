@@ -155,3 +155,16 @@ flutter build ios --simulator --debug
 ```
 
 Device and TestFlight builds go through Xcode. Open `ios/Runner.xcworkspace` and use Product > Archive. The notification service extension links the Rust core through CocoaPods, so there's nothing to wire up by hand. The project targets iOS 15.0, while TestFlight builds need iOS 16.
+
+### iOS dev variant
+
+"Hollow Dev" is a debug build that installs next to the TestFlight app on the same iPhone and shares nothing with it. Use it for any test on a phone that also carries a real Hollow install:
+
+```bash
+flutter run --flavor dev -d <device-udid>
+```
+
+- The `dev` scheme builds the `Debug-dev`, `Release-dev` and `Profile-dev` configurations. Only `Debug-dev` is meant to be used.
+- Every id comes from `ios/Flutter/Variant-dev.xcconfig`: bundle `com.anonlisten.hollow.dev` (extensions `.NotificationService` and `.BroadcastExtension` under it), App Group `group.com.anonlisten.hollow.dev`, keychain group `$(AppIdentifierPrefix)com.anonlisten.hollow.dev`, URL scheme `hollow-dev`, APNs `development`. Production takes the same settings from `Variant-prod.xcconfig`, and builds without `--flavor` stay production.
+- It signs with its own team (`HOLLOW_DEV_TEAM` in `Variant-dev.xcconfig`, overridable in `LocalSigning.xcconfig`), so Xcode registers the dev ids the first time it builds for a connected device. On a free Personal Team, also set `HOLLOW_DEV_CAPABILITIES = personal`: such a team grants no App Groups and no push, so the build drops those entitlements and runs without rich banners, push or screen share.
+- Push needs a Firebase iOS app for `com.anonlisten.hollow.dev`. Put its config at `ios/GoogleService-Info-dev.plist` (gitignored). Without it the dev build ships no Firebase config at all, so it can never register under the production app.

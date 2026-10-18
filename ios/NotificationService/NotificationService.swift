@@ -17,7 +17,9 @@ import Foundation  // Mach task_info / task_vm_info for the footprint measuremen
 // Must never drop a push: any failure (no App Group, missing/corrupt cache, unknown
 // sender) falls through to delivering the original content unchanged.
 class NotificationService: UNNotificationServiceExtension {
-  private let appGroupId = "group.com.anonlisten.hollow"
+  // From the build variant via Info.plist; empty (no group) rather than a
+  // production id when the key is missing.
+  private let appGroupId = Bundle.main.object(forInfoDictionaryKey: "HollowAppGroup") as? String ?? ""
 
   var contentHandler: ((UNNotificationContent) -> Void)?
   var bestAttempt: UNMutableNotificationContent?
