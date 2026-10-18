@@ -670,7 +670,11 @@ fn apply_update_tarball(
         .to_str()
         .ok_or("Staging dir path is not valid UTF-8")?;
 
-    crate::hollow_log!("[updater] Extracting {archive_path} into {staging_str}");
+    crate::hollow_log!(
+        "[updater] Extracting {} into {}",
+        crate::log::redact_path(archive_path),
+        crate::log::redact_path(staging_str)
+    );
     let out = std::process::Command::new("tar")
         .args(["xzf", archive_path, "-C", staging_str])
         .output()
@@ -715,8 +719,10 @@ fn apply_update_tarball(
     let script_path = updates.join("update.sh");
 
     crate::hollow_log!(
-        "[updater] Staged {bundle_str} for {app_dir}, waiting on pid {pid} in {}",
-        script_path.display()
+        "[updater] Staged {} for {}, waiting on pid {pid} in {}",
+        crate::log::redact_path(bundle_str),
+        crate::log::redact_path(app_dir),
+        crate::log::redact_path(&script_path)
     );
     let body = tarball_update_script(
         log_str,
@@ -899,7 +905,7 @@ fn apply_update_flatpak(
         .map_err(|e| format!("{e} {FLATPAK_TERMINAL_FALLBACK}"))?;
     let scope = info.scope();
 
-    crate::hollow_log!("[updater] Installing {bundle_path} on the host with {scope} (v{version})");
+    crate::hollow_log!("[updater] Installing {} on the host with {scope} (v{version})", crate::log::redact_path(bundle_path));
     let spawned = std::process::Command::new("flatpak-spawn")
         .args([
             "--host",
@@ -989,7 +995,7 @@ pub fn launch_update_script(script_path: String) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn launch_update_script_impl(script_path: &str) -> Result<(), String> {
-    crate::hollow_log!("[updater] Starting update script {script_path}");
+    crate::hollow_log!("[updater] Starting update script {}", crate::log::redact_path(script_path));
     match linux_install_kind_inner() {
         "flatpak" => launch_host_shell_script(script_path),
         _ => launch_detached_shell_script(script_path),
@@ -1489,7 +1495,7 @@ fn spawn_flatpak_relaunch_waiter() -> Result<(), String> {
         flatpak_relaunch_recipe(&info.instance_id, &current_args_quoted())
     );
     let path = write_shell_script(&script_path, &body)?;
-    crate::hollow_log!("[updater] Flatpak self-restart through the host script {path}");
+    crate::hollow_log!("[updater] Flatpak self-restart through the host script {}", crate::log::redact_path(&path));
     launch_host_shell_script(&path)
 }
 

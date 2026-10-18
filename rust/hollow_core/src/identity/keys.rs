@@ -28,7 +28,7 @@ pub fn set_data_dir(path: String) -> Result<(), String> {
         && DATA_DIR_OVERRIDE.get() != Some(&path)
     {
         crate::log::init();
-        hollow_log!("[HOLLOW-ID] The data folder was set already, so {path} was not used");
+        hollow_log!("[HOLLOW-ID] The data folder was set already, so {} was not used", crate::log::redact_path(&path));
     }
     Ok(())
 }

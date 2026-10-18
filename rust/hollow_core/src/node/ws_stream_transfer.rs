@@ -135,7 +135,7 @@ pub async fn ws_stream_send(
     let mut file = match tokio::fs::File::open(source_path).await {
         Ok(f) => tokio::io::BufReader::new(f),
         Err(e) => {
-            hollow_log!("[HOLLOW-WS-STREAM] Failed to open source {}: {e}", source_path.display());
+            hollow_log!("[HOLLOW-WS-STREAM] Failed to open source {}: {e}", crate::log::redact_file(source_path));
             return;
         }
     };

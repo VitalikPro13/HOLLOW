@@ -767,7 +767,7 @@ async fn ingest_inner(
                 })
                 .await;
         }
-        if sender != local_device && now.is_member(sender) {
+        if sender != local_device && now.is_member(sender) && !super::resolver::is_revoked(sender) {
             super::crypto_handler::share_state_with_sibling(ws_cmd_tx, sender, db_path, db_passphrase);
         }
     } else {

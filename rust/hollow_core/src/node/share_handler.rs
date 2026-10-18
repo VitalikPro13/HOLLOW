@@ -1964,7 +1964,8 @@ fn unique_final_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
     // hand back a path outside `dir` rather than trusting the invariant.
     if final_p.parent() != Some(dir) {
         hollow_log!(
-            "[HOLLOW-SECURITY] Refusing out-of-directory share path {final_p:?} — using fallback"
+            "[HOLLOW-SECURITY] Refusing out-of-directory share path {} — using fallback",
+            crate::log::redact_file(&final_p)
         );
         return dir.join(FALLBACK_DOWNLOAD_NAME);
     }

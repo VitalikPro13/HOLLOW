@@ -45,7 +45,7 @@ pub(crate) fn read_for_send(path: &Path) -> Result<Vec<u8>, String> {
     let data = super::at_rest::read_all(path).map_err(|e| format!("Failed to read file: {e}"))?;
     let ext = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
     strip_for_send(&ext, data).map_err(|e| {
-        hollow_log!("[HOLLOW-FILE] metadata strip refused {}: {e}", path.display());
+        hollow_log!("[HOLLOW-FILE] metadata strip refused {}: {e}", crate::log::redact_file(path));
         REFUSED.to_string()
     })
 }

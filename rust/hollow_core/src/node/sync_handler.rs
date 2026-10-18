@@ -887,7 +887,8 @@ pub(crate) fn register_relay_catchup(
     master: &crate::identity::native_identity::NativeKeypair,
 ) {
     let secs = state.relay_catchup_secs();
-    if secs <= 0 {
+    // A tombstoned shell is never joined again: its join ring would only replay old answers.
+    if secs <= 0 || state.is_deleted() {
         return;
     }
     let mut channels: Vec<String> = state
@@ -984,7 +985,8 @@ pub(crate) async fn request_channel_catchups(
     // connection, never by opening a SQLCipher handle per channel here.
     let owner = state.and_then(|s| s.anchor_owner());
     let fresh_channels: Vec<String> = match state {
-        Some(state) if state.relay_catchup_secs() > 0 => {
+        // A tombstoned shell has no channel anyone still posts to.
+        Some(state) if state.relay_catchup_secs() > 0 && !state.is_deleted() => {
             register_relay_catchup(ws_cmd_tx, state, room, master);
             state
                 .channels
@@ -1028,11 +1030,12 @@ pub(crate) fn request_join_ring_catchup(
     hidden: bool,
     tag: &str,
 ) {
-    let member = server_states.contains_key(room);
+    let held = server_states.get(room).filter(|s| !s.is_deleted());
+    let member = held.is_some();
     if member {
         join_hold.joined(room, hidden);
     }
-    let ring_wanted = server_states.get(room).is_some_and(|s| s.relay_catchup_secs() > 0)
+    let ring_wanted = held.is_some_and(|s| s.relay_catchup_secs() > 0)
         || pending_server_joins.contains_key(room);
     if !ring_wanted || hidden || !relay_catchup_done.insert((room.to_string(), JOIN_TOPIC.to_string())) {
         return;

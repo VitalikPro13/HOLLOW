@@ -122,7 +122,7 @@ pub(crate) async fn handle_vault_download_file(
     let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
     match local_shards(server_states, &vault_dir, &server_id, &content_id, &bundle_keypair.peer_id(), db_path, db_passphrase) {
         Ok(LocalShards::Done(disk_path)) => {
-            hollow_log!("[HOLLOW-VAULT] Download complete: {disk_path}");
+            hollow_log!("[HOLLOW-VAULT] Download complete: {}", crate::log::redact_file(&disk_path));
             let _ = event_tx.send(NetworkEvent::VaultDownloadComplete {
                 server_id, content_id, disk_path,
             }).await;

@@ -1527,7 +1527,10 @@ mod tests {
         super::super::resolver::forget_for_test(&pal);
         super::super::resolver::mark_revoked(std::slice::from_ref(&pal_dev));
         assert_eq!(ask_standing(&pal_dev, &me, &my_dev, &seats, &book), AskStanding::Silence, "revoked");
+        super::super::resolver::update(&pal_dev, &pal);
+        assert_eq!(ask_standing(&pal_dev, &me, &my_dev, &seats, &book), AskStanding::Silence, "revoked, linked again");
         super::super::resolver::unmark_revoked(std::slice::from_ref(&pal_dev));
+        assert_eq!(ask_standing(&pal_dev, &me, &my_dev, &seats, &book), AskStanding::IfFriend(pal.clone()), "control: recovered");
         super::super::blocklist::block(&pal);
         assert_eq!(ask_standing(&pal_dev, &me, &my_dev, &seats, &book), AskStanding::Silence, "blocked");
         super::super::blocklist::unblock(&pal);
@@ -1708,6 +1711,11 @@ mod tests {
         super::super::resolver::mark_revoked(std::slice::from_ref(&asked));
         handle_envelope_overlay_look_answer(&mut book, &ws_tx, &ev_tx, &asked, "share".into(), look.clone(), bundle.clone(), "me", &db, &pass).await;
         assert!(ev_rx.try_recv().is_err() && !held(), "the device we asked, removed since");
+        // The revocation mark judged alone: a link that comes back does not count it.
+        super::super::resolver::update(&asked, &m);
+        handle_envelope_overlay_look_answer(&mut book, &ws_tx, &ev_tx, &asked, "share".into(), look.clone(), bundle.clone(), "me", &db, &pass).await;
+        assert!(ev_rx.try_recv().is_err() && !held(), "the device we asked, removed but linked again");
+        // A recovery: the roster save links the member again, then lifts its mark.
         super::super::resolver::unmark_revoked(std::slice::from_ref(&asked));
         handle_envelope_overlay_look_answer(&mut book, &ws_tx, &ev_tx, &asked, "share".into(), look, bundle, "me", &db, &pass).await;
         assert!(matches!(ev_rx.try_recv(), Ok(NetworkEvent::OverlayLookReceived { master }) if master == m));

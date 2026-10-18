@@ -336,7 +336,7 @@ pub(crate) async fn handle_send_file(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    hollow_log!("[HOLLOW-FILE] SendFile: {file_path} mid={message_id}");
+    hollow_log!("[HOLLOW-FILE] SendFile: {} mid={message_id}", crate::log::redact_file(&file_path));
 
     let path = std::path::Path::new(&file_path);
     let original_name = path.file_name()
@@ -2925,7 +2925,7 @@ async fn try_decrypt_file_stream(
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.mark_file_complete(file_id, &disk_path);
     }
-    hollow_log!("[HOLLOW-STREAM] File {file_id} complete: {disk_path}");
+    hollow_log!("[HOLLOW-STREAM] File {file_id} complete: {}", crate::log::redact_file(&disk_path));
     StreamOutcome::Done(disk_path)
 }
 
@@ -3183,7 +3183,7 @@ async fn attempt_vault_reconstruction(
         Ok(plaintext) => {
             if let Ok(path) = crate::vault::pipeline::write_to_cache(content_id, &ext, &plaintext) {
                 let disk_path = path.to_string_lossy().to_string();
-                hollow_log!("[HOLLOW-VAULT] Download reconstructed: {disk_path}");
+                hollow_log!("[HOLLOW-VAULT] Download reconstructed: {}", crate::log::redact_file(&disk_path));
                 let _ = event_tx.send(NetworkEvent::VaultDownloadComplete {
                     server_id: dl_server_id, content_id: content_id.to_string(), disk_path,
                 }).await;

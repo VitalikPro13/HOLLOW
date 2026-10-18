@@ -2334,7 +2334,7 @@ impl MessageStore {
         self.conn
             .execute("DELETE FROM crdt_ops WHERE server_id = ?1", params![server_id])
             .map_err(|e| format!("Failed to delete server ops: {e}"))?;
-        Ok(())
+        self.delete_server_blobs(server_id)
     }
 
     /// Insert a CRDT operation. Uses INSERT OR IGNORE for dedup via UNIQUE constraint.
@@ -7506,6 +7506,20 @@ mod tests {
         assert!(store.save_stream_overlay("friend", "{}", 5, false).unwrap());
         assert_eq!(store.load_stream_overlay("friend").unwrap(), Some(("{}".to_string(), 5)));
         assert_eq!(store.overlay_add_person("friend", 1).unwrap(), 1);
+    }
+
+    /// A deleted server leaves none of its blobs behind, and another server keeps its own.
+    #[test]
+    fn deleting_a_server_drops_its_blobs() {
+        let store = mem_store();
+        store.save_server_state("gone", "{}").unwrap();
+        store.save_server_blob("gone", "server_avatar", "a").unwrap();
+        store.save_server_blob("gone", "crdt_resync_mark", "m").unwrap();
+        store.save_server_blob("kept", "server_avatar", "k").unwrap();
+        store.delete_server_state("gone").unwrap();
+        assert_eq!(store.load_server_blob("gone", "server_avatar").unwrap(), None);
+        assert_eq!(store.load_server_blob("gone", "crdt_resync_mark").unwrap(), None);
+        assert_eq!(store.load_server_blob("kept", "server_avatar").unwrap().as_deref(), Some("k"));
     }
 
     /// AR-29 (b3-fix): the roster freshness and ask tables arrive by additive migration,

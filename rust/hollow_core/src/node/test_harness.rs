@@ -2658,6 +2658,8 @@ pub(crate) struct TestNode {
     pub master_kp: NativeKeypair,
     /// What `relay_set_background` set in this node's process ([`MockRelay::set_background`]).
     away: Arc<std::sync::atomic::AtomicBool>,
+    /// The loop's own CRDT persistence actor, for a test that reads what it wrote.
+    crdt_store: CrdtStore,
     _join: AbortOnDrop,
     // Keep the tempdir alive for the node's lifetime.
     _tmp: crate::test_tmp::TestDir,
@@ -2693,6 +2695,11 @@ impl TestNode {
     ///
     /// Aborting the join handle is what a process exit does to the event loop, and
     /// the store actors die with it, which is what lets the file be reopened.
+    /// Waits until every CRDT write the loop queued so far is on disk.
+    pub(crate) async fn crdt_committed(&self) {
+        self.crdt_store.committed().await;
+    }
+
     fn into_storage(self) -> (String, crate::test_tmp::TestDir) {
         self._join.0.abort();
         (self.db_path, self._tmp)
@@ -3396,7 +3403,7 @@ async fn spawn_node_staged(
         cmd_tx_clone,
         olm,
         crypto_store,
-        crdt_store,
+        crdt_store.clone(),
         false,
         db_path.clone(),
         passphrase.clone(),
@@ -3418,6 +3425,7 @@ async fn spawn_node_staged(
         passphrase,
         master_kp: master.clone(),
         away,
+        crdt_store,
         _join: AbortOnDrop(join),
         _tmp: tmp,
     }
@@ -3470,7 +3478,7 @@ async fn spawn_node_on_db(
         cmd_tx_clone,
         olm,
         crypto_store,
-        crdt_store,
+        crdt_store.clone(),
         false,
         db_path.clone(),
         passphrase.clone(),
@@ -3492,6 +3500,7 @@ async fn spawn_node_on_db(
         passphrase,
         master_kp: master.clone(),
         away,
+        crdt_store,
         _join: AbortOnDrop(join),
         _tmp: tmp,
     }
@@ -24300,6 +24309,8 @@ async fn parked_join_completes_with_zero_overlap() {
     .await;
     assert!(joined, "B completes its join from the buffered snapshot with nobody online");
     assert!(saw_admitted, "the tile is told it was admitted BEFORE ServerJoined");
+    // Dart reads the row only after the commit (`reads_persisted_server_state`).
+    b.crdt_committed().await;
     assert!(b.servers().contains(&server_id), "B holds the server");
     assert!(
         b.server_state(&server_id).map(|s| !s.channels.is_empty()).unwrap_or(false),
@@ -25832,6 +25843,8 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
         .await,
         "B completes its join from the buffered snapshot with nobody online"
     );
+    // Dart reads the row only after the commit (`reads_persisted_server_state`).
+    b.crdt_committed().await;
     assert!(b.servers().contains(&server_id), "B holds the server");
     assert!(b.pending_joins().is_empty(), "a completed join deletes its row");
     // The precondition this whole test exists for. `Some(v)` and not `None`:
@@ -27132,7 +27145,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // never leave, a withheld return exchange, an edited DM that teaches nothing) and three
     // settles for the connect-time roster exchange before a test stages the 35-day clock;
     // g1-scale-probe's rewrite of the old benchmark gave some back (total 826.6 s).
-    const BUDGET_MS: u64 = 826_600;
+    // 2026-10-18: d-small-items proves a removed sibling gets no answer and a deleted
+    // server's rings stay quiet (one absence and a spawn stagger, 4.5 s, total 831.1 s).
+    const BUDGET_MS: u64 = 831_100;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -34677,6 +34692,10 @@ async fn a_ban_of_us_heard_as_an_op_leaves_the_server() {
     assert!(
         wait_until(15, async || x.live_server_state(&server_id).await.is_none()).await,
         "a ban of us left the server's state behind"
+    );
+    assert!(
+        wait_until(10, async || x.server_state(&server_id).is_none()).await,
+        "a ban of us left the server's row to reload on the next start"
     );
 }
 
@@ -44328,6 +44347,8 @@ async fn t1_sibling_back_gets_the_server(tags: [u8; 4], created: bool, d1_online
     })
     .await;
     assert!(back, "device 2 back from away must get the server (ServerJoined)");
+    // Dart reads the row only after the commit (`reads_persisted_server_state`).
+    d2.crdt_committed().await;
     assert!(d2.servers().contains(&server_id), "device 2 lists the server, got {:?}", d2.servers());
     expect_mls_leaf(&x, &server_id, &d2.device_id, 25).await;
     expect_mls_leaf(&d2, &server_id, &x.device_id, 25).await;
@@ -44492,6 +44513,8 @@ async fn t1_sibling_returning_device_announces_its_own_servers() {
     })
     .await;
     assert!(got, "device 2 coming back must announce its server to device 1 (ServerJoined)");
+    // Dart reads the row only after the commit (`reads_persisted_server_state`).
+    d1.crdt_committed().await;
     assert!(d1.servers().contains(&server_id), "device 1 lists the server, got {:?}", d1.servers());
 }
 
@@ -49013,8 +49036,12 @@ async fn b1_an_unasked_answer_never_clears_the_mark() {
     const O: u8 = 247;
     const M: u8 = 248;
     const X: u8 = 249;
-    let (o, m, x, server_id) = three_member_server(&relay, O, M, X).await;
+    let (o, mut m, x, server_id) = three_member_server(&relay, O, M, X).await;
     let voice = b1_close_a_voice_room_then_write(&o, &[&m, &x], &server_id, 4).await;
+    // X hands every op it takes on to M; one still on its way would wait in the relay's
+    // buffer while M restarts and bring the op back past the forgetting.
+    carried_barrier(&x, &mut m).await;
+    carried_barrier(&o, &mut m).await;
 
     relay.hold_direct(&o.device_id, &m.device_id);
     let mut m = restart_node_with(&relay, m, M, M, |db, pass| {
@@ -49176,6 +49203,8 @@ async fn b1_a_signed_op_this_build_cannot_read_marks_the_server() {
             _ => carry_as(&x, &m, broadcast(unread(&x.master_kp))).await,
         }
         assert!(wait_until(15, async || marked(&m).await == this_build).await, "a member's unreadable op over the {step} marked nothing");
+        // The mark is queued for the disk as it is set; the actor's commit is what lags.
+        m.crdt_committed().await;
         assert!(
             m.store().load_server_blob(&server_id, super::crdt_resync::MARK_KEY).unwrap().is_some(),
             "the {step} mark is stored at once",
@@ -49381,12 +49410,13 @@ async fn b1_a_kept_op_folds_in_at_start_with_nobody_online() {
             author: op.author.clone(), hlc: op.hlc.clone(), build: older.clone(), raw: serde_json::to_string(&op).unwrap(),
         }];
         let mark = super::crdt_resync::Mark { lacks: Some(older), ..Default::default() };
-        store.save_server_blob(&server_id, super::crdt_resync::KEPT_KEY, &serde_json::to_string(&kept).unwrap()).unwrap();
-        store.save_server_blob(&server_id, super::crdt_resync::MARK_KEY, &serde_json::to_string(&mark).unwrap()).unwrap();
         drop(store);
         b1_forget_op(db, pass, &server_id, b1_is_voice_chat_op, |s| {
             s.channels.get_mut(&voice).unwrap().voice_chat = VoiceChat::Server;
         });
+        let store = crate::storage::MessageStore::open(db, pass).unwrap();
+        store.save_server_blob(&server_id, super::crdt_resync::KEPT_KEY, &serde_json::to_string(&kept).unwrap()).unwrap();
+        store.save_server_blob(&server_id, super::crdt_resync::MARK_KEY, &serde_json::to_string(&mark).unwrap()).unwrap();
     })
     .await;
     assert!(m.live_server_state(&server_id).await.is_some_and(|s| !s.channel_chat_open(&voice)), "the kept op folded in at start");
@@ -50698,4 +50728,358 @@ async fn b3_fix_asks_the_push_fetch_noted_go_out_on_the_next_session() {
     sleep_ms(1000).await;
     assert_eq!(ar29_asks(&f, &d1.device_id).await, asks + 1, "once");
     assert_eq!(about(&third.master).await, third_before, "never about a third identity's roster");
+}
+
+// d-small-items
+
+/// Every event queued at `node`, taken without blocking.
+fn d_small_drain(node: &mut TestNode) -> Vec<NetworkEvent> {
+    let mut out = Vec::new();
+    while let Ok(ev) = node.event_rx.try_recv() {
+        out.push(ev);
+    }
+    out
+}
+
+/// Every whole friend list `b` (two friends) carried to `to`; a share of one friendship
+/// names one.
+async fn d_small_lists(b: &TestNode, to: &str) -> usize {
+    b.carried_to(to)
+        .await
+        .iter()
+        .filter(|m| matches!(m, super::types::HavenMessage::FriendListSync { friends, .. } if friends.len() >= 2))
+        .count()
+}
+
+/// Every FriendListRequest `b` carried to `to`: only its sibling state share asks one.
+async fn d_small_list_asks(b: &TestNode, to: &str) -> usize {
+    b.carried_to(to)
+        .await
+        .iter()
+        .filter(|m| matches!(m, super::types::HavenMessage::FriendListRequest))
+        .count()
+}
+
+/// The sibling-only asks, each with `tag` in what it names, from `c` to `b`, and our
+/// own roster, whose ingest from a sibling shares our state with it.
+async fn d_small_sibling_asks(relay: &MockRelay, room: &str, c: &TestNode, b: &TestNode, tag: &str, convo: &str, sid: &str) {
+    use super::types::{HavenMessage, MessageEnvelope, PersonalEmoteEntry};
+    let now = super::types::now_ms();
+    let roster = super::roster_book::load(&c.store(), &c.master_id).expect("C holds our roster");
+    let asks = [
+        HavenMessage::RosterSync { roster, reply: false, waiting: false },
+        HavenMessage::DmSiblingSyncRequest { per_convo_since: Vec::new(), gaps: HashMap::new() },
+        HavenMessage::SiblingServerAnnounce { server_id: sid.to_string(), owner: None, join_key: Some("ab".repeat(32)), fresh: false },
+        HavenMessage::PersonalEmoteSync {
+            emotes: vec![PersonalEmoteEntry { name: format!("ds_{tag}"), hash: String::new(), animated: false, source: String::new(), added_at: now }],
+        },
+        HavenMessage::FriendListRequest,
+        HavenMessage::ReadMarkers { markers: vec![ReadMarker { key: format!("ds-{tag}"), message_id: "m".into(), ts: now }] },
+        HavenMessage::DeviceKind { kind: "phone".into() },
+    ];
+    for ask in asks {
+        send_as(relay, room, c, b, ask).await;
+    }
+    olm_envelope_as(c, b, MessageEnvelope::DmSiblingSyncBatch { convo: convo.to_string(), messages: Vec::new(), has_more: None }).await;
+}
+
+/// Rows only our own devices file without a fresh signature, sent by `c` to `b`: a
+/// captionless inline image (the sentinel waiver) and a synced DM of ours, signed with
+/// the master key a removed device still holds. Returns their message ids.
+async fn d_small_own_rows(c: &TestNode, b: &TestNode, master: &NativeKeypair, tag: &str) -> (String, String) {
+    use base64::Engine as _;
+    use super::types::{DmSyncItem, FileHeaderPayload, MessageEnvelope};
+    let ts = super::types::now_ms();
+    let (image_mid, sync_mid) = (format!("d-small-image-{tag}"), format!("d-small-sync-{tag}"));
+    let sealed = crate::vault::pipeline::aes_encrypt(b"not a real png").expect("seal");
+    let header: FileHeaderPayload = serde_json::from_value(serde_json::json!({
+        "fid": format!("{:0>32}", format!("d5{tag}")), "name": "a.png", "ext": "png", "mime": "image/png",
+        "size": 14, "chunks": 1, "img": true, "mid": image_mid, "ts": ts,
+        "aes_key": hex::encode(sealed.key), "aes_nonce": hex::encode(sealed.nonce),
+        "inline_bytes": base64::engine::general_purpose::STANDARD.encode(&sealed.ciphertext),
+    }))
+    .expect("header");
+    olm_envelope_as(c, b, MessageEnvelope::FileHeader { inner: Box::new(header) }).await;
+
+    let me = master.peer_id();
+    let pk = base64::engine::general_purpose::STANDARD.encode(master.public_key_protobuf());
+    let extras = super::crypto_handler::SignedExtras {
+        mid: Some(&sync_mid), reply_to: None, file_id: None, order_us: Some(ts * 1000), lp_digest: None, album: None,
+    };
+    let (sig, pk) = super::crypto_handler::sign_message_versioned(master, &pk, "dm", &me, &me, ts, &extras, "planted");
+    let item: DmSyncItem = serde_json::from_value(serde_json::json!({
+        "t": "planted", "ts": ts, "mine": true, "sig": sig, "pk": pk, "mid": sync_mid, "order_us": ts * 1000,
+    }))
+    .expect("item");
+    olm_envelope_as(c, b, MessageEnvelope::DmSyncBatch { messages: vec![item], has_more: None }).await;
+    (image_mid, sync_mid)
+}
+
+/// A device the roster removed can keep its link here for a while, so the link alone
+/// never earns a sibling answer. One sub-assert per arm, each judged alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_removed_but_still_linked_device_is_refused_every_sibling_answer() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    // B holds friends, so it has a friend list to hand out.
+    let (friend, other) = (tag_kp(249).peer_id(), tag_kp(246).peer_id());
+    super::resolver::seed_self(&tag_kp(250).peer_id(), &[tag_kp(251).peer_id(), tag_kp(252).peer_id()]);
+    let mut b = spawn_node_with_friends(&relay, 250, 251, &[&friend, &other]).await;
+    // Spawn stagger (see `session_server_pair`).
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, 250, 252, &[]).await;
+    expect_siblings_ready(&relay, &b, &c, 15).await;
+    let room = format!("inbox:{}", b.master_id);
+    b.store()
+        .insert(&friend, "kept", true, super::types::now_ms(), None, None, Some("d-small-kept"), None, None, None, None)
+        .unwrap();
+    // The arrival convergence trades lists both ways for a while; it must end first.
+    let mut seen = (0usize, std::time::Instant::now());
+    assert!(
+        wait_until(30, async || {
+            let n = d_small_lists(&b, &c.device_id).await;
+            if n != seen.0 {
+                seen = (n, std::time::Instant::now());
+            }
+            n > 0 && seen.1.elapsed() >= std::time::Duration::from_millis(1500)
+        })
+        .await,
+        "precondition: B converged with its sibling"
+    );
+    // C's own kind lands off the loop; it must not land inside the window below.
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(15), |e| matches!(e, NetworkEvent::DeviceKindsChanged)).await,
+        "precondition: B holds C's kind"
+    );
+    let b_dev = b.device_id.clone();
+    let joins = |mark: usize, sid: &str| {
+        relay.commands_since(&b_dev, mark).iter().any(|(k, r, _)| *k == "join" && r.as_deref() == Some(sid))
+    };
+    let (gone_convo, back_convo) = (tag_kp(248).peer_id(), tag_kp(247).peer_id());
+    let (gone_sid, back_sid) = ("d5".repeat(16), "c7".repeat(16));
+
+    super::resolver::mark_revoked(std::slice::from_ref(&c.device_id));
+    assert!(!super::resolver::same_identity(&c.device_id, &b.master_id), "revocation alone ends the link");
+    // Linked again, each arm's own gate is all that refuses it.
+    super::resolver::seed_self(&b.master_id, std::slice::from_ref(&c.device_id));
+    d_small_drain(&mut b);
+    d_small_drain(&mut c);
+    let lists = d_small_lists(&b, &c.device_id).await;
+    let list_asks = d_small_list_asks(&b, &c.device_id).await;
+    let mark = relay.log_mark();
+    d_small_sibling_asks(&relay, &room, &c, &b, "gone", &gone_convo, &gone_sid).await;
+    let (gone_image, gone_sync) = d_small_own_rows(&c, &b, &tag_kp(250), "gone").await;
+    // ABSENCE: answers that must never come, with nothing to poll.
+    sleep_ms(3000).await;
+    let at_b = d_small_drain(&mut b);
+    let at_c = d_small_drain(&mut c);
+    let served = at_c.iter().any(|e| matches!(e, NetworkEvent::DmSyncCompleted { peer_id, .. } if *peer_id == friend));
+    let batch = at_b.iter().any(|e| matches!(e, NetworkEvent::DmSyncCompleted { peer_id, .. } if *peer_id == gone_convo));
+    let joined = joins(mark, &gone_sid);
+    let emotes = at_b.iter().any(|e| matches!(e, NetworkEvent::PersonalEmotesUpdated));
+    let listed = d_small_lists(&b, &c.device_id).await > lists;
+    let shared = d_small_list_asks(&b, &c.device_id).await > list_asks;
+    let markers = at_b.iter().any(|e| matches!(e, NetworkEvent::ReadMarkersReceived { markers } if markers.iter().any(|m| m.key == "ds-gone")));
+    let kind = at_b.iter().any(|e| matches!(e, NetworkEvent::DeviceKindsChanged));
+    let image = b.store().dm_message_exists(&gone_image);
+    let synced = b.store().dm_message_exists(&gone_sync);
+    super::resolver::unmark_revoked(std::slice::from_ref(&c.device_id));
+    assert!(!served, "DmSiblingSyncRequest: a removed device pulled our whole DM history");
+    assert!(!batch, "DmSiblingSyncBatch: a removed device filed DMs into our conversations");
+    assert!(!joined, "SiblingServerAnnounce: a removed device started a join for us");
+    assert!(!emotes, "PersonalEmoteSync: a removed device planted personal emotes");
+    assert!(!shared, "RosterSync: our roster from a removed device had our state shared with it");
+    assert!(!listed, "FriendListRequest: a removed device got our friend list");
+    assert!(!markers, "ReadMarkers: a removed device moved our read pointers");
+    assert!(!kind, "DeviceKind: a removed device renamed its kind");
+    assert!(!image, "FileHeader: a removed device filed an image row with no signature");
+    assert!(!synced, "DmSyncBatch: a removed device filed a DM row as one of ours");
+
+    // Control: the same asks from the device once it counts again are all answered.
+    let lists = d_small_lists(&b, &c.device_id).await;
+    let list_asks = d_small_list_asks(&b, &c.device_id).await;
+    let mark = relay.log_mark();
+    d_small_sibling_asks(&relay, &room, &c, &b, "back", &back_convo, &back_sid).await;
+    let (back_image, back_sync) = d_small_own_rows(&c, &b, &tag_kp(250), "back").await;
+    let served = wait_event(&mut c, std::time::Duration::from_secs(15), |e| {
+        matches!(e, NetworkEvent::DmSyncCompleted { peer_id, .. } if *peer_id == friend)
+    })
+    .await;
+    assert!(served, "control: a sibling's DmSiblingSyncRequest is served");
+    let (mut batch, mut emotes, mut markers, mut kind) = (false, false, false, false);
+    wait_event(&mut b, std::time::Duration::from_secs(15), |e| {
+        match e {
+            NetworkEvent::DmSyncCompleted { peer_id, .. } if *peer_id == back_convo => batch = true,
+            NetworkEvent::PersonalEmotesUpdated => emotes = true,
+            NetworkEvent::ReadMarkersReceived { markers: m } if m.iter().any(|m| m.key == "ds-back") => markers = true,
+            NetworkEvent::DeviceKindsChanged => kind = true,
+            _ => {}
+        }
+        batch && emotes && markers && kind
+    })
+    .await;
+    assert!(batch, "control: a sibling's DmSiblingSyncBatch lands");
+    assert!(emotes, "control: a sibling's PersonalEmoteSync lands");
+    assert!(markers, "control: a sibling's ReadMarkers land");
+    assert!(kind, "control: a sibling's DeviceKind lands");
+    assert!(
+        wait_until(10, async || joins(mark, &back_sid)).await,
+        "control: a sibling's SiblingServerAnnounce starts the join"
+    );
+    assert!(
+        wait_until(10, async || d_small_lists(&b, &c.device_id).await > lists).await,
+        "control: a sibling's FriendListRequest is answered"
+    );
+    assert!(
+        wait_until(10, async || d_small_list_asks(&b, &c.device_id).await > list_asks).await,
+        "control: our roster from a sibling has our state shared with it"
+    );
+    assert!(
+        wait_until(10, async || b.store().dm_message_exists(&back_image)).await,
+        "control: a sibling's captionless inline image files its row"
+    );
+    assert!(
+        wait_until(10, async || b.store().dm_message_exists(&back_sync)).await,
+        "control: a sibling's synced DM files its row"
+    );
+}
+
+/// A deleted server keeps its shell to serve the tombstone, but nobody joins it any
+/// more: neither its rings nor its join ring are registered or read back, so no stale
+/// answer replays into a gate that now counts nobody a member. Each layer alone.
+#[test]
+fn a_deleted_servers_join_ring_is_not_caught_up() {
+    let _g = test_guard();
+    let master = tag_kp(253);
+    let live = ServerState::new("ab".repeat(20), "Live".into(), master.peer_id());
+    let mut doomed = ServerState::new("cd".repeat(20), "Doomed".into(), master.peer_id());
+    doomed.deleted = true;
+    let (live_id, doomed_id) = (live.server_id.clone(), doomed.server_id.clone());
+    let states: HashMap<String, ServerState> = [live, doomed].into_iter().map(|s| (s.server_id.clone(), s)).collect();
+    let sent = |register: bool, room: &str| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        if register {
+            super::sync_handler::register_relay_catchup(&tx, &states[room], room, &master);
+        } else {
+            let mut hold = super::join_hold::JoinHold::default();
+            let mut done = HashSet::new();
+            super::sync_handler::request_join_ring_catchup(&tx, &states, &HashMap::new(), &mut hold, &mut done, room, false, "test");
+        }
+        let mut n = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, WsCommand::SetTopicBuffer { .. } | WsCommand::TopicCatchup { .. }) {
+                n += 1;
+            }
+        }
+        n
+    };
+    assert!(sent(true, &live_id) > 0, "control: a live server's rings are registered");
+    assert!(sent(false, &live_id) > 0, "control: a live server's join ring is caught up");
+    assert_eq!(sent(true, &doomed_id), 0, "a deleted server's rings are registered");
+    assert_eq!(sent(false, &doomed_id), 0, "a deleted server's join ring is caught up");
+}
+
+/// A deleted server's text channels are not caught up either: nobody posts to a
+/// tombstoned shell, and its rings would only replay what came before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_deleted_servers_channel_rings_are_not_caught_up() {
+    let _g = test_guard();
+    let master = tag_kp(253);
+    let live = ServerState::new("ab".repeat(20), "Live".into(), master.peer_id());
+    let mut doomed = ServerState::new("cd".repeat(20), "Doomed".into(), master.peer_id());
+    doomed.deleted = true;
+    // No database: every watermark is missing, so each channel asks the default window.
+    let store = CrdtStore::open("/nonexistent/d-small/none.db".into(), "00".repeat(32)).expect("actor");
+    for (state, want) in [(&live, true), (&doomed, false)] {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let mut done = HashSet::new();
+        super::sync_handler::request_channel_catchups(
+            &tx, &store, Some(state), &state.server_id, &master.peer_id(), &master, &mut done, "test",
+        )
+        .await;
+        let mut asked = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, WsCommand::TopicCatchup { .. }) {
+                asked += 1;
+            }
+        }
+        assert_eq!(asked > 0, want, "{}: channel rings caught up = {asked}", state.name());
+    }
+}
+
+/// A kick that only a sync answer brings stays a kick: the teardown's delete rides the
+/// same ordered queue as the state save before it, so a restart lists no server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_kick_learned_by_sync_stays_a_kick_after_restart() {
+    use base64::Engine as _;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_kp, y_kp) = (tag_kp(236), tag_kp(237));
+    let mut o = spawn_node_with_friends(&relay, 236, 236, &[&y_kp.peer_id()]).await;
+    let mut y = spawn_node_with_friends(&relay, 237, 237, &[&o_kp.peer_id()]).await;
+    expect_dm_pair_ready(&relay, &o, &y, 25).await;
+    let server_id = create_server_and_wait(&mut o, "Kick By Sync").await;
+    y.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(&server_id),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut y, std::time::Duration::from_secs(15), |e| {
+            matches!(e, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "precondition: Y joins"
+    );
+    assert!(wait_until(10, async || y.server_state(&server_id).is_some()).await, "precondition: Y saved the server");
+    d_small_drain(&mut y);
+
+    // The owner's removal of Y, reaching Y only inside a sync answer.
+    let mut kick = crate::crdt::operations::CrdtOp {
+        server_id: server_id.clone(),
+        hlc: crate::crdt::hlc::HlcTimestamp { physical_ms: super::types::now_ms() as u64 + 5, counter: 0, actor: o_kp.peer_id() },
+        author: o_kp.peer_id(),
+        payload: crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: y_kp.peer_id() },
+        auth: None,
+    };
+    kick.sign(&o_kp, &base64::engine::general_purpose::STANDARD.encode(o_kp.public_key_protobuf()));
+    let answer = super::types::HavenMessage::SyncResponse {
+        server_id: server_id.clone(),
+        ops_json: serde_json::to_string(&vec![kick]).unwrap(),
+        nonce: None,
+        page: None,
+    };
+    send_as(&relay, &server_id, &o, &y, answer).await;
+    let y_master = y_kp.peer_id();
+    assert!(
+        wait_event(&mut y, std::time::Duration::from_secs(15), |e| {
+            matches!(e, NetworkEvent::MemberLeft { server_id: sid, peer_id } if *sid == server_id && *peer_id == y_master)
+        })
+        .await,
+        "Y learns its kick from the sync answer"
+    );
+    assert!(wait_until(10, async || y.server_state(&server_id).is_none()).await, "the kick's teardown reached the database");
+
+    let y = restart_node(&relay, y, 237, 237).await;
+    // The loop answers only once its startup load is done; then its writes are flushed.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    y.cmd_tx.send(NodeCommand::GetServerStateSnapshot { server_id: server_id.clone(), reply: tx }).await.unwrap();
+    let live = tokio::time::timeout(std::time::Duration::from_secs(15), rx).await.expect("the restarted loop answers").unwrap();
+    assert!(live.is_none(), "the restarted loop holds the server Y was kicked from");
+    y.crdt_committed().await;
+    assert!(!y.servers().contains(&server_id), "a restart listed the server Y was kicked from");
+    assert!(y.server_state(&server_id).is_none(), "a restart brought the kicked server's state back");
+    drop(o);
 }

@@ -1022,9 +1022,7 @@ async fn run_event_loop(
                                 // above). A no-op for single-device, and never on an
                                 // anchored server, whose ops are master-keyed.
                                 if legacy && state.canonicalize_members(|id| super::resolver::resolve(id)) {
-                                    if let Ok(json) = serde_json::to_string(&state) {
-                                        let _ = store.save_server_state(&server_id, &json);
-                                    }
+                                    crdt_store.save_state_snapshot(server_id.clone(), &state);
                                     hollow_log!("[HOLLOW-MULTIDEV] Canonicalized device-keyed members → master for server {server_id}");
                                 }
                                 server_states.insert(server_id.clone(), state);
@@ -1050,6 +1048,8 @@ async fn run_event_loop(
     }
 
     // Ops an older build skipped: read again from what we kept, or fetched again whole.
+    // It writes on its own connection, so the canonicalize saves above land first.
+    crdt_store.committed().await;
     let mut crdt_resync = match crate::storage::MessageStore::open(&db_path, &db_passphrase) {
         Ok(store) => super::crdt_resync::CrdtResync::load(
             &store, &mut server_states, crdt_store.clone(), crate::api::updater::APP_VERSION,
@@ -7237,8 +7237,7 @@ async fn apply_remote_crdt_op(
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
     pending_server_joins: &HashMap<String, PendingJoin>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    db_path: &str,
-    db_passphrase: &str,
+    crdt_store: &super::crdt_store::CrdtStore,
     local_peer_str: &str,
     device_peer_id: &str,
     peer_str: &str,
@@ -7249,7 +7248,7 @@ async fn apply_remote_crdt_op(
     let may_take_our_seat = Box::pin(apply_remote_crdt_op_inner(
         server_states, crdt_resync, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
         mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
-        pending_server_joins, db_path, db_passphrase, local_peer_str, peer_str,
+        pending_server_joins, crdt_store, local_peer_str, peer_str,
         server_id, op_json,
     ))
     .await;
@@ -7279,8 +7278,7 @@ async fn apply_remote_crdt_op_inner(
     pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
     pending_mls_removals: &mut HashMap<String, Vec<String>>,
     pending_server_joins: &HashMap<String, PendingJoin>,
-    db_path: &str,
-    db_passphrase: &str,
+    crdt_store: &super::crdt_store::CrdtStore,
     local_peer_str: &str,
     peer_str: &str,
     server_id: String,
@@ -7309,13 +7307,10 @@ async fn apply_remote_crdt_op_inner(
         // the sender, who may legitimately be relaying.
         let state = server_states.get_mut(&server_id).unwrap();
         let ingested = state.ingest_remote(std::slice::from_ref(&op));
+        let op_is_new = ingested.admitted.iter().any(|o| o.author == op.author && o.hlc == op.hlc);
         if !ingested.admitted.is_empty() || ingested.rebuilt {
-            if let Ok(json) = serde_json::to_string(&state) {
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    let _ = store.save_server_state(&server_id, &json);
-                    store.persist_admitted_ops(&ingested.admitted, state.checkpoint_hlc.as_ref());
-                }
-            }
+            crdt_store.persist_admitted(ingested.admitted, state.checkpoint_hlc.clone());
+            crdt_store.save_state_snapshot(server_id.clone(), state);
         }
         if ingested.rebuilt {
             // A rebuild can change anything: the UI reloads the whole server.
@@ -7324,7 +7319,7 @@ async fn apply_remote_crdt_op_inner(
             }).await;
         }
 
-        if ingested.admitted.iter().any(|o| o.author == op.author && o.hlc == op.hlc) {
+        if op_is_new {
 
             // Forward the validated, NEW op onward, preferring the WebRTC mesh: the old
             // per-member SendDirect re-forward made every receiving node pay
@@ -7392,6 +7387,8 @@ async fn apply_remote_crdt_op_inner(
                         && !state.is_member(&local_peer_str);
                     if self_evicted {
                         self_evict_teardown = true; // teardown after the match
+                        // Queued before the event: Dart re-reads the server list on it.
+                        crdt_store.delete_server(server_id.clone());
                         let _ = event_tx.send(NetworkEvent::ServerDeleted {
                             server_id: server_id.clone(),
                         }).await;
@@ -7419,6 +7416,7 @@ async fn apply_remote_crdt_op_inner(
                     let us = super::resolver::same_identity(peer_id, local_peer_str);
                     if us && !pending_server_joins.contains_key(&server_id) && !state.is_member(local_peer_str) {
                         self_evict_teardown = true;
+                        crdt_store.delete_server(server_id.clone());
                         let _ = event_tx.send(NetworkEvent::ServerDeleted {
                             server_id: server_id.clone(),
                         }).await;
@@ -7505,9 +7503,6 @@ async fn apply_remote_crdt_op_inner(
                     .map(|s| s.subgroup_channel_ids())
                     .unwrap_or_default();
                 server_states.remove(&server_id);
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    let _ = store.delete_server_state(&server_id);
-                }
                 if let Some(mls_mgr) = mls.as_mut() {
                     if mls_mgr.has_group(&server_id) {
                         mls_mgr.remove_group(&server_id);
@@ -8574,6 +8569,10 @@ async fn handle_incoming_request_inner(
                     // the friend path we INVERT. From our own SIBLING, `is_mine` already means
                     // the same on both devices, so it is kept as-is.
                     let from_sibling = super::resolver::same_identity(&peer_str, &local_peer);
+                    if super::resolver::is_disowned_own_id(peer_str, &local_peer) {
+                        hollow_log!("[HOLLOW-SECURITY] Dropped a DM sync batch from {peer_str}, an id of ours that is no device of ours");
+                        return;
+                    }
                     let mut new_count = 0u32;
 
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -8807,7 +8806,7 @@ async fn handle_incoming_request_inner(
                 Ok(MessageEnvelope::DmSiblingSyncBatch { convo, messages, has_more }) => {
                     // Multi-device (Phase 6 / Step 5): a sibling backfilled one of our
                     // conversations. Honor ONLY from our own other device.
-                    if !super::resolver::same_identity(&peer_str, local_peer_str) {
+                    if !super::resolver::is_own_unrevoked_device(peer_str, local_peer_str) {
                         hollow_log!("[HOLLOW-SYNC] Dropped DmSiblingSyncBatch from non-self peer {peer_str}");
                         return;
                     }
@@ -9359,7 +9358,9 @@ async fn handle_incoming_request_inner(
                                     // signature binds the sender's Lamport stamp.
                                     let from_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
                                     let sentinel_text = format!("[file:{fid}]");
-                                    let sentinel_sig_ok = from_sibling || {
+                                    let sentinel_sig_ok = if from_sibling {
+                                        super::resolver::is_own_unrevoked_device(peer_str, master_peer_str)
+                                    } else {
                                         let extras = crypto_handler::SignedExtras {
                                             mid: mid.as_deref(),
                                             reply_to: None,
@@ -10146,11 +10147,7 @@ async fn handle_incoming_request_inner(
                     // Persist now — the SyncResponse that follows re-persists
                     // after merging ops, but a crash between the two must not
                     // strand a half-joined server.
-                    if let Ok(json) = serde_json::to_string(&snap) {
-                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                            let _ = store.save_server_state(&server_id, &json);
-                        }
-                    }
+                    crdt_store.save_state_snapshot(server_id.clone(), &snap);
                     server_states.insert(server_id, snap);
                 }
                 Err(e) => {
@@ -10227,11 +10224,7 @@ async fn handle_incoming_request_inner(
 
                 let mut admitted = Vec::new();
                 let merged = crdt_sync::merge_ops_with(state, &incoming_ops, |op| admitted.push(op.clone()));
-                if !admitted.is_empty()
-                    && let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase)
-                {
-                    store.persist_admitted_ops(&admitted, state.checkpoint_hlc.as_ref());
-                }
+                crdt_store.persist_admitted(admitted, state.checkpoint_hlc.clone());
                 if let Ok(report) = &merged {
                     if report.rejected > 0 {
                         hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from a SyncResponse for {server_id} from {peer_str}", report.rejected);
@@ -10257,11 +10250,7 @@ async fn handle_incoming_request_inner(
                             state.canonicalize_members(|id| super::resolver::resolve(id));
                         }
 
-                        if let Ok(json) = serde_json::to_string(&state) {
-                            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                let _ = store.save_server_state(&server_id, &json);
-                            }
-                        }
+                        crdt_store.save_state_snapshot(server_id.clone(), state);
 
                         if let Some(completed) = pending_server_joins.remove(&server_id) {
                             let server_name = state.name().to_string();
@@ -10350,13 +10339,8 @@ async fn handle_incoming_request_inner(
                                     })
                                     .flatten();
                                 if let Some(pledge_op) = pledge_op {
-
-                                    if let Ok(json) = serde_json::to_string(&state) {
-                                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                            let _ = store.save_server_state(&server_id, &json);
-                                            let _ = store.insert_crdt_op(&pledge_op);
-                                        }
-                                    }
+                                    crdt_store.insert_op(pledge_op.clone());
+                                    crdt_store.save_state_snapshot(server_id.clone(), state);
 
                                     // Broadcast the pledge op to connected members: MLS when we hold
                                     // the group, PLUS the plaintext `CrdtOpBroadcast` twin
@@ -10494,9 +10478,7 @@ async fn handle_incoming_request_inner(
                             // authored by a non-member, so real members reject it and we fork.
                             hollow_log!("[HOLLOW-CRDT] Offline-reconciled self-eviction from {server_id} (banned={banned_now}) — durable teardown");
                             server_states.remove(&server_id);
-                            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                let _ = store.delete_server_state(&server_id);
-                            }
+                            crdt_store.delete_server(server_id.clone());
                             if let Some(mls_mgr) = mls.as_mut() {
                                 if mls_mgr.has_group(&server_id) {
                                     mls_mgr.remove_group(&server_id);
@@ -10541,7 +10523,7 @@ async fn handle_incoming_request_inner(
                 mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
                 voice_channel_participants, voice_channel_gossip_mode,
                 pending_server_joins, bundle_keypair,
-                db_path, db_passphrase, local_peer_str, device_peer_id, peer_str,
+                crdt_store, local_peer_str, device_peer_id, peer_str,
                 server_id, op_json,
             ).await;
         }
@@ -10859,12 +10841,8 @@ async fn handle_incoming_request_inner(
                     // display: the purple chip draws from the joiner's OWN
                     // verified account credential on their profile.
 
-                    if let Ok(json) = serde_json::to_string(&state) {
-                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                            let _ = store.save_server_state(&server_id, &json);
-                            let _ = store.insert_crdt_op(&op);
-                        }
-                    }
+                    crdt_store.insert_op(op.clone());
+                    crdt_store.save_state_snapshot(server_id.clone(), state);
 
                     // Broadcast MemberAdded to other peers: MLS when we hold the group,
                     // PLUS the plaintext `CrdtOpBroadcast` twin UNCONDITIONALLY. Our own
@@ -11076,8 +11054,9 @@ async fn handle_incoming_request_inner(
 
             // A resolution is only meaningful for a server we hold, and only
             // from somebody entitled to have made it. Anyone in the room can
-            // publish on the topic, so CRDT membership of the SENDER is the gate.
-            if !server_states.contains_key(&server_id) {
+            // publish on the topic, so CRDT membership of the SENDER is the gate. A deleted
+            // server counts nobody a member, so its old answers are no stranger's.
+            if server_states.get(&server_id).is_none_or(|s| s.is_deleted()) {
                 return;
             }
             let sender_master = super::resolver::resolve(&peer_str);
@@ -11120,7 +11099,7 @@ async fn handle_incoming_request_inner(
                     mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
                     voice_channel_participants, voice_channel_gossip_mode,
                     pending_server_joins, bundle_keypair,
-                    db_path, db_passphrase, local_peer_str, device_peer_id, peer_str,
+                    crdt_store, local_peer_str, device_peer_id, peer_str,
                     server_id, op_json,
                 ).await;
             }
@@ -11154,7 +11133,7 @@ async fn handle_incoming_request_inner(
                 mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
                 voice_channel_participants, voice_channel_gossip_mode,
                 pending_server_joins, bundle_keypair,
-                db_path, db_passphrase, local_peer_str, device_peer_id, peer_str,
+                crdt_store, local_peer_str, device_peer_id, peer_str,
                 server_id.clone(), op_json,
             ).await;
             let evicted = !pending_server_joins.contains_key(&server_id)
@@ -11291,7 +11270,7 @@ async fn handle_incoming_request_inner(
             // Multi-device (Phase 6 / Step 5): a sibling device asks for our FULL
             // DM history across ALL conversations, both directions. Honor ONLY for
             // our own other device — a friend must never pull our whole DB.
-            if !super::resolver::same_identity(peer_str, local_peer_str) {
+            if !super::resolver::is_own_unrevoked_device(peer_str, local_peer_str) {
                 hollow_log!(
                     "[HOLLOW-SYNC] Dropped DmSiblingSyncRequest from non-self peer {peer_str}"
                 );
@@ -11353,7 +11332,7 @@ async fn handle_incoming_request_inner(
             // Multi-device: one of OUR OWN devices created a server and is telling us
             // (its sibling) to onboard. SECURITY: only act on a SAME-IDENTITY sender —
             // a stranger can't pull us into a server this way.
-            if !super::resolver::same_identity(&peer_str, local_peer_str) {
+            if !super::resolver::is_own_unrevoked_device(peer_str, local_peer_str) {
                 hollow_log!("[HOLLOW-SECURITY] Ignored SiblingServerAnnounce from non-sibling {peer_str}");
                 return;
             }
@@ -13124,7 +13103,7 @@ async fn handle_incoming_request_inner(
         HavenMessage::PersonalEmoteSync { emotes: incoming } => {
             // Multi-device: the personal emote set converges only between our OWN
             // devices. A non-self sender is trying to plant emotes on us.
-            if !super::resolver::same_identity(peer_str, local_peer_str) {
+            if !super::resolver::is_own_unrevoked_device(peer_str, local_peer_str) {
                 hollow_log!(
                     "[HOLLOW-MULTIDEV] Dropped PersonalEmoteSync from non-self peer {peer_str}"
                 );
@@ -13184,7 +13163,7 @@ async fn handle_incoming_request_inner(
             // Multi-device (Phase 6): a sibling asked for our friend list. Reply
             // ONLY to our own other device (a roster member). Pull companion to
             // the push a sibling gets when it joins: fixes the join-timing race.
-            if !super::resolver::same_identity(peer_str, local_peer_str) {
+            if !super::resolver::is_own_unrevoked_device(peer_str, local_peer_str) {
                 hollow_log!(
                     "[HOLLOW-MULTIDEV] Dropped FriendListRequest from non-self peer {peer_str}"
                 );
@@ -13197,7 +13176,7 @@ async fn handle_incoming_request_inner(
             // SECURITY: read state is per identity; a friend must not move our
             // pointers. The store apply and the never-regress rule live behind the
             // FFI (Dart owns the unread state), so this only gates and forwards.
-            if !super::resolver::same_identity(peer_str, local_peer_str) {
+            if !super::resolver::is_own_unrevoked_device(peer_str, local_peer_str) {
                 hollow_log!("[HOLLOW-UNREAD] Dropped ReadMarkers from non-self peer {peer_str}");
                 return;
             }
@@ -13235,7 +13214,7 @@ async fn handle_incoming_request_inner(
         }
 
         HavenMessage::DeviceKind { kind } => {
-            if !super::resolver::same_identity(peer_str, local_peer_str) || peer_str == device_peer_id {
+            if !super::resolver::is_own_unrevoked_device(peer_str, local_peer_str) || peer_str == device_peer_id {
                 hollow_log!("[HOLLOW-ROSTER] Dropped DeviceKind from non-sibling {peer_str}");
                 return;
             }

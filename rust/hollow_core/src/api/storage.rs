@@ -1079,7 +1079,7 @@ pub fn mark_file_complete(file_id: String, disk_path: String) -> Result<(), Stri
             (_, None) => Some("the bytes on disk could not be read"),
         };
         if let Some(reason) = refusal {
-            hollow_log!("[HOLLOW-SECURITY] REFUSED to complete {file_id} from {disk_path}: {reason}");
+            hollow_log!("[HOLLOW-SECURITY] REFUSED to complete {file_id} from {}: {reason}", crate::log::redact_file(&disk_path));
             return Err(crate::node::file_handler::FORGED_FILE_ERROR.to_string());
         }
     }
@@ -1472,28 +1472,6 @@ pub fn has_identity() -> Result<bool, String> {
     // A key a wipe could not take yet (another program held it) belongs to an
     // identity that is gone: the launch shows Welcome, never its unlock.
     Ok(dir.join("identity.key").exists() && !present(&dir.join(PENDING_WIPE_MARKER)))
-}
-
-/// Delete the on-disk identity and local DB so the next launch shows a fresh Welcome.
-/// Used to discard the THROWAWAY identity of a cancelled "Link a device" flow.
-/// DESTRUCTIVE: only call on a throwaway with no real data, and restart afterwards,
-/// because the live DB handle is still open.
-#[frb]
-pub fn delete_identity() -> Result<(), String> {
-    let dir = crate::identity::data_dir()?;
-    for name in [
-        "identity.key",
-        "identity.device",
-        "messages.db",
-        "messages.db-wal",
-        "messages.db-shm",
-    ] {
-        let p = dir.join(name);
-        if p.exists() {
-            let _ = std::fs::remove_file(&p);
-        }
-    }
-    Ok(())
 }
 
 /// Build the plaintext snapshot ZIP in memory: `identity.key` plus a WAL-checkpointed

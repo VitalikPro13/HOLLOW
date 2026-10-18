@@ -376,13 +376,6 @@ Future<List<String>> getMissingImageFileIdsForServer({
 /// Check if an identity key file exists on disk.
 Future<bool> hasIdentity() => RustLib.instance.api.crateApiStorageHasIdentity();
 
-/// Delete the on-disk identity and local DB so the next launch shows a fresh Welcome.
-/// Used to discard the THROWAWAY identity of a cancelled "Link a device" flow.
-/// DESTRUCTIVE: only call on a throwaway with no real data, and restart afterwards,
-/// because the live DB handle is still open.
-Future<void> deleteIdentity() =>
-    RustLib.instance.api.crateApiStorageDeleteIdentity();
-
 Future<BigInt> exportBackup({
   required String outputPath,
   required bool includeVault,

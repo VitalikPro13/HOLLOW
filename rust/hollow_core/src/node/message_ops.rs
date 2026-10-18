@@ -1735,6 +1735,9 @@ pub(crate) fn live_dm_change(
 ) -> Option<LiveDmChange> {
     let convo = super::resolver::resolve(&store.get_dm_message_peer(mid)?);
     let from_sibling = super::resolver::same_identity(sender, local_master);
+    if super::resolver::is_disowned_own_id(sender, local_master) {
+        return None;
+    }
     // A blocked identity's edits, cards and deletions are dropped like its messages.
     if !from_sibling && super::blocklist::is_blocked(sender) {
         return None;
@@ -1777,10 +1780,11 @@ pub(crate) fn dm_reaction_target_ok(
     reactor: &str,
     local_master: &str,
 ) -> bool {
-    let ok = store.get_dm_message_peer(mid).is_some_and(|peer| {
-        super::resolver::same_identity(reactor, local_master)
-            || (super::resolver::same_identity(&peer, reactor) && !super::blocklist::is_blocked(reactor))
-    });
+    let ok = !super::resolver::is_disowned_own_id(reactor, local_master)
+        && store.get_dm_message_peer(mid).is_some_and(|peer| {
+            super::resolver::same_identity(reactor, local_master)
+                || (super::resolver::same_identity(&peer, reactor) && !super::blocklist::is_blocked(reactor))
+        });
     if !ok {
         hollow_log!("[HOLLOW-SECURITY] REJECTED DM reaction on {mid} from {reactor}: not a row of that conversation");
     }
@@ -4206,6 +4210,29 @@ mod tests {
         );
         assert!(live_dm_change(&store, "a1", &a, &a).is_some(), "our own sibling is never blocked");
         crate::node::blocklist::clear_for_test();
+    }
+
+    /// A device of ours the roster removed, linked or not, edits, deletes, cards and
+    /// reacts on no DM row; nor does the bare master. Each kept link judged alone.
+    #[test]
+    fn authz_a_removed_device_changes_no_own_dm_row() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_for_test();
+        let store = mem_store();
+        let (a, b, gone, sib) = (kp(146).peer_id(), kp(147).peer_id(), kp(148).peer_id(), kp(149).peer_id());
+        store.insert(&b, "to bob", true, 1_100, None, None, Some("a1"), None, None, None, None).unwrap();
+        crate::node::resolver::seed_self(&a, &[gone.clone(), sib.clone()]);
+        assert!(live_dm_change(&store, "a1", &gone, &a).is_some(), "control: a sibling changes our row");
+        assert!(dm_reaction_target_ok(&store, "a1", &gone, &a), "control: a sibling reacts");
+        crate::node::resolver::mark_revoked(std::slice::from_ref(&gone));
+        crate::node::resolver::seed_self(&a, std::slice::from_ref(&gone));
+        assert!(live_dm_change(&store, "a1", &gone, &a).is_none(), "a removed device changed our DM row");
+        assert!(!dm_reaction_target_ok(&store, "a1", &gone, &a), "a removed device reacted on our DM row");
+        crate::node::resolver::note_roster(&a);
+        assert!(live_dm_change(&store, "a1", &a, &a).is_none(), "the bare master changed our DM row");
+        assert!(!dm_reaction_target_ok(&store, "a1", &a, &a), "the bare master reacted on our DM row");
+        assert!(live_dm_change(&store, "a1", &sib, &a).is_some(), "control: a sibling still counts");
+        crate::node::resolver::clear_for_test();
     }
 
     /// A live channel edit, deletion, card or reaction must name the channel its

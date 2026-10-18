@@ -213,13 +213,20 @@ pub(crate) fn forget(device_peer_id: &str) {
 }
 
 /// Mark device ids revoked for this process: DMs, typing and key exchange refuse
-/// them. Persist through `record_revoked_devices` as well.
+/// them. Persist through `record_revoked_devices` as well. A revoked device is no
+/// one's device, so its link goes too and [`same_identity`] never counts it.
 pub(crate) fn mark_revoked(device_peer_ids: &[String]) {
     if let Ok(mut set) = revoked().write() {
         for d in device_peer_ids {
             set.insert(d.clone());
         }
     }
+    if let Ok(mut map) = links().write() {
+        for d in device_peer_ids {
+            map.remove(d);
+        }
+    }
+    changed();
 }
 
 /// Lift the mark from devices a recovery brought back.
@@ -238,6 +245,18 @@ pub(crate) fn is_revoked(device_peer_id: &str) -> bool {
         .read()
         .map(|s| s.contains(device_peer_id))
         .unwrap_or(false)
+}
+
+/// The gate of every answer only our own devices get and every row only they may
+/// file. Revocation already drops the link; this holds if a link ever comes back.
+pub(crate) fn is_own_unrevoked_device(peer: &str, local_master: &str) -> bool {
+    same_identity(peer, local_master) && !is_revoked(peer) && !is_bare_master(peer)
+}
+
+/// One of our identity's ids that does not count as our device: revoked, or the
+/// bare master (G1). Whatever only our own devices may do, it may not.
+pub(crate) fn is_disowned_own_id(peer: &str, local_master: &str) -> bool {
+    same_identity(peer, local_master) && !is_own_unrevoked_device(peer, local_master)
 }
 
 /// Process-wide lock for EVERY test that mutates the global resolver map or
@@ -387,6 +406,35 @@ mod tests {
         assert!(!is_revoked("devZ"));
         clear_all();
         assert!(!is_revoked("devX"));
+    }
+
+    /// Revocation alone ends a device's link: it is no one's sibling any more.
+    #[test]
+    fn a_revoked_device_is_no_ones_device() {
+        let _g = guarded();
+        update_many("M", ["devA", "devB"]);
+        mark_revoked(&["devA".into()]);
+        assert!(!same_identity("devA", "M"), "a revoked device still resolves to its master");
+        assert!(!same_identity("devA", "devB"), "a revoked device is still a sibling");
+        assert_eq!(devices_for("M"), vec!["devB".to_string()]);
+    }
+
+    /// The sibling gate holds on its own: a revoked device linked again, or the bare
+    /// master, is not one of our devices.
+    #[test]
+    fn a_relinked_revoked_device_or_the_bare_master_is_not_our_device() {
+        let _g = guarded();
+        update_many("M", ["devA", "devB"]);
+        mark_revoked(&["devA".into()]);
+        update_many("M", ["devA"]);
+        assert!(!is_own_unrevoked_device("devA", "M"), "a revoked device counted as ours");
+        assert!(is_disowned_own_id("devA", "M"));
+        assert!(is_own_unrevoked_device("devB", "M"), "control: a sibling counts");
+        assert!(!is_disowned_own_id("devB", "M"));
+        note_roster("M");
+        assert!(!is_own_unrevoked_device("M", "M"), "the bare master counted as our device");
+        assert!(is_disowned_own_id("M", "M"));
+        assert!(!is_disowned_own_id("devF", "M"), "a stranger is no id of ours");
     }
 
     #[test]

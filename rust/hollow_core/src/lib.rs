@@ -107,6 +107,8 @@ pub(crate) mod log {
     }
 
     pub fn write(msg: &str) {
+        // Every line, Rust's and Dart's alike, names no account folder.
+        let msg = redact_line(msg);
         // Never eprintln!: it panics when stderr cannot be written, and on
         // Linux a closed terminal leaves the app alive (SIGHUP is ignored)
         // with a dead pty, so every log line would panic the task that logs.
@@ -124,6 +126,55 @@ pub(crate) mod log {
             let _ = writeln!(open.file, "[{now}] {msg}");
             let _ = open.file.flush();
         }
+    }
+
+    /// A person's file as the log names it: its kind, never its folder or its name.
+    pub(crate) fn redact_file(path: impl AsRef<std::ffi::OsStr>) -> String {
+        let ext = Path::new(path.as_ref())
+            .extension()
+            .and_then(|e| e.to_str())
+            .filter(|e| e.len() <= 8 && e.bytes().all(|b| b.is_ascii_alphanumeric()));
+        match ext {
+            Some(ext) => format!("<file .{}>", ext.to_ascii_lowercase()),
+            None => "<file>".to_string(),
+        }
+    }
+
+    fn redact_line(msg: &str) -> std::borrow::Cow<'_, str> {
+        if msg.contains(['/', '\\']) {
+            std::borrow::Cow::Owned(redact_path(msg))
+        } else {
+            std::borrow::Cow::Borrowed(msg)
+        }
+    }
+
+    /// One of the app's own paths as the log names it, the account folder hidden the
+    /// way the diagnostics export hides it.
+    pub(crate) fn redact_path(path: impl AsRef<std::ffi::OsStr>) -> String {
+        let text = Path::new(path.as_ref()).to_string_lossy().into_owned();
+        let lower = text.to_ascii_lowercase();
+        let mut out = String::with_capacity(text.len());
+        let mut at = 0;
+        while at < text.len() {
+            let next = ["/users/", "/home/", ":\\users\\"]
+                .iter()
+                .filter_map(|m| lower[at..].find(m).map(|i| (at + i + m.len(), *m)))
+                .min();
+            let Some((start, marker)) = next else { break };
+            // A Windows account name may hold spaces; a Unix one ends where the line's words do.
+            let windows = marker.starts_with(':');
+            let end = text[start..]
+                .find(|c: char| {
+                    matches!(c, '/' | '\\' | '"' | '\'')
+                        || (!windows && (c.is_whitespace() || matches!(c, ',' | ')' | ']' | ':' | ';')))
+                })
+                .map_or(text.len(), |i| start + i);
+            out.push_str(&text[at..start]);
+            out.push('~');
+            at = end;
+        }
+        out.push_str(&text[at..]);
+        out
     }
 
     /// The wipe's step: what the log holds is gone, and no later line lands until
@@ -156,6 +207,176 @@ pub(crate) mod log {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// A person's file leaves only its kind in the log, an app path only its shape.
+        #[test]
+        fn a_logged_path_names_no_person_and_no_file() {
+            assert_eq!(redact_file("/Users/jabun/Documents/secret plan.PDF"), "<file .pdf>");
+            assert_eq!(redact_file("C:\\Users\\Jabun\\notes"), "<file>");
+            assert_eq!(redact_file("a.<script>"), "<file>");
+            assert_eq!(redact_path("C:\\Users\\Jabun\\AppData\\Hollow"), "C:\\Users\\~\\AppData\\Hollow");
+            assert_eq!(redact_path("/home/alice/.var/app/x and /Users/bob"), "/home/~/.var/app/x and /Users/~");
+            assert_eq!(redact_path("/opt/hollow/bundle"), "/opt/hollow/bundle");
+        }
+
+        /// Every line the log writes hides the account folders it names, whoever
+        /// formatted it: Rust's own lines and the ones Dart hands over alike.
+        #[test]
+        fn every_written_line_hides_the_account_folder() {
+            let _g = crate::node::resolver::test_lock();
+            erase();
+            let tmp = crate::test_tmp::tempdir().unwrap();
+            std::fs::write(tmp.path().join("identity.key"), b"key").unwrap();
+            let log = tmp.path().join("hollow_debug.log");
+            open_for_test(log.clone(), tmp.path());
+            write("[PORTABLE] data root: /Users/alice/Hollow, backup C:\\Users\\Bob Smith\\AppData\\x");
+            crate::api::network::log_from_dart("[DART] home /home/carol and done".into());
+            let text = std::fs::read_to_string(&log).unwrap();
+            erase();
+            for name in ["alice", "Bob Smith", "carol"] {
+                assert!(!text.contains(name), "the log named the account {name}: {text}");
+            }
+            assert!(text.contains("/Users/~/Hollow,") && text.contains("/home/~ and done"), "{text}");
+        }
+
+        /// The words a log argument names a path or a file by.
+        fn names_a_path(ident: &str) -> bool {
+            let last = ident.rsplit('.').next().unwrap_or(ident).trim_start_matches(['&', '*']);
+            let word = last.rsplit('_').next().unwrap_or(last);
+            matches!(word, "path" | "dir" | "dest" | "name" | "file" | "filename")
+        }
+
+        /// The body of each `hollow_log!` call in `text`, parentheses balanced outside
+        /// string literals.
+        fn log_calls(text: &str) -> Vec<&str> {
+            let opener = concat!("hollow_log", "!(");
+            let mut out = Vec::new();
+            let mut rest = text;
+            while let Some(i) = rest.find(opener) {
+                let body = &rest[i + opener.len()..];
+                let (mut depth, mut in_str, mut esc, mut end) = (1usize, false, false, body.len());
+                for (j, c) in body.char_indices() {
+                    match (in_str, c) {
+                        (true, _) if esc => esc = false,
+                        (true, '\\') => esc = true,
+                        (true, '"') => in_str = false,
+                        (true, _) => {}
+                        (false, '"') => in_str = true,
+                        (false, '(') => depth += 1,
+                        (false, ')') => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = j;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                out.push(&body[..end]);
+                rest = &body[end..];
+            }
+            out
+        }
+
+        /// `call` with every `redact_path(..)` and `redact_file(..)` cut out, then split
+        /// into its string literals and the code between them.
+        fn split_call(call: &str) -> (Vec<String>, String) {
+            let mut code = call.to_string();
+            for wrap in ["redact_path(", "redact_file("] {
+                while let Some(i) = code.find(wrap) {
+                    let mut depth = 0usize;
+                    let mut end = code.len();
+                    for (j, c) in code[i + wrap.len() - 1..].char_indices() {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = i + wrap.len() - 1 + j + 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    code.replace_range(i..end, "R");
+                }
+            }
+            let (mut lits, mut outside, mut cur, mut in_str, mut esc) = (Vec::new(), String::new(), String::new(), false, false);
+            for c in code.chars() {
+                if in_str {
+                    if esc {
+                        esc = false;
+                    } else if c == '\\' {
+                        esc = true;
+                    } else if c == '"' {
+                        in_str = false;
+                        lits.push(std::mem::take(&mut cur));
+                        continue;
+                    }
+                    cur.push(c);
+                } else if c == '"' {
+                    in_str = true;
+                } else {
+                    outside.push(c);
+                }
+            }
+            (lits, outside)
+        }
+
+        /// No log line formats a path or a person's file name raw: a format argument
+        /// named for a path, a folder, a file or a name, or a path rendered with
+        /// `display()` or `to_string_lossy`, goes through `redact_file` or `redact_path`.
+        #[test]
+        fn no_log_line_writes_a_raw_path() {
+            // App-owned names, never a person's: data-root entries and a flag.
+            let allowed = [("recovery.rs", "name"), ("file_handler.rs", "store_full_file")];
+            let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+            let mut stack = vec![src];
+            let mut found = Vec::new();
+            while let Some(dir) = stack.pop() {
+                for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                        continue;
+                    }
+                    let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                    if !name.ends_with(".rs") || name == "test_harness.rs" || name == "frb_generated.rs" {
+                        continue;
+                    }
+                    let text = std::fs::read_to_string(&p).unwrap().replace("\r\n", "\n");
+                    for call in log_calls(&text) {
+                        let (lits, outside) = split_call(call);
+                        let mut idents: Vec<String> = Vec::new();
+                        for lit in &lits {
+                            for piece in lit.split('{').skip(1) {
+                                let id: String = piece.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.').collect();
+                                if !id.is_empty() && piece[id.len()..].starts_with(['}', ':']) {
+                                    idents.push(id);
+                                }
+                            }
+                        }
+                        for arg in outside.split(',').skip(1) {
+                            let arg = arg.trim();
+                            if !arg.is_empty() && arg.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '&' | '*')) {
+                                idents.push(arg.to_string());
+                            }
+                        }
+                        for id in idents.iter().filter(|id| names_a_path(id)) {
+                            if !allowed.iter().any(|(f, a)| *f == name && a == id) {
+                                found.push(format!("{name}: {{{id}}}"));
+                            }
+                        }
+                        if outside.contains("to_string_lossy") || outside.contains("display()") {
+                            found.push(format!("{name}: a path rendered raw"));
+                        }
+                    }
+                }
+            }
+            assert!(found.is_empty(), "log lines that write a raw path or file name: {found:?}");
+        }
 
         /// A root with no identity keeps no log, so a wiped install shows no use.
         #[test]

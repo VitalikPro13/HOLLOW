@@ -1428,7 +1428,7 @@ fn handle_file_header(
                 }
                 hollow_log!(
                     "[HOLLOW-FETCH] wrote inline image {} ({} bytes) -> {}",
-                    p.fid, plaintext.len(), disk_str
+                    p.fid, plaintext.len(), crate::log::redact_file(&disk_str)
                 );
                 // A REAL image message: run_fetch keeps it and merges the
                 // image_path onto the companion text DM by mid.

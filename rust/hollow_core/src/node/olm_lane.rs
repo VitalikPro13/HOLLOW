@@ -85,7 +85,7 @@ pub(crate) fn carry_to_own_siblings(
     let Some(json) = carried_json(msg) else { return 0 };
     let siblings: Vec<String> = super::crypto_handler::online_devices_for(ws_room_peers, local_master)
         .into_iter()
-        .filter(|d| d != local_device)
+        .filter(|d| d != local_device && super::resolver::is_own_unrevoked_device(d, local_master))
         .collect();
     for device in &siblings {
         carry_json(ws_cmd_tx, device, None, json.clone(), no_session);
@@ -108,7 +108,7 @@ pub(crate) fn carry_to_every_own_device(
     let own_inbox = format!("inbox:{local_master}");
     let mut sent = 0;
     for device in &present {
-        if device != local_device {
+        if device != local_device && super::resolver::is_own_unrevoked_device(device, local_master) {
             carry_json(ws_cmd_tx, device, None, json.clone(), NoSession::Queue);
             sent += 1;
         }
@@ -385,6 +385,39 @@ mod tests {
             }
         })
         .await;
+    }
+
+    /// Devices a sibling carry went to, in order.
+    fn carried_devices(rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let WsCommand::Carry { device, .. } = cmd {
+                out.push(device);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// A device the roster removed hears nothing meant for our own devices, even with
+    /// its link kept, and neither does the bare master in a room. Each fan-out alone.
+    #[test]
+    fn a_removed_device_hears_no_sibling_share() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_for_test();
+        let (master, us, sib, gone) = ("m-master", "m-us", "m-sib", "m-gone");
+        crate::node::resolver::seed_self(master, &[us.into(), sib.into(), gone.into()]);
+        crate::node::resolver::mark_revoked(&[gone.to_string()]);
+        crate::node::resolver::seed_self(master, &[gone.into()]);
+        crate::node::resolver::note_roster(master);
+        let peers: WsRoomPeers = [("inbox:m-master".to_string(), [us, sib, gone, master].iter().map(|s| s.to_string()).collect())].into();
+        let msg = HavenMessage::FriendListRequest;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        carry_to_own_siblings(&tx, &peers, master, us, &msg, NoSession::Queue);
+        assert_eq!(carried_devices(&mut rx), vec![sib.to_string()], "carry_to_own_siblings reached a device that is not ours");
+        carry_to_every_own_device(&tx, &peers, master, us, &msg);
+        assert_eq!(carried_devices(&mut rx), vec![sib.to_string()], "carry_to_every_own_device reached a device that is not ours");
+        crate::node::resolver::clear_for_test();
     }
 
     fn after_save(saved: crate::crypto::SessionSaved, plaintext: &str) -> WsCommand {

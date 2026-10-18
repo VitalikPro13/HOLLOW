@@ -210,6 +210,7 @@ impl CrdtStore {
             }
             CrdtStoreCmd::DeleteServer(server_id) => {
                 pending_states.remove(&server_id);
+                pending_blobs.retain(|(sid, _), _| sid != &server_id);
                 if let Err(e) = store.delete_server_state(&server_id) {
                     hollow_log!("CrdtStore: failed to delete server {server_id}: {e}");
                 }
@@ -425,5 +426,114 @@ mod tests {
             let json = &stored.iter().find(|(sid, _)| sid == "srv").expect("row").1;
             assert!(json.starts_with(&format!(r#"{{"name":"{name}""#)), "the reader saw a stale state after {name}");
         }
+    }
+
+    /// A store busy answering a catch-up read for a server of `n` channels, as at every
+    /// reconnect, so writes queued now land together in one later drain.
+    async fn busy_actor(n: usize) -> (crate::test_tmp::TestDir, CrdtStore, MessageStore, tokio::task::JoinHandle<HashMap<String, i64>>) {
+        let dir = crate::test_tmp::tempdir().expect("tmp");
+        let path_str = dir.path().join("busy.db").to_string_lossy().to_string();
+        let passphrase = "ab".repeat(32);
+        {
+            let store = MessageStore::open(&path_str, &passphrase).expect("seed store");
+            let _ = store.begin_transaction();
+            for i in 0..n {
+                store
+                    .insert_channel_message(
+                        "srv", &format!("c{i}"), "sender", "hi", false, 1_000 + i as i64,
+                        None, None, Some(&format!("m{i}")), None, None, None, None,
+                    )
+                    .expect("insert");
+            }
+            let _ = store.commit_transaction();
+        }
+        let actor = CrdtStore::open(path_str.clone(), passphrase.clone()).expect("actor");
+        actor.committed().await;
+        let direct = MessageStore::open(&path_str, &passphrase).expect("direct");
+        let ids: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+        let reader = actor.clone();
+        let read = tokio::spawn(async move { reader.channel_watermarks("srv".into(), ids).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        (dir, actor, direct, read)
+    }
+
+    /// Program order holds on disk: of two saves queued while the actor is busy, the
+    /// later one is what a restart reads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_later_state_save_wins_over_one_queued_before_it() {
+        let (_dir, actor, direct, read) = busy_actor(20_000).await;
+        actor.save_state("srv".into(), r#"{"name":"older"}"#.into());
+        actor.save_state("srv".into(), r#"{"name":"newer"}"#.into());
+        let _ = read.await;
+        actor.committed().await;
+        let stored = direct.load_all_servers().expect("read");
+        let json = &stored.iter().find(|(sid, _)| sid == "srv").expect("row").1;
+        assert!(json.contains("newer"), "the state queued first overwrote the newer one saved after it: {json}");
+    }
+
+    /// A delete queued after a snapshot of the same server leaves no row behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delete_after_a_queued_snapshot_stays_deleted() {
+        let (_dir, actor, direct, read) = busy_actor(20_000).await;
+        direct.save_server_state("gone", r#"{"name":"member"}"#).expect("seed");
+        actor.save_state("gone".into(), r#"{"name":"still a member"}"#.into());
+        actor.insert_op(crate::crdt::operations::CrdtOp {
+            server_id: "gone".into(),
+            hlc: crate::crdt::hlc::HlcTimestamp { physical_ms: 1, counter: 0, actor: "a".into() },
+            author: "a".into(),
+            payload: crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "x".into() },
+            auth: None,
+        });
+        actor.delete_server("gone".into());
+        let _ = read.await;
+        actor.committed().await;
+        let stored = direct.load_all_servers().expect("read");
+        assert!(stored.iter().all(|(sid, _)| sid != "gone"), "the deleted server came back: {stored:?}");
+        assert!(direct.load_ops_for_server("gone", None).unwrap().is_empty(), "the deleted server kept an op");
+    }
+
+    /// A blob queued before its server's delete, in the same drain, does not outlive it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_blob_queued_before_a_server_delete_does_not_outlive_it() {
+        let (_dir, actor, direct, read) = busy_actor(20_000).await;
+        actor.save_blob("gone".into(), "crdt_resync".into(), "{}".into());
+        actor.save_blob("kept".into(), "crdt_resync".into(), "{}".into());
+        actor.delete_server("gone".into());
+        let _ = read.await;
+        actor.committed().await;
+        assert_eq!(direct.load_server_blob("gone", "crdt_resync").unwrap(), None, "a blob outlived its server's delete");
+        assert!(direct.load_server_blob("kept", "crdt_resync").unwrap().is_some(), "another server's blob went with it");
+    }
+
+    /// Server rows have ONE writer, this actor: a direct write on another connection
+    /// races a write still queued here, and the older state or a deleted server lands
+    /// last. The startup fold in `CrdtResync::load` runs before the event loop queues
+    /// anything, and needs to know its writes landed.
+    #[test]
+    fn server_rows_are_written_only_through_the_actor() {
+        let writes = [
+            ".save_server_state(", ".delete_server_state(", ".insert_crdt_op(", ".persist_admitted_ops(",
+            ".save_server_blob(", ".delete_server_blob(", ".delete_server_blobs(", ".prune_crdt_ops(",
+        ];
+        let allowed: &[(&str, usize)] = &[("crdt_resync.rs", 4)];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        for sub in ["node", "api"] {
+            for entry in std::fs::read_dir(src.join(sub)).unwrap().flatten() {
+                let p = entry.path();
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                if !name.ends_with(".rs") || name == "crdt_store.rs" || name == "test_harness.rs" {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&p).unwrap().replace("\r\n", "\n");
+                let live = text.split("\n#[cfg(test)]\nmod tests").next().unwrap_or_default();
+                let n: usize = writes.iter().map(|w| live.matches(w).count()).sum();
+                let ok = allowed.iter().find(|(f, _)| *f == name).map_or(0, |(_, k)| *k);
+                if n != ok {
+                    found.push(format!("{sub}/{name}: {n} direct server-row write(s), {ok} allowed"));
+                }
+            }
+        }
+        assert!(found.is_empty(), "server rows written outside the CrdtStore actor: {found:?}");
     }
 }
