@@ -3007,6 +3007,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
 
 }
 
+/// Below this a DM header cannot fit the Offline status beside its buttons.
+const double _kDmHeaderFullWidth = 360;
+
 class _MobileChatHeader extends ConsumerWidget {
   final String? peerId;
   final String? serverId;
@@ -3053,22 +3056,27 @@ class _MobileChatHeader extends ConsumerWidget {
         border: Border(bottom: BorderSide(color: hollow.border)),
       ),
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
-      child: Row(
-        children: [
-          HollowIconButton(
-            icon: LucideIcons.arrowLeft,
-            label: 'Back',
-            size: 44,
-            onPressed: () => Navigator.of(context).pop(),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          Expanded(
-            child: _titleBlock(context, ref, hollow,
-                isDm: isDm, isSaved: isSaved, blocked: blocked),
-          ),
-          ..._trailingActions(context, ref, hollow,
-              isDm: isDm, isSaved: isSaved, blocked: blocked),
-        ],
+      child: LayoutBuilder(
+        builder: (context, constraints) => Row(
+          children: [
+            HollowIconButton(
+              icon: LucideIcons.arrowLeft,
+              label: 'Back',
+              size: 44,
+              onPressed: () => Navigator.of(context).pop(),
+            ),
+            const SizedBox(width: HollowSpacing.xs),
+            Expanded(
+              child: _titleBlock(context, ref, hollow,
+                  isDm: isDm, isSaved: isSaved, blocked: blocked),
+            ),
+            ..._trailingActions(context, ref, hollow,
+                isDm: isDm,
+                isSaved: isSaved,
+                blocked: blocked,
+                narrow: constraints.maxWidth < _kDmHeaderFullWidth),
+          ],
+        ),
       ),
     );
   }
@@ -3101,7 +3109,7 @@ class _MobileChatHeader extends ConsumerWidget {
             ? PresenceAvatar(
                 peerId: peerId!,
                 size: 32,
-                online: identityIsOnline(ref, peerId!),
+                online: !blocked && identityIsOnline(ref, peerId!),
                 ring: hollow.surface,
               )
             : Icon(LucideIcons.hash, size: 20, color: hollow.textTertiary);
@@ -3162,12 +3170,17 @@ class _MobileChatHeader extends ConsumerWidget {
   /// and search.
   List<Widget> _trailingActions(
       BuildContext context, WidgetRef ref, HollowTheme hollow,
-      {required bool isDm, required bool isSaved, required bool blocked}) {
+      {required bool isDm,
+      required bool isSaved,
+      required bool blocked,
+      required bool narrow}) {
     if (isDm) {
       final offline = ownLinkOfflineStatus(ref);
       return [
-        // Our own link, or a dead link reads as the friend being offline.
-        if (offline != null)
+        // Our own link, or a dead link reads as the friend being offline. A
+        // narrow phone sheds it before a control: the connection indicator
+        // over every route already says so.
+        if (offline != null && !narrow)
           Padding(
             padding: const EdgeInsets.only(right: HollowSpacing.xs),
             child: offline,
@@ -3182,13 +3195,16 @@ class _MobileChatHeader extends ConsumerWidget {
     final pinnedIds = serverId != null && channelId != null
         ? ref.watch(pinnedProvider)['$serverId:$channelId'] ?? const <String>[]
         : const <String>[];
+    final pinCount = serverId != null && channelId != null
+        ? ref.watch(shownPinCountProvider('$serverId:$channelId'))
+        : 0;
     return [
       if (serverId != null) _MobileChannelStatus(serverId: serverId!),
-      if (pinnedIds.isNotEmpty)
+      if (pinCount > 0)
         HollowIconButton(
           icon: LucideIcons.pin,
-          count: '${pinnedIds.length}',
-          label: '${pinnedIds.length} pinned',
+          count: '$pinCount',
+          label: '$pinCount pinned',
           size: 44,
           onPressed: () => _showPinnedMessagesSheet(
               context, ref, serverId!, channelId!, pinnedIds),

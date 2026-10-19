@@ -8,6 +8,7 @@ import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -214,10 +215,22 @@ void main() {
     expect(labels, isNot(contains('Manage member')));
   });
 
+  testWidgets('no call is offered to an online stranger', (tester) async {
+    await pumpMenuHost(tester,
+        extra: [onlineIdentitiesProvider.overrideWith(_ThemOnline.new)]);
+    await rightClickTarget(tester);
+    expect(menuLabels(tester), contains('Message'));
+    expect(menuLabels(tester), isNot(contains('Start a call')),
+        reason: 'the node drops a call invite from anyone but a friend');
+  });
+
   testWidgets('no call is offered to someone we blocked', (tester) async {
     late ProviderContainer c;
     await pumpMenuHost(tester,
-        extra: [onlineIdentitiesProvider.overrideWith(_ThemOnline.new)],
+        extra: [
+          onlineIdentitiesProvider.overrideWith(_ThemOnline.new),
+          friendsProvider.overrideWith(_ThemFriend.new),
+        ],
         capture: (container) => c = container);
     await rightClickTarget(tester);
     expect(menuLabels(tester), contains('Start a call'));
@@ -308,4 +321,17 @@ class _FixedIdentity extends IdentityNotifier {
 class _ThemOnline extends OnlineIdentitiesNotifier {
   @override
   Set<String> build() => {'master_them'};
+}
+
+class _ThemFriend extends FriendsNotifier {
+  @override
+  Map<String, FriendInfo> build() => const {
+        'master_them': FriendInfo(
+          peerId: 'master_them',
+          status: 'accepted',
+          direction: '',
+          requestedAt: 1700000000,
+          updatedAt: 1700000100,
+        ),
+      };
 }

@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
+import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
@@ -176,7 +177,11 @@ List<HollowMenuEntry> userMenuEntries({
     final inCall =
         menuRef.watch(callProvider.select((c) => c.status)) != CallStatus.idle;
     final blocked = menuRef.watch(peerBlockedProvider(master));
-    if (online && !inCall && !blocked) {
+    // The node drops a call invite from anyone but a friend, so a stranger
+    // would never ring.
+    final isFriend =
+        menuRef.watch(friendsProvider)[master]?.status == 'accepted';
+    if (online && !inCall && !blocked && isFriend) {
       entries.add(HollowMenuItem(
         icon: LucideIcons.phone,
         label: 'Start a call',

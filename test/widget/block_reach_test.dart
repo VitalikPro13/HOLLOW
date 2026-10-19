@@ -11,10 +11,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
+import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
@@ -26,6 +28,7 @@ import 'package:hollow/src/ui/chat/pinned_messages.dart';
 import 'package:hollow/src/ui/chat/reaction_bar.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/peer_id_text.dart';
+import 'package:hollow/src/ui/components/profile_identity_column.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 
@@ -51,6 +54,9 @@ class _Api implements RustLibApi {
 
   @override
   Future<void> crateApiStorageBlockPeer({required String peerId}) async {}
+
+  @override
+  Future<void> crateApiStorageUnblockPeer({required String peerId}) async {}
 
   @override
   Future<void> crateApiNetworkReportUser(
@@ -112,7 +118,8 @@ Future<ProviderContainer> _pumpDesktopDm(WidgetTester tester, String peer,
 }
 
 Future<ProviderContainer> _pumpPhoneDm(WidgetTester tester, String peer,
-    {double width = 375}) async {
+    {double width = 375,
+    RelayConnectionStatus relay = RelayConnectionStatus.connected}) async {
   tester.view.physicalSize = Size(width, 800);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -120,7 +127,7 @@ Future<ProviderContainer> _pumpPhoneDm(WidgetTester tester, String peer,
   await tester.pumpWidget(ProviderScope(
     overrides: hollowTestOverrides(extra: [
       deviceLinkProvider.overrideWith(_Links.new),
-      connectionStatusProvider.overrideWith(TestRelayStatus.new),
+      connectionStatusProvider.overrideWith(() => TestRelayStatus(relay)),
     ]),
     child: MaterialApp(
       navigatorKey: nav,
@@ -214,6 +221,94 @@ void main() {
         expect(shown.endsWith(_nameless.substring(_nameless.length - 6)),
             isTrue,
             reason: 'got "$shown"');
+        await tester.pump(const Duration(seconds: 2));
+      });
+    }
+  });
+
+  group('the profile card', () {
+    Future<ProviderContainer> pumpCard(
+        WidgetTester tester, String peer, ProfileCardDensity density) async {
+      tester.view.physicalSize = const Size(600, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(ProviderScope(
+        overrides: hollowTestOverrides(extra: [
+          deviceLinkProvider.overrideWith(_Links.new),
+        ]),
+        child: MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: ProfileIdentityColumn(
+                peerId: peer,
+                density: density,
+                width: kProfileColumnWidth,
+                dismissHost: () {},
+              ),
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+      return ProviderScope.containerOf(
+          tester.element(find.byType(ProfileIdentityColumn)));
+    }
+
+    for (final density in [ProfileCardDensity.full, ProfileCardDensity.touch]) {
+      testWidgets('${density.name}: a blocked friend shows Blocked and Unblock',
+          (tester) async {
+        final c = await pumpCard(tester, kFriendPeerId1, density);
+        expect(find.text('Friend'), findsOneWidget);
+        expect(find.text('Message'), findsOneWidget);
+
+        unawaited(c.read(blockedUsersProvider.notifier).block(kFriendPeerId1));
+        await tester.pump();
+        expect(find.text('Blocked'), findsOneWidget);
+        expect(find.text('Unblock'), findsOneWidget);
+        expect(find.text('Friend'), findsNothing);
+        expect(find.text('Message'), findsNothing);
+        expect(find.text('Online'), findsNothing);
+        expect(find.text('Offline'), findsNothing);
+
+        await tester.tap(find.text('Unblock'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Blocked'), findsNothing);
+        expect(find.text('Friend'), findsOneWidget);
+        await tester.pump(const Duration(seconds: 2));
+      });
+
+      testWidgets('${density.name}: a blocked stranger is offered no Add friend',
+          (tester) async {
+        final c = await pumpCard(tester, _nameless, density);
+        expect(find.text('Add friend'), findsOneWidget);
+        unawaited(c.read(blockedUsersProvider.notifier).block(_nameless));
+        await tester.pump();
+        expect(find.text('Add friend'), findsNothing);
+        expect(find.text('Unblock'), findsOneWidget);
+        await tester.pump(const Duration(seconds: 2));
+      });
+    }
+
+    testWidgets('a device id finds its blocked master', (tester) async {
+      final c = await pumpCard(tester, _bobDevice, ProfileCardDensity.compact);
+      unawaited(c.read(blockedUsersProvider.notifier).block(_bob));
+      await tester.pump();
+      expect(find.text('Blocked'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 2));
+    });
+  });
+
+  group('the phone DM header while offline', () {
+    for (final width in [320.0, 375.0]) {
+      testWidgets('fits at $width px', (tester) async {
+        await _pumpPhoneDm(tester, kFriendPeerId1,
+            width: width, relay: RelayConnectionStatus.disconnected);
+        expect(tester.takeException(), isNull);
+        expect(_hasButton('Voice call'), isTrue);
+        expect(_hasButton('Mute notifications'), isTrue);
+        expect(find.text('Offline'), width < 360 ? findsNothing : findsWidgets);
         await tester.pump(const Duration(seconds: 2));
       });
     }
@@ -409,6 +504,31 @@ void main() {
           hiddenAuthor: (id) => id == _bobDevice);
       expect(r.loaded.map((m) => m.messageId), ['p1']);
       expect(r.missing, 1);
+    });
+
+    test('the header pin count skips their loaded pins', () {
+      final c = ProviderContainer(overrides: hollowTestOverrides(extra: [
+        deviceLinkProvider.overrideWith(_Links.new),
+      ]));
+      addTearDown(c.dispose);
+      const key = 'srv:general';
+      c.read(pinnedProvider.notifier).state = {
+        key: ['p1', 'p2', 'p-old']
+      };
+      c.read(channelChatProvider.notifier).state = {
+        key: [
+          ChannelChatMessage(
+              senderId: 'carol', text: 'a', isMe: false, messageId: 'p1'),
+          ChannelChatMessage(
+              senderId: _bobDevice, text: 'b', isMe: false, messageId: 'p2'),
+        ],
+      };
+      final sub = c.listen(shownPinCountProvider(key), (_, _) {});
+      addTearDown(sub.close);
+      expect(sub.read(), 3);
+      unawaited(c.read(blockedUsersProvider.notifier).block(_bob));
+      expect(sub.read(), 2,
+          reason: 'one pin of theirs is loaded; the old one cannot be judged');
     });
 
     testWidgets('their search hits are not listed', (tester) async {

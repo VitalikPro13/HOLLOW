@@ -896,6 +896,18 @@
     },
     {
       "peer": "a",
+      "op": "wait_for",
+      "target": "text:Blocked",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "text:Unblock",
+      "value": 1
+    },
+    {
+      "peer": "a",
       "op": "shot",
       "name": "blk-d-11-profile-card-after-block"
     },

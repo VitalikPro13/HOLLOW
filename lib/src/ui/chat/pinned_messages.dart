@@ -4,6 +4,7 @@ import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
+import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -46,6 +47,22 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
   ]..sort((a, b) => b.timestamp.compareTo(a.timestamp));
   return (loaded: loaded, missing: pinnedIds.length - found.length);
 }
+
+/// How many pins the header shows for a `server:channel` [key]: every pin
+/// except loaded ones by someone we blocked, so it matches the list it opens.
+final shownPinCountProvider =
+    Provider.autoDispose.family<int, String>((ref, key) {
+  final pinnedIds = ref.watch(pinnedProvider)[key] ?? const <String>[];
+  if (pinnedIds.isEmpty) return 0;
+  final blocked = ref.watch(blockedUsersProvider);
+  if (blocked.isEmpty) return pinnedIds.length;
+  final links = ref.watch(deviceLinkProvider);
+  final messages =
+      ref.watch(channelChatProvider.select((m) => m[key])) ?? const [];
+  final resolved = resolvePinnedMessages(pinnedIds, messages,
+      hiddenAuthor: (id) => blocked.contains(links.identityOf(id)));
+  return resolved.loaded.length + resolved.missing;
+});
 
 /// The line that owns up to pins the list cannot show yet.
 String pinnedMissingLine(int missing) => missing == 1

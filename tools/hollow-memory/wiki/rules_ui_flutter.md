@@ -143,10 +143,15 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 - A block takes the person off every surface at once (Apple 1.2): a surface that shows a
   person's words, reactions, typing, pins, search hits, requests or a way to call them asks
   `peerBlockedProvider(id)` (device ids collapse inside); the DM header keeps back, name and
-  profile only, and the desktop profile panel drops its bell. A sibling's block lands through
+  profile only, and the desktop profile panel drops its bell. Member lists keep them (decided
+  10-19), but their profile card (every density, one `ProfileIdentityColumn`) says "Blocked"
+  with Unblock as its primary, no presence, status, Message or Add friend; counts of their
+  things (the header pin count, `shownPinCountProvider`) skip them too. A sibling's block lands through
   `BlockedUsersNotifier.load`, so react to the provider, never to the `block()` call.
   `test/widget/block_reach_test.dart`; real-app journeys `fleet/block_reach_desktop.json`
   (macOS a=t,b=u) and `fleet/block_reach_mobile.json` (a=ios:t,b=u), fresh identities each run.
+- A way to call someone shows only for an accepted FRIEND: the node drops a call invite from
+  anyone else, so a stranger's "Start a call" would ring nothing.
 - Temp nicknames live in relay RAM; the node re-claims a held one on every reconnect and before the relay's 10 minutes run out, so the UI keeps it across `RelayDisconnected`.
 
 ## Input and shortcuts

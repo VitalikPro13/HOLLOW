@@ -434,20 +434,20 @@
     },
     {
       "peer": "a",
+      "op": "wait_for",
+      "target": "text:Blocked",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "text:Add friend",
+      "value": 0
+    },
+    {
+      "peer": "a",
       "op": "shot",
       "name": "blk-m-04-profile-blocked"
-    },
-    {
-      "peer": "a",
-      "op": "tap",
-      "target": "semantics:More",
-      "index": 0
-    },
-    {
-      "peer": "a",
-      "op": "wait_for",
-      "target": "text:Unblock",
-      "timeout_ms": 5000
     },
     {
       "peer": "a",
@@ -1063,15 +1063,20 @@
     },
     {
       "peer": "a",
-      "op": "tap",
-      "target": "semantics:More",
-      "index": 0
+      "op": "wait_for",
+      "target": "text:Blocked",
+      "timeout_ms": 5000
     },
     {
       "peer": "a",
-      "op": "wait_for",
-      "target": "text:Unblock",
-      "timeout_ms": 5000
+      "op": "expect_count",
+      "target": "text:Add friend",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-m-12b-friend-profile-blocked"
     },
     {
       "peer": "a",

@@ -1539,9 +1539,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
     final searchOpen = ref.watch(chatSearchOpenProvider);
     final isSplit = ref.watch(splitViewProvider).isSplit;
     final membersOpen = ref.watch(memberPanelProvider);
-    final pinnedIds =
-        ref.watch(pinnedProvider)['${widget.serverId}:${widget.channelId}'] ??
-            const <String>[];
+    final pinKey = '${widget.serverId}:${widget.channelId}';
+    final pinnedIds = ref.watch(pinnedProvider)[pinKey] ?? const <String>[];
+    final pinCount = ref.watch(shownPinCountProvider(pinKey));
     return LayoutBuilder(builder: (context, constraints) {
       final width = constraints.maxWidth;
       return ChatHeaderBar(
@@ -1575,12 +1575,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
             : null,
         actions: [
           // Hidden while nothing is pinned in this channel.
-          if (pinnedIds.isNotEmpty)
+          if (pinCount > 0)
             HollowIconButton(
               icon: LucideIcons.pin,
-              count: '${pinnedIds.length}',
-              label:
-                  '${pinnedIds.length} pinned message${pinnedIds.length == 1 ? '' : 's'}',
+              count: '$pinCount',
+              label: '$pinCount pinned message${pinCount == 1 ? '' : 's'}',
               onPressed: () => _showPinnedMessages(context, pinnedIds),
             ),
           HollowIconButton(

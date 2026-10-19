@@ -149,6 +149,9 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
     final isFriend =
         !isMe && ref.watch(friendsProvider)[master]?.status == 'accepted';
     final isVerified = !isMe && ref.watch(isPeerVerifiedProvider(master));
+    // A blocked person stays findable, but their card shows the block, never
+    // their presence or a way to reach them.
+    final isBlocked = !isMe && ref.watch(peerBlockedProvider(peerId));
     final localNick = ref.watch(localNicknameProvider)[peerId];
 
     final displayName = profile?.displayName ?? '';
@@ -159,7 +162,7 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
     final override = localNick ?? widget.nickname;
     final hasOverride = override != null && override.isNotEmpty;
     final primaryName = hasOverride ? override : shownName;
-    final status = profile?.status ?? '';
+    final status = isBlocked ? '' : profile?.status ?? '';
     final aboutMe = profile?.aboutMe ?? '';
 
     final bannerHeight = widget.width / 2.5;
@@ -266,6 +269,7 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
                 isOnline: isOnline,
                 isFriend: isFriend,
                 isVerified: isVerified,
+                isBlocked: isBlocked,
               ),
               if (status.isNotEmpty) ...[
                 const SizedBox(height: HollowSpacing.xs),
@@ -297,6 +301,7 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
                   isMe: isMe,
                   isFriend: isFriend,
                   isVerified: isVerified,
+                  isBlocked: isBlocked,
                 ),
               ],
               if (aboutMe.isNotEmpty) ...[
@@ -340,6 +345,7 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
                   isMe: isMe,
                   isFriend: isFriend,
                   isVerified: isVerified,
+                  isBlocked: isBlocked,
                 ),
               ],
             ],
@@ -354,10 +360,20 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
     required bool isOnline,
     required bool isFriend,
     required bool isVerified,
+    required bool isBlocked,
   }) {
     final style = HollowTypography.bodySmall.copyWith(
       color: hollow.textSecondary,
     );
+    if (isBlocked) {
+      return Row(
+        children: [
+          Icon(LucideIcons.ban, size: 14, color: hollow.textSecondary),
+          const SizedBox(width: HollowSpacing.xs),
+          Text('Blocked', style: style),
+        ],
+      );
+    }
     final dot = Text(
       ' · ',
       style: HollowTypography.bodySmall.copyWith(color: hollow.textTertiary),
@@ -447,6 +463,7 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
     required bool isMe,
     required bool isFriend,
     required bool isVerified,
+    required bool isBlocked,
   }) {
     final compact = _compact;
     if (isMe) {
@@ -481,7 +498,17 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
     // the chat under this sheet.
     final inTheirDm =
         _touch && ref.watch(selectedPeerProvider) == widget.peerId;
-    final Widget? primary = isFriend
+    final Widget? primary = isBlocked
+        ? HollowButton.filled(
+            onPressed: () => _unblock(master),
+            loading: _unblocking,
+            compact: compact,
+            touch: _touch,
+            expand: true,
+            icon: const Icon(LucideIcons.ban),
+            child: const Text('Unblock'),
+          )
+        : isFriend
         ? (inTheirDm
               ? null
               : HollowButton.filled(
@@ -539,6 +566,15 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
         ),
       ],
     );
+  }
+
+  bool _unblocking = false;
+
+  Future<void> _unblock(String master) async {
+    if (_unblocking) return;
+    setState(() => _unblocking = true);
+    await unblockUser(context, masterId: master);
+    if (mounted) setState(() => _unblocking = false);
   }
 
   String get _name => displayNameForPeer(
