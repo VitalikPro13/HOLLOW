@@ -522,6 +522,10 @@ Future<void> showDiagnosticsDialog(BuildContext context,
   } catch (_) {
     version = 'unknown';
   }
+  try {
+    final build = updater_api.getCurrentBuild();
+    if (build > 0) version = '$version+$build';
+  } catch (_) {}
   var body = '';
   try {
     body = await recovery_api.diagnosticsReport(starting: starting);

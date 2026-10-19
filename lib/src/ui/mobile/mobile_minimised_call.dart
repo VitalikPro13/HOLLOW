@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/call/speaking_ring.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/shell/conference_actions.dart'
@@ -85,6 +86,9 @@ class MobileMinimisedCall extends ConsumerWidget {
 class _CallBarRow extends StatelessWidget {
   final Widget leading;
   final String title;
+
+  /// The person a DM call's [title] names, so an id fallback keeps its ending.
+  final String? titlePeerId;
   final Widget subtitle;
   final String openLabel;
   final VoidCallback onOpen;
@@ -94,6 +98,7 @@ class _CallBarRow extends StatelessWidget {
   const _CallBarRow({
     required this.leading,
     required this.title,
+    this.titlePeerId,
     required this.subtitle,
     required this.openLabel,
     required this.onOpen,
@@ -124,13 +129,21 @@ class _CallBarRow extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: HollowTypography.label
-                              .copyWith(color: hollow.textPrimary),
-                        ),
+                        if (titlePeerId case final peerId?)
+                          PeerNameText(
+                            name: title,
+                            peerId: peerId,
+                            style: HollowTypography.label
+                                .copyWith(color: hollow.textPrimary),
+                          )
+                        else
+                          Text(
+                            title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: HollowTypography.label
+                                .copyWith(color: hollow.textPrimary),
+                          ),
                         DefaultTextStyle.merge(
                           style: HollowTypography.monoSmall.copyWith(
                             color: hollow.success,
@@ -182,6 +195,7 @@ class _DmCallBar extends ConsumerWidget {
             peerId: master, size: MobileCallMetrics.barAvatar, frameId: ''),
       ),
       title: name,
+      titlePeerId: master,
       subtitle: subtitle,
       openLabel: 'Open the call with $name',
       onOpen: () =>

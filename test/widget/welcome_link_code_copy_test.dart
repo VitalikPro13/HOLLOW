@@ -55,6 +55,8 @@ void main() {
   ) async {
     showWelcomeDialog(await _open(tester));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('Agree and continue'));
+    await tester.pumpAndSettle();
 
     expect(
       find.textContaining('6-digit'),
@@ -67,6 +69,8 @@ void main() {
   testWidgets('creating an identity is the one filled action, and no phrase '
       'restore is offered', (tester) async {
     showWelcomeDialog(await _open(tester));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Agree and continue'));
     await tester.pumpAndSettle();
 
     final filled = tester
@@ -91,6 +95,8 @@ void main() {
     WelcomeResult? result;
     final host = await _open(tester);
     showWelcomeDialog(host).then((r) => result = r);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Agree and continue'));
     await tester.pumpAndSettle();
 
     await tester.tap(find.bySemanticsLabel(RegExp('^Change the relay')));

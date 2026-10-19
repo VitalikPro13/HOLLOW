@@ -274,8 +274,8 @@ Takes `KeyEvent`, `TextEditingController`, `FocusNode`, `onSend` callback, and o
 
 | Shortcut | Action |
 |---|---|
-| Enter | Calls `onSend()` (send message) |
-| Shift+Enter | Inserts newline at cursor position |
+| Enter (main or numpad) | Calls `onSend()` (send message) |
+| Shift+Enter (main or numpad) | Inserts newline at cursor position |
 | Ctrl+V | `_handlePasteKey`: ONE clipboard snapshot at key time (`pasteFromClipboard`, `ui/components/snapshot_paste.dart`); the image read (`_tryPasteImage`) starts only when the snapshot offers an image. Off Windows it returns `ignored` and the engine pastes (#101) |
 | Up (bare, empty composer) | `onEditLast`: edits the newest own editable message (`editNewestAction()` reusing the pane's `_editStartFor`); `ignored` when nothing is editable; the @mention/emote popups take Up first (#103) |
 | Ctrl+B | Wraps selection in `**bold**` |
@@ -283,6 +283,8 @@ Takes `KeyEvent`, `TextEditingController`, `FocusNode`, `onSend` callback, and o
 | Ctrl+E | Wraps selection in `` `code` `` |
 | Ctrl+Shift+X | Wraps selection in `~~strikethrough~~` |
 | Ctrl+Shift+S | Wraps selection in `\|\|spoiler\|\|` |
+
+Every Enter check goes through `isEnterKey()` (main + numpad; the composer, edit field, emote and @mention overlays). macOS and Linux report the numpad key as `numpadEnter` (Windows as plain Enter), and an Enter the framework leaves unhandled reaches the text input client, which breaks the line in a multiline field: that was the macOS "numpad Enter makes a new line" bug (10-19). `test/widget/chat_enter_send_test.dart` scans lib/ for a lone `LogicalKeyboardKey.enter`.
 
 ### _tryPasteImage()
 Async. Reads system clipboard via `super_clipboard` package. Checks for image formats in priority order: PNG, JPEG, GIF, BMP, WebP. If found, reads bytes, saves to a temp file as `clipboard_{timestamp}.{ext}`, and calls `onPasteImage(path, name)`.

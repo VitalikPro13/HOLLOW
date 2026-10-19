@@ -10,10 +10,11 @@ import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 String _senderName(Map<String, String> names, String id) =>
-    names[id] ?? (id.length > 8 ? id.substring(0, 8) : id);
+    names[id] ?? shortPeerLabel(id);
 
 /// The desktop "Filter by sender" control: a menu hanging off the button, the
 /// current choice checked.

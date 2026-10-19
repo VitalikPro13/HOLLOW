@@ -13,7 +13,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Verified-contacts pieces shared by desktop Settings > Security and the
@@ -28,13 +28,11 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 class VerifiedContactRow extends ConsumerWidget {
   final String id;
   final double avatarSize;
-  final String shortId;
 
   const VerifiedContactRow({
     super.key,
     required this.id,
     required this.avatarSize,
-    required this.shortId,
   });
 
   Future<void> _unverify(BuildContext context, WidgetRef ref) async {
@@ -75,8 +73,8 @@ class VerifiedContactRow extends ConsumerWidget {
     return SettingsRow(
       leading: HollowAvatar(peerId: id, size: avatarSize),
       title: name,
-      subtitleWidget: Text(
-        shortId,
+      subtitleWidget: PeerIdText(
+        id,
         style: HollowTypography.monoSmall.copyWith(color: hollow.textSecondary),
       ),
       trailing: Row(
@@ -127,7 +125,6 @@ class VerifiedContactsExpandRow extends ConsumerWidget {
             key: ValueKey(id),
             id: id,
             avatarSize: 32,
-            shortId: shortenPeerId(id),
           ),
       ],
     );

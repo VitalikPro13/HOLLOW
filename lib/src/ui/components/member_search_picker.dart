@@ -6,7 +6,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
-import 'package:hollow/src/ui/components/label_visuals.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Searchable member list shared by every member picker. Search matches the
@@ -106,7 +106,7 @@ class _MemberSearchPickerState extends State<MemberSearchPicker> {
                         : () => widget.onTapMember!(m),
                     leading: HollowAvatar(peerId: m.peerId, size: 28),
                     title: widget.nameOf(m),
-                    subtitle: shortPeerIdSuffix(m.peerId),
+                    subtitle: shortPeerLabel(m.peerId),
                     trailing: widget.trailingOf(m),
                   );
                 },

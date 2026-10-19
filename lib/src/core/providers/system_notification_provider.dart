@@ -59,6 +59,19 @@ class NotificationCard {
   })  : messages = messages ?? [],
         createdAt = createdAt ?? DateTime.now();
 
+  NotificationCard withMessages(List<NotificationMessage> kept) =>
+      NotificationCard(
+        sourceKey: sourceKey,
+        title: title,
+        avatarId: avatarId,
+        isDm: isDm,
+        serverId: serverId,
+        channelId: channelId,
+        peerId: peerId,
+        messages: kept,
+        createdAt: createdAt,
+      );
+
   NotificationCard withMessage(NotificationMessage msg) {
     final updated = List<NotificationMessage>.from(messages)..add(msg);
     if (updated.length > 5) {
@@ -146,6 +159,11 @@ class OsNotificationSink {
         body: body,
         avatarBytes: avatarBytes,
       );
+
+  /// Takes back the DM notifications keyed by any of [ids].
+  Future<void> withdrawPerson(Set<String> ids) => isMobile
+      ? push.withdrawPersonNotifications(ids)
+      : DesktopNotificationService.instance.withdrawDm(ids);
 
   /// The one notification App Lock allows: no name, no text, no reply.
   Future<void> hidden() => isMobile
@@ -389,6 +407,21 @@ class SystemNotificationNotifier
   /// Dismiss the pending card for a DM the user just opened: otherwise the card
   /// lingers, replays later and occupies the card cap.
   void dismissDm(String peerId) => dismissCard(peerId);
+
+  /// A block: the person's cards, toasts and banners leave the screen, and
+  /// their lines leave any channel card. [ids] are their master and devices.
+  Future<void> withdrawPerson(Set<String> ids) async {
+    final cards = <NotificationCard>[];
+    for (final c in state) {
+      if (ids.contains(c.sourceKey)) continue;
+      final kept =
+          c.messages.where((m) => !ids.contains(m.senderPeerId)).toList();
+      if (kept.isEmpty && c.messages.isNotEmpty) continue;
+      cards.add(kept.length == c.messages.length ? c : c.withMessages(kept));
+    }
+    state = cards;
+    await ref.read(osNotificationSinkProvider).withdrawPerson(ids);
+  }
 
   /// Dismiss the pending card for a channel the user just opened.
   void dismissChannel(String serverId, String channelId) =>

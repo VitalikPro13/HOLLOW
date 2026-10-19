@@ -13,6 +13,14 @@ use crate::identity::data_dir;
 
 pub(crate) const APP_VERSION: &str = "0.12.1";
 
+/// The quick-patch number on top of [`APP_VERSION`]: 0 for the release itself, 1 for
+/// the first same-version patch, shown as `0.12.2+1`. Separate from pubspec's `+N`,
+/// which is the Android versionCode / iOS build.
+pub(crate) const APP_BUILD: u32 = 0;
+
+/// The highest `build` a manifest entry may carry; it names download and staging paths.
+const MAX_BUILD: u32 = 9999;
+
 /// Keys allowed to sign `manifest.json`; the private half never enters the repo.
 /// More than one entry only during a key rotation.
 const MANIFEST_SIGNING_PUBKEYS: &[&str] = &[
@@ -31,6 +39,11 @@ pub struct DownloadProgress {
 #[frb(sync)]
 pub fn get_current_version() -> String {
     APP_VERSION.to_string()
+}
+
+#[frb(sync)]
+pub fn get_current_build() -> u32 {
+    APP_BUILD
 }
 
 /// How this Linux copy of Hollow was installed: `"flatpak"` or `"tarball"`, empty
@@ -64,10 +77,10 @@ pub fn fetch_version_manifest(manifest_url: String) -> Result<String, String> {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-        let manifest = fetch_bytes(&client, &manifest_url)
+        let manifest = fetch_bytes(&client, &manifest_url, MANIFEST_CAP)
             .await
             .map_err(|e| format!("Failed to fetch manifest: {e}"))?;
-        let sig = fetch_bytes(&client, &signature_url(&manifest_url))
+        let sig = fetch_bytes(&client, &signature_url(&manifest_url), SIG_CAP)
             .await
             .map_err(|e| format!("Failed to fetch manifest signature: {e}"))?;
         verify_manifest_signature(&manifest, &String::from_utf8_lossy(&sig))?;
@@ -76,26 +89,51 @@ pub fn fetch_version_manifest(manifest_url: String) -> Result<String, String> {
     })
 }
 
-/// Plain fetch for the OTHER release-folder feeds, display-only text with no signature
-/// sidecar. Nothing fetched here is ever executed or installed; the update manifest
-/// goes through [`fetch_version_manifest`].
+/// Fetches a release feed (`status.json`, `news.json`) AND its `.sig` sidecar,
+/// returning the text only when the signature verifies for THIS feed name (see
+/// [`feed_message`]). Dart treats any error as "nothing to show".
 #[frb]
-pub fn fetch_release_feed(url: String) -> Result<String, String> {
+pub fn fetch_signed_feed(url: String, feed: String) -> Result<String, String> {
+    let cap = fetch_cap(&feed).ok_or_else(|| "Unknown release feed".to_string())?;
     let rt = get_runtime();
     rt.block_on(async {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-        let body = fetch_bytes(&client, &url)
+        let body = fetch_bytes(&client, &url, cap)
             .await
             .map_err(|e| format!("Failed to fetch feed: {e}"))?;
-        String::from_utf8(body).map_err(|_| "Feed is not UTF-8".to_string())
+        let sig = fetch_bytes(&client, &signature_url(&url), SIG_CAP)
+            .await
+            .map_err(|e| format!("Failed to fetch feed signature: {e}"))?;
+        signed_feed_text(&feed, body, &String::from_utf8_lossy(&sig), MANIFEST_SIGNING_PUBKEYS)
     })
 }
 
-async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
-    let resp = client
+/// The feed text, only when `sig_text` verifies it for `feed` under a listed key.
+fn signed_feed_text(feed: &str, body: Vec<u8>, sig_text: &str, pubkeys_hex: &[&str]) -> Result<String, String> {
+    verify_feed_signature_with(feed, &body, sig_text, pubkeys_hex)?;
+    String::from_utf8(body).map_err(|_| "Feed is not UTF-8".to_string())
+}
+
+/// Read caps, enforced while the body streams so a hostile or broken host cannot
+/// make the app hold more; over the cap is an error and nothing is parsed.
+/// news.json grows a post at a time (20 KB at 0.12.1), hence its larger cap.
+/// `rust/hollow_manifest` refuses to sign anything over them.
+const MANIFEST_CAP: usize = 1024 * 1024;
+const SIG_CAP: usize = 64 * 1024;
+
+fn fetch_cap(feed: &str) -> Option<usize> {
+    match feed {
+        "status" => Some(64 * 1024),
+        "news" => Some(256 * 1024),
+        _ => None,
+    }
+}
+
+async fn fetch_bytes(client: &reqwest::Client, url: &str, cap: usize) -> Result<Vec<u8>, String> {
+    let mut resp = client
         .get(url)
         .header("Cache-Control", "no-cache")
         .send()
@@ -104,7 +142,18 @@ async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, Str
     if !resp.status().is_success() {
         return Err(format!("server returned {}", resp.status()));
     }
-    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+    let too_big = || format!("response is over {cap} bytes");
+    if resp.content_length().is_some_and(|n| n > cap as u64) {
+        return Err(too_big());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if body.len() + chunk.len() > cap {
+            return Err(too_big());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// `.../manifest.json?t=123` becomes `.../manifest.json.sig?t=123`: the
@@ -128,22 +177,62 @@ fn verify_manifest_signature_with(
     sig_text: &str,
     pubkeys_hex: &[&str],
 ) -> Result<(), String> {
-    let sig = base64::engine::general_purpose::STANDARD
-        .decode(sig_text.trim())
-        .map_err(|_| "Update manifest signature is not base64".to_string())?;
-    let sig = Signature::from_slice(&sig)
-        .map_err(|_| "Update manifest signature is malformed".to_string())?;
-    let verified = pubkeys_hex.iter().any(|hex_key| {
+    if signature_verifies(manifest, sig_text, pubkeys_hex) {
+        Ok(())
+    } else {
+        Err("Update manifest signature does not verify. The download host may have been tampered with; nothing was installed.".to_string())
+    }
+}
+
+/// True when `sig_text` is a base64 Ed25519 signature over `msg` by ANY listed key,
+/// under strict verification so a malleable or weak-key signature is refused too.
+fn signature_verifies(msg: &[u8], sig_text: &str, pubkeys_hex: &[&str]) -> bool {
+    let Ok(sig) = base64::engine::general_purpose::STANDARD.decode(sig_text.trim()) else {
+        return false;
+    };
+    let Ok(sig) = Signature::from_slice(&sig) else {
+        return false;
+    };
+    pubkeys_hex.iter().any(|hex_key| {
         hex::decode(hex_key)
             .ok()
             .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
             .and_then(|bytes| VerifyingKey::from_bytes(&bytes).ok())
-            .is_some_and(|vk| vk.verify_strict(manifest, &sig).is_ok())
-    });
-    if verified {
+            .is_some_and(|vk| vk.verify_strict(msg, &sig).is_ok())
+    })
+}
+
+/// The feeds a signature may name.
+const FEEDS: &[&str] = &["status", "news"];
+
+const FEED_SIG_CONTEXT: &[u8] = b"hollow-feed-sig-v1\0";
+
+/// What a feed signature covers: a fixed context, the feed's name and the exact
+/// bytes. The manifest is signed bare and starts with `{`, so no feed signature
+/// can pass as a manifest signature, nor one feed's as the other's. Mirrors
+/// `feeds::feed_message` in rust/hollow_manifest (`feed_signature_kat` in both).
+fn feed_message(feed: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if !FEEDS.contains(&feed) {
+        return Err("Unknown release feed".to_string());
+    }
+    let mut msg = Vec::with_capacity(FEED_SIG_CONTEXT.len() + feed.len() + 1 + bytes.len());
+    msg.extend_from_slice(FEED_SIG_CONTEXT);
+    msg.extend_from_slice(feed.as_bytes());
+    msg.push(0);
+    msg.extend_from_slice(bytes);
+    Ok(msg)
+}
+
+fn verify_feed_signature_with(
+    feed: &str,
+    bytes: &[u8],
+    sig_text: &str,
+    pubkeys_hex: &[&str],
+) -> Result<(), String> {
+    if signature_verifies(&feed_message(feed, bytes)?, sig_text, pubkeys_hex) {
         Ok(())
     } else {
-        Err("Update manifest signature does not verify. The download host may have been tampered with; nothing was installed.".to_string())
+        Err("Feed signature does not verify".to_string())
     }
 }
 
@@ -161,15 +250,46 @@ pub(crate) fn is_release_version(v: &str) -> bool {
 }
 
 /// Refuses a signed manifest whose `latest` or any listed `version` is not
-/// [`is_release_version`], before Dart can pick one to download.
+/// [`is_release_version`], or where two readable entries name one release, before
+/// Dart can pick one to download. A malformed `build` or `critical` is not refused
+/// here: Dart skips that entry alone (`VersionInfo.id`).
 fn manifest_versions_well_formed(manifest: &[u8]) -> Result<(), String> {
     let refused = || "Update manifest names a malformed version; nothing was installed.".to_string();
     let doc: serde_json::Value = serde_json::from_slice(manifest).map_err(|_| refused())?;
     let latest = doc.get("latest").and_then(|v| v.as_str());
     let listed = doc.get("versions").and_then(|v| v.as_array()).ok_or_else(refused)?;
-    let all_ok = latest.is_some_and(is_release_version)
-        && listed.iter().all(|e| e.get("version").and_then(|v| v.as_str()).is_some_and(is_release_version));
-    if all_ok { Ok(()) } else { Err(refused()) }
+    let mut seen = std::collections::HashSet::new();
+    for e in listed {
+        let version = e.get("version").and_then(|v| v.as_str()).filter(|v| is_release_version(v));
+        let Some(version) = version else { return Err(refused()) };
+        let Some(build) = readable_build(e) else { continue };
+        let parts: Vec<u64> = version.split('.').filter_map(|p| p.parse().ok()).collect();
+        if !seen.insert((parts, build)) {
+            return Err("Update manifest lists one release twice; nothing was installed.".to_string());
+        }
+    }
+    if latest.is_some_and(is_release_version) { Ok(()) } else { Err(refused()) }
+}
+
+/// The entry's build when Dart would offer it: `build` absent or an integer up to
+/// [`MAX_BUILD`], `critical` absent or a boolean. Mirrors `VersionInfo.fromJson`.
+fn readable_build(e: &serde_json::Value) -> Option<u64> {
+    let build = match e.get("build") {
+        None => 0,
+        Some(b) => b.as_u64().filter(|n| *n <= u64::from(MAX_BUILD))?,
+    };
+    e.get("critical").is_none_or(serde_json::Value::is_boolean).then_some(build)
+}
+
+/// How a release names its files on disk: `0.12.2`, or `0.12.2-b1` for a patch, so a
+/// patch never reuses the download or staging path of the version it patches.
+fn release_tag(version: &str, build: u32) -> String {
+    if build == 0 { version.to_string() } else { format!("{version}-b{build}") }
+}
+
+/// How a release is named to a person: `0.12.2`, or `0.12.2+1` for a patch.
+fn release_display(version: &str, build: u32) -> String {
+    if build == 0 { version.to_string() } else { format!("{version}+{build}") }
 }
 
 /// A checksum the manifest hands us must be 64 hex characters before a
@@ -334,6 +454,262 @@ mod integrity_tests {
         assert!(normalise_expected_sha256(&"a".repeat(63)).is_err());
         assert!(normalise_expected_sha256(&"g".repeat(64)).is_err());
     }
+
+    /// Pins the feed signature scheme; rust/hollow_manifest's `feed_signature_kat`
+    /// holds the same vector.
+    #[test]
+    fn feed_signature_kat() {
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let listed = hex::encode(key.verifying_key().to_bytes());
+        let body = br#"{"issued":1,"notices":[]}"#;
+        let sig = "09MlGHO/bj7y1tDOrqfnwAHWmrTD14eEQGLMvL+XQCDpy3n3uf2J90wVOtu8nwzPYjLvx2doj3Fo/Rkq5QK1CA==";
+        assert_eq!(b64(&key.sign(&feed_message("status", body).unwrap()).to_bytes()), sig);
+        assert!(verify_feed_signature_with("status", body, sig, &[&listed]).is_ok());
+    }
+
+    /// One key signs the manifest and both feeds, so each signature must be
+    /// worthless as any of the other two.
+    #[test]
+    fn a_feed_signature_never_passes_as_the_manifest_or_the_other_feed() {
+        let key = SigningKey::from_bytes(&[3u8; 32]);
+        let listed = hex::encode(key.verifying_key().to_bytes());
+        let body = br#"{"latest":"0.12.2","versions":[]}"#;
+        let as_status = b64(&key.sign(&feed_message("status", body).unwrap()).to_bytes());
+        let as_news = b64(&key.sign(&feed_message("news", body).unwrap()).to_bytes());
+        let as_manifest = b64(&key.sign(body).to_bytes());
+
+        assert!(verify_feed_signature_with("status", body, &as_status, &[&listed]).is_ok());
+        assert!(verify_feed_signature_with("news", body, &as_news, &[&listed]).is_ok());
+        assert!(verify_manifest_signature_with(body, &as_manifest, &[&listed]).is_ok());
+
+        assert!(verify_manifest_signature_with(body, &as_status, &[&listed]).is_err());
+        assert!(verify_manifest_signature_with(body, &as_news, &[&listed]).is_err());
+        assert!(verify_feed_signature_with("news", body, &as_status, &[&listed]).is_err());
+        assert!(verify_feed_signature_with("status", body, &as_news, &[&listed]).is_err());
+        assert!(verify_feed_signature_with("status", body, &as_manifest, &[&listed]).is_err());
+        assert!(verify_feed_signature_with("news", body, &as_manifest, &[&listed]).is_err());
+    }
+
+    #[test]
+    fn a_feed_signature_needs_a_listed_key_and_the_exact_bytes() {
+        let key = SigningKey::from_bytes(&[3u8; 32]);
+        let listed = hex::encode(key.verifying_key().to_bytes());
+        let other = hex::encode(SigningKey::from_bytes(&[4u8; 32]).verifying_key().to_bytes());
+        let body = br#"{"issued":5,"notices":[]}"#;
+        let sig = b64(&key.sign(&feed_message("status", body).unwrap()).to_bytes());
+        assert!(verify_feed_signature_with("status", body, &sig, &[&other, &listed]).is_ok());
+        assert!(verify_feed_signature_with("status", body, &sig, &[&other]).is_err());
+        let mut tampered = body.to_vec();
+        tampered[10] ^= 1;
+        assert!(verify_feed_signature_with("status", &tampered, &sig, &[&listed]).is_err());
+        for garbage in ["", "not base64!", &b64(&[0u8; 10])] {
+            assert!(verify_feed_signature_with("status", body, garbage, &[&listed]).is_err());
+        }
+        assert_eq!(signed_feed_text("status", body.to_vec(), &sig, &[&listed]).unwrap(), r#"{"issued":5,"notices":[]}"#);
+        assert!(signed_feed_text("status", tampered.clone(), &sig, &[&listed]).is_err());
+        assert!(signed_feed_text("news", body.to_vec(), &sig, &[&listed]).is_err());
+        // An unlisted feed name refuses before anything is fetched or verified.
+        assert!(verify_feed_signature_with("manifest", body, &sig, &[&listed]).is_err());
+        assert!(fetch_signed_feed("https://invalid.invalid/x.json".into(), "manifest".into())
+            .is_err_and(|e| e == "Unknown release feed"));
+    }
+
+    /// A malformed `build` or `critical` drops only its own entry (Dart skips it),
+    /// so these fields never become wire limits like the three-part version.
+    #[test]
+    fn a_malformed_build_or_critical_skips_only_its_entry() {
+        for ok in [
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":1}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2","build":0,"critical":false}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2","build":9999,"critical":true}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":10000}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":-1}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":1.5}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":"1"}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":null}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":{"n":1}}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":1,"critical":"yes"}]}"#,
+        ] {
+            assert!(manifest_versions_well_formed(ok.as_bytes()).is_ok(), "{ok} refused");
+        }
+        for bad in [
+            r#"{"latest":"0.12.2+1","versions":[{"version":"0.12.2"}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2+1"}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2-b1","build":1}]}"#,
+        ] {
+            assert!(manifest_versions_well_formed(bad.as_bytes()).is_err(), "{bad} accepted");
+        }
+    }
+
+    /// Two readable entries naming one release make the pick depend on order.
+    #[test]
+    fn a_manifest_repeating_a_version_and_build_is_refused() {
+        for bad in [
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":1},{"version":"0.12.2","build":1}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":0}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.02"}]}"#,
+        ] {
+            assert!(manifest_versions_well_formed(bad.as_bytes()).is_err(), "{bad} accepted");
+        }
+        // An entry Dart skips names nothing, so it repeats nothing.
+        for ok in [
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":"0"}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","critical":"no"}]}"#,
+            r#"{"latest":"0.12.2","versions":[{"version":"0.12.2"},{"version":"0.12.2","build":1},{"version":"0.12.1"}]}"#,
+        ] {
+            assert!(manifest_versions_well_formed(ok.as_bytes()).is_ok(), "{ok} refused");
+        }
+    }
+
+    /// Serves `body` once on a loopback port; `chunked` leaves out Content-Length
+    /// so only the read itself can enforce the cap.
+    fn serve_once(body: Vec<u8>, chunked: bool) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else { return };
+            let mut req = [0u8; 4096];
+            let _ = sock.read(&mut req);
+            let _ = if chunked {
+                let mut out = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+                for part in body.chunks(16 * 1024) {
+                    out.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+                    out.extend_from_slice(part);
+                    out.extend_from_slice(b"\r\n");
+                }
+                out.extend_from_slice(b"0\r\n\r\n");
+                sock.write_all(&out)
+            } else {
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                sock.write_all(head.as_bytes()).and_then(|()| sock.write_all(&body))
+            };
+        });
+        format!("http://{addr}/feed.json")
+    }
+
+    /// Answers two requests on one loopback port: `sig` for a path ending in
+    /// `.sig`, `body` otherwise. `announce` sends that Content-Length instead and
+    /// keeps the socket open after the short write, as a host lying about size would.
+    fn serve_pair(body: Vec<u8>, sig: Vec<u8>, announce: Option<usize>) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept() else { return };
+                let mut req = [0u8; 4096];
+                let n = sock.read(&mut req).unwrap_or(0);
+                let line = String::from_utf8_lossy(&req[..n]).lines().next().unwrap_or("").to_string();
+                let part = if line.contains(".sig") { &sig } else { &body };
+                let len = announce.unwrap_or(part.len());
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n");
+                let _ = sock.write_all(head.as_bytes()).and_then(|()| sock.write_all(part));
+                if announce.is_some() {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            }
+        });
+        format!("http://{addr}/feed.json")
+    }
+
+    /// The caps are wired into both public fetches, for the body and the sidecar.
+    #[test]
+    fn the_public_fetches_apply_their_caps() {
+        let status = fetch_cap("status").unwrap();
+        let e = fetch_signed_feed(serve_pair(vec![b' '; status + 1], b"x".to_vec(), None), "status".into());
+        assert!(e.as_ref().is_err_and(|e| e.starts_with("Failed to fetch feed: response is over")), "{e:?}");
+        let e = fetch_signed_feed(serve_pair(b"{}".to_vec(), vec![b'A'; SIG_CAP + 1], None), "news".into());
+        assert!(e.as_ref().is_err_and(|e| e.starts_with("Failed to fetch feed signature: response is over")), "{e:?}");
+        let e = fetch_version_manifest(serve_pair(vec![b' '; MANIFEST_CAP + 1], b"x".to_vec(), None));
+        assert!(e.as_ref().is_err_and(|e| e.starts_with("Failed to fetch manifest: response is over")), "{e:?}");
+        let e = fetch_version_manifest(serve_pair(b"{}".to_vec(), vec![b'A'; SIG_CAP + 1], None));
+        assert!(e.as_ref().is_err_and(|e| e.starts_with("Failed to fetch manifest signature: response is over")), "{e:?}");
+    }
+
+    /// A body announced over the cap is refused before any of it is read.
+    #[test]
+    fn a_body_announced_over_the_cap_is_refused_unread() {
+        let cap = fetch_cap("status").unwrap();
+        let e = fetch_capped(&serve_pair(b"{".to_vec(), Vec::new(), Some(cap + 1)), cap);
+        assert!(e.as_ref().is_err_and(|e| e.contains("over")), "{e:?}");
+    }
+
+    fn fetch_capped(url: &str, cap: usize) -> Result<Vec<u8>, String> {
+        get_runtime().block_on(async {
+            let client = reqwest::Client::builder().no_proxy().build().expect("client");
+            fetch_bytes(&client, url, cap).await
+        })
+    }
+
+    #[test]
+    fn a_feed_body_over_the_cap_is_refused() {
+        let cap = fetch_cap("status").unwrap();
+        for chunked in [false, true] {
+            let at_cap = fetch_capped(&serve_once(vec![b'x'; cap], chunked), cap);
+            assert_eq!(at_cap.map(|b| b.len()), Ok(cap), "chunked={chunked}");
+            let over = fetch_capped(&serve_once(vec![b'x'; cap + 1], chunked), cap);
+            assert!(over.is_err(), "a body one byte over the cap was read (chunked={chunked})");
+        }
+        assert!(fetch_cap("news").unwrap() >= 4 * 64 * 1024, "news.json is 20 KB and grows a post at a time");
+        assert!(fetch_cap("manifest").is_none(), "the manifest has its own cap");
+    }
+
+    #[test]
+    fn a_manifest_body_over_the_cap_is_refused() {
+        for chunked in [false, true] {
+            let over = fetch_capped(&serve_once(vec![b' '; MANIFEST_CAP + 1], chunked), MANIFEST_CAP);
+            assert!(over.is_err(), "a manifest over its cap was read (chunked={chunked})");
+        }
+        let sig = fetch_capped(&serve_once(vec![b'A'; SIG_CAP + 1], true), SIG_CAP);
+        assert!(sig.is_err(), "a signature over its cap was read");
+    }
+
+    #[test]
+    fn a_patch_never_reuses_the_paths_of_the_release_it_patches() {
+        assert_eq!(release_tag("0.12.2", 0), "0.12.2");
+        assert_eq!(release_tag("0.12.2", 1), "0.12.2-b1");
+        assert_eq!(release_display("0.12.2", 0), "0.12.2");
+        assert_eq!(release_display("0.12.2", 1), "0.12.2+1");
+        assert_ne!(release_tag("0.12.2", 1), release_tag("0.12.2", 0));
+        assert_ne!(release_tag("0.12.2", 1), release_tag("0.12.21", 0));
+    }
+
+    fn zip_with_one_file(dir: &Path) -> PathBuf {
+        use std::io::Write;
+        let zip_path = dir.join("update.zip");
+        let file = fs::File::create(&zip_path).expect("create zip");
+        let mut writer = zip::ZipWriter::new(file);
+        writer.start_file("hollow.exe", zip::write::SimpleFileOptions::default()).expect("entry");
+        writer.write_all(b"exe").expect("write");
+        writer.finish().expect("finish");
+        zip_path
+    }
+
+    #[test]
+    fn a_patch_stages_under_its_own_tag() {
+        let tmp = crate::test_tmp::tempdir().expect("tmp");
+        let zip = zip_with_one_file(tmp.path());
+        let app = tmp.path().join("app");
+        fs::create_dir_all(&app).expect("app dir");
+        // The platform's later steps may refuse this fake archive; the staging name is
+        // chosen before them.
+        let _ = apply_update_at(tmp.path(), zip.to_str().unwrap(), app.to_str().unwrap(), "0.12.2", 1);
+        assert!(tmp.path().join("updates").join("staging-0.12.2-b1").exists());
+        assert!(!tmp.path().join("updates").join("staging-0.12.2").exists());
+    }
+
+    #[test]
+    fn a_build_above_the_bound_stages_nothing() {
+        let tmp = crate::test_tmp::tempdir().expect("tmp");
+        let zip = zip_with_one_file(tmp.path());
+        let app = tmp.path().join("app");
+        fs::create_dir_all(&app).expect("app dir");
+        let r = apply_update_at(tmp.path(), zip.to_str().unwrap(), app.to_str().unwrap(), "0.12.2", MAX_BUILD + 1);
+        assert!(r.is_err(), "an out-of-range build was applied: {r:?}");
+        assert!(!tmp.path().join("updates").exists(), "an out-of-range build staged files");
+    }
 }
 
 #[frb]
@@ -341,18 +717,34 @@ pub fn apply_update(
     zip_path: String,
     app_dir: String,
     version: String,
+    build: u32,
 ) -> Result<String, String> {
     let data = data_dir()?;
-    apply_update_at(&data, &zip_path, &app_dir, &version)
+    apply_update_at(&data, &zip_path, &app_dir, &version, build)
+}
+
+/// A release as the apply paths name it: `tag` in file and folder names, `display`
+/// in what a person or the log reads.
+struct ReleaseName {
+    tag: String,
+    display: String,
 }
 
 /// Every platform's apply, behind the version check: nothing is extracted,
-/// staged or scripted for a version that is not [`is_release_version`].
-fn apply_update_at(data: &Path, archive_path: &str, app_dir: &str, version: &str) -> Result<String, String> {
-    if !is_release_version(version) {
+/// staged or scripted for a version that is not [`is_release_version`] or a
+/// build above [`MAX_BUILD`].
+fn apply_update_at(
+    data: &Path,
+    archive_path: &str,
+    app_dir: &str,
+    version: &str,
+    build: u32,
+) -> Result<String, String> {
+    if !is_release_version(version) || build > MAX_BUILD {
         return Err("Update version is malformed; nothing was installed.".to_string());
     }
-    apply_update_impl(data, archive_path, app_dir, version)
+    let rel = ReleaseName { tag: release_tag(version, build), display: release_display(version, build) };
+    apply_update_impl(data, archive_path, app_dir, &rel)
 }
 
 /// Linux: the download is either the portable tarball or a `.flatpak` bundle,
@@ -363,11 +755,11 @@ fn apply_update_impl(
     data: &Path,
     archive_path: &str,
     app_dir: &str,
-    version: &str,
+    rel: &ReleaseName,
 ) -> Result<String, String> {
     match linux_install_kind_inner() {
-        "flatpak" => apply_update_flatpak(data, archive_path, version),
-        _ => apply_update_tarball(data, archive_path, app_dir, version, std::process::id()),
+        "flatpak" => apply_update_flatpak(data, archive_path, &rel.display),
+        _ => apply_update_tarball(data, archive_path, app_dir, rel, std::process::id()),
     }
 }
 
@@ -376,9 +768,10 @@ fn apply_update_impl(
     data: &Path,
     zip_path: &str,
     app_dir: &str,
-    version: &str,
+    rel: &ReleaseName,
 ) -> Result<String, String> {
-    let staging_dir = data.join("updates").join(format!("staging-{version}"));
+    let staging_dir = data.join("updates").join(format!("staging-{}", rel.tag));
+    let version = &rel.display;
 
     if staging_dir.exists() {
         fs::remove_dir_all(&staging_dir)
@@ -654,14 +1047,14 @@ fn apply_update_tarball(
     data: &Path,
     archive_path: &str,
     app_dir: &str,
-    version: &str,
+    rel: &ReleaseName,
     pid: u32,
 ) -> Result<String, String> {
     use std::os::unix::fs::PermissionsExt;
 
     let updates = data.join("updates");
     fs::create_dir_all(&updates).map_err(|e| format!("Failed to create updates dir: {e}"))?;
-    let staging = updates.join(format!("staging-{version}"));
+    let staging = updates.join(format!("staging-{}", rel.tag));
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|e| format!("Failed to clean staging dir: {e}"))?;
     }
@@ -730,7 +1123,7 @@ fn apply_update_tarball(
         bundle_str,
         staging_str,
         archive_path,
-        version,
+        &rel.display,
         pid,
         &current_args_quoted(),
     );
@@ -1290,7 +1683,7 @@ mod extract_zip_tests {
         }
         let app = tmp.join("app");
         std::fs::create_dir_all(&app).expect("app dir");
-        let r = super::apply_update_at(&tmp, zip_path.to_str().unwrap(), app.to_str().unwrap(), "0.12.0 & calc");
+        let r = super::apply_update_at(&tmp, zip_path.to_str().unwrap(), app.to_str().unwrap(), "0.12.0 & calc", 0);
         let staged = tmp.join("updates").exists();
         let _ = std::fs::remove_dir_all(&tmp);
         assert!(r.is_err(), "a malformed version was applied: {r:?}");
@@ -1748,7 +2141,7 @@ org.freedesktop.portal.Desktop=talk
             &data,
             archive.to_str().unwrap(),
             app.to_str().unwrap(),
-            "9.9.9",
+            &ReleaseName { tag: "9.9.9".into(), display: "9.9.9".into() },
             watched,
         )
         .expect("generate the update script");
@@ -1829,7 +2222,7 @@ org.freedesktop.portal.Desktop=talk
             &data,
             archive.to_str().unwrap(),
             app.to_str().unwrap(),
-            "9.9.9",
+            &ReleaseName { tag: "9.9.9".into(), display: "9.9.9".into() },
             watched,
         )
         .expect("generate the update script");

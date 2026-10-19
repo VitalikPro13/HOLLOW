@@ -97,6 +97,8 @@ import 'package:hollow/src/ui/dialogs/keychain_protection_dialogs.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/protection_prompt.dart';
 import 'package:hollow/src/ui/dialogs/welcome_dialog.dart';
+import 'package:hollow/src/ui/dialogs/terms_agreement_dialog.dart';
+import 'package:hollow/src/core/services/terms_agreement.dart';
 import 'package:hollow/src/ui/dialogs/license_key_dialog.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/gif_library_provider.dart';
@@ -606,9 +608,21 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
   /// The start's own offers, one after another so their dialogs never stack.
   Future<void> _offerAfterStart({required bool setUpThisLaunch}) async {
+    await _askTermsAgreement();
     await _offerPhraseUpgrade();
     await _offerProtection();
     if (!setUpThisLaunch) await _offerKeychainLock();
+  }
+
+  /// An identity made before Welcome asked for the Terms agrees once, never
+  /// above the app lock's cover or a roster lock.
+  Future<void> _askTermsAgreement() async {
+    await _untilUnlocked();
+    if (!mounted || ref.read(rosterGateProvider).kind != RosterGateKind.none) {
+      return;
+    }
+    if (!await termsAgreementDue() || !mounted) return;
+    await showTermsAgreementDialog(context);
   }
 
   /// A linked or restored device starts without a lock (C-IDENTITY-15). Offered
@@ -1115,6 +1129,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required bool linkedThisLaunch,
   }) async {
     final identity = ref.read(identityProvider);
+    // Agreed on Welcome before the database existed; a failed save only means
+    // the one-time question comes back.
+    if (welcomeResult?.agreedTerms == true) {
+      await recordTermsAgreement().catchError((_) {});
+    }
 
     // Must follow the identity load, which opens the DB. Building the provider
     // self-applies the persisted mode to ReduceMotionController, refining the OS
@@ -1244,7 +1263,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Home's first-run checklist flags, same reason.
     await ref
         .read(homeSetupProvider.notifier)
-        .load(ref.read(updaterProvider).currentVersion);
+        .load(ref.read(updaterProvider).currentDisplay);
+    // After the DB is open, and before the network phase: no status notice
+    // shows until the stored stamp is read.
+    await ref.read(statusProvider.notifier).loadDismissed();
     // App lock, same reason: the store has to be open first.
     await ref.read(lockAfterMinutesProvider.notifier).load();
     _armAppLock();
@@ -1415,9 +1437,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Loaded, not only streamed: an alert raised while the app was closed has to
     // be waiting in the conversation on the next launch, or it is missable.
     await ref.read(securityAlertsProvider.notifier).load();
-
-    // After the DB is open, or the dismissed banner re-appears on every restart.
-    await ref.read(statusProvider.notifier).loadDismissed();
 
     await ref.read(systemNotificationProvider.notifier).init();
     _registerDesktopNotificationHandlers();

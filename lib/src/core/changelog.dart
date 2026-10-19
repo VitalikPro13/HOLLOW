@@ -1,9 +1,10 @@
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/version_compare.dart';
 
 /// One release block of `changelog.txt`.
 class ChangelogRelease {
-  /// As written in the header, without the `v`: `0.11.1`, `0.11`.
+  /// As written in the header, without the `v`: `0.11.1`, `0.11`, `0.12.2+1`.
   final String version;
   final String title;
 
@@ -18,9 +19,23 @@ class ChangelogRelease {
     required this.sections,
   });
 
-  /// Whether this block describes [appVersion]; `0.11` and `0.11.0` match.
-  bool describes(String appVersion) =>
-      _normalise(version) == _normalise(appVersion);
+  /// Whether this block describes [appVersion] exactly, build included;
+  /// `0.11` and `0.11.0` match, `0.12.2` and `0.12.2+1` do not.
+  bool describes(String appVersion) {
+    final mine = ReleaseId.parse(version);
+    final theirs = ReleaseId.parse(appVersion);
+    return mine != null && mine == theirs;
+  }
+}
+
+/// The block for the running build [appVersion] (`0.12.2+1`): its own block,
+/// else the release it patches, else -1.
+int changelogIndexFor(List<ChangelogRelease> releases, String appVersion) {
+  final exact = releases.indexWhere((r) => r.describes(appVersion));
+  if (exact >= 0) return exact;
+  final running = ReleaseId.parse(appVersion);
+  if (running == null || running.build == 0) return -1;
+  return releases.indexWhere((r) => r.describes(running.version));
 }
 
 class ChangelogSection {
@@ -31,16 +46,7 @@ class ChangelogSection {
   const ChangelogSection({required this.name, required this.items});
 }
 
-String _normalise(String v) {
-  var s = v.trim();
-  if (s.startsWith('v')) s = s.substring(1);
-  while (s.endsWith('.0') && '.'.allMatches(s).length > 1) {
-    s = s.substring(0, s.length - 2);
-  }
-  return s;
-}
-
-final _header = RegExp(r'^v(\d+(?:\.\d+)*)\s*-\s*(.*)$');
+final _header = RegExp(r'^v(\d+(?:\.\d+)*(?:\+\d+)?)\s*-\s*(.*)$');
 final _section = RegExp(r'^[A-Z0-9][A-Z0-9 &/,\-]+$');
 
 /// Parses the whole file, newest release first, as the release flow writes it:

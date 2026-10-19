@@ -284,7 +284,7 @@ try {
         Start-Sleep -Milliseconds 400
     }
     if ($newPid -eq 0) { throw 'the waiter never brought e back' }
-    Step e @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 90000 }
+    Step e @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 90000 }
     Step e @{ op = 'shot'; name = 'pw-03-welcome' }
     Set-Gate 'G2 e destroys this device and relaunches to Welcome' 'PASS'
 

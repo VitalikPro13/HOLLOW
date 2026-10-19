@@ -24,8 +24,30 @@ String? linuxInstallKindOverride;
 /// True inside a Flatpak sandbox (Linux only).
 bool get isFlatpakInstall => linuxInstallKind == 'flatpak';
 
+/// `Platform.operatingSystem`, which tests replace to pick another platform's
+/// downloads.
+String get updaterPlatform => updaterPlatformOverride ?? Platform.operatingSystem;
+
+@visibleForTesting
+String? updaterPlatformOverride;
+
+/// The highest `build` an entry may carry (`MAX_BUILD` in updater.rs).
+const _kMaxBuild = 9999;
+
 class VersionInfo {
   final String version;
+
+  /// The quick-patch number on top of [version] (`0.12.2+1`); 0 when absent.
+  /// Apps up to 0.12.1 ignore it.
+  final int build;
+
+  /// False when `build` or `critical` is malformed: that entry alone is never
+  /// offered, so neither field becomes a wire limit (Rust `readable_build`).
+  final bool readable;
+
+  /// Makes the prompt louder: the release fixes something people should not
+  /// wait on.
+  final bool critical;
   final String date;
   final String urlWindows;
   final String urlMacos;
@@ -46,6 +68,9 @@ class VersionInfo {
 
   const VersionInfo({
     required this.version,
+    this.build = 0,
+    this.readable = true,
+    this.critical = false,
     required this.date,
     this.urlWindows = '',
     this.urlMacos = '',
@@ -58,45 +83,64 @@ class VersionInfo {
     required this.notes,
   });
 
-  factory VersionInfo.fromJson(Map<String, dynamic> json) => VersionInfo(
-        version: json['version'] as String? ?? '',
-        date: json['date'] as String? ?? '',
-        urlWindows: json['url_windows'] as String? ?? '',
-        urlMacos: json['url_macos'] as String? ?? '',
-        urlLinux: json['url_linux'] as String? ?? '',
-        urlLinuxTargz: json['url_linux_targz'] as String? ?? '',
-        sha256Windows: json['sha256_windows'] as String? ?? '',
-        sha256Macos: json['sha256_macos'] as String? ?? '',
-        sha256Linux: json['sha256_linux'] as String? ?? '',
-        sha256LinuxTargz: json['sha256_linux_targz'] as String? ?? '',
-        notes: json['notes'] as String? ?? '',
-      );
+  factory VersionInfo.fromJson(Map<String, dynamic> json) {
+    final rawBuild = json['build'];
+    final build = rawBuild is int ? rawBuild : 0;
+    final buildOk = !json.containsKey('build') ||
+        (rawBuild is int && rawBuild >= 0 && rawBuild <= _kMaxBuild);
+    final criticalOk =
+        !json.containsKey('critical') || json['critical'] is bool;
+    String str(String key) => json[key] is String ? json[key] as String : '';
+    return VersionInfo(
+      version: str('version'),
+      build: build,
+      readable: buildOk && criticalOk,
+      critical: json['critical'] == true,
+      date: str('date'),
+      urlWindows: str('url_windows'),
+      urlMacos: str('url_macos'),
+      urlLinux: str('url_linux'),
+      urlLinuxTargz: str('url_linux_targz'),
+      sha256Windows: str('sha256_windows'),
+      sha256Macos: str('sha256_macos'),
+      sha256Linux: str('sha256_linux'),
+      sha256LinuxTargz: str('sha256_linux_targz'),
+      notes: str('notes'),
+    );
+  }
+
+  /// Null for an entry this build cannot read; such an entry is never offered.
+  ReleaseId? get id => readable ? ReleaseId.of(version, build) : null;
+
+  /// `0.12.2` or `0.12.2+1`.
+  String get display => id?.display ?? version;
 
   /// The download URL for the current platform and install kind (empty if
-  /// unsupported).
-  String get platformUrl {
-    if (Platform.isMacOS) return urlMacos;
-    if (Platform.isLinux) return isFlatpakInstall ? urlLinux : urlLinuxTargz;
-    return urlWindows; // Windows
-  }
+  /// unsupported, phones included: they update through their stores).
+  String get platformUrl => switch (updaterPlatform) {
+        'macos' => urlMacos,
+        'linux' => isFlatpakInstall ? urlLinux : urlLinuxTargz,
+        'windows' => urlWindows,
+        _ => '',
+      };
 
   /// The expected SHA-256 of [platformUrl] (empty when the manifest entry
   /// carries none, which the updater treats as "not installable").
-  String get platformSha256 {
-    if (Platform.isMacOS) return sha256Macos;
-    if (Platform.isLinux) {
-      return isFlatpakInstall ? sha256Linux : sha256LinuxTargz;
-    }
-    return sha256Windows; // Windows
-  }
+  String get platformSha256 => switch (updaterPlatform) {
+        'macos' => sha256Macos,
+        'linux' => isFlatpakInstall ? sha256Linux : sha256LinuxTargz,
+        'windows' => sha256Windows,
+        _ => '',
+      };
 
   /// File name the download lands under: the tool that applies it cares
   /// about the extension (`flatpak install`, `tar`, the zip extractor).
   String get downloadFileName {
-    if (Platform.isLinux) {
-      return isFlatpakInstall ? '$version.flatpak' : '$version.tar.gz';
+    final tag = id?.tag ?? version;
+    if (updaterPlatform == 'linux') {
+      return isFlatpakInstall ? '$tag.flatpak' : '$tag.tar.gz';
     }
-    return '$version.zip';
+    return '$tag.zip';
   }
 
   /// Whether an update is actually downloadable on this platform.
@@ -112,11 +156,38 @@ class VersionManifest {
   factory VersionManifest.fromJson(Map<String, dynamic> json) =>
       VersionManifest(
         latest: json['latest'] as String? ?? '',
-        versions: (json['versions'] as List<dynamic>?)
-                ?.map((v) => VersionInfo.fromJson(v as Map<String, dynamic>))
-                .toList() ??
-            [],
+        versions: [
+          if (json['versions'] case final List<dynamic> list)
+            for (final v in list)
+              if (v is Map<String, dynamic>) VersionInfo.fromJson(v)
+        ],
       );
+
+  /// The entries this install could download, newest first. An entry with no
+  /// URL for this platform and install kind is a release for someone else.
+  List<VersionInfo> get installable {
+    final out = [
+      for (final v in versions)
+        if (v.id != null && v.hasPlatformUrl) v
+    ];
+    out.sort((a, b) => b.id!.compareTo(a.id!));
+    return out;
+  }
+
+  /// The newest installable entry strictly newer than [running], or null.
+  /// Strictly newer only: a replayed older, still validly signed manifest must
+  /// not read as an update.
+  VersionInfo? updateFor(ReleaseId running) {
+    for (final v in installable) {
+      if (v.id!.isNewerThan(running)) return v;
+    }
+    return null;
+  }
+
+  /// Whether any installable entry newer than [running] is marked critical:
+  /// installing the newest one carries that fix too.
+  bool criticalFor(ReleaseId running) =>
+      installable.any((v) => v.critical && v.id!.isNewerThan(running));
 }
 
 enum UpdateStatus { idle, checking, downloading, extracting, readyToInstall, error }
@@ -139,6 +210,9 @@ class UpdateState {
   final UpdateFailure? failure;
   final String currentVersion;
 
+  /// The quick-patch number of the running build ([currentVersion]`+N`).
+  final int currentBuild;
+
   /// When a manifest last arrived, manual or background; a failed check
   /// leaves it alone.
   final DateTime? lastChecked;
@@ -155,8 +229,17 @@ class UpdateState {
     this.error,
     this.failure,
     this.currentVersion = '',
+    this.currentBuild = 0,
     this.lastChecked,
   });
+
+  /// The running build as the updater orders it.
+  ReleaseId get running =>
+      ReleaseId.of(currentVersion, currentBuild) ?? ReleaseId.of('0')!;
+
+  /// `0.12.2`, or `0.12.2+1` on a patch build.
+  String get currentDisplay =>
+      ReleaseId.of(currentVersion, currentBuild)?.display ?? currentVersion;
 
   UpdateState copyWith({
     UpdateStatus? status,
@@ -184,6 +267,7 @@ class UpdateState {
         error: error ?? this.error,
         failure: failure ?? this.failure,
         currentVersion: currentVersion ?? this.currentVersion,
+        currentBuild: currentBuild,
         lastChecked: lastChecked ?? this.lastChecked,
       );
 }
@@ -198,7 +282,9 @@ class UpdateNotifier extends Notifier<UpdateState> {
   UpdateState build() {
     ref.onDispose(() => _recheck?.cancel());
     _armRecheck();
-    return UpdateState(currentVersion: updater_api.getCurrentVersion());
+    final running = ref.read(runningReleaseProvider);
+    return UpdateState(
+        currentVersion: running.version, currentBuild: running.build);
   }
 
   /// Desktop only: phones update through their stores.
@@ -264,7 +350,7 @@ class UpdateNotifier extends Notifier<UpdateState> {
 
     state = state.copyWith(
       status: UpdateStatus.downloading,
-      selectedVersion: version.version,
+      selectedVersion: version.display,
       downloadProgress: 0.0,
       bytesDownloaded: 0,
       totalBytes: 0,
@@ -358,6 +444,7 @@ class UpdateNotifier extends Notifier<UpdateState> {
         zipPath: destPath,
         appDir: appDir,
         version: version.version,
+        build: version.build,
       );
 
       state = state.copyWith(
@@ -434,10 +521,33 @@ class UpdateNotifier extends Notifier<UpdateState> {
 final updaterProvider =
     NotifierProvider<UpdateNotifier, UpdateState>(UpdateNotifier.new);
 
-final hasUpdateProvider = Provider<bool>((ref) {
+/// Fetches a signed release feed (`status`, `news`) by URL and feed name; any
+/// failure, a missing or bad signature included, throws. Tests replace it.
+typedef SignedFeedFetch = Future<String> Function(String url, String feed);
+
+final signedFeedFetchProvider = Provider<SignedFeedFetch>(
+    (ref) => (url, feed) => updater_api.fetchSignedFeed(url: url, feed: feed));
+
+/// The running build, from Rust's `APP_VERSION` + `APP_BUILD`. Tests override it:
+/// the Rust bridge is never initialised in a widget test.
+final runningReleaseProvider = Provider<ReleaseId>((ref) =>
+    ReleaseId.of(updater_api.getCurrentVersion(),
+        updater_api.getCurrentBuild()) ??
+    ReleaseId.of('0')!);
+
+/// The release this install should move to: the newest entry with a download
+/// for this platform that is newer than the running build. `latest` is for
+/// apps up to 0.12.1 and the website, never consulted here.
+final updateCandidateProvider = Provider<VersionInfo?>((ref) {
   final state = ref.watch(updaterProvider);
-  if (state.manifest == null) return false;
-  // Strictly newer only: a replayed older (still validly signed) manifest
-  // must not read as an update. See version_compare.dart.
-  return isNewerVersion(state.manifest!.latest, state.currentVersion);
+  return state.manifest?.updateFor(state.running);
+});
+
+final hasUpdateProvider =
+    Provider<bool>((ref) => ref.watch(updateCandidateProvider) != null);
+
+/// Whether the waiting update is marked critical, which makes its prompt louder.
+final criticalUpdateProvider = Provider<bool>((ref) {
+  final state = ref.watch(updaterProvider);
+  return state.manifest?.criticalFor(state.running) ?? false;
 });

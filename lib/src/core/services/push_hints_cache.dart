@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -131,9 +132,6 @@ class PushHintsCache {
       if (blocked.contains(peerId)) continue;
       try {
         final profile = await storage_api.getProfileLight(peerId: peerId);
-        final name = (profile != null && profile.displayName.isNotEmpty)
-            ? profile.displayName
-            : null;
 
         String? avatarPath;
         final bytes = await storage_api.getAvatar(peerId: peerId);
@@ -146,19 +144,15 @@ class PushHintsCache {
           keep.add('$peerId.img');
         }
 
-        if (name != null || avatarPath != null) {
-          // `master` threads the NSE's banners per person, as Dart's are.
-          final entry = {
-            'name': ?name,
-            'avatar': ?avatarPath,
-            'master': peerId,
-          };
-          // Keyed under the master AND every known device id of this friend,
-          // so `map[sender]` in the NSE hits whichever device sent it.
-          map[peerId] = entry;
-          for (final deviceId in aliasesFor[peerId] ?? const <String>[]) {
-            map[deviceId] = entry;
-          }
+        final entry = hintEntry(
+            master: peerId,
+            name: profile?.displayName,
+            avatarPath: avatarPath);
+        // Keyed under the master AND every known device id of this friend,
+        // so `map[sender]` in the NSE hits whichever device sent it.
+        map[peerId] = entry;
+        for (final deviceId in aliasesFor[peerId] ?? const <String>[]) {
+          map[deviceId] = entry;
         }
       } catch (e) {
         debugPrint('[HOLLOW-PUSHHINTS] skip $peerId: $e');
@@ -169,6 +163,21 @@ class PushHintsCache {
     _prune(base, keep);
     debugPrint('[HOLLOW-PUSHHINTS] wrote ${map.length} hint(s)');
   }
+
+  /// One friend's hint. Every friend gets one, named or not: without an entry
+  /// the extension neither names the sender nor fetches the text.
+  /// `master` threads the NSE's banners per person, as Dart's are.
+  @visibleForTesting
+  static Map<String, dynamic> hintEntry({
+    required String master,
+    String? name,
+    String? avatarPath,
+  }) =>
+      {
+        'name': (name == null || name.isEmpty) ? shortPeerLabel(master) : name,
+        'avatar': ?avatarPath,
+        'master': master,
+      };
 
   /// The key `NotificationService.swift` reads: present, it shows only the
   /// generic banner and fetches nothing.

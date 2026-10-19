@@ -6,10 +6,13 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_update_at`, `apply_update_impl`, `bat_quoted_path`, `detect_common_prefix`, `download_inner`, `extract_zip_to`, `fetch_bytes`, `install_kind_impl`, `is_release_version`, `launch_update_script_impl`, `manifest_versions_well_formed`, `normalise_expected_sha256`, `relaunch_snippet`, `signature_url`, `spawn_waiter`, `verify_manifest_signature_with`, `verify_manifest_signature`
+// These functions are ignored because they are not marked as `pub`: `apply_update_at`, `apply_update_impl`, `detect_common_prefix`, `download_inner`, `extract_zip_to`, `feed_message`, `fetch_bytes`, `install_kind_impl`, `is_release_version`, `launch_update_script_impl`, `manifest_versions_well_formed`, `normalise_expected_sha256`, `relaunch_snippet`, `release_display`, `release_tag`, `sh_quote`, `signature_url`, `signature_verifies`, `spawn_waiter`, `verify_feed_signature_with`, `verify_feed_signature`, `verify_manifest_signature_with`, `verify_manifest_signature`, `write_macos_update_script`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ReleaseName`
 
 String getCurrentVersion() =>
     RustLib.instance.api.crateApiUpdaterGetCurrentVersion();
+
+int getCurrentBuild() => RustLib.instance.api.crateApiUpdaterGetCurrentBuild();
 
 /// How this Linux copy of Hollow was installed: `"flatpak"` or `"tarball"`, empty
 /// elsewhere. Dart branches its update UI on it (a flatpak's `/app` is read-only, so
@@ -27,11 +30,11 @@ Future<String> fetchVersionManifest({required String manifestUrl}) => RustLib
     .api
     .crateApiUpdaterFetchVersionManifest(manifestUrl: manifestUrl);
 
-/// Plain fetch for the OTHER release-folder feeds, display-only text with no signature
-/// sidecar. Nothing fetched here is ever executed or installed; the update manifest
-/// goes through [`fetch_version_manifest`].
-Future<String> fetchReleaseFeed({required String url}) =>
-    RustLib.instance.api.crateApiUpdaterFetchReleaseFeed(url: url);
+/// Fetches a release feed (`status.json`, `news.json`) AND its `.sig` sidecar,
+/// returning the text only when the signature verifies for THIS feed name (see
+/// [`feed_message`]). Dart treats any error as "nothing to show".
+Future<String> fetchSignedFeed({required String url, required String feed}) =>
+    RustLib.instance.api.crateApiUpdaterFetchSignedFeed(url: url, feed: feed);
 
 /// Downloads `url` to `dest_path` and keeps the file ONLY if its SHA-256 matches the
 /// value from the signed manifest. Any failure, a mismatch included, deletes the
@@ -50,10 +53,12 @@ Future<String> applyUpdate({
   required String zipPath,
   required String appDir,
   required String version,
+  required int build,
 }) => RustLib.instance.api.crateApiUpdaterApplyUpdate(
   zipPath: zipPath,
   appDir: appDir,
   version: version,
+  build: build,
 );
 
 /// Starts the script [`apply_update`] returned so that it OUTLIVES this

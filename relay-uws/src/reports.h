@@ -37,6 +37,11 @@ struct ReportsState {
     // Atomic write (tmp + rename); no-op unless dirty. Keeps dirty set on
     // failure so the next flush retries.
     void save_if_dirty();
+    // The categories a client may file. "blocked" is the count a block sends:
+    // like every other category it adds to the blocked person's total only, so
+    // the relay never holds anyone's block list.
+    static bool is_category(const std::string& category);
+
     // Returns true if this (reporter, target, category) was new.
     bool add(const std::string& reporter, const std::string& target,
              const std::string& category);

@@ -84,7 +84,9 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
     final hollow = HollowTheme.of(context);
     final state = ref.watch(updaterProvider);
     final notifier = ref.read(updaterProvider.notifier);
-    final hasUpdate = ref.watch(hasUpdateProvider);
+    final candidate = ref.watch(updateCandidateProvider);
+    final hasUpdate = candidate != null;
+    final critical = ref.watch(criticalUpdateProvider);
 
     switch (state.status) {
       case UpdateStatus.downloading:
@@ -154,7 +156,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
       case UpdateStatus.error:
         final checking = state.status == UpdateStatus.checking;
         final failed = state.status == UpdateStatus.error && state.error != null;
-        final latest = hasUpdate ? _latestEntry(state) : null;
+        final latest = candidate;
 
         final String title;
         if (failed && state.failure != UpdateFailure.check) {
@@ -162,7 +164,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
         } else if (failed) {
           title = 'Could not check for updates';
         } else if (hasUpdate) {
-          title = 'Version ${state.manifest!.latest} is available';
+          title = 'Version ${candidate.display} is available';
         } else if (state.manifest != null) {
           title = "You're up to date";
         } else if (checking) {
@@ -179,7 +181,11 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
               ? Text(state.error!,
                   style: HollowTypography.bodySmall
                       .copyWith(color: hollow.error))
-              : null,
+              : hasUpdate && critical
+                  ? Text('This update fixes a serious problem. Install it soon.',
+                      style: HollowTypography.bodySmall
+                          .copyWith(color: hollow.warning))
+                  : null,
           subtitle: checked == null
               ? null
               : 'Last checked ${relativeTimeLabel(checked)}',
@@ -202,10 +208,10 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
 
   Widget _earlierVersions() {
     final state = ref.watch(updaterProvider);
-    final manifest = state.manifest;
-    if (manifest == null || manifest.versions.isEmpty) {
-      return const SizedBox.shrink();
-    }
+    final installable = state.manifest?.installable ?? const <VersionInfo>[];
+    if (installable.isEmpty) return const SizedBox.shrink();
+    final newest = installable.first.id;
+    final running = state.running;
     final canInstall = state.status == UpdateStatus.idle ||
         state.status == UpdateStatus.error;
     final notifier = ref.read(updaterProvider.notifier);
@@ -213,25 +219,18 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
       title: 'Earlier versions',
       subtitle: 'Install an older build if a new one misbehaves',
       children: [
-        for (final v in manifest.versions)
+        for (final v in installable)
           _VersionRow(
-            key: ValueKey(v.version),
+            key: ValueKey(v.display),
             version: v,
-            isCurrent: v.version == state.currentVersion,
-            isLatest: v.version == manifest.latest,
-            onInstall: v.version != state.currentVersion && canInstall
+            isCurrent: v.id == running,
+            isLatest: v.id == newest,
+            onInstall: v.id != running && canInstall
                 ? () => notifier.downloadVersion(v).catchError((_) {})
                 : null,
           ),
       ],
     );
-  }
-
-  static VersionInfo? _latestEntry(UpdateState state) {
-    for (final v in state.manifest!.versions) {
-      if (v.version == state.manifest!.latest) return v;
-    }
-    return null;
   }
 
   /// What the indeterminate step after the download is doing: extracting a zip,
@@ -257,8 +256,8 @@ class _WhatsNewRow extends ConsumerWidget {
     final releases =
         ref.watch(changelogProvider).valueOrNull ?? const <ChangelogRelease>[];
     if (releases.isEmpty) return const SizedBox.shrink();
-    final version = ref.watch(updaterProvider.select((u) => u.currentVersion));
-    final found = releases.indexWhere((r) => r.describes(version));
+    final version = ref.watch(updaterProvider.select((u) => u.currentDisplay));
+    final found = changelogIndexFor(releases, version);
     final index = found < 0 ? 0 : found;
     return SettingsRow(
       title: "What's new",
@@ -308,7 +307,7 @@ class _VersionRow extends StatelessWidget {
       if (version.notes.isNotEmpty) version.notes,
     ].join(' · ');
     return SettingsRow(
-      title: 'v${version.version}',
+      title: 'v${version.display}',
       subtitleWidget: line.isEmpty
           ? null
           : Text(line, maxLines: 1, overflow: TextOverflow.ellipsis),

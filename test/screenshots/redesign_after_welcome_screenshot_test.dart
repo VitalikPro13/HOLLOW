@@ -146,6 +146,7 @@ void main() {
     Size size = _desk,
     bool light = false,
     bool withProfiles = false,
+    bool agree = true,
   }) async {
     IOOverrides.global = _WelcomeIo(withProfiles: withProfiles);
     addTearDown(() => IOOverrides.global = null);
@@ -154,9 +155,30 @@ void main() {
     unawaited(showWelcomeDialog(hostContext));
     await tester.pump();
     await settle(tester);
+    if (agree) await tap(tester, find.text('Agree and continue'));
   }
 
   Finder relayButton() => find.bySemanticsLabel(RegExp('^Change the relay'));
+
+  testWidgets('welcome: the Terms come first', (t) async {
+    await openWelcome(t, agree: false);
+    await capture(t, 'welcome_terms_dark');
+  }, variant: _desktop);
+
+  testWidgets('welcome: the Terms come first, light', (t) async {
+    await openWelcome(t, light: true, agree: false);
+    await capture(t, 'welcome_terms_light');
+  }, variant: _desktop);
+
+  testWidgets('welcome: phone Terms', (t) async {
+    await openWelcome(t, size: _hand, agree: false);
+    await capture(t, 'welcome_phone_terms_dark');
+  }, variant: _phone);
+
+  testWidgets('welcome: small phone Terms', (t) async {
+    await openWelcome(t, size: const Size(375, 812), light: true, agree: false);
+    await capture(t, 'welcome_phone_terms_375_light');
+  }, variant: _phone);
 
   testWidgets('welcome: first run and relay, dark', (t) async {
     await openWelcome(t);

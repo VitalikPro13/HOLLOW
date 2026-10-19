@@ -108,11 +108,11 @@ class HomeNewsCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final posts = ref.watch(newsProvider).posts;
-    final version = ref.watch(updaterProvider.select((u) => u.currentVersion));
+    final version = ref.watch(updaterProvider.select((u) => u.currentDisplay));
     final setup = ref.watch(homeSetupProvider);
     final releases =
         ref.watch(changelogProvider).valueOrNull ?? const <ChangelogRelease>[];
-    final current = releases.indexWhere((r) => r.describes(version));
+    final current = changelogIndexFor(releases, version);
     final release = current < 0 ? null : releases[current];
     final justUpdated = release != null &&
         setup.loaded &&

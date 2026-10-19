@@ -15,7 +15,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The full-screen lock for a device our own roster does not admit (design ID-1):
@@ -222,7 +222,7 @@ Future<void> showPendingDeviceDialog(BuildContext context, WidgetRef ref, String
   if (!waiting || !context.mounted) return asks.answered(device);
   final name = deviceGivenName(device,
           labels: ref.read(deviceLabelProvider), kinds: ref.read(deviceKindProvider)) ??
-      shortenPeerId(device);
+      shortPeerLabel(device);
   await showHollowDialog<void>(
     context: context,
     barrierDismissible: false,

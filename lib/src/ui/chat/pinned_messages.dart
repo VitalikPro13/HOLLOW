@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -26,17 +27,24 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The pinned messages of one channel that are loaded in [messages], newest
 /// first, and how many pins are not loaded (older than the loaded history).
+/// A loaded pin by an author [hiddenAuthor] names (someone we blocked) is
+/// neither listed nor counted as missing.
 ({List<ChannelChatMessage> loaded, int missing}) resolvePinnedMessages(
-    List<String> pinnedIds, List<ChannelChatMessage> messages) {
+    List<String> pinnedIds, List<ChannelChatMessage> messages,
+    {bool Function(String senderId)? hiddenAuthor}) {
   final byId = {
     for (final m in messages)
       if (m.messageId != null) m.messageId!: m,
   };
-  final loaded = [
+  final found = [
     for (final id in pinnedIds)
       if (byId[id] != null) byId[id]!,
+  ];
+  final loaded = [
+    for (final m in found)
+      if (hiddenAuthor == null || !hiddenAuthor(m.senderId)) m,
   ]..sort((a, b) => b.timestamp.compareTo(a.timestamp));
-  return (loaded: loaded, missing: pinnedIds.length - loaded.length);
+  return (loaded: loaded, missing: pinnedIds.length - found.length);
 }
 
 /// The line that owns up to pins the list cannot show yet.
@@ -58,7 +66,11 @@ void showPinnedMessages(
   required void Function(String messageId) onJump,
   bool touch = false,
 }) {
-  final resolved = resolvePinnedMessages(pinnedIds, messages);
+  final container = ProviderScope.containerOf(context, listen: false);
+  final blocked = container.read(blockedUsersProvider);
+  final links = container.read(deviceLinkProvider);
+  final resolved = resolvePinnedMessages(pinnedIds, messages,
+      hiddenAuthor: (id) => blocked.contains(links.identityOf(id)));
 
   Widget list(BuildContext listContext) => _PinnedList(
         serverId: serverId,

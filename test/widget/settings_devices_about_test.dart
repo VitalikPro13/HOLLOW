@@ -78,6 +78,31 @@ void main() {
     expect(find.text('Privacy'), findsOneWidget);
   });
 
+  testWidgets('about: a patch build shows as +1 and a critical patch says so',
+      (tester) async {
+    updaterPlatformOverride = 'windows';
+    addTearDown(() => updaterPlatformOverride = null);
+    await pumpPage(tester, const AboutSettingsPage(), extra: [
+      updaterProvider.overrideWith(() => _PatchUpdater()),
+    ]);
+    expect(find.textContaining('v0.12.2+1 · beta', findRichText: true), findsOneWidget);
+    expect(find.text('Version 0.12.2+2 is available'), findsOneWidget);
+    expect(find.text('This update fixes a serious problem. Install it soon.'),
+        findsOneWidget);
+    expect(find.text('Download'), findsOneWidget);
+  });
+
+  testWidgets('about: a patch for another platform is not offered',
+      (tester) async {
+    updaterPlatformOverride = 'macos';
+    addTearDown(() => updaterPlatformOverride = null);
+    await pumpPage(tester, const AboutSettingsPage(), extra: [
+      updaterProvider.overrideWith(() => _PatchUpdater()),
+    ]);
+    expect(find.text("You're up to date"), findsOneWidget);
+    expect(find.textContaining('serious problem'), findsNothing);
+  });
+
   testWidgets('about: the updater row says when it last checked',
       (tester) async {
     await pumpPage(tester, const AboutSettingsPage(), extra: [
@@ -94,6 +119,32 @@ class _CheckedUpdater extends UpdateNotifier {
         currentVersion: '0.11.1',
         manifest: const VersionManifest(latest: '0.11.1', versions: []),
         lastChecked: DateTime.now().subtract(const Duration(hours: 3)),
+      );
+
+  @override
+  Future<void> checkForUpdates({bool background = false}) async {}
+}
+
+class _PatchUpdater extends UpdateNotifier {
+  @override
+  UpdateState build() => const UpdateState(
+        currentVersion: '0.12.2',
+        currentBuild: 1,
+        manifest: VersionManifest(latest: '0.12.2', versions: [
+          VersionInfo(
+              version: '0.12.2',
+              date: '',
+              notes: '',
+              urlWindows: 'https://h/w.zip',
+              urlMacos: 'https://h/m.zip'),
+          VersionInfo(
+              version: '0.12.2',
+              build: 2,
+              critical: true,
+              date: '',
+              notes: '',
+              urlWindows: 'https://h/w2.zip'),
+        ]),
       );
 
   @override

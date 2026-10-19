@@ -18,8 +18,8 @@ import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:hollow/src/ui/components/member_search_picker.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:hollow/src/ui/settings/manage_member_dialog.dart'
     show grantRemainingLabel, optimisticGrant;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -154,7 +154,7 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog>
       final name = grantNames[i];
       final shared = grantNames.where((n) => n == name).length > 1;
       final left = grantRemainingLabel(grants[i]);
-      return shared ? '${shortPeerIdSuffix(grants[i].peerId)} · $left' : left;
+      return shared ? '${shortPeerLabel(grants[i].peerId)} · $left' : left;
     }
 
     return Column(

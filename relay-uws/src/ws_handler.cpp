@@ -1845,8 +1845,7 @@ static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
     // The target is persisted (hashed for dedup, in the clear for the per-target
     // counts), so it must be a peer id and not free-form text.
     if (!is_peer_id_shape(target) || target == data->peer_id) return;
-    if (category != "spam" && category != "harassment" &&
-        category != "illegal_content" && category != "impersonation") return;
+    if (!ReportsState::is_category(category)) return;
     state.reports.add(data->peer_id, target, category);
     send_json(ws, {{"type", "report_ack"}});
     // No logging — reporter/target peer ids are user-identifying.

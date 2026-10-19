@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 
 /// Multi-device management shared by the desktop Devices category and the
 /// mobile Settings tab. The two surfaces differ only in text styling and row
@@ -27,7 +28,7 @@ bool deviceIsActive(MyDevice d) =>
 /// The device's label, else "Desktop" or "Phone", else its shortened peer id.
 String deviceTitle(MyDevice d) => d.label.isNotEmpty
     ? d.label
-    : deviceKindName(d.kind) ?? shortenPeerId(d.peerId);
+    : deviceKindName(d.kind) ?? shortPeerLabel(d.peerId);
 
 /// Re-pulls the device list from the running node. Call on open: the startup
 /// warm-up races node readiness and nothing keeps the list fresh while
@@ -198,8 +199,12 @@ class _RemoveDeviceDialogState extends ConsumerState<RemoveDeviceDialog>
               key: ValueKey('added-$id'),
               touch: touch,
               title: deviceGivenName(id, labels: labels, kinds: kinds) ??
-                  shortenPeerId(id),
-              subtitle: shortenPeerId(id),
+                  shortPeerLabel(id),
+              // A device titled by its id already shows it once.
+              subtitle: deviceGivenName(id, labels: labels, kinds: kinds) ==
+                      null
+                  ? null
+                  : shortPeerLabel(id),
             ),
           const SizedBox(height: HollowSpacing.md),
           Row(

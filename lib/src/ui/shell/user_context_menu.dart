@@ -175,7 +175,8 @@ List<HollowMenuEntry> userMenuEntries({
     final online = menuRef.watch(onlineIdentitiesProvider).contains(master);
     final inCall =
         menuRef.watch(callProvider.select((c) => c.status)) != CallStatus.idle;
-    if (online && !inCall) {
+    final blocked = menuRef.watch(peerBlockedProvider(master));
+    if (online && !inCall && !blocked) {
       entries.add(HollowMenuItem(
         icon: LucideIcons.phone,
         label: 'Start a call',

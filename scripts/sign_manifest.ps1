@@ -39,7 +39,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $manifest = Join-Path $repo 'legal\manifest.json'
 $sig = "$manifest.sig"
 $toolDir = Join-Path $repo 'rust\hollow_manifest'
-$tool = Join-Path $toolDir 'target\release\hollow-manifest.exe'
+$tool = Join-Path $toolDir $(if ($env:OS -eq 'Windows_NT') { 'target\release\hollow-manifest.exe' } else { 'target/release/hollow-manifest' })
 $manifestUrl = 'https://anonlisten.com/hollow/releases/manifest.json'
 
 # --- release.local.env: MANIFEST_SIGNING_KEY (+ optional RELEASE_SSH / RELEASE_DIR) ---
@@ -60,7 +60,8 @@ $remoteDir = if ($cfg['RELEASE_DIR']) { $cfg['RELEASE_DIR'] } else { '~/domains/
 
 # --- The public key the app trusts, read from updater.rs so the two cannot drift ---
 $updaterRs = Get-Content (Join-Path $repo 'rust\hollow_core\src\api\updater.rs') -Raw
-$pubkeys = [regex]::Matches($updaterRs, '"([0-9a-f]{64})"') | ForEach-Object { $_.Groups[1].Value }
+$block = [regex]::Match($updaterRs, 'const MANIFEST_SIGNING_PUBKEYS[^=]*=\s*&\[[^\]]*\]').Value
+$pubkeys = [regex]::Matches($block, '"([0-9a-f]{64})"') | ForEach-Object { $_.Groups[1].Value }
 if (-not $pubkeys) { throw "No MANIFEST_SIGNING_PUBKEYS entry found in updater.rs" }
 
 # --- Build the tool (fast; own tiny crate) ---

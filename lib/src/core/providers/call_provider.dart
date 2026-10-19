@@ -13,6 +13,7 @@ import 'package:hollow/src/core/call_invite_decision.dart';
 import 'package:hollow/src/core/call_setup_trace.dart';
 import 'package:hollow/src/core/models/call_record.dart';
 import 'package:hollow/src/core/providers/call_records_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
@@ -357,6 +358,9 @@ class CallNotifier extends Notifier<CallState> {
   @override
   CallState build() {
     ref.listen(siblingCallProvider, (_, _) => _onSiblingCall());
+    // A block, here or on another of our devices, ends a call with that person
+    // at once, ringing or live.
+    ref.listen<Set<String>>(blockedUsersProvider, (_, _) => _endIfPeerBlocked());
     ref.listen<Duration>(voicePollIntervalProvider,
         (_, next) => _voiceService?.setPollInterval(next));
     return const CallState();
@@ -383,6 +387,17 @@ class CallNotifier extends Notifier<CallState> {
       _endCause = CallEndCause.ringTimeout;
     }
     unawaited(_cleanup());
+  }
+
+  bool _isBlocked(String peerId) =>
+      ref.read(peerBlockedProvider(peerId));
+
+  void _endIfPeerBlocked() {
+    final peerId = state.peerId;
+    if (state.status == CallStatus.idle || peerId == null) return;
+    if (!_isBlocked(peerId)) return;
+    _callLog('[HOLLOW-CALL] Ending call=${state.callId}: the peer was blocked');
+    unawaited(endCall().catchError((Object _) {}));
   }
 
   /// Says why a call cannot start here, when another of our devices is in one.
@@ -967,6 +982,10 @@ class CallNotifier extends Notifier<CallState> {
   /// Start an outgoing call to a peer.
   Future<void> startCall(String peerId, {bool withVideo = false}) async {
     if (state.status != CallStatus.idle || _blockedElsewhere()) return;
+    if (_isBlocked(peerId)) {
+      _callLog('[HOLLOW-CALL] Refused a call to a blocked peer');
+      return;
+    }
     // The relay socket stops backing off while a call is live, so a blip recovers
     // in about a second. Taken at the START: the invite and accept ride it too.
     RealtimeSessionFlag.acquire('dm-call');
@@ -1873,6 +1892,12 @@ class CallNotifier extends Notifier<CallState> {
       sframeKey = json['sframe_key'] as String? ?? '';
     } else {
       callId = payload;
+    }
+    // The node drops a blocked person's invite already; this holds when the
+    // two block lists briefly disagree.
+    if (_isBlocked(peerId)) {
+      _callLog('[HOLLOW-CALL] Dropped invite from a blocked peer');
+      return;
     }
 
     // Glare has to be settled BEFORE the busy guard: `ringing` is not `idle`, so

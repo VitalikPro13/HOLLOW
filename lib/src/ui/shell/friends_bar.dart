@@ -30,6 +30,7 @@ import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/components/voice_here_badge.dart';
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -326,8 +327,9 @@ class _FriendChip extends ConsumerWidget { // design-ignore: an avatar tab in th
           const SizedBox(width: HollowSpacing.sm),
           ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: _kChipNameWidth),
-            child: Text(
-              name,
+            child: PeerNameText(
+              name: name,
+              peerId: peerId,
               style: HollowTypography.label.copyWith(
                 color: selected
                     ? hollow.accentText
@@ -335,8 +337,6 @@ class _FriendChip extends ConsumerWidget { // design-ignore: an avatar tab in th
                         ? hollow.textPrimary
                         : hollow.textSecondary,
               ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
             ),
           ),
           if (inCallWithThem) ...[

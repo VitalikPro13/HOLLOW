@@ -1078,7 +1078,7 @@ Set of blocked MASTER peer_ids mirroring the Rust block list (SQLCipher `blocked
 - `load()` -- from `loadBlockedPeers()` FFI, called in hollow_shell `_bootstrap` (beside hiddenArchiveDms load), never in build().
 - `block()`/`unblock()` -- optimistic set update + `blockPeer`/`unblockPeer` FFI, revert + rethrow on error (callers toast).
 - ALWAYS compare `deviceLinkProvider.identityOf(peerId)` against the set, never a raw device id.
-- Report flow (relay-side counts, not part of this provider): `report_user` FFI from `report_user_dialog.dart` (4 categories: spam/harassment/illegal_content/impersonation).
+- Report flow (relay-side counts, not part of this provider): `report_user` FFI from `report_user_dialog.dart` (categories spam/harassment/illegal_content/impersonation; `blocked` is sent by `BlockedUsersNotifier.block` itself, never picked in the dialog).
 
 ## Saved Messages Provider (2026-07-07)
 

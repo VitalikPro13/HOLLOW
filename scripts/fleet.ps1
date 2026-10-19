@@ -1116,7 +1116,12 @@ $phraseCheckSteps = @(
 )
 
 $onboardStepsMobile = @(
-    @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 60000 },
+    # Welcome offers nothing until the Terms are agreed (Apple 1.2).
+    @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 60000 },
+    @{ op = 'shot'; name = 'welcome-terms'; soft = $true },
+    @{ op = 'tap'; target = 'text:Agree and continue'; frames = 40 },
+    @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 },
+    @{ op = 'shot'; name = 'welcome-agreed'; soft = $true },
     @{ op = 'tap'; target = 'text:Create an identity'; frames = 60 },
     @{ op = 'wait_for'; target = 'text:Your recovery phrase'; timeout_ms = 60000 }
 ) + $phraseCheckSteps + @(
@@ -1136,7 +1141,12 @@ $onboardStepsMobile = @(
 )
 
 $onboardSteps = @(
-    @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 60000 },
+    # Welcome offers nothing until the Terms are agreed (Apple 1.2).
+    @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 60000 },
+    @{ op = 'shot'; name = 'welcome-terms'; soft = $true },
+    @{ op = 'tap'; target = 'text:Agree and continue'; frames = 40 },
+    @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 },
+    @{ op = 'shot'; name = 'welcome-agreed'; soft = $true },
     @{ op = 'tap'; target = 'text:Create an identity'; frames = 60 },
     # The recovery-phrase dialog is the app confirming the identity exists.
     @{ op = 'wait_for'; target = 'text:Your recovery phrase'; timeout_ms = 60000 }

@@ -46,6 +46,9 @@ class _RecoveryApi implements RustLibApi {
   String crateApiUpdaterGetCurrentVersion() => '0.12.1';
 
   @override
+  int crateApiUpdaterGetCurrentBuild() => 0;
+
+  @override
   Future<void> crateApiNetworkLogFromDart({required String message}) async {}
 
   @override
@@ -247,6 +250,8 @@ void main() {
       ));
       showWelcomeDialog(host, relinkedTo: relinkedTo);
       await tester.pumpAndSettle();
+      await tester.tap(find.text('Agree and continue'));
+      await tester.pumpAndSettle();
     }
 
     testWidgets('desktop names the old data and leads with linking', (tester) async {
@@ -352,6 +357,8 @@ void main() {
       addTearDown(tester.view.reset);
       final context = await host(tester);
       showWelcomeDialog(context, relinkedFolder: '/media/stick/hollow_data-old-2026-10-10');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Agree and continue'));
       await tester.pumpAndSettle();
       expect(
         find.text('Your old data is in this folder. Link this device to bring your '

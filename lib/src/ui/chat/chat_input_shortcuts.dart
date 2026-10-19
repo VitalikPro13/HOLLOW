@@ -39,7 +39,7 @@ KeyEventResult handleChatInputKey(
       !HardwareKeyboard.instance.isAltPressed;
   final isShift = HardwareKeyboard.instance.isShiftPressed;
 
-  if (event.logicalKey == LogicalKeyboardKey.enter && !isCtrl) {
+  if (isEnterKey(event.logicalKey) && !isCtrl) {
     return _handleEnterKey(controller, onSend, isShift);
   }
 
@@ -50,6 +50,11 @@ KeyEventResult handleChatInputKey(
   return _handleFormattingKey(
       event, controller, formatBindings ?? kAppShortcutDefaults);
 }
+
+/// The main Enter or the numpad's. One the composer leaves unhandled reaches
+/// the text input client, which breaks the line in a multiline field.
+bool isEnterKey(LogicalKeyboardKey key) =>
+    key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter;
 
 /// A bare Up press in an empty composer, as in Discord and Slack. A draft,
 /// even a space, keeps Up for the caret; a held key opens the edit once.

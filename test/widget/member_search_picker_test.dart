@@ -10,14 +10,13 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_theme_data.dart';
-import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:hollow/src/ui/components/member_search_picker.dart';
 import 'package:hollow/src/ui/server_settings/pages/labels_page.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Member picker search contract:
-///  - empty query lists every member, each with the short peer-id suffix
-///    ("…" + last 6) so same-named members stay distinguishable,
+///  - empty query lists every member, each with the short peer-id label
+///    (first 4 + "…" + last 10) so same-named members stay distinguishable,
 ///  - the filter matches display name, nickname AND raw peer id
 ///    (case-insensitive substring — a pasted id works),
 ///  - no matches shows the 'No members match' state, never a blank card,
@@ -93,11 +92,6 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('shortPeerIdSuffix is ellipsis + last 6', (tester) async {
-    expect(shortPeerIdSuffix('peer_nova_1111111111111111'), '…111111');
-    expect(shortPeerIdSuffix('short'), 'short');
-  });
-
   testWidgets('empty query lists everyone with id suffixes', (tester) async {
     await pumpPicker(tester);
     expect(find.text('Nova'), findsNWidgets(2));
@@ -105,8 +99,8 @@ void main() {
     expect(find.text('Kestrel'), findsOneWidget);
     expect(find.text('Lyra'), findsOneWidget);
     // Same-name members are told apart by their id suffix.
-    expect(find.text('…111111'), findsOneWidget);
-    expect(find.text('…666666'), findsOneWidget);
+    expect(find.text('peer…1111111111'), findsOneWidget);
+    expect(find.text('peer…6666666666'), findsOneWidget);
   });
 
   testWidgets('search filters by name, case-insensitively', (tester) async {
@@ -124,8 +118,8 @@ void main() {
     await tester.enterText(find.byType(TextField), '666666');
     await tester.pump();
     expect(find.text('Nova'), findsOneWidget); // only the …666666 one
-    expect(find.text('…666666'), findsOneWidget);
-    expect(find.text('…111111'), findsNothing);
+    expect(find.text('peer…6666666666'), findsOneWidget);
+    expect(find.text('peer…1111111111'), findsNothing);
   });
 
   testWidgets('no matches shows the empty state', (tester) async {

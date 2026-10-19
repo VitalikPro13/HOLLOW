@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
@@ -39,9 +40,11 @@ import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/dialogs/confirm_remove_friend.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The Friends Manager's tabs.
@@ -117,10 +120,7 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
     // Pending requests stay raw, because the device to master mapping is not
     // usually known until after acceptance.
     final accepted = ref.watch(sortedFriendsProvider);
-    final incoming = friends.values
-        .where((f) => f.status == 'pending' && f.direction == 'incoming')
-        .toList()
-      ..sort((a, b) => b.requestedAt.compareTo(a.requestedAt));
+    final incoming = ref.watch(incomingFriendRequestsProvider);
     final outgoing = friends.values
         .where((f) => f.status == 'pending' && f.direction == 'outgoing')
         .toList()
@@ -543,7 +543,7 @@ class _FriendRowState extends ConsumerState<_FriendRow> {
         final name = displayNameForPeer(
             menuRef.watch(profileProvider.select((p) => p[master])), master);
         return [
-          if (online && !inCall)
+          if (online && !inCall && !menuRef.watch(peerBlockedProvider(master)))
             HollowMenuItem(
               icon: LucideIcons.phone,
               label: 'Voice call',
@@ -775,7 +775,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
 
       return HollowListRow(
         leading: HollowAvatar(peerId: displayId, size: 32),
-        title: chosen ?? displayId,
+        title: chosen ?? shortPeerLabel(displayId),
         subtitle: incoming ? receivedRequestLabel(at) : sentRequestLabel(at),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
@@ -1129,12 +1129,10 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
                 children: [
                   Text('Your user ID', style: title),
                   const SizedBox(height: HollowSpacing.xxs),
-                  Text(
+                  PeerIdText(
                     myId,
                     style: HollowTypography.mono
                         .copyWith(color: hollow.textSecondary),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                   ),
                 ],
               ),

@@ -135,6 +135,10 @@ mailbox still holds their own earlier runs: a `wait_for` passes on yesterday's r
   mailbox is empty. `-Onboard` alone already starts from an empty data dir and so already mints new
   keys; `-Fresh` throws the old fixture away first and makes the intent greppable. It is an error
   without `-Onboard`.
+* **Terms (0.12.2, Apple 1.2):** Welcome shows only "Agree and continue" until it is tapped; every
+  onboarding list and Welcome-driving script taps it first. A fixture stamped before 0.12.2 never
+  agreed, so the one-time "Our Terms of Use" dialog covers it after every restore: re-onboard such
+  fixtures once (`-Onboard -Fresh`).
 * **Both friend journeys default to fresh identities.** They call `Start-FreshFleet` in
   `fleet_lib.ps1` (stop, `-Onboard -Fresh`, `-Live`, then print each peer's new peer id), so they
   need no fleet up first and cost about a minute more. `-KeepIdentities` drives whatever fleet is

@@ -88,6 +88,16 @@ class DesktopNotificationService {
   /// Last local_notifier instance per source, so a follow-up can close it.
   final Map<String, LocalNotification> _activeNative = {};
 
+  /// The newest toast ids posted per payload, so one person's can be taken
+  /// back after a block.
+  final Map<String, Set<int>> _postedBySource = {};
+
+  void _notePosted(String payload, int id) {
+    final ids = _postedBySource[payload] ??= {};
+    ids.add(id);
+    if (ids.length > 50) ids.remove(ids.first);
+  }
+
   /// Tap on a toast opens this conversation. Payload matches the mobile push
   /// path: a bare peer id for a DM, `channel:<serverId>:<channelId>` otherwise.
   static void Function(String payload)? _openHandler;
@@ -415,6 +425,25 @@ class DesktopNotificationService {
     }
   }
 
+  /// Takes back the DM toasts posted for any of [sourceKeys], for a block.
+  Future<void> withdrawDm(Set<String> sourceKeys) async {
+    if (!_initialized) return;
+    try {
+      for (final key in sourceKeys) {
+        for (final id in _postedBySource.remove(key) ?? const <int>{}) {
+          if (Platform.isWindows) {
+            await _win.cancel(id);
+          } else if (Platform.isMacOS) {
+            await _mac.cancel(id);
+          }
+        }
+        _activeNative.remove('dm:$key')?.close();
+      }
+    } catch (e) {
+      notifLog('withdrawing DM toasts FAILED: $e');
+    }
+  }
+
   /// Takes every Hollow toast back out of the notification centre as the lock
   /// goes up: a preview posted a minute before must not outlive it.
   Future<void> withdrawAll() async {
@@ -430,6 +459,7 @@ class DesktopNotificationService {
         }
         _activeNative.clear();
       }
+      _postedBySource.clear();
     } catch (e) {
       notifLog('withdrawing toasts FAILED: $e');
     }
@@ -481,6 +511,7 @@ class DesktopNotificationService {
               : [DarwinNotificationAttachment(avatarPath, identifier: 'avatar')],
         ),
       );
+      _notePosted(payload, id);
       notifLog('macOS notification posted id=$id avatar=${avatarPath != null}');
     } catch (e) {
       debugPrint('[HOLLOW] macOS notification failed: $e');
@@ -555,6 +586,7 @@ class DesktopNotificationService {
       // A success line matters as much as the failure one: if this appears
       // with no toast on screen, the OS suppressed it (Focus assist, or
       // Hollow switched off in Windows notification settings).
+      _notePosted(payload, id);
       notifLog('Windows toast posted id=$id avatar=${avatarPath != null}');
     } catch (e) {
       debugPrint('[HOLLOW] Windows toast failed: $e');

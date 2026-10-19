@@ -15,6 +15,9 @@ import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -267,7 +270,14 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
 
     // Attachments render as file cards for guests too: metadata rides the
     // guest sync, and bytes come only through the gated public-file path.
-    final visible = messages.where((m) => m.hiddenAt == null).toList();
+    // A blocked author's posts leave the view the moment the block lands.
+    final blocked = ref.watch(blockedUsersProvider);
+    final links = ref.watch(deviceLinkProvider);
+    final visible = messages
+        .where((m) =>
+            m.hiddenAt == null &&
+            !blocked.contains(links.identityOf(m.senderId)))
+        .toList();
     final filtered = _searchQuery.isEmpty
         ? visible
         : visible
@@ -484,6 +494,12 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                       onDownload: msg.fileAttachment == null
                                           ? null
                                           : () => _downloadFor(msg),
+                                      onReport: reportMessageAction(context,
+                                          isMe: msg.isMe,
+                                          senderMaster: links
+                                              .identityOf(msg.senderId),
+                                          displayName:
+                                              _senderName(msg.senderId)),
                                       child: ChannelMessageBubble(
                                         message: msg,
                                         serverId: widget.serverId,

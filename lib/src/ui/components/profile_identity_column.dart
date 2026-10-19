@@ -44,6 +44,7 @@ import 'package:hollow/src/ui/dialogs/showcase_editor.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
 import 'package:hollow/src/ui/settings/stream_overlay/overlay_tick.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -153,7 +154,7 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
     final displayName = profile?.displayName ?? '';
     final shownName = displayName.isNotEmpty
         ? displayName
-        : (peerId.length > 8 ? '${peerId.substring(0, 8)}...' : peerId);
+        : shortPeerLabel(peerId);
     // Local nickname, then server nickname, then the profile's own name.
     final override = localNick ?? widget.nickname;
     final hasOverride = override != null && override.isNotEmpty;

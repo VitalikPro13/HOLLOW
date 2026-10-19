@@ -111,7 +111,7 @@ void main() {
         nameOf: realNameOf,
       );
       expect(s.caption,
-          'a1b2c3d4... is offline. Hollow will fetch it when they return.');
+          'a1b2…f6a7b8c9d0 is offline. Hollow will fetch it when they return.');
     });
 
     test('3. a holder that answered "I do not have it" is named', () {
@@ -134,7 +134,7 @@ void main() {
         ),
         nameOf: realNameOf,
       );
-      expect(s.caption, 'a1b2c3d4... no longer has this file');
+      expect(s.caption, 'a1b2…f6a7b8c9d0 no longer has this file');
     });
 
     test('4. retention removal is final, and says whose policy it was', () {
@@ -537,7 +537,7 @@ void main() {
       );
 
       expect(
-        find.text('a1b2c3d4... is offline. Hollow will fetch it when they '
+        find.text('a1b2…f6a7b8c9d0 is offline. Hollow will fetch it when they '
             'return.'),
         findsOneWidget,
       );
@@ -556,7 +556,7 @@ void main() {
         ),
       );
 
-      expect(find.text('a1b2c3d4... no longer has this file'), findsOneWidget);
+      expect(find.text('a1b2…f6a7b8c9d0 no longer has this file'), findsOneWidget);
       expect(find.bySemanticsLabel('Download report.pdf'), findsNothing);
       handle.dispose();
     });

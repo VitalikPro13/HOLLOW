@@ -11,6 +11,7 @@ import 'package:hollow/src/core/hidden_notification.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:hollow/src/core/services/relay_triggers.dart' show kPushNudge;
 import 'package:hollow/src/core/services/unified_push_service.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
@@ -205,6 +206,23 @@ Future<void> dismissPeerNotification(String sender) async {
     }
   } catch (_) {
     // getActiveNotifications is unsupported below API 23 — harmless to skip.
+  }
+}
+
+/// Takes back every banner a person's devices left on this phone, for a block:
+/// [ids] holds the master and each device id their banners may be keyed by.
+Future<void> withdrawPersonNotifications(Set<String> ids) async {
+  if (!Platform.isAndroid && !Platform.isIOS) return;
+  try {
+    final plugin = FlutterLocalNotificationsPlugin();
+    for (final id in ids) {
+      await dismissPeerNotification(id);
+      if (Platform.isIOS) await plugin.cancel(_iosCollapseId(id));
+      await clearNotificationLines(id);
+    }
+    if (Platform.isIOS) await removeIosThreadBanners(ids);
+  } catch (e) {
+    await _pushLog('withdrawing a blocked person\'s banners failed: $e');
   }
 }
 
@@ -469,7 +487,7 @@ Future<void> handlePushWake(Map<String, dynamic> data) async {
   // for the fetched content and post ONE already-populated notification, with
   // no generic flash and no visible swap. A content-free banner is only the
   // fallback when the fetch fails, times out or returns nothing.
-  String displayName = _truncatePeerId(sender);
+  String displayName = shortPeerLabel(sender);
   Uint8List? avatarBytes;
 
   // Per-PERSON notification key: the relay `sender` is a DEVICE id, so a
@@ -535,7 +553,7 @@ Future<bool> _dmPushMuted(String personKey) async {
 /// any failure.
 Future<(String, Uint8List?, String)> _resolveDmPushProfile(
     String sender) async {
-  String displayName = _truncatePeerId(sender);
+  String? chosenName;
   Uint8List? avatarBytes;
   String personKey = sender;
   try {
@@ -543,7 +561,7 @@ Future<(String, Uint8List?, String)> _resolveDmPushProfile(
     await _pushLog('getPushProfile: found=${profile != null}, '
         'hasAvatar=${profile?.avatarBytes != null}');
     if (profile != null && profile.displayName.isNotEmpty) {
-      displayName = profile.displayName;
+      chosenName = profile.displayName;
     }
     avatarBytes = profile?.avatarBytes;
     // Resolve AFTER getPushProfile (it warmed the resolver).
@@ -554,7 +572,7 @@ Future<(String, Uint8List?, String)> _resolveDmPushProfile(
   } catch (e) {
     await _pushLog('getPushProfile FAILED: $e');
   }
-  return (displayName, avatarBytes, personKey);
+  return (chosenName ?? shortPeerLabel(personKey), avatarBytes, personKey);
 }
 
 /// The live node's half of a push wake. A phone closes its relay socket a few
@@ -1015,7 +1033,7 @@ Future<String> _channelWakeNameOf(
     String peerId, Map<String, String> cache) async {
   final cached = cache[peerId];
   if (cached != null) return cached;
-  var name = _truncatePeerId(peerId);
+  var name = shortPeerLabel(peerId);
   try {
     final profile = await network_api.getPushProfile(peerId: peerId);
     if (profile != null && profile.displayName.isNotEmpty) {
@@ -1158,11 +1176,6 @@ String _channelLineKey(String server, String channel) => 'ch:$server:$channel';
 /// place, mirroring `_iosCollapseId` semantics on Android.
 int _channelNotifId(String server, String channel) =>
     _iosCollapseId('$server:$channel');
-
-String _truncatePeerId(String peerId) {
-  if (peerId.length > 12) return '${peerId.substring(0, 12)}...';
-  return peerId;
-}
 
 /// Deterministic 31-bit FNV-1a hash of a peer_id. MUST match the sidecar's
 /// `iosCollapseId` byte-for-byte: the sidecar sets it as the

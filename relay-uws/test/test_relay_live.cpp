@@ -1219,6 +1219,14 @@ static void test_guests() {
     check("claims no link code", !got(*g, typed("link_code_claimed")));
     check("and resolves none", !got(*g, typed("link_code_resolved")) && !got(*g, typed("link_code_error")));
     check("a member files a report", ask(*n, report, "report_ack").has_value());
+    json block_count = report;
+    block_count["category"] = "blocked";
+    check("and the count a block sends", ask(*n, block_count, "report_ack").has_value());
+    json unknown = report;
+    unknown["category"] = "muted";
+    n->send(unknown);
+    settle({n.get()});
+    check("an unknown category files nothing", !got(*n, typed("report_ack")));
     check("parks a destroy signal", ask(*n, deposit, "kill_deposited").has_value());
     check("reads a join lock", ask(*n, lock_get, "lock_chain").has_value());
     check("and offers one", ask(*n, lock_put, "lock_chain").has_value());

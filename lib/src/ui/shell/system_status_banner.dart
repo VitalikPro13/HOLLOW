@@ -36,8 +36,8 @@ import 'package:hollow/src/ui/components/hollow_text_link.dart';
   }
 }
 
-/// The feed is unsigned, so its link shows only when it is one the untrusted
-/// link helper would actually open.
+/// A signed feed's link is still someone else's string, so it shows only when it
+/// is one the untrusted link helper would actually open.
 bool _hasOpenableLink(SystemStatus status) => canOpenUntrustedUrl(status.link);
 
 void _openStatusLink(String url) {
@@ -160,7 +160,8 @@ class _StatusCountdownState extends State<StatusCountdown> {
 enum StatusBannerAnchor { top, bottom }
 
 /// The global, dismissible system-status strip. Renders ONLY for banner-worthy,
-/// non-dismissed notices, so an operational feed collapses it to nothing.
+/// non-dismissed notices, so an operational feed collapses it to nothing. With
+/// several live notices it shows the most severe one not yet dismissed.
 ///
 /// Starts collapsed, because the notice appears unprompted and should announce
 /// itself quietly; tapping expands to the full untruncated text, which on a
@@ -182,11 +183,10 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
 
   @override
   Widget build(BuildContext context) {
-    final st = ref.watch(statusProvider);
-    if (!st.showBanner) return const SizedBox.shrink();
+    final status = ref.watch(statusProvider.select((s) => s.bannerNotice));
+    if (status == null) return const SizedBox.shrink();
 
     final hollow = HollowTheme.of(context);
-    final status = st.status;
     final vis = statusVisual(status.level, hollow);
     final color = vis.color;
 
@@ -208,7 +208,8 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
             icon: LucideIcons.x,
             label: 'Dismiss status notice',
             size: _kControl,
-            onPressed: () => ref.read(statusProvider.notifier).dismissCurrent(),
+            onPressed: () =>
+                ref.read(statusProvider.notifier).dismiss(status.id),
           )
         : null;
 

@@ -51779,3 +51779,81 @@ async fn a_channel_backfill_event_reports_a_committed_row() {
     );
     drop(o);
 }
+
+// block-fix-calls
+// A block stops the person's calls: their invite never rings us, while the same
+// invite from the same device rang a moment before and rings again on unblock.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_blocked_friends_call_never_rings() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let _block_guard = BlocklistClearGuard;
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    // A = the blocker. B = a friend whose device is not its master, so the block
+    // (master-keyed) must collapse the ringing device to catch it.
+    const A_MASTER: u8 = 72;
+    const B_MASTER: u8 = 82;
+    const B_DEV: u8 = 83;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    super::resolver::seed_self(&b_master, &[b_dev.clone()]);
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    async fn ring(b: &TestNode, a_master: &str, call_id: &str) {
+        b.cmd_tx
+            .send(NodeCommand::CallSendSignal {
+                peer_id: a_master.to_string(),
+                signal_type: "invite".to_string(),
+                payload: serde_json::json!({ "call_id": call_id, "video": false, "sframe_key": "k" }).to_string(),
+            })
+            .await
+            .unwrap();
+    }
+    fn rang(ev: &NetworkEvent, call_id: &str) -> bool {
+        matches!(ev, NetworkEvent::CallSignal { signal_type, payload, .. }
+            if signal_type == "invite" && payload.contains(call_id))
+    }
+
+    ring(&b, &a_master, "before-block").await;
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(15), |ev| rang(ev, "before-block")).await,
+        "control: the friend's invite rings before the block"
+    );
+    b.cmd_tx
+        .send(NodeCommand::CallSendSignal {
+            peer_id: a_master.clone(),
+            signal_type: "end".to_string(),
+            payload: "before-block".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(1000).await;
+    drain_events(&mut a);
+
+    super::blocklist::block(&b_master);
+    ring(&b, &a_master, "after-block").await;
+    assert!(
+        !wait_event(&mut a, std::time::Duration::from_secs(6), |ev| rang(ev, "after-block")).await,
+        "a blocked friend's invite must never reach the call screen"
+    );
+
+    super::blocklist::unblock(&b_master);
+    ring(&b, &a_master, "after-unblock").await;
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(15), |ev| rang(ev, "after-unblock")).await,
+        "unblocked, the same device rings again"
+    );
+    drop((a, b));
+}

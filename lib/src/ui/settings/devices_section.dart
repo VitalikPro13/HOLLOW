@@ -18,8 +18,9 @@ import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/shell/roster_lock.dart' show rosterDateLabel;
 import 'package:hollow/src/ui/settings/device_management_shared.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/settings/sync_check_card.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Settings > Devices: the devices on this identity, linking another, and the
@@ -141,22 +142,26 @@ class _DeviceRow extends ConsumerWidget {
       titleTrailing:
           device.isThisDevice ? const HollowBadge('This device') : null,
       leading: _DeviceKindTile(device: device),
-      subtitleWidget: Text.rich(
-        TextSpan(children: [
+      subtitleWidget: Row(
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
+        children: [
           // A device titled by its id already shows it once.
-          if (deviceTitle(device) != shortenPeerId(device.peerId)) ...[
-            TextSpan(
-              text: shortenPeerId(device.peerId),
-              style: HollowTypography.monoSmall
-                  .copyWith(color: hollow.textSecondary),
+          if (deviceTitle(device) != shortPeerLabel(device.peerId)) ...[
+            Flexible(
+              child: PeerIdText(
+                device.peerId,
+                style: HollowTypography.monoSmall
+                    .copyWith(color: hollow.textSecondary),
+              ),
             ),
-            const TextSpan(text: ' · '),
+            const Text(' · '),
           ],
-          TextSpan(
-            text: device.online ? 'online' : 'offline',
+          Text(
+            device.online ? 'online' : 'offline',
             style: device.online ? TextStyle(color: hollow.success) : null,
           ),
-        ]),
+        ],
       ),
       trailing: device.isThisDevice
           ? HollowIconButton(
@@ -211,7 +216,7 @@ String _rosterDeviceTitle(WidgetRef ref, String id) =>
     deviceGivenName(id,
         labels: ref.watch(deviceLabelProvider),
         kinds: ref.watch(deviceKindProvider)) ??
-    shortenPeerId(id);
+    shortPeerLabel(id);
 
 /// A device restored from a backup that asks to join. Unless the phrase turned
 /// it off, it joins on its own once seven days pass with nobody refusing it.

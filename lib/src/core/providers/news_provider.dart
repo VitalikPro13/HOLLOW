@@ -2,7 +2,6 @@ import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
-import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 
 const kNewsUrl = 'https://anonlisten.com/hollow/releases/news.json';
 
@@ -59,10 +58,10 @@ class NewsNotifier extends Notifier<NewsState> {
   Future<bool> _doFetch() async {
     try {
       final bustCache = DateTime.now().millisecondsSinceEpoch;
-      // Plain fetch: news.json is display-only text and carries no signature
-      // sidecar (fetchVersionManifest would demand news.json.sig).
-      final json = await updater_api.fetchReleaseFeed(
-          url: '$kNewsUrl?t=$bustCache');
+      // Signed under the `news` feed name: an unsigned or forged copy throws
+      // and the posts already shown stay.
+      final json = await ref
+          .read(signedFeedFetchProvider)('$kNewsUrl?t=$bustCache', 'news');
       final list = jsonDecode(json) as List<dynamic>;
       final posts = list
           .map((e) => NewsPost.fromJson(e as Map<String, dynamic>))

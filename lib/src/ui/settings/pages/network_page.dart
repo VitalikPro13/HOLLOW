@@ -8,7 +8,6 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/network_section.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
 
 /// Settings > network. Hosted by the desktop Settings place and pushed as a phone
 /// sub-page under `SettingsDensity(touch: true)`; the host owns the scroll.
@@ -42,8 +41,8 @@ class _PeerIdSection extends ConsumerWidget {
       title: 'Your ID',
       children: [
         SettingsRow(
-          title: peerId.isEmpty ? 'Not ready yet' : shortenPeerId(peerId),
-          monoTitle: peerId.isNotEmpty,
+          title: peerId.isEmpty ? 'Not ready yet' : peerId,
+          peerIdTitle: peerId.isNotEmpty,
           subtitle: 'How the network knows you',
           trailing: HollowButton.ghost(
             compact: true,

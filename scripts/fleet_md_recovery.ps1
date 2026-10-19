@@ -270,7 +270,9 @@ function Get-LinkCode($peer) {
 function Invoke-Link($label) {
     Open-SettingsDevices p
     $code = Get-LinkCode p
-    Step q @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 90000 }
+    Step q @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 90000 }
+    Step q @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 }
+    Step q @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 }
     Step q @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
     Step q @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 180000 }
     Wait-ForConnected q
@@ -485,7 +487,7 @@ try {
     $keptNow = @(Get-ChildItem $runRoot -Directory -Filter 'q-old-*')
     if ($keptNow.Count -ne 1) { throw "expected one kept folder after Link again, found $($keptNow.Count)" }
     Step q @{ op = 'wait_for'; target = "contains:$($keptNow[0].FullName)"; timeout_ms = 5000 }
-    Step q @{ op = 'expect_text'; value = 'Create an identity' }
+    Step q @{ op = 'expect_text'; value = 'Agree and continue' }
     Step q @{ op = 'shot'; name = "rec-$runTag-q-welcome" }
     $rootLeft = @(Get-ChildItem $qData -Force | ForEach-Object { $_.Name })
     Say "q root after the relink: $($rootLeft -join ', ')" 'DarkGray'

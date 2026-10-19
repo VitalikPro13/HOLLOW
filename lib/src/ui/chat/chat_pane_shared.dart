@@ -9,6 +9,7 @@ import 'package:hollow/src/core/message_tokens.dart'
 import 'package:hollow/src/core/models/call_record.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -31,6 +32,7 @@ import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_skeleton.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
@@ -263,16 +265,24 @@ class ChatSearchResultsView<T> extends StatelessWidget {
   final VoidCallback onRetry;
   final double maxHeight;
 
+  /// Hits never listed, such as a blocked person's messages.
+  final bool Function(T hit)? hidden;
+
   const ChatSearchResultsView({
     super.key,
     required this.results,
     required this.itemBuilder,
     required this.onRetry,
     this.maxHeight = 200,
+    this.hidden,
   });
 
   @override
   Widget build(BuildContext context) {
+    final hidden = this.hidden;
+    final hits = hidden == null
+        ? results.hits
+        : results.hits.where((h) => !hidden(h)).toList();
     if (results.failed) {
       return Padding(
         padding: const EdgeInsets.only(top: HollowSpacing.sm),
@@ -287,7 +297,7 @@ class ChatSearchResultsView<T> extends StatelessWidget {
         ),
       );
     }
-    if (results.hits.isEmpty) {
+    if (hits.isEmpty) {
       if (results.query.isEmpty) return const SizedBox.shrink();
       return Padding(
         padding: const EdgeInsets.only(top: HollowSpacing.sm),
@@ -301,8 +311,8 @@ class ChatSearchResultsView<T> extends StatelessWidget {
       constraints: BoxConstraints(maxHeight: maxHeight),
       child: ListView.builder(
         shrinkWrap: true,
-        itemCount: results.hits.length,
-        itemBuilder: (_, index) => itemBuilder(results.hits[index]),
+        itemCount: hits.length,
+        itemBuilder: (_, index) => itemBuilder(hits[index]),
       ),
     );
   }
@@ -1323,6 +1333,9 @@ const double kChatHeaderHeight = 48;
 class ChatHeaderBar extends StatelessWidget {
   final Widget leading;
   final String title;
+
+  /// The person a DM's [title] names, so an id fallback keeps its ending.
+  final String? titlePeerId;
   final String? subtitle;
   final List<Widget> badges;
   final Widget? status;
@@ -1332,6 +1345,7 @@ class ChatHeaderBar extends StatelessWidget {
     super.key,
     required this.leading,
     required this.title,
+    this.titlePeerId,
     this.subtitle,
     this.badges = const [],
     this.status,
@@ -1364,13 +1378,21 @@ class ChatHeaderBar extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: HollowTypography.subheading
-                            .copyWith(color: hollow.textPrimary),
-                      ),
+                      if (titlePeerId case final peerId?)
+                        PeerNameText(
+                          name: title,
+                          peerId: peerId,
+                          style: HollowTypography.subheading
+                              .copyWith(color: hollow.textPrimary),
+                        )
+                      else
+                        Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: HollowTypography.subheading
+                              .copyWith(color: hollow.textPrimary),
+                        ),
                       if (subtitle != null && subtitle.isNotEmpty)
                         Text(
                           subtitle,
@@ -1843,7 +1865,7 @@ class _UnreadJumpFadeState extends State<UnreadJumpFade> {
 }
 
 /// Collapses typing peer ids to MASTER identities, excluding every id that is
-/// "us".
+/// "us" and anyone we blocked.
 ///
 /// Rust collapses a typist to master only while the sibling's device id is warm
 /// in the resolver, so a raw DEVICE id can arrive and a bare
@@ -1860,9 +1882,11 @@ Set<String> typingMastersFor(WidgetRef ref, Set<String> typingPeers) {
       links.sameIdentity(pid, myMaster) ||
       myDeviceIds.contains(pid) ||
       (myRunningDevice != null && pid == myRunningDevice);
+  final blocked = ref.watch(blockedUsersProvider);
   return typingPeers
       .where((pid) => !isMe(pid))
       .map((pid) => links.identityOf(pid))
+      .where((master) => !blocked.contains(master))
       .toSet();
 }
 

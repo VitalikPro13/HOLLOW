@@ -534,7 +534,9 @@ try {
     Say "a is showing link code $code" 'Green'
 
     Start-EmptyPeer b
-    Step b @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 90000 }
+    Step b @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 90000 }
+    Step b @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 }
+    Step b @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 }
     Step b @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
     Step b @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 180000 }
     Step b @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 20000 }

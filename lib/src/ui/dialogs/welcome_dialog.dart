@@ -22,10 +22,12 @@ import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/dialogs/terms_agreement_dialog.dart';
 import 'package:hollow/src/ui/dialogs/welcome_frame.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-typedef WelcomeResult = ({String action, String relayDomain});
+/// [agreedTerms] is always true: Welcome lets nobody on without agreeing.
+typedef WelcomeResult = ({String action, String relayDomain, bool agreedTerms});
 
 /// [relinkedTo]: this device was set to link again; the old data's profile
 /// name on a desktop, empty on a phone. [relinkedFolder]: the same, where no
@@ -64,6 +66,10 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   final _passController = TextEditingController();
   bool _showAdvanced = false;
   String? _relayError;
+
+  // Apple 1.2: the Terms are agreed to before an identity is made, restored
+  // or linked, and the choices that do any of it appear only after.
+  bool _agreed = false;
 
   _Backup? _backup;
   bool _obscure = true;
@@ -145,8 +151,9 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   }
 
   void _finish(String action) {
-    if (!_relayIsUsable()) return;
-    Navigator.of(context).pop((action: action, relayDomain: _relayDomain!));
+    if (!_agreed || !_relayIsUsable()) return;
+    Navigator.of(context)
+        .pop((action: action, relayDomain: _relayDomain!, agreedTerms: true));
   }
 
   @override
@@ -157,7 +164,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   }
 
   Future<void> _pickBackup() async {
-    if (_restoring) return;
+    if (!_agreed || _restoring) return;
     // Mobile does not recognise the custom `.hollow` extension, so a
     // `FileType.custom` filter hides the backup file.
     final isMobile = Platform.isAndroid || Platform.isIOS;
@@ -188,7 +195,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     final backup = _backup;
     // Never trimmed: a passphrase may begin or end with a space.
     final passphrase = _passController.text;
-    if (_restoring || backup == null || passphrase.isEmpty) return;
+    if (!_agreed || _restoring || backup == null || passphrase.isEmpty) return;
     if (!_relayIsUsable()) return;
     setState(() {
       _restoring = true;
@@ -202,7 +209,11 @@ class _WelcomeContentState extends State<_WelcomeContent> {
       if (!mounted) return;
       Navigator.of(
         context,
-      ).pop((action: 'restored_backup', relayDomain: _relayDomain!));
+      ).pop((
+        action: 'restored_backup',
+        relayDomain: _relayDomain!,
+        agreedTerms: true,
+      ));
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -313,7 +324,32 @@ class _WelcomeContentState extends State<_WelcomeContent> {
       onTap: () => _finish('link_device'),
     );
 
-    final rest = Column(
+    final footer = [
+      const SizedBox(height: HollowSpacing.md),
+      const HollowDivider(),
+      const SizedBox(height: HollowSpacing.sm),
+      _footer(hollow, phone),
+      if (_showAdvanced) _relaySection(hollow),
+      if (_showProfiles && _otherProfiles.isNotEmpty) _profilesSection(hollow),
+    ];
+
+    final terms = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        TermsSummary(touch: phone, align: align),
+        SizedBox(height: phone ? HollowSpacing.xl : HollowSpacing.xxl),
+        HollowButton.filled(
+          expand: true,
+          touch: phone,
+          onPressed: () => setState(() => _agreed = true),
+          child: const Text('Agree and continue'),
+        ),
+        ...footer,
+      ],
+    );
+
+    final rest = !_agreed ? terms : Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -369,13 +405,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           ),
           onTap: _pickBackup,
         ),
-        const SizedBox(height: HollowSpacing.md),
-        const HollowDivider(),
-        const SizedBox(height: HollowSpacing.sm),
-        _footer(hollow, phone),
-        if (_showAdvanced) _relaySection(hollow),
-        if (_showProfiles && _otherProfiles.isNotEmpty)
-          _profilesSection(hollow),
+        ...footer,
       ],
     );
 

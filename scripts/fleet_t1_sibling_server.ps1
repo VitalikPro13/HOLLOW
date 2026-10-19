@@ -394,7 +394,9 @@ try {
     $code = Get-LinkCode g
     Say "g is showing link code $code" 'Green'
     Start-EmptyPeer h
-    Step h @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 90000 }
+    Step h @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 90000 }
+    Step h @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 }
+    Step h @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 }
     Step h @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
     Step h @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 180000 }
     Wait-ForConnected h

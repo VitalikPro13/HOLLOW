@@ -140,3 +140,14 @@ release pipeline is the `release` skill.
   identity does and is erased by the wipe. HOL-SEC-156.
 - The updater accepts a manifest version only as three numeric parts (`is_release_version`),
   and Windows script paths go through `bat_quoted_path`. HOL-SEC-147.
+- Quick patches (0.12.2): the build rides `"build": N` on the version entry and `APP_BUILD`
+  beside `APP_VERSION` (never pubspec's `+N`); `version` / `latest` stay three-part forever
+  (0.12.1 refuses the whole manifest otherwise). Paths use `release_tag` (`0.12.2-b1`), people
+  see `0.12.2+1`. New apps pick the newest (version, build) entry with a URL for THEIR
+  platform and install kind (`VersionManifest.updateFor`), never `latest`; the full-platform
+  entry stays FIRST (old apps and the website read the first; `hollow-manifest sign` refuses
+  otherwise). A malformed `build`/`critical` skips its entry only, never the manifest.
+  `status.json` and `news.json` are SIGNED (`fetch_signed_feed`, domain-separated from the
+  manifest, size-capped while streaming); an unsigned feed shows nothing in 0.12.2+. Sign
+  status ONLY via `scripts/sign_feeds.*` (stamp never below the live copy; over 1 h ahead is
+  refused). Wiki `security_write_gates` §45.

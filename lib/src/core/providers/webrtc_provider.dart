@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/services/webrtc_service.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 
 /// Per-peer WebRTC connection status.
 enum WebRtcPeerStatus { connecting, connected, failed }
@@ -66,7 +67,7 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
     };
 
     _service!.onShareConnectionFailed = (peerId) {
-      final short = peerId.length > 12 ? '${peerId.substring(0, 12)}...' : peerId;
+      final short = shortPeerLabel(peerId);
       debugPrint('[HOLLOW-SHARE] STUN-only connection failed to $peerId — peer unreachable without TURN');
       final overlay = hollowNavigatorKey.currentState?.overlay;
       final ctx = overlay?.context;

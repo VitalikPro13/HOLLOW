@@ -37,8 +37,12 @@ class MobileIncomingCallOverlay extends ConsumerStatefulWidget {
 class _MobileIncomingCallOverlayState
     extends ConsumerState<MobileIncomingCallOverlay>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _controller =
-      AnimationController(vsync: this);
+  // Rebuilds once the exit ends, else the faded card keeps its taps and its
+  // spoken label.
+  late final AnimationController _controller = AnimationController(vsync: this)
+    ..addStatusListener((s) {
+      if (s == AnimationStatus.dismissed && mounted) setState(() {});
+    });
   late final Animation<double> _fade = CurvedAnimation(
       parent: _controller,
       curve: HollowCurves.enter,

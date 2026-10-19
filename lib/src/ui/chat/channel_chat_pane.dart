@@ -21,6 +21,7 @@ import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/core/providers/composer_focus_provider.dart';
 import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
@@ -1645,6 +1646,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
           ),
           ChatSearchResultsView<storage_api.StoredChannelMessage>(
             results: _search,
+            hidden: (hit) => ref.read(peerBlockedProvider(hit.senderId)),
             itemBuilder: (hit) => _buildSearchResultTile(hollow, hit),
             onRetry: () => _onSearch(_searchController.text),
           ),
@@ -1898,6 +1900,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
       onCopy: _copyFor(context, msg),
       onCopyImage: isAlbum ? null : _copyImageFor(context, msg),
       onInfo: _infoFor(context, msg),
+      onReport: _reportFor(context, msg, links),
       child: _buildBubble(msg, index, showHeader, messages, replyIndexById,
           localMentionName, localMentionNick,
           _tilingAt(messages, index, showHeader, links)),
@@ -2310,6 +2313,23 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
 
   // MLS authenticates conference lines per message, so the Ed25519 proof dialog
   // would only ever read "UNSIGNED".
+  /// Reports the author's MASTER identity; the message stays on this device.
+  VoidCallback? _reportFor(
+      BuildContext context, ChannelChatMessage msg, DeviceLinkState links) {
+    final master = links.identityOf(msg.senderId);
+    return reportMessageAction(
+      context,
+      isMe: msg.isMe,
+      senderMaster: master,
+      displayName: serverDisplayNameFor(
+        ref.read(profileProvider),
+        master,
+        nickname:
+            ref.read(serverNicknamesProvider(widget.serverId))[master] ?? '',
+      ),
+    );
+  }
+
   VoidCallback? _infoFor(BuildContext context, ChannelChatMessage msg) {
     if (_isConference) return null;
     return () {
@@ -2547,7 +2567,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
       _moveMentionSelection(-1);
       return KeyEventResult.handled;
     }
-    if (event.logicalKey == LogicalKeyboardKey.enter ||
+    if (isEnterKey(event.logicalKey) ||
         event.logicalKey == LogicalKeyboardKey.tab) {
       _acceptMention(_mentionCandidates[_mentionSelectedIndex]);
       return KeyEventResult.handled;

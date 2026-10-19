@@ -45,7 +45,6 @@ import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart' show shortenPeerId;
 import 'package:hollow/src/ui/shell/friends_bar.dart';
 import 'package:hollow/src/ui/shell/home_dashboard.dart'
     show
@@ -55,6 +54,7 @@ import 'package:hollow/src/ui/shell/home_dashboard.dart'
         homeShowsSetup,
         kHomeRowInset;
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 // ---------------------------------------------------------------------------
@@ -272,7 +272,7 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
     final labels = ref.watch(deviceLabelProvider);
     final kinds = ref.watch(deviceKindProvider);
     String name(String id) =>
-        deviceGivenName(id, labels: labels, kinds: kinds) ?? shortenPeerId(id);
+        deviceGivenName(id, labels: labels, kinds: kinds) ?? shortPeerLabel(id);
     return [
       for (final a in alerts)
         if (ownDeviceAddedDetail(a) case final added?)
@@ -304,13 +304,9 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
   }
 
   List<_AttentionItem> _requestItems() {
-    final friends = ref.watch(friendsProvider);
     final profiles = ref.watch(profileProvider);
     ref.watch(localNicknameProvider);
-    final incoming = friends.values
-        .where((f) => f.status == 'pending' && f.direction == 'incoming')
-        .toList()
-      ..sort((a, b) => b.requestedAt.compareTo(a.requestedAt));
+    final incoming = ref.watch(incomingFriendRequestsProvider);
     return [
       for (final f in incoming)
         _AttentionItem(
@@ -370,16 +366,24 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
 
   List<_AttentionItem> _updateItems() {
     if (!widget.actions.installsUpdates) return const [];
-    if (!ref.watch(hasUpdateProvider)) return const [];
+    final next = ref.watch(updateCandidateProvider);
+    if (next == null) return const [];
     final update = ref.watch(updaterProvider);
-    final latest = update.manifest?.latest;
-    if (latest == null) return const [];
+    final critical = ref.watch(criticalUpdateProvider);
+    final hollow = HollowTheme.of(context);
     return [
       _AttentionItem(
-        id: 'update:$latest',
-        leading: _GlyphTile(LucideIcons.download, size: _leadingSize),
-        title: 'Hollow $latest is ready to install',
-        body: 'You have ${update.currentVersion}.',
+        id: 'update:${next.display}',
+        leading: critical
+            ? _GlyphTile(LucideIcons.triangleAlert,
+                size: _leadingSize, color: hollow.warning)
+            : _GlyphTile(LucideIcons.download, size: _leadingSize),
+        title: critical
+            ? 'Hollow ${next.display} fixes a serious problem'
+            : 'Hollow ${next.display} is ready to install',
+        body: critical
+            ? 'Install it soon. You have ${update.currentDisplay}.'
+            : 'You have ${update.currentDisplay}.',
         primaryLabel: 'View update',
         onPrimary: () async => widget.actions.openUpdate(context),
         failure: "Couldn't open the update",
@@ -432,7 +436,10 @@ const double _kTouchLeadingSize = 40;
 class _GlyphTile extends StatelessWidget {
   final IconData icon;
   final double size;
-  const _GlyphTile(this.icon, {required this.size});
+
+  /// Null = the quiet `textSecondary`.
+  final Color? color;
+  const _GlyphTile(this.icon, {required this.size, this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -440,7 +447,7 @@ class _GlyphTile extends StatelessWidget {
     return SizedBox(
       width: size,
       height: size,
-      child: Icon(icon, size: 20, color: hollow.textSecondary),
+      child: Icon(icon, size: 20, color: color ?? hollow.textSecondary),
     );
   }
 }
@@ -629,7 +636,11 @@ class _HomeSetupChecklistState extends ConsumerState<HomeSetupChecklist> {
       _SetupStep(
         title: 'Add a friend',
         body: 'Send a request to someone you know, or accept theirs.',
-        done: ref.watch(sortedFriendsProvider).isNotEmpty,
+        // A friend the person blocked still counts: the step was done.
+        done: ref
+            .watch(friendsProvider)
+            .values
+            .any((f) => f.status == 'accepted'),
         action: 'Add friend',
         onAction: () => actions.addFriend(context),
       ),

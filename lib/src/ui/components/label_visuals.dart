@@ -21,11 +21,6 @@ Color parseLabelColor(String hex) {
   return kLabelPresetColors.last;
 }
 
-/// Short peer-id suffix ("…T7iS4F") that tells apart members sharing a display
-/// name. An id too short to truncate passes through unchanged.
-String shortPeerIdSuffix(String peerId) =>
-    peerId.length > 10 ? '…${peerId.substring(peerId.length - 6)}' : peerId;
-
 /// Cosmetic-vs-Access selector for the label create and edit dialog, and the
 /// role picker: a [HollowChip] with its icon.
 class LabelTypeChip extends StatelessWidget {

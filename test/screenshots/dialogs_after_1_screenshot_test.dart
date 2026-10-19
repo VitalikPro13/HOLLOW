@@ -38,6 +38,7 @@ import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
+import 'package:hollow/src/ui/dialogs/terms_agreement_dialog.dart';
 import 'package:hollow/src/ui/dialogs/shard_bundle_dialog.dart';
 import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
@@ -105,6 +106,14 @@ class _Api implements RustLibApi {
 
   @override
   Future<void> crateApiNetworkLogFromDart({required String message}) async {}
+
+  @override
+  Future<void> crateApiNetworkReportUser(
+          {required String target, required String category}) async {}
+
+  @override
+  Future<void> crateApiStorageSaveSetting(
+          {required String key, required String value}) async {}
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -386,6 +395,21 @@ void main() {
   }, then: (t) async {
     await t.tap(find.text('Spam'));
   });
+  shoot('report_message', (t) async {
+    unawaited(showReportUserDialog(host,
+        masterId: 'm1', displayName: 'Juno', aboutMessage: true));
+  }, then: (t) async {
+    await t.tap(find.text('Harassment'));
+  });
+  shoot('report_offer_block', (t) async {
+    unawaited(showReportUserDialog(host,
+        masterId: 'm1', displayName: 'Juno', aboutMessage: true));
+  }, then: (t) async {
+    await t.tap(find.text('Spam'));
+    await t.pump();
+    await t.tap(find.text('Report'));
+  });
+  shoot('terms_agreement', (t) => showTermsAgreementDialog(host));
   shoot('new_message', (t) => showNewMessageDialog(host));
   shoot('twitch_code', (t) => showTwitchDeviceCodeDialog(host));
   shoot(

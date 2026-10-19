@@ -10,6 +10,7 @@ import '../components/hollow_pressable.dart';
 import 'emoji_data.dart';
 import 'emote_image.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
+import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 
 /// Composer support for custom emotes and assets.
 ///
@@ -326,7 +327,7 @@ class EmoteAutocomplete {
       _entry?.markNeedsBuild();
       return KeyEventResult.handled;
     }
-    if (event.logicalKey == LogicalKeyboardKey.enter ||
+    if (isEnterKey(event.logicalKey) ||
         event.logicalKey == LogicalKeyboardKey.tab) {
       _accept(_candidates[_selected]);
       return KeyEventResult.handled;

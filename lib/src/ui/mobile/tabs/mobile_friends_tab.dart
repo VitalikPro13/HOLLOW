@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
@@ -31,6 +32,7 @@ import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileFriendsTab extends ConsumerStatefulWidget {
@@ -70,17 +72,14 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     // stranded under a DEVICE id does not appear twice. Pending requests stay
     // raw, their mapping being unknown until acceptance.
     final accepted = ref.watch(sortedFriendsProvider);
-    final incoming = <FriendInfo>[];
+    final incoming = ref.watch(incomingFriendRequestsProvider);
     final outgoing = <FriendInfo>[];
 
     for (final f in friends.values) {
-      if (f.status == 'pending' && f.direction == 'incoming') {
-        incoming.add(f);
-      } else if (f.status == 'pending' && f.direction == 'outgoing') {
+      if (f.status == 'pending' && f.direction == 'outgoing') {
         outgoing.add(f);
       }
     }
-    incoming.sort((a, b) => b.requestedAt.compareTo(a.requestedAt));
     outgoing.sort((a, b) => b.requestedAt.compareTo(a.requestedAt));
 
     // Resolved device to master first, so a favourite saved under a device id
@@ -400,7 +399,8 @@ class _FriendRow extends ConsumerWidget {
     final name = localNick ?? displayNameFor(profiles, peerId);
     // As on desktop: a call is offered only when it can start.
     final canCall = ref.read(onlineIdentitiesProvider).contains(peerId) &&
-        ref.read(callProvider).status == CallStatus.idle;
+        ref.read(callProvider).status == CallStatus.idle &&
+        !ref.read(peerBlockedProvider(peerId));
 
     Widget row(IconData icon, String label, VoidCallback onTap) =>
         HollowListRow(
@@ -537,7 +537,7 @@ class _PendingRowState extends ConsumerState<_PendingRow> {
     final info = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(chosen ?? displayId,
+        Text(chosen ?? shortPeerLabel(displayId),
             style: (chosen != null
                     ? HollowTypography.bodyTouch
                     : HollowTypography.mono)

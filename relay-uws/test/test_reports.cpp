@@ -93,6 +93,31 @@ int main() {
         check("the file carries the version", j.value("version", 0) == ReportsState::FILE_VERSION);
     }
 
+    printf("categories\n");
+    {
+        for (const char* c : {"spam", "harassment", "illegal_content", "impersonation", "blocked"})
+            check(std::string("the relay counts ") + c, ReportsState::is_category(c));
+        for (const char* c : {"", "Blocked", "blocked ", "other", "spam,blocked"})
+            check(std::string("the relay refuses '") + c + "'", !ReportsState::is_category(c));
+        check("a category with a NUL inside is refused",
+              !ReportsState::is_category(std::string("blocked\0x", 9)));
+
+        ReportsState r;
+        randombytes_buf(r.secret, 32);
+        check("a block counts", r.add(A, B, "blocked"));
+        check("blocking the same person again does not", !r.add(A, B, "blocked"));
+        check("a block is its own count beside a report",
+              r.add(A, B, "spam") && r.counts[B]["blocked"] == 1 && r.counts[B]["spam"] == 1);
+        r.file_path = dir + "/blocked.json";
+        r.save_if_dirty();
+        const std::string file = slurp(r.file_path);
+        check("a block names no blocker on disk", file.find(A) == std::string::npos);
+        // Only the per-target counts are readable: nothing is keyed by the blocker.
+        json j = json::parse(file);
+        bool only_targets = j["counts"].size() == 1 && j["counts"].contains(B);
+        check("the counts are keyed by the blocked person only", only_targets);
+    }
+
     printf("restart\n");
     {
         ReportsState r;

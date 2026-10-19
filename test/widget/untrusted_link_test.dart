@@ -158,7 +158,7 @@ void main() {
       );
       await tester.pumpWidget(app(const HomeStatusCard(), overrides: [
         statusProvider.overrideWith(() =>
-            _FixedStatus(StatusState(status: status, hasFetched: true))),
+            _FixedStatus(StatusState(notices: [status], hasFetched: true))),
       ]));
       await tester.tap(find.text('Relay maintenance'));
       await tester.pump();
@@ -189,13 +189,15 @@ void main() {
     Future<void> pumpBanner(WidgetTester tester, String link) async {
       await tester.pumpWidget(app(const SystemStatusBanner(), overrides: [
         statusProvider.overrideWith(() => _FixedStatus(StatusState(
-            status: SystemStatus(
-              id: 'x',
-              level: StatusLevel.warning,
-              title: 'Relay maintenance',
-              message: 'Details inside',
-              link: link,
-            ),
+            notices: [
+              SystemStatus(
+                id: 'x',
+                level: StatusLevel.warning,
+                title: 'Relay maintenance',
+                message: 'Details inside',
+                link: link,
+              ),
+            ],
             hasFetched: true))),
       ]));
       await tester.tap(find.byIcon(LucideIcons.chevronDown));

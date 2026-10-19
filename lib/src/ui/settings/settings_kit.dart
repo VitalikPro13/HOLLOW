@@ -11,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The building blocks of every Settings page, desktop and phone alike: a page
@@ -249,6 +250,9 @@ class SettingsRow extends StatelessWidget {
   /// The title in the console voice, for a thing the protocol names (a relay).
   final bool monoTitle;
 
+  /// The title is a peer id: mono, on one line, its ending always shown.
+  final bool peerIdTitle;
+
   /// The title's colour when it names a person in their name colour.
   final Color? titleColor;
 
@@ -267,6 +271,7 @@ class SettingsRow extends StatelessWidget {
     this.enabled = true,
     this.titleTrailing,
     this.monoTitle = false,
+    this.peerIdTitle = false,
     this.titleColor,
     this.trailingTop = false,
   });
@@ -275,7 +280,7 @@ class SettingsRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final touch = SettingsDensity.touchOf(context);
-    final titleStyle = (monoTitle
+    final titleStyle = (monoTitle || peerIdTitle
             ? HollowTypography.mono
             : touch
                 ? HollowTypography.bodyTouch
@@ -296,7 +301,9 @@ class SettingsRow extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (titleTrailing == null)
+        if (peerIdTitle)
+          PeerIdText(title, style: titleStyle)
+        else if (titleTrailing == null)
           Text(title, style: titleStyle)
         else
           Wrap(

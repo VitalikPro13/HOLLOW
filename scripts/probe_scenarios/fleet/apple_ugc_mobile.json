@@ -1,0 +1,334 @@
+{
+  "_": [
+    "Apple 1.2 proof on the phone: Report on a DM from the long-press sheet, Block in the same flow,",
+    "the DM swaps to the notice and leaves the Chats list at once; no Report on our own message.",
+    "run: pwsh scripts/fleet.ps1 -Scenario apple_ugc_mobile -Peers a=r,b=s"
+  ],
+  "peers": [
+    "a",
+    "b"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "PEER_A"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Friends",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Paste an ID, or type a nickname",
+      "value": "${PEER_A}"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:${PEER_A}",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Send request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Friends, 1 friend request",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Friends",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Accept friend request",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Accept friend request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "the accepted friend must reach the UI on BOTH sides, not just the friends table"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:probe-b",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:probe-a",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:probe-a"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "field",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "field",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "dm from b ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Send message",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:dm from b ${RUN}",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Chats",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:dm from b ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "field",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "field",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "field",
+      "value": "dm from a ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Send message",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:dm from a ${RUN}",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:dm from a ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "one row per message in the open chat; the Chats list preview may add a second match, so the count is reported, not asserted"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "Apple 1.2 on the phone: long-press b's DM"
+    },
+    {
+      "peer": "a",
+      "op": "long_press",
+      "target": "text:dm from b ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:Report message",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "ugc-m-01-sheet"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Report message",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "dialog > text:Report message",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Harassment",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "ugc-m-02-report-dialog"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Report",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "dialog > text:Report sent",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "ugc-m-03-offer-block"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Block",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "contains:You blocked",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "ugc-m-04-dm-blocked"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Back",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Chats",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "expect_no_text",
+      "value": "probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "ugc-m-05-chats-after-block"
+    },
+    {
+      "peer": "b",
+      "op": "long_press",
+      "target": "text:dm from b ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:Copy text",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "b",
+      "op": "expect_no_text",
+      "value": "Report message"
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "ugc-m-06-own-sheet"
+    },
+    {
+      "peer": "all",
+      "op": "dump",
+      "name": "ugc-done"
+    }
+  ],
+  "cleanup": []
+}

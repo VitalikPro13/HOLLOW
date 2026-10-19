@@ -9,24 +9,21 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 
 /// Blocked-users pieces shared by desktop Settings > Security and the mobile
 /// Blocked users tab. The list is master-keyed and purely local: Rust drops
 /// their DMs, requests and calls at ingest.
 
-/// One blocked-user row. Avatar size and id formatting differ per surface, so
-/// they are passed in.
+/// One blocked-user row. Avatar size differs per surface, so it is passed in.
 class BlockedUserRow extends ConsumerStatefulWidget {
   final String id;
   final double avatarSize;
-  final String shortId;
 
   const BlockedUserRow({
     super.key,
     required this.id,
     required this.avatarSize,
-    required this.shortId,
   });
 
   @override
@@ -64,8 +61,8 @@ class _BlockedUserRowState extends ConsumerState<BlockedUserRow> {
     return SettingsRow(
       leading: HollowAvatar(peerId: widget.id, size: widget.avatarSize),
       title: name,
-      subtitleWidget: Text(
-        widget.shortId,
+      subtitleWidget: PeerIdText(
+        widget.id,
         style: HollowTypography.monoSmall.copyWith(color: hollow.textSecondary),
       ),
       trailing: HollowButton.outline(
@@ -100,7 +97,6 @@ class BlockedUsersExpandRow extends ConsumerWidget {
             key: ValueKey(id),
             id: id,
             avatarSize: 32,
-            shortId: shortenPeerId(id),
           ),
       ],
     );

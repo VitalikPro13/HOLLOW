@@ -34,8 +34,8 @@ class AboutTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Rust's APP_VERSION is the one source, shared with mobile About.
-    final appVersion = ref.watch(updaterProvider).currentVersion;
+    // Rust's APP_VERSION + APP_BUILD are the one source, shared with mobile About.
+    final appVersion = ref.watch(updaterProvider).currentDisplay;
     final secondary =
         HollowTypography.bodySmall.copyWith(color: hollow.textSecondary);
 
@@ -143,7 +143,7 @@ class AboutTab extends ConsumerWidget {
                   HollowButton.ghost(
                     compact: true,
                     semanticLabel: 'Read the privacy policy',
-                    onPressed: () => _showLegalDocument(
+                    onPressed: () => showLegalDocument(
                       context,
                       title: 'Privacy Policy',
                       assetPath: 'legal/PRIVACY_POLICY.md',
@@ -153,7 +153,7 @@ class AboutTab extends ConsumerWidget {
                   HollowButton.ghost(
                     compact: true,
                     semanticLabel: 'Read the terms of use',
-                    onPressed: () => _showLegalDocument(
+                    onPressed: () => showLegalDocument(
                       context,
                       title: 'Terms of Use',
                       assetPath: 'legal/TERMS_OF_USE.md',
@@ -295,17 +295,20 @@ const _socials = <(IconData, String, String)>[
   (BrandIcons.kofi, 'Ko-fi', 'https://ko-fi.com/AnonListen'),
 ];
 
-void _showLegalDocument(
+/// Opens a bundled legal document: a sheet on a touch surface, else a dialog.
+/// [touch] overrides the Settings density, for callers outside Settings.
+void showLegalDocument(
   BuildContext context, {
   required String title,
   required String assetPath,
+  bool? touch,
 }) async {
   final hollow = HollowTheme.of(context);
   final body = await loadLegalMarkdownBody(assetPath);
 
   if (!context.mounted) return;
 
-  if (SettingsDensity.touchOf(context)) {
+  if (touch ?? SettingsDensity.touchOf(context)) {
     _showLegalSheet(context, hollow, title, body);
     return;
   }

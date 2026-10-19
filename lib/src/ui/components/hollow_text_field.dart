@@ -1,9 +1,66 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+
+/// The caret every Hollow input draws: as tall as the glyphs (not the line
+/// box), with the last glyph's own side bearing as a gap before it.
+abstract final class HollowCaret {
+  static const double width = 2;
+  static const Radius radius = Radius.circular(width / 2);
+
+  /// The painted caret height for text in [style]: ascender to descender.
+  static double height(TextStyle style, TextScaler scaler) =>
+      scaler.scale(style.fontSize ?? HollowTypography.body.fontSize!) * 1.2;
+
+  /// What to pass as `cursorHeight` so the painted caret is [height] tall:
+  /// the render object draws an Apple caret 2 px taller than asked.
+  static double fieldHeight(TextStyle style, TextScaler scaler) =>
+      height(style, scaler) - (_apple ? 2 : 0);
+
+  /// The blink: a fade on iOS, as the system does, a plain blink elsewhere.
+  static bool get opacityAnimates =>
+      defaultTargetPlatform == TargetPlatform.iOS;
+
+  static bool get _apple =>
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.macOS;
+}
+
+/// Puts a Material [TextField] on the Hollow caret's horizontal position.
+/// On Apple platforms the field shifts its caret 2 physical px left, into the
+/// last glyph, keyed off `Theme.platform` with no parameter to undo it. So the
+/// field alone sees the nearest non-Apple platform that keeps the same IME
+/// length rule and selection handling (iOS as fuchsia, macOS as linux), and
+/// whatever it hosts gets the real theme back through `restore`. Its menu
+/// comes from the field's own selection controls, which ignore the platform.
+class HollowCaretScope extends StatelessWidget {
+  const HollowCaretScope({super.key, required this.builder});
+
+  /// Builds the field; `restore` wraps what it hosts (prefix, suffix).
+  final Widget Function(Widget Function(Widget) restore) builder;
+
+  static TargetPlatform? _standIn(TargetPlatform platform) =>
+      switch (platform) {
+        TargetPlatform.iOS => TargetPlatform.fuchsia,
+        TargetPlatform.macOS => TargetPlatform.linux,
+        _ => null,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final real = Theme.of(context);
+    Widget restore(Widget child) => Theme(data: real, child: child);
+    final field = builder(restore);
+    final standIn = _standIn(real.platform);
+    if (standIn == null) return field;
+    return Theme(data: real.copyWith(platform: standIn), child: field);
+  }
+}
+
 /// Custom Hollow text field: flat, with no Material floating label.
 class HollowTextField extends StatefulWidget {
   final TextEditingController? controller;
@@ -34,6 +91,9 @@ class HollowTextField extends StatefulWidget {
   /// marks it.
   final bool quietFocus;
 
+  final TextInputAction? textInputAction;
+  final TapRegionCallback? onTapOutside;
+
   const HollowTextField({
     super.key,
     this.controller,
@@ -56,6 +116,8 @@ class HollowTextField extends StatefulWidget {
     this.inputFormatters,
     this.trailing,
     this.quietFocus = false,
+    this.textInputAction,
+    this.onTapOutside,
   });
 
   @override
@@ -137,7 +199,11 @@ class _HollowTextFieldState extends State<HollowTextField>
         ? hollow.error
         : (widget.quietFocus ? hollow.border : hollow.accent);
 
-    Widget field = TextField(
+    final style = widget.style ??
+        HollowTypography.body.copyWith(color: hollow.textPrimary);
+    final scaler = MediaQuery.textScalerOf(context);
+
+    Widget field = HollowCaretScope(builder: (restore) => TextField(
       controller: widget.controller,
       focusNode: _focusNode,
       autofocus: widget.autofocus,
@@ -149,12 +215,14 @@ class _HollowTextFieldState extends State<HollowTextField>
       inputFormatters: widget.inputFormatters,
       onSubmitted: widget.onSubmitted,
       onChanged: widget.onChanged,
+      textInputAction: widget.textInputAction,
+      onTapOutside: widget.onTapOutside,
       cursorColor: hollow.accent,
-      cursorWidth: 2,
-      style: widget.style ??
-          HollowTypography.body.copyWith(
-            color: hollow.textPrimary,
-          ),
+      cursorWidth: HollowCaret.width,
+      cursorHeight: HollowCaret.fieldHeight(style, scaler),
+      cursorRadius: HollowCaret.radius,
+      cursorOpacityAnimates: HollowCaret.opacityAnimates,
+      style: style,
       buildCounter: (context,
               {required currentLength,
               required isFocused,
@@ -167,18 +235,18 @@ class _HollowTextFieldState extends State<HollowTextField>
           color: hollow.textSecondary,
         ),
         prefixIcon: widget.prefixIcon != null
-            ? IconTheme(
+            ? restore(IconTheme(
                 data: IconThemeData(
                   color: hollow.textSecondary,
                   size: 18,
                 ),
                 child: widget.prefixIcon!,
-              )
+              ))
             : null,
         prefixIconConstraints: widget.prefixIcon != null
             ? const BoxConstraints(minWidth: 40, minHeight: 0)
             : null,
-        suffixIcon: widget.trailing,
+        suffixIcon: widget.trailing == null ? null : restore(widget.trailing!),
         suffixIconConstraints: widget.trailing != null
             ? const BoxConstraints(minWidth: 0, minHeight: 0)
             : null,
@@ -202,7 +270,7 @@ class _HollowTextFieldState extends State<HollowTextField>
         ),
         isDense: widget.isDense,
       ),
-    );
+    ));
 
     if (_shakeAnimation != null) {
       field = AnimatedBuilder(

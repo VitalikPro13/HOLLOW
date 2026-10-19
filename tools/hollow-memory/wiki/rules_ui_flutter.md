@@ -45,6 +45,10 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   selection-overlay crash); a raw-OverlayEntry teardown needs a `removed` guard.
   `feedback_textfield_overlay_selectioncontrols`.
 - Per-item opacity: `AnimatedOpacity` (GPU-composited), never the `Opacity` widget.
+- A card that returns `SizedBox.shrink()` once `!controller.isAnimating` must rebuild when its
+  exit ends (a `dismissed` status listener): nothing else rebuilds it, so the faded card keeps
+  its taps and its screen-reader label (both incoming-call cards did, 0.12.2).
+  `mobile_call_surfaces_test` "the card leaves once the call stops ringing".
 
 ## Shell, window, scale, theme
 
@@ -78,6 +82,12 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 
 ## Lists, chat, selection
 
+- A peer id on screen ALWAYS keeps its ending (every id starts "12D3KooW", the ending is
+  what people compare): `shortPeerLabel` ("12D3…" + last 10) for name fallbacks and
+  compact rows, `PeerIdText` (fits the width, start capped at 4, the rest to the ending)
+  for a full id, `PeerNameText` for a name slot whose fallback is an id; never widen a
+  slot to show more, put the room into the ending (Vitalik 10-19). Copy copies the whole
+  id. `lib/src/core/peer_id_label.dart`, `test/peer_id_label_test.dart`.
 - List rows with per-item loaded state need `ValueKey(item id)` + a `didUpdateWidget`
   reload; else Flutter re-parents State across different conversations.
   `feedback_listview_state_reuse_keys`.
@@ -130,10 +140,22 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   `feedback_lazy_avatar_pattern`, `feedback_reload_unchanged_bytes_identity`.
 - Event streaming: Rust->Dart `StreamSink`: `watch_network_events()` feeds
   `EventStreamNotifier`.
+- A block takes the person off every surface at once (Apple 1.2): a surface that shows a
+  person's words, reactions, typing, pins, search hits, requests or a way to call them asks
+  `peerBlockedProvider(id)` (device ids collapse inside); the DM header keeps back, name and
+  profile only, and the desktop profile panel drops its bell. A sibling's block lands through
+  `BlockedUsersNotifier.load`, so react to the provider, never to the `block()` call.
+  `test/widget/block_reach_test.dart`; real-app journeys `fleet/block_reach_desktop.json`
+  (macOS a=t,b=u) and `fleet/block_reach_mobile.json` (a=ios:t,b=u), fresh identities each run.
 - Temp nicknames live in relay RAM; the node re-claims a held one on every reconnect and before the relay's 10 minutes run out, so the UI keeps it across `RelayDisconnected`.
 
 ## Input and shortcuts
 
+- Every Hollow input draws `HollowCaret` (as tall as the glyphs, a gap after the last
+  one) through `HollowCaretScope`: on macOS AND iOS the field alone sees Linux/Fuchsia,
+  because Material shifts an Apple caret 2 px into the last glyph with no parameter to
+  undo it (Vitalik judged the iOS fix better too, 10-19). Raw `TextField`s are banned
+  for visible inputs; `test/widget/hollow_caret_test.dart`.
 - AltGr = Ctrl+Alt on Windows: a hand-rolled `isControlPressed` needs
   `&& !isAltPressed` (else AZERTY @/€ are swallowed); `SingleActivator` is immune.
   `feedback_altgr_ctrl_alt_shortcuts`.

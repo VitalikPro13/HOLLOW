@@ -19,6 +19,7 @@ import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/message_row.dart';
+import 'package:hollow/src/ui/dialogs/incoming_call_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_video_view.dart';
 import 'package:hollow/src/ui/mobile/mobile_incoming_call.dart';
@@ -213,6 +214,40 @@ void main() {
       expect(find.byType(MobileCallScreen), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
+
+    // A faded card still answered taps and read "Voice call from ..." to a
+    // screen reader long after the call ended, a blocked caller's too.
+    for (final desktop in [false, true]) {
+      testWidgets(
+          '${desktop ? 'desktop' : 'phone'}: the card leaves once the call '
+          'stops ringing', (tester) async {
+        final calls = _InCall(const CallState(
+          status: CallStatus.ringing,
+          peerId: kFriendPeerId1,
+          callId: 'c1',
+          direction: CallDirection.incoming,
+        ));
+        await _pump(
+          tester,
+          const SizedBox(),
+          extra: [callProvider.overrideWith(() => calls)],
+          builder: (context, child) => Stack(children: [
+            child!,
+            if (desktop)
+              const IncomingCallOverlay()
+            else
+              MobileIncomingCallOverlay(navigatorKey: _nav),
+          ]),
+        );
+        expect(_semantic('Decline'), findsOneWidget);
+        calls.state = const CallState();
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+        expect(_semantic('Decline'), findsNothing);
+        expect(find.textContaining('call'), findsNothing);
+        await tester.pumpWidget(const SizedBox());
+      });
+    }
   });
 
   group('control row', () {

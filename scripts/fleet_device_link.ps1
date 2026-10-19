@@ -702,7 +702,9 @@ function Get-LinkCode($peer) {
 # which is how E1 gets a peer that cannot reach a relay without the fleet
 # growing a switch of its own.
 function Open-EnterCode($peer, $relayDomain) {
-    Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 90000 }
+    Step $peer @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 90000 }
+    Step $peer @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 }
+    Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 }
     if ($relayDomain) {
         Step $peer @{ op = 'tap'; target = 'semantics:Change the relay'; index = 0 }
         Step $peer @{ op = 'wait_for'; target = 'hint:relay.anonlisten.com'; timeout_ms = 10000 }

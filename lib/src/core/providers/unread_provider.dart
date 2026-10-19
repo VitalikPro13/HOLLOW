@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -21,7 +23,23 @@ class UnreadNotifier extends Notifier<UnreadState> {
   final Map<String, Timer> _markerPush = {};
 
   @override
-  UnreadState build() => const UnreadState();
+  UnreadState build() {
+    // A blocked person's conversation leaves the screen, and its badge with
+    // it, on every device of ours the block reaches.
+    ref.listen<Set<String>>(blockedUsersProvider,
+        (prev, next) => _clearNewlyBlocked(prev ?? const {}, next));
+    return const UnreadState();
+  }
+
+  void _clearNewlyBlocked(Set<String> prev, Set<String> next) {
+    final links = ref.read(deviceLinkProvider);
+    for (final peerId in state.dmUnreadCounts.keys.toList()) {
+      final master = links.identityOf(peerId);
+      if (next.contains(master) && !prev.contains(master)) {
+        unawaited(markDmSeenLatest(peerId).catchError((Object _) => false));
+      }
+    }
+  }
 
   void _pushReadMarker(String key, String messageId) {
     _markerPush.remove(key)?.cancel();

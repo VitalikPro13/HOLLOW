@@ -235,15 +235,21 @@ pub struct DownloadProgress {
 
 ### `get_current_version() -> String`
 
-Sync function (`#[frb(sync)]`). Returns `APP_VERSION`.
+Sync function (`#[frb(sync)]`). Returns `APP_VERSION` (always three numeric parts).
+
+### `get_current_build() -> u32`
+
+Sync. Returns `APP_BUILD`, the quick-patch number on top of `APP_VERSION` (0 = the release, 1 = the first same-version patch, shown as `0.12.2+1`). Unrelated to pubspec's `+N` (Android versionCode / iOS build). Dart reads both through `runningReleaseProvider` (`updater_provider.dart`).
 
 ### `fetch_version_manifest(manifest_url: String) -> Result<String, String>`
 
 Fetches `manifest.json` AND its `manifest.json.sig` sidecar (same URL plus `.sig`, same cache-buster, 10-second timeout, `Cache-Control: no-cache`), then `verify_strict`s the base64 Ed25519 signature over the manifest's EXACT bytes against `MANIFEST_SIGNING_PUBKEYS` (hex list baked into the binary; more than one entry only during a key rotation). Returns the manifest text only when a listed key verifies it; otherwise `Err` and Dart shows "check failed". The download host can serve bytes, it cannot mint a signature. Dart then treats only a strictly NEWER `latest` as an update (`version_compare.dart::isNewerVersion`), so a replayed old signed manifest is not a downgrade lever. Signing side: `rust/hollow_manifest` + `scripts/sign_manifest.ps1` (see memory `project_update_integrity`). Both `legal/manifest.json` and `legal/manifest.json.sig` are committed and uploaded to the release folder.
 
-### `fetch_release_feed(url: String) -> Result<String, String>`
+### `fetch_signed_feed(url: String, feed: String) -> Result<String, String>`
 
-Plain GET (same client settings, NO signature) for the display-only feeds in the release folder: `news.json` (`news_provider.dart`) and `status.json` (`status_provider.dart`). Nothing fetched through here is installed or executed. The update manifest must never use it.
+Fetches `status.json` or `news.json` AND its `.sig` sidecar (same URL plus `.sig`, same cache-buster) and returns the text only when the base64 Ed25519 signature verifies under a `MANIFEST_SIGNING_PUBKEYS` key over `"hollow-feed-sig-v1\0" + feed + "\0" + bytes` (`feed_message`). The prefix is the domain separation: the manifest is signed BARE, so a feed signature never passes as the manifest's, nor one feed's as the other's. `feed` must be `status` or `news` (refused before any fetch). Dart (`signedFeedFetchProvider`) treats every error as "nothing to show". Replaced the unsigned `fetch_release_feed` in 0.12.2. Signing side: `hollow-manifest feed-sign` / `feed-verify`, `scripts/sign_feeds.sh` / `.ps1`.
+
+**Quick patches and platform subsets (0.12.2):** a version entry may carry `"build": N` (integer 0 to 9999, absent = 0) and `"critical": true`. `version` and `latest` stay three numeric parts forever (apps up to 0.12.1 refuse the WHOLE manifest otherwise); Rust refuses a manifest whose `build` is not a bounded integer or whose `critical` is not a boolean. New apps ignore `latest` and pick the newest (version, build) entry that has a URL for THEIR platform and install kind and is newer than the running build (`VersionManifest.updateFor`); an entry without their URL is invisible, phones see none. Old apps and the website read the FIRST entry whose version is `latest`, so the full-platform entry stays first.
 
 **Per-platform manifest URLs (no legacy single `url` field as of v0.5.0):** each version entry has `url_windows`, `url_macos` (zip, used by the updater), `url_macos_dmg` (DMG, used by the website's new-user download button), `url_linux` (Flatpak bundle, checksum `sha256_linux`), `url_linux_targz` (portable tarball, checksum `sha256_linux_targz`, both filled by `hollow-manifest fill-hashes`), `url_android` (APK). Dart `VersionInfo.platformUrl` / `platformSha256` (in `updater_provider.dart`) select by `Platform` and, on Linux, by `linuxInstallKind`. A Linux release therefore needs BOTH artifacts uploaded before the manifest is signed.
 
@@ -251,7 +257,10 @@ Plain GET (same client settings, NO signature) for the display-only feeds in the
 
 Spawns an async download task on the tokio runtime (non-blocking). `expected_sha256` is the `sha256_<platform>` field of the SIGNED manifest entry (Dart `VersionInfo.platformSha256`; Dart refuses to start when it is empty). Refuses non-`https://` URLs. Streams the update ZIP from `url` to `dest_path`, hashing every chunk, and pushes `DownloadProgress` events after each write. When the stream ends the digest must equal `expected_sha256`, else the file is deleted. ANY failure (mismatch, cancelled sink, transport, non-2xx) deletes the partial file and sends a final `DownloadProgress { error: Some(reason) }`; Dart surfaces it as the error state and never reaches `apply_update`. Creates parent directories for `dest_path` if needed.
 
-### `apply_update(zip_path: String, app_dir: String, version: String) -> Result<String, String>`
+### `apply_update(zip_path: String, app_dir: String, version: String, build: u32) -> Result<String, String>`
+
+`version` must be `is_release_version` and `build` at most `MAX_BUILD` before anything is staged. Paths use the release TAG (`0.12.2`, `0.12.2-b1` for a patch: `release_tag`), so a patch never reuses the staging folder or download name of the release it patches; scripts and logs show `0.12.2+1` (`release_display`).
+
 
 Extracts the update and generates a platform-specific helper script that performs the swap after the app exits, then relaunches. Returns the path to the generated script; Dart's `installAndRestart` launches it detached and then `exit(0)`s. Branches by `#[cfg(target_os)]`:
 

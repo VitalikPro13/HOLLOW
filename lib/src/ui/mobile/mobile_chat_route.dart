@@ -33,6 +33,9 @@ import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
+import 'package:hollow/src/ui/chat/blocked_conversation_notice.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -85,6 +88,7 @@ import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/call/call_actions.dart' show startDmCallFlow;
 import 'package:hollow/src/ui/chat/pinned_messages.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:hollow/src/ui/mobile/mobile_member_panel.dart';
 import 'package:hollow/src/ui/mobile/mobile_notification_banner.dart';
 import 'package:hollow/src/ui/mobile/mobile_minimised_call.dart';
@@ -393,8 +397,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       return _dmAlbums.display as List<T>;
     }
     if (visible is List<ChannelChatMessage>) {
-      _channelAlbums = collapseChannelAlbums(visible as List<ChannelChatMessage>,
-          identityOf: ref.read(deviceLinkProvider).identityOf);
+      // After the freeze cap, which counts the raw list: a blocked author's
+      // posts stay stored and come back on unblock.
+      final blocked = ref.read(blockedUsersProvider);
+      final identityOf = ref.read(deviceLinkProvider).identityOf;
+      final shown = (visible as List<ChannelChatMessage>)
+          .where((m) => !blocked.contains(identityOf(m.senderId)))
+          .toList();
+      _channelAlbums = collapseChannelAlbums(shown, identityOf: identityOf);
       return _channelAlbums.display as List<T>;
     }
     return visible;
@@ -1489,12 +1499,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
                 IdentityDestroyedBanner(peerId: widget.peerId!),
               // The call you are in, from any chat: tap it to open the call.
               const MobileMinimisedCall(floating: false),
-              if (widget.isDm)
+              if (widget.isDm && !_watchDmPeerBlocked())
                 MobileCallElsewhereBar(
                     peerMaster: ref
                         .watch(deviceLinkProvider)
                         .identityOf(widget.peerId!)),
-              if (_searchOpen) _buildSearchBar(hollow),
+              // Searching would bring a blocked person's messages back.
+              if (_searchOpen && !_watchDmPeerBlocked()) _buildSearchBar(hollow),
               if (!widget.isDm) _buildSyncIndicator(hollow),
               if (chatClosed)
                 const Expanded(
@@ -1812,6 +1823,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
 
   /// The input bar, or the explanatory banner where posting is blocked.
   Widget _buildComposerOrBanner(HollowTheme hollow) {
+    if (_watchDmPeerBlocked()) return const SizedBox.shrink();
     if (!widget.isDm) {
       final canPost = ref.watch(canPostInChannelProvider((
         serverId: widget.serverId!,
@@ -2089,7 +2101,20 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
   String get _callPeer =>
       ref.read(deviceLinkProvider).identityOf(widget.peerId!);
 
+  /// A DM with someone we blocked shows the notice in place of the chat.
+  bool _watchDmPeerBlocked() =>
+      widget.isDm &&
+      ref.watch(blockedUsersProvider).contains(
+          ref.watch(deviceLinkProvider).identityOf(widget.peerId!));
+
   Widget _buildDmMessages() {
+    if (_watchDmPeerBlocked()) {
+      return BlockedConversationNotice(
+        masterId: ref.read(deviceLinkProvider).identityOf(widget.peerId!),
+        displayName: displayNameFor(ref.read(profileProvider), widget.peerId!),
+        touch: true,
+      );
+    }
     // Per-conversation select: the map is replaced wholesale on every insert, so
     // watching it rebuilds this list for activity in any conversation.
     final allMessages =
@@ -2378,6 +2403,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
     // watching it rebuilds this list for activity in any channel.
     final allMessages =
         ref.watch(channelChatProvider.select((m) => m[_channelKey])) ?? [];
+    // Re-runs the blocked-author filter the moment a block lands.
+    ref.watch(blockedUsersProvider);
     final messages = _displayMessages(allMessages);
 
     ref.listen(channelChatProvider, _onChannelMessagesChanged);
@@ -2543,6 +2570,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       onInfo: msg.messageId != null
           ? () => _showDmProof(msg, senderName, localPeerId)
           : null,
+      onReport: reportMessageAction(context,
+          isMe: msg.isMe,
+          senderMaster: ref.read(deviceLinkProvider).identityOf(widget.peerId!),
+          displayName: senderName),
     );
   }
 
@@ -2591,6 +2622,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
           ? () => _showChannelProof(msg, senderName)
           : null,
       onPin: _pinActionFor(msg.messageId),
+      onReport: reportMessageAction(context,
+          isMe: msg.isMe,
+          senderMaster: ref.read(deviceLinkProvider).identityOf(msg.senderId),
+          displayName: senderName),
       isPinned: msg.messageId != null &&
           (ref.read(pinnedProvider)[_channelKey] ?? [])
               .contains(msg.messageId),
@@ -2856,6 +2891,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       final nicknames = ref.watch(serverNicknamesProvider(widget.serverId!));
       results = ChatSearchResultsView<storage_api.StoredChannelMessage>(
         results: _search,
+        hidden: (hit) => ref.read(peerBlockedProvider(hit.senderId)),
         onRetry: () => _onSearch(_searchController.text),
         maxHeight: resultsHeight,
         itemBuilder: (msg) {
@@ -2932,7 +2968,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TextField(
+          HollowTextField(
             controller: _editController,
             focusNode: _editFocusNode,
             maxLines: 5,
@@ -2940,22 +2976,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
             inputFormatters: [MessageByteLimitFormatter()],
             textInputAction: TextInputAction.newline,
             style: HollowTypography.bodyTouch.copyWith(color: hollow.textPrimary),
-            decoration: InputDecoration(
-              filled: true,
-              fillColor: hollow.elevated,
-              contentPadding: const EdgeInsets.all(HollowSpacing.md),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                borderSide: BorderSide(color: hollow.border),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                borderSide: BorderSide(color: hollow.accent),
-              ),
-              hintText: 'Edit message',
-              hintStyle: HollowTypography.bodyTouch
-                  .copyWith(color: hollow.textTertiary),
-            ),
+            hintText: 'Edit message',
           ),
           const SizedBox(height: HollowSpacing.sm),
           Row(
@@ -3021,6 +3042,9 @@ class _MobileChatHeader extends ConsumerWidget {
     final isSaved = isDm &&
         savedId != null &&
         ref.watch(deviceLinkProvider).identityOf(peerId!) == savedId;
+    // Someone we blocked keeps only back, their name and the way to their
+    // profile, where Unblock lives.
+    final blocked = isDm && !isSaved && ref.watch(peerBlockedProvider(peerId!));
 
     return Container(
       height: 56,
@@ -3040,17 +3064,17 @@ class _MobileChatHeader extends ConsumerWidget {
           const SizedBox(width: HollowSpacing.xs),
           Expanded(
             child: _titleBlock(context, ref, hollow,
-                isDm: isDm, isSaved: isSaved),
+                isDm: isDm, isSaved: isSaved, blocked: blocked),
           ),
           ..._trailingActions(context, ref, hollow,
-              isDm: isDm, isSaved: isSaved),
+              isDm: isDm, isSaved: isSaved, blocked: blocked),
         ],
       ),
     );
   }
   /// The avatar and names, tappable through to the person's profile in a DM.
   Widget _titleBlock(BuildContext context, WidgetRef ref, HollowTheme hollow,
-      {required bool isDm, required bool isSaved}) {
+      {required bool isDm, required bool isSaved, required bool blocked}) {
     final profiles = ref.watch(profileProvider);
     final String title;
     final String? subtitle;
@@ -3059,7 +3083,8 @@ class _MobileChatHeader extends ConsumerWidget {
       subtitle = null;
     } else if (isDm) {
       title = displayNameFor(profiles, peerId!);
-      subtitle = profiles[peerId!]?.status;
+      // A blocked person's status is their words too.
+      subtitle = blocked ? null : profiles[peerId!]?.status;
     } else {
       title = channelName ?? 'Channel';
       subtitle = serverId == null
@@ -3098,13 +3123,21 @@ class _MobileChatHeader extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: HollowTypography.subheading
-                        .copyWith(color: hollow.textPrimary),
-                  ),
+                  if (isDm && !isSaved)
+                    PeerNameText(
+                      name: title,
+                      peerId: peerId!,
+                      style: HollowTypography.subheading
+                          .copyWith(color: hollow.textPrimary),
+                    )
+                  else
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HollowTypography.subheading
+                          .copyWith(color: hollow.textPrimary),
+                    ),
                   if (subtitle != null && subtitle.isNotEmpty)
                     Text(
                       subtitle,
@@ -3129,7 +3162,7 @@ class _MobileChatHeader extends ConsumerWidget {
   /// and search.
   List<Widget> _trailingActions(
       BuildContext context, WidgetRef ref, HollowTheme hollow,
-      {required bool isDm, required bool isSaved}) {
+      {required bool isDm, required bool isSaved, required bool blocked}) {
     if (isDm) {
       final offline = ownLinkOfflineStatus(ref);
       return [
@@ -3140,9 +3173,10 @@ class _MobileChatHeader extends ConsumerWidget {
             child: offline,
           ),
         // Saved messages hides the call buttons: you cannot call yourself.
-        if (!isSaved) _DmCallButtons(peerId: peerId!),
-        if (onSearchToggle != null) _searchButton(),
-        _DmMuteButton(peerId: peerId!),
+        // Someone we blocked is not rung, searched or heard from.
+        if (!isSaved && !blocked) _DmCallButtons(peerId: peerId!),
+        if (onSearchToggle != null && !blocked) _searchButton(),
+        if (!blocked) _DmMuteButton(peerId: peerId!),
       ];
     }
     final pinnedIds = serverId != null && channelId != null

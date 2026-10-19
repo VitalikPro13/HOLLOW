@@ -10,6 +10,7 @@ import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 
 /// Where the recovery phrase is typed (design ID-1). Nothing here keeps the
 /// phrase: it goes to Rust, which turns it into keys and drops it.
@@ -201,7 +202,7 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
     final labels = ref.watch(deviceLabelProvider);
     final kinds = ref.watch(deviceKindProvider);
     String name(String id) =>
-        deviceGivenName(id, labels: labels, kinds: kinds) ?? shortenPeerId(id);
+        deviceGivenName(id, labels: labels, kinds: kinds) ?? shortPeerLabel(id);
     final filled = _phrase.text.trim().isNotEmpty;
     return HollowDialog(
       title: widget.title,

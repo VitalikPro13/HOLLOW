@@ -4,8 +4,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/composer_insert_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -35,6 +37,7 @@ void main() {
     String? selectedServer,
     String? selectedChannel,
     ProviderContainer? Function(ProviderContainer)? capture,
+    List<Override> extra = const [],
   }) async {
     tester.view.physicalSize = const Size(900, 700);
     tester.view.devicePixelRatio = 1.0;
@@ -45,6 +48,7 @@ void main() {
 
     final container = ProviderContainer(overrides: [
       identityProvider.overrideWith(() => _FixedIdentity()),
+      ...extra,
       if (serverId != null) ...[
         myRoleProvider(serverId).overrideWith((ref) async => myRole),
         myPermissionsProvider(serverId).overrideWith((ref) async => myPerms),
@@ -210,6 +214,24 @@ void main() {
     expect(labels, isNot(contains('Manage member')));
   });
 
+  testWidgets('no call is offered to someone we blocked', (tester) async {
+    late ProviderContainer c;
+    await pumpMenuHost(tester,
+        extra: [onlineIdentitiesProvider.overrideWith(_ThemOnline.new)],
+        capture: (container) => c = container);
+    await rightClickTarget(tester);
+    expect(menuLabels(tester), contains('Start a call'));
+    await tester.tapAt(const Offset(5, 5));
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 30));
+    }
+
+    c.read(blockedUsersProvider.notifier).state = {them};
+    await rightClickTarget(tester);
+    expect(menuLabels(tester), isNot(contains('Start a call')));
+    expect(menuLabels(tester), contains('Unblock'));
+  });
+
   testWidgets('the DM tile surface adds the conversation rows', (tester) async {
     await pumpMenuHost(tester, surface: UserMenuSurface.dmTile);
     await rightClickTarget(tester);
@@ -281,4 +303,9 @@ void main() {
 class _FixedIdentity extends IdentityNotifier {
   @override
   IdentityState build() => const IdentityState(peerId: 'master_me');
+}
+
+class _ThemOnline extends OnlineIdentitiesNotifier {
+  @override
+  Set<String> build() => {'master_them'};
 }

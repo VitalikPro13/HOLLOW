@@ -21,6 +21,7 @@ import 'package:hollow/src/ui/call/call_ringtone.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart' show dmCallPeerName;
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The incoming call (5.4): one card under the header, ghost Decline and one
@@ -54,10 +55,14 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
   @override
   void initState() {
     super.initState();
+    // Rebuilds once the exit ends, else the faded card keeps its taps and its
+    // spoken label.
     _controller = AnimationController(
       vsync: this,
       duration: HollowDurations.normal,
-    );
+    )..addStatusListener((s) {
+        if (s == AnimationStatus.dismissed && mounted) setState(() {});
+      });
     _fadeAnim = CurvedAnimation(
       parent: _controller,
       curve: HollowCurves.enter,
@@ -202,10 +207,9 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(
-                                  _cachedDisplayName,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
+                                PeerNameText(
+                                  name: _cachedDisplayName,
+                                  peerId: _cachedMaster,
                                   style: HollowTypography.subheading.copyWith(
                                     color: nameColorFor(_cachedMaster, hollow),
                                   ),

@@ -346,6 +346,8 @@ class _Actions extends ConsumerWidget {
     final localNick = ref.watch(localNicknameProvider)[peerId];
     final notifying = ref.watch(notificationSettingsProvider
         .select((s) => s.dmEnabled[peerId] ?? true));
+    // Nothing of theirs can notify us while blocked; the phone header agrees.
+    final blocked = ref.watch(peerBlockedProvider(master));
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -357,15 +359,17 @@ class _Actions extends ConsumerWidget {
           onPressed: () => showLocalNicknameDialog(context, ref, peerId,
               currentNickname: localNick ?? ''),
         ),
-        const SizedBox(width: HollowSpacing.xs),
-        HollowIconButton(
-          icon: notifying ? LucideIcons.bell : LucideIcons.bellOff,
-          label: notifying ? 'Mute notifications' : 'Unmute notifications',
-          selected: !notifying,
-          onPressed: () => ref
-              .read(notificationSettingsProvider.notifier)
-              .setDmEnabled(peerId, !notifying),
-        ),
+        if (!blocked) ...[
+          const SizedBox(width: HollowSpacing.xs),
+          HollowIconButton(
+            icon: notifying ? LucideIcons.bell : LucideIcons.bellOff,
+            label: notifying ? 'Mute notifications' : 'Unmute notifications',
+            selected: !notifying,
+            onPressed: () => ref
+                .read(notificationSettingsProvider.notifier)
+                .setDmEnabled(peerId, !notifying),
+          ),
+        ],
         const SizedBox(width: HollowSpacing.xs),
         Builder(
           builder: (buttonContext) => HollowIconButton(

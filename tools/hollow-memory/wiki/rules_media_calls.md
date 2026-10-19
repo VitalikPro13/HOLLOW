@@ -22,6 +22,11 @@ whitelist) stay in CLAUDE.md.
   is in a voice channel or meeting, that device alone rings ("Answering will leave #channel")
   and the others stay silent. The locked "In a call on another device" strip is `CallElsewhereRow` /
   `MobileCallElsewhereBar`. `project_one_call_per_identity`.
+- A blocked master is never called and never rings: `startDmCallFlow` says why, `CallNotifier`
+  refuses `startCall` and drops the invite (the node already drops it in `call_invite_allowed`),
+  and a block (here or from a sibling) ends a ringing or live call with them. A new call entry
+  point hides itself for a blocked person (`peerBlockedProvider`). Harness
+  `a_blocked_friends_call_never_rings`, `test/widget/block_reach_test.dart`.
 - VAD/speaking state lives in `speaking_provider.dart`, NEVER in CallState/
   VoiceChannelState. REMOTE peers membership-select; OURSELVES = a bool
   (`vcLocalSpeakingProvider`, the set is DEVICE-keyed). LOCAL mic level =

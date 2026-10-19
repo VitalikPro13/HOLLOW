@@ -37,6 +37,9 @@ import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
+import 'package:hollow/src/ui/chat/blocked_conversation_notice.dart';
+import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/core/providers/unread_marker_provider.dart';
@@ -767,6 +770,8 @@ class _ChatPaneState extends ConsumerState<ChatPane>
     final savedId = ref.watch(savedMessagesPeerIdProvider);
     final isSavedMessages = savedId != null &&
         ref.watch(deviceLinkProvider).identityOf(widget.peerId) == savedId;
+    final peerMaster = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
+    final blockedPeer = ref.watch(blockedUsersProvider).contains(peerMaster);
 
     // Custom-emote pull source for every token and reaction in this DM: the
     // counterpart's devices.
@@ -776,12 +781,14 @@ class _ChatPaneState extends ConsumerState<ChatPane>
         children: [
           _buildHeader(hollow,
               isSavedMessages: isSavedMessages,
+              blocked: blockedPeer,
               showProfilePanel: showProfilePanel,
               stageShown: stageShown),
 
-          DmCallRow(peerMaster: widget.peerId),
+          if (!blockedPeer) DmCallRow(peerMaster: widget.peerId),
 
-          if (ref.watch(chatSearchOpenProvider))
+          // Searching would bring a blocked person's messages back on screen.
+          if (ref.watch(chatSearchOpenProvider) && !blockedPeer)
             _buildSearchBar(hollow, isSavedMessages),
 
           // Pinned above the message list rather than a toast, because the
@@ -794,6 +801,13 @@ class _ChatPaneState extends ConsumerState<ChatPane>
           if (stageShown)
             Expanded(
               child: CallStage(source: DmCallStageSource(widget.peerId)),
+            )
+          else if (blockedPeer)
+            Expanded(
+              child: BlockedConversationNotice(
+                masterId: peerMaster,
+                displayName: displayNameFor(profiles, widget.peerId),
+              ),
             )
           else
             ..._buildMessageArea(
@@ -912,6 +926,7 @@ class _ChatPaneState extends ConsumerState<ChatPane>
   /// DM header: avatar, name(s), connection status, and pane actions.
   Widget _buildHeader(HollowTheme hollow,
       {required bool isSavedMessages,
+      required bool blocked,
       required bool showProfilePanel,
       required bool stageShown}) {
     final searchOpen = ref.watch(chatSearchOpenProvider);
@@ -933,30 +948,36 @@ class _ChatPaneState extends ConsumerState<ChatPane>
               ring: hollow.surface,
             ),
       title: isSavedMessages ? 'Saved messages' : (hasNick ? localNick : realName),
-      subtitle: isSavedMessages ? null : (hasNick ? realName : status),
+      titlePeerId: isSavedMessages || hasNick ? null : widget.peerId,
+      // A blocked person's status is their words too.
+      subtitle: isSavedMessages
+          ? null
+          : (hasNick ? realName : (blocked ? null : status)),
       badges: [if (stageShown) const _InCallMark()],
       // Our own link, or a dead link reads as the friend being offline.
       status: ownLinkOfflineStatus(ref),
       actions: [
-        // Hidden for Saved messages (you cannot call yourself) and during a
-        // call with this person, which has its own controls.
-        if (!isSavedMessages && !_inCallWithPeer()) ...[
+        // Hidden for Saved messages (you cannot call yourself), for someone
+        // we blocked, and during a call with this person, which has its own
+        // controls.
+        if (!isSavedMessages && !blocked && !_inCallWithPeer()) ...[
           _buildVoiceCallButton(hollow),
           _buildVideoCallButton(hollow),
         ],
-        HollowIconButton(
-          icon: LucideIcons.search,
-          label: 'Search messages',
-          selected: searchOpen,
-          onPressed: () {
-            ref.read(chatSearchOpenProvider.notifier).state = !searchOpen;
-            if (!searchOpen) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                _searchFocusNode.requestFocus();
-              });
-            }
-          },
-        ),
+        if (!blocked)
+          HollowIconButton(
+            icon: LucideIcons.search,
+            label: 'Search messages',
+            selected: searchOpen,
+            onPressed: () {
+              ref.read(chatSearchOpenProvider.notifier).state = !searchOpen;
+              if (!searchOpen) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _searchFocusNode.requestFocus();
+                });
+              }
+            },
+          ),
         if (ref.watch(layoutModeProvider) == LayoutMode.dock)
           HollowIconButton(
             icon: LucideIcons.columns,
@@ -1411,6 +1432,10 @@ class _ChatPaneState extends ConsumerState<ChatPane>
       onCopy: _copyFor(context, msg),
       onCopyImage: isAlbum ? null : _copyImageFor(context, msg),
       onInfo: _infoFor(context, msg),
+      onReport: reportMessageAction(context,
+          isMe: msg.isMe,
+          senderMaster: ref.read(deviceLinkProvider).identityOf(widget.peerId),
+          displayName: displayNameFor(profiles, widget.peerId)),
       child: _buildBubble(
           msg, index, showHeader, messages, replyIndexById, profiles,
           localPeerId, _tilingAt(messages, index, showHeader)),

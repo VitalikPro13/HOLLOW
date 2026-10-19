@@ -1,8 +1,8 @@
 # Hollow: Terms of Use
 
-**Last updated: September 25, 2026**
+**Last updated: October 19, 2026**
 
-These Terms of Use ("Terms") govern your access to and use of the Hollow application and related services ("Services") provided by AnonListen ("we", "us", "our"). By using Hollow, you agree to these Terms.
+These Terms of Use ("Terms") govern your access to and use of the Hollow application and related services ("Services") provided by AnonListen ("we", "us", "our"). By using Hollow, you agree to these Terms. Hollow asks you to agree to them before you create, restore or link an identity.
 
 ## 1. What Hollow is
 
@@ -46,11 +46,17 @@ Because Hollow uses end-to-end encryption, **we cannot access, review, moderate,
 
 Individual Hollow servers are created and managed by their owners. Server owners may set their own rules and moderate their own communities. We are not responsible for the moderation practices of individual server owners.
 
-### Reporting
+### No tolerance for objectionable content or abuse
 
-If you become aware of any use of Hollow that violates these Terms, you may report it to us at **privacy@anonlisten.com**. Hollow also includes in-app tools: you can block users (stored only on your device) and report users. Reports are stored only as counters per reported account, and the relay keeps no readable record of who filed a report. No message content is or can be included.
+Hollow has no tolerance for objectionable content or abusive users. Anything Section 4 forbids counts as objectionable here, and so does content meant to threaten, demean or sexually harass another person.
 
-Due to the encrypted nature of the platform, our ability to investigate reports is limited. Where reports or other signals indicate violations of these Terms, we may take the actions available to us at the infrastructure level, such as revoking access to our hosted relay.
+### Reporting and blocking
+
+If you become aware of any use of Hollow that violates these Terms, you may report it to us at **privacy@anonlisten.com**. Inside the app you can report a message or a user, and you can block a user. A report sends us only the reported account and the reason you picked. The message's text, its ID and its files stay on your device. Blocking hides that person's messages and your conversation with them on your device at once, and it sends our relay one anonymous count against the blocked account. Reports and block counts are stored only as counters per reported account, and the relay keeps no readable record of who filed a report or who blocked whom.
+
+### How we enforce these Terms
+
+We cannot read your messages, so we act on accounts, never on content. Where reports, block counts or other signals show that an account breaks these Terms, we may ban that account from the relays we operate. A count on its own never bans anyone automatically. An account named in repeated valid notices of infringement, including copyright notices, is banned from our relays. A ban reaches only the relays we operate. It does not touch the copy of Hollow on anyone's device (Section 6), and server owners keep moderating their own servers.
 
 ## 6. Software ownership and your rights
 
@@ -129,7 +135,7 @@ All content passing through the relay is end-to-end encrypted and opaque to us.
 
 ## 15. Changes to these Terms
 
-We may update these Terms from time to time. Changes will be posted with an updated "Last updated" date. Material changes will be communicated through the application. Your continued use of Hollow after changes constitutes acceptance of the updated Terms.
+We may update these Terms from time to time. Changes will be posted with an updated "Last updated" date. Material changes will be communicated through the application, which asks you to agree to them before you go on. Your continued use of Hollow after changes constitutes acceptance of the updated Terms.
 
 ## 16. Severability
 

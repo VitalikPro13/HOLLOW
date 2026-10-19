@@ -29,6 +29,7 @@ void showMobileMessageActions({
   void Function(String emoji)? onReaction,
   VoidCallback? onInfo,
   VoidCallback? onPin,
+  VoidCallback? onReport,
   bool isPinned = false,
   String? serverId,
   /// What the file row offers, mirroring the card. The caller reads it from
@@ -54,6 +55,7 @@ void showMobileMessageActions({
       onReaction: onReaction,
       onInfo: onInfo,
       onPin: onPin,
+      onReport: isMe ? null : onReport,
       isPinned: isPinned,
       serverId: serverId,
       fileAction: fileAction,
@@ -77,6 +79,7 @@ class _MessageActionsSheet extends StatefulWidget {
   final void Function(String emoji)? onReaction;
   final VoidCallback? onInfo;
   final VoidCallback? onPin;
+  final VoidCallback? onReport;
   final bool isPinned;
   final String? serverId;
   final FileBarAction fileAction;
@@ -95,6 +98,7 @@ class _MessageActionsSheet extends StatefulWidget {
     this.onReaction,
     this.onInfo,
     this.onPin,
+    this.onReport,
     this.isPinned = false,
     this.serverId,
     this.fileAction = FileBarAction.download,
@@ -215,6 +219,14 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
             icon: LucideIcons.shieldCheck,
             label: 'Message proof',
             onTap: () => run(widget.onInfo!),
+          ),
+      ],
+      [
+        if (widget.onReport != null)
+          _ActionRow(
+            icon: LucideIcons.flag,
+            label: 'Report message',
+            onTap: () => run(widget.onReport!),
           ),
       ],
       [

@@ -31,6 +31,7 @@ import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
 import 'package:hollow/src/ui/settings/moderation_dialogs.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The desktop member search box's fixed width beside the filter chips.
@@ -75,9 +76,6 @@ String _remaining(crdt_api.MutedMemberFfi m) {
   if (left.inMinutes >= 1) return 'For another ${n(left.inMinutes, 'minute')}';
   return 'For less than a minute';
 }
-
-String _shortId(String id) =>
-    id.length > 12 ? '${id.substring(0, 4)}…${id.substring(id.length - 4)}' : id;
 
 /// Everyone in the server: moderation first for those who can act on it, then
 /// one searchable list filtered by role. A big server stays one list, built
@@ -524,10 +522,10 @@ class _ModerationSection extends ConsumerWidget {
                   final known = profiles.containsKey(peer);
                   return SettingsRow(
                     key: ValueKey('banned-$peer'),
-                    title: known ? nameOf(peer) : _shortId(peer),
-                    monoTitle: !known,
+                    title: known ? nameOf(peer) : peer,
+                    peerIdTitle: !known,
                     subtitleWidget: known
-                        ? Text(_shortId(peer),
+                        ? PeerIdText(peer,
                             style: HollowTypography.monoSmall
                                 .copyWith(color: hollow.textSecondary))
                         : null,

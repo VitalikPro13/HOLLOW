@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
@@ -137,6 +138,9 @@ final sortedFriendsProvider = Provider<List<FriendInfo>>((ref) {
   // id (the relay claims nicknames under the device socket) while presence keys
   // on the MASTER, so resolve device->master before the backend re-key lands.
   final links = ref.watch(deviceLinkProvider);
+  // A block hides the person at once: their DM leaves every list the moment
+  // it lands, and only Settings > Blocked users still names them.
+  final blocked = ref.watch(blockedUsersProvider);
 
   // Collapse each accepted friend's stored id to its MASTER and dedupe, so every
   // render site keys its online dot, name and avatar correctly. A friend stranded
@@ -144,6 +148,7 @@ final sortedFriendsProvider = Provider<List<FriendInfo>>((ref) {
   final byMaster = <String, FriendInfo>{};
   for (final f in friends.values.where((f) => f.status == 'accepted')) {
     final master = links.identityOf(f.peerId);
+    if (blocked.contains(master)) continue;
     final resolved = master == f.peerId
         ? f
         : FriendInfo(
@@ -239,10 +244,21 @@ final friendsBarProvider = Provider<FriendsBarContent>((ref) {
   );
 });
 
-/// Count of incoming pending friend requests (for badge display).
-final pendingFriendCountProvider = Provider<int>((ref) {
+/// Incoming friend requests still waiting, newest first. A blocked person's
+/// request leaves every list the moment the block lands.
+final incomingFriendRequestsProvider = Provider<List<FriendInfo>>((ref) {
   final friends = ref.watch(friendsProvider);
+  final blocked = ref.watch(blockedUsersProvider);
+  final links = ref.watch(deviceLinkProvider);
   return friends.values
-      .where((f) => f.status == 'pending' && f.direction == 'incoming')
-      .length;
+      .where((f) =>
+          f.status == 'pending' &&
+          f.direction == 'incoming' &&
+          !blocked.contains(links.identityOf(f.peerId)))
+      .toList()
+    ..sort((a, b) => b.requestedAt.compareTo(a.requestedAt));
 });
+
+/// Count of incoming pending friend requests (for badge display).
+final pendingFriendCountProvider = Provider<int>(
+    (ref) => ref.watch(incomingFriendRequestsProvider).length);

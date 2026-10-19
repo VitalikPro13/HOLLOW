@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -63,6 +64,11 @@ Future<void> startDmCallFlow(
   bool withVideo = false,
   VoidCallback? beforeCall,
 }) async {
+  if (ref.read(peerBlockedProvider(master))) {
+    HollowToast.show(context, 'Unblock this person to call them',
+        type: HollowToastType.info);
+    return;
+  }
   final elsewhere = ref.read(callElsewhereProvider);
   if (elsewhere != null) {
     HollowToast.show(context, callElsewhereReason(elsewhere),

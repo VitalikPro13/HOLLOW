@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/showcase.dart' as showcase_api;
@@ -186,8 +187,7 @@ String displayNameFor(
 /// full map. Prefer this with `ref.watch(profileProvider.select(...))` to
 /// avoid rebuilding when unrelated profiles change.
 String displayNameForPeer(storage_api.UserProfile? profile, String peerId) {
-  return chosenNameForPeer(profile, peerId) ??
-      (peerId.length > 8 ? '${peerId.substring(0, 8)}...' : peerId);
+  return chosenNameForPeer(profile, peerId) ?? shortPeerLabel(peerId);
 }
 
 /// The name a person chose or we gave them (local nickname, then profile

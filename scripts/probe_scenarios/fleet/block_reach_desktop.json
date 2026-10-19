@@ -1,0 +1,1237 @@
+{
+  "_": [
+    "Block reach on desktop (Apple 1.2): a blocks a stranger, then a friend; from b a friend request,",
+    "a channel mention, a DM, a voice and a video call reach nothing of a; every call/search entry is gone",
+    "from a's header, user menu, profile card and friend rows; unblocking brings it all back.",
+    "Needs FRESH identities (the relay replays friend requests).",
+    "run: FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Scenario block_reach_desktop -Peers a=t,b=u"
+  ],
+  "peers": [
+    "a",
+    "b"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "PEER_A"
+    },
+    {
+      "peer": "b",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "PEER_B"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "PART 1: strangers in a server. a creates it, b joins and posts"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Create a server"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "dialog > text:Add a server",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "hint:My Awesome Server",
+      "value": "blk-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Create",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "server:blk-${RUN}",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "open_server",
+      "name": "blk-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "channel:general",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "server:blk-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Invite people"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "type:HollowCopyField",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "target": "type:HollowCopyField",
+      "as": "INVITE"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "dialog",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Create a server"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Invite link",
+      "value": "${INVITE}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "dialog > text:Join",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "server:blk-${RUN}",
+      "timeout_ms": 90000
+    },
+    {
+      "peer": "b",
+      "op": "open_server",
+      "name": "blk-${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "channel:general",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "a",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "key:member:${PEER_B}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 2000
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "hello from b ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:hello from b ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a blocks the stranger b from the member list"
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "key:member:${PEER_B}"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "menu > text:Block",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Block",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "dialog > text:Block",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Block",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "dialog",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "expect_no_text",
+      "value": "hello from b ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-01-channel-after-block"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "from b: a friend request and a channel post with a mention, neither reaches a"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:_FriendsManager > text:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Paste an ID, or type a nickname",
+      "value": "${PEER_A}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Send request",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "ping @probe-a while blocked ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "contains:while blocked ${RUN}",
+      "timeout_ms": 15000,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 8000
+    },
+    {
+      "peer": "a",
+      "op": "expect_no_text",
+      "value": "while blocked ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Home",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "expect_no_text",
+      "value": "wants to be your friend"
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-02-home-no-request"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Requests",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "semantics:Accept friend request",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-03-requests-empty"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a unblocks b from the member list: b's posts come back"
+    },
+    {
+      "peer": "a",
+      "op": "open_server",
+      "name": "blk-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "key:member:${PEER_B}",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "key:member:${PEER_B}"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "menu > text:Unblock",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "menu > text:Start a call",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Unblock",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:hello from b ${RUN}",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "contains:while blocked ${RUN}",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-04-channel-after-unblock"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "b's dropped request never landed: b withdraws it and asks again, a accepts"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:_FriendsManager > text:Requests",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Cancel request",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:_FriendsManager > text:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Paste an ID, or type a nickname",
+      "value": "${PEER_A}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Send request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Requests",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Accept friend request",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Accept friend request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:probe-b",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:probe-a",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "PART 2: friends. DMs both ways, then a control call from b rings a"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Home",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "field",
+      "value": "dm from a ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Home",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:dm from a ${RUN}",
+      "timeout_ms": 60000,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:probe-a"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "dm before block ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:dm before block ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Start voice call",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "all",
+      "op": "hover_at",
+      "x": 5,
+      "y": 400
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-05-dm-header-before"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "provider": "online",
+      "matches": "${PEER_A}",
+      "timeout_ms": 30000,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Start voice call",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:Accept",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-06-control-call-rings"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Decline",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "provider": "callStatus",
+      "equals": "idle",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "provider": "callStatus",
+      "equals": "idle",
+      "timeout_ms": 40000
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a blocks b from the friend row's menu, with the DM open"
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "semantics:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "menu > text:Block",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Block",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "dialog > text:Block",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Block",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "dialog",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "contains:You blocked",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "semantics:Start voice call",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "semantics:Start video call",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "semantics:Search messages",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "semantics:Mute notifications",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "expect_no_text",
+      "value": "dm before block ${RUN}"
+    },
+    {
+      "peer": "all",
+      "op": "hover_at",
+      "x": 5,
+      "y": 400
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-07-dm-header-after"
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "hint:Search messages",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Home",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1200
+    },
+    {
+      "peer": "a",
+      "op": "expect_no_text",
+      "value": "probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-08-home-after-block"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "type:_FriendsManager > text:probe-b",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-09-friends-after-block"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "open_server",
+      "name": "blk-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "key:member:${PEER_B}",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "key:member:${PEER_B}"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "menu > text:Unblock",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "menu > text:Start a call",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-10-user-menu-after-block"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 600
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "key:member:${PEER_B}"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1200
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "semantics:Start voice call",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-11-profile-card-after-block"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 600
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "from b: a DM, a voice call, a video call and a mention; nothing reaches a"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Home",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:probe-a"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "dm while blocked ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:dm while blocked ${RUN}",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "blk-d-12-b-side-dm-sent"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Start voice call",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "text:Accept",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "provider": "callStatus",
+      "equals": "idle",
+      "timeout_ms": 2000
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "blk-d-13-b-side-calling"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "provider": "callStatus",
+      "equals": "idle",
+      "timeout_ms": 40000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Start video call",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "text:Accept",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "provider": "callStatus",
+      "equals": "idle",
+      "timeout_ms": 2000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "provider": "callStatus",
+      "equals": "idle",
+      "timeout_ms": 40000
+    },
+    {
+      "peer": "b",
+      "op": "open_server",
+      "name": "blk-${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "mention @probe-a again while blocked ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 6000
+    },
+    {
+      "peer": "a",
+      "op": "expect_no_text",
+      "value": "again while blocked ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "expect_no_text",
+      "value": "dm while blocked ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-14-a-after-b-tries"
+    },
+    {
+      "peer": "all",
+      "op": "dump",
+      "name": "blk-d-blocked"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a unblocks b: friend row, history, calls and posts all return"
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "key:member:${PEER_B}"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "menu > text:Unblock",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Unblock",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "contains:again while blocked ${RUN}",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Home",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:probe-b",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:dm before block ${RUN}",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Start voice call",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Search messages",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Mute notifications",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Home",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:probe-a"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "dm after unblock ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:dm after unblock ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "all",
+      "op": "hover_at",
+      "x": 5,
+      "y": 400
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-15-dm-after-unblock"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "provider": "online",
+      "matches": "${PEER_A}",
+      "timeout_ms": 30000,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Start voice call",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:Accept",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "blk-d-16-call-rings-again"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Decline",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "provider": "callStatus",
+      "equals": "idle",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "all",
+      "op": "dump",
+      "name": "blk-d-done"
+    }
+  ],
+  "cleanup": [
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "the server lives only in these throwaway fixtures"
+    }
+  ]
+}

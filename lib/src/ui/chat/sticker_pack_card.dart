@@ -11,6 +11,7 @@ import '../../theme/hollow_typography.dart';
 import '../components/hollow_button.dart';
 import '../components/hollow_toast.dart';
 import 'file_card_status.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 
 /// The file extension a shared sticker pack carries (issue #36).
 const String kStickerPackExtension = 'hollow-pack';
@@ -168,10 +169,7 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
     // claims. Anyone may author a pack, so an unsigned one is anonymous rather
     // than suspicious.
     if (preview.authorVerified && preview.author.isNotEmpty) {
-      final short = preview.author.length > 10
-          ? preview.author.substring(preview.author.length - 6)
-          : preview.author;
-      return '$label · by …$short';
+      return '$label · by ${shortPeerLabel(preview.author)}';
     }
     return label;
   }

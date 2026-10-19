@@ -1,6 +1,6 @@
 # Hollow: Privacy Policy
 
-**Last updated: October 4, 2026**
+**Last updated: October 19, 2026**
 
 Hollow is built on one principle: your conversations are yours. We cannot read your messages, listen to your calls, or identify you. This policy explains what data exists, where it exists, and what we can and cannot access.
 
@@ -24,7 +24,7 @@ Hollow is a fully distributed, encrypted communication platform. There is no cen
 
 ## What the relay server does
 
-Hollow uses a WebSocket relay server for signaling and message routing. The relay routes end-to-end encrypted data between peers. It cannot decrypt anything it carries, and it writes nothing about you or your activity to disk. The only thing the relay ever persists is the anonymous abuse-report counter described in "In-app reporting and blocking" below.
+Hollow uses a WebSocket relay server for signaling and message routing. The relay routes end-to-end encrypted data between peers. It cannot decrypt anything it carries, and it writes nothing about you or your activity to disk. The only thing the relay ever persists is the anonymous counter of reports and blocks described in "In-app reporting and blocking" below.
 
 **What the relay processes in transit (not stored):**
 
@@ -65,8 +65,8 @@ Desktop platforms do not use any push service. Notifications on desktop are gene
 
 ## In-app reporting and blocking
 
-- **Blocking** is entirely local. Your block list is stored only on your device in the encrypted database. It is never sent to us and we cannot see it.
-- **Reporting** a user sends the reported account's cryptographic peer ID and a category (e.g., spam, harassment) to the relay. The relay stores a count of reports per reported account and category. So that the same report is not counted twice, it also stores a one-way fingerprint of each report, keyed with a secret that never leaves the relay's server; without that secret the fingerprint reveals nothing about who filed the report. The secret sits on the same disk, so someone who copied that disk could check whether one particular person reported one particular account, a single guess at a time, but could not list who reported whom. Your report reaches the relay over your own connection, but the relay does not store who sent it. No message content is (or can be) included in a report; we cannot decrypt any conversation.
+- **Blocking** hides the person on your device. Your block list is stored only on your device in the encrypted database, and it is never sent to us. When you block someone, your device also sends the relay one anonymous count: the blocked account's peer ID with the category "blocked". The relay adds it to that account's total exactly as it counts a report, described next, so it holds a number per blocked account and never a list of whom you blocked. Unblocking sends nothing.
+- **Reporting** a user sends the reported account's cryptographic peer ID and a category (e.g., spam, harassment) to the relay. Reporting a message sends the same two things about the person who wrote it; the message's text, its ID and its files never leave your device. The relay stores a count of reports per reported account and category. So that the same report is not counted twice, it also stores a one-way fingerprint of each report, keyed with a secret that never leaves the relay's server; without that secret the fingerprint reveals nothing about who filed the report. The secret sits on the same disk, so someone who copied that disk could check whether one particular person reported one particular account, a single guess at a time, but could not list who reported whom. Your report reaches the relay over your own connection, but the relay does not store who sent it. No message content is (or can be) included in a report; we cannot decrypt any conversation.
 
 ## Infrastructure and hosting
 
@@ -128,7 +128,7 @@ Because Hollow is designed with privacy by design, our ability to respond to dat
 - We **cannot** provide conversation history. No readable message history exists on our infrastructure. The temporary offline-delivery buffer holds only end-to-end encrypted payloads, in memory, that we have no keys to decrypt.
 - We **cannot** provide metadata about who communicates with whom. The relay does not maintain or log this information persistently.
 
-The only user-related record our infrastructure writes to disk is the abuse-report counter described above: the peer IDs of reported accounts with their report counts, and the keyed fingerprints. It contains no message content, no communication metadata, and no readable record of who filed a report.
+The only user-related record our infrastructure writes to disk is the abuse-report counter described above: the peer IDs of reported or blocked accounts with their counts, and the keyed fingerprints. It contains no message content, no communication metadata, and no readable record of who filed a report or who blocked whom.
 
 We will comply with valid, binding court orders issued under applicable law (the European Union and Poland). We will notify affected users of any requests unless legally prohibited from doing so. We will challenge overbroad or legally questionable requests.
 

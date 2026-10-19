@@ -18,9 +18,11 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
+import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/chat/file_card_status.dart';
+import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Coordinates action bar visibility so only one message shows its bar.
@@ -101,6 +103,9 @@ class MessageHoverWrapper extends ConsumerStatefulWidget {
   final VoidCallback? onCopyImage;
   final VoidCallback? onInfo;
 
+  /// Reports the author; surfaces leave it null on our own messages.
+  final VoidCallback? onReport;
+
   /// Affects wording only: [onPin] is a toggle either way, and surfaces with no
   /// pins leave this false.
   final bool isPinned;
@@ -129,6 +134,7 @@ class MessageHoverWrapper extends ConsumerStatefulWidget {
     this.onCopy,
     this.onCopyImage,
     this.onInfo,
+    this.onReport,
     this.isPinned = false,
     this.fileAttachment,
   });
@@ -170,7 +176,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
           widget.onEditCancel?.call();
           return KeyEventResult.handled;
         }
-        if (event.logicalKey == LogicalKeyboardKey.enter) {
+        if (isEnterKey(event.logicalKey)) {
           if (HardwareKeyboard.instance.isShiftPressed) {
             final sel = _editController.selection;
             final text = _editController.text;
@@ -280,7 +286,8 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
       widget.onDownload != null ||
       widget.onCopy != null ||
       widget.onCopyImage != null ||
-      widget.onInfo != null;
+      widget.onInfo != null ||
+      widget.onReport != null;
 
   /// Where the bar may paint, in overlay space: the message list plus half a
   /// bar above it, so a compact top row's bar is not cut and no bar ever
@@ -546,6 +553,17 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     ];
     if (meta.isNotEmpty) groups.add(meta);
 
+    if (widget.onReport != null && !widget.isMe) {
+      groups.add([
+        HollowMenuItem(
+          icon: LucideIcons.flag,
+          label: 'Report message',
+          isDanger: true,
+          onTap: widget.onReport,
+        ),
+      ]);
+    }
+
     if (widget.onDelete != null) {
       groups.add([
         HollowMenuItem(
@@ -602,10 +620,6 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
   }
 
   Widget _buildEditView(HollowTheme hollow) {
-    OutlineInputBorder border(Color color) => OutlineInputBorder(
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          borderSide: BorderSide(color: color),
-        );
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.lg,
@@ -614,24 +628,13 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          TextField(
+          HollowTextField(
             controller: _editController,
             focusNode: _editFocusNode,
-            style: HollowTypography.body.copyWith(color: hollow.textPrimary),
             maxLines: 5,
             minLines: 1,
+            isDense: true,
             inputFormatters: [MessageByteLimitFormatter()],
-            decoration: InputDecoration(
-              filled: true,
-              fillColor: hollow.elevated,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.md,
-                vertical: HollowSpacing.sm,
-              ),
-              border: border(hollow.border),
-              enabledBorder: border(hollow.border),
-              focusedBorder: border(hollow.accent),
-            ),
             onTapOutside: (_) => widget.onEditCancel?.call(),
           ),
           const SizedBox(height: HollowSpacing.xs),

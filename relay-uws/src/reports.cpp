@@ -203,6 +203,12 @@ void ReportsState::save_if_dirty() {
     // No content logging — the file itself is the operator's view.
 }
 
+bool ReportsState::is_category(const std::string& category) {
+    return category == "spam" || category == "harassment" ||
+           category == "illegal_content" || category == "impersonation" ||
+           category == "blocked";
+}
+
 bool ReportsState::add(const std::string& reporter, const std::string& target,
                        const std::string& category) {
     std::string key = fingerprint(reporter, target, category);

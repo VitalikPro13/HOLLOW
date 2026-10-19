@@ -24,6 +24,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/shell/channel_context_menus.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
@@ -782,12 +783,16 @@ class _HomeContent extends ConsumerWidget {
     // A friend is online if ANY of their devices is, collapsed to the master
     // identity.
     final online = ref.watch(onlineIdentitiesProvider);
+    // A blocked person leaves the list the moment the block lands.
+    final blocked = ref.watch(blockedUsersProvider);
+    // Device to master mirror for the block check and the encrypted-lock
+    // lookup below: `peers` is DEVICE-keyed and `friend.peerId` is the MASTER.
+    final links = ref.watch(deviceLinkProvider);
     final accepted = friends.values
-        .where((f) => f.status == 'accepted')
+        .where((f) =>
+            f.status == 'accepted' && !blocked.contains(links.identityOf(f.peerId)))
         .toList();
-    final pendingIncoming = friends.values
-        .where((f) => f.status == 'pending' && f.direction == 'incoming')
-        .toList();
+    final pendingIncoming = ref.watch(incomingFriendRequestsProvider);
     final pendingOutgoing = friends.values
         .where((f) => f.status == 'pending' && f.direction == 'outgoing')
         .toList();
@@ -800,10 +805,6 @@ class _HomeContent extends ConsumerWidget {
     });
 
     final hasPending = pendingIncoming.isNotEmpty || pendingOutgoing.isNotEmpty;
-
-    // Device to master mirror for the encrypted-lock lookup below: `peers` is
-    // DEVICE-keyed and `friend.peerId` is the MASTER.
-    final links = ref.watch(deviceLinkProvider);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

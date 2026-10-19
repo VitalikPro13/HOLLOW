@@ -10,6 +10,9 @@ class _ManifestApi implements RustLibApi {
   String crateApiUpdaterGetCurrentVersion() => '0.11.1';
 
   @override
+  int crateApiUpdaterGetCurrentBuild() => 0;
+
+  @override
   Future<String> crateApiUpdaterFetchVersionManifest(
       {required String manifestUrl}) async {
     if (fail) throw Exception('offline');

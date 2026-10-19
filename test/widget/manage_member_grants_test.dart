@@ -197,7 +197,9 @@ void main() {
               channelId: 'chan-vip',
               channelName: 'vip-lounge'));
       await tester.pumpAndSettle();
-      expect(find.textContaining('…'), findsNothing);
+      // A nameless person is still named by their short id; only the
+      // "id · time left" subtitle is the suffix.
+      expect(find.textContaining(RegExp(r'…\S+ · ')), findsNothing);
     });
   });
 }

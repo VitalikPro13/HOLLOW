@@ -19,10 +19,6 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// implementation of the card, toggle, segment and slider blocks so the two
 /// cannot drift: extend this module instead of copying widgets between them.
 
-/// Shortens a peer_id for display (`12D3…JQcW`).
-String shortenPeerId(String id) =>
-    id.length <= 12 ? id : '${id.substring(0, 6)}…${id.substring(id.length - 4)}';
-
 /// Wraps a list of settings cards in a scroll view with standard spacing.
 Widget settingsCardList(List<Widget> cards) {
   return SingleChildScrollView(
