@@ -1,21 +1,21 @@
 {
-  "latest": "0.12.1",
+  "latest": "0.12.2",
   "versions": [
     {
-      "version": "0.12.1",
-      "date": "October 16, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.12.1-win64.zip",
-      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.12.1-win64-setup.exe",
-      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.12.1-macos.zip",
-      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.12.1.dmg",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.12.1-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.12.1-linux.tar.gz",
-      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.12.1-android.apk",
-      "notes": "Resumable Connections, OBS Stream Overlay, Device Linking & Voice Room Chat",
-      "sha256_windows": "a62fd4da22b01fbda4ba98357c1f522a2374924176a67bf5fb6382fad8352ca8",
-      "sha256_macos": "ead551c743cbccb92ff4fa905c262849d2b922c7e7792cc2d1becc2cfca688b7",
-      "sha256_linux": "28a1f4ee355f58722280c76d5bf2e17899d5385099ae24595ca1bf38b675609d",
-      "sha256_linux_targz": "11bcb15925f5405abc32d6f65cabc303755972ef27850b9c5d3dcfe3d9b242d5"
+      "version": "0.12.2",
+      "date": "October 20, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.12.2-win64.zip",
+      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.12.2-win64-setup.exe",
+      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.12.2-macos.zip",
+      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.12.2.dmg",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.12.2-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.12.2-linux.tar.gz",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.12.2-android.apk",
+      "notes": "Blocking, Message Reports, Stronger App Lock & Private Push Notifications",
+      "sha256_windows": "11598b5cdb39f1fe4a868998db01bf6310eda6cb737537941e73834c4949224b",
+      "sha256_macos": "dbbf52c9902a1c9c73f0de38e26c115d4a59afffcd2568d7d9477e8fb45f702d",
+      "sha256_linux": "ac2ab1bad0b412c9e0b06f1106b3b3095642a8dc8ec405960a1d1af8c7daaba8",
+      "sha256_linux_targz": "f6771f6b8e6f5127530cc77a5b4608abeaabf22e4223c9f61b2378e1a567df76"
     }
   ]
 }

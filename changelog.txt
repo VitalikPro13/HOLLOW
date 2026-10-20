@@ -1,3 +1,54 @@
+v0.12.2 - Blocking, Message Reports, Stronger App Lock & Private Push Notifications
+
+No breaking changes, so 0.12.1 and 0.12.2 work together. Self-hosters, update your relay too, so offline messages keep working in new servers and channels, as the [self-hosting guide](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/SELF_HOSTING.md#moving-to-0122) explains.
+
+SECURITY
+
+- Important security fixes
+
+SAFETY
+
+- New users agree to the Terms before they start, and existing users are asked once
+- You can report a message, which sends us the author's ID and none of the message, then offers to block them
+- Blocking someone hides them everywhere at once, including calls, requests, reactions, pins and notifications
+- A block tells the relay only an anonymous count
+- Messages missed while someone was blocked come back when you unblock them
+- A blocked person's profile card says Blocked and offers Unblock
+
+PRIVACY & PROTECTION
+
+- Google and Apple can no longer see who sends you push notifications or which servers they come from
+- On phones, App Lock uses the secure hardware, so a copy of your data can't be used to guess your PIN
+- After four wrong PINs or passwords Hollow makes you wait longer each time, and it never wipes anything after misses
+- Each profile has its own App Lock
+- A duress code set before this version gets a one-time suggestion to set it again for the same protection
+- Debug logs no longer contain your account folder or file names
+
+UPDATES
+
+- News and status notices are signed, so the app shows only ones that really come from us
+- Self-hosted installs get the notices meant for them
+- Urgent fixes can ship as quick patches without a new version number
+- Hollow offers an update only when there is a download for your platform
+
+YOUR DEVICES
+
+- Removing a device now reaches contacts who were offline at the time, so they stop sending it messages
+- Server changes an older version couldn't read show up after you update
+- Fixed members sometimes disagreeing about a server's settings after one of them restarted Hollow
+- Fixed a server you were kicked from sometimes coming back after a restart
+- Deleting a server also removes the images it stored
+
+CHAT
+
+- Notifications from a friend with no name or picture show the sender and the message
+- Numpad Enter works like Enter on macOS and Linux
+- The text cursor is as tall as the text, with a small gap after the last letter
+- Peer IDs show their last ten characters, so you can compare them
+- The member menu offers a call only to friends
+- Fixed hearing your own voice when you are alone in a voice room
+- The phone chat header no longer overflows on very small screens
+
 v0.12.1 - Resumable Connections, OBS Stream Overlay, Device Linking & Voice Room Chat
 
 No breaking changes. Self-hosters that run their own relays, please upgrade it according to the [self-hosting guide](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/SELF_HOSTING.md), which covers both Docker and standalone users.

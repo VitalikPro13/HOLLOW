@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-10-20-v0122",
+    "date": "October 20, 2026",
+    "title": "v0.12.2 - Blocking, Message Reports, Stronger App Lock & Private Push Notifications",
+    "body": "Hey! This update is a bit smaller than the previous one, but it still has some important changes. App Lock is now stronger and more secure, and you can block users and report messages directly from the chat. Push notifications are more private too. Everything is in the changelog, as usual. I'm preparing for the next big release. TestFlight is planned to be discontinued because the App Store release is coming soon. You'll get a warning about it in the app. Thanks!"
+  },
+  {
     "id": "2026-10-16-v0121",
     "date": "October 16, 2026",
     "title": "v0.12.1 - Resumable Connections, OBS Stream Overlay, Device Linking & Voice Room Chat",

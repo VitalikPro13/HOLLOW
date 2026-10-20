@@ -11,7 +11,7 @@ use super::network::get_runtime;
 use crate::frb_generated::StreamSink;
 use crate::identity::data_dir;
 
-pub(crate) const APP_VERSION: &str = "0.12.1";
+pub(crate) const APP_VERSION: &str = "0.12.2";
 
 /// The quick-patch number on top of [`APP_VERSION`]: 0 for the release itself, 1 for
 /// the first same-version patch, shown as `0.12.2+1`. Separate from pubspec's `+N`,

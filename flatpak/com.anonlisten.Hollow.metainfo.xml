@@ -20,6 +20,11 @@
   <launchable type="desktop-id">com.anonlisten.Hollow.desktop</launchable>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.12.2" date="2026-10-20">
+      <description>
+        <p>Blocking, message reports, a stronger App Lock and private push notifications</p>
+      </description>
+    </release>
     <release version="0.12.1" date="2026-10-16">
       <description>
         <p>Resumable connections, OBS stream overlay, device linking, voice room chat settings and a wrong clock fix</p>

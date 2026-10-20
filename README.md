@@ -59,10 +59,10 @@ If you find a vulnerability, please report it privately as described in [SECURIT
 
 | Platform | Links |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.12.1-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.12.1-win64.zip) |
-| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.12.1.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.12.1-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.12.1-linux.tar.gz) |
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.12.1-android.apk) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.12.2-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.12.2-win64.zip) |
+| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.12.2.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.12.2-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.12.2-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.12.2-android.apk) |
 | iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
 
 What changed in each version is on the [releases page](https://github.com/VitalikPro13/HOLLOW/releases).
@@ -78,7 +78,7 @@ cp .env.example .env              # set your address, TURN secret and email
 docker compose up -d
 ```
 
-Then point the app at it in Settings, under Network. [relay-uws/SELF_HOSTING.md](relay-uws/SELF_HOSTING.md) is the full guide, including what a self-hosted relay does not have. If your relay is older than 0.12, follow [Moving to 0.12](relay-uws/SELF_HOSTING.md#moving-to-012) before your members update the app.
+Then point the app at it in Settings, under Network. [relay-uws/SELF_HOSTING.md](relay-uws/SELF_HOSTING.md) is the full guide, including what a self-hosted relay does not have. Update your relay to 0.12.2, as [Moving to 0.12.2](relay-uws/SELF_HOSTING.md#moving-to-0122) explains.
 
 The relay is written in C++ on uWebSockets. It handles TLS 1.3 itself, with no reverse proxy, and fits about 572,000 concurrent connections on an $8/month VPS ([BENCHMARK.md](relay-uws/BENCHMARK.md)).
 

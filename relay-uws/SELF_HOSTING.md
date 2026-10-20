@@ -318,32 +318,11 @@ a member who is offline is lost, so pick a quiet moment.
 
 ### Moving to 0.12.2
 
-Update the relay before anyone on it updates the app. From 0.12.2 the app signs your
-relay's address into the requests that make it keep channel messages for offline
-members, and an older relay can't check that signature. Until the relay is updated,
-new servers and channels on it keep nothing for offline members, joining a server
-where nobody is online can fail, and the server setting Offline catch-up does nothing.
-
-Update it as above, or as in [Without Docker](#without-docker). Apps from 0.12.1 keep
-working on the updated relay, so nobody has to rush. Nothing in `.env` changes, and no
-new ports open.
-
-### Moving to 0.12
-
-0.12 can't talk to 0.11, and the two can't share a relay either. The 0.12 app
-can't sign in to an older relay, and a 0.11 app can't sign in to an updated one.
-So update the relay first, then everyone's app, in one go:
-
-1. Update the relay as above, or as in [Without Docker](#without-docker) if you
-   run it that way.
-2. Run `sudo sh deploy/harden-host.sh` again. Since 0.11.1 it also turns the
-   firewall's log off, keeps relay lines out of `/var/log`, turns kdump off and
-   tightens SSH. It changes only what isn't set yet.
-3. Run `sudo bash deploy/check-host.sh`. Every check should say `ok`.
-4. Then everyone on your relay updates the app. Until they do, they can't
-   connect. Invite links made before 0.12 stop working, so send new ones.
-
-Nothing in `.env` changes, and no new ports open.
+Apps from 0.12.1 and 0.12.2 both work on either relay. Update the relay as above, or
+as in [Without Docker](#without-docker), so offline messages keep working in servers
+and channels created after the update. From 0.12.2 the app signs your relay's address
+into those requests, and an older relay can't check that. Nothing in `.env` changes,
+and no new ports open.
 
 ## Ports
 
@@ -396,10 +375,6 @@ timedatectl
 
 Logins carry a signed timestamp with a 60 second window, so a clock that is
 minutes out rejects every login while everything else looks fine.
-
-**Nobody can connect after updating the app to 0.12.** The relay is older than
-0.12 and can't answer the new sign-in. Update the relay, as in
-[Moving to 0.12](#moving-to-012).
 
 **Some members connect and others can't.** From 0.12 the app signs the exact
 address it connected to, and the relay only accepts its own `RELAY_HOST`
@@ -825,8 +800,7 @@ place within about 10 seconds, missing nothing. If `push-sidecar` changed, run
 `npm install --omit=optional --omit=dev` in it and
 `sudo systemctl restart hollow-push` as well.
 
-For the move to 0.12, [Moving to 0.12](#moving-to-012) applies here too: the
-relay first, then the host script and the check, then the apps.
+For the move to 0.12.2, [Moving to 0.12.2](#moving-to-0122) applies here too.
 
 ### When something is wrong
 
