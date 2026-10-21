@@ -1,3 +1,9 @@
+v0.12.2+1 - Emergency Certificate Fix
+
+SECURITY
+
+- Hollow no longer trusts the leaked eMudhra certificates, so nobody can use one to pose as the relay or our servers
+
 v0.12.2 - Blocking, Message Reports, Stronger App Lock & Private Push Notifications
 
 No breaking changes, so 0.12.1 and 0.12.2 work together. Self-hosters, update your relay too, so offline messages keep working in new servers and channels, as the [self-hosting guide](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/SELF_HOSTING.md#moving-to-0122) explains.

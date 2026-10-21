@@ -4,18 +4,31 @@
     {
       "version": "0.12.2",
       "date": "October 20, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.12.2-win64.zip",
-      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.12.2-win64-setup.exe",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-win64.zip",
+      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-win64-setup.exe",
       "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.12.2-macos.zip",
       "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.12.2.dmg",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.12.2-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.12.2-linux.tar.gz",
-      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.12.2-android.apk",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-linux.tar.gz",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-android.apk",
       "notes": "Blocking, Message Reports, Stronger App Lock & Private Push Notifications",
-      "sha256_windows": "11598b5cdb39f1fe4a868998db01bf6310eda6cb737537941e73834c4949224b",
+      "sha256_windows": "6809e70a3f99eaf67a8869fa103a1c3689bd909ab9a0231ce6998e66bd829dd5",
       "sha256_macos": "dbbf52c9902a1c9c73f0de38e26c115d4a59afffcd2568d7d9477e8fb45f702d",
-      "sha256_linux": "ac2ab1bad0b412c9e0b06f1106b3b3095642a8dc8ec405960a1d1af8c7daaba8",
-      "sha256_linux_targz": "f6771f6b8e6f5127530cc77a5b4608abeaabf22e4223c9f61b2378e1a567df76"
+      "sha256_linux": "b6c9d6fdef57314d9204ea19da5200fe1264381e07cc4e58f6c6a14094c72f5a",
+      "sha256_linux_targz": "31279cbba97014fe6b929af61ab4f3f273a4912f221e74d5b9662d89f934b22a"
+    },
+    {
+      "version": "0.12.2",
+      "build": 1,
+      "critical": true,
+      "date": "October 21, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-win64.zip",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-linux.tar.gz",
+      "notes": "Emergency Certificate Fix",
+      "sha256_windows": "6809e70a3f99eaf67a8869fa103a1c3689bd909ab9a0231ce6998e66bd829dd5",
+      "sha256_linux": "b6c9d6fdef57314d9204ea19da5200fe1264381e07cc4e58f6c6a14094c72f5a",
+      "sha256_linux_targz": "31279cbba97014fe6b929af61ab4f3f273a4912f221e74d5b9662d89f934b22a"
     }
   ]
 }
