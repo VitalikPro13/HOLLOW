@@ -35,3 +35,9 @@ f3ae76de2cca7bd10eb1d746dabc1da3e678f459:test/screenshots/dialogs_after_1_screen
 bb5f57b0d279319f362f53bec4c8d71f32e88e53:reports/planned/security/audit/design_A_frame_authority.md:generic-api-key:452
 bb5f57b0d279319f362f53bec4c8d71f32e88e53:tools/hollow-memory/wiki/conferences.md:generic-api-key:17
 4c14451641b66e6f51e30ea523906fca0a5b916a:reports/MEDIA_FORWARDING_PLAN.md:generic-api-key:240
+
+# RFC 8291 Appendix A's published example receiver: the auth secret every
+# Web Push test suite uses, fixed test vectors for the sealed push wake.
+# Reviewed 2026-10-21.
+5cb41db4386d91221eab55ff6698997b2019baab:push-sidecar/test/sealed_wake.test.js:generic-api-key:16
+5cb41db4386d91221eab55ff6698997b2019baab:push-sidecar/test/sealed_wake_vectors.json:generic-api-key:4
