@@ -27160,7 +27160,7 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // server's rings stay quiet (one absence and a spawn stagger, 4.5 s, total 831.1 s).
     // 2026-10-18: f-flakes holds a repaired device off the relay over two MLS ticks to
     // prove the member keeps its sibling seated (one absence, 4.5 s, total 835.6 s).
-    const BUDGET_MS: u64 = 835_600;
+    const BUDGET_MS: u64 = 836_800;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -51805,6 +51805,7 @@ async fn a_blocked_friends_call_never_rings() {
     super::resolver::seed_self(&b_master, &[b_dev.clone()]);
 
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    // Spawn stagger against the symmetric KeyBundle glare (counted in BUDGET_MS).
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[&a_master]).await;
     expect_dm_pair_ready(&relay, &a, &b, 20).await;
@@ -51839,7 +51840,12 @@ async fn a_blocked_friends_call_never_rings() {
         })
         .await
         .unwrap();
-    sleep_ms(1000).await;
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(15), |ev| matches!(ev,
+            NetworkEvent::CallSignal { signal_type, payload, .. }
+                if signal_type == "end" && payload == "before-block")).await,
+        "control: the first call ends before the block"
+    );
     drain_events(&mut a);
 
     super::blocklist::block(&b_master);

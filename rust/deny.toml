@@ -31,6 +31,7 @@ ignore = [
   { id = "RUSTSEC-2024-0384", reason = "instant unmaintained, via parking_lot 0.11 via reed-solomon-erasure 6.0: a wasm shim, std::time on our six native targets." },
   { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained, via hax-lib-macros under libcrux (the openmls crypto provider): build-time only, carried upstream." },
   { id = "RUSTSEC-2026-0319", reason = "anymap2 unmaintained, via liquid-core, a build-dependency of tract-linalg's build script under deep_filter: build-time only, no code ships." },
+  { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 (via tokio-tungstenite and ureq 2) is a shim with no certificates of its own: it re-exports webpki-roots 1.x, locked at 1.0.10, which drops the emSign root. No 0.26 release past 0.26.11 exists and tokio-tungstenite 0.30 still requires the 0.26 shim." },
 ]
 
 [licenses]

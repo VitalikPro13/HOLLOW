@@ -48,3 +48,10 @@ reason = "libcrux-kem 0.0.9 hybrid KEM panics on short input, via hpke-rs-libcru
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0331"
 reason = "libcrux-kem 0.0.9 hybrid KEM panics on short input, via hpke-rs-libcrux: locked only as hpke-rs's optional libcrux backend, which openmls_rust_crypto never enables, so it is never compiled (cargo deny's feature-resolved graph has no such crate, hence no rust/deny.toml mirror). The fix needs hpke-rs 0.8, which openmls_rust_crypto 0.6 cannot take."
+
+[[PackageOverrides]]
+name = "webpki-roots"
+version = "0.26.11"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "RUSTSEC-2026-0381: a shim with no certificates of its own that re-exports webpki-roots 1.x, locked at 1.0.10 (patched). Scoped to this version so a 1.x below 1.0.10 still fails. See rust/deny.toml."
