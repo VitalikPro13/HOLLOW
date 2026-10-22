@@ -880,7 +880,7 @@ pub(crate) async fn handle_send_channel_message(
     // targeted 0x09 frames. The MLS ciphertext or signed plaintext is decryptable
     // by any member, so one encryption serves both paths. None on the legacy Olm
     // fan-out, where pairwise sessions cannot pre-encrypt without burning ratchets.
-    let offline_wire_bytes: Option<Vec<u8>> = if server.is_channel_public(&channel_id) {
+    let offline_wire_bytes: Option<OfflineCopy> = if server.is_channel_public(&channel_id) {
         // Public channels: plaintext broadcast (no MLS/Olm). Guests receive it too.
         let msg = HavenMessage::PublicChannelMessage {
             server_id: server_id.clone(),
@@ -897,7 +897,7 @@ pub(crate) async fn handle_send_channel_message(
             album: None,
             file_meta: None,
         };
-        send_public_channel_msg(ws_cmd_tx, server, &channel_id, &msg)
+        send_public_channel_msg(ws_cmd_tx, server, &channel_id, &msg).map(|data| (data, None))
     } else {
         let envelope = MessageEnvelope::ChannelMessage {
             inner: Box::new(ChannelMessagePayload {
@@ -1149,6 +1149,10 @@ pub(crate) fn send_public_channel_msg(
     Some(data)
 }
 
+/// A channel post's wire bytes for the offline 0x09 copies, with the MLS save they
+/// wait on (none for a public channel's plaintext).
+type OfflineCopy = (Vec<u8>, Option<crate::crypto::SessionSaved>);
+
 /// Broadcast one non-public channel envelope to the server. MLS path: encrypt once
 /// into a single WS topic broadcast; restricted channels encrypt under their own
 /// per-channel subgroup. Olm per-device fan-out is the fallback on MLS failure and
@@ -1172,7 +1176,7 @@ async fn broadcast_channel_envelope(
     envelope: &MessageEnvelope,
     mls_fail_log: &str,
     bootstrap_subgroup: bool,
-) -> Option<Vec<u8>> {
+) -> Option<OfflineCopy> {
     let use_subgroup = server.channel_uses_subgroup(channel_id);
     let group_key = if use_subgroup {
         crate::crypto::subgroup_id(server_id, channel_id)
@@ -1183,7 +1187,7 @@ async fn broadcast_channel_envelope(
     if use_mls {
         let ring = super::ring_auth::topic(server, channel_id);
         match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, server_id, channel_id, &ring, use_subgroup, envelope, crypto_store, Some(server)) {
-            Ok(wire_bytes) => return Some(wire_bytes),
+            Ok((wire_bytes, saved)) => return Some((wire_bytes, Some(saved))),
             Err(e) => {
                 hollow_log!("[HOLLOW-MLS] {mls_fail_log}: {e}");
                 let envelope_json = serde_json::to_string(envelope).unwrap_or_default();
@@ -1262,7 +1266,7 @@ fn queue_offline_channel_push(
     reply_author: Option<&str>,
     has_everyone: bool,
     mentioned_names: &[String],
-    offline_wire_bytes: &Option<Vec<u8>>,
+    offline_wire_bytes: &Option<OfflineCopy>,
 ) {
     // `server.members` is MASTER-keyed (Step 6). Pick masters who are NOT
     // reachable by ANY of their devices, and who aren't us.
@@ -1296,12 +1300,16 @@ fn queue_offline_channel_push(
             targets.push(member.clone());
         }
         for target in targets {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendChannelDirect {
+            let frame = super::ws_client::WsCommand::SendChannelDirect {
                 room_code: server_id.to_string(),
                 target_peer: target,
                 channel_id: channel_id.to_string(),
                 mention: mentioned,
-                data: offline_wire_bytes.clone().unwrap_or_default(),
+                data: offline_wire_bytes.as_ref().map(|(data, _)| data.clone()).unwrap_or_default(),
+            };
+            let _ = ws_cmd_tx.send(match offline_wire_bytes {
+                Some((_, Some(saved))) => super::ws_client::WsCommand::AfterMlsSave { saved: saved.clone(), frame: Box::new(frame) },
+                _ => frame,
             });
         }
     }
@@ -3401,6 +3409,30 @@ pub(crate) async fn handle_envelope_remove_reaction(
 mod tests {
     use super::*;
     use crate::identity::native_identity::NativeKeypair;
+
+    /// The offline 0x09 copy of an MLS post waits on the post's save, as the room
+    /// frame does; a public post's plaintext copy waits on nothing.
+    #[test]
+    fn an_offline_copy_of_an_mls_post_waits_on_its_save() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_for_test();
+        let olm = OlmManager::new();
+        let mut state = ServerState::new("srv".into(), "s".into(), "me".into());
+        let cid = state.channels.keys().next().unwrap().clone();
+        state.members.insert("away".into(), crate::crdt::server_state::MemberInfo { peer_id: "away".into(), display_name: "away".into() });
+        let peers = HashMap::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mls_copy = Some((b"mls".to_vec(), Some(crate::crypto::SessionSaved::failed())));
+        queue_offline_channel_push(&olm, &tx, &peers, &state, "me", "srv", &cid, None, false, &[], &mls_copy);
+        let cmd = rx.try_recv().expect("a copy for the offline member");
+        assert!(
+            matches!(&cmd, super::super::ws_client::WsCommand::AfterMlsSave { frame, .. } if matches!(**frame, super::super::ws_client::WsCommand::SendChannelDirect { .. })),
+            "an MLS copy skipped the save wait: {cmd:?}"
+        );
+        queue_offline_channel_push(&olm, &tx, &peers, &state, "me", "srv", &cid, None, false, &[], &Some((b"plain".to_vec(), None)));
+        assert!(matches!(rx.try_recv(), Ok(super::super::ws_client::WsCommand::SendChannelDirect { .. })));
+        crate::node::resolver::clear_for_test();
+    }
 
     // ── Deletion propagation through sync (0.8.4) — REJECT-ABSENT ──────
     //

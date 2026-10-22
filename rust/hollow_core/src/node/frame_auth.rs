@@ -273,6 +273,7 @@ pub(crate) fn spawn_sealer(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (carry_tx, carry_rx) = tokio::sync::mpsc::unbounded_channel::<CarryRequest>();
     tokio::spawn(async move {
+        let mut mls_releases = super::olm_lane::MlsReleases::default();
         while let Some(cmd) = rx.recv().await {
             let out = match cmd {
                 WsCommand::Carry { .. } => {
@@ -295,7 +296,7 @@ pub(crate) fn spawn_sealer(
             for cmd in out {
                 #[cfg(test)]
                 super::test_harness::g1_probe::note_olm(&cmd);
-                if let Some(cmd) = super::olm_lane::released(cmd, &carry_tx).await
+                if let Some(cmd) = super::olm_lane::released(cmd, &carry_tx, &mut mls_releases).await
                     && relay.send(seal_command(&keypair, cmd)).is_err()
                 {
                     relay_gone = true;

@@ -1486,21 +1486,23 @@ pub(crate) fn check_backfill_signature(
     }
 }
 
-/// Persist MLS state (signer + credential + storage) via the CryptoStore actor.
+/// Persist what changed in the MLS state via the CryptoStore actor.
 pub(crate) fn persist_mls_state(mls: &MlsManager, crypto_store: &crate::crypto::CryptoStore) {
-    let signer = match mls.signer_bytes() {
-        Ok(s) => s,
-        Err(e) => { hollow_log!("[HOLLOW-MLS] Failed to serialize signer: {e}"); return; }
-    };
-    let cred = match mls.credential_bytes() {
-        Ok(c) => c,
-        Err(e) => { hollow_log!("[HOLLOW-MLS] Failed to serialize credential: {e}"); return; }
-    };
-    let storage = match mls.serialize_storage() {
-        Ok(s) => s,
-        Err(e) => { hollow_log!("[HOLLOW-MLS] Failed to serialize storage: {e}"); return; }
-    };
-    crypto_store.save_mls_identity(signer, cred, storage);
+    let _ = persist_mls_state_awaited(mls, crypto_store);
+}
+
+/// [`persist_mls_state`], and hear when the save is on disk: a frame encrypted from
+/// this state leaves only then (AR-30), so a crash never sends from a ratchet step a
+/// frame on the wire already used.
+pub(crate) fn persist_mls_state_awaited(mls: &MlsManager, crypto_store: &crate::crypto::CryptoStore) -> crate::crypto::SessionSaved {
+    let save = if crypto_store.take_mls_resync() { mls.take_whole_save() } else { mls.take_save() };
+    match save {
+        Ok(save) => crypto_store.save_mls(save),
+        Err(e) => {
+            hollow_log!("[HOLLOW-MLS] Failed to build the MLS save: {e}");
+            crate::crypto::SessionSaved::failed()
+        }
+    }
 }
 
 /// Mint a KeyPackage AND persist the MLS state that holds its private half.
@@ -2583,12 +2585,12 @@ pub(crate) fn send_mls_broadcast_in(
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(&group_key, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
-    // MLS rule: persist on encrypt. A regressed SEND ratchet re-uses generations
-    // receivers already consumed, so every live message then fails with
-    // SecretTreeError(TooDistantInThePast) on the other side. A 2s debounce here
-    // wedged live channel messages from mobile senders exactly that way; do not
-    // retry it.
-    persist_mls_state(mls, crypto_store);
+    // MLS rule: persist on encrypt, and the frame waits for the save. A regressed SEND
+    // ratchet re-uses generations receivers already consumed, so every live message
+    // then fails with SecretTreeError(TooDistantInThePast) on the other side. A 2s
+    // debounce here wedged live channel messages from mobile senders exactly that way;
+    // do not retry it.
+    let saved = persist_mls_state_awaited(mls, crypto_store);
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),
         body: body_b64,
@@ -2597,10 +2599,8 @@ pub(crate) fn send_mls_broadcast_in(
     let data = serde_json::to_vec(&msg).map_err(|e| format!("serialize msg: {e}"))?;
     #[cfg(test)]
     super::test_harness::g1_probe::note_inner(&data, &json);
-    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-        room_code: server_id.to_string(),
-        data,
-    });
+    let frame = super::ws_client::WsCommand::SendToRoom { room_code: server_id.to_string(), data };
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::AfterMlsSave { saved, frame: Box::new(frame) });
     Ok(())
 }
 
@@ -2636,7 +2636,8 @@ pub(crate) fn mls_envelope_fits_group(
 ///
 /// Returns the serialized wire bytes so callers can re-deliver the SAME
 /// ciphertext to offline members over 0x09: an MLS application message is
-/// decryptable by every member, so one encryption serves both paths.
+/// decryptable by every member, so one encryption serves both paths. Each copy
+/// waits on the returned save, as the room frame does.
 ///
 /// `use_subgroup` encrypts under the per-channel subgroup and stamps
 /// `channel_id` so the receiver decrypts under the same one. `ring` is the relay
@@ -2652,7 +2653,7 @@ pub(crate) fn send_mls_broadcast_topic(
     envelope: &MessageEnvelope,
     crypto_store: &CryptoStore,
     seats: Option<&crate::crdt::server_state::ServerState>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, crate::crypto::SessionSaved), String> {
     let group_key = if use_subgroup {
         crate::crypto::subgroup_id(server_id, channel)
     } else {
@@ -2663,9 +2664,9 @@ pub(crate) fn send_mls_broadcast_topic(
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(&group_key, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
-    // MLS rule: persist on encrypt — send-side ratchet state must never be
-    // debounced (see send_mls_broadcast for the full why).
-    persist_mls_state(mls, crypto_store);
+    // MLS rule: persist on encrypt, the frame waits for the save (see
+    // send_mls_broadcast_in for the full why).
+    let saved = persist_mls_state_awaited(mls, crypto_store);
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),
         body: body_b64,
@@ -2675,44 +2676,13 @@ pub(crate) fn send_mls_broadcast_topic(
     #[cfg(test)]
     super::test_harness::g1_probe::note_inner(&data, &json);
     hollow_log!("[HOLLOW-TOPIC] Broadcast room={server_id} topic={ring} group={group_key} ({} bytes)", data.len());
-    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
+    let frame = super::ws_client::WsCommand::SendToRoomTopic {
         room_code: server_id.to_string(),
         topic: ring.to_string(),
         data: data.clone(),
-    });
-    Ok(data)
-}
-
-/// MLS-encrypt a targeted envelope and broadcast to the server room.
-/// All members decrypt (keeping ratchets in sync) but only `target_peer` acts.
-/// Retained for backward compatibility — new code uses Olm+SendDirect instead.
-#[allow(dead_code)]
-pub(crate) fn send_mls_to_peer(
-    mls: &mut MlsManager,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    server_id: &str,
-    target_peer: &str,
-    envelope: &MessageEnvelope,
-    crypto_store: &CryptoStore,
-) -> Result<(), String> {
-    let mut json_value = serde_json::to_value(envelope).map_err(|e| format!("serialize: {e}"))?;
-    if let Some(obj) = json_value.as_object_mut() {
-        obj.insert("target".to_string(), serde_json::Value::String(target_peer.to_string()));
-    }
-    let json = serde_json::to_string(&json_value).map_err(|e| format!("re-serialize: {e}"))?;
-    let ciphertext = mls.encrypt(server_id, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
-    let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
-    let msg = HavenMessage::MlsChannelMessage {
-        server_id: server_id.to_string(),
-        body: body_b64,
-        channel_id: None,
     };
-    let data = serde_json::to_vec(&msg).map_err(|e| format!("serialize msg: {e}"))?;
-    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-        room_code: server_id.to_string(),
-        data,
-    });
-    Ok(())
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::AfterMlsSave { saved: saved.clone(), frame: Box::new(frame) });
+    Ok((data, saved))
 }
 
 /// Encrypt and send a message to a peer via WS relay.
@@ -6085,5 +6055,32 @@ mod tests {
         assert!(!asked && minted == 0 && rx.try_recv().is_err(),
             "a second repair was asked (minted {minted}, before {before}) while the first one's Welcome waits");
         super::super::resolver::clear_all();
+    }
+}
+
+/// A failed MLS save took its rows off the changed list: the next one writes the store whole.
+#[cfg(test)]
+mod g13_mls_saves {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn after_a_failed_save_the_next_one_is_whole() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("m.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        let (mut mls, _) = crate::crypto::mls_manager_test_keys::bound(1, 2);
+        mls.create_group("srv").unwrap();
+        let soon = std::time::Duration::from_secs(10);
+        assert_eq!(persist_mls_state_awaited(&mls, &store).settled(soon).await, crate::crypto::Saved::Stored);
+        let stored = || crate::storage::MessageStore::open(&path, &pass).unwrap().load_mls_rows().unwrap().len();
+        let all = stored();
+        assert!(all > 0);
+        crate::storage::MessageStore::open(&path, &pass).unwrap().delete_mls_rows_for_test();
+        store.want_mls_resync();
+        mls.encrypt("srv", b"x").unwrap();
+        assert_eq!(persist_mls_state_awaited(&mls, &store).settled(soon).await, crate::crypto::Saved::Stored);
+        assert_eq!(stored(), all, "the save after a failure wrote only what changed");
     }
 }

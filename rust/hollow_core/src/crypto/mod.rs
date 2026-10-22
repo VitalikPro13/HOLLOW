@@ -1,4 +1,6 @@
 mod mls_manager;
+mod mls_past;
+pub(crate) mod mls_storage;
 #[cfg(test)]
 mod mls_scale_probe;
 mod olm_manager;
@@ -13,6 +15,8 @@ pub(crate) use mls_manager::{
 pub(crate) use mls_manager::{subgroup_id, KEY_PACKAGE_MAX_AGE};
 #[cfg(test)]
 pub(crate) use mls_manager::certificate_for_test;
+#[cfg(test)]
+pub(crate) use mls_manager::test_keys as mls_manager_test_keys;
 pub(crate) use mls_manager::split_group_key;
 pub(crate) use olm_manager::OlmManager;
 pub(crate) use store::{CryptoStore, Saved, SessionSaved};

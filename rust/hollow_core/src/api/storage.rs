@@ -2898,6 +2898,9 @@ mod tests {
             store.save_olm_account("{\"account\":1}").unwrap();
             store.save_olm_session("peer", "{\"session\":1}", 1, 0).unwrap();
             store.save_mls_identity(b"signer", b"credential", b"storage").unwrap();
+            let rows = vec![(String::new(), b"Tree-row".to_vec(), Some(b"group state".to_vec()))];
+            let save = crate::crypto::mls_storage::MlsSave { signer: b"signer".to_vec(), rows, ..Default::default() };
+            store.save_mls_state(&save).unwrap();
             store.save_setting("recovery_mnemonic", "abandon abandon about").unwrap();
             store.save_setting("kept", "yes").unwrap();
             store.wal_checkpoint().unwrap();
@@ -2913,6 +2916,9 @@ mod tests {
             }
             if store.load_mls_identity().unwrap().is_some() {
                 left.push("mls identity");
+            }
+            if !store.load_mls_rows().unwrap().is_empty() {
+                left.push("mls rows");
             }
             if store.load_setting("recovery_mnemonic").unwrap().is_some() {
                 left.push("recovery phrase");
@@ -2930,7 +2936,7 @@ mod tests {
         let exported_path = out.path().join("exported.db");
         std::fs::write(&exported_path, exported).unwrap();
         assert_eq!(secrets(&exported_path), Vec::<&str>::new(), "the export carries device secrets");
-        assert_eq!(secrets(&db).len(), 4, "the live database keeps its own");
+        assert_eq!(secrets(&db).len(), 5, "the live database keeps its own");
 
         // A transfer's temp file never travels, and what does an import takes back whole.
         std::fs::create_dir_all(tmp.path().join("files")).unwrap();

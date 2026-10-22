@@ -1,0 +1,326 @@
+{
+ "_": [
+  "g13-s2 MLS smoke, part one, on two throwaway peers: a makes a server, b joins,",
+  "they talk in #general, a kicks b and b rejoins (two epoch changes), and they talk again.",
+  "Part two (g13s2_mls_b) runs after a restarts."
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "b",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_B"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "g13s2-smoke"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:g13s2-smoke",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "g13s2-smoke"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:g13s2-smoke"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "server:g13s2-smoke",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "g13s2-smoke"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "key:member:${PEER_B}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "first from a ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:first from a ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "first from b ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:first from b ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "g13s2-01-talking"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "a kicks b and b rejoins: two commits move the epoch"
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "key:member:${PEER_B}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Kick member",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "dialog > text:Kick",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Kick",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "key:member:${PEER_B}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "server:g13s2-smoke",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "server:g13s2-smoke",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "g13s2-smoke"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "key:member:${PEER_B}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "after the epoch change from a ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:after the epoch change from a ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "after the epoch change from b ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:after the epoch change from b ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "g13s2-02-after-epoch"
+  },
+  {
+   "peer": "all",
+   "op": "dump",
+   "name": "g13s2-a"
+  }
+ ]
+}

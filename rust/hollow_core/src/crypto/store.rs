@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
 
+use super::mls_storage::MlsSave;
 use super::olm_manager::{SessionVersion, StoredSession};
 use crate::storage::MessageStore;
 
@@ -13,7 +16,8 @@ pub(crate) enum CryptoStoreCmd {
     SaveSession { peer_id: String, pickle: String, version: SessionVersion, saved: Option<watch::Sender<Saved>> },
     DeleteSession { peer_id: String },
     SaveReadMark { peer_id: String, sealed_ms: i64 },
-    SaveMlsIdentity { signer: Vec<u8>, credential: Vec<u8>, storage: Vec<u8> },
+    /// The MLS rows changed since the last save; `saved` as for a session save.
+    SaveMls { save: MlsSave, saved: Option<watch::Sender<Saved>> },
     /// The stored sessions that came further than `held`, and every read mark.
     ReadNewer { held: HashMap<String, SessionVersion>, reply: oneshot::Sender<Newer> },
     /// Answered once everything queued before it was written.
@@ -39,9 +43,9 @@ pub(crate) enum Saved {
     Failed,
 }
 
-/// One session save an Olm frame waits for before it may leave the process (AR-30):
-/// a frame on the wire whose session state a crash can lose would let the next
-/// encrypt after a restart reuse its message key.
+/// One state save a frame waits for before it may leave the process (AR-30): a frame
+/// on the wire whose Olm session or MLS group state a crash can lose would let the
+/// next encrypt after a restart reuse its message key.
 #[derive(Clone, Debug)]
 pub(crate) struct SessionSaved(watch::Receiver<Saved>);
 
@@ -53,6 +57,11 @@ impl SessionSaved {
             Ok(Err(_)) => Saved::Failed,
             Err(_) => Saved::Pending,
         }
+    }
+
+    /// Whether `other` waits on the same save.
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        self.0.same_channel(&other.0)
     }
 
     /// A save that can never settle as stored: nothing could be queued.
@@ -70,26 +79,17 @@ impl SessionSaved {
 /// Commands the actor takes off its queue at once before writing.
 const WRITE_BATCH: usize = 64;
 
-/// A batch as the actor writes it: in order, except that only its newest MLS snapshot
-/// is written, last. Each snapshot is the whole state, so the older ones are moot.
-fn coalesce(batch: Vec<CryptoStoreCmd>) -> Vec<CryptoStoreCmd> {
-    let mut newest_mls = None;
-    let mut out: Vec<CryptoStoreCmd> = batch
-        .into_iter()
-        .filter_map(|cmd| match cmd {
-            CryptoStoreCmd::SaveMlsIdentity { .. } => {
-                newest_mls = Some(cmd);
-                None
-            }
-            other => Some(other),
-        })
-        .collect();
-    out.extend(newest_mls);
-    out
+/// What the actor knows of the MLS rows on disk: once a save failed, every later save
+/// taken as a change on top of it is refused until a whole one lands.
+#[derive(Default)]
+struct MlsDisk {
+    broken: bool,
 }
 
-/// Write one command; a session save returns its outcome and who waits for it.
-fn write(store: &MessageStore, cmd: CryptoStoreCmd) -> Option<(watch::Sender<Saved>, Saved)> {
+/// Write one command; a waited-on save returns its outcome and who waits for it. A
+/// failed MLS save raises `mls_resync`: its rows are no longer marked changed, so only
+/// a whole save brings the store back.
+fn write(store: &MessageStore, cmd: CryptoStoreCmd, mls_resync: &AtomicBool, mls: &mut MlsDisk) -> Option<(watch::Sender<Saved>, Saved)> {
     match cmd {
         CryptoStoreCmd::SaveAccount(pickle) => {
             if let Err(e) = store.save_olm_account(&pickle) {
@@ -121,10 +121,26 @@ fn write(store: &MessageStore, cmd: CryptoStoreCmd) -> Option<(watch::Sender<Sav
                 hollow_log!("CryptoStore: failed to save read mark for {peer_id}: {e}");
             }
         }
-        CryptoStoreCmd::SaveMlsIdentity { signer, credential, storage } => {
-            if let Err(e) = store.save_mls_identity(&signer, &credential, &storage) {
-                hollow_log!("CryptoStore: failed to save MLS identity: {e}");
-            }
+        CryptoStoreCmd::SaveMls { save, saved } => {
+            let whole = save.retain_only.is_some();
+            let outcome = if mls.broken && !whole {
+                mls_resync.store(true, Ordering::Relaxed);
+                Saved::Failed
+            } else {
+                match store.save_mls_state(&save) {
+                    Ok(()) => {
+                        mls.broken = false;
+                        Saved::Stored
+                    }
+                    Err(e) => {
+                        hollow_log!("CryptoStore: failed to save MLS state: {e}");
+                        mls.broken = true;
+                        mls_resync.store(true, Ordering::Relaxed);
+                        Saved::Failed
+                    }
+                }
+            };
+            return saved.map(|tx| (tx, outcome));
         }
         // The actor answers these apart from the writes.
         CryptoStoreCmd::ReadNewer { .. } | CryptoStoreCmd::Flush(_) => {}
@@ -155,15 +171,20 @@ fn read_newer(store: &MessageStore, held: &HashMap<String, SessionVersion>) -> N
 
 /// Write a batch inside one transaction, so one commit covers it, and tell each
 /// waiting frame what became of its save only once the commit returned.
-fn write_batch(store: &MessageStore, batch: Vec<CryptoStoreCmd>) {
+fn write_batch(store: &MessageStore, batch: Vec<CryptoStoreCmd>, mls_resync: &AtomicBool, mls: &mut MlsDisk) {
     let in_transaction = store.begin_transaction().is_ok();
+    let has_mls = batch.iter().any(|cmd| matches!(cmd, CryptoStoreCmd::SaveMls { .. }));
     let mut outcomes = Vec::new();
-    for cmd in coalesce(batch) {
-        outcomes.extend(write(store, cmd));
+    for cmd in batch {
+        outcomes.extend(write(store, cmd, mls_resync, mls));
     }
     if in_transaction && let Err(e) = store.commit_transaction() {
         hollow_log!("CryptoStore: batch not committed: {e}");
         let _ = store.rollback_transaction();
+        if has_mls {
+            mls.broken = true;
+            mls_resync.store(true, Ordering::Relaxed);
+        }
         for (_, outcome) in outcomes.iter_mut() {
             *outcome = Saved::Failed;
         }
@@ -179,18 +200,22 @@ fn write_batch(store: &MessageStore, batch: Vec<CryptoStoreCmd>) {
 /// in-memory `OlmManager` is authoritative; the DB only survives restarts.
 pub(crate) struct CryptoStore {
     cmd_tx: mpsc::UnboundedSender<CryptoStoreCmd>,
+    mls_resync: Arc<AtomicBool>,
 }
 
 impl CryptoStore {
     /// Spawn the persistence actor. Opens its own DB connection.
     pub fn open(db_path: String, passphrase: String) -> Result<Self, String> {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<CryptoStoreCmd>();
+        let mls_resync = Arc::new(AtomicBool::new(false));
+        let resync = mls_resync.clone();
 
         tokio::task::spawn_blocking(move || {
             let store = match MessageStore::open(&db_path, &passphrase) {
                 Ok(s) => s,
                 Err(e) => {
                     hollow_log!("CryptoStore: failed to open DB: {e}");
+                    resync.store(true, Ordering::Relaxed);
                     return;
                 }
             };
@@ -201,6 +226,7 @@ impl CryptoStore {
             let _held = held_saves::Guard(db_path.clone());
 
             let mut backlog = crate::sentinel::BacklogLatch::new("crypto_store", 256);
+            let mut mls_disk = MlsDisk::default();
             while let Some(first) = cmd_rx.blocking_recv() {
                 backlog.observe(cmd_rx.len());
                 let mut batch = vec![first];
@@ -225,7 +251,7 @@ impl CryptoStore {
                 #[cfg(test)]
                 let writes = held_saves::intercept(&db_path, writes);
                 if !writes.is_empty() {
-                    write_batch(&store, writes);
+                    write_batch(&store, writes, &resync, &mut mls_disk);
                 }
                 for done in flushes {
                     let _ = done.send(());
@@ -233,7 +259,7 @@ impl CryptoStore {
             }
         });
 
-        Ok(CryptoStore { cmd_tx })
+        Ok(CryptoStore { cmd_tx, mls_resync })
     }
 
     /// Fire-and-forget: persist the account pickle.
@@ -265,11 +291,23 @@ impl CryptoStore {
         let _ = self.cmd_tx.send(CryptoStoreCmd::SaveReadMark { peer_id, sealed_ms });
     }
 
-    /// Fire-and-forget: persist MLS identity (signer, credential, storage).
-    pub fn save_mls_identity(&self, signer: Vec<u8>, credential: Vec<u8>, storage: Vec<u8>) {
-        let _ = self.cmd_tx.send(CryptoStoreCmd::SaveMlsIdentity {
-            signer, credential, storage,
-        });
+    /// Persist an MLS save and hear what became of it.
+    pub fn save_mls(&self, save: MlsSave) -> SessionSaved {
+        let (tx, rx) = watch::channel(Saved::Pending);
+        if self.cmd_tx.send(CryptoStoreCmd::SaveMls { save, saved: Some(tx) }).is_err() {
+            self.mls_resync.store(true, Ordering::Relaxed);
+        }
+        SessionSaved(rx)
+    }
+
+    /// Whether an MLS save failed since the last ask, so the next must be a whole one.
+    pub fn take_mls_resync(&self) -> bool {
+        self.mls_resync.swap(false, Ordering::Relaxed)
+    }
+
+    /// Ask for the next MLS save to be a whole one.
+    pub fn want_mls_resync(&self) {
+        self.mls_resync.store(true, Ordering::Relaxed);
     }
 
     /// Whether everything queued so far was written within `within`, so the Olm frames
@@ -299,6 +337,7 @@ pub(crate) mod held_saves {
     #[derive(Default)]
     struct Held {
         holding: bool,
+        holding_mls: bool,
         saves: Vec<CryptoStoreCmd>,
     }
 
@@ -314,18 +353,24 @@ pub(crate) mod held_saves {
         with(|held| held.entry(db_path.to_string()).or_default().holding = true);
     }
 
+    /// Hold every MLS save to `db_path` from now on.
+    pub(crate) fn hold_mls(db_path: &str) {
+        with(|held| held.entry(db_path.to_string()).or_default().holding_mls = true);
+    }
+
     /// Stop holding and write what was held, in order, through a connection of our own.
     pub(crate) fn release(db_path: &str, passphrase: &str) {
         let saves = with(|held| match held.get_mut(db_path) {
             Some(h) => {
                 h.holding = false;
+                h.holding_mls = false;
                 std::mem::take(&mut h.saves)
             }
             None => Vec::new(),
         });
         if !saves.is_empty() {
             let store = MessageStore::open(db_path, passphrase).expect("open the held store");
-            write_batch(&store, saves);
+            write_batch(&store, saves, &AtomicBool::new(false), &mut MlsDisk::default());
         }
     }
 
@@ -336,9 +381,13 @@ pub(crate) mod held_saves {
 
     pub(super) fn intercept(db_path: &str, writes: Vec<CryptoStoreCmd>) -> Vec<CryptoStoreCmd> {
         with(|held| match held.get_mut(db_path) {
-            Some(h) if h.holding => {
-                let (saves, rest): (Vec<_>, Vec<_>) =
-                    writes.into_iter().partition(|cmd| matches!(cmd, CryptoStoreCmd::SaveSession { .. }));
+            Some(h) if h.holding || h.holding_mls => {
+                let (session, mls) = (h.holding, h.holding_mls);
+                let (saves, rest): (Vec<_>, Vec<_>) = writes.into_iter().partition(|cmd| match cmd {
+                    CryptoStoreCmd::SaveSession { .. } => session,
+                    CryptoStoreCmd::SaveMls { .. } => mls,
+                    _ => false,
+                });
                 h.saves.extend(saves);
                 rest
             }
@@ -359,29 +408,6 @@ pub(crate) mod held_saves {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// C-MLS-08: every send queues a full MLS snapshot, and only the newest of a batch
-    /// is worth writing; everything else keeps its order.
-    #[test]
-    fn queued_mls_snapshots_coalesce_to_the_newest() {
-        let mls = |tag: u8| CryptoStoreCmd::SaveMlsIdentity { signer: vec![tag], credential: vec![], storage: vec![] };
-        let written = coalesce(vec![
-            mls(1),
-            CryptoStoreCmd::SaveSession { peer_id: "a".into(), pickle: "p".into(), version: SessionVersion::default(), saved: None },
-            mls(2),
-            CryptoStoreCmd::SaveAccount("acct".into()),
-        ]);
-        let shape: Vec<String> = written
-            .iter()
-            .map(|cmd| match cmd {
-                CryptoStoreCmd::SaveMlsIdentity { signer, .. } => format!("mls{}", signer[0]),
-                CryptoStoreCmd::SaveSession { peer_id, .. } => format!("session {peer_id}"),
-                CryptoStoreCmd::SaveAccount(_) => "account".to_string(),
-                _ => "other".to_string(),
-            })
-            .collect();
-        assert_eq!(shape, vec!["session a", "account", "mls2"]);
-    }
 
     fn v(sends: u64, reads: u64) -> SessionVersion {
         SessionVersion { sends, reads }
@@ -414,6 +440,80 @@ mod tests {
         assert_eq!(older.settled(SOON).await, Saved::Refused, "an older copy must not count as saved");
         let again = store.save_session_awaited("bob".into(), "p1".into(), v(1, 0));
         assert_eq!(again.settled(SOON).await, Saved::Stored, "the same state saved again is on disk");
+    }
+
+    fn mls_save(value: &[u8]) -> MlsSave {
+        MlsSave {
+            signer: b"signer".to_vec(),
+            credential: b"credential".to_vec(),
+            rows: vec![(String::new(), b"row".to_vec(), Some(value.to_vec()))],
+            ..Default::default()
+        }
+    }
+
+    /// An MLS frame waits on this: stored only once its rows are on disk, and saves
+    /// land in the order they were taken.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_mls_save_says_stored_only_once_its_rows_are_on_disk() {
+        let (_tmp, path, pass) = temp_db();
+        let store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        held_saves::hold_mls(&path);
+        let first = store.save_mls(mls_save(b"one"));
+        let second = store.save_mls(mls_save(b"two"));
+        assert_eq!(second.clone().settled(Duration::from_millis(400)).await, Saved::Pending, "settled before it was written");
+        assert!(MessageStore::open(&path, &pass).unwrap().load_mls_rows().unwrap().is_empty());
+        held_saves::release(&path, &pass);
+        assert_eq!(first.settled(SOON).await, Saved::Stored);
+        assert_eq!(second.settled(SOON).await, Saved::Stored);
+        let rows = MessageStore::open(&path, &pass).unwrap().load_mls_rows().unwrap();
+        assert_eq!(rows, vec![(String::new(), b"row".to_vec(), b"two".to_vec())]);
+        assert!(!store.take_mls_resync());
+    }
+
+    /// A save that did not land took its rows off the changed list, so the next save
+    /// must be a whole one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_mls_save_asks_for_a_whole_one() {
+        let (_tmp, path, _pass) = temp_db();
+        let wrong_key = CryptoStore::open(path, "00".repeat(32)).unwrap();
+        assert_eq!(wrong_key.save_mls(mls_save(b"lost")).settled(SOON).await, Saved::Failed);
+        assert!(wrong_key.take_mls_resync(), "a lost save went unnoticed");
+        assert!(!wrong_key.take_mls_resync(), "asked once");
+    }
+
+    /// After a failed save, a change taken on top of it is refused until a whole save
+    /// lands, and a failed save leaves none of its rows behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn after_a_failed_mls_save_only_a_whole_one_lands() {
+        let (_tmp, path, pass) = temp_db();
+        let store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        let disk = || MessageStore::open(&path, &pass).unwrap();
+        assert!(store.flushed(SOON).await);
+        // Rows past the first fail: the identity and the first row must not land either.
+        disk().conn_execute_for_test("CREATE TRIGGER no_bad BEFORE INSERT ON mls_storage WHEN NEW.k = X'626164' BEGIN SELECT RAISE(ABORT, 'refused'); END;");
+        let mut half = mls_save(b"one");
+        half.rows.push((String::new(), b"bad".to_vec(), Some(b"x".to_vec())));
+        assert_eq!(store.save_mls(half).settled(SOON).await, Saved::Failed);
+        assert!(disk().load_mls_rows().unwrap().is_empty(), "a failed save left rows behind");
+        assert!(disk().load_mls_identity().unwrap().is_none(), "a failed save left its identity behind");
+        assert_eq!(store.save_mls(mls_save(b"two")).settled(SOON).await, Saved::Failed, "a change on top of a failed save landed");
+        assert!(disk().load_mls_rows().unwrap().is_empty());
+        let mut whole = mls_save(b"three");
+        whole.retain_only = Some(vec![String::new()]);
+        assert_eq!(store.save_mls(whole).settled(SOON).await, Saved::Stored);
+        assert_eq!(store.save_mls(mls_save(b"four")).settled(SOON).await, Saved::Stored, "the whole save did not clear the failure");
+        assert_eq!(disk().load_mls_rows().unwrap(), vec![(String::new(), b"row".to_vec(), b"four".to_vec())]);
+    }
+
+    /// A store that opens but cannot write the rows says so, and asks for a whole save.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_mls_write_that_fails_asks_for_a_whole_save() {
+        let (_tmp, path, pass) = temp_db();
+        let store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        assert!(store.flushed(SOON).await);
+        MessageStore::open(&path, &pass).unwrap().drop_mls_rows_table_for_test();
+        assert_eq!(store.save_mls(mls_save(b"lost")).settled(SOON).await, Saved::Failed);
+        assert!(store.take_mls_resync(), "a lost save went unnoticed");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

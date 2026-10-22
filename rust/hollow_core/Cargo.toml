@@ -74,6 +74,8 @@ zeroize = { version = "1", features = ["derive"] }
 blind-rsa-signatures = "=0.17.2"
 bs58 = "0.5"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# Packed MLS past epochs (crypto/mls_past.rs); already in the tree through zip and png.
+flate2 = "1"
 argon2 = "0.5"
 # Meeting knock proofs (node/conference.rs); already in the tree through openmls.
 hmac = "0.12"

@@ -1,0 +1,179 @@
+{
+ "_": [
+  "g13-s2 MLS smoke, part two: after a restarted mid-conversation, a and b talk",
+  "again in the server part one made, then a deletes it."
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:g13s2-smoke",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "g13s2-smoke"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "g13s2-smoke"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "after the restart from a ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:after the restart from a ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "second after the restart from a ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:second after the restart from a ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "after the restart from b ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:after the restart from b ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "g13s2-03-after-restart"
+  },
+  {
+   "peer": "all",
+   "op": "dump",
+   "name": "g13s2-b"
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:g13s2-smoke"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Server settings"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "server:g13s2-smoke",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "server:g13s2-smoke",
+   "timeout_ms": 90000
+  }
+ ]
+}

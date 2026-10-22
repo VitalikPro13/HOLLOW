@@ -266,7 +266,18 @@ CREATE TABLE IF NOT EXISTS mls_identity (
 )
 ```
 
-Singleton row. Stores OpenMLS signer, credential, and provider storage as binary blobs.
+Singleton row. Stores OpenMLS signer and credential; `storage_data` is the pre-0.13 whole store, NULL once the first 0.13 save moved it to `mls_storage`.
+
+```sql
+CREATE TABLE IF NOT EXISTS mls_storage (
+    scope TEXT NOT NULL,   -- '' live store, 'past:{epoch}:{group}' a kept past epoch
+    k     BLOB NOT NULL,
+    v     BLOB NOT NULL,
+    PRIMARY KEY (scope, k)
+) WITHOUT ROWID
+```
+
+The OpenMLS store by row (`openmls_memory_storage` keys and values unchanged). Device-bound: `scrub_device_secrets` and `clear_mls_identity` empty it with `mls_identity`.
 
 - `messages.rs:save_mls_identity()` -- Upsert all three blobs.
 - `messages.rs:load_mls_identity()` -- Returns `Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)>`.

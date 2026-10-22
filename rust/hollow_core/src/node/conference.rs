@@ -989,13 +989,14 @@ pub(crate) fn send_group_line(
             return false;
         }
     };
-    // MLS rule: persist on encrypt (send ratchet must never be debounced).
-    persist_mls_state(mls_mgr, crypto_store);
+    // MLS rule: persist on encrypt, and the frame waits for the save.
+    let saved = super::crypto_handler::persist_mls_state_awaited(mls_mgr, crypto_store);
     let data = serde_json::to_vec(&HavenMessage::ConferenceChat {
         conf_id: conf_id.to_string(),
         body: base64::engine::general_purpose::STANDARD.encode(ciphertext),
     }).unwrap_or_default();
-    let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: sid, data });
+    let frame = WsCommand::SendToRoom { room_code: sid, data };
+    let _ = ws_cmd_tx.send(WsCommand::AfterMlsSave { saved, frame: Box::new(frame) });
     true
 }
 

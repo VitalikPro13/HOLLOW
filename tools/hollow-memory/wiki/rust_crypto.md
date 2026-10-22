@@ -111,9 +111,9 @@ Called after every encrypt/decrypt operation to ensure the ratchet state survive
 
 `crypto_handler:persist_mls_state(mls, crypto_store)`
 
-Serializes three blobs (signer, credential, MemoryStorage) and sends them to the `CryptoStore` fire-and-forget actor for writing to SQLCipher. Previously used direct `MessageStore` calls; now uses the CryptoStore mpsc actor for consistency.
+Sends the CryptoStore actor an `MlsSave`: the signer, the credential and ONLY the store rows that changed since the last save (0.13, G1 scale fix 5; it used to write the whole store, every group, per sent message: 5 MB at a 1k server). `crypto/mls_storage.rs` `TrackedStorage` wraps `openmls_memory_storage` and notes the row key every write touches (a test-only check after each write fails if any other row changed). A failed save raises `CryptoStore::take_mls_resync`, and the next save is a whole one. `persist_mls_state_awaited` returns the save's `SessionSaved`.
 
-**CRITICAL:** Must be called after every MLS encrypt AND decrypt. The MLS secret tree advances on encrypt — if not persisted, app restart reuses the old generation, causing `SecretReuseError` on the receiving peer. Both `send_mls_broadcast` and `send_mls_broadcast_topic` call this immediately after `mls.encrypt()`.
+**CRITICAL:** Must be called after every MLS encrypt AND decrypt. The MLS secret tree advances on encrypt — if not persisted, app restart reuses the old generation, causing `SecretReuseError` on the receiving peer. `send_mls_broadcast_in`, `send_mls_broadcast_topic` and the meeting chat (`conference::send_group_line`) send their frame as `WsCommand::AfterMlsSave`: the sealing stage releases it only once the save is on disk; when it does not land the sealer asks the node for a whole save (`WsCommand::MlsSaveAgain`; any later save covers the frame) and gives the frame up only after 3 such saves failed. The offline 0x09 copies of a post wait on the same save (`olm_lane::MlsReleases` waits once per save). The MLS twin of AR-30. In the CryptoStore each save is one SAVEPOINT, and after a failed one every later save taken as a change is refused until a whole save lands.
 
 ### MLS Broadcast Encryption
 
@@ -486,7 +486,7 @@ Restores from SQLCipher-persisted state:
 
 `MlsManager:credential_bytes() -> Result<Vec<u8>, String>` — serde JSON of the `CredentialWithKey`.
 
-`MlsManager:serialize_storage() -> Result<Vec<u8>, String>` — binary blob of the provider's MemoryStorage. Format: `u64 entry_count` followed by `(u64 key_len, u64 value_len, key_bytes, value_bytes)` for each entry. All integers big-endian.
+`MlsManager:take_save() / take_whole_save() -> Result<MlsSave, String>` — the changed rows (or every row, replacing what is stored for this manager's scopes). `serialize_storage()` (test-only) still writes the pre-0.13 blob: `u64 entry_count` followed by `(u64 key_len, u64 value_len, key_bytes, value_bytes)`, big-endian.
 
 ### KeyPackage Generation
 
@@ -692,12 +692,11 @@ Both are called from `crypto_handler:persist_crypto_state()` after every Olm enc
 
 ## MLS Persistence (via MessageStore)
 
-MLS state is persisted via the CryptoStore fire-and-forget actor from `crypto_handler:persist_mls_state()`. This writes three blobs to SQLCipher:
-- **signer_bytes** — serde JSON of the `SignatureKeyPair`
-- **credential_bytes** — serde JSON of the `CredentialWithKey`
-- **storage_blob** — binary serialization of the OpenMLS MemoryStorage HashMap
+MLS state is persisted via the CryptoStore actor from `crypto_handler:persist_mls_state()`: the signer and credential blobs in `mls_identity`, the store by row in `mls_storage` (scope `''` = the live store, `past:{epoch}:{group}` = a kept past epoch). A 0.12 database still holds the whole store in `mls_identity.storage_data`; it loads, and the first save writes every row and sets the blob NULL.
 
-On startup, `MlsManager::from_persisted()` restores from these blobs and loads MLS groups from the provider storage by server_id.
+On startup, `MlsManager::load_from(store, group_keys)` restores the rows (laid over a leftover blob) and loads the named groups; a push fetch reads only its server's past epochs (`load_mls_rows_in`), the others stay on disk untouched.
+
+**Past epochs (0.13, G1 scale fix 4):** OpenMLS's own `max_past_epochs` window kept each past epoch's member list inside the message secrets it rewrites on EVERY message (63 ms per message at 1k members, 0.6 s at 10k). The groups now run `max_past_epochs(0)`, and every merge (`merge_pending_commit`, an accepted or held commit) first copies the group's rows into a store of their own (`crypto/mls_past.rs`, 3 per group); a frame from an older epoch opens there (`decrypt_fresh`), against that epoch's tree. The copy never holds epoch key pairs, its group state is stored as `Operational` (mid-merge it is our staged commit, which holds the NEXT epoch's secrets and path keys), its init, exporter, external and resumption secrets are zeroed, and its message secrets live beside the packed row, so a late frame's consumed keys leave the disk. An unpacked copy leaves RAM after 10 idle minutes. Any NEW merge path must go through `PastEpochs::capture` + `keep`, else frames from the epoch before it stop opening. At the upgrade from 0.12.2 the past epochs OpenMLS kept are dropped once (channel sync serves those frames). A blob in `mls_identity.storage_data` always wins over rows (a 0.12 build ran after a downgrade); the first save replaces the rows.
 
 **Multi-device regeneration (Step 6, swarm.rs MLS load block):** after restoring, the node checks `mgr.credential_identity()`. If the credential isn't ours — `cred != device_peer_id && (cred != master_peer_str || has_sibling)` where `has_sibling = devices_for(master).any(!= our device)` — it `clear_mls_identity()`s and mints a FRESH one (a linked sibling inherited the source device's identity). A LEGACY SOLE single-device install (no siblings, cred == master) is kept untouched — re-keying its leaf would orphan servers it owns. `import_pending_link` (api/storage.rs) ALSO clears the inherited MLS identity right after a link import (deterministic, primary path). `MessageStore::clear_mls_identity()` deletes the singleton row. See `feedback_mls_sibling_identity_collision`.
 

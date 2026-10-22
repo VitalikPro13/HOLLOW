@@ -6,10 +6,11 @@ use openmls::prelude::*;
 use openmls::framing::errors::{MessageDecryptionError, SecretTreeError};
 use openmls::prelude::tls_codec::{Serialize as TlsSerialize, Deserialize as TlsDeserialize};
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
 use sha2::{Digest, Sha256};
 
+use super::mls_past::PastEpochs;
+use super::mls_storage::{parse_past_scope, MlsProvider, MlsSave, LIVE_SCOPE};
 use crate::hollow_log;
 use crate::identity::native_identity::NativeKeypair;
 
@@ -22,18 +23,18 @@ const CIPHERSUITE: Ciphersuite =
 /// the receiver may have processed newer traffic or crossed an epoch bump, and the
 /// OpenMLS defaults made such frames PERMANENTLY undecryptable. A bounded window is
 /// kept instead: 512 skipped message keys per sender ratchet and receive secrets for
-/// the last 3 epochs. A deliberate, bounded relaxation of forward secrecy, since any
-/// peer would re-serve the same plaintext through channel sync anyway.
+/// the last 3 epochs (`mls_past`, outside OpenMLS, whose own window made every message
+/// O(N)). A deliberate, bounded relaxation of forward secrecy, since any peer would
+/// re-serve the same plaintext through channel sync anyway.
 const SENDER_RATCHET_TOLERANCE: u32 = 512;
 const SENDER_RATCHET_MAX_FORWARD: u32 = 2000;
-const MAX_PAST_EPOCHS: usize = 3;
 
 /// The shared join-config carrying the late-delivery windows. Applied at create, at
 /// join, AND to groups loaded from disk, so pre-existing groups upgrade on next start.
 fn hollow_join_config() -> MlsGroupJoinConfig {
     MlsGroupJoinConfig::builder()
         .use_ratchet_tree_extension(true)
-        .max_past_epochs(MAX_PAST_EPOCHS)
+        .max_past_epochs(0)
         .sender_ratchet_configuration(SenderRatchetConfiguration::new(
             SENDER_RATCHET_TOLERANCE,
             SENDER_RATCHET_MAX_FORWARD,
@@ -252,12 +253,58 @@ fn minted_for(leaf: &LeafNode, group_key: &str) -> Option<u64> {
 }
 
 /// Whether we still hold the private half of the KeyPackage `hash_ref` names.
-fn key_package_held(provider: &OpenMlsRustCrypto, hash_ref: &KeyPackageRef) -> bool {
+fn key_package_held(provider: &MlsProvider, hash_ref: &KeyPackageRef) -> bool {
     use openmls_traits::storage::StorageProvider;
     provider
         .storage()
         .key_package::<KeyPackageRef, KeyPackageBundle>(hash_ref)
         .is_ok_and(|kp| kp.is_some())
+}
+
+/// Whether a load of `server_ids` reads the rows of `scope`: the live store, and the
+/// past epochs of those groups only.
+fn scope_wanted(scope: &str, server_ids: &[String]) -> bool {
+    scope == LIVE_SCOPE || parse_past_scope(scope).is_some_and(|(group, _)| server_ids.contains(&group))
+}
+
+/// Open an application message in `group`, and say who sent it.
+fn open_application(
+    group: &mut MlsGroup,
+    provider: &MlsProvider,
+    leaf_cache: &LeafCache,
+    protocol_msg: ProtocolMessage,
+) -> Result<Decrypted, DecryptFail> {
+    let processed = match group.process_message(provider, protocol_msg) {
+        Ok(processed) => processed,
+        Err(ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+            MessageDecryptionError::SecretTreeError(SecretTreeError::SecretReuseError),
+        ))) => return Ok(Decrypted::Replay),
+        Err(ProcessMessageError::ValidationError(ValidationError::WrongGroupId)) => {
+            return Err(DecryptFail::Garbage("names another group".to_string()));
+        }
+        Err(e) => return Err(DecryptFail::Stale(format!("MLS process_message failed: {e:?}"))),
+    };
+
+    let credential = processed.credential().serialized_content().to_vec();
+    let current_key = match processed.sender() {
+        Sender::Member(index) => group
+            .member_at(*index)
+            .filter(|m| m.credential.serialized_content() == credential.as_slice())
+            .map(|m| m.signature_key),
+        _ => return Err(DecryptFail::Garbage("not sent by a member".to_string())),
+    };
+    let sender = match current_key {
+        Some(key) => classify_cached(leaf_cache, &credential, &key),
+        None => classify_by_certificate(&credential),
+    };
+
+    match processed.into_content() {
+        ProcessedMessageContent::ApplicationMessage(app_msg) => match sender {
+            LeafView::Bound(sender) => Ok(Decrypted::Fresh { plaintext: app_msg.into_bytes(), sender }),
+            LeafView::Unbound(raw) => Ok(Decrypted::UnboundSender(raw)),
+        },
+        _ => Err(DecryptFail::Garbage("not an application message".to_string())),
+    }
 }
 
 /// Who a held commit is from, one slot each: the committer's master, or its raw id.
@@ -439,7 +486,11 @@ pub(crate) struct MembershipCommit {
 /// Wraps OpenMLS for Hollow's channel group encryption: one MLS group per server,
 /// while DMs stay on Olm.
 pub(crate) struct MlsManager {
-    provider: OpenMlsRustCrypto,
+    provider: MlsProvider,
+    /// Each group's last epochs, for frames that arrive after a merge.
+    past: PastEpochs,
+    /// The next save writes every row: the store came from a pre-0.13 blob, or a save failed.
+    whole_save_due: std::sync::atomic::AtomicBool,
     signer: SignatureKeyPair,
     credential_with_key: CredentialWithKey,
     /// The pre-0.12 identity (a random key and a bare id), kept only to rebind our
@@ -503,13 +554,15 @@ fn device_identity(
 
 impl MlsManager {
     fn with_identity(
-        provider: OpenMlsRustCrypto,
+        provider: MlsProvider,
         signer: SignatureKeyPair,
         credential_with_key: CredentialWithKey,
         groups: HashMap<String, MlsGroup>,
     ) -> Self {
         MlsManager {
             provider,
+            past: PastEpochs::default(),
+            whole_save_due: std::sync::atomic::AtomicBool::new(false),
             signer,
             credential_with_key,
             legacy: None,
@@ -535,7 +588,7 @@ impl MlsManager {
     pub fn new(device: &NativeKeypair, master: &NativeKeypair) -> Result<Self, String> {
         let (signer, credential_with_key) = device_identity(device, master);
         Ok(Self::with_identity(
-            OpenMlsRustCrypto::default(),
+            MlsProvider::default(),
             signer,
             credential_with_key,
             HashMap::new(),
@@ -543,30 +596,50 @@ impl MlsManager {
     }
 
     /// Restore MlsManager from persisted state: serde JSON blobs for the signer and
-    /// credential, and the serialized MemoryStorage map for `storage_blob`. A node
-    /// then calls [`Self::adopt_device_identity`]; the fetch paths only decrypt.
+    /// credential, and the pre-0.13 whole-store blob for `storage_blob`. A node then
+    /// calls [`Self::adopt_device_identity`]; the fetch paths only decrypt.
+    #[cfg(test)]
     pub fn from_persisted(
         signer_bytes: &[u8],
         credential_bytes: &[u8],
         storage_blob: Option<&[u8]>,
         server_ids: &[String],
     ) -> Result<Self, String> {
-        let provider = OpenMlsRustCrypto::default();
+        Self::from_stored(signer_bytes, credential_bytes, storage_blob, Vec::new(), Vec::new(), server_ids)
+    }
 
-        if let Some(blob) = storage_blob {
-            let mut cursor = std::io::Cursor::new(blob);
-            let count = read_u64(&mut cursor)?;
-            let mut values = provider.storage().values.write()
-                .map_err(|e| format!("Lock poisoned: {e}"))?;
-            for _ in 0..count {
-                let k_len = read_u64(&mut cursor)?;
-                let v_len = read_u64(&mut cursor)?;
-                let k = read_bytes(&mut cursor, k_len as usize)?;
-                let v = read_bytes(&mut cursor, v_len as usize)?;
-                values.insert(k, v);
+    /// [`Self::from_persisted`] from the stored rows, `(scope, key, value)`, or from a
+    /// pre-0.13 blob when one is there (the rows are then ignored); the first save then
+    /// writes every row and drops the blob. Only `server_ids` are loaded as groups; `unread` names the
+    /// stored scopes whose rows were left on disk.
+    pub fn from_stored(
+        signer_bytes: &[u8],
+        credential_bytes: &[u8],
+        storage_blob: Option<&[u8]>,
+        rows: Vec<(String, Vec<u8>, Vec<u8>)>,
+        unread: Vec<String>,
+        server_ids: &[String],
+    ) -> Result<Self, String> {
+        let provider = MlsProvider::default();
+        // A blob means the last save was a pre-0.13 build's (after a downgrade, written
+        // later than any row): the rows are stale, and its first save replaces them.
+        let rows = match storage_blob {
+            Some(blob) => {
+                provider.storage().load_rows(super::mls_storage::rows_from_blob(blob)?);
+                Vec::new()
             }
-            drop(values);
+            None => rows,
+        };
+        let mut past_rows = super::mls_storage::PastRows::new();
+        let mut live_rows = Vec::new();
+        for (scope, k, v) in rows {
+            if scope == LIVE_SCOPE {
+                live_rows.push((k, v));
+            } else if let Some(past) = parse_past_scope(&scope) {
+                past_rows.entry(past).or_default().push((k, v));
+            }
         }
+        provider.storage().load_rows(live_rows);
 
         let signer: SignatureKeyPair = serde_json::from_slice(signer_bytes)
             .map_err(|e| format!("Failed to deserialize MLS signer: {e}"))?;
@@ -595,7 +668,21 @@ impl MlsManager {
             }
         }
 
-        Ok(Self::with_identity(provider, signer, credential_with_key, groups))
+        let epochs: HashMap<String, u64> = groups.iter().map(|(k, g)| (k.clone(), g.epoch().as_u64())).collect();
+        let mut mgr = Self::with_identity(provider, signer, credential_with_key, groups);
+        mgr.past.restore(past_rows, &epochs);
+        if storage_blob.is_none() {
+            mgr.past.note_dormant(unread.iter().filter_map(|scope| parse_past_scope(scope)));
+        }
+        mgr.whole_save_due.store(storage_blob.is_some(), std::sync::atomic::Ordering::Relaxed);
+        Ok(mgr)
+    }
+
+    /// The MLS identity and groups `store` holds, `None` when it holds no identity.
+    pub fn load_from(store: &crate::storage::MessageStore, server_ids: &[String]) -> Result<Option<Self>, String> {
+        let Some((signer, credential, blob)) = store.load_mls_identity()? else { return Ok(None) };
+        let (rows, unread) = store.load_mls_rows_in(|scope| scope_wanted(scope, server_ids))?;
+        Self::from_stored(&signer, &credential, blob.as_deref(), rows, unread, server_ids).map(Some)
     }
 
     /// Make this device's key our signer and our credential the bound one. A restored
@@ -647,20 +734,59 @@ impl MlsManager {
             .map_err(|e| format!("Failed to serialize MLS credential: {e}"))
     }
 
-    /// Serialize the provider's MemoryStorage to a blob for DB persistence.
+    /// TEST-ONLY: the live store as a pre-0.13 whole-store blob.
+    #[cfg(test)]
     pub fn serialize_storage(&self) -> Result<Vec<u8>, String> {
-        let values = self.provider.storage().values.read()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
-        let mut buf = Vec::new();
-        let count = values.len() as u64;
-        buf.extend_from_slice(&count.to_be_bytes());
-        for (k, v) in values.iter() {
-            buf.extend_from_slice(&(k.len() as u64).to_be_bytes());
-            buf.extend_from_slice(&(v.len() as u64).to_be_bytes());
-            buf.extend_from_slice(k);
-            buf.extend_from_slice(v);
+        Ok(self.provider.storage().to_blob())
+    }
+
+    /// What changed since the last save, every row instead when a whole save is due.
+    /// The rows taken are the caller's to write: a save that fails must be followed by
+    /// [`Self::take_whole_save`].
+    pub fn take_save(&self) -> Result<MlsSave, String> {
+        let whole = self.whole_save_due.swap(false, std::sync::atomic::Ordering::Relaxed);
+        self.take(whole).inspect_err(|_| self.whole_save_due.store(whole, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Every row of every store this manager holds, replacing what is stored for them.
+    pub fn take_whole_save(&self) -> Result<MlsSave, String> {
+        self.take(true).inspect_err(|_| self.whole_save_due.store(true, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn take(&self, whole: bool) -> Result<MlsSave, String> {
+        let mut save = MlsSave {
+            signer: self.signer_bytes()?,
+            credential: self.credential_bytes()?,
+            drop_blob: whole,
+            ..Default::default()
+        };
+        let live = LIVE_SCOPE.to_string();
+        if whole {
+            save.retain_only = Some(std::iter::once(live.clone()).chain(self.past.scopes()).collect());
+            save.cleared.push(live.clone());
+            let rows = self.provider.storage().take_all();
+            save.rows.extend(rows.into_iter().map(|(k, v)| (live.clone(), k, Some(v))));
+        } else {
+            let rows = self.provider.storage().take_changes();
+            save.rows.extend(rows.into_iter().map(|(k, v)| (live.clone(), k, v)));
         }
-        Ok(buf)
+        self.past.take_into(&mut save, whole);
+        Ok(save)
+    }
+
+    /// TEST-ONLY: what keeping `group_key`'s current epoch as a past one costs: the
+    /// seconds to copy and pack it, and the packed bytes.
+    #[cfg(test)]
+    pub fn past_capture_cost(&self, group_key: &str) -> (f64, usize) {
+        let t = std::time::Instant::now();
+        let capture = PastEpochs::capture(&self.provider, &self.groups[group_key]);
+        (t.elapsed().as_secs_f64(), capture.map_or(0, |c| c.packed_len()))
+    }
+
+    /// The epochs of `group_key` a late frame can still open in, oldest first.
+    #[cfg(test)]
+    pub fn past_epochs(&self, group_key: &str) -> Vec<u64> {
+        self.past.epochs(group_key)
     }
 
     /// Generate a KeyPackage bound to no group: a meeting's knock, which is never a
@@ -785,7 +911,7 @@ impl MlsManager {
         let config = MlsGroupCreateConfig::builder()
             .ciphersuite(CIPHERSUITE)
             .use_ratchet_tree_extension(true)
-            .max_past_epochs(MAX_PAST_EPOCHS)
+            .max_past_epochs(0)
             .sender_ratchet_configuration(SenderRatchetConfiguration::new(
                 SENDER_RATCHET_TOLERANCE,
                 SENDER_RATCHET_MAX_FORWARD,
@@ -941,12 +1067,14 @@ impl MlsManager {
     pub fn merge_pending_commit(&mut self, server_id: &str) -> Result<(), String> {
         let group = self.groups.get_mut(server_id)
             .ok_or_else(|| format!("No MLS group for server {server_id}"))?;
+        let before = PastEpochs::capture(&self.provider, group);
 
         group
             .merge_pending_commit(&self.provider)
             .map_err(|e| format!("Failed to merge pending commit: {e:?}"))?;
 
         hollow_log!("[HOLLOW-MLS] Merged pending commit for server {server_id}, epoch: {:?}", group.epoch());
+        self.past.keep(server_id, before, group.epoch().as_u64());
         self.note_epoch(server_id);
         Ok(())
     }
@@ -1087,6 +1215,7 @@ impl MlsManager {
         if let Some(mut old) = self.groups.remove(group_key) {
             let _ = old.delete(self.provider.storage());
         }
+        self.past.drop_group(group_key);
         self.commit_cache.remove(group_key);
         self.epoch_digests.remove(group_key);
         self.held_commits.remove(group_key);
@@ -1284,37 +1413,26 @@ impl MlsManager {
             .try_into_protocol_message()
             .map_err(|e| DecryptFail::Garbage(format!("Not a protocol message: {e:?}")))?;
 
-        let processed = match group.process_message(&self.provider, protocol_msg) {
-            Ok(processed) => processed,
-            Err(ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
-                MessageDecryptionError::SecretTreeError(SecretTreeError::SecretReuseError),
-            ))) => return Ok(Decrypted::Replay),
-            Err(ProcessMessageError::ValidationError(ValidationError::WrongGroupId)) => {
-                return Err(DecryptFail::Garbage("names another group".to_string()));
-            }
-            Err(e) => return Err(DecryptFail::Stale(format!("MLS process_message failed: {e:?}"))),
-        };
-
-        let credential = processed.credential().serialized_content().to_vec();
-        let current_key = match processed.sender() {
-            Sender::Member(index) => group
-                .member_at(*index)
-                .filter(|m| m.credential.serialized_content() == credential.as_slice())
-                .map(|m| m.signature_key),
-            _ => return Err(DecryptFail::Garbage("not sent by a member".to_string())),
-        };
-        let sender = match current_key {
-            Some(key) => classify_cached(&self.leaf_cache, &credential, &key),
-            None => classify_by_certificate(&credential),
-        };
-
-        match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app_msg) => match sender {
-                LeafView::Bound(sender) => Ok(Decrypted::Fresh { plaintext: app_msg.into_bytes(), sender }),
-                LeafView::Unbound(raw) => Ok(Decrypted::UnboundSender(raw)),
-            },
-            _ => Err(DecryptFail::Garbage("not an application message".to_string())),
+        // A frame from an epoch we merged past opens against that epoch as it stood;
+        // one older than the window fails as stale, as it did inside OpenMLS.
+        let epoch = protocol_msg.epoch().as_u64();
+        if matches!(protocol_msg, ProtocolMessage::PrivateMessage(_))
+            && protocol_msg.group_id() == group.group_id()
+            && epoch < group.epoch().as_u64()
+        {
+            let leaf_cache = &self.leaf_cache;
+            return self
+                .past
+                .open(server_id, epoch, |group, provider| {
+                    let opened = open_application(group, provider, leaf_cache, protocol_msg);
+                    if opened.is_err() {
+                        let _ = group.clear_pending_proposals(provider.storage());
+                    }
+                    opened
+                })
+                .unwrap_or_else(|| Err(DecryptFail::Stale(format!("epoch {epoch} is past the late-delivery window"))));
         }
+        open_application(group, &self.provider, &self.leaf_cache, protocol_msg)
     }
 
     /// Process a commit, let `judge` rule on what it would change, and only then
@@ -1389,10 +1507,12 @@ impl MlsManager {
         let verdict = judge(&facts);
         match &verdict {
             Verdict::Accept => {
+                let before = PastEpochs::capture(&self.provider, group);
                 group
                     .merge_staged_commit(&self.provider, staged)
                     .map_err(|e| format!("Failed to merge staged commit: {e:?}"))?;
                 hollow_log!("[HOLLOW-MLS] Processed commit for server {server_id}, new epoch: {:?}", group.epoch());
+                self.past.keep(server_id, before, group.epoch().as_u64());
                 note_eviction(&mut self.evictions, server_id, &facts);
             }
             Verdict::Hold(_) => {
@@ -1473,9 +1593,11 @@ impl MlsManager {
             }
             match judge(&commit.facts) {
                 Verdict::Accept => {
+                    let before = PastEpochs::capture(&self.provider, group);
                     if let Err(e) = group.merge_staged_commit(&self.provider, commit.staged) {
                         return Some(Err(format!("Failed to merge held commit: {e:?}")));
                     }
+                    self.past.keep(group_key, before, group.epoch().as_u64());
                     note_eviction(&mut self.evictions, group_key, &commit.facts);
                     ruling = Some(Verdict::Accept);
                 }
@@ -1661,6 +1783,7 @@ impl MlsManager {
             // Delete from OpenMLS provider storage so join_from_welcome doesn't hit GroupAlreadyExists.
             let _ = group.delete(self.provider.storage());
         }
+        self.past.drop_group(server_id);
         // Cached commits belong to the dropped incarnation: a fresh Welcome lands us past
         // them, and serving them would produce partial catch-ups that end behind the group.
         self.commit_cache.remove(server_id);
@@ -1684,14 +1807,13 @@ impl MlsManager {
 
     /// The id of every group the provider store holds, loaded or not.
     fn stored_group_ids(&self) -> Vec<GroupId> {
-        // openmls_memory_storage keys a group's context `b"GroupContext"`, its JSON id,
-        // then a two-byte version.
-        const GROUP_CONTEXT_LABEL: &[u8] = b"GroupContext";
-        let Ok(values) = self.provider.storage().values.read() else { return Vec::new() };
-        values
-            .keys()
+        let context = super::mls_storage::label::GROUP_CONTEXT;
+        self.provider
+            .storage()
+            .keys_with_prefix(context)
+            .iter()
             .filter_map(|key| {
-                let id = key.strip_prefix(GROUP_CONTEXT_LABEL)?;
+                let id = key.strip_prefix(context)?;
                 serde_json::from_slice(id.get(..id.len().checked_sub(2)?)?).ok()
             })
             .collect()
@@ -1709,8 +1831,13 @@ impl MlsManager {
                 continue;
             }
             self.erase_stored_group(&group_id);
+            self.past.drop_group(&key);
             forgotten.push(key);
         }
+        let groups = &self.groups;
+        forgotten.extend(
+            self.past.drop_dormant_unless(|key| groups.contains_key(key) || keep_servers.contains(&split_group_key(key).0)),
+        );
         forgotten
     }
 
@@ -1846,22 +1973,6 @@ impl MlsManager {
     }
 }
 
-/// Read a u64 from a byte reader (big-endian).
-fn read_u64(cursor: &mut std::io::Cursor<&[u8]>) -> Result<u64, String> {
-    use std::io::Read;
-    let mut buf = [0u8; 8];
-    cursor.read_exact(&mut buf).map_err(|e| format!("Read error: {e}"))?;
-    Ok(u64::from_be_bytes(buf))
-}
-
-/// Read `len` bytes from a reader.
-fn read_bytes(cursor: &mut std::io::Cursor<&[u8]>, len: usize) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let mut buf = vec![0u8; len];
-    cursor.read_exact(&mut buf).map_err(|e| format!("Read error: {e}"))?;
-    Ok(buf)
-}
-
 #[cfg(test)]
 impl MlsManager {
     /// A pre-0.12 identity: a random key and a bare id, as every install had before
@@ -1872,7 +1983,7 @@ impl MlsManager {
             credential: BasicCredential::new(identity_id.as_bytes().to_vec()).into(),
             signature_key: signer.to_public_vec().into(),
         };
-        Self::with_identity(OpenMlsRustCrypto::default(), signer, credential_with_key, HashMap::new())
+        Self::with_identity(MlsProvider::default(), signer, credential_with_key, HashMap::new())
     }
 
     /// A KeyPackage whose leaf claims `credential_text` under this manager's OWN key.
@@ -1909,8 +2020,9 @@ impl MlsManager {
     pub(crate) fn self_update_commit(&mut self, group_key: &str) -> Vec<u8> {
         let group = self.groups.get_mut(group_key).unwrap();
         let bundle = group.self_update(&self.provider, &self.signer, LeafNodeParameters::default()).unwrap();
-        group.merge_pending_commit(&self.provider).unwrap();
-        TlsSerialize::tls_serialize_detached(bundle.commit()).unwrap()
+        let commit = TlsSerialize::tls_serialize_detached(bundle.commit()).unwrap();
+        self.merge_pending_commit(group_key).unwrap();
+        commit
     }
 
     /// This manager's own credential text.
@@ -2583,7 +2695,7 @@ mod tests {
     /// Whether any key of the store names group `group_key`.
     fn stored_mentions(mgr: &MlsManager, group_key: &str) -> bool {
         let needle = serde_json::to_vec(&GroupId::from_slice(group_key.as_bytes())).unwrap();
-        mgr.provider.storage().values.read().unwrap().keys().any(|k| k.windows(needle.len()).any(|w| w == needle.as_slice()))
+        mgr.provider.storage().keys_with_prefix(b"").iter().any(|k| k.windows(needle.len()).any(|w| w == needle.as_slice()))
     }
 
     /// C-MLS-06: a restore forgets every stored group nothing loaded (a meeting's, a
@@ -3243,5 +3355,581 @@ mod md_review_mls {
         let lapsed: Vec<Option<String>> =
             member.lapsed_commits.get("s").into_iter().flatten().map(|l| committer_key(&l.facts)).collect();
         assert!(lapsed.contains(&ninth), "the commit dropped at the cap left nothing to call for its repair: {lapsed:?}");
+    }
+}
+
+/// G1 scale fixes 4 and 5: late frames open in kept past epochs, saves write rows.
+#[cfg(test)]
+mod g13_past_epochs_and_row_saves {
+    use super::test_keys::bound;
+    use super::*;
+
+    /// An owner and a member seated in `group`.
+    fn pair(group: &str) -> (MlsManager, MlsManager) {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group(group).unwrap();
+        let (mut member, member_dev) = bound(3, 4);
+        let kp = member.generate_key_package().unwrap();
+        let (_, welcome, _) = owner.add_members_batch(group, &[(member_dev, kp)]).unwrap();
+        owner.merge_pending_commit(group).unwrap();
+        member.join_from_welcome(group, &welcome).unwrap();
+        (owner, member)
+    }
+
+    /// The owner adds one more device and merges; the member does not see it yet.
+    fn owner_moves_on(owner: &mut MlsManager, group: &str, tag: u8) -> Vec<u8> {
+        let (extra, dev) = bound(tag, tag + 1);
+        let (commit, _, _) = owner.add_members_batch(group, &[(dev, extra.generate_key_package().unwrap())]).unwrap();
+        owner.merge_pending_commit(group).unwrap();
+        commit
+    }
+
+    fn opens(mgr: &mut MlsManager, group: &str, ct: &[u8]) -> Option<Vec<u8>> {
+        match mgr.decrypt_fresh(group, ct) {
+            Ok(Decrypted::Fresh { plaintext, .. }) => Some(plaintext),
+            _ => None,
+        }
+    }
+
+    /// Fix 4: OpenMLS keeps no past epoch inside the live group, yet a frame sent
+    /// at an epoch we merged past still opens, up to three epochs back, and once only.
+    #[test]
+    fn a_frame_from_a_merged_epoch_still_opens_up_to_three_epochs_back() {
+        for group in ["srv-late", "srv-late#chan", "conf:late"] {
+            let (mut owner, mut member) = pair(group);
+            let mut late = Vec::new();
+            for round in 0..4u8 {
+                late.push(member.encrypt(group, format!("late {round}").as_bytes()).unwrap());
+                let commit = owner_moves_on(&mut owner, group, 10 + 2 * round);
+                member.process_commit(group, &commit).unwrap();
+            }
+            assert_eq!(owner.past_epochs(group).len(), MAX_PAST_EPOCHS_FOR_TEST, "{group}");
+            assert!(opens(&mut owner, group, &late[0]).is_none(), "{group}: four epochs back is past the window");
+            for (round, ct) in late.iter().enumerate().skip(1) {
+                assert_eq!(opens(&mut owner, group, ct), Some(format!("late {round}").into_bytes()), "{group}");
+                assert!(matches!(owner.decrypt_fresh(group, ct), Ok(Decrypted::Replay)), "{group}: a late frame opens once");
+            }
+            let live = member.encrypt(group, b"now").unwrap();
+            assert_eq!(opens(&mut owner, group, &live), Some(b"now".to_vec()), "{group}");
+            let gid = GroupId::from_slice(group.as_bytes());
+            let key = super::super::mls_storage::row_key(super::super::mls_storage::label::MESSAGE_SECRETS, &gid);
+            for (mgr, who) in [(&owner, "the creator"), (&member, "a joiner")] {
+                let secrets = mgr.provider.storage().rows(std::slice::from_ref(&key));
+                let stored: serde_json::Value = serde_json::from_slice(&secrets[0].1).unwrap();
+                assert_eq!(stored["past_epoch_trees"], serde_json::json!([]), "{group}: {who}'s live group carries past epochs again");
+            }
+        }
+    }
+
+    const MAX_PAST_EPOCHS_FOR_TEST: usize = super::super::mls_past::MAX_PAST_EPOCHS;
+
+    /// Fix 4 across a restart: the kept past epochs are stored and load back.
+    #[test]
+    fn a_late_frame_still_opens_after_a_restart() {
+        let group = "srv-restart";
+        let (mut owner, mut member) = pair(group);
+        let mut disk = Disk::default();
+        disk.land(owner.take_save().unwrap());
+        let late = member.encrypt(group, b"sent before the commit").unwrap();
+        let commit = owner_moves_on(&mut owner, group, 30);
+        member.process_commit(group, &commit).unwrap();
+        disk.land(owner.take_save().unwrap());
+        let mut restored = disk.load(&[group]);
+        assert_eq!(restored.past_epochs(group), owner.past_epochs(group));
+        assert_eq!(opens(&mut restored, group, &late), Some(b"sent before the commit".to_vec()));
+        // What the late frame consumed is saved too: the reloaded copy never opens it again.
+        disk.land(restored.take_save().unwrap());
+        let mut again = disk.load(&[group]);
+        assert!(matches!(again.decrypt_fresh(group, &late), Ok(Decrypted::Replay)));
+        let whole = again.take_whole_save().unwrap();
+        let mut fresh = Disk::default();
+        fresh.land(whole);
+        assert!(matches!(fresh.load(&[group]).decrypt_fresh(group, &late), Ok(Decrypted::Replay)), "a whole save lost an override");
+    }
+
+    /// The `mls_storage` table as the saves landed on it, in memory.
+    #[derive(Default)]
+    struct Disk {
+        table: std::collections::BTreeMap<(String, Vec<u8>), Vec<u8>>,
+        identity: (Vec<u8>, Vec<u8>),
+    }
+
+    impl Disk {
+        fn land(&mut self, save: MlsSave) {
+            if let Some(keep) = &save.retain_only {
+                self.table.retain(|(s, _), _| keep.contains(s));
+            }
+            for scope in &save.cleared {
+                self.table.retain(|(s, _), _| s != scope);
+            }
+            for (s, k, v) in save.rows {
+                match v {
+                    Some(v) => self.table.insert((s, k), v),
+                    None => self.table.remove(&(s, k)),
+                };
+            }
+            self.identity = (save.signer, save.credential);
+        }
+
+        fn load(&self, groups: &[&str]) -> MlsManager {
+            let rows = self.table.iter().map(|((s, k), v)| (s.clone(), k.clone(), v.clone())).collect();
+            let keys: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+            MlsManager::from_stored(&self.identity.0, &self.identity.1, None, rows, Vec::new(), &keys).unwrap()
+        }
+    }
+
+    /// Fix 5: a send saves the one row its ratchet moved, not the store.
+    #[test]
+    fn a_send_saves_only_the_row_it_changed() {
+        let group = "srv-rows";
+        let (mut owner, _member) = pair(group);
+        owner.create_group("srv-other").unwrap();
+        let _ = owner.take_save().unwrap();
+        owner.encrypt(group, &[b'x'; 512]).unwrap();
+        let save = owner.take_save().unwrap();
+        let gid = GroupId::from_slice(group.as_bytes());
+        let secrets = super::super::mls_storage::row_key(super::super::mls_storage::label::MESSAGE_SECRETS, &gid);
+        let keys: Vec<&Vec<u8>> = save.rows.iter().map(|(_, k, _)| k).collect();
+        assert_eq!(keys, vec![&secrets], "a send saved more than its group's message secrets");
+        assert!(save.cleared.is_empty() && !save.drop_blob);
+        assert!(save.row_bytes() * 4 < owner.provider.storage().byte_len(), "the save is most of the store");
+        assert!(owner.take_save().unwrap().rows.is_empty(), "nothing changed since");
+    }
+
+    /// The past store keeps none of the epoch secrets it never uses: its exporter is
+    /// not that epoch's, and it holds no key that opens a commit.
+    #[test]
+    fn a_past_epoch_keeps_no_secret_it_does_not_need() {
+        let group = "srv-scrub";
+        let (mut owner, _member) = pair(group);
+        let epoch = owner.epoch(group).unwrap();
+        let exporter = owner.export_secret(group, "sframe", b"ctx", 32).unwrap();
+        owner_moves_on(&mut owner, group, 40);
+        let past_exporter = owner
+            .past
+            .open(group, epoch, |g, provider| g.export_secret(provider.crypto(), "sframe", b"ctx", 32).unwrap())
+            .expect("the past epoch loads");
+        assert_ne!(past_exporter, exporter, "the past store still derives that epoch's exporter");
+        let save = owner.take_whole_save().unwrap();
+        let scope = super::super::mls_storage::past_scope(group, epoch);
+        let labels = [super::super::mls_storage::label::EPOCH_KEY_PAIRS, super::super::mls_storage::label::ENCRYPTION_KEY_PAIR];
+        let packed = save.rows.iter().find(|(s, k, _)| *s == scope && k.starts_with(b"\0")).expect("the packed past epoch");
+        let rows = super::super::mls_past::unpack(packed.2.as_ref().unwrap()).unwrap();
+        assert!(!rows.is_empty());
+        assert!(!rows.iter().any(|(k, _)| labels.iter().any(|l| k.starts_with(l))), "a past store holds a private key");
+    }
+
+    /// A pre-0.13 blob loads, and its first save writes every row and drops the blob.
+    #[test]
+    fn a_blob_store_loads_and_its_first_save_writes_every_row() {
+        let group = "srv-blob";
+        let (owner, _member) = pair(group);
+        let blob = owner.serialize_storage().unwrap();
+        let restored = MlsManager::from_persisted(
+            &owner.signer_bytes().unwrap(),
+            &owner.credential_bytes().unwrap(),
+            Some(&blob),
+            &[group.to_string()],
+        )
+        .unwrap();
+        let first = restored.take_save().unwrap();
+        assert!(first.drop_blob && first.cleared.contains(&String::new()));
+        assert_eq!(first.rows.len(), restored.provider.storage().take_all().len());
+        assert!(!restored.take_save().unwrap().drop_blob, "only the first save replaces the store");
+    }
+
+    /// A 0.12.2 database (the whole store in `mls_identity.storage_data`, no
+    /// `mls_storage` table) opens, its groups (server, subgroup, meeting) all work, and
+    /// the first save moves it to rows and empties the blob.
+    #[test]
+    fn a_0_12_2_database_moves_to_rows_and_every_group_still_works() {
+        let groups = ["srv-old", "srv-old#locked", "conf:old"];
+        let (mut owner, _) = bound(1, 2);
+        let (mut member, member_dev) = bound(3, 4);
+        for group in groups {
+            owner.create_group(group).unwrap();
+            let kp = member.generate_key_package().unwrap();
+            let (_, welcome, _) = owner.add_members_batch(group, &[(member_dev.clone(), kp)]).unwrap();
+            owner.merge_pending_commit(group).unwrap();
+            member.join_from_welcome(group, &welcome).unwrap();
+        }
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let key = "ab".repeat(32);
+        let old = tmp.path().join("old.db").to_string_lossy().into_owned();
+        {
+            let store = crate::storage::MessageStore::open(&old, &key).unwrap();
+            store
+                .save_mls_identity(&owner.signer_bytes().unwrap(), &owner.credential_bytes().unwrap(), &owner.serialize_storage().unwrap())
+                .unwrap();
+            store.drop_mls_rows_table_for_test();
+        }
+        let copy = tmp.path().join("copy.db").to_string_lossy().into_owned();
+        std::fs::copy(&old, &copy).unwrap();
+        let keys: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+        let store = crate::storage::MessageStore::open(&copy, &key).unwrap();
+        let mut loaded = MlsManager::load_from(&store, &keys).unwrap().expect("the 0.12.2 identity loads");
+        let save = loaded.take_save().unwrap();
+        assert!(save.drop_blob, "the first save after the upgrade must replace the blob");
+        store.save_mls_state(&save).unwrap();
+        assert_eq!(store.load_mls_identity().unwrap().unwrap().2, None, "the blob outlived the move to rows");
+        for group in groups {
+            let ct = loaded.encrypt(group, group.as_bytes()).unwrap();
+            assert_eq!(opens(&mut member, group, &ct), Some(group.as_bytes().to_vec()), "{group}");
+        }
+        store.save_mls_state(&loaded.take_save().unwrap()).unwrap();
+        let mut again = MlsManager::load_from(&store, &keys).unwrap().unwrap();
+        for group in groups {
+            let back = member.encrypt(group, b"back").unwrap();
+            assert_eq!(opens(&mut again, group, &back), Some(b"back".to_vec()), "{group} after a reload from rows");
+            let ct = again.encrypt(group, b"next").unwrap();
+            assert_eq!(opens(&mut member, group, &ct), Some(b"next".to_vec()), "{group}: the reload reused a sent generation");
+        }
+    }
+
+    /// A push fetch loads one server: it reads only that server's past epochs, its
+    /// saves (whole ones too) leave the other servers' alone, and a node that forgets
+    /// a group it no longer loads erases that group's past epochs with it.
+    #[test]
+    fn a_partial_load_leaves_other_groups_past_epochs_alone() {
+        let (mut owner, _) = bound(1, 2);
+        for (group, tag) in [("srv-a", 50u8), ("srv-b", 60u8)] {
+            owner.create_group(group).unwrap();
+            owner_moves_on(&mut owner, group, tag);
+        }
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("m.db").to_string_lossy().into_owned();
+        let store = crate::storage::MessageStore::open(&path, &"ab".repeat(32)).unwrap();
+        store.save_mls_state(&owner.take_whole_save().unwrap()).unwrap();
+        let b_rows = |store: &crate::storage::MessageStore| {
+            store.load_mls_rows().unwrap().iter().filter(|(scope, _, _)| scope.ends_with(":srv-b")).count()
+        };
+        let stored_b = b_rows(&store);
+        assert!(stored_b > 0);
+
+        let fetch = MlsManager::load_from(&store, &["srv-a".to_string()]).unwrap().unwrap();
+        assert!(!fetch.past_epochs("srv-a").is_empty());
+        assert!(fetch.past_epochs("srv-b").is_empty(), "a fetch read another server's past epochs");
+        store.save_mls_state(&fetch.take_whole_save().unwrap()).unwrap();
+        assert_eq!(b_rows(&store), stored_b, "a fetch's save touched another server's past epochs");
+
+        // A past epoch dropped by a save that never landed: the whole save after it erases it.
+        let mut node = MlsManager::load_from(&store, &["srv-a".to_string(), "srv-b".to_string()]).unwrap().unwrap();
+        node.remove_group("srv-a");
+        let _lost = node.take_save().unwrap();
+        store.save_mls_state(&node.take_whole_save().unwrap()).unwrap();
+        let a_left = store.load_mls_rows().unwrap().iter().filter(|(s, _, _)| s.ends_with(":srv-a")).count();
+        assert_eq!(a_left, 0, "a dropped past epoch outlived the whole save after a lost one");
+        assert_eq!(b_rows(&store), stored_b);
+        store.save_mls_state(&owner.take_whole_save().unwrap()).unwrap();
+
+        assert!(scope_wanted("", &["srv-a".to_string()]) && scope_wanted("past:3:srv-a", &["srv-a".to_string()]));
+        assert!(!scope_wanted("past:3:srv-b", &["srv-a".to_string()]), "a fetch reads another server's past epochs");
+        // A past epoch whose group is stored nowhere else goes too.
+        let stray = super::super::mls_storage::past_scope("srv-stray", 4);
+        let (signer, credential) = (owner.signer_bytes().unwrap(), owner.credential_bytes().unwrap());
+        let rows = vec![(stray.clone(), b"\0packed".to_vec(), Some(b"x".to_vec()))];
+        store.save_mls_state(&MlsSave { signer, credential, rows, ..Default::default() }).unwrap();
+        let mut node = MlsManager::load_from(&store, &["srv-a".to_string()]).unwrap().unwrap();
+        let forgotten = node.forget_unloaded_groups(&[]);
+        assert!(forgotten.contains(&"srv-b".to_string()) && forgotten.contains(&"srv-stray".to_string()), "{forgotten:?}");
+        store.save_mls_state(&node.take_save().unwrap()).unwrap();
+        assert_eq!(b_rows(&store), 0, "a forgotten group's past epochs outlived it");
+        assert!(!store.load_mls_rows().unwrap().iter().any(|(s, _, _)| *s == stray), "a stray past epoch outlived its forget");
+    }
+
+    /// A group's past epochs go with it: removed, or replaced by a Welcome.
+    #[test]
+    fn a_group_that_goes_takes_its_past_epochs_along() {
+        let group = "srv-gone";
+        let (mut owner, mut member) = pair(group);
+        let commit = owner_moves_on(&mut owner, group, 70);
+        member.process_commit(group, &commit).unwrap();
+        assert!(!member.past_epochs(group).is_empty());
+        let _ = member.take_save().unwrap();
+        let (mut owner2, _) = bound(9, 10);
+        owner2.create_group(group).unwrap();
+        let kp = member.generate_key_package().unwrap();
+        let id = MlsManager::key_package_identity(&kp).unwrap().id().to_string();
+        let (_, welcome, _) = owner2.add_members_batch(group, &[(id, kp)]).unwrap();
+        owner2.merge_pending_commit(group).unwrap();
+        member.join_from_welcome(group, &welcome).unwrap();
+        assert!(member.past_epochs(group).is_empty(), "a Welcome kept the replaced group's past epochs");
+        let cleared = |save: MlsSave| save.cleared.iter().any(|s| s.ends_with(&format!(":{group}")));
+        assert!(cleared(member.take_save().unwrap()), "the stored past epoch outlived the replaced group");
+
+        let commit = owner_moves_on(&mut owner2, group, 72);
+        member.process_commit(group, &commit).unwrap();
+        assert!(!member.past_epochs(group).is_empty());
+        let _ = member.take_save().unwrap();
+        member.remove_group(group);
+        assert!(member.past_epochs(group).is_empty());
+        assert!(cleared(member.take_save().unwrap()), "the stored past epoch outlived its removed group");
+    }
+}
+
+/// g13-s2 fix round: what a past copy holds, row by row, on every path that keeps one.
+#[cfg(test)]
+mod g13_past_copy_contents {
+    use super::super::mls_storage::{label, past_scope, row_key, Rows};
+    use super::test_keys::bound;
+    use super::*;
+    use std::collections::HashSet;
+
+    fn pair(group: &str) -> (MlsManager, MlsManager) {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group(group).unwrap();
+        let (mut member, member_dev) = bound(3, 4);
+        let kp = member.generate_key_package().unwrap();
+        let (_, welcome, _) = owner.add_members_batch(group, &[(member_dev, kp)]).unwrap();
+        owner.merge_pending_commit(group).unwrap();
+        member.join_from_welcome(group, &welcome).unwrap();
+        (owner, member)
+    }
+
+    fn kp_of(tag: u8) -> (String, Vec<u8>) {
+        let (extra, dev) = bound(tag, tag + 1);
+        (dev, extra.generate_key_package().unwrap())
+    }
+
+    /// Every byte string of 16 or more bytes under a JSON row.
+    fn byte_strings(row: &[u8]) -> HashSet<Vec<u8>> {
+        fn walk(v: &serde_json::Value, out: &mut HashSet<Vec<u8>>) {
+            match v {
+                serde_json::Value::Array(items) if items.len() >= 16 && items.iter().all(|i| i.is_u64()) => {
+                    out.insert(items.iter().map(|i| i.as_u64().unwrap() as u8).collect());
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|i| walk(i, out)),
+                serde_json::Value::Object(m) => m.values().for_each(|i| walk(i, out)),
+                _ => {}
+            }
+        }
+        let mut out = HashSet::new();
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(row) {
+            walk(&v, &mut out);
+        }
+        out.retain(|b| b.iter().any(|x| *x != 0));
+        out
+    }
+
+    /// The secrets in `mgr`'s live store a past copy must never hold: the epoch secrets
+    /// (but the authenticator), the message secrets and every private key.
+    fn live_secrets(mgr: &MlsManager, group: &str) -> HashSet<Vec<u8>> {
+        let gid = GroupId::from_slice(group.as_bytes());
+        let storage = mgr.provider.storage();
+        let mut out = HashSet::new();
+        for (_, row) in storage.rows(&[row_key(label::EPOCH_SECRETS, &gid)]) {
+            let mut v: serde_json::Value = serde_json::from_slice(&row).unwrap();
+            v.as_object_mut().unwrap().remove("epoch_authenticator");
+            out.extend(byte_strings(&serde_json::to_vec(&v).unwrap()));
+        }
+        for (_, row) in storage.rows(&[row_key(label::MESSAGE_SECRETS, &gid)]) {
+            out.extend(byte_strings(&row));
+        }
+        for prefix in [label::EPOCH_KEY_PAIRS, label::ENCRYPTION_KEY_PAIR] {
+            for (_, row) in storage.rows(&storage.keys_with_prefix(prefix)) {
+                out.extend(private_halves(&row));
+            }
+        }
+        assert!(!out.is_empty());
+        out
+    }
+
+    /// The byte strings under every `private*` field of a key-pair row.
+    fn private_halves(row: &[u8]) -> HashSet<Vec<u8>> {
+        fn walk(v: &serde_json::Value, out: &mut HashSet<Vec<u8>>) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    for (k, x) in m {
+                        if k.starts_with("private") {
+                            out.extend(byte_strings(&serde_json::to_vec(x).unwrap()));
+                        } else {
+                            walk(x, out);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|i| walk(i, out)),
+                _ => {}
+            }
+        }
+        let mut out = HashSet::new();
+        walk(&serde_json::from_slice(row).unwrap(), &mut out);
+        out
+    }
+
+    /// The rows of `mgr`'s past copy of `epoch`: the packed ones, then the plain ones.
+    fn copy_rows(mgr: &MlsManager, group: &str, epoch: u64) -> (Rows, Rows) {
+        let save = mgr.take_whole_save().unwrap();
+        let scope = past_scope(group, epoch);
+        let mine: Vec<_> = save.rows.into_iter().filter(|(s, _, _)| *s == scope).map(|(_, k, v)| (k, v.unwrap())).collect();
+        let (packed, plain): (Rows, Rows) = mine.into_iter().partition(|(k, _)| k.starts_with(b"\0"));
+        (super::super::mls_past::unpack(&packed.first().expect("a packed copy").1).unwrap(), plain)
+    }
+
+    fn check(mgr: &MlsManager, group: &str, epoch: u64, forbidden: &HashSet<Vec<u8>>, who: &str) {
+        let gid = GroupId::from_slice(group.as_bytes());
+        let (packed, plain) = copy_rows(mgr, group, epoch);
+        let allowed: Vec<Vec<u8>> = [
+            label::TREE, label::GROUP_CONTEXT, label::INTERIM_TRANSCRIPT_HASH, label::CONFIRMATION_TAG,
+            label::JOIN_CONFIG, label::OWN_LEAF_NODES, label::GROUP_STATE, label::OWN_LEAF_NODE_INDEX,
+            label::EPOCH_SECRETS, label::RESUMPTION_PSK,
+        ]
+        .iter()
+        .map(|l| row_key(l, &gid))
+        .collect();
+        for (k, _) in &packed {
+            assert!(allowed.contains(k), "{who}: the packed copy holds a row it never needs: {}", String::from_utf8_lossy(k));
+        }
+        assert_eq!(plain.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(), vec![row_key(label::MESSAGE_SECRETS, &gid)], "{who}: only the message secrets stay out of the packed copy");
+        let state = packed.iter().find(|(k, _)| *k == row_key(label::GROUP_STATE, &gid)).unwrap();
+        assert_eq!(state.1, serde_json::to_vec(&MlsGroupState::Operational).unwrap(), "{who}: the copy keeps a staged commit");
+        for (k, row) in packed.iter().chain(plain.iter()) {
+            let leaked: Vec<_> = byte_strings(row).intersection(forbidden).cloned().collect();
+            assert!(leaked.is_empty(), "{who}: {} holds {} secret(s) of a later epoch or a private key", String::from_utf8_lossy(k), leaked.len());
+        }
+    }
+
+    /// The committer's, a receiver's and a receiver with its own commit pending (glare):
+    /// none of their copies holds a secret it does not need to open a frame of that
+    /// epoch, and none holds a later epoch's secret or a private key.
+    #[test]
+    fn every_past_copy_holds_only_what_opening_a_frame_needs() {
+        let group = "srv-contents";
+        let (mut owner, mut member) = pair(group);
+        let e = owner.epoch(group).unwrap();
+        let mut forbidden_owner = HashSet::new();
+        let mut before = live_secrets(&owner, group);
+        let secrets_e = row_key(label::MESSAGE_SECRETS, &GroupId::from_slice(group.as_bytes()));
+        let msg_e = owner.provider.storage().rows(&[secrets_e.clone()]).into_iter().flat_map(|(_, r)| byte_strings(&r)).collect::<HashSet<_>>();
+        before.retain(|b| !msg_e.contains(b));
+        let (commit, _, _) = owner.add_members_batch(group, &[kp_of(20)]).unwrap();
+        owner.merge_pending_commit(group).unwrap();
+        forbidden_owner.extend(before);
+        forbidden_owner.extend(live_secrets(&owner, group));
+        check(&owner, group, e, &forbidden_owner, "the committer");
+
+        // Glare: the member's own commit is pending when the owner's lands.
+        let _pending = member.add_members_batch(group, &[kp_of(30)]).unwrap();
+        member.process_commit(group, &commit).unwrap();
+        let forbidden_member = live_secrets(&member, group);
+        check(&member, group, e, &forbidden_member, "a receiver with its own commit pending");
+
+        let (commit, _, _) = owner.add_members_batch(group, &[kp_of(40)]).unwrap();
+        owner.merge_pending_commit(group).unwrap();
+        member.process_commit(group, &commit).unwrap();
+        check(&member, group, e + 1, &live_secrets(&member, group), "a receiver");
+    }
+
+    /// An unpacked past epoch leaves RAM once idle, and nothing it learned is lost.
+    #[test]
+    fn an_idle_unpacked_past_epoch_is_let_go() {
+        let group = "srv-idle";
+        let (mut owner, mut member) = pair(group);
+        let (one, two) = (member.encrypt(group, b"one").unwrap(), member.encrypt(group, b"two").unwrap());
+        let (commit, _, _) = owner.add_members_batch(group, &[kp_of(50)]).unwrap();
+        owner.merge_pending_commit(group).unwrap();
+        member.process_commit(group, &commit).unwrap();
+        assert!(matches!(owner.decrypt_fresh(group, &one), Ok(Decrypted::Fresh { .. })));
+        let _ = owner.take_save().unwrap();
+        assert_eq!(owner.past.open_count(), 1);
+        owner.past.age_open(std::time::Duration::from_secs(601));
+        let _ = owner.take_save().unwrap();
+        assert_eq!(owner.past.open_count(), 0, "an idle past epoch stayed unpacked");
+        assert!(matches!(owner.decrypt_fresh(group, &two), Ok(Decrypted::Fresh { .. })));
+        assert!(matches!(owner.decrypt_fresh(group, &one), Ok(Decrypted::Replay)), "the reopened copy forgot a consumed key");
+    }
+}
+
+#[cfg(test)]
+/// Hostile review proofs (g13-s2 fix round).
+mod g13_review_proofs {
+    use super::test_keys::bound;
+    use super::*;
+
+    fn pair(group: &str) -> (MlsManager, MlsManager) {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group(group).unwrap();
+        let (mut member, member_dev) = bound(3, 4);
+        let kp = member.generate_key_package().unwrap();
+        let (_, welcome, _) = owner.add_members_batch(group, &[(member_dev, kp)]).unwrap();
+        owner.merge_pending_commit(group).unwrap();
+        member.join_from_welcome(group, &welcome).unwrap();
+        (owner, member)
+    }
+
+    fn owner_moves_on(owner: &mut MlsManager, group: &str, tag: u8) -> Vec<u8> {
+        let (extra, dev) = bound(tag, tag + 1);
+        let (commit, _, _) = owner.add_members_batch(group, &[(dev, extra.generate_key_package().unwrap())]).unwrap();
+        owner.merge_pending_commit(group).unwrap();
+        commit
+    }
+
+    fn find<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+        match v {
+            serde_json::Value::Object(m) => m.get(key).or_else(|| m.values().find_map(|x| find(x, key))),
+            serde_json::Value::Array(a) => a.iter().find_map(|x| find(x, key)),
+            _ => None,
+        }
+    }
+
+    /// A committer's past copy of epoch E must not carry epoch E+1's secrets: while the
+    /// live group is at E+1 or later, the copy must not hold E+1's exporter (SFrame key)
+    /// nor E+1's un-ratcheted message secrets.
+    #[test]
+    fn a_committers_past_copy_holds_no_next_epoch_secret() {
+        let group = "srv-review";
+        let (mut owner, mut member) = pair(group);
+        let e = owner.epoch(group).unwrap();
+        let commit = owner_moves_on(&mut owner, group, 20); // owner now at e+1
+        member.process_commit(group, &commit).unwrap();
+        let gid = GroupId::from_slice(group.as_bytes());
+        let live_secrets = owner.provider.storage().rows(&[super::super::mls_storage::row_key(super::super::mls_storage::label::EPOCH_SECRETS, &gid)]);
+        let live: serde_json::Value = serde_json::from_slice(&live_secrets[0].1).unwrap();
+        owner_moves_on(&mut owner, group, 30);
+        owner_moves_on(&mut owner, group, 40); // owner now at e+3, the e copy still held
+        assert!(owner.past_epochs(group).contains(&e));
+
+        let pending = owner.past.open(group, e, |g, _| g.pending_commit().is_some()).unwrap();
+        let save = owner.take_whole_save().unwrap();
+        let scope = super::super::mls_storage::past_scope(group, e);
+        let packed = save.rows.iter().find(|(s, k, _)| *s == scope && k.starts_with(b"\0")).unwrap();
+        let rows = super::super::mls_past::unpack(packed.2.as_ref().unwrap()).unwrap();
+        let state_key = super::super::mls_storage::row_key(super::super::mls_storage::label::GROUP_STATE, &gid);
+        let state: serde_json::Value = serde_json::from_slice(&rows.iter().find(|(k, _)| *k == state_key).unwrap().1).unwrap();
+        let staged_exporter = find(&state, "group_epoch_secrets").and_then(|s| s.get("exporter_secret")).cloned();
+        let has_keypairs = find(&state, "new_keypairs").is_some();
+        let has_msg = find(&state, "message_secrets").is_some();
+        let _ = (has_keypairs, has_msg);
+        assert!(!pending, "the past copy of epoch {e} still holds our staged commit to epoch {}", e + 1);
+        assert_ne!(staged_exporter.as_ref(), live.get("exporter_secret"), "the past copy on disk holds epoch e+1's exporter secret");
+    }
+
+    /// Upgrade to 0.13, downgrade to 0.12.2 (which writes the blob and never reads the
+    /// rows), upgrade again: the newer blob must win over the stale rows.
+    #[test]
+    fn a_blob_written_after_a_downgrade_wins_over_stale_rows() {
+        let group = "srv-downgrade";
+        let (mut owner, mut member) = pair(group);
+        // A second group with past epochs, which the second upgrade's load does not name.
+        owner.create_group("srv-unnamed").unwrap();
+        owner_moves_on(&mut owner, "srv-unnamed", 60);
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("d.db").to_string_lossy().into_owned();
+        let store = crate::storage::MessageStore::open(&path, &"ab".repeat(32)).unwrap();
+        store.save_mls_state(&owner.take_whole_save().unwrap()).unwrap(); // 0.13 run
+        for i in 0..3u8 {
+            let ct = owner.encrypt(group, &[i]).unwrap();
+            assert!(matches!(member.decrypt_fresh(group, &ct), Ok(Decrypted::Fresh { .. })));
+        }
+        // 0.12.2 run after a downgrade: the whole store in the blob, rows untouched.
+        store.save_mls_identity(&owner.signer_bytes().unwrap(), &owner.credential_bytes().unwrap(), &owner.serialize_storage().unwrap()).unwrap();
+        let mut again = MlsManager::load_from(&store, &[group.to_string()]).unwrap().unwrap();
+        let ct = again.encrypt(group, b"after the second upgrade").unwrap();
+        assert!(
+            matches!(member.decrypt_fresh(group, &ct), Ok(Decrypted::Fresh { .. })),
+            "the stale 0.13 rows overrode the newer blob: the send ratchet went back"
+        );
+        store.save_mls_state(&again.take_save().unwrap()).unwrap();
+        let stale = store.load_mls_rows().unwrap().into_iter().filter(|(s, _, _)| s.ends_with(":srv-unnamed")).count();
+        assert_eq!(stale, 0, "the first save after the blob kept stale past epochs of a group it did not load");
     }
 }

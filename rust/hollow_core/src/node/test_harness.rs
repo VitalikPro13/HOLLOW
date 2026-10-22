@@ -195,6 +195,8 @@ fn cmd_kind(cmd: &WsCommand) -> &'static str {
         WsCommand::SendBinaryDirect { .. } => "send_binary",
         WsCommand::Carry { .. } => "carry",
         WsCommand::AfterSave { .. } => "after_save",
+        WsCommand::AfterMlsSave { .. } => "after_mls_save",
+        WsCommand::MlsSaveAgain => "mls_save_again",
         WsCommand::Subscribe { .. } => "subscribe",
         WsCommand::SendToRoomTopic { .. } => "send_topic",
         WsCommand::CheckPeers { .. } => "check_peers",
@@ -27160,7 +27162,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // server's rings stay quiet (one absence and a spawn stagger, 4.5 s, total 831.1 s).
     // 2026-10-18: f-flakes holds a repaired device off the relay over two MLS ticks to
     // prove the member keeps its sibling seated (one absence, 4.5 s, total 835.6 s).
-    const BUDGET_MS: u64 = 836_800;
+    // 2026-10-22: g13-s2 proves an MLS frame stays off the wire while its group state's
+    // save is held, twice (two absences, 1.0 s).
+    const BUDGET_MS: u64 = 837_800;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -30209,10 +30213,7 @@ async fn hostile_mls_copy(node: &TestNode, tag: u8, group_key: &str) -> crate::c
     let live = node.mls_epoch(group_key).await;
     for _ in 0..50 {
         let store = crate::storage::MessageStore::open(&node.db_path, &node.passphrase).expect("open store");
-        if let Ok(Some((signer, cred, storage))) = store.load_mls_identity()
-            && let Ok(mut copy) = crate::crypto::MlsManager::from_persisted(
-                &signer, &cred, storage.as_deref(), &[group_key.to_string()],
-            )
+        if let Ok(Some(mut copy)) = crate::crypto::MlsManager::load_from(&store, &[group_key.to_string()])
             && copy.epoch(group_key).ok() == live
         {
             copy.adopt_device_identity(&keys(tag), &keys(tag));
@@ -36799,25 +36800,15 @@ fn knocked_key_package(relay: &MockRelay, device: &str, conf_id: &str) -> Vec<u8
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, knock["key_package"].as_str().unwrap()).unwrap()
 }
 
-/// The keys of every entry in a persisted MLS store blob.
-fn mls_blob_keys(blob: &[u8]) -> Vec<Vec<u8>> {
-    let word = |at: usize| u64::from_be_bytes(blob[at..at + 8].try_into().unwrap()) as usize;
-    let mut keys = Vec::new();
-    let mut at = 8;
-    for _ in 0..word(0) {
-        let (k_len, v_len) = (word(at), word(at + 8));
-        keys.push(blob[at + 16..at + 16 + k_len].to_vec());
-        at += 16 + k_len + v_len;
-    }
-    keys
-}
-
 /// Whether `node`'s persisted MLS store holds any entry of group `group_key`.
 fn persisted_mls_mentions(node: &TestNode, group_key: &str) -> bool {
     let store = crate::storage::MessageStore::open(&node.db_path, &node.passphrase).expect("open store");
-    let Ok(Some((_, _, Some(blob)))) = store.load_mls_identity() else { return false };
+    let Ok(rows) = store.load_mls_rows() else { return false };
     let needle = serde_json::to_vec(&openmls::prelude::GroupId::from_slice(group_key.as_bytes())).unwrap();
-    mls_blob_keys(&blob).iter().any(|k| k.windows(needle.len()).any(|w| w == needle.as_slice()))
+    rows.iter().any(|(scope, k, _)| {
+        crate::crypto::mls_storage::parse_past_scope(scope).is_some_and(|(g, _)| g == group_key)
+            || k.windows(needle.len()).any(|w| w == needle.as_slice())
+    })
 }
 
 /// Wait until `node` no longer holds `group_key` and its persisted store says the same.
@@ -51959,4 +51950,192 @@ async fn g13h_siblings_after_a_peer_ahead_converge_on_both_writes() {
         assert_eq!((name, ops), (&seen[0].1, &seen[0].2), "{device} diverged from {}", seen[0].0);
     }
     drop((b, c, v));
+}
+
+// g13-s2
+// MLS scale fixes 4 and 5: past epochs live outside OpenMLS, saves write rows, and an
+// MLS frame leaves only once the group state that encrypted it is on disk.
+
+async fn post_channel(node: &TestNode, server_id: &str, channel: &str, text: &str) {
+    node.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.to_string(),
+            channel_id: channel.to_string(),
+            text: text.to_string(),
+            message_id: format!("mid-{}", text.replace(' ', "-")),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+}
+
+fn mls_channel_frames(relay: &MockRelay, device: &str) -> Vec<Vec<u8>> {
+    relay
+        .recorded_frames(device)
+        .into_iter()
+        .filter(|frame| {
+            matches!(
+                serde_json::from_slice::<super::types::HavenMessage>(super::frame_auth::unchecked_body(frame)),
+                Ok(super::types::HavenMessage::MlsChannelMessage { .. })
+            )
+        })
+        .collect()
+}
+
+fn holds_channel_message(node: &TestNode, server_id: &str, channel: &str, text: &str) -> bool {
+    node.channel_messages(server_id, channel).iter().any(|m| m.text == text)
+}
+
+/// A channel frame M encrypted before O merged the next epoch reaches O only after
+/// the merge (a relay ring replays it), with nobody left to sync it from: it still
+/// opens, in the past epoch O kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_channel_frame_from_before_a_merge_still_opens_after_it() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, server_id) = three_member_server(&relay, 201, 202, 203).await;
+    expect_mls_group(&[&o, &m, &x], &server_id, 20).await;
+    let general = general_channel_of(&server_id);
+    let epoch = o.mls_epoch(&server_id).await.expect("O holds the group");
+
+    // Only M is online when it posts, and the ring loses the frame: O first sees it
+    // when it is replayed, and nobody can serve the message by sync then.
+    for gone in [&o, &x] {
+        relay.set_online(&gone.device_id, false);
+        assert!(wait_until(10, async || !relay.online_devices().contains(&gone.device_id)).await);
+    }
+    relay.set_recording(&m.device_id, true);
+    post_channel(&m, &server_id, &general, "sent at the old epoch").await;
+    assert!(wait_until(10, async || !mls_channel_frames(&relay, &m.device_id).is_empty()).await, "M sent no MLS frame");
+    let late = mls_channel_frames(&relay, &m.device_id).remove(0);
+    let ring = super::ring_auth::ring_topic(&server_id, Some(&o.master_id), &general);
+    relay.drop_topic_frames_from(&server_id, &ring, &m.device_id);
+    relay.drop_topic_frames_from(&server_id, &general, &m.device_id);
+    relay.set_online(&m.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&m.device_id)).await);
+    relay.set_online(&o.device_id, true);
+    assert!(wait_until(10, async || relay.online_devices().contains(&o.device_id)).await);
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: x.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || o.mls_epoch(&server_id).await.is_some_and(|e| e > epoch)).await,
+        "the kick never moved O's epoch"
+    );
+    assert!(!holds_channel_message(&o, &server_id, &general, "sent at the old epoch"), "O had the message before the replay");
+
+    relay.inject(&server_id, &m.device_id, &o.device_id, late);
+    assert!(
+        wait_until(10, async || holds_channel_message(&o, &server_id, &general, "sent at the old epoch")).await,
+        "a frame from the epoch before the merge did not open"
+    );
+    drop((o, m, x));
+}
+
+/// The crash-after-encrypt case: a channel frame waits for the save of the group state
+/// that encrypted it. While the save is held nothing leaves; a node killed then boots
+/// on the state before it, and every message it sends afterwards still opens, so no
+/// generation a receiver consumed is used twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn an_mls_frame_leaves_only_after_its_group_state_is_saved() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_tag, m_tag, x_tag) = (204, 205, 206);
+    let (o, m, x, server_id) = three_member_server(&relay, o_tag, m_tag, x_tag).await;
+    expect_mls_group(&[&o, &m, &x], &server_id, 20).await;
+    let general = general_channel_of(&server_id);
+    relay.set_recording(&o.device_id, true);
+    post_channel(&o, &server_id, &general, "warm").await;
+    assert!(wait_until(10, async || holds_channel_message(&m, &server_id, &general, "warm")).await);
+
+    // Slow: the frame and the offline copy of it wait, then go the moment the save lands.
+    relay.set_online(&x.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&x.device_id)).await);
+    assert!(wait_until(10, async || !o.sees_peer(&x.device_id).await).await, "O still sees X");
+    let sent = mls_channel_frames(&relay, &o.device_id).len();
+    let copies = relay.channel_copies_for(&x.device_id).len();
+    crate::crypto::held_saves::hold_mls(&o.db_path);
+    post_channel(&o, &server_id, &general, "slow").await;
+    sleep_ms(500).await; // an absence: nothing to poll
+    assert_eq!(mls_channel_frames(&relay, &o.device_id).len(), sent, "an MLS frame left before its group state was saved");
+    assert_eq!(relay.channel_copies_for(&x.device_id).len(), copies, "an offline copy left before its group state was saved");
+    crate::crypto::held_saves::release(&o.db_path, &o.passphrase);
+    assert!(wait_until(10, async || holds_channel_message(&m, &server_id, &general, "slow")).await, "the frame never left once saved");
+    assert!(wait_until(10, async || relay.channel_copies_for(&x.device_id).len() > copies).await, "the offline copy never left once saved");
+    relay.set_online(&x.device_id, true);
+    assert!(wait_until(10, async || relay.online_devices().contains(&x.device_id)).await);
+
+    // Killed while the save is held: nothing of it reached the wire, and the restart
+    // encrypts from the saved state.
+    let sent = mls_channel_frames(&relay, &o.device_id).len();
+    crate::crypto::held_saves::hold_mls(&o.db_path);
+    post_channel(&o, &server_id, &general, "unsaved").await;
+    sleep_ms(500).await; // an absence: nothing to poll
+    assert_eq!(mls_channel_frames(&relay, &o.device_id).len(), sent, "an MLS frame left before its group state was saved");
+    let o = restart_node(&relay, o, o_tag, o_tag).await;
+    expect_mls_group(&[&o, &m, &x], &server_id, 20).await;
+    for i in 0..3 {
+        post_channel(&o, &server_id, &general, &format!("after the kill {i}")).await;
+    }
+    for i in 0..3 {
+        let text = format!("after the kill {i}");
+        for (node, who) in [(&m, "M"), (&x, "X")] {
+            assert!(
+                wait_until(15, async || holds_channel_message(node, &server_id, &general, &text)).await,
+                "{who} never opened {text:?}: a generation went out twice"
+            );
+        }
+    }
+    drop((o, m, x));
+}
+
+/// A node whose database still holds the 0.12.2 MLS blob boots, keeps every group,
+/// moves the store to rows, and keeps talking across a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_node_on_a_0_12_2_mls_store_keeps_its_groups() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_tag, m_tag, x_tag) = (207, 208, 209);
+    let (o, m, x, server_id) = three_member_server(&relay, o_tag, m_tag, x_tag).await;
+    expect_mls_group(&[&o, &m, &x], &server_id, 20).await;
+    let general = general_channel_of(&server_id);
+    post_channel(&m, &server_id, &general, "before the upgrade").await;
+    assert!(wait_until(10, async || holds_channel_message(&o, &server_id, &general, "before the upgrade")).await);
+    let epoch = o.mls_epoch(&server_id).await;
+
+    let o = restart_node_with(&relay, o, o_tag, o_tag, |db, pass| {
+        let store = crate::storage::MessageStore::open(db, pass).unwrap();
+        let mgr = crate::crypto::MlsManager::load_from(&store, &[]).unwrap().expect("O saved its MLS identity");
+        let blob = mgr.serialize_storage().unwrap();
+        store.clear_mls_identity().unwrap();
+        store.save_mls_identity(&mgr.signer_bytes().unwrap(), &mgr.credential_bytes().unwrap(), &blob).unwrap();
+    })
+    .await;
+    assert_eq!(o.mls_epoch(&server_id).await, epoch, "the group did not survive the 0.12.2 store");
+    post_channel(&o, &server_id, &general, "after the upgrade").await;
+    post_channel(&m, &server_id, &general, "back to O").await;
+    assert!(wait_until(15, async || holds_channel_message(&m, &server_id, &general, "after the upgrade")).await);
+    assert!(wait_until(15, async || holds_channel_message(&o, &server_id, &general, "back to O")).await);
+    assert!(
+        wait_until(10, async || {
+            let store = crate::storage::MessageStore::open(&o.db_path, &o.passphrase).unwrap();
+            store.load_mls_identity().unwrap().is_some_and(|(_, _, blob)| blob.is_none()) && !store.load_mls_rows().unwrap().is_empty()
+        })
+        .await,
+        "the store never moved to rows"
+    );
+
+    let o = restart_node(&relay, o, o_tag, o_tag).await;
+    assert_eq!(o.mls_epoch(&server_id).await, epoch, "the group did not survive a restart from rows");
+    post_channel(&o, &server_id, &general, "after the restart").await;
+    assert!(wait_until(15, async || holds_channel_message(&x, &server_id, &general, "after the restart")).await);
+    drop((o, m, x));
 }

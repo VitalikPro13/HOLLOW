@@ -1932,6 +1932,7 @@ dependencies = [
  "crdts",
  "dirs",
  "ed25519-dalek",
+ "flate2",
  "flutter_rust_bridge",
  "futures-util",
  "getrandom 0.3.4",

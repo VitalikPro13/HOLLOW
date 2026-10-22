@@ -1061,7 +1061,7 @@ async fn run_event_loop(
     let mut mls: Option<MlsManager> = {
         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             match store.load_mls_identity() {
-                Ok(Some((signer_data, credential_data, storage_data))) => {
+                Ok(Some(_)) => {
                     // Every MLS group key to reload: each server's bare id (the server-wide group)
                     // plus each restricted channel's subgroup id.
                     let mut server_ids: Vec<String> = Vec::new();
@@ -1071,12 +1071,9 @@ async fn run_event_loop(
                             server_ids.push(crate::crypto::subgroup_id(sid, &cid));
                         }
                     }
-                    match MlsManager::from_persisted(
-                        &signer_data,
-                        &credential_data,
-                        storage_data.as_deref(),
-                        &server_ids,
-                    ) {
+                    let restored = MlsManager::load_from(&store, &server_ids)
+                        .and_then(|mgr| mgr.ok_or_else(|| "the MLS identity vanished".to_string()));
+                    match restored {
                         Ok(mgr) => {
                             // Detect an MLS credential that does not belong to THIS device and must be
                             // regenerated: a linked sibling imported the SOURCE device's whole DB including
@@ -1151,13 +1148,13 @@ async fn run_event_loop(
         match MlsManager::new(&device_keypair, &master_keypair) {
             Ok(mgr) => {
                 hollow_log!("[HOLLOW-MLS] Created new MLS identity");
-                if let Ok(signer) = mgr.signer_bytes() {
-                    if let Ok(cred) = mgr.credential_bytes() {
-                        if let Ok(storage) = mgr.serialize_storage() {
-                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
-                                let _ = store.save_mls_identity(&signer, &cred, &storage);
-                            }
-                        }
+                if let (Ok(save), Ok(store)) =
+                    (mgr.take_whole_save(), crate::storage::MessageStore::open(&db_path, &db_passphrase))
+                    && store.begin_transaction().is_ok()
+                {
+                    if store.save_mls_state(&save).and_then(|()| store.commit_transaction()).is_err() {
+                        let _ = store.rollback_transaction();
+                        crypto_store.want_mls_resync();
                     }
                 }
                 mls = Some(mgr);
@@ -1578,6 +1575,13 @@ async fn run_event_loop(
                     )
                     .deliver(&device, room.as_deref(), &json, no_session, ticket);
                     let _ = done.send(frames);
+                } else if matches!(carry, super::ws_client::WsCommand::MlsSaveAgain) {
+                    let again = mls.as_ref().map(|mgr| {
+                        crypto_store.want_mls_resync();
+                        let saved = super::crypto_handler::persist_mls_state_awaited(mgr, &crypto_store);
+                        super::ws_client::WsCommand::AfterMlsSave { saved, frame: Box::new(super::ws_client::WsCommand::MlsSaveAgain) }
+                    });
+                    let _ = done.send(again.into_iter().collect());
                 }
             }
 

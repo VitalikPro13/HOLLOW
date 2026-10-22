@@ -56,6 +56,7 @@ struct Row {
 #[test]
 #[ignore = "scale probe: builds MLS groups up to 100k leaves. Run with --ignored --nocapture."]
 fn mls_scale_probe() {
+    super::mls_storage::verify::set(false);
     let sizes = env_sizes();
     let batch: usize = std::env::var("HOLLOW_MLS_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(500);
     let out = std::env::var("HOLLOW_MLS_OUT").ok();
@@ -185,9 +186,49 @@ fn mls_scale_probe() {
         observer.decrypt(GROUP, &ct).expect("decrypt");
         push(&mut rows, target, "app_msg_decrypt_secs", t.elapsed().as_secs_f64(), "s");
 
-        // What each member keeps (the persisted MLS blob).
-        push(&mut rows, target, "member_state_bytes", observer.serialize_storage().expect("observer state").len() as f64, "B");
-        push(&mut rows, target, "owner_state_bytes", owner.serialize_storage().expect("owner state").len() as f64, "B");
+        // A send as the node does it (encrypt, then build the save it writes), and a
+        // receive, each the mean of 5.
+        let _ = owner.take_save().expect("save");
+        let (mut enc, mut ser, mut dec, mut bytes) = (0.0, 0.0, 0.0, 0usize);
+        for _ in 0..5 {
+            let t = Instant::now();
+            let ct = owner.encrypt(GROUP, &plaintext).expect("encrypt");
+            enc += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            bytes = owner.take_save().expect("save").row_bytes();
+            ser += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            observer.decrypt(GROUP, &ct).expect("decrypt");
+            dec += t.elapsed().as_secs_f64();
+        }
+        push(&mut rows, target, "send_encrypt_mean_secs", enc / 5.0, "s");
+        push(&mut rows, target, "send_save_build_mean_secs", ser / 5.0, "s");
+        push(&mut rows, target, "send_save_bytes", bytes as f64, "B");
+        push(&mut rows, target, "recv_decrypt_mean_secs", dec / 5.0, "s");
+
+        // What each merge adds: the current epoch copied and packed as a past one.
+        let (secs, packed) = owner.past_capture_cost(GROUP);
+        push(&mut rows, target, "past_epoch_capture_secs", secs, "s");
+        push(&mut rows, target, "past_epoch_packed_bytes", packed as f64, "B");
+
+        // A frame sent one epoch back, opened after the merge: the late-delivery path.
+        let late = observer.encrypt(GROUP, &plaintext).expect("late encrypt");
+        next += 1;
+        let one = member_key_package(next);
+        let (commit, _, _) = owner.add_members_batch(GROUP, &[one]).expect("add for the late frame");
+        owner.merge_pending_commit(GROUP).expect("merge for the late frame");
+        let t = Instant::now();
+        owner.decrypt(GROUP, &late).expect("late frame opens");
+        push(&mut rows, target, "late_frame_first_open_secs", t.elapsed().as_secs_f64(), "s");
+        observer.process_commit(GROUP, &commit).expect("observer follows");
+        let t = Instant::now();
+        let save = owner.take_save().expect("save after late frame");
+        push(&mut rows, target, "late_frame_save_bytes", save.row_bytes() as f64, "B");
+        push(&mut rows, target, "late_frame_save_build_secs", t.elapsed().as_secs_f64(), "s");
+
+        // What each member keeps: every stored row, past epochs included.
+        push(&mut rows, target, "member_state_bytes", observer.take_whole_save().expect("observer state").row_bytes() as f64, "B");
+        push(&mut rows, target, "owner_state_bytes", owner.take_whole_save().expect("owner state").row_bytes() as f64, "B");
         push(&mut rows, target, "elapsed_total_secs", started.elapsed().as_secs_f64(), "s");
     }
 

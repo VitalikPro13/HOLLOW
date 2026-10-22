@@ -2602,8 +2602,10 @@ mod tests {
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
                 super::super::ws_client::WsCommand::Carry { device, .. } => carried.push(device),
-                super::super::ws_client::WsCommand::SendToRoom { data, .. } => {
-                    if let Ok(HavenMessage::MlsChannelMessage { channel_id, .. }) = serde_json::from_slice(&data) {
+                super::super::ws_client::WsCommand::AfterMlsSave { frame, .. } => {
+                    if let super::super::ws_client::WsCommand::SendToRoom { data, .. } = *frame
+                        && let Ok(HavenMessage::MlsChannelMessage { channel_id, .. }) = serde_json::from_slice(&data)
+                    {
                         groups.push(channel_id);
                     }
                 }

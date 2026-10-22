@@ -2911,7 +2911,7 @@ pub fn start_fetch_node(
         Some(ref room) => {
             let store = MessageStore::open(&db_path, &passphrase)?;
             match store.load_mls_identity() {
-                Ok(Some((signer, cred, storage))) => {
+                Ok(Some(_)) => {
                     // Restore the server-wide group PLUS every restricted-channel subgroup so a
                     // buffered restricted-channel message decrypts. The fetch node has no live
                     // ServerState, so read the persisted state JSON to enumerate them.
@@ -2923,9 +2923,9 @@ pub fn start_fetch_node(
                             }
                         }
                     }
-                    match crate::crypto::MlsManager::from_persisted(
-                        &signer, &cred, storage.as_deref(), &group_keys,
-                    ) {
+                    let restored = crate::crypto::MlsManager::load_from(&store, &group_keys)
+                        .and_then(|mgr| mgr.ok_or_else(|| "the MLS identity vanished".to_string()));
+                    match restored {
                         Ok(m) => Some(m),
                         Err(e) => {
                             hollow_log!("[HOLLOW-FETCH] MLS restore failed: {e} — content-free fallback");

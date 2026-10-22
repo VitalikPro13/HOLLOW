@@ -872,6 +872,16 @@ impl MessageStore {
                 credential_data BLOB NOT NULL,
                 storage_data    BLOB
             )"),
+            // The MLS store by row (0.13): `scope` '' is the live store, `past:{epoch}:{group}`
+            // a kept past epoch. Replaces `mls_identity.storage_data`, the whole store in one
+            // blob, which the first save after an upgrade empties.
+            ("mls_storage table",
+             "CREATE TABLE IF NOT EXISTS mls_storage (
+                scope TEXT NOT NULL,
+                k     BLOB NOT NULL,
+                v     BLOB NOT NULL,
+                PRIMARY KEY (scope, k)
+            ) WITHOUT ROWID"),
             // File sharing (Phase 3.5).
             ("files table",
              "CREATE TABLE IF NOT EXISTS files (
@@ -3102,7 +3112,107 @@ impl MessageStore {
 
     // ── MLS Identity Persistence ──
 
-    /// Save MLS identity (signer + credential + storage blob). Upsert singleton row.
+    /// Write one MLS save: the identity, then the scopes it empties, then its rows. A
+    /// savepoint inside the caller's transaction (or its own, outside one) makes the save
+    /// land whole or not at all.
+    pub fn save_mls_state(&self, save: &crate::crypto::mls_storage::MlsSave) -> Result<(), String> {
+        let fail = |e: rusqlite::Error| format!("Failed to save MLS state: {e}");
+        self.conn.execute_batch("SAVEPOINT mls_save").map_err(fail)?;
+        let written = self.write_mls_save(save);
+        let end = if written.is_ok() { "RELEASE mls_save" } else { "ROLLBACK TO mls_save; RELEASE mls_save" };
+        self.conn.execute_batch(end).map_err(fail)?;
+        written
+    }
+
+    fn write_mls_save(&self, save: &crate::crypto::mls_storage::MlsSave) -> Result<(), String> {
+        let fail = |e: rusqlite::Error| format!("Failed to save MLS state: {e}");
+        self.conn
+            .execute(
+                "INSERT INTO mls_identity (id, signer_data, credential_data, storage_data)
+                 VALUES (1, ?1, ?2, NULL)
+                 ON CONFLICT(id) DO UPDATE SET
+                    signer_data = excluded.signer_data,
+                    credential_data = excluded.credential_data,
+                    storage_data = CASE WHEN ?3 THEN NULL ELSE mls_identity.storage_data END",
+                params![save.signer, save.credential, save.drop_blob],
+            )
+            .map_err(fail)?;
+        if let Some(keep) = &save.retain_only {
+            let stored: Vec<String> = {
+                let mut stmt = self.conn.prepare_cached("SELECT DISTINCT scope FROM mls_storage").map_err(fail)?;
+                let rows = stmt.query_map([], |row| row.get(0)).map_err(fail)?;
+                rows.collect::<Result<_, _>>().map_err(fail)?
+            };
+            for scope in stored.iter().filter(|s| !keep.contains(s)) {
+                self.conn.execute("DELETE FROM mls_storage WHERE scope = ?1", params![scope]).map_err(fail)?;
+            }
+        }
+        for scope in &save.cleared {
+            self.conn.execute("DELETE FROM mls_storage WHERE scope = ?1", params![scope]).map_err(fail)?;
+        }
+        let mut put = self
+            .conn
+            .prepare_cached("INSERT OR REPLACE INTO mls_storage (scope, k, v) VALUES (?1, ?2, ?3)")
+            .map_err(fail)?;
+        let mut del = self.conn.prepare_cached("DELETE FROM mls_storage WHERE scope = ?1 AND k = ?2").map_err(fail)?;
+        for (scope, k, v) in &save.rows {
+            match v {
+                Some(v) => put.execute(params![scope, k, v]).map_err(fail)?,
+                None => del.execute(params![scope, k]).map_err(fail)?,
+            };
+        }
+        Ok(())
+    }
+
+    /// Every stored MLS row, `(scope, key, value)`.
+    pub fn load_mls_rows(&self) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, String> {
+        Ok(self.load_mls_rows_in(|_| true)?.0)
+    }
+
+    /// The stored MLS rows of the scopes `wanted` keeps, and the names of the others,
+    /// whose values are never read (a push fetch loads one server's past epochs).
+    pub fn load_mls_rows_in(
+        &self,
+        wanted: impl Fn(&str) -> bool,
+    ) -> Result<(Vec<(String, Vec<u8>, Vec<u8>)>, Vec<String>), String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT scope, k, v FROM mls_storage")
+            .map_err(|e| format!("Failed to prepare mls_storage query: {e}"))?;
+        let mut rows = stmt.query([]).map_err(|e| format!("Failed to query mls_storage: {e}"))?;
+        let (mut kept, mut others) = (Vec::new(), std::collections::BTreeSet::new());
+        let fail = |e: rusqlite::Error| format!("Failed to read mls_storage row: {e}");
+        while let Some(row) = rows.next().map_err(fail)? {
+            let scope: String = row.get(0).map_err(fail)?;
+            if wanted(&scope) {
+                kept.push((scope, row.get(1).map_err(fail)?, row.get(2).map_err(fail)?));
+            } else {
+                others.insert(scope);
+            }
+        }
+        Ok((kept, others.into_iter().collect()))
+    }
+
+    /// TEST-ONLY: run raw SQL on this connection.
+    #[cfg(test)]
+    pub fn conn_execute_for_test(&self, sql: &str) {
+        self.conn.execute_batch(sql).unwrap();
+    }
+
+    /// TEST-ONLY: lose every stored MLS row.
+    #[cfg(test)]
+    pub fn delete_mls_rows_for_test(&self) {
+        self.conn.execute_batch("DELETE FROM mls_storage;").unwrap();
+    }
+
+    /// TEST-ONLY: back to the shape a 0.12 build left on disk.
+    #[cfg(test)]
+    pub fn drop_mls_rows_table_for_test(&self) {
+        self.conn.execute_batch("DROP TABLE mls_storage; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    }
+
+    /// TEST-ONLY: an MLS identity as 0.12 stored it, the whole store in one blob.
+    #[cfg(test)]
     pub fn save_mls_identity(
         &self,
         signer_data: &[u8],
@@ -3135,6 +3245,7 @@ impl MessageStore {
                  DELETE FROM olm_sessions;
                  DELETE FROM olm_session_floors;
                  DELETE FROM mls_identity;
+                 DELETE FROM mls_storage;
                  DELETE FROM app_settings WHERE key = 'recovery_mnemonic';",
             )
             .map_err(|e| format!("Failed to scrub device secrets: {e}"))?;
@@ -3147,7 +3258,7 @@ impl MessageStore {
     /// inherited the source device's identity and must mint a distinct one.
     pub fn clear_mls_identity(&self) -> Result<(), String> {
         self.conn
-            .execute("DELETE FROM mls_identity WHERE id = 1", [])
+            .execute_batch("DELETE FROM mls_identity WHERE id = 1; DELETE FROM mls_storage;")
             .map_err(|e| format!("Failed to clear MLS identity: {e}"))?;
         Ok(())
     }

@@ -203,16 +203,7 @@ fn fetch_and_decrypt(
     let mut mls: Option<crate::crypto::MlsManager> = match server_room {
         Some(room) => {
             let store = crate::storage::MessageStore::open(&db_path, &passphrase)?;
-            match store.load_mls_identity() {
-                Ok(Some((signer, cred, storage))) => crate::crypto::MlsManager::from_persisted(
-                    &signer,
-                    &cred,
-                    storage.as_deref(),
-                    &[room.to_string()],
-                )
-                .ok(),
-                _ => None,
-            }
+            crate::crypto::MlsManager::load_from(&store, &[room.to_string()]).ok().flatten()
         }
         None => None,
     };
