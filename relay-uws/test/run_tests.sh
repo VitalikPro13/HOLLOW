@@ -34,6 +34,7 @@ run() {
 }
 LIBS="-lsodium -lcrypto"
 run test_auth_frame
+run test_binary_frame
 run test_client_json
 run test_conn_rate
 run test_conn_rate_exempt
@@ -64,6 +65,41 @@ fi
 run test_snapshot_codec
 run test_turn_uris
 run test_verify_device_list ../src/device_list.cpp ../src/crypto.cpp $LIBS
+# The fuzz targets (../fuzz) replayed over their seeds and every input that once broke
+# one; libFuzzer itself runs them in ClusterFuzzLite (.clusterfuzzlite).
+replay() {
+    local name=$1
+    shift
+    if ! g++ $flags -I../src "../fuzz/$name.cpp" ../fuzz/replay_main.cpp "$@" -o "$out/$name" 2> "$out/$name.build"; then
+        echo "BUILD FAIL $name"
+        head -20 "$out/$name.build"
+        fail=1
+        return
+    fi
+    if timeout 300 "$out/$name" "$out/seeds/$name" "../fuzz/regressions/$name" > "$out/$name.log" 2>&1; then
+        echo "pass $name ($(grep -o 'replayed [0-9]* inputs' "$out/$name.log"))"
+    else
+        echo "FAIL $name"
+        tail -20 "$out/$name.log"
+        fail=1
+    fi
+}
+if python3 ../fuzz/make_seeds.py "$out/seeds" && mkdir -p "$out/seeds/fuzz_snapshot_codec" &&
+    g++ -std=c++17 -O1 -I../src ../fuzz/gen_snapshot_seeds.cpp -o "$out/gen_snapshot_seeds" &&
+    "$out/gen_snapshot_seeds" "$out/seeds/fuzz_snapshot_codec"; then
+    replay fuzz_auth_frame ../src/crypto.cpp $LIBS
+    replay fuzz_binary_frame
+    replay fuzz_client_json
+    replay fuzz_crypto_inputs ../src/crypto.cpp $LIBS
+    replay fuzz_join_lock
+    replay fuzz_kill_order
+    replay fuzz_ring_auth
+    replay fuzz_roster
+    replay fuzz_snapshot_codec
+else
+    echo "FAIL fuzz seeds (make_seeds.py or gen_snapshot_seeds)"
+    fail=1
+fi
 # The handlers themselves: the real relay on loopback, driven over TLS.
 bash ./run_live.sh "$out" || fail=1
 # The same relay across a restart, the snapshot handed over through a stand-in fd store.

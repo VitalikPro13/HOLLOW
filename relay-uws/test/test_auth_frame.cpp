@@ -213,6 +213,16 @@ int main() {
     test_v3();
     test_time();
 
+    // nlohmann stops reading at a NUL: the relay took the frame before it and ignored the rest.
+    {
+        using namespace std::string_literals;
+        const std::string hello = "{\"type\":\"auth_hello\"}\0junk"s;
+        const std::string auth = "{\"type\":\"auth\",\"peer_id\":\"p\",\"public_key\":\"k\",\"signature\":\"s\"}\0"s;
+        check("a hello with bytes after a NUL is no hello", !is_auth_hello(hello));
+        check("an auth frame ending in a NUL is refused", !accepted(auth));
+        check("the same auth frame without the NUL parses", accepted(auth.substr(0, auth.size() - 1)));
+    }
+
     if (failures) {
         printf("%d FAILED\n", failures);
         return 1;

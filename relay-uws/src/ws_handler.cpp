@@ -1,5 +1,6 @@
 #include "ws_handler.h"
 #include "auth_frame.h"
+#include "binary_frame.h"
 #include "client_json.h"
 #include "ring_evict.h"
 #include "ring_auth.h"
@@ -1203,20 +1204,10 @@ static void notify_push_sidecar(const std::string& token, const std::string& pla
     notify_push_sidecar(PushJob{token, platform, sender, "", "", false});
 }
 
-// Build the 0x06 direct-message frame the receiver expects:
-// [0x06][room\0][sender\0][payload]
 static std::string build_direct_frame(std::string_view room,
                                        std::string_view sender,
                                        std::string_view payload) {
-    std::string frame;
-    frame.reserve(1 + room.size() + 1 + sender.size() + 1 + payload.size());
-    frame.push_back(0x06);
-    frame.append(room);
-    frame.push_back(0x00);
-    frame.append(sender);
-    frame.push_back(0x00);
-    frame.append(payload);
-    return frame;
+    return binary_frame::direct_frame(room, sender, payload);
 }
 
 // Drop the frame `seq` wherever it sits, keeping every byte counter in step.
@@ -2077,30 +2068,10 @@ static void try_channel_push_notify(const std::string& target, const std::string
 // fetch node; empty payload = push trigger only.
 static void handle_binary_channel_direct(PerSocketData* data,
                                           std::string_view raw, RelayState& state) {
-    if (raw.size() < 6) return;
-
-    auto room_nul = raw.find('\0', 1);
-    if (room_nul == std::string_view::npos) return;
-    std::string_view room_code = raw.substr(1, room_nul - 1);
-
-    size_t target_start = room_nul + 1;
-    if (target_start >= raw.size()) return;
-    auto target_nul = raw.find('\0', target_start);
-    if (target_nul == std::string_view::npos) return;
-    std::string_view target_peer = raw.substr(target_start, target_nul - target_start);
-
-    size_t channel_start = target_nul + 1;
-    if (channel_start >= raw.size()) return;
-    auto channel_nul = raw.find('\0', channel_start);
-    if (channel_nul == std::string_view::npos) return;
-    std::string_view channel = raw.substr(channel_start, channel_nul - channel_start);
-
-    size_t flags_pos = channel_nul + 1;
-    if (flags_pos >= raw.size()) return;
-    bool mention = (static_cast<uint8_t>(raw[flags_pos]) & 0x01) != 0;
-
-    std::string_view payload = (flags_pos + 1 < raw.size())
-        ? raw.substr(flags_pos + 1) : std::string_view{};
+    const auto f = binary_frame::parse_channel_direct(raw);
+    if (!f) return;
+    const std::string_view room_code = f->room, target_peer = f->target, channel = f->channel, payload = f->payload;
+    const bool mention = f->mention;
 
     std::string room_str(room_code);
     std::string target_str(target_peer);
@@ -2242,27 +2213,9 @@ static void handle_direct(PerSocketData* data, const std::string& room,
 
 static void handle_binary_direct(PerSocketData* data,
                                   std::string_view raw, RelayState& state) {
-    // Parse: [0x02][room\0][target\0][payload]
-    if (raw.size() < 4) return;
-
-    size_t room_start = 1;
-    auto room_nul_pos = raw.find('\0', room_start);
-    if (room_nul_pos == std::string_view::npos) return;
-
-    std::string_view room_code = raw.substr(room_start, room_nul_pos - room_start);
-
-    size_t peer_start = room_nul_pos + 1;
-    if (peer_start >= raw.size()) return;
-
-    auto peer_nul_pos = raw.find('\0', peer_start);
-    if (peer_nul_pos == std::string_view::npos) return;
-
-    std::string_view target_peer = raw.substr(peer_start, peer_nul_pos - peer_start);
-
-    size_t payload_start = peer_nul_pos + 1;
-    if (payload_start >= raw.size()) return;
-
-    std::string_view payload = raw.substr(payload_start);
+    const auto f = binary_frame::parse_chunk(raw);
+    if (!f) return;
+    const std::string_view room_code = f->room, target_peer = f->target, payload = f->payload;
 
     std::string room_str(room_code);
     auto rit = state.ws_rooms.find(room_str);
@@ -2307,23 +2260,15 @@ static void handle_binary_direct(PerSocketData* data,
 // channels). Both arrive as 0x05.
 static void handle_binary_msg(PerSocketData* data,
                                std::string_view raw, RelayState& state, bool to_all = false) {
-    // Parse: [0x03 or 0x0A][room\0][payload]
-    if (raw.size() < 3) return;
-
-    auto room_nul = raw.find('\0', 1);
-    if (room_nul == std::string_view::npos) return;
-
-    std::string_view room_code = raw.substr(1, room_nul - 1);
+    const auto f = binary_frame::parse_broadcast(raw);
+    if (!f) return;
+    const std::string_view room_code = f->room, payload = f->payload;
     std::string room_str(room_code);
 
     auto rit = state.ws_rooms.find(room_str);
     if (rit == state.ws_rooms.end()) return;
 
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
-
-    size_t payload_start = room_nul + 1;
-    std::string_view payload = (payload_start < raw.size())
-        ? raw.substr(payload_start) : std::string_view{};
 
     // Build: [0x05][room\0][sender\0][payload]
     std::string forwarded;
@@ -2354,25 +2299,9 @@ static void handle_binary_msg(PerSocketData* data,
 static void handle_binary_direct_msg(PerSocketData* data,
                                       std::string_view raw, RelayState& state,
                                       bool is_image = false) {
-    // Parse: [0x04][room\0][target\0][payload]
-    if (raw.size() < 5) return;
-
-    auto room_nul = raw.find('\0', 1);
-    if (room_nul == std::string_view::npos) return;
-
-    std::string_view room_code = raw.substr(1, room_nul - 1);
-
-    size_t peer_start = room_nul + 1;
-    if (peer_start >= raw.size()) return;
-
-    auto peer_nul = raw.find('\0', peer_start);
-    if (peer_nul == std::string_view::npos) return;
-
-    std::string_view target_peer = raw.substr(peer_start, peer_nul - peer_start);
-
-    size_t payload_start = peer_nul + 1;
-    std::string_view payload = (payload_start < raw.size())
-        ? raw.substr(payload_start) : std::string_view{};
+    const auto f = binary_frame::parse_direct(raw);
+    if (!f) return;
+    const std::string_view room_code = f->room, target_peer = f->target, payload = f->payload;
 
     std::string room_str(room_code);
     std::string target_str(target_peer);
@@ -2519,32 +2448,16 @@ static void handle_subscribe(PerSocketData* data, const std::string& room, const
 
 static void handle_binary_topic_msg(PerSocketData* data,
                                      std::string_view raw, RelayState& state) {
-    // Parse: [0x07][room\0][topic\0][payload]
-    if (raw.size() < 4) return;
-
-    auto room_nul = raw.find('\0', 1);
-    if (room_nul == std::string_view::npos) return;
-
-    std::string_view room_code = raw.substr(1, room_nul - 1);
+    const auto f = binary_frame::parse_topic(raw);
+    if (!f) return;
+    const std::string_view room_code = f->room, topic = f->topic, payload = f->payload;
     std::string room_str(room_code);
-
-    size_t topic_start = room_nul + 1;
-    if (topic_start >= raw.size()) return;
-
-    auto topic_nul = raw.find('\0', topic_start);
-    if (topic_nul == std::string_view::npos) return;
-
-    std::string_view topic = raw.substr(topic_start, topic_nul - topic_start);
     std::string topic_str(topic);
 
     auto rit = state.ws_rooms.find(room_str);
     if (rit == state.ws_rooms.end()) return;
 
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
-
-    size_t payload_start = topic_nul + 1;
-    std::string_view payload = (payload_start < raw.size())
-        ? raw.substr(payload_start) : std::string_view{};
 
     // Build: [0x08][room\0][topic\0][sender\0][payload]
     std::string forwarded;
@@ -3204,14 +3117,7 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
 
 // --- Session lifecycle (section 9.2 and 9.7) ---------------------------------
 
-// The sender a 0x06 frame names: [0x06][room\0][sender\0][payload].
-static std::string direct_frame_sender(const std::string& frame) {
-    const size_t room_end = frame.find('\0', 1);
-    if (room_end == std::string::npos) return std::string();
-    const size_t sender_end = frame.find('\0', room_end + 1);
-    if (sender_end == std::string::npos) return std::string();
-    return frame.substr(room_end + 1, sender_end - room_end - 1);
-}
+using binary_frame::direct_frame_sender;
 
 // A session ends: the 0x06 frames its ring holds move into offline_buffer under their
 // room, each under its own cap there, so the replay on join and push take over.

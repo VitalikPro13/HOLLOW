@@ -1,0 +1,4 @@
+# The snapshot's head and tail tags.
+head="HRSN"
+tail="HRSE"
+version="\x09\x00\x00\x00"

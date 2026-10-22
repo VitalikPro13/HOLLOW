@@ -99,6 +99,42 @@ Binary name: `hollow-relay`
   it, never `json::parse`; the roster's size is measured as held
   (`roster::to_json(*shown)`), never by re-dumping client JSON. Tests:
   `test_client_json.cpp`, `test_kill_order.cpp`, live `test_deep_json`.
+  It also refuses any text holding a NUL byte (0.13, found by fuzzing): nlohmann ends
+  its input at a NUL, so `{...}\0junk` read as the value before it while serde refuses it.
+- **Fuzzing (0.13, audit G4b)**: `relay-uws/fuzz/` holds libFuzzer targets for every
+  parser a stranger reaches: `fuzz_auth_frame` (pre-auth, with the real key derivation
+  and signature check), `fuzz_binary_frame` (the opcode parsers, `src/binary_frame.h`,
+  lifted out of `ws_handler.cpp`; a split must put the frame back together byte for
+  byte), `fuzz_client_json` (the depth rule is exact against nlohmann alone),
+  `fuzz_ring_auth`, `fuzz_join_lock` (a held chain always verifies under its record's
+  owner), `fuzz_roster` (shows through `RosterBook`: within caps, round-trips, a repeat
+  show changes nothing), `fuzz_kill_order`, `fuzz_snapshot_codec`, `fuzz_crypto_inputs`
+  (base58 decode and encode agree). Rules behind signatures run on stand-in crypto
+  (`fuzz/fuzz_support.h`: a signature counts unless empty or starting with `!`).
+  `fuzz/build.sh` builds them (macOS needs Homebrew llvm); `run_tests.sh` replays every
+  seed (`fuzz/make_seeds.py`, from the test vectors) and every input in
+  `fuzz/regressions/<target>/` through `fuzz/replay_main.cpp`, plain and sanitized.
+  A crash a fuzzer finds goes into `fuzz/regressions/` with its fix.
+  **No public CI fuzzing** (Vitalik, 2026-10-22): a public repo's workflow artifacts
+  would publish every crash input. `.clusterfuzzlite/` stays as dormant config (base
+  image pinned by digest) for a private runner later.
+  **Nightly on the Mac mini**: `fuzz/nightly.sh` via launchd agent
+  `com.anonlisten.hollow.fuzz-nightly` (template `fuzz/com.anonlisten.hollow.fuzz-nightly.plist`,
+  03:30, nice 19, background QoS; launchd never starts it twice and a lock skips an
+  overlapping manual run). It copies `relay-uws/{src,test,fuzz}` of `~/src/HOLLOW` (only
+  read) to a snapshot, builds with Homebrew llvm, runs the nine targets 5 at a time for
+  an hour in all from the persistent corpus, then minimizes each corpus (`-merge=1`).
+  Everything lives in `~/dev/fuzz-nightly/`: `summary.txt` (last run: rev, execs, cov,
+  corpus, crashes per target), `history.txt` (one line per run: ok, CRASH, skipped or
+  BUILD FAILED), `logs/<date>/` (7 days), `crashes/<date>/<target>/`, and
+  `CRASH_<date>.txt` plus a macOS notification only when a target crashed (replay one:
+  `~/dev/fuzz-nightly/build/<target> <input>`). The installed copy
+  `~/dev/fuzz-nightly/nightly.sh` runs the tree's script whenever that changed.
+  Install or refresh: `bash relay-uws/fuzz/nightly.sh install [--seed-corpus DIR]`;
+  run now: `nightly.sh run [--budget SECS] [--src DIR]` or
+  `launchctl kickstart gui/$(id -u)/com.anonlisten.hollow.fuzz-nightly`; disable:
+  `nightly.sh uninstall` (or `launchctl bootout gui/$(id -u)/com.anonlisten.hollow.fuzz-nightly`);
+  the corpus and logs stay.
 
 ## Door-proof server rooms (design D1, 2026-10-02, HOL-SEC-091)
 

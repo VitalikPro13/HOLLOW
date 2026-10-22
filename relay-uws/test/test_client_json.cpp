@@ -92,6 +92,13 @@ int main() {
                         {"prefs", {{"srv", {{"level", "mentions"}, {"channels", {{"c", "nothing"}}}}}}}};
     check("push prefs, the deepest frame after a join, pass", !refused(prefs.dump()));
 
+    // nlohmann ends its input at a NUL byte, so a frame with one read as the value before
+    // it and ignored the rest, which serde (the client) refuses. JSON never has a raw NUL.
+    using namespace std::string_literals;
+    check("a frame with bytes after a NUL is refused", refused("{\"type\":\"auth_hello\"}\0{\"x\":1}"s));
+    check("a frame ending in a NUL is refused", refused("{\"type\":\"join\",\"room\":\"r\"}\0"s));
+    check("a NUL inside a string is refused", refused("{\"type\":\"jo\0in\"}"s));
+
     if (failures) {
         printf("%d FAILED\n", failures);
         return 1;

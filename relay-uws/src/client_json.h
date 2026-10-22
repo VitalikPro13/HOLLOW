@@ -39,8 +39,12 @@ inline bool depth_within(std::string_view text, size_t max_depth) {
 }
 
 // The parsed value, or a discarded one for text that is invalid or too deep. Never throws.
+// nlohmann ends its input at a NUL byte, so text with one read as the value before it and
+// ignored the rest; JSON never holds a raw NUL, and serde on the client refuses it.
 inline nlohmann::json parse(std::string_view text) {
-    if (!depth_within(text, MAX_DEPTH)) return nlohmann::json(nlohmann::json::value_t::discarded);
+    if (text.find('\0') != std::string_view::npos || !depth_within(text, MAX_DEPTH)) {
+        return nlohmann::json(nlohmann::json::value_t::discarded);
+    }
     return nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
 }
 
