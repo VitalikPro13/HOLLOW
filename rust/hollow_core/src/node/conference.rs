@@ -435,6 +435,101 @@ pub(crate) struct ConferenceHostState {
     pub host_display_name: String,
     pub host_avatar_hash: String,
     pub pending: HashMap<String, ConfPendingJoin>,
+    /// Knocks seated without a waiting room, paced (AR-27).
+    pub pacing: KnockPacing,
+}
+
+/// Admission commits without a waiting room per meeting per minute; each seats every
+/// knock due at that tick.
+const ADMISSION_COMMITS_PER_MINUTE: usize = 6;
+/// A seated device knocking again is re-seated at once the first time, then after
+/// a backoff doubling from this ...
+const RESEAT_BACKOFF_START: std::time::Duration = std::time::Duration::from_secs(30);
+/// ... up to this, forgotten after this long without a re-knock.
+const RESEAT_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(600);
+const RESEAT_FORGET: std::time::Duration = std::time::Duration::from_secs(600);
+/// Knocks kept waiting per meeting, and for how long: a knocker still there knocks
+/// again (its client re-knocks on a timer).
+const KNOCKS_KEPT: usize = 64;
+const KNOCK_KEPT_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+
+struct WaitingKnock {
+    device: String,
+    key_package_b64: String,
+    at: std::time::Instant,
+}
+
+/// Every admission and re-seat is an MLS epoch and an SFrame rotation for everyone in
+/// the meeting, so the host seats knocks on its batch tick, all that are due in one
+/// commit, and paces what knocks can force. A knocker holds one place in the queue
+/// (its newest knock, at the back), so knocking again only delays itself.
+#[derive(Default)]
+pub(crate) struct KnockPacing {
+    reseats: HashMap<String, (u32, std::time::Instant)>,
+    commits: std::collections::VecDeque<std::time::Instant>,
+    waiting: std::collections::VecDeque<WaitingKnock>,
+}
+
+impl KnockPacing {
+    fn backing_off(&self, device: &str, seated: bool, now: std::time::Instant) -> bool {
+        seated
+            && self.reseats.get(device).is_some_and(|(count, last)| {
+                let since = now.duration_since(*last);
+                since < RESEAT_FORGET && *count > 0 && since < Self::backoff(*count)
+            })
+    }
+
+    fn backoff(count: u32) -> std::time::Duration {
+        RESEAT_BACKOFF_START.saturating_mul(1u32 << (count - 1).min(5)).min(RESEAT_BACKOFF_MAX)
+    }
+
+    /// Queue `device`'s knock; false when the queue is full (the knock is dropped).
+    pub(crate) fn queue(&mut self, device: &str, key_package_b64: String, now: std::time::Instant) -> bool {
+        self.waiting.retain(|k| k.device != device && now.duration_since(k.at) < KNOCK_KEPT_FOR);
+        if self.waiting.len() >= KNOCKS_KEPT {
+            return false;
+        }
+        self.waiting.push_back(WaitingKnock { device: device.to_string(), key_package_b64, at: now });
+        true
+    }
+
+    /// The knocks to seat in this tick's one commit, in arrival order, as
+    /// `(device, KeyPackage)`; `seated` says whether a device holds a seat already
+    /// (a re-seat), a `blocked` knocker's knock is dropped. Empty while the meeting is
+    /// at its pace.
+    pub(crate) fn take_due(
+        &mut self,
+        now: std::time::Instant,
+        seated: impl Fn(&str) -> bool,
+        blocked: impl Fn(&str) -> bool,
+    ) -> Vec<(String, String)> {
+        let minute = std::time::Duration::from_secs(60);
+        self.commits.retain(|t| now.duration_since(*t) < minute);
+        self.waiting.retain(|k| now.duration_since(k.at) < KNOCK_KEPT_FOR);
+        self.reseats.retain(|_, (_, last)| now.duration_since(*last) < RESEAT_FORGET);
+        // Blocked since it knocked: dropped, never seated.
+        self.waiting.retain(|k| !blocked(&k.device));
+        if self.commits.len() >= ADMISSION_COMMITS_PER_MINUTE {
+            return Vec::new();
+        }
+        let (due, wait): (Vec<WaitingKnock>, Vec<WaitingKnock>) =
+            std::mem::take(&mut self.waiting).into_iter().partition(|k| !self.backing_off(&k.device, seated(&k.device), now));
+        self.waiting = wait.into();
+        if due.is_empty() {
+            return Vec::new();
+        }
+        self.commits.push_back(now);
+        due.into_iter()
+            .map(|k| {
+                if seated(&k.device) {
+                    let entry = self.reseats.entry(k.device.clone()).or_insert((0, now));
+                    entry.0 += 1;
+                    entry.1 = now;
+                }
+                (k.device, k.key_package_b64)
+            })
+            .collect()
+    }
 }
 
 // ── Host: start / end ────────────────────────────────────────────────
@@ -495,6 +590,7 @@ pub(crate) fn handle_conference_start(
         host_display_name,
         host_avatar_hash,
         pending: HashMap::new(),
+        pacing: KnockPacing::default(),
     });
     hollow_log!("[HOLLOW-CONF] Meeting started for conference {conf_id} (waiting_room={waiting_room})");
 }
@@ -614,8 +710,6 @@ pub(crate) fn handle_conference_leave(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_inbound_join_request(
     conference_host: &mut HashMap<String, ConferenceHostState>,
-    mls: &mut Option<MlsManager>,
-    crypto_store: &CryptoStore,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     sender_peer: &str,
@@ -667,10 +761,10 @@ pub(crate) async fn handle_inbound_join_request(
         });
 
     if !host_state.waiting_room {
-        let host = host_state.host.clone();
-        let seal = host_state.seal.clone();
-        admit_peer(mls, crypto_store, ws_cmd_tx, event_tx,
-            &conf_id, &host, &seal, sender_peer, &key_package_b64).await;
+        // Seated on the batch tick (`seat_paced_knocks`), with every other knock due.
+        if !host_state.pacing.queue(sender_peer, key_package_b64, std::time::Instant::now()) {
+            hollow_log!("[HOLLOW-CONF] Dropped a knock from {sender_peer} for {conf_id}: too many knocks wait");
+        }
         return;
     }
 
@@ -688,10 +782,7 @@ fn seat_of(key_package_b64: &str, device: &str) -> Option<crate::crypto::LeafIde
     MlsManager::key_package_identity(&kp).ok()?.bound().filter(|id| id.device == device).cloned()
 }
 
-/// Host accepted a waiting joiner (or the waiting room is off): commit the MLS
-/// add, Welcome the joiner directly (with the proof that we are its host),
-/// broadcast the commit to the room with the Tier-1 epoch guard, and rotate our
-/// own SFrame key.
+/// Host accepted a waiting joiner: [`admit_peers`] for one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn admit_peer(
     mls: &mut Option<MlsManager>,
@@ -704,32 +795,53 @@ pub(crate) async fn admit_peer(
     peer_id: &str,
     key_package_b64: &str,
 ) {
+    let knock = [(peer_id.to_string(), key_package_b64.to_string())];
+    admit_peers(mls, crypto_store, ws_cmd_tx, event_tx, conf_id, host, seal, &knock).await;
+}
+
+/// Seat `knocks` (device, KeyPackage) in ONE MLS commit, Welcome each joiner directly
+/// (with the proof that we are its host), broadcast the commit to the room with the
+/// Tier-1 epoch guard, and rotate our own SFrame key.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn admit_peers(
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    conf_id: &str,
+    host: &ConfHost,
+    seal: &MeetingSeal,
+    knocks: &[(String, String)],
+) {
     let sid = conf_server_id(conf_id);
-    // The roster may have dropped the device since it knocked.
-    if seat_of(key_package_b64, peer_id).is_none_or(|leaf| refused(&leaf)) {
-        hollow_log!("[HOLLOW-SECURITY] Not admitting {peer_id} to {conf_id}: its master's roster does not count it");
+    let Some(mls_mgr) = mls.as_mut() else { return; };
+    let mut adds: Vec<(String, Vec<u8>)> = Vec::new();
+    for (peer_id, key_package_b64) in knocks {
+        // The roster may have dropped the device since it knocked.
+        if seat_of(key_package_b64, peer_id).is_none_or(|leaf| refused(&leaf)) {
+            hollow_log!("[HOLLOW-SECURITY] Not admitting {peer_id} to {conf_id}: its master's roster does not count it");
+            continue;
+        }
+        match base64::engine::general_purpose::STANDARD.decode(key_package_b64) {
+            Ok(b) => adds.push((peer_id.clone(), b)),
+            Err(e) => hollow_log!("[HOLLOW-CONF] KeyPackage b64 decode failed for {conf_id}: {e}"),
+        }
+    }
+    if adds.is_empty() {
         return;
     }
-    let Some(mls_mgr) = mls.as_mut() else { return; };
-    let kp_bytes = match base64::engine::general_purpose::STANDARD.decode(key_package_b64) {
-        Ok(b) => b,
-        Err(e) => {
-            hollow_log!("[HOLLOW-CONF] KeyPackage b64 decode failed for {conf_id}: {e}");
-            return;
-        }
-    };
     // A device that knocks with a fresh KeyPackage while a leaf of it is seated (it
-    // left, or never read our Welcome) gets that seat back in the same commit.
-    let stale: Vec<String> = mls_mgr.group_members(&sid).into_iter().filter(|d| d == peer_id).collect();
-    let done = match mls_mgr.commit_membership(&sid, &stale, &[(peer_id.to_string(), kp_bytes)]) {
+    // left, or never read our Welcome) gets that seat back in the same commit. No
+    // receiver judges a meeting host's tally.
+    let done = match mls_mgr.commit_admissions(&sid, &adds, true) {
         Ok(done) => done,
         Err(e) => {
-            hollow_log!("[HOLLOW-CONF] Seating {peer_id} failed for {conf_id}: {e}");
+            hollow_log!("[HOLLOW-CONF] Seating {} knock(s) failed for {conf_id}: {e}", adds.len());
             return;
         }
     };
     let Some(welcome) = done.welcome else {
-        hollow_log!("[HOLLOW-CONF] Seating {peer_id} in {conf_id} made no Welcome");
+        hollow_log!("[HOLLOW-CONF] Seating knocks in {conf_id} made no Welcome");
         return;
     };
     if let Err(e) = mls_mgr.merge_pending_commit(&sid) {
@@ -740,11 +852,13 @@ pub(crate) async fn admit_peer(
     let commit = done.commit;
 
     let welcome_b64 = base64::engine::general_purpose::STANDARD.encode(welcome);
-    send_sealed_to(ws_cmd_tx, seal, conf_id, peer_id,
-        &HavenMessage::MlsWelcome {
-            server_id: sid.clone(), welcome: welcome_b64, channel_id: None,
-            conf_host: Some(host.clone()),
-        });
+    for peer_id in &done.added {
+        send_sealed_to(ws_cmd_tx, seal, conf_id, peer_id,
+            &HavenMessage::MlsWelcome {
+                server_id: sid.clone(), welcome: welcome_b64.clone(), channel_id: None,
+                conf_host: Some(host.clone()),
+            });
+    }
     let epoch = mls_mgr.epoch(&sid).ok();
     broadcast_mls_commit(mls_mgr, ws_cmd_tx, &sid, None,
         base64::engine::general_purpose::STANDARD.encode(commit), epoch);
@@ -756,7 +870,31 @@ pub(crate) async fn admit_peer(
             channel_id: None,
         }).await;
     }
-    hollow_log!("[HOLLOW-CONF] Admitted {peer_id} to conference {conf_id}");
+    hollow_log!("[HOLLOW-CONF] Admitted {:?} to conference {conf_id}", done.added);
+}
+
+/// Batch tick: seat the knocks due in each meeting without a waiting room, one commit
+/// per meeting. A knocker blocked since it knocked is dropped here.
+pub(crate) async fn seat_paced_knocks(
+    conference_host: &mut HashMap<String, ConferenceHostState>,
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) {
+    let now = std::time::Instant::now();
+    let mut conf_ids: Vec<String> = conference_host.keys().cloned().collect();
+    conf_ids.sort();
+    for conf_id in conf_ids {
+        let Some(host_state) = conference_host.get_mut(&conf_id) else { continue };
+        let members = mls.as_ref().map(|m| m.group_members(&conf_server_id(&conf_id))).unwrap_or_default();
+        let due = host_state.pacing.take_due(now, |d| members.iter().any(|m| m == d), super::blocklist::is_blocked);
+        if due.is_empty() {
+            continue;
+        }
+        let (host, seal) = (host_state.host.clone(), host_state.seal.clone());
+        admit_peers(mls, crypto_store, ws_cmd_tx, event_tx, &conf_id, &host, &seal, &due).await;
+    }
 }
 
 /// Host explicitly admits a waiting-room entry (FFI `conference_admit`).
@@ -819,7 +957,7 @@ pub(crate) async fn handle_conference_kick(
     };
     let sid = conf_server_id(conf_id);
     let Some(mls_mgr) = mls.as_mut() else { return; };
-    let commit = match mls_mgr.remove_identity_leaves(&sid, &[peer_id]) {
+    let commit = match mls_mgr.remove_identity_leaves_as(&sid, &[peer_id], true) {
         Ok(c) => c,
         Err(e) => {
             hollow_log!("[HOLLOW-CONF] Kick remove_identity_leaves failed for {conf_id}: {e}");
@@ -944,7 +1082,7 @@ async fn unseat_refused_inner(
         if gone.is_empty() {
             continue;
         }
-        let done = match mls_mgr.commit_membership(&sid, &gone, &[]) {
+        let done = match mls_mgr.commit_membership_as(&sid, &gone, &[], true) {
             Ok(done) => done,
             Err(e) => {
                 hollow_log!("[HOLLOW-CONF] Could not unseat {gone:?} from {conf_id}: {e}");
@@ -1434,5 +1572,77 @@ mod tests {
         assert!(open_meeting(&key, &room_a, "dev", &n, &c).is_some(), "a meeting's Welcome rides its lane");
         assert_eq!(welcome("server-id").lane(), Lane::Relay, "a server's Welcome does not");
         assert_eq!(welcome(&room_a).lane(), Lane::Meeting, "and a meeting's is never read in the clear");
+    }
+}
+
+#[cfg(test)]
+mod knock_pacing_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn devices(due: Vec<(String, String)>) -> Vec<String> {
+        due.into_iter().map(|(d, _)| d).collect()
+    }
+
+    #[test]
+    fn a_reknocking_guest_is_reseated_once_at_once_then_after_a_doubling_backoff() {
+        let mut p = KnockPacing::default();
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let seated = |_: &str| true;
+        p.queue("g", "kp".into(), at(0));
+        assert_eq!(devices(p.take_due(at(0), |_| false, |_| false)), vec!["g"]);
+        p.queue("g", "kp".into(), at(11));
+        assert_eq!(devices(p.take_due(at(11), seated, |_| false)), vec!["g"], "the first re-seat is immediate (a crashed guest)");
+        p.queue("g", "kp".into(), at(20));
+        assert!(p.take_due(at(30), seated, |_| false).is_empty(), "the second waits 30 s");
+        assert_eq!(devices(p.take_due(at(41), seated, |_| false)), vec!["g"]);
+        p.queue("g", "kp".into(), at(42));
+        assert!(p.take_due(at(41 + 59), seated, |_| false).is_empty(), "then a minute");
+        assert_eq!(devices(p.take_due(at(41 + 60), seated, |_| false)), vec!["g"]);
+        p.queue("other", "kp".into(), at(102));
+        assert_eq!(devices(p.take_due(at(102), seated, |_| false)), vec!["other"], "per device");
+    }
+
+    #[test]
+    fn every_due_knock_is_seated_in_one_commit_in_arrival_order_at_most_six_a_minute() {
+        let mut p = KnockPacing::default();
+        let t0 = Instant::now();
+        for d in ["d3", "d1", "d2"] {
+            p.queue(d, format!("kp-{d}"), t0);
+        }
+        p.queue("d3", "kp-d3-newer".into(), t0);
+        let due = p.take_due(t0, |_| false, |_| false);
+        assert_eq!(due, vec![("d1".into(), "kp-d1".into()), ("d2".into(), "kp-d2".into()), ("d3".into(), "kp-d3-newer".into())], "one place per knocker, its newest knock at the back");
+        for i in 1..6u64 {
+            p.queue(&format!("e{i}"), "kp".into(), t0 + Duration::from_secs(i));
+            assert_eq!(p.take_due(t0 + Duration::from_secs(i), |_| false, |_| false).len(), 1);
+        }
+        p.queue("late", "kp".into(), t0 + Duration::from_secs(10));
+        assert!(p.take_due(t0 + Duration::from_secs(10), |_| false, |_| false).is_empty(), "six commits in a minute");
+        assert_eq!(devices(p.take_due(t0 + Duration::from_secs(60), |_| false, |_| false)), vec!["late"]);
+    }
+
+    #[test]
+    fn the_knock_queue_is_bounded_and_forgets_old_knocks() {
+        let mut p = KnockPacing::default();
+        let t0 = Instant::now();
+        for i in 0..KNOCKS_KEPT {
+            assert!(p.queue(&format!("d{i}"), "kp".into(), t0));
+        }
+        assert!(!p.queue("one-more", "kp".into(), t0), "a full queue drops the newcomer");
+        assert!(p.queue("d0", "kp".into(), t0), "a knocker already waiting keeps its one place");
+        assert!(p.queue("one-more", "kp".into(), t0 + KNOCK_KEPT_FOR), "old knocks expire");
+        assert_eq!(devices(p.take_due(t0 + KNOCK_KEPT_FOR, |_| false, |_| false)), vec!["one-more"]);
+    }
+
+    #[test]
+    fn a_knocker_blocked_while_it_waits_is_never_seated() {
+        let mut p = KnockPacing::default();
+        let t0 = Instant::now();
+        p.queue("friend", "kp".into(), t0);
+        p.queue("blocked", "kp".into(), t0);
+        assert_eq!(devices(p.take_due(t0, |_| false, |d| d == "blocked")), vec!["friend"]);
+        assert!(p.take_due(t0 + Duration::from_secs(60), |_| false, |_| false).is_empty(), "its knock is gone");
     }
 }

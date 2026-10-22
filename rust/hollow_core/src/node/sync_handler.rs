@@ -420,12 +420,13 @@ async fn mls_remove_identity_and_broadcast(
     identity: &str,
     emit_epoch_event: bool,
     drop_group_on_err: bool,
+    rate_exempt: bool,
     log_ok: &str,
 ) {
     if !mls_mgr.has_group(server_id) { return; }
     let id_set = identity_credential_ids(identity);
     let owned: Vec<&str> = id_set.iter().map(|s| s.as_str()).collect();
-    match mls_mgr.remove_identity_leaves(server_id, &owned) {
+    match mls_mgr.remove_identity_leaves_as(server_id, &owned, rate_exempt) {
         Ok(commit_bytes) => match mls_mgr.merge_pending_commit(server_id) {
             Ok(()) => {
                 persist_mls_state(mls_mgr, crypto_store);
@@ -2434,7 +2435,7 @@ pub(crate) async fn handle_kick_member(
         if let Some(mls_mgr) = mls {
             mls_remove_identity_and_broadcast(
                 mls_mgr, event_tx, ws_cmd_tx, crypto_store, &server_id, &peer_id,
-                true, false,
+                true, false, crate::node::crypto_handler::is_anchor_owner(state, local_peer_str),
                 &format!("Removed all leaves of {peer_id} from MLS group, epoch rotated"),
             ).await;
 
@@ -2443,7 +2444,7 @@ pub(crate) async fn handle_kick_member(
             let target_master = super::resolver::resolve(&peer_id);
             crate::node::crypto_handler::remove_identity_from_subgroups(
                 mls_mgr, event_tx, ws_cmd_tx, crypto_store,
-                state, &server_id, &target_master,
+                state, &server_id, &target_master, local_peer_str,
             ).await;
         }
     }
@@ -2647,7 +2648,7 @@ pub(crate) async fn handle_leave_server(
         if let Some(mls_mgr) = mls {
             mls_remove_identity_and_broadcast(
                 mls_mgr, event_tx, ws_cmd_tx, crypto_store, &server_id, local_peer_str,
-                false, true,
+                false, true, crate::node::crypto_handler::is_anchor_owner(state, local_peer_str),
                 &format!("Left MLS group for {server_id}"),
             ).await;
 
@@ -2725,7 +2726,7 @@ pub(crate) async fn handle_ban_member(
         if let Some(mls_mgr) = mls {
             mls_remove_identity_and_broadcast(
                 mls_mgr, event_tx, ws_cmd_tx, crypto_store, &server_id, &peer_id,
-                true, false,
+                true, false, crate::node::crypto_handler::is_anchor_owner(state, local_peer_str),
                 &format!("Removed all leaves of banned {peer_id} from MLS group"),
             ).await;
 
@@ -2733,7 +2734,7 @@ pub(crate) async fn handle_ban_member(
             let target_master = super::resolver::resolve(&peer_id);
             crate::node::crypto_handler::remove_identity_from_subgroups(
                 mls_mgr, event_tx, ws_cmd_tx, crypto_store,
-                state, &server_id, &target_master,
+                state, &server_id, &target_master, local_peer_str,
             ).await;
         }
     }

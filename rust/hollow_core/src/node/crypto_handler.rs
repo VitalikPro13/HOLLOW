@@ -1972,6 +1972,13 @@ impl MlsTurn {
         self.returning |= !live;
     }
 
+    /// Whether this device may commit right now, between ticks: in the foreground,
+    /// its socket up and settled. Changes nothing.
+    pub(crate) fn live(&self) -> bool {
+        !super::ws_client::backgrounded()
+            && self.live_since.is_some_and(|t| !self.returning || t.elapsed() >= MLS_TURN_SETTLE)
+    }
+
     /// Asked once per batch tick: whether this tick may commit.
     pub(crate) fn take(&mut self) -> bool {
         if super::ws_client::backgrounded() {
@@ -2447,6 +2454,7 @@ pub(crate) fn sweep_unseated_leaves(
 /// per-channel MLS subgroups, one commit per subgroup. Used by kick/ban/leave so
 /// a removed human loses access to restricted channels, not just the server-wide
 /// group. No-op for subgroups we do not hold or where the target has no leaf.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn remove_identity_from_subgroups(
     mls: &mut MlsManager,
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -2455,6 +2463,7 @@ pub(crate) async fn remove_identity_from_subgroups(
     server: &crate::crdt::server_state::ServerState,
     server_id: &str,
     target_master: &str,
+    local_master: &str,
 ) {
     // credential ids of the removed human = {master} ∪ all known devices.
     let id_set: Vec<String> = {
@@ -2474,7 +2483,7 @@ pub(crate) async fn remove_identity_from_subgroups(
         };
         if present.is_empty() { continue; }
 
-        match mls.remove_identity_leaves(&group_key, &present) {
+        match mls.remove_identity_leaves_as(&group_key, &present, is_anchor_owner(server, local_master)) {
             Ok(commit_bytes) => {
                 if let Err(e) = mls.merge_pending_commit(&group_key) {
                     hollow_log!("[HOLLOW-MLS] subgroup remove merge failed for {group_key}: {e}");
@@ -2965,6 +2974,18 @@ pub(crate) fn broadcast_mls_commit(
         };
         mls.cache_commit(&group_key, epoch, commit_b64.clone());
     }
+    send_commit_frame(ws_cmd_tx, server_id, channel_id, commit_b64, epoch);
+}
+
+/// The room broadcast of one commit, uncached: for a committer relaying a member's
+/// commit before it merges (it caches after).
+pub(crate) fn send_commit_frame(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    server_id: &str,
+    channel_id: Option<String>,
+    commit_b64: String,
+    epoch: Option<u64>,
+) {
     let data = serde_json::to_vec(&HavenMessage::MlsCommit {
         server_id: server_id.to_string(),
         commit: commit_b64,
@@ -3214,7 +3235,7 @@ pub(crate) async fn rebind_unbound_leaves(
         }
         let (server_id, channel_id) = crate::crypto::split_group_key(&group_key);
         let Some(state) = server_states.get(&server_id) else { continue };
-        let authority = group_authority(state, channel_id.as_deref(), local_peer_str, ws_room_peers);
+        let authority = group_authority(state, channel_id.as_deref(), local_peer_str, ws_room_peers, &Default::default());
         let we_are_authority =
             authority.as_deref().is_some_and(|a| super::resolver::same_identity(a, local_peer_str));
         // Two devices of the authority that upgrade together would each rebind and fork
@@ -3254,7 +3275,10 @@ pub(crate) async fn rebind_unbound_leaves(
         let target = if we_are_authority && !we_act {
             Some(local_peer_str.to_string())
         } else if we_are_authority {
-            epoch_catchup_responder(state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str)
+            epoch_catchup_responder(
+                state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str,
+                &unfit_responders(mls_mgr, state, &server_id, channel_id.as_deref()),
+            )
         } else {
             authority
         };
@@ -3300,7 +3324,8 @@ pub(crate) fn ask_leaf_repair(
     if !entitled || mls_mgr.welcome_waits(group_key) {
         return false;
     }
-    let Some(target) = epoch_catchup_responder(state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str) else {
+    let unfit = unfit_responders(mls_mgr, state, &server_id, channel_id.as_deref());
+    let Some(target) = epoch_catchup_responder(state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str, &unfit) else {
         return false;
     };
     if preferred_online_device(ws_room_peers, &target).is_none() {
@@ -3349,7 +3374,8 @@ pub(crate) fn repair_after_spent_catchup(
     if mls_mgr.holds_commit(&group_key) {
         return false;
     }
-    let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str);
+    let unfit = unfit_responders(mls_mgr, state, server_id, channel_id);
+    let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str, &unfit);
     if !responder.is_some_and(|r| super::resolver::same_identity(&r, frame_sender)) {
         hollow_log!("[HOLLOW-MLS] A spent commit for {group_key} came from {frame_sender}, not our catch-up responder; no repair");
         return false;
@@ -3368,6 +3394,56 @@ pub(crate) fn repair_after_spent_catchup(
 /// hint-triggered work against floods and request loops.
 pub(crate) const EPOCH_HINT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Whether `master` is the server's anchored owner (design E: fixed, never a role
+/// some op could hand out), the one master the epoch-rate rule exempts.
+pub(crate) fn is_anchor_owner(state: &crate::crdt::server_state::ServerState, master: &str) -> bool {
+    state.anchor_owner().as_deref() == Some(master)
+}
+
+/// Masters our copy of the group shows unfit to answer for it (catch-up, repairs):
+/// at their cap, or keeping a pre-0.13 leaf where every other master's carries a tally.
+pub(crate) fn unfit_responders(
+    mls: &MlsManager,
+    state: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    channel_id: Option<&str>,
+) -> std::collections::HashSet<String> {
+    let group_key = match channel_id {
+        Some(cid) => crate::crypto::subgroup_id(server_id, cid),
+        None => server_id.to_string(),
+    };
+    mls.unfit_masters(&group_key, false, |m| is_anchor_owner(state, m))
+}
+
+/// `elected` unless the tree shows it unfit to commit, then the lowest fit online
+/// master (we always count as online, so our own election never names us unfit);
+/// with nobody fit, `elected` stands.
+pub(crate) fn fit_coordinator(
+    elected: Option<String>,
+    members: &[String],
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    unfit: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let elected = elected?;
+    if !unfit.iter().any(|m| super::resolver::same_identity(m, &elected)) {
+        return Some(elected);
+    }
+    online_master_identities(members, local_peer, ws_room_peers)
+        .into_iter()
+        .find(|m| !unfit.iter().any(|u| super::resolver::same_identity(u, m)))
+        .or(Some(elected))
+}
+
+/// Masters our copy of the group shows unfit to commit for it: at their cap.
+pub(crate) fn unfit_committers(
+    mls: &MlsManager,
+    state: &crate::crdt::server_state::ServerState,
+    group_key: &str,
+) -> std::collections::HashSet<String> {
+    mls.unfit_masters(group_key, true, |m| is_anchor_owner(state, m))
+}
+
 /// The authority for an MLS group key: the subgroup coordinator for a restricted
 /// channel; for the server-wide group the OWNER when online-or-us, else the
 /// lowest online master so epoch catch-up still has a live responder. May return
@@ -3377,9 +3453,10 @@ fn group_authority(
     channel_id: Option<&str>,
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    unfit: &std::collections::HashSet<String>,
 ) -> Option<String> {
     match channel_id {
-        Some(cid) => elect_subgroup_coordinator(state, cid, local_peer, ws_room_peers),
+        Some(cid) => elect_subgroup_coordinator(state, cid, local_peer, ws_room_peers).filter(|c| !unfit.contains(c)),
         None => {
             let owner = state.members.keys().find(|m| {
                 state.roles.get(*m)
@@ -3391,8 +3468,8 @@ fn group_authority(
             {
                 return Some(owner.clone());
             }
-            let members: Vec<String> = state.members.keys().cloned().collect();
-            elect_coordinator(&members, local_peer, ws_room_peers)
+            let members: Vec<String> = state.members.keys().filter(|m| !unfit.contains(*m)).cloned().collect();
+            elect_coordinator(&members, local_peer, ws_room_peers).filter(|c| !unfit.contains(c))
         }
     }
 }
@@ -3406,13 +3483,16 @@ pub(crate) fn may_repair_our_leaf(
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     requester: &str,
+    unfit: &std::collections::HashSet<String>,
 ) -> bool {
     let is_owner = state.roles.get(requester)
         .is_some_and(|r| *r.read() == crate::crdt::operations::MemberRole::Owner);
     let named = |elected: Option<String>| elected.is_some_and(|e| super::resolver::same_identity(&e, requester));
     is_owner
-        || named(epoch_catchup_responder(state, channel_id, local_peer, ws_room_peers, local_peer))
-        || channel_id.is_some_and(|cid| named(elect_subgroup_coordinator(state, cid, local_peer, ws_room_peers)))
+        || named(epoch_catchup_responder(state, channel_id, local_peer, ws_room_peers, local_peer, unfit))
+        || channel_id.is_some_and(|cid| {
+            named(elect_subgroup_coordinator(state, cid, local_peer, ws_room_peers).filter(|c| !unfit.contains(c)))
+        })
 }
 
 /// Who answers an epoch catch-up for a group, given that `behind` is the peer
@@ -3432,8 +3512,9 @@ fn epoch_catchup_responder(
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     behind: &str,
+    unfit: &std::collections::HashSet<String>,
 ) -> Option<String> {
-    let authority = group_authority(state, channel_id, local_peer, ws_room_peers);
+    let authority = group_authority(state, channel_id, local_peer, ws_room_peers, unfit);
     if let Some(a) = &authority
         && !super::resolver::same_identity(a, behind)
     {
@@ -3444,7 +3525,7 @@ fn epoch_catchup_responder(
     let candidates: Vec<String> = state
         .members
         .keys()
-        .filter(|m| !super::resolver::same_identity(m, behind))
+        .filter(|m| !super::resolver::same_identity(m, behind) && !unfit.contains(*m))
         .filter(|m| match channel_id {
             Some(cid) => state.can_see_channel(m, cid),
             None => true,
@@ -3457,6 +3538,9 @@ fn epoch_catchup_responder(
         .into_iter()
         .find(|c| !super::resolver::same_identity(c, behind))
 }
+
+/// Commits per `MlsCommitCatchup` frame.
+const CATCHUP_FRAME_COMMITS: usize = 4;
 
 /// React to a peer's MLS epoch hint (`SyncRequest.mls_epoch` / `MlsEpochProbe`),
 /// the detector for present-but-stale groups. They are otherwise invisible:
@@ -3528,7 +3612,8 @@ pub(crate) fn handle_epoch_hint(
     if their_epoch < own_epoch || forked {
         // ONE responder, no room-wide echo, elected with the peer that is behind
         // excluded so a stale AUTHORITY still gets an answer. A direct probe skips it.
-        let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, from_peer);
+        let unfit = unfit_responders(mls_mgr, state, server_id, channel_id);
+        let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, from_peer, &unfit);
         if !direct_probe
             && !responder.as_deref().is_some_and(|r| super::resolver::same_identity(r, local_peer_str))
         {
@@ -3553,14 +3638,17 @@ pub(crate) fn handle_epoch_hint(
                     "[HOLLOW-MLS] Serving commit catch-up to {from_peer} for {group_key}: {} commit(s), epochs {}..={}",
                     commits.len(), their_epoch + 1, own_epoch
                 );
-                send_message_to_peer(
-                    ws_cmd_tx, ws_room_peers, from_peer,
-                    HavenMessage::MlsCommitCatchup {
-                        server_id: server_id.to_string(),
-                        channel_id: channel_id.map(|c| c.to_string()),
-                        commits,
-                    },
-                );
+                // A few commits per frame: a day of cadence in a big tree is megabytes.
+                for chunk in commits.chunks(CATCHUP_FRAME_COMMITS) {
+                    send_message_to_peer(
+                        ws_cmd_tx, ws_room_peers, from_peer,
+                        HavenMessage::MlsCommitCatchup {
+                            server_id: server_id.to_string(),
+                            channel_id: channel_id.map(|c| c.to_string()),
+                            commits: chunk.to_vec(),
+                        },
+                    );
+                }
             }
             None => {
                 // Of two forks the one the authority's acting device holds stays, or
@@ -3614,7 +3702,7 @@ fn is_authoritys_acting_device(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     device: &str,
 ) -> bool {
-    group_authority(state, channel_id, local_peer, ws_room_peers)
+    group_authority(state, channel_id, local_peer, ws_room_peers, &Default::default())
         .filter(|a| !super::resolver::same_identity(a, local_peer))
         .and_then(|a| acting_device(&super::resolver::resolve(&a), ws_room_peers))
         .is_some_and(|d| d == device)
@@ -3647,7 +3735,10 @@ pub(crate) fn send_epoch_probe(
     // "we are the authority" says who COMMITS, never who holds the newest epoch,
     // and treating it as the latter left a returning owner with nobody to ask.
     let Some(authority) =
-        epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str)
+        epoch_catchup_responder(
+            state, channel_id, local_peer_str, ws_room_peers, local_peer_str,
+            &unfit_responders(mls_mgr, state, server_id, channel_id),
+        )
     else {
         return false; // no other online member — nobody to ask
     };
@@ -3710,6 +3801,24 @@ mod tests {
         rooms.iter().map(|(room, peers)| {
             (room.to_string(), peers.iter().map(|p| p.to_string()).collect())
         }).collect()
+    }
+
+    /// Review M3: a master the tree shows unfit never repairs our leaf, even as the
+    /// subgroup's elected coordinator.
+    #[test]
+    fn an_unfit_subgroup_coordinator_may_not_repair_our_leaf() {
+        use crate::crdt::server_state::{MemberInfo, ServerState};
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let mut state = ServerState::new("ur_srv".into(), "s".into(), "ur_owner".into());
+        for m in ["ur_owner", "ua_flooder", "uz_local"] {
+            state.members.insert(m.into(), MemberInfo { peer_id: m.into(), display_name: m.into() });
+        }
+        let channel = state.channels.keys().next().unwrap().clone();
+        let rooms = make_room_peers(&[("ur_srv", &["ua_flooder"])]);
+        assert!(may_repair_our_leaf(&state, Some(&channel), "uz_local", &rooms, "ua_flooder", &HashSet::new()));
+        let unfit: HashSet<String> = ["ua_flooder".to_string()].into();
+        assert!(!may_repair_our_leaf(&state, Some(&channel), "uz_local", &rooms, "ua_flooder", &unfit));
     }
 
     #[test]

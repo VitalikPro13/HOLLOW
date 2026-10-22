@@ -1404,6 +1404,14 @@ pub(crate) enum NodeCommand {
     DebugSnapshot {
         reply: tokio::sync::oneshot::Sender<DebugSnapshotReply>,
     },
+    /// TEST-ONLY: commit a path-only self-update in `group_key` now, broadcast and
+    /// merged, ignoring turns and the cap: a member that does not follow the rules.
+    /// `epochs` replaces the tally's own list; `None` states the honest next one.
+    #[cfg(test)]
+    DebugCommitSelfUpdate {
+        group_key: String,
+        epochs: Option<Vec<u64>>,
+    },
 
     /// TEST-ONLY: carry any Olm-lane message to one device through this node's own
     /// session, as a member with a modified client could. Absent in release builds.
@@ -1616,6 +1624,8 @@ impl NodeCommand {
             #[cfg(test)]
             Self::DebugSnapshot { .. } => "DebugSnapshot",
             #[cfg(test)]
+            Self::DebugCommitSelfUpdate { .. } => "DebugCommitSelfUpdate",
+            #[cfg(test)]
             Self::TestCarry { .. } => "TestCarry",
             #[cfg(test)]
             Self::TestEnvelopeJson { .. } => "TestEnvelopeJson",
@@ -1644,6 +1654,8 @@ pub(crate) struct DebugSnapshotReply {
     pub mls_epoch: std::collections::HashMap<String, u64>,
     /// server_id -> digest of the current epoch: equal epochs, different digests = a fork.
     pub mls_epoch_auth: std::collections::HashMap<String, String>,
+    /// group key -> every leaf as `(device, last written by a commit, its own tally epochs)`.
+    pub mls_leaf_tallies: std::collections::HashMap<String, Vec<(String, bool, Vec<u64>)>>,
     /// peer DEVICE id -> Olm session status: "none" | "unconfirmed" | "confirmed".
     pub olm_sessions: std::collections::HashMap<String, String>,
     /// peer DEVICE id -> the id of the Olm session we encrypt with; both sides of a
@@ -2088,6 +2100,50 @@ pub(crate) enum HavenMessage {
         epoch: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch_auth: Option<String>,
+    },
+
+    /// A member device that is not the group's committer passes on a KeyPackage it was
+    /// sent to the committer its own election names. The package is signed by the
+    /// device it seats, so the forwarder vouches for nothing.
+    #[serde(rename = "mls_kp_forward")]
+    MlsKeyPackageForward {
+        server_id: String,
+        key_package: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
+    },
+
+    /// The group's committer hands one device a turn to refresh its own leaf at
+    /// `epoch` (AR-25): it commits nothing in that group until the turn ends.
+    #[serde(rename = "mls_update_turn")]
+    MlsUpdateTurn {
+        server_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
+        epoch: u64,
+        nonce: u64,
+    },
+
+    /// The turn holder's staged self-update, sent to the committer alone, which
+    /// broadcasts it if the turn is still open and drops it otherwise.
+    #[serde(rename = "mls_update_turn_commit")]
+    MlsUpdateTurnCommit {
+        server_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
+        epoch: u64,
+        nonce: u64,
+        commit: String,
+    },
+
+    /// The turn holder will not commit for this turn.
+    #[serde(rename = "mls_update_turn_declined")]
+    MlsUpdateTurnDeclined {
+        server_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
+        epoch: u64,
+        nonce: u64,
     },
 
     /// Replay of missed MLS commit frames to ONE stale member, in ascending epoch
@@ -4282,6 +4338,10 @@ impl HavenMessage {
             | Self::DmSiblingSyncRequest { .. }
             | Self::MlsKeyPackageRequest { .. }
             | Self::MlsEpochProbe { .. }
+            | Self::MlsKeyPackageForward { .. }
+            | Self::MlsUpdateTurn { .. }
+            | Self::MlsUpdateTurnCommit { .. }
+            | Self::MlsUpdateTurnDeclined { .. }
             | Self::ConferenceJoinRequest { .. }
             | Self::ConferenceJoinDenied { .. }
             | Self::ConferenceLobbyInfo { .. }
@@ -4484,6 +4544,10 @@ impl HavenMessage {
             | Self::MlsKeyPackage { .. }
             | Self::MlsKeyPackageRequest { .. }
             | Self::MlsEpochProbe { .. }
+            | Self::MlsKeyPackageForward { .. }
+            | Self::MlsUpdateTurn { .. }
+            | Self::MlsUpdateTurnCommit { .. }
+            | Self::MlsUpdateTurnDeclined { .. }
             | Self::ConferenceChat { .. }
             | Self::LinkPake { .. }
             | Self::LinkPakeReply { .. }

@@ -27267,7 +27267,11 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // one absence proof, a mesh op nobody hands on, and one wait past the joiners' post-join
     // asks, which have no signal (14.5 s, total 851.3 s), and a window in which only a
     // digest sync's first answer reaches a member back from away (2 s, total 853.3 s).
-    const BUDGET_MS: u64 = 858_700;
+    // 2026-10-22: g13-s3 (self-update turns, the epoch-rate rule) added absence proofs (no
+    // turn for a hidden device, a late or forged turn commit never relayed, no repair onto
+    // a flooder's fork), post spacing that gives each frame a chance to show a fork, and the
+    // KeyPackage loop's one-a-second pacing (11.9 s on top of the 858.7 s above, total 870.6 s).
+    const BUDGET_MS: u64 = 870_600;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -53673,4 +53677,726 @@ async fn g13_an_unseen_op_goes_to_the_first_member_that_joins_the_room() {
         })
     };
     assert!(wait_until(20, pledged).await, "J's pledge never went to the member that came online");
+}
+
+// g13-s3
+
+/// Shortens the self-update cadence for one harness test and puts it back after.
+struct G13s3Cadence;
+
+impl G13s3Cadence {
+    fn scaled(scale: f64) -> Self {
+        super::mls_turns::set_cadence_scale_for_test(scale);
+        G13s3Cadence
+    }
+}
+
+impl Drop for G13s3Cadence {
+    fn drop(&mut self) {
+        super::mls_turns::reset_cadence_scale_for_test();
+    }
+}
+
+/// Owner plus members on friends, the server created and every member seated.
+async fn g13s3_server(relay: &MockRelay, tags: &[u8], name: &str) -> (Vec<TestNode>, String) {
+    g13s3_server_seating(relay, tags, name, tags.len()).await
+}
+
+/// [`g13s3_server`] seating only the first `seated` nodes (the owner first).
+async fn g13s3_server_seating(relay: &MockRelay, tags: &[u8], name: &str, seated: usize) -> (Vec<TestNode>, String) {
+    let masters: Vec<String> = tags.iter().map(|t| tag_kp(*t).peer_id()).collect();
+    let mut nodes = Vec::new();
+    for (i, tag) in tags.iter().enumerate() {
+        let friends: Vec<&str> = masters.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, m)| m.as_str()).collect();
+        nodes.push(spawn_node_with_friends(relay, *tag, *tag, &friends).await);
+    }
+    for i in 0..nodes.len() {
+        for j in i + 1..nodes.len() {
+            expect_dm_pair_ready(relay, &nodes[i], &nodes[j], 25).await;
+        }
+    }
+    let server_id = create_server_and_wait(&mut nodes[0], name).await;
+    for i in 1..seated {
+        join_and_wait(&mut nodes[i], &server_id).await;
+        let device = nodes[i].device_id.clone();
+        expect_mls_leaf(&nodes[0], &server_id, &device, 30).await;
+    }
+    (nodes, server_id)
+}
+
+/// Devices whose leaf in `group_key` a commit's update path wrote, as `node` sees them.
+async fn g13s3_refreshed(node: &TestNode, group_key: &str) -> Option<Vec<String>> {
+    let snap = node.debug_snapshot().await?;
+    let mut v: Vec<String> = snap.mls_leaf_tallies.get(group_key)?.iter().filter(|(_, w, _)| *w).map(|(d, _, _)| d.clone()).collect();
+    v.sort();
+    Some(v)
+}
+
+fn g13s3_frames(relay: &MockRelay, kind: &str) -> usize {
+    relay.wiretap().frames.iter().filter(|f| f.kind() == kind).count()
+}
+
+/// AR-25: every leaf refreshes itself on a turn the committer hands out and relays,
+/// one epoch per refresh, no repair and no Welcome, and the group never forks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_turns_refresh_every_leaf_once_without_a_fork() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (nodes, server_id) = g13s3_server(&relay, &[201, 202, 203], "Turns").await;
+    let start = quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await;
+    let (start_epoch, _) = start.expect("one group after the joins");
+    relay.start_wiretap();
+    let _cadence = G13s3Cadence::scaled(0.001);
+
+    let mut everyone: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    everyone.sort();
+    assert!(
+        wait_until(60, async || {
+            for n in &nodes {
+                if g13s3_refreshed(n, &server_id).await.as_ref() != Some(&everyone) {
+                    return false;
+                }
+            }
+            true
+        })
+        .await,
+        "every leaf refreshed: {:?}",
+        g13s3_refreshed(&nodes[0], &server_id).await,
+    );
+    let (epoch, _) = quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await.expect("one group, no fork");
+    let refreshes = g13s3_frames(&relay, "mls_commit");
+    assert_eq!(epoch - start_epoch, refreshes as u64, "one epoch per relayed refresh, nothing else committed");
+    assert!(refreshes >= 3);
+    assert_eq!(g13s3_frames(&relay, "mls_welcome"), 0, "a refresh is never a repair");
+    assert_eq!(g13s3_frames(&relay, "mls_kp"), 0, "nobody asked for a leaf");
+    let committer = &nodes[0].device_id;
+    assert!(
+        relay.wiretap().frames.iter().filter(|f| f.kind() == "mls_commit").all(|f| &f.from == committer),
+        "every refresh is broadcast by the committer",
+    );
+    drop(nodes);
+}
+
+/// AR-25 and the MlsTurn rule: a device hidden from the room is never handed a turn,
+/// and a turn reaching it while it is away is declined, never acted on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_a_backgrounded_device_takes_no_turn() {
+    let _g = test_guard();
+    let _cadence = G13s3Cadence::scaled(0.001);
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (nodes, server_id) = g13s3_server(&relay, &[204, 205, 206], "Away").await;
+    let away = &nodes[2];
+    relay.set_background(away, true);
+    assert!(wait_until(10, async || !nodes[0].sees_peer(&away.device_id).await).await, "the committer no longer sees it");
+    relay.start_wiretap();
+    let others = {
+        let mut v = vec![nodes[0].device_id.clone(), nodes[1].device_id.clone()];
+        v.sort();
+        v
+    };
+    assert!(
+        wait_until(40, async || {
+            g13s3_refreshed(&nodes[0], &server_id).await.is_some_and(|r| others.iter().all(|d| r.contains(d)))
+        })
+        .await,
+        "the devices on screen refresh",
+    );
+    sleep_ms(2000).await; // absence: no turn for the hidden device across more ticks
+    let tap = relay.wiretap();
+    assert!(
+        !tap.frames.iter().any(|f| f.kind() == "mls_update_turn" && f.to.as_deref() == Some(away.device_id.as_str())),
+        "a hidden device was handed a turn",
+    );
+    assert!(!tap.frames.iter().any(|f| f.from == away.device_id && f.kind() == "mls_update_turn_commit"));
+    assert!(!g13s3_refreshed(&nodes[0], &server_id).await.unwrap_or_default().contains(&away.device_id));
+    // A turn that reaches it anyway while it is away is declined, never acted on.
+    let epoch = away.mls_epoch(&server_id).await.unwrap();
+    let turn = serde_json::to_vec(&super::types::HavenMessage::MlsUpdateTurn { server_id: server_id.clone(), channel_id: None, epoch, nonce: 3 }).unwrap();
+    relay.inject_direct(&server_id, &nodes[0].device_id, &away.device_id, turn);
+    assert!(
+        wait_until(10, async || relay.wiretap().frames.iter().any(|f| f.from == away.device_id && f.kind() == "mls_update_turn_declined")).await,
+        "the away device declines",
+    );
+    assert!(!relay.wiretap().frames.iter().any(|f| f.from == away.device_id && f.kind() == "mls_update_turn_commit"));
+
+    relay.set_background(away, false);
+    assert!(
+        wait_until(40, async || g13s3_refreshed(&nodes[0], &server_id).await.is_some_and(|r| r.contains(&away.device_id))).await,
+        "back on screen it gets its turn",
+    );
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await.is_some(), "one group");
+    drop(nodes);
+}
+
+/// AR-25 fork safety: while a turn is out the committer commits nothing in that
+/// group, and a turn commit reaching it after the turn ended is dropped unrelayed,
+/// so a member's refresh and the committer's own add never share an epoch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_a_late_turn_commit_is_dropped_and_the_committers_add_waits_for_the_turn() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut nodes, server_id) = g13s3_server_seating(&relay, &[207, 208, 209], "Late Turn", 2).await;
+    let (o, a) = (nodes[0].device_id.clone(), nodes[1].device_id.clone());
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1]], &server_id, 30).await.is_some());
+    relay.hold_direct(&a, &o);
+    relay.start_wiretap();
+    let _cadence = G13s3Cadence::scaled(0.001);
+    assert!(
+        wait_until(30, async || relay.held_kinds(&a, &o).iter().any(|k| k == "mls_update_turn_commit")).await,
+        "the member answers its turn",
+    );
+    let turn_at = std::time::Instant::now();
+    nodes[2].cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    let j = nodes[2].device_id.clone();
+    // Let everything through but the held turn commit.
+    for kind in relay.held_kinds(&a, &o) {
+        if kind != "mls_update_turn_commit" {
+            relay.release_held_kind(&a, &o, &kind);
+        }
+    }
+    expect_mls_leaf(&nodes[0], &server_id, &j, 40).await;
+    // The committer merges as it hands its broadcast to the socket: the frame may reach
+    // the relay a moment after the leaf shows.
+    assert!(
+        wait_until(5, async || relay.wiretap().frames.iter().any(|f| f.kind() == "mls_commit" && f.from == o)).await,
+        "the committer broadcast the add",
+    );
+    assert!(
+        // The answer is seen up to a batch tick after the turn went out.
+        turn_at.elapsed() >= super::mls_turns::LEASE - std::time::Duration::from_secs(3),
+        "the add waited for the open turn to end",
+    );
+    relay.release_held_kind(&a, &o, "mls_update_turn_commit");
+    sleep_ms(2000).await; // absence: the late commit is never relayed
+    let body = |f: &TapFrame, field: &str| {
+        serde_json::from_slice::<serde_json::Value>(&f.body).ok().and_then(|v| v.get(field).and_then(|c| c.as_str()).map(str::to_string))
+    };
+    let tap = relay.wiretap();
+    let late: Vec<String> = tap.frames.iter().filter(|f| f.from == a && f.kind() == "mls_update_turn_commit").filter_map(|f| body(f, "commit")).collect();
+    assert!(!late.is_empty(), "the held turn commit reached the relay");
+    assert!(
+        !tap.frames.iter().filter(|f| f.kind() == "mls_commit").filter_map(|f| body(f, "commit")).any(|c| late.contains(&c)),
+        "a turn commit after its turn is never relayed",
+    );
+    assert!(
+        quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 40).await.is_some(),
+        "one group: o={:?} a={:?} j={:?}",
+        nodes[0].mls_epoch_state(&server_id).await,
+        nodes[1].mls_epoch_state(&server_id).await,
+        nodes[2].mls_epoch_state(&server_id).await,
+    );
+    let _ = nodes.pop();
+    drop(nodes);
+}
+
+/// AR-25: a turn counts only from the device the member itself names as the group's
+/// committer, and a decline ends a turn only from the device holding it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_turns_and_declines_count_only_from_their_own_party() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (nodes, server_id) = g13s3_server(&relay, &[210, 211, 212], "Parties").await;
+    let (o, a, b) = (nodes[0].device_id.clone(), nodes[1].device_id.clone(), nodes[2].device_id.clone());
+    let (epoch, _) = quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await.expect("one group");
+    relay.start_wiretap();
+
+    // A member that is not the committer hands out a turn: declined, nothing staged.
+    let forged = serde_json::to_vec(&super::types::HavenMessage::MlsUpdateTurn { server_id: server_id.clone(), channel_id: None, epoch, nonce: 7 }).unwrap();
+    relay.inject_direct(&server_id, &b, &a, forged);
+    assert!(
+        wait_until(10, async || relay.wiretap().frames.iter().any(|f| f.from == a && f.kind() == "mls_update_turn_declined")).await,
+        "the member declines a turn from a device that does not commit for the group",
+    );
+    sleep_ms(1500).await; // absence: no commit staged for the forged turn
+    assert!(!relay.wiretap().frames.iter().any(|f| f.from == a && f.kind() == "mls_update_turn_commit"));
+
+    // The committer's real turn; a third party's decline must not end it.
+    relay.hold_direct(&a, &o);
+    let _cadence = G13s3Cadence::scaled(0.001);
+    let nonce_of = |f: &TapFrame| serde_json::from_slice::<serde_json::Value>(&f.body).ok().and_then(|v| v.get("nonce")?.as_u64());
+    assert!(
+        wait_until(30, async || relay.held_kinds(&a, &o).iter().any(|k| k == "mls_update_turn_commit")).await,
+        "the member answers the committer's turn",
+    );
+    let tap = relay.wiretap();
+    let turn = tap.frames.iter().rev().find(|f| f.from == o && f.kind() == "mls_update_turn" && f.to.as_deref() == Some(a.as_str())).expect("the turn");
+    let (nonce, turn_epoch) = (nonce_of(turn).unwrap(), serde_json::from_slice::<serde_json::Value>(&turn.body).unwrap()["epoch"].as_u64().unwrap());
+    let decline = serde_json::to_vec(&super::types::HavenMessage::MlsUpdateTurnDeclined { server_id: server_id.clone(), channel_id: None, epoch: turn_epoch, nonce }).unwrap();
+    relay.inject_direct(&server_id, &b, &o, decline);
+    sleep_ms(1000).await; // settle: the forged decline is handled before the real commit
+    relay.release_held(&a, &o);
+    assert!(
+        wait_until(10, async || g13s3_refreshed(&nodes[0], &server_id).await.is_some_and(|r| r.contains(&a))).await,
+        "the turn stayed open and the holder's refresh was relayed",
+    );
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await.is_some(), "one group");
+    drop(nodes);
+}
+
+/// A self-update committed now outside every rule, waited on until it merged here.
+async fn g13s3_force_self_update(node: &TestNode, group_key: &str) {
+    let before = node.mls_epoch(group_key).await.unwrap_or(0);
+    node.cmd_tx.send(NodeCommand::DebugCommitSelfUpdate { group_key: group_key.to_string(), epochs: None }).await.unwrap();
+    assert!(wait_until(5, async || node.mls_epoch(group_key).await.is_some_and(|e| e > before)).await, "the forced self-update merged");
+}
+
+async fn g13s3_post(node: &TestNode, server_id: &str, id: &str) {
+    node.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.to_string(),
+            channel_id: general_channel_of(server_id),
+            text: id.to_string(),
+            message_id: id.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+}
+
+/// Two members committing a self-update at one epoch without turns (a pre-turn
+/// client or a hostile one): the relay's order picks one, the other is repaired
+/// alone, no group is dropped and the owner is never repaired. Both orders.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_concurrent_self_updates_at_one_epoch_converge() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (nodes, server_id) = g13s3_server(&relay, &[213, 214, 215], "Racing").await;
+    let o = nodes[0].device_id.clone();
+    for (round, (first, second)) in [(1usize, 2usize), (2, 1)].into_iter().enumerate() {
+        assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 40).await.is_some());
+        let (f, s) = (nodes[first].device_id.clone(), nodes[second].device_id.clone());
+        // The second committer's broadcast reaches everyone after the first's.
+        relay.hold_broadcasts(&s, &o);
+        relay.hold_broadcasts(&s, &f);
+        relay.start_wiretap();
+        for i in [first, second] {
+            g13s3_force_self_update(&nodes[i], &server_id).await;
+        }
+        relay.release_broadcasts(&s, &o);
+        relay.release_broadcasts(&s, &f);
+        // Traffic is what shows a fork.
+        for k in 0..6 {
+            g13s3_post(&nodes[k % 3], &server_id, &format!("race-{round}-{k}")).await;
+            sleep_ms(300).await; // spacing: each post is a fresh chance to see the fork
+        }
+        assert!(
+            quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 60).await.is_some(),
+            "round {round}: one group again: o={:?} f={:?} s={:?}",
+            nodes[0].mls_epoch_state(&server_id).await,
+            nodes[first].mls_epoch_state(&server_id).await,
+            nodes[second].mls_epoch_state(&server_id).await,
+        );
+        let tap = relay.wiretap();
+        let welcomed: Vec<String> = tap.frames.iter().filter(|f| f.kind() == "mls_welcome").filter_map(|f| f.to.clone()).collect();
+        assert!(!welcomed.contains(&o), "round {round}: the owner was repaired");
+        assert!(!welcomed.contains(&f), "round {round}: the commit the relay delivered first stays");
+        for n in &nodes {
+            assert!(n.mls_epoch(&server_id).await.is_some(), "round {round}: a group was dropped");
+        }
+    }
+    drop(nodes);
+}
+
+/// A member that missed more commits than the old eight-commit cache (a phone asleep
+/// through a stretch of cadence) catches up from the cache, in several frames,
+/// without a repair.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_a_member_away_through_a_stretch_of_cadence_catches_up_without_a_repair() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (nodes, server_id) = g13s3_server(&relay, &[216, 217, 218], "Asleep").await;
+    let (start, _) = quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await.expect("one group");
+    let sleeper = nodes[2].device_id.clone();
+    relay.set_broadcast_deaf(&sleeper, true);
+    relay.start_wiretap();
+    for _ in 0..12 {
+        g13s3_force_self_update(&nodes[0], &server_id).await;
+    }
+    assert!(wait_until(15, async || nodes[1].mls_epoch(&server_id).await == Some(start + 12)).await);
+    assert_eq!(nodes[2].mls_epoch(&server_id).await, Some(start), "it heard none of them");
+    relay.set_broadcast_deaf(&sleeper, false);
+    for k in 0..4 {
+        g13s3_post(&nodes[0], &server_id, &format!("wake-{k}")).await;
+        sleep_ms(300).await; // spacing: each post is a fresh chance to notice the gap
+    }
+    assert!(
+        quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 40).await.is_some(),
+        "caught up: {:?}",
+        nodes[2].mls_epoch_state(&server_id).await,
+    );
+    let tap = relay.wiretap();
+    assert!(!tap.frames.iter().any(|f| f.kind() == "mls_welcome"), "a catch-up, not a repair");
+    assert!(tap.frames.iter().filter(|f| f.kind() == "mls_commit_catchup").count() >= 3, "served in several frames");
+    drop(nodes);
+}
+
+/// AR-25 in a restricted channel's subgroup: its own committer hands out its own
+/// turns, and its leaves refresh without touching the server group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_subgroup_leaves_refresh_under_the_subgroup_coordinator() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut nodes, server_id) = g13s3_server(&relay, &[219, 220, 221], "Subgroup Turns").await;
+    nodes[0]
+        .cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
+            name: "secret".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut cid = None;
+    assert!(
+        wait_event(&mut nodes[0], std::time::Duration::from_secs(5), |ev| {
+            if let NetworkEvent::ChannelAdded { channel_id, name, .. } = ev
+                && name == "secret"
+            {
+                cid = Some(channel_id.clone());
+                return true;
+            }
+            false
+        })
+        .await
+    );
+    let cid = cid.unwrap();
+    for n in &nodes[1..] {
+        assert!(wait_until(10, async || n.live_server_state(&server_id).await.is_some_and(|s| s.channels.contains_key(&cid))).await);
+    }
+    nodes[0]
+        .cmd_tx
+        .send(NodeCommand::SetChannelVisibility { server_id: server_id.clone(), channel_id: cid.clone(), visibility: "admin".into() })
+        .await
+        .unwrap();
+    let a_master = nodes[1].master_id.clone();
+    nodes[0]
+        .cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: a_master, new_role: "admin".into() })
+        .await
+        .unwrap();
+    let subgroup = crate::crypto::subgroup_id(&server_id, &cid);
+    let a = nodes[1].device_id.clone();
+    expect_mls_leaf(&nodes[0], &subgroup, &a, 30).await;
+    let (server_epoch, _) = quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await.expect("server group");
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1]], &subgroup, 30).await.is_some());
+    // Server-group turns would also run; only the subgroup's are under test here.
+    let sub_leaves = {
+        let mut v = vec![nodes[0].device_id.clone(), a.clone()];
+        v.sort();
+        v
+    };
+    let _cadence = G13s3Cadence::scaled(0.001);
+    assert!(
+        wait_until(60, async || g13s3_refreshed(&nodes[1], &subgroup).await.as_ref() == Some(&sub_leaves)).await,
+        "both subgroup leaves refreshed: {:?}",
+        g13s3_refreshed(&nodes[1], &subgroup).await,
+    );
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1]], &subgroup, 30).await.is_some(), "one subgroup, no fork");
+    assert!(nodes[2].mls_members(&subgroup).await.is_empty(), "the member who cannot see the channel holds none of it");
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 40).await.is_some_and(|(e, _)| e >= server_epoch));
+    drop(nodes);
+}
+
+/// AR-27 through an honest committer: a member that keeps sending fresh KeyPackages
+/// gets three repairs, then waits, instead of a re-key of the group every tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_key_packages_in_a_loop_get_bounded_repairs() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (nodes, server_id) = g13s3_server(&relay, &[222, 223, 224], "KeyPackage Loop").await;
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await.is_some());
+    let (o, b) = (nodes[0].device_id.clone(), nodes[2].device_id.clone());
+    relay.start_wiretap();
+    for _ in 0..12 {
+        // B's own keys minting packages its node never sees: a modified client.
+        let kp = crate::crypto::mls_tally::stray_key_package(&tag_kp(224), &tag_kp(224), &server_id);
+        let frame = serde_json::to_vec(&super::types::HavenMessage::MlsKeyPackage {
+            server_id: server_id.clone(),
+            key_package: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &kp),
+            channel_id: None,
+        })
+        .unwrap();
+        relay.inject_direct(&server_id, &b, &o, frame);
+        sleep_ms(1000).await; // pacing: the loop is the point, one KeyPackage a second
+    }
+    sleep_ms(1500).await; // absence: no further repair after the last one
+    let commits = mls_commits_from(&relay, &o);
+    assert!(commits <= 3, "{commits} repairs in 15 s for one member's KeyPackages");
+    assert!(commits >= 1, "its first KeyPackage is still honoured");
+    drop(nodes);
+}
+
+/// AR-27: a member forcing epochs with honest-looking self-updates gets three in
+/// twelve epochs; every honest member refuses the fourth alike and stays on one
+/// group, and the honest committer carries on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_a_flooding_member_is_capped_while_honest_members_converge() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut nodes, server_id) = g13s3_server_seating(&relay, &[225, 226, 227, 228], "Flood", 3).await;
+    let (start, _) = quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await.expect("one group");
+    for _ in 0..6 {
+        g13s3_force_self_update(&nodes[2], &server_id).await;
+    }
+    let honest = quiet_agreed_group(&[&nodes[0], &nodes[1]], &server_id, 30).await.expect("the honest members agree");
+    assert_eq!(honest.0, start + 3, "three counted commits pass, the fourth is refused by everyone");
+    assert!(nodes[2].mls_epoch(&server_id).await.unwrap_or(0) > start + 3, "the flooder sits alone on its own fork");
+
+    // The honest committer still commits: a join lands on the honest chain.
+    nodes[3].cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    let j = nodes[3].device_id.clone();
+    expect_mls_leaf(&nodes[0], &server_id, &j, 40).await;
+    let after = quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[3]], &server_id, 40).await.expect("one honest group with the joiner");
+    assert!(after.0 > honest.0);
+    let _ = nodes.pop();
+    drop(nodes);
+}
+
+/// AR-27 without the owner: a capped flooder that is the lowest online master is not
+/// the honest members' responder, so it can neither have them hand it a KeyPackage
+/// nor repair them onto its fork; the owner coming back finds one honest group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_a_capped_stand_in_authority_cannot_repair_honest_members_onto_its_fork() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    // The flooder's master sorts before the honest member's: the stand-in authority.
+    let (f_tag, a_tag) = if tag_kp(230).peer_id() < tag_kp(231).peer_id() { (230, 231) } else { (231, 230) };
+    let (mut nodes, server_id) = g13s3_server_seating(&relay, &[229, a_tag, f_tag, 236], "Stand In", 3).await;
+    let mut joiner = nodes.pop().unwrap();
+    let (o, a, f) = (&nodes[0], &nodes[1], &nodes[2]);
+    let (start, _) = quiet_agreed_group(&[o, a, f], &server_id, 30).await.expect("one group");
+    relay.set_background(o, true);
+    assert!(wait_until(10, async || !a.sees_peer(&o.device_id).await).await);
+    relay.start_wiretap();
+    for _ in 0..5 {
+        g13s3_force_self_update(f, &server_id).await;
+    }
+    for k in 0..6 {
+        g13s3_post(f, &server_id, &format!("flood-{k}")).await;
+        sleep_ms(300).await; // spacing: each post is a fresh failure that could ask a repair
+    }
+    sleep_ms(2000).await; // absence: no KeyPackage to the flooder, no repair onto its fork
+    assert_eq!(a.mls_epoch(&server_id).await, Some(start + 3), "the honest member refused the fourth and stayed");
+    let tap = relay.wiretap();
+    assert!(
+        !tap.frames.iter().any(|fr| fr.from == a.device_id && fr.kind() == "mls_kp" && fr.to.as_deref() == Some(f.device_id.as_str())),
+        "the honest member handed the capped flooder a KeyPackage",
+    );
+    // A join now: the capped flooder is not elected to commit it, the honest member is.
+    joiner.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    expect_mls_leaf(a, &server_id, &joiner.device_id, 40).await;
+    assert!(
+        quiet_agreed_group(&[a, &joiner], &server_id, 30).await.is_some(),
+        "the joiner lands on the honest chain: a={:?} j={:?}",
+        a.mls_epoch_state(&server_id).await,
+        joiner.mls_epoch_state(&server_id).await,
+    );
+    relay.set_background(o, false);
+    assert!(
+        quiet_agreed_group(&[o, a], &server_id, 40).await.is_some_and(|(e, _)| e >= start + 3),
+        "the owner back, one honest group: o={:?} a={:?}",
+        o.mls_epoch_state(&server_id).await,
+        a.mls_epoch_state(&server_id).await,
+    );
+    drop(joiner);
+    drop(nodes);
+}
+
+/// AR-27 (design 7 A): a repair of another master's device is charged to that master,
+/// and the committer's new leaf carries the charge; members judging it agree, so a
+/// stand-in coordinator's repairs keep one group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_a_stand_in_coordinators_repairs_carry_their_charge_and_keep_one_group() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut tags = [233u8, 234, 235];
+    tags.sort_by_key(|t| tag_kp(*t).peer_id());
+    let [a_tag, b_tag, c_tag] = tags;
+    let (nodes, server_id) = g13s3_server(&relay, &[232, a_tag, b_tag, c_tag], "Stand In Repairs").await;
+    let (o, a, b, c) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3]);
+    assert!(quiet_agreed_group(&[o, a, b, c], &server_id, 30).await.is_some());
+    relay.set_background(o, true);
+    assert!(wait_until(10, async || !a.sees_peer(&o.device_id).await).await);
+    // b spends two counted commits of its own, so one repair of it reaches its cap.
+    for _ in 0..2 {
+        g13s3_force_self_update(b, &server_id).await;
+    }
+    assert!(quiet_agreed_group(&[a, b, c], &server_id, 30).await.is_some());
+    relay.start_wiretap();
+    for _ in 0..2 {
+        let kp = crate::crypto::mls_tally::stray_key_package(&tag_kp(b_tag), &tag_kp(b_tag), &server_id);
+        let frame = serde_json::to_vec(&super::types::HavenMessage::MlsKeyPackage {
+            server_id: server_id.clone(),
+            key_package: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &kp),
+            channel_id: None,
+        })
+        .unwrap();
+        let before = mls_commits_from(&relay, &a.device_id);
+        relay.inject_direct(&server_id, &b.device_id, &a.device_id, frame);
+        // The second repair may rightly wait for b's window; the wait just bounds it.
+        let _ = wait_until(5, async || mls_commits_from(&relay, &a.device_id) > before).await;
+    }
+    assert!(mls_commits_from(&relay, &a.device_id) >= 1, "the stand-in repaired b");
+    assert!(
+        !relay.wiretap().frames.iter().any(|fr| fr.kind() == "mls_welcome" && fr.to.as_deref() == Some(c.device_id.as_str())),
+        "the other member was never repaired: it refused none of the stand-in's commits",
+    );
+    assert!(
+        quiet_agreed_group(&[a, c], &server_id, 30).await.is_some(),
+        "the other member accepts the stand-in's repairs: a={:?} c={:?}",
+        a.mls_epoch_state(&server_id).await,
+        c.mls_epoch_state(&server_id).await,
+    );
+    drop(nodes);
+}
+
+/// AR-25: a turn holder that never answers costs one lease, then the committer moves
+/// on to the next stale leaf.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_a_turn_nobody_answers_lapses_and_the_next_leaf_gets_one() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (nodes, server_id) = g13s3_server(&relay, &[237, 238, 239], "Silent Holder").await;
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await.is_some());
+    let o = nodes[0].device_id.clone();
+    // Both members' answers vanish: whoever gets the first turn never answers it.
+    for n in &nodes[1..] {
+        relay.hold_direct(&n.device_id, &o);
+    }
+    relay.start_wiretap();
+    let _cadence = G13s3Cadence::scaled(0.001);
+    let turns_to = |relay: &MockRelay| {
+        let mut to: Vec<String> = relay.wiretap().frames.iter().filter(|f| f.from == o && f.kind() == "mls_update_turn").filter_map(|f| f.to.clone()).collect();
+        to.dedup();
+        to
+    };
+    assert!(
+        wait_until(45, async || turns_to(&relay).len() >= 2).await,
+        "after the first turn lapses the committer hands the next one: {:?}",
+        turns_to(&relay),
+    );
+    drop(nodes);
+}
+
+/// Review M1: the committer's own sibling device refreshes its leaf on a turn like
+/// any other member's device, relayed by the committing device, no repair.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_the_committers_own_sibling_refreshes_on_its_turn() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, c) = sibling_pair(&relay, 240, 241, 242).await;
+    let server_id = create_server_and_wait(&mut b, "Siblings").await;
+    expect_mls_leaf(&b, &server_id, &c.device_id, 40).await;
+    assert!(quiet_agreed_group(&[&b, &c], &server_id, 30).await.is_some(), "one group for both devices");
+    relay.start_wiretap();
+    let _cadence = G13s3Cadence::scaled(0.001);
+    let mut both = vec![b.device_id.clone(), c.device_id.clone()];
+    both.sort();
+    assert!(
+        wait_until(60, async || {
+            g13s3_refreshed(&b, &server_id).await.as_ref() == Some(&both) && g13s3_refreshed(&c, &server_id).await.as_ref() == Some(&both)
+        })
+        .await,
+        "both devices refreshed: {:?}",
+        g13s3_refreshed(&b, &server_id).await,
+    );
+    let committer = both[0].clone();
+    let tap = relay.wiretap();
+    assert!(tap.frames.iter().any(|f| f.from == both[1] && f.kind() == "mls_update_turn_commit"), "the sibling answered a turn");
+    assert!(!tap.frames.iter().any(|f| f.from == both[1] && f.kind() == "mls_update_turn_declined"), "the sibling declined its own committer");
+    assert!(tap.frames.iter().filter(|f| f.kind() == "mls_commit").all(|f| f.from == committer), "the committing device relays");
+    assert_eq!(g13s3_frames(&relay, "mls_welcome"), 0, "a refresh is never a repair");
+    assert!(quiet_agreed_group(&[&b, &c], &server_id, 30).await.is_some(), "one group");
+}
+
+/// Review M4: a meeting without a waiting room seats every knock due at a tick in one
+/// commit, so a burst of knocks is one epoch, not one per guest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13s3_knocks_on_an_open_meeting_are_seated_together() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let host = spawn_node_on(&relay, 243, 243).await;
+    let mut guests: Vec<TestNode> = Vec::new();
+    for tag in [244u8, 245, 246] {
+        guests.push(spawn_node_on(&relay, tag, tag).await);
+    }
+    let everyone: Vec<&TestNode> = std::iter::once(&host).chain(guests.iter()).collect();
+    expect_on_relay(&relay, &everyone).await;
+    let nonce = "open-n1";
+    let conf_id = super::conference::derive_conf_id(&host.master_id, nonce);
+    host.cmd_tx
+        .send(NodeCommand::ConferenceStart {
+            conf_id: conf_id.clone(),
+            nonce: nonce.to_string(),
+            link_key: MEETING_LINK_KEY.to_string(),
+            waiting_room: false,
+            code_key: None,
+            host_display_name: "Hosty".to_string(),
+            host_avatar_hash: String::new(),
+        })
+        .await
+        .unwrap();
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+    assert!(wait_until(10, async || relay.room_devices(&conf_sid).contains(&host.device_id)).await, "the host opens the room");
+    let start = host.mls_epoch(&conf_sid).await.expect("the host holds the meeting group");
+    for g in &guests {
+        knock_on_meeting(g, &conf_id, "Gee").await;
+    }
+    // In-process guests share the knock registry, so only the host's side is read.
+    assert!(
+        wait_until(15, async || {
+            let seats = host.mls_members(&conf_sid).await;
+            guests.iter().all(|g| seats.contains(&g.device_id))
+        })
+        .await,
+        "every knocker is seated: {:?}",
+        host.mls_members(&conf_sid).await,
+    );
+    let epochs = host.mls_epoch(&conf_sid).await.unwrap() - start;
+    assert!(epochs < guests.len() as u64, "{epochs} commits for {} knocks sent together", guests.len());
 }

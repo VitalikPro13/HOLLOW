@@ -107,6 +107,25 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
         }
         (LeafView::Bound(identity), _) => identity,
     };
+    // The epoch-rate rule (AR-27) first: it reads only the tree and the commit, so every
+    // member rules alike, before any rule that waits on our own view.
+    if let GroupRules::Server { state, .. } = rules
+        && !facts.tree.is_empty()
+    {
+        let adds: Vec<LeafIdentity> = facts.adds.iter().filter_map(LeafView::bound).cloned().collect();
+        let input = crate::crypto::mls_rate::RateInput {
+            epoch: facts.epoch,
+            leaves: &facts.tree,
+            committer,
+            adds: &adds,
+            removes: &facts.removes,
+            no_proposals: facts.no_proposals,
+        };
+        let is_owner = |m: &str| super::crypto_handler::is_anchor_owner(state, m);
+        if let Some(why) = crate::crypto::mls_rate::rate_refusal(&input, facts.path_tally.as_ref().map(Option::as_ref), is_owner) {
+            return Verdict::Refuse(format!("epoch rate: {why}"));
+        }
+    }
     if refused(committer) {
         return Verdict::Refuse(format!("committed by revoked or disowned device {}", committer.device));
     }
@@ -346,6 +365,10 @@ pub(crate) fn frame_names_a_group(msg: &super::types::HavenMessage, from: &str) 
         | H::MlsCommit { server_id, channel_id, .. }
         | H::MlsKeyPackageRequest { server_id, channel_id }
         | H::MlsEpochProbe { server_id, channel_id, .. }
+        | H::MlsKeyPackageForward { server_id, channel_id, .. }
+        | H::MlsUpdateTurn { server_id, channel_id, .. }
+        | H::MlsUpdateTurnCommit { server_id, channel_id, .. }
+        | H::MlsUpdateTurnDeclined { server_id, channel_id, .. }
         | H::MlsCommitCatchup { server_id, channel_id, .. } => names_a_group(server_id, channel_id.as_deref()),
         _ => true,
     };

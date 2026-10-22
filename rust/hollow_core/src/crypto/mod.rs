@@ -1,6 +1,8 @@
 mod mls_manager;
 mod mls_past;
+pub(crate) mod mls_rate;
 pub(crate) mod mls_storage;
+pub(crate) mod mls_tally;
 #[cfg(test)]
 mod mls_scale_probe;
 mod olm_manager;

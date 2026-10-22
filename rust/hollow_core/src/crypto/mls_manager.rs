@@ -239,6 +239,12 @@ fn mint_stamp(group_key: &str) -> Extensions<LeafNode> {
         .expect("application_id is a leaf-node extension")
 }
 
+/// A new leaf's extensions: the mint stamp and an empty tally refreshed today.
+fn stamped_leaf_extensions(group_key: &str) -> Extensions<LeafNode> {
+    let tally = super::mls_tally::Tally { refreshed_day: super::mls_tally::today(), epochs: Vec::new(), carried: Vec::new() };
+    super::mls_tally::with_tally(&mint_stamp(group_key), &tally)
+}
+
 /// The group tag and mint time a leaf's stamp names, if it carries one.
 fn read_stamp(leaf: &LeafNode) -> Option<([u8; 16], u64)> {
     let id = leaf.extensions().application_id()?.as_slice();
@@ -337,6 +343,14 @@ pub(crate) struct CommitFacts {
     /// The commit re-adds this device: whether we still hold that KeyPackage's private
     /// half, without which its Welcome can never be opened.
     pub readds_us_with_held_key: Option<bool>,
+    /// The group epoch the commit was built at, and the tree before it (AR-27).
+    pub epoch: u64,
+    pub tree: Vec<super::mls_tally::LeafRecord>,
+    /// The tally of the committer's new leaf: `None` without an update path,
+    /// `Some(None)` for a leaf that carries none.
+    pub path_tally: Option<Option<super::mls_tally::Tally>>,
+    /// The commit carries no proposal at all.
+    pub no_proposals: bool,
 }
 
 /// What a received Welcome would install, read before it replaces anything.
@@ -530,13 +544,28 @@ pub(crate) struct MlsManager {
     /// KeyPackage we hold, so its Welcome can be opened.
     evictions: HashMap<String, bool>,
     minted: MintedKeyPackages,
+    /// Per group, the self-update we staged and handed to the committer, with the epoch
+    /// it was built at: its broadcast, byte for byte, is what merges it. RAM-only.
+    own_staged: HashMap<String, (u64, Vec<u8>)>,
     seat_cache: SeatCache,
     leaf_cache: LeafCache,
 }
 
-/// Commits kept per group for catch-up replay. Deeper staleness than this is
-/// rare (it needs that many missed broadcasts) and falls back to a repair.
+/// Commits kept per group for catch-up replay. A desktop, the device that answers
+/// catch-ups, keeps about a day of self-update cadence plus churn, so a phone asleep
+/// overnight catches up instead of costing a repair; a phone serves little and keeps
+/// few. Deeper staleness falls back to a repair.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const COMMIT_CACHE_CAP: usize = 64;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 const COMMIT_CACHE_CAP: usize = 8;
+
+/// Bytes of base64 commit frames kept per group, whatever their count: a commit in a
+/// blank tree of thousands of leaves weighs hundreds of KB.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const COMMIT_CACHE_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+const COMMIT_CACHE_BYTES: usize = 2 * 1024 * 1024;
 
 fn device_identity(
     device: &NativeKeypair,
@@ -582,6 +611,7 @@ impl MlsManager {
             founded_subgroups: Vec::new(),
             evictions: HashMap::new(),
             minted: Mutex::new(HashMap::new()),
+            own_staged: HashMap::new(),
             seat_cache: Mutex::new(HashMap::new()),
             leaf_cache: Mutex::new(HashMap::new()),
         }
@@ -821,7 +851,8 @@ impl MlsManager {
     /// older ones for the group are dropped once superseded for a while.
     pub fn generate_key_package_for(&self, group_key: &str, parked: bool) -> Result<Vec<u8>, String> {
         let bundle = KeyPackage::builder()
-            .leaf_node_extensions(mint_stamp(group_key))
+            .leaf_node_capabilities(super::mls_tally::tally_capabilities())
+            .leaf_node_extensions(stamped_leaf_extensions(group_key))
             .build(CIPHERSUITE, &self.provider, &self.signer, self.credential_with_key.clone())
             .map_err(|e| format!("Failed to build KeyPackage: {e:?}"))?;
         let kp = bundle.key_package();
@@ -927,7 +958,8 @@ impl MlsManager {
                 SENDER_RATCHET_TOLERANCE,
                 SENDER_RATCHET_MAX_FORWARD,
             ))
-            .with_leaf_node_extensions(mint_stamp(server_id))
+            .capabilities(super::mls_tally::tally_capabilities())
+            .with_leaf_node_extensions(stamped_leaf_extensions(server_id))
             .map_err(|e| format!("Failed to stamp our leaf: {e:?}"))?
             .build();
 
@@ -953,12 +985,27 @@ impl MlsManager {
     /// commit, which is how a leaf is repaired. Our own leaf is never removed, and an
     /// add is skipped unless its KeyPackage is valid, bound and names that device.
     /// Caller merges with `merge_pending_commit` after broadcasting.
+    #[cfg(test)]
     pub fn commit_membership(
         &mut self,
         group_key: &str,
         removals: &[String],
         adds: &[(String, Vec<u8>)],
     ) -> Result<MembershipCommit, String> {
+        self.commit_membership_as(group_key, removals, adds, false)
+    }
+
+    /// [`Self::commit_membership`]; `rate_exempt` when no receiver judges our tally (we
+    /// are the server's anchored owner, or the group is a meeting), so a history we
+    /// cannot restate never stops the commit.
+    pub fn commit_membership_as(
+        &mut self,
+        group_key: &str,
+        removals: &[String],
+        adds: &[(String, Vec<u8>)],
+        rate_exempt: bool,
+    ) -> Result<MembershipCommit, String> {
+        let tree = self.leaf_records(group_key);
         let group = self.groups.get_mut(group_key)
             .ok_or_else(|| format!("No MLS group for server {group_key}"))?;
         if !own_leaf_bound(group, self.signer.public(), &self.leaf_cache) {
@@ -988,6 +1035,7 @@ impl MlsManager {
 
         let mut key_packages = Vec::new();
         let mut added: Vec<String> = Vec::new();
+        let mut added_ids: Vec<LeafIdentity> = Vec::new();
         for (device_id, kp_bytes) in adds {
             if staying.contains(device_id.as_str()) || added.contains(device_id) {
                 hollow_log!("[HOLLOW-MLS] Skipping {device_id}: already has a leaf in {group_key}");
@@ -1012,6 +1060,9 @@ impl MlsManager {
                 hollow_log!("[HOLLOW-SECURITY] Skipping KeyPackage queued for {device_id}: its leaf is {leaf:?}");
                 continue;
             }
+            if let Some(identity) = leaf.bound() {
+                added_ids.push(identity.clone());
+            }
             key_packages.push(kp);
             added.push(device_id.clone());
         }
@@ -1020,8 +1071,47 @@ impl MlsManager {
             return Err("No valid membership change to commit".to_string());
         }
 
-        let bundle = group
-            .commit_builder()
+        // The tally our new leaf must state (AR-27), on every commit that carries a path
+        // or counts against anyone.
+        let removed_views: Vec<LeafView> = group
+            .members()
+            .filter(|m| remove_indices.contains(&m.index))
+            .map(|m| member_view(&self.leaf_cache, &m))
+            .collect();
+        let epoch = group.epoch().as_u64();
+        let mut params = None;
+        if let Some(me) = tree.iter().find(|r| r.index == own_index.u32()).and_then(|r| r.identity.clone()) {
+            let input = super::mls_rate::RateInput {
+                epoch, leaves: &tree, committer: &me, adds: &added_ids, removes: &removed_views, no_proposals: false,
+            };
+            let charges = super::mls_rate::charges(&input);
+            if !remove_indices.is_empty() || charges.any() {
+                // Where receivers judge our tally, one we cannot derive is one they refuse:
+                // committing it would leave us alone at the next epoch.
+                let tally = match super::mls_rate::expected_tally(&input, &charges, super::mls_tally::today()) {
+                    Ok(tally) => Some(tally),
+                    Err(_) if rate_exempt => Some(super::mls_rate::fresh_tally(&input, &charges, super::mls_tally::today())),
+                    Err(why) if super::mls_rate::others_all_capable(&tree, &me.master) => {
+                        hollow_log!("[HOLLOW-MLS] Not committing in {group_key}: {why}");
+                        return Err(format!("no honest tally for this commit: {why}"));
+                    }
+                    Err(_) => None,
+                };
+                params = tally.and_then(|tally| {
+                    let extensions = group.own_leaf_node().map(|leaf| super::mls_tally::with_tally(leaf.extensions(), &tally))?;
+                    Some(LeafNodeParameters::builder()
+                        .with_capabilities(super::mls_tally::tally_capabilities())
+                        .with_extensions(extensions)
+                        .build())
+                });
+            }
+        }
+        let builder = group.commit_builder();
+        let builder = match params {
+            Some(params) => builder.force_self_update(true).leaf_node_parameters(params),
+            None => builder,
+        };
+        let bundle = builder
             .propose_removals(remove_indices)
             .propose_adds(key_packages)
             .load_psks(self.provider.storage())
@@ -1045,6 +1135,41 @@ impl MlsManager {
         Ok(MembershipCommit { commit, welcome, added, removed })
     }
 
+    /// Seat `adds` in one commit, giving back the seat of any device among them that
+    /// holds a leaf. OpenMLS judges a batch whole, so a KeyPackage that passes alone
+    /// but fails the batch (capabilities, a reused key) is left out and the rest are
+    /// seated: one stranger's package never blocks every other knock.
+    pub(crate) fn commit_admissions(
+        &mut self,
+        group_key: &str,
+        adds: &[(String, Vec<u8>)],
+        rate_exempt: bool,
+    ) -> Result<MembershipCommit, String> {
+        let seated = self.group_members(group_key);
+        let stale = |adds: &[(String, Vec<u8>)]| -> Vec<String> {
+            seated.iter().filter(|d| adds.iter().any(|(p, _)| p == *d)).cloned().collect()
+        };
+        let whole = self.commit_membership_as(group_key, &stale(adds), adds, rate_exempt);
+        if whole.is_ok() || adds.len() < 2 {
+            return whole;
+        }
+        let mut fit: Vec<(String, Vec<u8>)> = Vec::new();
+        for add in adds {
+            let mut trial = fit.clone();
+            trial.push(add.clone());
+            if self.commit_membership_as(group_key, &stale(&trial), &trial, rate_exempt).is_ok() {
+                self.clear_pending_commit(group_key);
+                fit = trial;
+            } else {
+                hollow_log!("[HOLLOW-SECURITY] Left {}'s KeyPackage out of {group_key}'s admissions: the batch refuses it", add.0);
+            }
+        }
+        if fit.is_empty() {
+            return whole;
+        }
+        self.commit_membership_as(group_key, &stale(&fit), &fit, rate_exempt)
+    }
+
     /// Add one member. Returns `(commit, welcome)`; the caller merges after broadcasting.
     pub fn add_member(
         &mut self,
@@ -1055,7 +1180,7 @@ impl MlsManager {
             .bound()
             .map(|b| b.device.clone())
             .ok_or("KeyPackage leaf is not bound")?;
-        let done = self.commit_membership(server_id, &[], &[(device, key_package_bytes.to_vec())])?;
+        let done = self.commit_membership_as(server_id, &[], &[(device, key_package_bytes.to_vec())], false)?;
         let welcome = done.welcome.ok_or("add produced no Welcome")?;
         Ok((done.commit, welcome))
     }
@@ -1071,6 +1196,150 @@ impl MlsManager {
         let done = self.commit_membership(server_id, &[], key_packages)?;
         let welcome = done.welcome.ok_or("No valid new members to add")?;
         Ok((done.commit, welcome, done.added))
+    }
+
+    /// Every leaf of the group as the tally rules read it.
+    pub(crate) fn leaf_records(&self, group_key: &str) -> Vec<super::mls_tally::LeafRecord> {
+        let Some(group) = self.groups.get(group_key) else { return Vec::new() };
+        let today = super::mls_tally::today();
+        group
+            .members()
+            .filter_map(|m| {
+                let leaf = group.public_group().leaf(m.index)?;
+                let tally = super::mls_tally::leaf_tally(leaf);
+                let minted_day = read_stamp(leaf).map(|(_, ms)| (ms / 86_400_000) as u32);
+                let fresh_day = tally.as_ref().map(|t| t.refreshed_day).or(minted_day).unwrap_or(0).min(today);
+                Some(super::mls_tally::LeafRecord {
+                    index: m.index.u32(),
+                    identity: member_view(&self.leaf_cache, &m).bound().cloned(),
+                    declares: leaf.capabilities().extensions().contains(&super::mls_tally::tally_extension_type()),
+                    tally,
+                    commit_written: super::mls_tally::written_by_commit(leaf),
+                    fresh_day,
+                })
+            })
+            .collect()
+    }
+
+    /// Masters of the group the tree shows unfit to act for it ([`super::mls_rate::unfit`]).
+    pub(crate) fn unfit_masters(&self, group_key: &str, as_committer: bool, is_owner: impl Fn(&str) -> bool) -> HashSet<String> {
+        let Ok(epoch) = self.epoch(group_key) else { return HashSet::new() };
+        super::mls_rate::unfit_masters(&self.leaf_records(group_key), epoch, as_committer, is_owner)
+    }
+
+    /// Devices whose leaf change in a planned commit must wait, where receivers judge
+    /// our tally: each repaired master's past the carried bound or with a history no
+    /// tally can restate, and (unless we are `is_owner`, exempt from the cap) our own
+    /// master's at its cap and each repaired master's that is. Empty when nothing must
+    /// wait.
+    pub(crate) fn over_cap_devices(
+        &self,
+        group_key: &str,
+        removals: &[String],
+        adds: &[(String, Vec<u8>)],
+        is_owner: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        let Some(group) = self.groups.get(group_key) else { return Vec::new() };
+        let tree = self.leaf_records(group_key);
+        let own_index = group.own_leaf_index().u32();
+        let Some(me) = tree.iter().find(|r| r.index == own_index).and_then(|r| r.identity.clone()) else { return Vec::new() };
+        if !super::mls_rate::others_all_capable(&tree, &me.master) {
+            return Vec::new();
+        }
+        let add_ids: Vec<LeafIdentity> = adds
+            .iter()
+            .filter_map(|(_, kp)| Self::key_package_identity(kp).ok().and_then(|l| l.bound().cloned()))
+            .collect();
+        let removes: Vec<LeafView> = group
+            .members()
+            .map(|m| member_view(&self.leaf_cache, &m))
+            .filter(|v| removals.iter().any(|r| r == v.id()))
+            .collect();
+        let epoch = group.epoch().as_u64();
+        let input = super::mls_rate::RateInput { epoch, leaves: &tree, committer: &me, adds: &add_ids, removes: &removes, no_proposals: false };
+        let charges = super::mls_rate::charges(&input);
+        let history = |m: &str| super::mls_tally::master_tally(&tree, m, epoch);
+        let mut blocked_masters: Vec<String> = super::mls_rate::carried_overflow(&input, &charges);
+        blocked_masters.extend(
+            charges.repaired.iter().filter(|n| history(n) == super::mls_tally::MasterTally::Unreadable).cloned(),
+        );
+        if !is_owner(&me.master) {
+            let capped = |m: &str| super::mls_tally::capped(&history(m), epoch);
+            blocked_masters.extend(charges.repaired.iter().filter(|n| capped(n)).cloned());
+            if charges.committer && capped(&me.master) {
+                blocked_masters.push(me.master.clone());
+            }
+        }
+        let master_of_device = |d: &str| {
+            add_ids.iter().find(|a| a.device == d).map(|a| a.master.clone())
+                .or_else(|| removes.iter().filter_map(LeafView::bound).find(|r| r.device == d).map(|r| r.master.clone()))
+        };
+        removals
+            .iter()
+            .chain(adds.iter().map(|(d, _)| d))
+            .filter(|d| master_of_device(d).is_some_and(|m| blocked_masters.contains(&m)))
+            .cloned()
+            .collect()
+    }
+
+    /// Stage a path-only commit of our own leaf: a fresh encryption key under the same
+    /// credential, the tally set to `tally`. Left pending, not merged: the committer
+    /// we hand it to decides whether it takes the epoch, and its broadcast of these
+    /// bytes is what merges it here (`OwnPendingCommit`).
+    pub(crate) fn stage_self_update(&mut self, group_key: &str, tally: &super::mls_tally::Tally) -> Result<Vec<u8>, String> {
+        let group = self.groups.get_mut(group_key).ok_or_else(|| format!("No MLS group for {group_key}"))?;
+        if !own_leaf_bound(group, self.signer.public(), &self.leaf_cache) {
+            return Err(format!("our leaf in {group_key} is not bound"));
+        }
+        if group.pending_commit().is_some() {
+            return Err(format!("a commit of ours for {group_key} is already pending"));
+        }
+        let extensions = group
+            .own_leaf_node()
+            .map(|leaf| super::mls_tally::with_tally(leaf.extensions(), tally))
+            .ok_or("no own leaf")?;
+        let params = LeafNodeParameters::builder()
+            .with_capabilities(super::mls_tally::tally_capabilities())
+            .with_extensions(extensions)
+            .build();
+        let bundle = group
+            .commit_builder()
+            .consume_proposal_store(false)
+            .force_self_update(true)
+            .leaf_node_parameters(params)
+            .load_psks(self.provider.storage())
+            .map_err(|e| format!("Failed to load PSKs: {e:?}"))?
+            .build(self.provider.rand(), self.provider.crypto(), &self.signer, |_| true)
+            .map_err(|e| format!("Failed to build self-update: {e:?}"))?
+            .stage_commit(&self.provider)
+            .map_err(|e| format!("Failed to stage self-update: {e:?}"))?;
+        let bytes = TlsSerialize::tls_serialize_detached(bundle.commit())
+            .map_err(|e| format!("Failed to serialize self-update: {e:?}"))?;
+        let epoch = group.epoch().as_u64();
+        self.own_staged.insert(group_key.to_string(), (epoch, bytes.clone()));
+        Ok(bytes)
+    }
+
+    /// Merge our own staged self-update right away: we are the committer and have
+    /// broadcast it ourselves.
+    pub(crate) fn merge_own_self_update(&mut self, group_key: &str) -> Result<(), String> {
+        self.own_staged.remove(group_key);
+        self.merge_pending_commit(group_key)
+    }
+
+    /// Drop a commit of ours that never took its epoch; whether one was pending.
+    pub(crate) fn clear_pending_commit(&mut self, group_key: &str) -> bool {
+        self.own_staged.remove(group_key);
+        let Some(group) = self.groups.get_mut(group_key) else { return false };
+        if group.pending_commit().is_none() {
+            return false;
+        }
+        group.clear_pending_commit(self.provider.storage()).is_ok()
+    }
+
+    /// Groups holding a commit of ours that is staged and not merged.
+    pub(crate) fn groups_with_pending_commit(&self) -> Vec<String> {
+        self.groups.iter().filter(|(_, g)| g.pending_commit().is_some()).map(|(k, _)| k.clone()).collect()
     }
 
     /// Merge the pending commit after add/remove.
@@ -1105,10 +1374,21 @@ impl MlsManager {
     /// devices_for(master)`. A bound leaf matches by its certified master even when
     /// our device lists do not know that device. Ids with no leaf are skipped, so a
     /// re-issued kick is harmless; an error only if nothing matched.
+    #[cfg(test)]
     pub fn remove_identity_leaves(
         &mut self,
         server_id: &str,
         credential_ids: &[&str],
+    ) -> Result<Vec<u8>, String> {
+        self.remove_identity_leaves_as(server_id, credential_ids, false)
+    }
+
+    /// [`Self::remove_identity_leaves`], `rate_exempt` as in [`Self::commit_membership_as`].
+    pub fn remove_identity_leaves_as(
+        &mut self,
+        server_id: &str,
+        credential_ids: &[&str],
+        rate_exempt: bool,
     ) -> Result<Vec<u8>, String> {
         if credential_ids.is_empty() {
             return Err("No credential ids to remove".to_string());
@@ -1129,7 +1409,7 @@ impl MlsManager {
                 credential_ids.len()
             ));
         }
-        let done = self.commit_membership(server_id, &matching, &[])?;
+        let done = self.commit_membership_as(server_id, &matching, &[], rate_exempt)?;
         if done.removed.is_empty() {
             return Err(format!("Nothing removable for {matching:?} in {server_id}"));
         }
@@ -1167,6 +1447,19 @@ impl MlsManager {
     /// Only the group authority does this (anyone else asks it for a repair), so
     /// commits stay linear. The caller broadcasts, then merges.
     pub fn rebind_own_leaf(&mut self, group_key: &str) -> Result<Vec<u8>, String> {
+        // The bound leaf declares the tally and states our master's history unchanged:
+        // a rebind is judged by no rate rule, so it must not move it either way.
+        let tree = self.leaf_records(group_key);
+        let epoch = self.epoch(group_key)?;
+        let master = classify_leaf(self.credential_with_key.credential.serialized_content(), self.signer.public())
+            .bound()
+            .map(|b| b.master.clone())
+            .ok_or("our credential is not bound")?;
+        let epochs = match super::mls_tally::master_tally(&tree, &master, epoch) {
+            super::mls_tally::MasterTally::List(list) => list,
+            super::mls_tally::MasterTally::Unreadable => Vec::new(),
+        };
+        let tally = super::mls_tally::Tally { refreshed_day: super::mls_tally::today(), epochs, carried: Vec::new() }.checked()?;
         let (legacy_signer, _) = self.legacy.as_ref().ok_or("no legacy signer to rebind with")?;
         let group = self.groups.get_mut(group_key)
             .ok_or_else(|| format!("No MLS group for server {group_key}"))?;
@@ -1182,7 +1475,10 @@ impl MlsManager {
                     signer: &self.signer,
                     credential_with_key: self.credential_with_key.clone(),
                 },
-                LeafNodeParameters::builder().with_extensions(mint_stamp(group_key)).build(),
+                LeafNodeParameters::builder()
+                    .with_capabilities(super::mls_tally::tally_capabilities())
+                    .with_extensions(super::mls_tally::with_tally(&mint_stamp(group_key), &tally))
+                    .build(),
             )
             .map_err(|e| format!("Failed to rebind our leaf: {e:?}"))?;
         TlsSerialize::tls_serialize_detached(bundle.commit())
@@ -1454,8 +1750,40 @@ impl MlsManager {
         commit_bytes: &[u8],
         judge: impl FnOnce(&CommitFacts) -> Verdict,
     ) -> Result<Verdict, CommitError> {
+        self.process_commit_judged_then(server_id, commit_bytes, judge, || {})
+    }
+
+    /// [`Self::process_commit_judged`], running `before_merge` once an accepted commit
+    /// is staged and before it merges: a committer relaying a member's self-update
+    /// broadcasts it there, so it never sits alone at the new epoch.
+    pub fn process_commit_judged_then(
+        &mut self,
+        server_id: &str,
+        commit_bytes: &[u8],
+        judge: impl FnOnce(&CommitFacts) -> Verdict,
+        before_merge: impl FnOnce(),
+    ) -> Result<Verdict, CommitError> {
+        let tree = self.leaf_records(server_id);
         let group = self.groups.get_mut(server_id)
             .ok_or_else(|| format!("No MLS group for server {server_id}"))?;
+
+        // Our own self-update, broadcast by the committer we handed it to. Its author
+        // cannot decrypt a private commit, so it is known by its exact bytes.
+        let epoch_now = group.epoch().as_u64();
+        if self.own_staged.get(server_id).is_some_and(|(e, bytes)| *e == epoch_now && bytes == commit_bytes) {
+            self.own_staged.remove(server_id);
+            if group.pending_commit().is_none() {
+                return Err(CommitError::Other("our relayed self-update is no longer pending".into()));
+            }
+            let before = PastEpochs::capture(&self.provider, group);
+            group
+                .merge_pending_commit(&self.provider)
+                .map_err(|e| format!("Failed to merge our relayed self-update: {e:?}"))?;
+            hollow_log!("[HOLLOW-MLS] Our self-update for {server_id} was relayed, new epoch: {:?}", group.epoch());
+            self.past.keep(server_id, before, group.epoch().as_u64());
+            self.note_epoch(server_id);
+            return Ok(Verdict::Accept);
+        }
 
         let msg_in: MlsMessageIn = TlsDeserialize::tls_deserialize_exact(commit_bytes)
             .map_err(|e| format!("Failed to deserialize commit: {e:?}"))?;
@@ -1489,6 +1817,10 @@ impl MlsManager {
                 !matches!(p.proposal().proposal_type(), ProposalType::Add | ProposalType::Remove)
             }),
             removes_us: staged.self_removed(),
+            epoch: group.epoch().as_u64(),
+            tree,
+            path_tally: staged.update_path_leaf_node().map(super::mls_tally::leaf_tally),
+            no_proposals: staged.queued_proposals().next().is_none(),
             ..Default::default()
         };
         for proposal in staged.add_proposals() {
@@ -1519,6 +1851,7 @@ impl MlsManager {
         match &verdict {
             Verdict::Accept => {
                 let before = PastEpochs::capture(&self.provider, group);
+                before_merge();
                 group
                     .merge_staged_commit(&self.provider, staged)
                     .map_err(|e| format!("Failed to merge staged commit: {e:?}"))?;
@@ -1780,6 +2113,9 @@ impl MlsManager {
 
     fn note_epoch(&mut self, group_key: &str) {
         let (Ok(epoch), Some(digest)) = (self.epoch(group_key), self.epoch_auth_digest(group_key)) else { return };
+        if self.own_staged.get(group_key).is_some_and(|(e, _)| *e < epoch) {
+            self.own_staged.remove(group_key);
+        }
         let ring = self.epoch_digests.entry(group_key.to_string()).or_default();
         ring.retain(|(e, _)| *e < epoch);
         ring.push_back((epoch, digest));
@@ -1912,7 +2248,9 @@ impl MlsManager {
         }
         ring.push_back((epoch, commit_b64));
         ring.make_contiguous().sort_by_key(|(e, _)| *e);
-        while ring.len() > COMMIT_CACHE_CAP {
+        while ring.len() > COMMIT_CACHE_CAP
+            || (ring.len() > 1 && ring.iter().map(|(_, c)| c.len()).sum::<usize>() > COMMIT_CACHE_BYTES)
+        {
             ring.pop_front();
         }
     }
@@ -2029,10 +2367,15 @@ impl MlsManager {
     /// it locally: an honest-looking commit that stages a fork when only some members
     /// see it.
     pub(crate) fn self_update_commit(&mut self, group_key: &str) -> Vec<u8> {
-        let group = self.groups.get_mut(group_key).unwrap();
-        let bundle = group.self_update(&self.provider, &self.signer, LeafNodeParameters::default()).unwrap();
-        let commit = TlsSerialize::tls_serialize_detached(bundle.commit()).unwrap();
-        self.merge_pending_commit(group_key).unwrap();
+        let records = self.leaf_records(group_key);
+        let group = &self.groups[group_key];
+        let (epoch, own) = (group.epoch().as_u64(), group.own_leaf_index().u32());
+        let me = records.iter().find(|r| r.index == own).and_then(|r| r.identity.clone()).unwrap();
+        let input = super::mls_rate::RateInput { epoch, leaves: &records, committer: &me, adds: &[], removes: &[], no_proposals: true };
+        let charges = super::mls_rate::charges(&input);
+        let tally = super::mls_rate::expected_tally(&input, &charges, super::mls_tally::today()).unwrap_or_default();
+        let commit = self.stage_self_update(group_key, &tally).unwrap();
+        self.merge_own_self_update(group_key).unwrap();
         commit
     }
 
@@ -2116,16 +2459,31 @@ mod commit_cache_tests {
             Some(vec![(1, "first".to_string())])
         );
         // Cap: only the newest COMMIT_CACHE_CAP entries survive.
-        for e in 2..=20u64 {
+        let last = super::COMMIT_CACHE_CAP as u64 + 12;
+        for e in 2..=last {
             mgr.cache_commit("g", e, format!("c{e}"));
         }
-        assert!(mgr.cached_commits_after("g", 0, 20).is_none(), "old entries evicted");
-        let tail_start = 20 - super::COMMIT_CACHE_CAP as u64;
-        let tail = mgr.cached_commits_after("g", tail_start, 20).expect("newest entries kept");
+        assert!(mgr.cached_commits_after("g", 0, last).is_none(), "old entries evicted");
+        let tail_start = last - super::COMMIT_CACHE_CAP as u64;
+        let tail = mgr.cached_commits_after("g", tail_start, last).expect("newest entries kept");
         assert_eq!(tail.len(), super::COMMIT_CACHE_CAP);
         // remove_group drops the ring.
         mgr.remove_group("g");
-        assert!(mgr.cached_commits_after("g", tail_start, 20).is_none());
+        assert!(mgr.cached_commits_after("g", tail_start, last).is_none());
+    }
+
+    #[test]
+    fn the_commit_cache_keeps_to_its_byte_budget_but_always_the_newest_commit() {
+        let (mut mgr, _) = bound(1, 3);
+        let big = "x".repeat(super::COMMIT_CACHE_BYTES / 3 + 1);
+        for e in 1..=4u64 {
+            mgr.cache_commit("g", e, big.clone());
+        }
+        assert!(mgr.cached_commits_after("g", 1, 4).is_none(), "three such commits exceed the budget");
+        assert_eq!(mgr.cached_commits_after("g", 2, 4).map(|c| c.len()), Some(2));
+        let huge = "y".repeat(super::COMMIT_CACHE_BYTES + 1);
+        mgr.cache_commit("g", 5, huge);
+        assert_eq!(mgr.cached_commits_after("g", 4, 5).map(|c| c.len()), Some(1), "one commit over the budget is still kept");
     }
 }
 
@@ -2915,6 +3273,11 @@ mod tests {
             Some(LeafView::Bound(LeafIdentity { device: owner_device.peer_id(), master: owner_master.peer_id() }))
         );
         assert!(seen.adds.is_empty() && seen.removes.is_empty() && !seen.other_proposals);
+        assert_eq!(
+            seen.path_tally.as_ref().and_then(|t| t.as_ref()).map(|t| (t.epochs.clone(), t.carried.len())),
+            Some((Vec::new(), 0)),
+            "the rebound leaf declares the tally and states its history unchanged",
+        );
         sibling.process_commit("s", &rebind).unwrap();
 
         // The friend adopts its own device key: it may not speak until repaired.
@@ -3848,6 +4211,53 @@ mod g13_past_copy_contents {
         assert!(matches!(owner.decrypt_fresh(group, &two), Ok(Decrypted::Fresh { .. })));
         assert!(matches!(owner.decrypt_fresh(group, &one), Ok(Decrypted::Replay)), "the reopened copy forgot a consumed key");
     }
+
+    fn opens(mgr: &mut MlsManager, group: &str, ct: &[u8]) -> bool {
+        matches!(mgr.decrypt_fresh(group, ct), Ok(Decrypted::Fresh { .. }))
+    }
+
+    /// g13-s3 merge points: a member's self-update relayed by the committer (merged in
+    /// the judged Accept branch) and its echo merging the member's own staged commit
+    /// both keep the epoch they leave, so a frame sent at it still opens on each side,
+    /// and the member's mid-merge copy keeps no staged commit.
+    #[test]
+    fn a_relayed_self_update_keeps_the_epoch_it_leaves_on_both_ends() {
+        let group = "srv-turn";
+        let (mut owner, mut member) = pair(group);
+        let e = owner.epoch(group).unwrap();
+        let from_member = member.encrypt(group, b"member at e").unwrap();
+        let from_owner = owner.encrypt(group, b"owner at e").unwrap();
+        let tally = super::super::mls_tally::Tally { refreshed_day: super::super::mls_tally::today(), epochs: vec![e], carried: vec![] };
+        let commit = member.stage_self_update(group, &tally).unwrap();
+
+        let mut relayed = false;
+        let verdict = owner.process_commit_judged_then(group, &commit, |_| Verdict::Accept, || relayed = true).unwrap();
+        assert!(relayed && verdict == Verdict::Accept);
+        assert_eq!(owner.epoch(group).unwrap(), e + 1);
+        assert_eq!(owner.past_epochs(group).last(), Some(&e), "the relayed merge kept no past epoch");
+        assert!(opens(&mut owner, group, &from_member), "a frame from the epoch the relayed commit left no longer opens");
+
+        assert_eq!(member.process_commit_judged(group, &commit, |_| Verdict::Refuse("not asked".into())).unwrap(), Verdict::Accept);
+        assert_eq!(member.epoch(group).unwrap(), e + 1);
+        assert_eq!(member.past_epochs(group), vec![e], "our own relayed self-update kept no past epoch");
+        assert!(opens(&mut member, group, &from_owner), "a frame from the epoch our self-update left no longer opens");
+        check(&member, group, e, &live_secrets(&member, group), "a member merging its own relayed self-update");
+    }
+
+    /// g13-s3 merge point: the committer refreshing its own leaf keeps the epoch it leaves.
+    #[test]
+    fn the_committers_own_self_update_keeps_the_epoch_it_leaves() {
+        let group = "srv-own-turn";
+        let (mut owner, mut member) = pair(group);
+        let e = owner.epoch(group).unwrap();
+        let from_member = member.encrypt(group, b"member at e").unwrap();
+        let commit = owner.self_update_commit(group);
+        assert_eq!(owner.past_epochs(group).last(), Some(&e));
+        assert!(opens(&mut owner, group, &from_member));
+        check(&owner, group, e, &live_secrets(&owner, group), "a committer merging its own self-update");
+        member.process_commit(group, &commit).unwrap();
+        assert_eq!(member.epoch_auth_digest(group), owner.epoch_auth_digest(group));
+    }
 }
 
 #[cfg(test)]
@@ -3942,5 +4352,57 @@ mod g13_review_proofs {
         store.save_mls_state(&again.take_save().unwrap()).unwrap();
         let stale = store.load_mls_rows().unwrap().into_iter().filter(|(s, _, _)| s.ends_with(":srv-unnamed")).count();
         assert_eq!(stale, 0, "the first save after the blob kept stale past epochs of a group it did not load");
+    }
+}
+
+#[cfg(test)]
+/// g13-s3 review 2, M1: admissions to an open meeting batch every due knock into one
+/// commit, which OpenMLS judges whole.
+mod g13_s3_admissions {
+    use super::test_keys::bound;
+    use super::*;
+
+    /// A KeyPackage that passes alone (signature, binding) but that no group admits:
+    /// its leaf does not list the Basic credential it carries.
+    fn poisoned(tag: u8) -> (String, Vec<u8>) {
+        let (m, dev) = bound(tag, tag + 1);
+        let caps = Capabilities::builder()
+            .credentials(vec![CredentialType::X509])
+            .extensions(vec![super::super::mls_tally::tally_extension_type()])
+            .build();
+        let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(caps)
+            .build(CIPHERSUITE, &m.provider, &m.signer, m.credential_with_key.clone())
+            .unwrap();
+        (dev, TlsSerialize::tls_serialize_detached(bundle.key_package()).unwrap())
+    }
+
+    #[test]
+    fn one_poisoned_knock_never_blocks_the_others() {
+        let group = "conf:poison";
+        let (mut host, _) = bound(1, 2);
+        host.create_group(group).unwrap();
+        let mut guests: Vec<(MlsManager, String)> = [10u8, 12, 14].into_iter().map(|t| bound(t, t + 1)).collect();
+        let honest: Vec<(String, Vec<u8>)> = guests.iter().map(|(m, d)| (d.clone(), m.generate_key_package().unwrap())).collect();
+        let bad = poisoned(20);
+        let knocks = vec![honest[0].clone(), bad.clone(), honest[1].clone(), honest[2].clone()];
+        assert!(host.commit_membership_as(group, &[], &knocks, true).is_err(), "the batch with the poisoned package fails whole");
+        assert!(host.groups_with_pending_commit().is_empty());
+
+        let epoch = host.epoch(group).unwrap();
+        let done = host.commit_admissions(group, &knocks, true).expect("the honest knocks are seated");
+        let mut want: Vec<String> = honest.iter().map(|(d, _)| d.clone()).collect();
+        let mut got = done.added.clone();
+        want.sort();
+        got.sort();
+        assert_eq!(got, want);
+        host.merge_pending_commit(group).unwrap();
+        assert_eq!(host.epoch(group).unwrap(), epoch + 1, "one commit seats them all");
+        assert!(!host.group_members(group).contains(&bad.0));
+        let welcome = done.welcome.unwrap();
+        for (guest, _) in guests.iter_mut() {
+            guest.join_from_welcome(group, &welcome).unwrap();
+            assert_eq!(guest.epoch_auth_digest(group), host.epoch_auth_digest(group));
+        }
     }
 }
