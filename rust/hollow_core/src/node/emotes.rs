@@ -422,7 +422,8 @@ pub(crate) fn handle_request_emotes(
                 }
                 continue;
             }
-            if store.has_emote_blob(&h).unwrap_or(false) {
+            // A hash the image check refused names those exact bytes on every holder.
+            if store.has_emote_blob(&h).unwrap_or(false) || super::image_gate::is_refused(&store, &h) {
                 continue;
             }
             fresh.push(h);
@@ -476,6 +477,10 @@ pub(crate) fn handle_emote_request(
             continue;
         }
         asked_anything = true;
+        if super::image_gate::is_refused(&store, &h) {
+            missing.push(h);
+            continue;
+        }
         match store.load_emote_blob(&h) {
             Ok(Some(bytes)) => {
                 // Budget the reply: with GIF-sized blobs cached, 20 hashes could
@@ -540,10 +545,7 @@ pub(crate) async fn handle_emote_assets(
     if assets.is_empty() {
         return;
     }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
-        return;
-    };
-    let mut stored: Vec<String> = Vec::new();
+    let mut to_check: Vec<(String, Vec<u8>, bool, &'static str)> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
     for (hash, bytes) in assets {
         // Unsolicited hash — drop silently, and DON'T touch the pending table.
@@ -570,27 +572,50 @@ pub(crate) async fn handle_emote_assets(
             }
             continue;
         }
+        // The ask is answered here: these bytes match their hash, so every holder
+        // would send the same ones and the image check below decides for all of them.
+        pending.remove(&hash);
         let animated = webp_is_animated(&bytes);
-        if store
-            .save_asset_blob(&hash, &bytes, animated, kind.db_kind())
-            .is_ok()
-        {
-            pending.remove(&hash);
-            stored.push(hash);
-        }
+        to_check.push((hash, bytes, animated, kind.db_kind()));
     }
     // Rotation for the refusals, after the loop so one bundle costs one pass
     // over the candidates however many hashes it carried.
     if !refused.is_empty() {
         dispatch_asks(ws_cmd_tx, ws_room_peers, pending, &refused, None, local_peer_str);
     }
-    if stored.is_empty() {
+    if to_check.is_empty() {
         return;
     }
-    hollow_log!("[HOLLOW-EMOTE] Cached {} asset blob(s) from peer", stored.len());
-    let _ = event_tx
-        .send(NetworkEvent::EmoteAssetsReceived { hashes: stored })
-        .await;
+    // SECURITY (AR-28): every reader paints these bytes with a native decoder, so
+    // each blob must fully decode in pure Rust before it is cached. Off the loop: an
+    // animation can take a second. A refusal is kept as a verdict, so the hash is
+    // never asked for again and Dart, told about it, shows the honest fallback.
+    let (db, pass, events) = (db_path.to_string(), db_passphrase.to_string(), event_tx.clone());
+    tokio::spawn(async move {
+        let settled = tokio::task::spawn_blocking(move || {
+            let Ok(store) = crate::storage::MessageStore::open(&db, &pass) else {
+                return Vec::new();
+            };
+            let mut settled = Vec::new();
+            for (hash, bytes, animated, db_kind) in to_check {
+                use super::image_gate::{judge_in, Verdict, SLOT_WAIT};
+                // Not judged for want of a slot: cached unchecked, and every render
+                // path checks it before Dart paints it.
+                if judge_in(&store, &bytes, SLOT_WAIT) == Verdict::Refused {
+                    settled.push(hash);
+                } else if store.save_asset_blob(&hash, &bytes, animated, db_kind).is_ok() {
+                    hollow_log!("[HOLLOW-EMOTE] Cached asset blob {} from peer", &hash[..12]);
+                    settled.push(hash);
+                }
+            }
+            settled
+        })
+        .await
+        .unwrap_or_default();
+        if !settled.is_empty() {
+            let _ = events.send(NetworkEvent::EmoteAssetsReceived { hashes: settled }).await;
+        }
+    });
 }
 
 #[cfg(test)]

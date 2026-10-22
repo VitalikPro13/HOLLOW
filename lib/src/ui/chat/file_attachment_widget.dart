@@ -157,7 +157,7 @@ class FileAttachmentWidget extends ConsumerWidget {
     }
 
     if (attachment.isImage) {
-      return _buildImagePreview(context, hollow, isComplete, diskPath, isDownloading, progress, bytesReceived, vaultPhase, status, onDownload);
+      return _buildImagePreview(context, hollow, isComplete, diskPath, isDownloading, progress, bytesReceived, vaultPhase, status, onDownload, transfer?.error);
     }
     return _buildFileCard(hollow, isComplete, isDownloading, progress, bytesReceived, vaultPhase, status, onDownload);
   }
@@ -305,12 +305,22 @@ class FileAttachmentWidget extends ConsumerWidget {
   }
 
   Widget _buildImagePreview(
-      BuildContext context, HollowTheme hollow, bool isComplete, String? diskPath, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, FileCardStatus status, VoidCallback onDownload) {
+      BuildContext context, HollowTheme hollow, bool isComplete, String? diskPath, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, FileCardStatus status, VoidCallback onDownload, String? sendError) {
     const maxWidth = _previewMaxWidth;
     const maxHeight = _previewMaxHeight;
     final box = _displayBoxSize();
     final displayWidth = box.w;
     final displayHeight = box.h;
+
+    // A photo Rust would not send (AR-28: receivers could not show it) says so on
+    // the sender's own row, instead of looking sent.
+    if (sendError != null && sendError.isNotEmpty && sendError != 'auto_download_off') {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        child: CantShowImage(
+            width: displayWidth, height: displayHeight, caption: sendError),
+      );
+    }
 
     if (isComplete && diskPath != null && File(diskPath).existsSync()) {
       final isGif = attachment.fileExt.toLowerCase() == 'gif';
@@ -357,8 +367,8 @@ class FileAttachmentWidget extends ConsumerWidget {
                       ? null
                       : (maxWidth * MediaQuery.devicePixelRatioOf(context))
                           .ceil(),
-                  errorWidget: _buildPlaceholder(hollow, displayWidth,
-                      displayHeight, false, 1.0, 0, null, status),
+                  errorWidget: CantShowImage(
+                      width: displayWidth, height: displayHeight),
                 ),
               ),
             ),

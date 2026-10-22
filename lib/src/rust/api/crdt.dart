@@ -136,7 +136,8 @@ Future<void> setServerAvatar({
 Future<void> clearServerAvatar({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtClearServerAvatar(serverId: serverId);
 
-/// Get a server avatar as raw bytes. Returns None if no avatar set.
+/// Get a server avatar as raw bytes. Returns None if no avatar set, or if the
+/// image check refused it (an admin's bytes, painted with no tap).
 Future<Uint8List?> getServerAvatar({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtGetServerAvatar(serverId: serverId);
 

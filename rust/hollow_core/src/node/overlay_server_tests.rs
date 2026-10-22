@@ -1655,3 +1655,38 @@ fn review_fix_the_db_backend_draws_a_look_only_while_shared() {
     assert_eq!(shared, HashSet::from([theirs, pick.clone()]));
     assert_eq!(shown, HashSet::from([pick]), "a look no longer shared is drawable");
 }
+
+/// AR-28: the browser source decodes natively too, so the store backend hands it
+/// only images that passed the pure-Rust check, each kind on its own.
+#[test]
+fn the_browser_source_gets_only_images_that_pass_the_check() {
+    let _l = crate::api::storage::store_test_lock();
+    let good = {
+        let img = image::RgbaImage::from_pixel(10, 10, image::Rgba([1, 2, 3, 255]));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    };
+    let mut bad = good.clone();
+    let n = bad.len();
+    for b in &mut bad[45..n - 16] {
+        *b = 0x5A;
+    }
+    let ms = crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+    let (gh, bh) = (super::super::image_gate::digest(&good), super::super::image_gate::digest(&bad));
+    for (h, b) in [(&gh, &good), (&bh, &bad)] {
+        ms.save_asset_blob(h, b, false, "emote").unwrap();
+        ms.save_overlay_blob(h, b, false).unwrap();
+    }
+    ms.save_profile("bad", "B", "", "", 1, Some(&bad), None, "", None, None, None, None, None, None, None).unwrap();
+    ms.save_profile("good", "G", "", "", 1, Some(&good), None, "", None, None, None, None, None, None, None).unwrap();
+    crate::api::storage::set_test_store(ms);
+
+    assert_eq!(DbBackend.blob(&bh), None);
+    assert_eq!(DbBackend.overlay_image(&bh), None);
+    assert_eq!(DbBackend.still_avatar("bad"), None);
+    assert_eq!(DbBackend.blob(&gh), Some(good.clone()));
+    assert_eq!(DbBackend.overlay_image(&gh), Some(good.clone()));
+    assert_eq!(DbBackend.still_avatar("good"), Some(good));
+    crate::api::storage::set_test_store(crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap());
+}

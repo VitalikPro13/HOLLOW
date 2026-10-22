@@ -3,6 +3,10 @@ import 'package:flutter/foundation.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/rust/api/at_rest.dart' as ffi;
 
+/// Rust's `IMAGE_NOT_YET` (api/at_rest.rs): the file waits for a check slot, which is
+/// not a refusal.
+const String kImageNotYet = 'Hollow is still checking this image';
+
 /// Progress of the one-per-boot sweep over files an older version left in the clear.
 typedef AtRestStatus = ffi.AtRestStatus;
 
@@ -23,6 +27,31 @@ class AtRest {
     if (override != null) return override(path);
     return _read(path);
   }
+
+  /// Replaces the image read in tests.
+  @visibleForTesting
+  static Future<Uint8List> Function(String path)? debugReadImage;
+
+  /// The bytes of an image file for Flutter's decoder, only once Rust has decoded
+  /// them whole; throws for a file it refused, so the caller shows its fallback.
+  /// While Rust is still waiting to check the file it asks again, up to a minute.
+  static Future<Uint8List> readImage(String path) async {
+    for (var attempt = 0;; attempt++) {
+      try {
+        final override = debugReadImage;
+        return override != null
+            ? await override(path)
+            : await ffi.readAtRestImage(path: path);
+      } catch (e) {
+        if (attempt >= 60 || !e.toString().contains(kImageNotYet)) rethrow;
+        await Future<void>.delayed(debugImageRetryDelay);
+      }
+    }
+  }
+
+  /// The wait between two asks while Rust is still checking an image.
+  @visibleForTesting
+  static Duration debugImageRetryDelay = const Duration(seconds: 1);
 
   /// Replaces the ranged read in tests.
   @visibleForTesting

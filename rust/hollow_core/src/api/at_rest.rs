@@ -53,6 +53,27 @@ pub fn read_at_rest(path: String) -> Result<Vec<u8>, String> {
     at_rest::read_all(std::path::Path::new(&path))
 }
 
+#[frb(ignore)]
+const IMAGE_REFUSED: &str = "Hollow can't show this image";
+/// What [`read_at_rest_image`] fails with while the check waits for a slot; Dart
+/// matches it (`AtRest.readImage`) and tries again instead of showing a refusal.
+#[frb(ignore)]
+pub(crate) const IMAGE_NOT_YET: &str = "Hollow is still checking this image";
+
+/// An image file's bytes for Flutter's decoder, only once they fully decode in pure
+/// Rust (AR-28): a peer's file can carry any bytes behind an image header, and the
+/// native codecs paint it with no tap. Errs with [`IMAGE_REFUSED`] otherwise.
+#[frb]
+pub fn read_at_rest_image(path: String) -> Result<Vec<u8>, String> {
+    use crate::node::image_gate::{judge_for_ffi, Verdict};
+    let bytes = at_rest::read_all(std::path::Path::new(&path))?;
+    match judge_for_ffi(&bytes) {
+        Verdict::Pass => Ok(bytes),
+        Verdict::Refused => Err(IMAGE_REFUSED.to_string()),
+        Verdict::NotYet => Err(IMAGE_NOT_YET.to_string()),
+    }
+}
+
 #[frb]
 pub fn read_at_rest_range(path: String, offset: u64, len: u32) -> Result<Vec<u8>, String> {
     at_rest::read_range(std::path::Path::new(&path), offset, len as usize)
@@ -97,6 +118,12 @@ pub fn at_rest_status() -> AtRestStatus {
 
 #[cfg(test)]
 mod tests {
+    /// Dart's `kImageNotYet` matches this text to retry instead of refusing.
+    #[test]
+    fn the_not_yet_text_is_what_dart_matches() {
+        assert_eq!(super::IMAGE_NOT_YET, "Hollow is still checking this image");
+    }
+
     use super::*;
 
     #[test]

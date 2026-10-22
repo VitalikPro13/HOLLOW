@@ -2673,11 +2673,28 @@ pub fn get_push_profile(peer_id: String) -> Result<Option<PushProfile>, String> 
     // The push `sender` is a relay-attested DEVICE id while profiles are keyed by
     // MASTER, so warm the resolver from DB links and resolve device to master.
     node::resolver::warm_from_store(&store);
-    let master = node::resolver::resolve(&peer_id);
+    push_profile_in(&store, &peer_id)
+}
+
+#[cfg(test)]
+pub(crate) fn push_profile_in_for_test(store: &MessageStore, peer_id: &str) -> Option<Vec<u8>> {
+    push_profile_in(store, peer_id).ok().flatten().and_then(|p| p.avatar_bytes)
+}
+
+/// The push profile of `peer_id` from an open store, its avatar through the image check.
+fn push_profile_in(store: &MessageStore, peer_id: &str) -> Result<Option<PushProfile>, String> {
+    let master = node::resolver::resolve(peer_id);
     let profile = store.load_profile_light(&master)?;
     match profile {
         Some(p) => {
-            let avatar = store.load_avatar(&master).unwrap_or(None);
+            // The notification icon is decoded by the OS's own native codec, no tap.
+            let avatar = store
+                .load_avatar(&master)
+                .unwrap_or(None)
+                .filter(|b| {
+                    let wait = node::image_gate::FFI_SLOT_WAIT;
+                    node::image_gate::judge_in(store, b, wait) == node::image_gate::Verdict::Pass
+                });
             let named = !p.display_name.is_empty();
             hollow_log!("[HOLLOW-PUSH] get_push_profile: loaded (name={named}, avatar={})", avatar.is_some());
             Ok(Some(PushProfile {

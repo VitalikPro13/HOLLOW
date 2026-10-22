@@ -38,12 +38,14 @@ void main() {
   setUp(() {
     tmp = Directory.systemTemp.createTempSync('hollow_media_viewer');
     AtRest.debugRead = (_) async => _png;
+    AtRest.debugReadImage = (_) async => _png;
     mediaViewerCrispPixels = true;
     ReduceMotionController.instance.setMode(ReduceMotionMode.off);
   });
 
   tearDown(() {
     AtRest.debugRead = null;
+    AtRest.debugReadImage = null;
     MediaLibrary.debugLoader = null;
     ReduceMotionController.instance.setMode(ReduceMotionMode.auto);
     try {

@@ -1,0 +1,402 @@
+{
+  "_": [
+    "AR-28: peer images pass a pure-Rust full decode before Skia sees them.",
+    "a sends b a valid photo and an undecodable one (header in order, VP8 bitstream",
+    "overwritten): the sender refuses to send it and says why on its own row. Then a valid",
+    "animated emote and one whose second frame is corrupt (the emote passthrough checks",
+    "the first frame only, so an ordinary client can author it): b paints the valid one",
+    "and shows ':badone:' for the refused one. No crash anywhere.",
+    "",
+    "Fixtures: image_check_fixtures/ beside this file: bad_photo is a cwebp still with its",
+    "VP8 bitstream overwritten from byte 40, bad_emote an img2webp 2-frame animation with frame 2 overwritten.",
+    "",
+    "run: FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario image_check -Peers a=p,b=q"
+  ],
+  "peers": [
+    "a",
+    "b"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "PEER_A"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:_FriendsManager > text:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Paste an ID, or type a nickname",
+      "value": "${PEER_A}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Send request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Requests",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Accept friend request",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Accept friend request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:probe-b",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:probe-a",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:probe-a"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a valid photo renders; an undecodable one never leaves the sender, which says why (the receiver-side refusal is pinned by unit and widget tests: no ordinary client can send one any more)"
+    },
+    {
+      "peer": "a",
+      "op": "attach_file",
+      "path": "${REPO}/scripts/probe_scenarios/fleet/image_check_fixtures/good_photo.webp"
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "field",
+      "value": "good photo ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:good photo ${RUN}",
+      "timeout_ms": 90000
+    },
+    {
+      "peer": "a",
+      "op": "attach_file",
+      "path": "${REPO}/scripts/probe_scenarios/fleet/image_check_fixtures/bad_photo.webp"
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bad photo ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:Hollow can't send this image because it is too large or damaged.",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "all",
+      "op": "wait",
+      "ms": 15000,
+      "why": "the photo must never leave: nothing for b to receive"
+    },
+    {
+      "peer": "b",
+      "op": "expect_count",
+      "target": "text:bad photo ${RUN}",
+      "value": 0
+    },
+    {
+      "peer": "all",
+      "op": "wait",
+      "ms": 3000
+    },
+    {
+      "peer": "all",
+      "op": "shot",
+      "name": "image-check-photos"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a valid animated emote crosses the rail and paints; one whose second frame is corrupt never paints anywhere"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Emoji, GIFs and stickers",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Mine emotes tab",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Mine emotes tab",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "arm_file_pick",
+      "path": "${REPO}/scripts/probe_scenarios/fleet/image_check_fixtures/good_anim.webp"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Upload a personal emote image",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "hint:emote_name",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "hint:emote_name",
+      "value": "goodone"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Save",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Emote goodone",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Emote goodone",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "semantics::goodone: emote",
+      "timeout_ms": 90000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Emoji, GIFs and stickers",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Mine emotes tab",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Mine emotes tab",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "arm_file_pick",
+      "path": "${REPO}/scripts/probe_scenarios/fleet/image_check_fixtures/bad_emote.webp"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Upload a personal emote image",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "hint:emote_name",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "hint:emote_name",
+      "value": "badone"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Save",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Emote badone",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Emote badone",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text::badone:",
+      "timeout_ms": 90000
+    },
+    {
+      "peer": "all",
+      "op": "wait",
+      "ms": 20000,
+      "why": "any pull of the refused blob has long finished; it must still read as its name, never paint"
+    },
+    {
+      "peer": "b",
+      "op": "expect_count",
+      "target": "text::badone:",
+      "value": 1,
+      "soft": false
+    },
+    {
+      "peer": "b",
+      "op": "expect_count",
+      "target": "semantics::goodone: emote",
+      "value": 1,
+      "soft": false
+    },
+    {
+      "peer": "all",
+      "op": "shot",
+      "name": "image-check-emotes"
+    },
+    {
+      "peer": "all",
+      "op": "dump",
+      "name": "image-check-converged"
+    }
+  ],
+  "cleanup": [
+    {
+      "peer": "all",
+      "op": "log",
+      "message": "nothing to undo: every run restores the fixture data directories."
+    }
+  ]
+}

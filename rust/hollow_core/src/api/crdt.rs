@@ -556,7 +556,8 @@ pub fn clear_server_avatar(server_id: String) -> Result<(), String> {
     update_server_setting(server_id, "server_avatar".into(), String::new())
 }
 
-/// Get a server avatar as raw bytes. Returns None if no avatar set.
+/// Get a server avatar as raw bytes. Returns None if no avatar set, or if the
+/// image check refused it (an admin's bytes, painted with no tap).
 #[frb]
 pub fn get_server_avatar(server_id: String) -> Result<Option<Vec<u8>>, String> {
     let b64 = get_server_setting(server_id, "server_avatar".into())?;
@@ -567,7 +568,7 @@ pub fn get_server_avatar(server_id: String) -> Result<Option<Vec<u8>>, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&b64)
         .map_err(|e| format!("Invalid server avatar base64: {e}"))?;
-    Ok(Some(bytes))
+    Ok(crate::node::image_gate::shown(Some(bytes)))
 }
 
 /// Animated server icon as seen locally. The CRDT carries only the hash; the bytes
@@ -591,12 +592,7 @@ pub fn get_server_avatar_anim(server_id: String) -> Result<Option<ServerAvatarAn
     if !crate::crdt::valid_emote_hash(&hash) {
         return Ok(None);
     }
-    let bytes = {
-        let store = super::storage::get_store();
-        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-        let ms = guard.as_ref().ok_or("Message store is not open")?;
-        ms.load_emote_blob(&hash)?
-    };
+    let bytes = crate::node::image_gate::rail_blob_shown(&hash)?;
     Ok(Some(ServerAvatarAnimData { hash, bytes }))
 }
 
@@ -656,12 +652,7 @@ pub fn get_server_banner(server_id: String) -> Result<Option<ServerBannerData>, 
         return Ok(None);
     }
     let animated = get_server_setting(server_id, "server_banner_animated".into())? == "1";
-    let bytes = {
-        let store = super::storage::get_store();
-        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-        let ms = guard.as_ref().ok_or("Message store is not open")?;
-        ms.load_emote_blob(&hash)?
-    };
+    let bytes = crate::node::image_gate::rail_blob_shown(&hash)?;
     Ok(Some(ServerBannerData { hash, animated, bytes }))
 }
 

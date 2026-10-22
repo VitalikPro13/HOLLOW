@@ -248,15 +248,65 @@ pub fn convert_animation_to_webp(
         WebpQuality::Small => webp_anim::AnimParams::plain(30.0),
     };
 
-    let webp_data = webp_anim::encode_animation(&timed, (w, h), &params)?;
-    Ok((webp_data, w, h))
+    let (nw, nh) = send_anim_dims(w, h, timed.len())?;
+    let timed = if (nw, nh) == (w, h) { timed } else { crop_resize_frames(&timed, (0, 0, w, h), nw, nh) };
+    let webp_data = webp_anim::encode_animation(&timed, (nw, nh), &params)?;
+    Ok((webp_data, nw, nh))
+}
+
+/// Decode ceiling for a photo WE send: our own file, so far above the receive rule,
+/// and the result is scaled down to [`send_dims`] before it leaves.
+const SEND_DECODE_ALLOC_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// The size a still is sent at: inside every bound of a receiver's check
+/// (`image_check::Budget::PEER`: side, pixels, and decode memory counting
+/// image-webp's working planes and an alpha channel), with 10% headroom. Never upscales.
+pub(crate) fn send_dims(w: u32, h: u32, lossless: bool) -> (u32, u32) {
+    let budget = super::image_check::Budget::PEER;
+    let per_px = 4 + super::image_check::webp_working_bytes(1, 1, lossless);
+    let max_px = budget.max_still_pixels.min(budget.max_alloc * 9 / 10 / per_px) as f64;
+    let side = f64::from(budget.max_side.min(16_383));
+    let (fw, fh) = (f64::from(w.max(1)), f64::from(h.max(1)));
+    let scale = 1f64.min(side / fw).min(side / fh).min((max_px / (fw * fh)).sqrt());
+    (((fw * scale).floor() as u32).max(1), ((fh * scale).floor() as u32).max(1))
+}
+
+/// The canvas an animation is sent at, by the same rule for animations: side,
+/// canvas times frames, and three RGBA canvases at once. Too many frames is an error.
+pub(crate) fn send_anim_dims(w: u32, h: u32, frames: usize) -> Result<(u32, u32), String> {
+    let budget = super::image_check::Budget::PEER;
+    if frames as u64 > u64::from(budget.max_frames) {
+        return Err("Animation has too many frames to send".into());
+    }
+    let frames = frames.max(1) as f64;
+    let max_canvas = (budget.max_anim_pixels as f64 * 0.9 / frames).min(budget.max_alloc as f64 * 0.9 / 12.0);
+    let side = f64::from(budget.max_anim_side);
+    let (fw, fh) = (f64::from(w.max(1)), f64::from(h.max(1)));
+    let scale = 1f64.min(side / fw).min(side / fh).min((max_canvas / (fw * fh)).sqrt());
+    Ok((((fw * scale).floor() as u32).max(1), ((fh * scale).floor() as u32).max(1)))
+}
+
+/// Our own photo decoded and scaled to [`send_dims`], so a receiver can show it.
+fn decode_for_send(data: &[u8], lossless: bool) -> Result<image::DynamicImage, String> {
+    let img = without_unwinding(|| {
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?;
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(SEND_DECODE_ALLOC_BYTES);
+        reader.limits(limits);
+        reader.decode().map_err(|e| e.to_string())
+    })
+    .map_err(|e| format!("Failed to decode image: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    let (sw, sh) = send_dims(w, h, lossless);
+    Ok(if (sw, sh) == (w, h) { img } else { img.resize_exact(sw, sh, FilterType::Triangle) })
 }
 
 /// Convert image bytes to lossless WebP.
 /// Returns (webp_bytes, width, height).
 pub fn convert_to_webp_lossless(data: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
-    let img = load_bounded(data)
-        .map_err(|e| format!("Failed to decode image: {e}"))?;
+    let img = decode_for_send(data, true)?;
 
     let width = img.width();
     let height = img.height();
@@ -281,8 +331,7 @@ pub fn convert_to_webp_with_quality(
         return convert_to_webp_lossless(data);
     }
 
-    let img = load_bounded(data)
-        .map_err(|e| format!("Failed to decode image: {e}"))?;
+    let img = decode_for_send(data, false)?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
         return Err("Image has zero dimensions".into());
@@ -349,6 +398,10 @@ fn encode_lossy_webp_still(rgba: &[u8], w: u32, h: u32, quality: f32) -> Result<
 /// [`is_animated_image`] on the way out. Frame delays under 20ms become 100ms,
 /// the browser convention, so a 0ms GIF does not play at ticker speed.
 pub fn decode_animation_frames(data: &[u8]) -> Result<Vec<(image::RgbaImage, i32)>, String> {
+    without_unwinding(|| decode_animation_frames_inner(data))
+}
+
+fn decode_animation_frames_inner(data: &[u8]) -> Result<Vec<(image::RgbaImage, i32)>, String> {
     let frames: image::Frames<'_> = if data.starts_with(b"GIF8") {
         GifDecoder::new(Cursor::new(data))
             .map_err(|e| format!("Failed to decode GIF: {e}"))?
@@ -428,6 +481,82 @@ fn crop_resize_frames(
 
 #[cfg(test)]
 mod tests {
+    /// Whatever size a sender starts from, what it sends fits every bound of a
+    /// receiver's check, decode memory included; small images are never upscaled.
+    #[test]
+    fn a_sent_still_always_fits_the_receivers_budget() {
+        let b = super::super::image_check::Budget::PEER;
+        for (w, h) in [(12_000, 9_000), (8_064, 6_048), (30_000, 2_000), (16_000, 16_000), (65_000, 900), (100, 100)] {
+            for lossless in [false, true] {
+                let (sw, sh) = super::send_dims(w, h, lossless);
+                let px = u64::from(sw) * u64::from(sh);
+                assert!(sw <= 16_383 && sh <= 16_383 && sw <= b.max_side && sh <= b.max_side, "{w}x{h} -> {sw}x{sh}");
+                assert!(px <= b.max_still_pixels, "{w}x{h} -> {sw}x{sh}");
+                let need = px * 4 + super::super::image_check::webp_working_bytes(sw, sh, lossless);
+                assert!(need <= b.max_alloc, "{w}x{h} -> {sw}x{sh} needs {need}");
+                assert!(sw <= w && sh <= h, "never upscale");
+            }
+        }
+        assert_eq!(super::send_dims(100, 100, false), (100, 100));
+    }
+
+    /// An animation wider than a receiver's canvas side is scaled down before it leaves.
+    #[test]
+    fn a_wide_animation_is_scaled_to_the_receivers_canvas() {
+        let mut gif = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut gif);
+            for i in 0..2u8 {
+                let frame = image::RgbaImage::from_pixel(5_000, 8, image::Rgba([i * 90, 20, 30, 255]));
+                enc.encode_frame(image::Frame::new(frame)).unwrap();
+            }
+        }
+        let (webp, w, h) = super::convert_animation_to_webp(&gif, super::WebpQuality::Balanced).unwrap();
+        assert!(w <= super::super::image_check::Budget::PEER.max_anim_side && h >= 1, "{w}x{h}");
+        assert!(super::super::image_check::check(&webp).is_ok());
+    }
+
+    #[test]
+    fn a_sent_animation_always_fits_the_receivers_budget() {
+        let b = super::super::image_check::Budget::PEER;
+        for (w, h, f) in [(6_000, 6_000, 10), (480, 480, 300), (1_920, 1_080, 500), (4_096, 4_096, 1)] {
+            let (sw, sh) = super::send_anim_dims(w, h, f).unwrap();
+            let canvas = u64::from(sw) * u64::from(sh);
+            assert!(sw <= b.max_anim_side && sh <= b.max_anim_side, "{w}x{h}x{f} -> {sw}x{sh}");
+            assert!(canvas * f as u64 <= b.max_anim_pixels, "{w}x{h}x{f} -> {sw}x{sh}");
+            assert!(canvas * 4 * 3 <= b.max_alloc, "{w}x{h}x{f} -> {sw}x{sh}");
+        }
+        assert!(super::send_anim_dims(10, 10, b.max_frames as usize + 1).is_err());
+    }
+    /// Fuzz inputs that panic `image-webp` (see `image_check`): every decode a peer's
+    /// bytes reach answers them with a refusal, never an unwind that ends the task.
+    #[test]
+    fn a_webp_that_panics_the_decoder_is_refused_not_unwound() {
+        let inputs: [&[u8]; 8] = [
+            include_bytes!("image_check_fixtures/webp_panic_1.webp"),
+            include_bytes!("image_check_fixtures/webp_panic_2.webp"),
+            include_bytes!("image_check_fixtures/webp_panic_3.webp"),
+            include_bytes!("image_check_fixtures/webp_panic_4.webp"),
+            include_bytes!("image_check_fixtures/webp_panic_5.webp"),
+            include_bytes!("image_check_fixtures/webp_panic_6.webp"),
+            include_bytes!("image_check_fixtures/webp_panic_7.webp"),
+            include_bytes!("image_check_fixtures/webp_panic_8.webp"),
+        ];
+        for (i, bytes) in inputs.iter().enumerate() {
+            let thumb = std::panic::catch_unwind(|| super::reencode_peer_thumb(bytes, super::PEER_THUMB_MAX_DIM, 75.0));
+            assert!(matches!(thumb, Ok(None)), "peer thumb: input {} unwound or passed", i + 1);
+            let loaded = std::panic::catch_unwind(|| super::load_bounded(bytes));
+            assert!(matches!(loaded, Ok(Err(_))), "load_bounded: input {} unwound or passed", i + 1);
+            // A stranger's friend-request card thumb lands here on the event loop.
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            let card = std::panic::catch_unwind(|| super::card_thumb_for_display(&b64));
+            assert!(matches!(card, Ok(None)), "card thumb: input {} unwound or passed", i + 1);
+            let frames = std::panic::catch_unwind(|| super::decode_animation_frames(bytes));
+            assert!(matches!(frames, Ok(Err(_))), "animation frames: input {} unwound or passed", i + 1);
+        }
+    }
+
     use super::*;
 
     fn webp_still(w: u32, h: u32) -> Vec<u8> {
@@ -2050,11 +2179,21 @@ fn decode_limits() -> image::Limits {
 /// crate: every call site goes through here, so no path can decode a bomb by
 /// forgetting a bound. The error is the underlying one verbatim.
 pub(crate) fn load_bounded(data: &[u8]) -> Result<image::DynamicImage, String> {
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
-    reader.limits(decode_limits());
-    reader.decode().map_err(|e| e.to_string())
+    without_unwinding(|| {
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?;
+        reader.limits(decode_limits());
+        reader.decode().map_err(|e| e.to_string())
+    })
+}
+
+/// A decode with any decoder panic turned into an error. `image-webp` 0.2.4 panics on
+/// some hostile WebPs (fuzzing, AR-28), and an unwind would end whatever task, event
+/// loop included, was decoding a peer's bytes.
+pub(crate) fn without_unwinding<T>(decode: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode))
+        .unwrap_or_else(|_| Err("the image decoder panicked".into()))
 }
 
 /// `(width, height)` if they are inside [`MAX_DECODE_DIM`], else the reason.
@@ -2080,9 +2219,13 @@ pub(crate) fn reencode_peer_thumb(webp: &[u8], max_dim: u32, quality: f32) -> Op
     if w == 0 || h == 0 || w > max_dim || h > max_dim {
         return None;
     }
-    let mut reader = image::ImageReader::with_format(Cursor::new(webp), ImageFormat::WebP);
-    reader.limits(decode_limits());
-    let rgba = reader.decode().ok()?.to_rgba8();
+    let rgba = without_unwinding(|| {
+        let mut reader = image::ImageReader::with_format(Cursor::new(webp), ImageFormat::WebP);
+        reader.limits(decode_limits());
+        reader.decode().map_err(|e| e.to_string())
+    })
+    .ok()?
+    .to_rgba8();
     let (dw, dh) = rgba.dimensions();
     let bytes = encode_lossy_webp_still(rgba.as_raw(), dw, dh, quality).ok()?;
     Some((bytes, dw, dh))
@@ -2301,6 +2444,8 @@ pub fn validate_sticker_blob(data: &[u8]) -> Result<(u32, u32, bool), String> {
     if data.len() < 16 || &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
         return Err("Sticker is not a WebP image".into());
     }
+    // A pack comes from someone else and libwebp decodes it below (AR-28).
+    super::image_check::check(data).map_err(|e| format!("Sticker {e}"))?;
 
     // Everything Hollow emits is an ANMF container even for a still, so the
     // animation decoder is the common path; other producers fall back.

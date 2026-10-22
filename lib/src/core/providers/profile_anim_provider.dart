@@ -49,6 +49,11 @@ class ProfileAnimNotifier extends Notifier<Map<String, Uint8List>> {
         state = {...state, hash: bytes};
         return;
       }
+      // Empty = Rust refused the image: the still shows, and nothing pulls it.
+      if (bytes != null) {
+        _awaiting.remove(hash);
+        return;
+      }
       if (peerHint != null && peerHint.isNotEmpty) {
         _awaiting[hash] = peerHint;
         requestAssetOnce(hash, kind: 'profile', peerHint: peerHint);

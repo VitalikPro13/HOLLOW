@@ -1,0 +1,28 @@
+# cargo-fuzz harness for the AR-28 image check: `cargo +nightly fuzz run image_check`.
+# Compiles src/node/image_check.rs on its own (it depends on `image` alone), so it
+# never builds the whole app. Keep `image` on the app's exact version and features.
+[package]
+name = "hollow_core_fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+image = { version = "=0.25.10", default-features = false, features = ["webp", "png", "jpeg", "gif", "bmp"] }
+
+[[bin]]
+name = "image_check"
+path = "fuzz_targets/image_check.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1

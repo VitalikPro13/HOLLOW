@@ -132,7 +132,7 @@ security-framework = "3"
 tempfile = "3"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)', 'cfg(image_check_standalone)'] }
 
 # The screen-share audio codec must run at REALTIME on phones even in DEBUG
 # app builds (debug APK = dev-profile Rust): unoptimized c2rust-transpiled

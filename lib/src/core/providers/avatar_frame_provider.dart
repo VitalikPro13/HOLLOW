@@ -45,6 +45,11 @@ class AvatarFrameNotifier extends Notifier<Map<String, Uint8List>> {
         state = {...state, id: bytes};
         return;
       }
+      // Empty = Rust refused the image: the still shows, and nothing pulls it.
+      if (bytes != null) {
+        _awaiting.remove(id);
+        return;
+      }
       if (peerHint != null && peerHint.isNotEmpty) {
         _awaiting[id] = peerHint;
         requestAssetOnce(id, kind: 'frame', peerHint: peerHint);

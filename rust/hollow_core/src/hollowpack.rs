@@ -311,6 +311,9 @@ pub fn processed_from_bytes(role: Role, bytes: Vec<u8>) -> Result<ProcessedFile,
             MAX_FILE_BYTES / (1024 * 1024)
         ));
     }
+    // A pack comes from someone else; libwebp decodes it below (AR-28).
+    crate::node::image_check::check(&bytes)
+        .map_err(|e| format!("The {} file in this pack {e}", role.as_str()))?;
     let (w, h, animated) = blob_shape(&bytes)?;
     check_role_shape(role, w, h, animated)?;
     if role == Role::Frame {
@@ -774,6 +777,17 @@ fn check_role_shape(role: Role, w: u32, h: u32, animated: bool) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
+    /// AR-28: a pack file our pure-Rust check refuses never reaches libwebp's decode,
+    /// whatever role it claims (fuzz inputs that panic image-webp, see image_check).
+    #[test]
+    fn a_pack_file_the_image_check_refuses_is_refused_before_libwebp() {
+        let bytes = include_bytes!("node/image_check_fixtures/webp_panic_1.webp").to_vec();
+        for role in [Role::AvatarAnim, Role::Avatar, Role::Frame] {
+            let err = processed_from_bytes(role, bytes.clone()).err().unwrap_or_default();
+            assert!(err.contains("panic"), "{role:?}: {err}");
+        }
+    }
+
     use super::*;
 
     // ── Fixtures, built in memory ─────────────────────────────────────

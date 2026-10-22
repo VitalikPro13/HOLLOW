@@ -12,6 +12,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
 
@@ -35,6 +36,7 @@ void main() {
 
   tearDown(() {
     AtRest.debugRead = null;
+    AtRest.debugReadImage = null;
     debugClearAttachmentImageCache();
     try {
       tmp.deleteSync(recursive: true);
@@ -50,14 +52,15 @@ void main() {
   }
 
   Future<void> pump(WidgetTester tester, Widget child) async {
-    await tester.pumpWidget(MaterialApp(home: Scaffold(body: child)));
+    await tester.pumpWidget(MaterialApp(
+        theme: HollowThemeData.dark(), home: Scaffold(body: child)));
     await tester.pump();
   }
 
   testWidgets('a still reads through AtRest, not the file on disk',
       (tester) async {
     final path = ciphertextAt('shot.png');
-    AtRest.debugRead = (p) async {
+    AtRest.debugReadImage = (p) async {
       reads.add(p);
       return _png;
     };
@@ -85,7 +88,7 @@ void main() {
 
   testWidgets('the provider decrypts before it decodes', (tester) async {
     final path = ciphertextAt('shot.png');
-    AtRest.debugRead = (p) async {
+    AtRest.debugReadImage = (p) async {
       reads.add(p);
       return _png;
     };
@@ -107,7 +110,7 @@ void main() {
   testWidgets('an animation is handed decrypted bytes, never a path',
       (tester) async {
     final path = ciphertextAt('wave.gif');
-    AtRest.debugRead = (p) async {
+    AtRest.debugReadImage = (p) async {
       reads.add(p);
       return _gif;
     };
@@ -127,7 +130,7 @@ void main() {
   testWidgets('a second animated mount reuses the cached bytes',
       (tester) async {
     final path = ciphertextAt('wave.gif');
-    AtRest.debugRead = (p) async {
+    AtRest.debugReadImage = (p) async {
       reads.add(p);
       return _gif;
     };
@@ -144,7 +147,7 @@ void main() {
   testWidgets('a failed read shows the error widget, not an exception',
       (tester) async {
     final path = ciphertextAt('gone.gif');
-    AtRest.debugRead = (_) async => throw const FileSystemException('no key');
+    AtRest.debugReadImage = (_) async => throw const FileSystemException('no key');
 
     await pump(
         tester,
@@ -170,7 +173,7 @@ void main() {
   testWidgets('a cached animation shows in the first frame, no gap',
       (tester) async {
     final path = ciphertextAt('wave.gif');
-    AtRest.debugRead = (_) async => _gif;
+    AtRest.debugReadImage = (_) async => _gif;
 
     await pump(tester, AttachmentImage(path: path, animated: true));
     await tester.pump();
@@ -180,5 +183,50 @@ void main() {
         home: Scaffold(body: AttachmentImage(path: path, animated: true))));
     expect(find.byType(AnimatedGifImage), findsOneWidget,
         reason: 'no pump between mount and paint');
+  });
+
+  // AR-28: the image read is the gated one. A plain read would hand Skia the
+  // bytes even when Rust's pure decode refused them.
+  testWidgets('a still Rust refused paints the honest box, never the bytes',
+      (tester) async {
+    final path = ciphertextAt('hostile.png');
+    AtRest.debugRead = (_) async => _png;
+    AtRest.debugReadImage = (_) async => throw Exception("Hollow can't show this image");
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: Scaffold(
+              body: AttachmentImage(
+                  path: path,
+                  width: 120,
+                  height: 90,
+                  errorWidget: const CantShowImage(width: 120, height: 90)))));
+      for (var i = 0; i < 20 && find.byType(CantShowImage).evaluate().isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        await tester.pump();
+      }
+    });
+
+    expect(find.text(kCantShowImageCaption), findsOneWidget);
+  });
+
+  testWidgets('an animation Rust refused paints the honest box, never the bytes',
+      (tester) async {
+    final path = ciphertextAt('hostile.gif');
+    AtRest.debugRead = (_) async => _gif;
+    AtRest.debugReadImage = (_) async => throw Exception("Hollow can't show this image");
+
+    await pump(
+        tester,
+        AttachmentImage(
+          path: path,
+          animated: true,
+          errorWidget: const CantShowImage(width: 120, height: 90),
+        ));
+    await tester.pump();
+
+    expect(find.text(kCantShowImageCaption), findsOneWidget);
+    expect(find.byType(AnimatedGifImage), findsNothing);
   });
 }

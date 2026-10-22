@@ -5,7 +5,60 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
+import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+/// What an attachment that never reached the decoder says: Hollow refused its
+/// bytes (they did not decode safely) or could not read them.
+const String kCantShowImageCaption = "Can't show this image";
+
+/// The honest box for an image Hollow will not paint, sized like the image it
+/// stands in for. The file itself is still there to save.
+class CantShowImage extends StatelessWidget {
+  final double? width;
+  final double? height;
+
+  /// Replaces [kCantShowImageCaption], e.g. with why a photo was not sent.
+  final String? caption;
+
+  const CantShowImage({super.key, this.width, this.height, this.caption});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final text = caption ?? kCantShowImageCaption;
+    return Semantics(
+      label: text,
+      child: Container(
+        width: width,
+        height: height,
+        color: hollow.elevated,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.all(HollowSpacing.sm),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(LucideIcons.imageOff, size: 20, color: hollow.textSecondary),
+              const SizedBox(height: HollowSpacing.sm),
+              ExcludeSemantics(
+                child: Text(
+                  text,
+                  textAlign: TextAlign.center,
+                  style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 /// How many decoded attachment payloads the animated path keeps. Stills are not
 /// here: they live in Flutter's own [ImageCache], which already evicts by size.
@@ -63,7 +116,8 @@ class AtRestImageKey {
 /// An [ImageProvider] over a file that is encrypted at rest.
 ///
 /// The decrypted bytes are handed straight to the decoder and never kept in a
-/// map of our own, so eviction stays Flutter's job.
+/// map of our own, so eviction stays Flutter's job. They reach the decoder only
+/// after Rust's image check passed them; a refusal fails the load.
 @immutable
 class AtRestImageProvider extends ImageProvider<AtRestImageKey> {
   final String path;
@@ -107,7 +161,7 @@ class AtRestImageProvider extends ImageProvider<AtRestImageKey> {
   }
 
   Future<ui.Codec> _load(AtRestImageKey key, ImageDecoderCallback decode) async {
-    final bytes = await AtRest.read(key.path);
+    final bytes = await AtRest.readImage(key.path);
     if (bytes.isEmpty) {
       PaintingBinding.instance.imageCache.evict(key);
       throw StateError('${key.path} is empty and cannot be decoded.');
@@ -193,7 +247,7 @@ class _AttachmentImageState extends State<AttachmentImage> {
     final path = widget.path;
     final generation = _loadGeneration;
     try {
-      final bytes = await AtRest.read(path);
+      final bytes = await AtRest.readImage(path);
       _rememberAnimated(path, bytes);
       if (mounted && generation == _loadGeneration) {
         setState(() => _bytes = bytes);

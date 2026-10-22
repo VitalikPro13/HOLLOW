@@ -18,8 +18,9 @@ String emoteToken({required String name, required String hash}) =>
 Future<ProcessedEmote> processAndStoreEmote({required List<int> rawBytes}) =>
     RustLib.instance.api.crateApiEmotesProcessAndStoreEmote(rawBytes: rawBytes);
 
-/// Cached emote bytes for a hash (None = not cached yet; caller should
-/// trigger [request_emotes] and re-read on `EmoteAssetsReceived`).
+/// Cached rail bytes for a hash: None = not cached yet (trigger [request_emotes] and
+/// re-read on `EmoteAssetsReceived`); empty = refused by the image check, so show the
+/// fallback and never pull it.
 Future<Uint8List?> getEmoteBytes({required String hash}) =>
     RustLib.instance.api.crateApiEmotesGetEmoteBytes(hash: hash);
 

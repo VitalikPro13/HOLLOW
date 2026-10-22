@@ -308,6 +308,11 @@ pub fn count_channel_messages_ffi(server_id: String, channel_id: String) -> Resu
     Ok(ms.count_channel_messages(&server_id, &channel_id))
 }
 
+/// A peer's still as Dart may paint it: through the image check, or nothing (AR-28).
+fn shown(bytes: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    crate::node::image_gate::shown(bytes)
+}
+
 /// A user profile returned to Dart.
 pub struct UserProfile {
     pub peer_id: String,
@@ -336,19 +341,21 @@ pub struct UserProfile {
 /// Get a profile for a specific peer (or ourselves). Returns None if no profile stored.
 #[frb]
 pub fn get_profile(peer_id: String) -> Result<Option<UserProfile>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-
-    match ms.load_profile(&peer_id)? {
+    let loaded = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.load_profile(&peer_id)?
+    };
+    match loaded {
         Some(p) => Ok(Some(UserProfile {
             peer_id: p.peer_id,
             display_name: p.display_name,
             status: p.status,
             about_me: p.about_me,
             updated_at: p.updated_at,
-            avatar_bytes: p.avatar_bytes,
-            banner_bytes: p.banner_bytes,
+            avatar_bytes: shown(p.avatar_bytes),
+            banner_bytes: shown(p.banner_bytes),
             twitch_username: p.twitch_username,
             showcase_board: p.showcase_board,
             avatar_frame: p.avatar_frame,
@@ -363,11 +370,12 @@ pub fn get_profile(peer_id: String) -> Result<Option<UserProfile>, String> {
 /// Get all stored profiles (for populating the profile cache on startup).
 #[frb]
 pub fn get_all_profiles() -> Result<Vec<UserProfile>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-
-    let profiles = ms.load_all_profiles()?;
+    let profiles = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.load_all_profiles()?
+    };
     Ok(profiles
         .into_iter()
         .map(|p| UserProfile {
@@ -376,8 +384,8 @@ pub fn get_all_profiles() -> Result<Vec<UserProfile>, String> {
             status: p.status,
             about_me: p.about_me,
             updated_at: p.updated_at,
-            avatar_bytes: p.avatar_bytes,
-            banner_bytes: p.banner_bytes,
+            avatar_bytes: shown(p.avatar_bytes),
+            banner_bytes: shown(p.banner_bytes),
             twitch_username: p.twitch_username,
             showcase_board: p.showcase_board,
             avatar_frame: p.avatar_frame,
@@ -446,20 +454,26 @@ pub fn get_profile_light(peer_id: String) -> Result<Option<UserProfile>, String>
 /// Get only the avatar bytes for a peer (lazy load for HollowAvatar).
 #[frb]
 pub fn get_avatar(peer_id: String) -> Result<Option<Vec<u8>>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    // A pending friend shows its card thumb until the full avatar lands.
-    ms.load_avatar_for_display(&peer_id)
+    let bytes = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        // A pending friend shows its card thumb until the full avatar lands.
+        ms.load_avatar_for_display(&peer_id)?
+    };
+    Ok(shown(bytes))
 }
 
 /// Get only the banner bytes for a peer (lazy load for profile card/DM header).
 #[frb]
 pub fn get_banner(peer_id: String) -> Result<Option<Vec<u8>>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.load_banner(&peer_id)
+    let bytes = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.load_banner(&peer_id)?
+    };
+    Ok(shown(bytes))
 }
 
 // ── Call records ──────────────────────────────────────────────

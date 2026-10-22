@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_update_at`, `apply_update_impl`, `detect_common_prefix`, `download_inner`, `extract_zip_to`, `feed_message`, `fetch_bytes`, `install_kind_impl`, `is_release_version`, `launch_update_script_impl`, `manifest_versions_well_formed`, `normalise_expected_sha256`, `relaunch_snippet`, `release_display`, `release_tag`, `sh_quote`, `signature_url`, `signature_verifies`, `spawn_waiter`, `verify_feed_signature_with`, `verify_feed_signature`, `verify_manifest_signature_with`, `verify_manifest_signature`, `write_macos_update_script`
+// These functions are ignored because they are not marked as `pub`: `apply_update_at`, `apply_update_impl`, `detect_common_prefix`, `download_inner`, `extract_zip_to`, `feed_message`, `fetch_bytes`, `fetch_cap`, `install_kind_impl`, `is_release_version`, `launch_update_script_impl`, `manifest_versions_well_formed`, `normalise_expected_sha256`, `readable_build`, `relaunch_snippet`, `release_display`, `release_tag`, `sh_quote`, `signature_url`, `signature_verifies`, `signed_feed_text`, `spawn_waiter`, `verify_feed_signature_with`, `verify_manifest_signature_with`, `verify_manifest_signature`, `write_macos_update_script`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ReleaseName`
 
 String getCurrentVersion() =>

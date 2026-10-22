@@ -17461,14 +17461,10 @@ async fn asset_cap_enforced_per_kind() {
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
     expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
-    // O holds a 300 KB blob with a valid WebP container (the wire check is
-    // container magic + content hash — it need not decode).
+    // O holds a real WebP of about 300 KB: over the emote cap, under the gif one.
     use sha2::{Digest, Sha256};
-    let mut big = Vec::with_capacity(300_012);
-    big.extend_from_slice(b"RIFF");
-    big.extend_from_slice(&300_004u32.to_le_bytes());
-    big.extend_from_slice(b"WEBP");
-    big.resize(300_012, 0u8);
+    let big = sized_webp_blob(300_012, 81);
+    assert!(big.len() > super::assets::AssetKind::Emote.recv_cap());
     let hash = hex::encode(Sha256::digest(&big));
     o.store()
         .save_asset_blob(&hash, &big, false, "gif")
@@ -27164,7 +27160,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // prove the member keeps its sibling seated (one absence, 4.5 s, total 835.6 s).
     // 2026-10-22: g13-s2 proves an MLS frame stays off the wire while its group state's
     // save is held, twice (two absences, 1.0 s).
-    const BUDGET_MS: u64 = 837_800;
+    // 2026-10-22: g13-image-check adds two spawn staggers and one absence proof, an
+    // asset ask for a refused hash that must never leave (4.4 s).
+    const BUDGET_MS: u64 = 842_200;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -28373,6 +28371,27 @@ fn frames_of_type(relay: &MockRelay, device: &str, kind: &str) -> Vec<serde_json
         .collect()
 }
 
+/// A real lossless WebP of noise, at least `min_len` bytes: a rail blob sized to a cap
+/// that still decodes, since every receipt now decodes it whole (AR-28).
+fn sized_webp_blob(min_len: usize, seed: u32) -> Vec<u8> {
+    use image::ImageEncoder;
+    let side = ((min_len as f64 / 2.5).sqrt() as u32).max(16);
+    let mut state = seed | 1;
+    let img = image::RgbaImage::from_fn(side, side, |_, _| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        let [r, g, b, _] = state.to_le_bytes();
+        image::Rgba([r, g, b, 255])
+    });
+    let mut out = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+        .write_image(img.as_raw(), side, side, image::ExtendedColorType::Rgba8)
+        .expect("encode a sized webp");
+    assert!(out.len() >= min_len, "a {side}px noise webp came out at {} bytes", out.len());
+    out
+}
+
 /// A small, real, still WebP the way authoring produces one, plus its hash.
 /// `tint` keeps each test's blob (and therefore its hash) its own.
 fn asset_blob(tint: u8) -> (Vec<u8>, String) {
@@ -28876,11 +28895,8 @@ async fn asset_pull_rotates_after_invalid_bytes() {
     // because content addressing means every honest holder of a hash holds
     // the same bytes.
     use sha2::{Digest, Sha256};
-    let mut big = Vec::with_capacity(300_012);
-    big.extend_from_slice(b"RIFF");
-    big.extend_from_slice(&300_004u32.to_le_bytes());
-    big.extend_from_slice(b"WEBP");
-    big.resize(300_012, 0u8);
+    let big = sized_webp_blob(300_012, 97);
+    assert!(big.len() > super::assets::AssetKind::Emote.recv_cap());
     let hash = hex::encode(Sha256::digest(&big));
     for holder in [&o, &g] {
         holder
@@ -52138,4 +52154,142 @@ async fn a_node_on_a_0_12_2_mls_store_keeps_its_groups() {
     post_channel(&o, &server_id, &general, "after the restart").await;
     assert!(wait_until(15, async || holds_channel_message(&x, &server_id, &general, "after the restart")).await);
     drop((o, m, x));
+}
+
+// g13-image-check
+
+/// A WebP whose container, header and hash are all in order and whose pixels do not
+/// decode: what the receipt's cheap gates admit and only a full decode refuses.
+fn g13_undecodable_webp(seed: u8) -> Vec<u8> {
+    let img = image::RgbaImage::from_fn(64, 48, |x, y| image::Rgba([x as u8 ^ seed, y as u8, seed, 255]));
+    let params = super::webp_anim::AnimParams::plain(75.0);
+    let mut bad = super::webp_anim::encode_still(img.as_raw(), 64, 48, &params).expect("encode");
+    let n = bad.len();
+    for b in &mut bad[40..n - 8] {
+        *b = 0xFF;
+    }
+    assert!(super::image_convert::webp_header_dimensions(&bad).is_some(), "the header must stay readable");
+    assert!(super::image_check::check(&bad).is_err(), "the pixels must not decode");
+    bad
+}
+
+/// AR-28, the rail receipt and the asker: a blob that passes the cap, the magic and
+/// the canvas header but does not decode is never cached, its refusal is kept and
+/// told to Dart, and its hash is never asked for again; a valid blob in the same
+/// bundle lands byte-identical.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_rail_blob_that_does_not_decode_is_refused_at_receipt() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const O_MASTER: u8 = 171;
+    const J_MASTER: u8 = 172;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+    let o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await; // spawn stagger, as every friend pair
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+
+    let (good, good_hash) = asset_blob(171);
+    let bad = g13_undecodable_webp(171);
+    let bad_hash = so_hash(&bad);
+    assert!(bad.len() < super::assets::AssetKind::Emote.recv_cap());
+    for (hash, bytes) in [(&good_hash, &good), (&bad_hash, &bad)] {
+        o.store().save_asset_blob(hash, bytes, false, "emote").expect("O holds both");
+    }
+
+    drain_events(&mut j);
+    let ask = |hashes: Vec<String>| NodeCommand::RequestEmotes {
+        hashes,
+        kind: super::assets::AssetKind::Emote,
+        server_id: None,
+        peer_hint: Some(o_master.clone()),
+    };
+    j.cmd_tx.send(ask(vec![good_hash.clone(), bad_hash.clone()])).await.unwrap();
+    let mut told: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !(told.contains(&good_hash) && told.contains(&bad_hash)) && std::time::Instant::now() < deadline {
+        wait_event(&mut j, std::time::Duration::from_secs(1), |ev| {
+            if let NetworkEvent::EmoteAssetsReceived { hashes } = ev {
+                told.extend(hashes.iter().cloned());
+            }
+            false
+        })
+        .await;
+    }
+    assert!(told.contains(&good_hash), "the valid blob must land and be told");
+    assert!(told.contains(&bad_hash), "Dart must hear about the refused hash, to stop showing it as loading");
+    assert_eq!(
+        j.store().load_emote_blob(&good_hash).unwrap().as_deref(),
+        Some(good.as_slice()),
+        "a valid blob passes unchanged"
+    );
+    assert!(!j.store().has_emote_blob(&bad_hash).unwrap(), "an undecodable blob must never be cached");
+    let rule = super::image_check::RULE;
+    assert_eq!(j.store().image_verdict(&bad_hash, rule).map(|r| r.0), Some(super::image_gate::CODE_REFUSED), "the refusal is kept");
+    assert_eq!(j.store().image_verdict(&good_hash, rule).map(|r| r.0), Some(super::image_gate::CODE_PASS), "and so is the pass");
+
+    // The refusal names those exact bytes on every holder: no further ask goes out.
+    let asks_before = j.carried_of_type("emote_request").await.len();
+    j.cmd_tx.send(ask(vec![bad_hash.clone()])).await.unwrap();
+    sleep_ms(2000).await; // absence proof: an ask that must never leave
+    assert_eq!(
+        j.carried_of_type("emote_request").await.len(),
+        asks_before,
+        "a refused hash must never be asked for again"
+    );
+    drop((o, j));
+}
+
+/// AR-28, the responder: a holder whose own check refused a blob answers it as
+/// missing instead of passing the bytes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_holder_never_serves_a_blob_its_image_check_refused() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const O_MASTER: u8 = 173;
+    const J_MASTER: u8 = 174;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+    let o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await; // spawn stagger, as every friend pair
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+
+    let bad = g13_undecodable_webp(173);
+    let bad_hash = so_hash(&bad);
+    o.store().save_asset_blob(&bad_hash, &bad, false, "emote").expect("O holds it");
+    o.store().record_image_verdict(&bad_hash, super::image_gate::CODE_REFUSED, super::image_check::RULE).unwrap();
+
+    drain_events(&mut j);
+    j.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![bad_hash.clone()],
+            kind: super::assets::AssetKind::Emote,
+            server_id: None,
+            peer_hint: Some(o_master.clone()),
+        })
+        .await
+        .unwrap();
+    let named_missing = wait_until(15, async || {
+        o.carried_of_type("emote_assets").await.iter().any(|v| {
+            v["missing"].as_array().is_some_and(|m| m.iter().any(|h| h == &serde_json::json!(bad_hash)))
+        })
+    })
+    .await;
+    assert!(named_missing, "the holder must answer a refused blob as missing");
+    assert!(
+        !o.carried_of_type("emote_assets").await.iter().any(|v| v["bundle_json"].as_str().is_some_and(|b| b.contains(&bad_hash))),
+        "and must never put its bytes in a bundle"
+    );
+    assert!(!j.store().has_emote_blob(&bad_hash).unwrap());
+    drop((o, j));
 }

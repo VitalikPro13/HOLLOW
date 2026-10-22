@@ -1086,6 +1086,9 @@ pub(crate) enum NodeCommand {
         server_id: Option<String>,
         peer_hint: Option<String>,
     },
+    /// Images whose check had to wait for a slot are now judged: Dart re-reads them
+    /// (`EmoteAssetsReceived`), instead of an FFI call parking a pool thread (AR-28).
+    ImagesRechecked { hashes: Vec<String> },
     SetNickname { server_id: String, peer_id: String, nickname: String },
     SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,
@@ -1496,6 +1499,7 @@ impl NodeCommand {
             Self::AddServerSticker { .. } => "AddServerSticker",
             Self::RemoveServerSticker { .. } => "RemoveServerSticker",
             Self::RequestEmotes { .. } => "RequestEmotes",
+            Self::ImagesRechecked { .. } => "ImagesRechecked",
             Self::SetNickname { .. } => "SetNickname",
             Self::SetTwitchUsername { .. } => "SetTwitchUsername",
             Self::NotifyShutdown => "NotifyShutdown",

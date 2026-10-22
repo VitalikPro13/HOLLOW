@@ -278,6 +278,18 @@ pub(crate) fn ddl(conn: &Connection, what: &str, sql: &str) -> Result<(), String
 /// `app_settings` key of the next stream overlay slot to hand out.
 const OVERLAY_NEXT_SLOT_SETTING: &str = "overlay_next_slot";
 
+/// Image-check verdicts kept: a few KB of rows per thousand images, never decisive.
+const MAX_IMAGE_VERDICTS: i64 = 50_000;
+/// How far past the cap the table may grow before a trim pays for its scan.
+const IMAGE_VERDICT_SLACK: i64 = 5_000;
+
+fn now_ms_for_verdicts() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// One person on this device's stream overlay (`overlay_people`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverlayPersonRow {
@@ -1038,6 +1050,18 @@ impl MessageStore {
                 animated INTEGER NOT NULL DEFAULT 0,
                 added_at INTEGER NOT NULL DEFAULT 0
             )")?;
+
+        // What the pure-Rust image check said about a peer's exact bytes (AR-28), so a
+        // render path decodes each image once. `rule` names the check version.
+        ddl(conn, "image_verdicts table",
+            "CREATE TABLE IF NOT EXISTS image_verdicts (
+                hash       TEXT PRIMARY KEY,
+                ok         INTEGER NOT NULL,
+                rule       INTEGER NOT NULL,
+                checked_at INTEGER NOT NULL DEFAULT 0
+            )")?;
+        ddl(conn, "idx_image_verdicts_at",
+            "CREATE INDEX IF NOT EXISTS idx_image_verdicts_at ON image_verdicts (checked_at)")?;
 
         // One row per DM call this device took part in, written by each side when the
         // call ends. LOCAL ONLY: its own table, so no sync, backfill, digest, unread
@@ -3235,7 +3259,8 @@ impl MessageStore {
 
     /// Remove everything that belongs to one device or to nobody's disk from a copy of
     /// the database leaving this device (a backup, a link snapshot): the Olm account and
-    /// sessions, the MLS identity and groups, and a 0.11 stored recovery phrase. Deleted
+    /// sessions, the MLS identity and groups, a 0.11 stored recovery phrase, and the image
+    /// verdicts (only this install's own decodes may vouch for bytes, AR-28). Deleted
     /// pages are zeroed and the file rebuilt, so no free page still holds them.
     pub fn scrub_device_secrets(&self) -> Result<(), String> {
         self.conn
@@ -3246,7 +3271,8 @@ impl MessageStore {
                  DELETE FROM olm_session_floors;
                  DELETE FROM mls_identity;
                  DELETE FROM mls_storage;
-                 DELETE FROM app_settings WHERE key = 'recovery_mnemonic';",
+                 DELETE FROM app_settings WHERE key = 'recovery_mnemonic';
+                 DELETE FROM image_verdicts;",
             )
             .map_err(|e| format!("Failed to scrub device secrets: {e}"))?;
         self.conn
@@ -5832,6 +5858,64 @@ impl MessageStore {
             .map_err(|e| format!("Failed to save overlay image: {e}"))
     }
 
+    /// The stored image-check verdict row `(code, checked_at_ms)` for these exact bytes
+    /// (SHA-256 hex) under check version `rule`; codes are `image_gate`'s. A hit older
+    /// than a day is touched, so the trim evicts the least recently USED rows.
+    pub fn image_verdict(&self, hash: &str, rule: i64) -> Option<(i64, i64)> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT ok, checked_at FROM image_verdicts WHERE hash = ?1 AND rule = ?2",
+                params![hash, rule],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .ok()?;
+        let now = now_ms_for_verdicts();
+        if row.0 != 3 && now - row.1 > DAY_MS {
+            let _ = self.conn.execute(
+                "UPDATE image_verdicts SET checked_at = ?2 WHERE hash = ?1",
+                params![hash, now],
+            );
+        }
+        Some(row)
+    }
+
+    /// Keep an image-check verdict code, newest wins. The table is a cache: past
+    /// [`MAX_IMAGE_VERDICTS`] plus slack the least recently used rows go, and a lost
+    /// row costs one more decode.
+    pub fn record_image_verdict(&self, hash: &str, code: i64, rule: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO image_verdicts (hash, ok, rule, checked_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(hash) DO UPDATE SET ok = excluded.ok, rule = excluded.rule,
+                 checked_at = excluded.checked_at",
+                params![hash, code, rule, now_ms_for_verdicts()],
+            )
+            .map_err(|e| format!("Failed to save image verdict: {e}"))?;
+        // A count only every 1024th new row: the trim is rare and the table small.
+        if self.conn.last_insert_rowid() % 1024 == 0 {
+            let rows: i64 = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM image_verdicts", [], |r| r.get(0))
+                .unwrap_or(0);
+            if rows > MAX_IMAGE_VERDICTS + IMAGE_VERDICT_SLACK {
+                self.conn
+                    .execute(
+                        "DELETE FROM image_verdicts WHERE hash IN (
+                             SELECT hash FROM image_verdicts ORDER BY checked_at ASC LIMIT ?1)",
+                        params![rows - MAX_IMAGE_VERDICTS],
+                    )
+                    .map_err(|e| format!("Failed to trim image verdicts: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop a verdict row: a check that said nothing about the bytes (no slot).
+    pub fn forget_image_verdict(&self, hash: &str) {
+        let _ = self.conn.execute("DELETE FROM image_verdicts WHERE hash = ?1", params![hash]);
+    }
+
     pub fn load_overlay_blob(&self, hash: &str) -> Result<Option<Vec<u8>>, String> {
         match self.conn.query_row("SELECT bytes FROM overlay_blobs WHERE hash = ?1", params![hash], |row| {
             row.get::<_, Vec<u8>>(0)
@@ -7794,6 +7878,17 @@ mod tests {
         assert_eq!((a.local_look.as_deref(), a.their_look.as_deref(), a.held_stamp), (Some("{}"), Some("{\"v\":1}"), 7));
         assert!(!store.overlay_set_local_look("zz", Some("{}")).unwrap(), "no row for a person never added");
         assert_eq!(store.overlay_people().unwrap().iter().map(|p| p.slot).collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    /// A verdict is only one this install computed (AR-28): a restored or linked
+    /// database arrives with none, so a source that wrote "pass" cannot vouch for bytes.
+    #[test]
+    fn a_staged_database_loses_its_image_verdicts() {
+        let store = mem_store();
+        store.record_image_verdict("h", 1, 1).unwrap();
+        assert!(store.image_verdict("h", 1).is_some());
+        store.scrub_device_secrets().unwrap();
+        assert_eq!(store.image_verdict("h", 1), None);
     }
 
     /// Overlay images and rail blobs never share a row: the same bytes held as both

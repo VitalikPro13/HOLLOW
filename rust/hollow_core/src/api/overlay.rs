@@ -98,7 +98,7 @@ pub fn overlay_image_bytes(hash: String) -> Option<Vec<u8>> {
     if !crate::crdt::valid_emote_hash(&hash) {
         return None;
     }
-    with_store(|ms| ms.load_overlay_blob(&hash)).ok().flatten()
+    crate::node::image_gate::shown(with_store(|ms| ms.load_overlay_blob(&hash)).ok().flatten())
 }
 
 #[frb]
@@ -194,12 +194,17 @@ mod tests {
         let _st = super::super::storage::store_test_lock();
         let ms = crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
         let (rail, look) = ("a".repeat(64), "b".repeat(64));
-        ms.save_asset_blob(&rail, b"sticker", false, "sticker").unwrap();
-        ms.save_overlay_blob(&look, b"look", false).unwrap();
+        // A real image: the read passes the AR-28 image check before it crosses.
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        ms.save_asset_blob(&rail, &png, false, "sticker").unwrap();
+        ms.save_overlay_blob(&look, &png, false).unwrap();
         super::super::storage::set_test_store(ms);
         let (r, l, bad) = (overlay_image_bytes(rail), overlay_image_bytes(look), overlay_image_bytes("../x".into()));
         super::super::storage::set_test_store(crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap());
-        assert_eq!(l.as_deref(), Some(&b"look"[..]), "CONTROL: an overlay image");
+        assert_eq!(l.as_deref(), Some(&png[..]), "CONTROL: an overlay image");
         assert_eq!(r, None, "a sticker was handed out as an overlay image");
         assert_eq!(bad, None);
     }

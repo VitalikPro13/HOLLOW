@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../core/message_tokens.dart';
 import '../../core/providers/emote_provider.dart';
@@ -60,10 +61,13 @@ class EmoteImage extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final bytes = ref.watch(emoteBytesProvider(hash)).valueOrNull;
 
-    if (bytes == null) {
-      final scope = EmoteScope.of(context);
-      requestEmoteOnce(hash,
-          serverId: scope?.serverId, peerHint: scope?.peerHint);
+    // Empty = Rust refused the image, so it is never pulled and never decoded.
+    if (bytes == null || bytes.isEmpty) {
+      if (bytes == null) {
+        final scope = EmoteScope.of(context);
+        requestEmoteOnce(hash,
+            serverId: scope?.serverId, peerHint: scope?.peerHint);
+      }
       return Text(
         ':$name:',
         style: (fallbackStyle ?? const TextStyle())
@@ -239,6 +243,8 @@ class ChatAssetImage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final bytes = ref.watch(emoteBytesProvider(hash)).valueOrNull;
+    // Empty = Rust refused the image: never pulled again, never decoded.
+    final refused = bytes != null && bytes.isEmpty;
 
     if (bytes == null) {
       final scope = EmoteScope.of(context);
@@ -256,14 +262,18 @@ class ChatAssetImage extends ConsumerWidget {
           ),
           child: Center(
             child: Icon(
-              kind == 'g' ? Icons.gif_box_outlined : Icons.image_outlined,
+              refused
+                  ? LucideIcons.imageOff
+                  : kind == 'g'
+                      ? Icons.gif_box_outlined
+                      : Icons.image_outlined,
               color: hollow.textTertiary,
               size: 20,
             ),
           ),
         );
 
-    final content = bytes == null
+    final content = bytes == null || refused
         ? placeholder()
         : ClipRRect(
             borderRadius: radius,
@@ -285,8 +295,12 @@ class ChatAssetImage extends ConsumerWidget {
     // The two states must READ differently for a screen reader and the probe
     // alike: one label for both says a placeholder is the picture.
     return Semantics(
-      image: bytes != null,
-      label: bytes == null ? '$_label loading' : _label,
+      image: bytes != null && !refused,
+      label: refused
+          ? "Can't show this $_label"
+          : bytes == null
+              ? '$_label loading'
+              : _label,
       child: box,
     );
   }

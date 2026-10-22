@@ -11,6 +11,12 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 Future<Uint8List> readAtRest({required String path}) =>
     RustLib.instance.api.crateApiAtRestReadAtRest(path: path);
 
+/// An image file's bytes for Flutter's decoder, only once they fully decode in pure
+/// Rust (AR-28): a peer's file can carry any bytes behind an image header, and the
+/// native codecs paint it with no tap. Errs with [`IMAGE_REFUSED`] otherwise.
+Future<Uint8List> readAtRestImage({required String path}) =>
+    RustLib.instance.api.crateApiAtRestReadAtRestImage(path: path);
+
 Future<Uint8List> readAtRestRange({
   required String path,
   required BigInt offset,

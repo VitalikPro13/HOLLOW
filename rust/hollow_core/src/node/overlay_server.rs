@@ -91,7 +91,8 @@ pub(crate) trait Backend: Send + Sync {
     fn local_master(&self) -> Option<String>;
 }
 
-/// Reads through the long-lived FFI store, never a fresh `MessageStore::open`.
+/// Reads through the long-lived FFI store, never a fresh `MessageStore::open`. Images
+/// pass the image gate first: the browser source decodes them natively (AR-28).
 struct DbBackend;
 
 fn with_store<T>(f: impl FnOnce(&crate::storage::MessageStore) -> Option<T>) -> Option<T> {
@@ -110,19 +111,19 @@ impl Backend for DbBackend {
         with_store(|ms| ms.load_profile_light(master).ok().flatten()).map(|p| p.avatar_anim)
     }
     fn still_avatar(&self, master: &str) -> Option<Vec<u8>> {
-        with_store(|ms| ms.load_avatar_for_display(master).ok().flatten())
+        super::image_gate::shown(with_store(|ms| ms.load_avatar_for_display(master).ok().flatten()))
     }
     fn blob_kind(&self, hash: &str) -> Option<String> {
         with_store(|ms| ms.asset_blob_kind(hash).ok().flatten())
     }
     fn blob(&self, hash: &str) -> Option<Vec<u8>> {
-        with_store(|ms| ms.load_emote_blob(hash).ok().flatten())
+        super::image_gate::shown(with_store(|ms| ms.load_emote_blob(hash).ok().flatten()))
     }
     fn holds_overlay_image(&self, hash: &str) -> bool {
         with_store(|ms| ms.has_overlay_blob(hash).ok()).unwrap_or(false)
     }
     fn overlay_image(&self, hash: &str) -> Option<Vec<u8>> {
-        with_store(|ms| ms.load_overlay_blob(hash).ok().flatten())
+        super::image_gate::shown(with_store(|ms| ms.load_overlay_blob(hash).ok().flatten()))
     }
     fn field_off(&self, master: &str) -> bool {
         let master = super::resolver::resolve(master);

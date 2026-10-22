@@ -1,7 +1,7 @@
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/attachment_image.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
@@ -306,10 +306,13 @@ class _SavedFileTile extends ConsumerWidget {
                   ? Stack(
                       fit: StackFit.expand,
                       children: [
-                        Image.file(
-                          File(entry.savedPath!),
+                        // Through Rust's image check, like every attachment: the
+                        // saved copy is the sender's bytes.
+                        AttachmentImage(
+                          path: entry.savedPath!,
                           fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) => _fileIconFallback(hollow),
+                          cacheWidth: 80,
+                          errorWidget: _fileIconFallback(hollow),
                         ),
                         if (entry.isVideo)
                           Container(

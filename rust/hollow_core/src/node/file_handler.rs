@@ -609,15 +609,45 @@ fn convert_image_for_send(
     let thumb = generate_file_thumb(&file_data);
     let converted = convert_image_data(file_data, original_ext, webp_quality, override_width, override_height)
         .map_err(|e| {
+            if e == UNSENDABLE_IMAGE {
+                return e;
+            }
             hollow_log!("[HOLLOW-FILE] metadata strip refused a photo: {e}");
             super::media_strip::REFUSED.to_string()
         })?;
     Ok((converted, thumb))
 }
 
+/// Why a photo was not sent: whatever we send must pass every receiver's image
+/// check (AR-28), or it would arrive as "Can't show this image".
+pub(crate) const UNSENDABLE_IMAGE: &str = "Hollow can't send this image because it is too large or damaged.";
+
+/// The last step for every photo: the exact bytes about to leave pass the check a
+/// receiver runs, else the send stops here with [`UNSENDABLE_IMAGE`].
+fn receivers_can_show(converted: ConvertedImage) -> Result<ConvertedImage, String> {
+    match super::image_check::check(&converted.0) {
+        Ok(_) => Ok(converted),
+        Err(why) => {
+            hollow_log!("[HOLLOW-FILE] not sending a photo receivers would refuse: it {why}");
+            Err(UNSENDABLE_IMAGE.to_string())
+        }
+    }
+}
+
 /// Every arm drops the photo's metadata: a re-encode leaves it behind, and
 /// the arms that send the original strip its container instead (C-FILES-03).
 fn convert_image_data(
+    file_data: Vec<u8>,
+    original_ext: &str,
+    webp_quality: image_convert::WebpQuality,
+    override_width: Option<u32>,
+    override_height: Option<u32>,
+) -> Result<ConvertedImage, String> {
+    convert_image_arms(file_data, original_ext, webp_quality, override_width, override_height)
+        .and_then(receivers_can_show)
+}
+
+fn convert_image_arms(
     file_data: Vec<u8>,
     original_ext: &str,
     webp_quality: image_convert::WebpQuality,
@@ -3663,6 +3693,40 @@ async fn register_pending_file_stream_and_reprocess(
 
 #[cfg(test)]
 mod tests {
+    /// AR-28 on the send side: a photo whose bytes a receiver would refuse never
+    /// leaves (every arm, including the ones that send the original).
+    #[test]
+    fn a_photo_receivers_would_refuse_is_not_sent() {
+        let img = image::RgbaImage::from_fn(64, 48, |x, y| image::Rgba([x as u8, y as u8, 7, 255]));
+        let params = super::super::webp_anim::AnimParams::plain(75.0);
+        let mut bad = super::super::webp_anim::encode_still(img.as_raw(), 64, 48, &params).unwrap();
+        let n = bad.len();
+        for b in &mut bad[40..n - 8] {
+            *b = 0xFF;
+        }
+        let q = super::image_convert::WebpQuality::Balanced;
+        assert_eq!(
+            super::convert_image_data(bad, "webp", q, None, None).err().as_deref(),
+            Some(super::UNSENDABLE_IMAGE)
+        );
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let (sent, ext, ..) = super::convert_image_data(png, "png", q, None, None).expect("a normal photo is sent");
+        assert_eq!(ext, "webp");
+        assert!(super::super::image_check::check(&sent).is_ok());
+    }
+
+    /// A panorama past WebP's 16383 px side is scaled to fit, not sent as the original.
+    #[test]
+    fn a_panorama_past_the_side_limit_is_scaled_to_fit() {
+        let img = image::RgbaImage::from_fn(17_000, 40, |x, y| image::Rgba([(x % 251) as u8, y as u8, 9, 255]));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let q = super::image_convert::WebpQuality::Balanced;
+        let (sent, _, w, h) = super::convert_image_data(png, "png", q, None, None).expect("scaled and sent");
+        assert!(w.unwrap() <= 16_383 && h.unwrap() >= 1, "{w:?}x{h:?}");
+        assert!(super::super::image_check::check(&sent).is_ok());
+    }
     use super::*;
 
     /// The gossip file relay is gone: any MLS member could arm it for any file id with a
@@ -4070,22 +4134,23 @@ mod tests {
         assert!(!lands(&card, "m2", "bob"), "another message");
     }
 
-    /// C-FILES-03: when the encoder cannot read a photo, the original goes out,
-    /// and it used to go out with its Exif GPS. Every arm now strips it, and a
-    /// photo nothing can clean is refused.
+    /// C-FILES-03: when the encoder cannot read a photo, the original used to go out
+    /// with its Exif GPS. Every arm now strips it, a photo nothing can clean is
+    /// refused, and since AR-28 one that receivers could not decode does not leave.
     #[test]
     fn a_photo_the_encoder_cannot_read_still_leaves_without_its_gps() {
         use super::super::media_strip::fixtures::{jpeg_with_gps, LOCATION};
         let mut jpeg = jpeg_with_gps(6);
-        // SOF3, lossless coding: valid markers the encoder refuses to decode.
+        // SOF3, lossless coding: valid markers the encoder refuses to decode, and so
+        // does every receiver's image check.
         let sof = jpeg.windows(4).position(|w| w == [0xFF, 0xC0, 0x00, 0x11]).expect("baseline frame header");
         jpeg[sof + 1] = 0xC3;
         assert!(image_convert::convert_to_webp_with_quality(&jpeg, image_convert::WebpQuality::Balanced).is_err());
-
-        let (out, ext, ..) = convert_image_data(jpeg, "jpg", image_convert::WebpQuality::Balanced, None, None)
-            .expect("the original is cleaned and sent");
-        assert_eq!(ext, "jpg");
-        assert!(!out.windows(LOCATION.len()).any(|w| w == LOCATION), "no GPS leaves with the original");
+        assert_eq!(
+            convert_image_data(jpeg, "jpg", image_convert::WebpQuality::Balanced, None, None).err().as_deref(),
+            Some(UNSENDABLE_IMAGE),
+            "nothing leaves, so no GPS leaves either"
+        );
 
         // Every GIF takes the animation encoder, so the last arm only ever meets
         // a `.gif` holding something else.

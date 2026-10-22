@@ -216,13 +216,17 @@ pub fn process_showcase_artwork(raw_bytes: Vec<u8>) -> Result<ShowcaseAsset, Str
 /// All showcase assets replicated for [peer_id]'s profile.
 #[frb]
 pub fn get_showcase_assets(peer_id: String) -> Result<Vec<ShowcaseAsset>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    let bundle = ms.load_showcase_assets(&peer_id)?;
+    let bundle = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.load_showcase_assets(&peer_id)?
+    };
+    // A refused image is left out, so its block shows the no-art placeholder (AR-28).
     Ok(match bundle {
         Some(bytes) => decode_asset_bundle(&bytes)
             .into_iter()
+            .filter(|(_, bytes)| crate::node::image_gate::judge_for_ffi(bytes) == crate::node::image_gate::Verdict::Pass)
             .map(|(hash, bytes)| ShowcaseAsset { hash, bytes })
             .collect(),
         None => vec![],

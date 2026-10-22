@@ -2071,6 +2071,10 @@ async fn run_event_loop(
                         );
                     }
 
+                    NodeCommand::ImagesRechecked { hashes } => {
+                        let _ = event_tx.send(NetworkEvent::EmoteAssetsReceived { hashes }).await;
+                    }
+
                     NodeCommand::SetChannelVisibility { server_id, channel_id, visibility } => {
                         let sid = server_id.clone();
                         let cid = channel_id.clone();
@@ -2251,13 +2255,13 @@ async fn run_event_loop(
                                     base64::engine::general_purpose::STANDARD.decode(&b64).ok()
                                 });
                             let banner_thumb = super::assets::public_banner_thumb(state, &db_path, &db_passphrase);
-                            let _ = event_tx.send(NetworkEvent::PublicChannelListReceived {
+                            super::image_gate::emit_guest_event(&event_tx, NetworkEvent::PublicChannelListReceived {
                                 server_id: server_id.clone(),
                                 server_name: state.name().to_string(),
                                 channels,
                                 server_avatar: local_avatar,
                                 server_banner_thumb: banner_thumb,
-                            }).await;
+                            });
                         } else {
                             hollow_log!("[HOLLOW-GUEST] Not a member, joining room as guest: {server_id}");
                             guest_rooms.enter(&server_id, &db_passphrase);
@@ -2354,9 +2358,9 @@ async fn run_event_loop(
                                         }
                                     }
                                     hollow_log!("[HOLLOW-GUEST] Serving {} messages from local DB for {channel_id}", ffi_messages.len());
-                                    let _ = event_tx.send(NetworkEvent::PublicChannelSyncReceived {
+                                    super::image_gate::emit_guest_event(&event_tx, NetworkEvent::PublicChannelSyncReceived {
                                         server_id, channel_id, messages: ffi_messages, has_more, sender_profiles: ffi_profiles,
-                                    }).await;
+                                    });
                                 }
                             }
                         } else {
@@ -13661,9 +13665,9 @@ async fn handle_incoming_request_inner(
             } else {
                 base64::engine::general_purpose::STANDARD.decode(&server_banner_thumb_b64).ok()
             };
-            let _ = event_tx.send(NetworkEvent::PublicChannelListReceived {
+            super::image_gate::emit_guest_event(event_tx, NetworkEvent::PublicChannelListReceived {
                 server_id, server_name, channels: entries, server_avatar, server_banner_thumb,
-            }).await;
+            });
         }
 
         HavenMessage::PublicChannelSyncResponse { server_id, channel_id, messages, has_more, sender_cards } => {
@@ -13738,9 +13742,9 @@ async fn handle_incoming_request_inner(
                 let (name, avatar) = super::profile_card::guest_sender(&pid, given)?;
                 Some(SyncSenderProfileFfi { peer_id: pid, name: Some(name), avatar })
             }).collect();
-            let _ = event_tx.send(NetworkEvent::PublicChannelSyncReceived {
+            super::image_gate::emit_guest_event(event_tx, NetworkEvent::PublicChannelSyncReceived {
                 server_id, channel_id, messages: ffi_messages, has_more, sender_profiles: ffi_profiles,
-            }).await;
+            });
         }
 
         HavenMessage::PublicChannelConfigChanged { server_id, channel_id, is_public, channel_name, category } => {

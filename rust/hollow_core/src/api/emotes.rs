@@ -80,14 +80,12 @@ pub fn process_and_store_emote(raw_bytes: Vec<u8>) -> Result<ProcessedEmote, Str
     Ok(ProcessedEmote { hash, animated })
 }
 
-/// Cached emote bytes for a hash (None = not cached yet; caller should
-/// trigger [request_emotes] and re-read on `EmoteAssetsReceived`).
+/// Cached rail bytes for a hash: None = not cached yet (trigger [request_emotes] and
+/// re-read on `EmoteAssetsReceived`); empty = refused by the image check, so show the
+/// fallback and never pull it.
 #[frb]
 pub fn get_emote_bytes(hash: String) -> Result<Option<Vec<u8>>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.load_emote_blob(&hash)
+    crate::node::image_gate::rail_blob_shown(&hash)
 }
 
 /// Pull emote bytes we don't have from the network: `server_id` asks one
