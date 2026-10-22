@@ -1151,7 +1151,7 @@ pub(crate) fn send_public_channel_msg(
 
 /// A channel post's wire bytes for the offline 0x09 copies, with the MLS save they
 /// wait on (none for a public channel's plaintext).
-type OfflineCopy = (Vec<u8>, Option<crate::crypto::SessionSaved>);
+type OfflineCopy = (Vec<u8>, Option<crate::crypto::MlsSaved>);
 
 /// Broadcast one non-public channel envelope to the server. MLS path: encrypt once
 /// into a single WS topic broadcast; restricted channels encrypt under their own
@@ -3422,7 +3422,7 @@ mod tests {
         state.members.insert("away".into(), crate::crdt::server_state::MemberInfo { peer_id: "away".into(), display_name: "away".into() });
         let peers = HashMap::new();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mls_copy = Some((b"mls".to_vec(), Some(crate::crypto::SessionSaved::failed())));
+        let mls_copy = Some((b"mls".to_vec(), Some(crate::crypto::MlsSaved::failed(1))));
         queue_offline_channel_push(&olm, &tx, &peers, &state, "me", "srv", &cid, None, false, &[], &mls_copy);
         let cmd = rx.try_recv().expect("a copy for the offline member");
         assert!(

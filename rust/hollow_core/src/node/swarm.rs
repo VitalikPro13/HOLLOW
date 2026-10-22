@@ -1593,11 +1593,10 @@ async fn run_event_loop(
                     )
                     .deliver(&device, room.as_deref(), &json, no_session, ticket);
                     let _ = done.send(frames);
-                } else if matches!(carry, super::ws_client::WsCommand::MlsSaveAgain) {
+                } else if let super::ws_client::WsCommand::MlsSaveAgain { after } = carry {
                     let again = mls.as_ref().map(|mgr| {
-                        crypto_store.want_mls_resync();
-                        let saved = super::crypto_handler::persist_mls_state_awaited(mgr, &crypto_store);
-                        super::ws_client::WsCommand::AfterMlsSave { saved, frame: Box::new(super::ws_client::WsCommand::MlsSaveAgain) }
+                        let saved = super::crypto_handler::mls_save_again(mgr, &crypto_store, after);
+                        super::ws_client::WsCommand::AfterMlsSave { saved, frame: Box::new(super::ws_client::WsCommand::MlsSaveAgain { after }) }
                     });
                     let _ = done.send(again.into_iter().collect());
                 }

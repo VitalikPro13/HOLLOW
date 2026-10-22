@@ -1494,15 +1494,25 @@ pub(crate) fn persist_mls_state(mls: &MlsManager, crypto_store: &crate::crypto::
 /// [`persist_mls_state`], and hear when the save is on disk: a frame encrypted from
 /// this state leaves only then (AR-30), so a crash never sends from a ratchet step a
 /// frame on the wire already used.
-pub(crate) fn persist_mls_state_awaited(mls: &MlsManager, crypto_store: &crate::crypto::CryptoStore) -> crate::crypto::SessionSaved {
+pub(crate) fn persist_mls_state_awaited(mls: &MlsManager, crypto_store: &crate::crypto::CryptoStore) -> crate::crypto::MlsSaved {
     let save = if crypto_store.take_mls_resync() { mls.take_whole_save() } else { mls.take_save() };
     match save {
         Ok(save) => crypto_store.save_mls(save),
         Err(e) => {
             hollow_log!("[HOLLOW-MLS] Failed to build the MLS save: {e}");
-            crate::crypto::SessionSaved::failed()
+            crate::crypto::MlsSaved::failed(mls.taken())
         }
     }
+}
+
+/// The save the sealing stage waits on after save number `after` did not land: a whole
+/// save taken since that has not failed, else a new one, so a burst of frames behind
+/// one failure costs one whole save.
+pub(crate) fn mls_save_again(mls: &MlsManager, crypto_store: &crate::crypto::CryptoStore, after: u64) -> crate::crypto::MlsSaved {
+    crypto_store.whole_save_after(after).unwrap_or_else(|| {
+        crypto_store.want_mls_resync();
+        persist_mls_state_awaited(mls, crypto_store)
+    })
 }
 
 /// Mint a KeyPackage AND persist the MLS state that holds its private half.
@@ -2653,7 +2663,7 @@ pub(crate) fn send_mls_broadcast_topic(
     envelope: &MessageEnvelope,
     crypto_store: &CryptoStore,
     seats: Option<&crate::crdt::server_state::ServerState>,
-) -> Result<(Vec<u8>, crate::crypto::SessionSaved), String> {
+) -> Result<(Vec<u8>, crate::crypto::MlsSaved), String> {
     let group_key = if use_subgroup {
         crate::crypto::subgroup_id(server_id, channel)
     } else {

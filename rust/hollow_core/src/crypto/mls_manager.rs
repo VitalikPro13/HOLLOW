@@ -483,6 +483,10 @@ pub(crate) struct MembershipCommit {
     pub removed: Vec<String>,
 }
 
+/// Saves taken in this process, by any manager: a save's number orders it after every
+/// frame encrypted before it, even across a manager replaced mid-run.
+static TAKES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Wraps OpenMLS for Hollow's channel group encryption: one MLS group per server,
 /// while DMs stay on Olm.
 pub(crate) struct MlsManager {
@@ -753,8 +757,15 @@ impl MlsManager {
         self.take(true).inspect_err(|_| self.whole_save_due.store(true, std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// The number of the newest save taken, whether or not it could be built.
+    pub fn taken(&self) -> u64 {
+        TAKES.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn take(&self, whole: bool) -> Result<MlsSave, String> {
+        let take = TAKES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let mut save = MlsSave {
+            take,
             signer: self.signer_bytes()?,
             credential: self.credential_bytes()?,
             drop_blob: whole,

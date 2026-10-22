@@ -41,6 +41,8 @@ pub(crate) type PastRows = HashMap<(String, u64), Rows>;
 /// One save of the MLS store, written by the CryptoStore in one transaction.
 #[derive(Debug, Default)]
 pub(crate) struct MlsSave {
+    /// [`super::MlsManager::taken`] for this save: it holds every change made before it.
+    pub take: u64,
     pub signer: Vec<u8>,
     pub credential: Vec<u8>,
     /// Scopes emptied before `rows` are written: a whole-store save, a dropped past epoch.

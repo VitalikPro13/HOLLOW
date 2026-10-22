@@ -137,10 +137,11 @@ pub enum WsCommand {
     AfterSave { saved: crate::crypto::SessionSaved, frame: Box<WsCommand>, device: String, plaintext: String },
     /// An MLS `frame` that may leave only once the save of the group state that
     /// encrypted it is on disk; dropped when the save does not land (`olm_lane::released`).
-    AfterMlsSave { saved: crate::crypto::SessionSaved, frame: Box<WsCommand> },
-    /// The sealing stage asks the node for a whole MLS save: an `AfterMlsSave` frame's
-    /// own save did not land, and any later save covers it. Never reaches the relay.
-    MlsSaveAgain,
+    AfterMlsSave { saved: crate::crypto::MlsSaved, frame: Box<WsCommand> },
+    /// The sealing stage asks the node for a whole MLS save taken after save number
+    /// `after`, which an `AfterMlsSave` frame waited on and which did not land; any
+    /// later save covers the frame. Never reaches the relay.
+    MlsSaveAgain { after: u64 },
     /// Subscribe to specific channel topics in a room (reduces fan-out).
     Subscribe { room_code: String, topics: Vec<String> },
     /// Broadcast to peers subscribed to a specific topic in a room.
@@ -2133,7 +2134,7 @@ fn command_frame(cmd: &WsCommand) -> Option<Frame> {
         | WsCommand::Carry { .. }
         | WsCommand::AfterSave { .. }
         | WsCommand::AfterMlsSave { .. }
-        | WsCommand::MlsSaveAgain => None,
+        | WsCommand::MlsSaveAgain { .. } => None,
     }
 }
 

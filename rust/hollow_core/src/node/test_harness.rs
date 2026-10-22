@@ -229,7 +229,7 @@ fn cmd_kind(cmd: &WsCommand) -> &'static str {
         WsCommand::Carry { .. } => "carry",
         WsCommand::AfterSave { .. } => "after_save",
         WsCommand::AfterMlsSave { .. } => "after_mls_save",
-        WsCommand::MlsSaveAgain => "mls_save_again",
+        WsCommand::MlsSaveAgain { .. } => "mls_save_again",
         WsCommand::Subscribe { .. } => "subscribe",
         WsCommand::SendToRoomTopic { .. } => "send_topic",
         WsCommand::CheckPeers { .. } => "check_peers",

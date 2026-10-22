@@ -31,53 +31,87 @@ pub(crate) const SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs
 /// Saves asked of the node for one MLS frame before the frame is given up.
 const MLS_SAVE_TRIES: usize = 3;
 
-/// The last MLS save the sealing stage waited on and whether it landed: the copies of
-/// one ciphertext (the room frame, its offline pushes) wait on it once.
-#[derive(Default)]
+/// How long one MLS frame waits for its group state to land, every save and ask
+/// together: a disk that never answers holds the sealing stage no longer than this.
+const MLS_SAVE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What the sealing stage knows of the MLS saves, so the copies of one ciphertext (the
+/// room frame, its offline pushes) and every frame a landed save covers wait once.
 pub(crate) struct MlsReleases {
-    last: Option<(crate::crypto::SessionSaved, bool)>,
+    /// The newest take a landed save holds: the state of every frame encrypted before
+    /// it is on disk, as group state only ever moves forward.
+    landed: u64,
+    /// The take of the last frame given up, so its copies follow it at once.
+    given_up: Option<u64>,
+    patience: std::time::Duration,
 }
 
-/// Whether `saved`, or a later save the node makes for it, lands on disk. A later save
-/// covers the frame: the group state it holds only ever moves forward.
-async fn mls_save_lands(mut saved: crate::crypto::SessionSaved, node: &super::frame_auth::CarryTx) -> bool {
-    for _ in 0..MLS_SAVE_TRIES {
-        let outcome = saved.clone().settled(SAVE_WAIT).await;
-        if outcome == crate::crypto::Saved::Stored {
-            return true;
-        }
-        hollow_log!("[HOLLOW-MLS] The save an MLS frame waits on did not land ({outcome:?}); asking for another");
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        if node.send((WsCommand::MlsSaveAgain, done_tx)).is_err() {
-            return false;
-        }
-        match tokio::time::timeout(SAVE_WAIT, done_rx).await {
-            Ok(Ok(answer)) => match answer.into_iter().next() {
-                Some(WsCommand::AfterMlsSave { saved: again, .. }) => saved = again,
-                _ => return false,
-            },
-            _ => return false,
-        }
+impl Default for MlsReleases {
+    fn default() -> Self {
+        Self { landed: 0, given_up: None, patience: MLS_SAVE_PATIENCE }
     }
-    false
+}
+
+/// The take of a landed save that holds `saved`'s frame: `saved` itself, or a whole
+/// save the node makes after it failed. A save still pending is waited on, never
+/// replaced.
+async fn mls_save_lands(mut saved: crate::crypto::MlsSaved, node: &super::frame_auth::CarryTx, patience: std::time::Duration) -> Option<u64> {
+    let deadline = Instant::now() + patience;
+    let mut asks = 0;
+    loop {
+        match saved.settled(deadline.saturating_duration_since(Instant::now())).await {
+            crate::crypto::Saved::Stored => return Some(saved.take()),
+            crate::crypto::Saved::Pending => {
+                hollow_log!("[HOLLOW-MLS] The save an MLS frame waits on is still not on disk after {patience:?}");
+                return None;
+            }
+            outcome => hollow_log!("[HOLLOW-MLS] The save an MLS frame waits on did not land ({outcome:?}); asking for a whole one"),
+        }
+        let after = saved.take();
+        saved = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if asks == MLS_SAVE_TRIES || left.is_zero() {
+                return None;
+            }
+            asks += 1;
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            if node.send((WsCommand::MlsSaveAgain { after }, done_tx)).is_err() {
+                return None;
+            }
+            match tokio::time::timeout(SAVE_WAIT.min(left), done_rx).await {
+                Ok(Ok(answer)) => match answer.into_iter().next() {
+                    Some(WsCommand::AfterMlsSave { saved: again, .. }) => break again,
+                    _ => return None,
+                },
+                Ok(Err(_)) => return None,
+                // A late answer costs one try; its save, if made, is what the next ask gets.
+                Err(_) => hollow_log!("[HOLLOW-MLS] The node did not answer an MLS save ask in time"),
+            }
+        };
+    }
 }
 
 /// What the sealing stage sends for `cmd`: a [`WsCommand::AfterSave`] frame once its
 /// session save is on disk, nothing when the save failed, was refused or did not land
 /// within [`SAVE_WAIT`], in which case its plaintext goes back to the node through
 /// `node`, to wait in the resend queue. A [`WsCommand::AfterMlsSave`] frame goes once
-/// its save, or a later one the node makes for it, landed; it is lost only when
-/// [`MLS_SAVE_TRIES`] saves in a row did not (the disk refuses), and then the
-/// channel's sync serves its message. Anything else passes unchanged.
+/// its save, or a later one, landed; it is lost only when [`MLS_SAVE_TRIES`] whole
+/// saves asked after it did not land either, or nothing landed within
+/// [`MLS_SAVE_PATIENCE`], and then the channel's sync serves its message. Anything else
+/// passes unchanged.
 pub(crate) async fn released(cmd: WsCommand, node: &super::frame_auth::CarryTx, mls: &mut MlsReleases) -> Option<WsCommand> {
     if let WsCommand::AfterMlsSave { saved, frame } = cmd {
-        let landed = match &mls.last {
-            Some((last, landed)) if last.same(&saved) => *landed,
-            _ => {
-                let landed = mls_save_lands(saved.clone(), node).await;
-                mls.last = Some((saved, landed));
-                landed
-            }
+        let take = saved.take();
+        let landed = if take <= mls.landed {
+            true
+        } else if mls.given_up == Some(take) {
+            false
+        } else if let Some(landed) = mls_save_lands(saved, node, mls.patience).await {
+            mls.landed = mls.landed.max(landed);
+            true
+        } else {
+            mls.given_up = Some(take);
+            false
         };
         if !landed {
             hollow_log!("[HOLLOW-SECURITY] Kept back an MLS frame: no save of its group state landed");
@@ -471,22 +505,23 @@ mod tests {
         crate::node::resolver::clear_for_test();
     }
 
-    fn after_mls_save(saved: crate::crypto::SessionSaved) -> WsCommand {
+    fn after_mls_save(saved: crate::crypto::MlsSaved) -> WsCommand {
         WsCommand::AfterMlsSave { saved, frame: Box::new(WsCommand::SendToRoom { room_code: "r".into(), data: b"mls".to_vec() }) }
     }
 
-    /// The node side of an MLS save ask: answers each with `outcome`, counts the asks.
-    fn answer_save_asks(
+    /// The node side of an MLS save ask: answers each with `outcome` of the ask's
+    /// `after`, counts the asks.
+    pub(super) fn answer_save_asks(
         mut asks: tokio::sync::mpsc::UnboundedReceiver<super::super::frame_auth::CarryRequest>,
-        outcome: fn() -> crate::crypto::SessionSaved,
+        outcome: impl Fn(u64) -> crate::crypto::MlsSaved + Send + 'static,
     ) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
         let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = count.clone();
         tokio::spawn(async move {
             while let Some((ask, done)) = asks.recv().await {
-                assert!(matches!(ask, WsCommand::MlsSaveAgain), "{ask:?}");
+                let WsCommand::MlsSaveAgain { after } = ask else { panic!("{ask:?}") };
                 seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = done.send(vec![after_mls_save(outcome())]);
+                let _ = done.send(vec![after_mls_save(outcome(after))]);
             }
         });
         count
@@ -498,9 +533,9 @@ mod tests {
     #[tokio::test]
     async fn an_mls_frame_goes_once_a_save_lands_and_its_copies_follow() {
         let (node, asks) = tokio::sync::mpsc::unbounded_channel();
-        let count = answer_save_asks(asks, crate::crypto::SessionSaved::stored_for_test);
+        let count = answer_save_asks(asks, |after| crate::crypto::MlsSaved::stored_for_test(after + 1));
         let mut memo = MlsReleases::default();
-        let failed = crate::crypto::SessionSaved::failed();
+        let failed = crate::crypto::MlsSaved::failed(1);
         let sent = released(after_mls_save(failed.clone()), &node, &mut memo).await;
         assert!(matches!(sent, Some(WsCommand::SendToRoom { .. })), "a frame whose first save failed was dropped: {sent:?}");
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -513,14 +548,14 @@ mod tests {
     #[tokio::test]
     async fn an_mls_frame_no_save_covers_stays_back_with_its_copies() {
         let (node, asks) = tokio::sync::mpsc::unbounded_channel();
-        let count = answer_save_asks(asks, crate::crypto::SessionSaved::failed);
+        let count = answer_save_asks(asks, |after| crate::crypto::MlsSaved::failed(after + 1));
         let mut memo = MlsReleases::default();
-        let failed = crate::crypto::SessionSaved::failed();
+        let failed = crate::crypto::MlsSaved::failed(1);
         assert!(released(after_mls_save(failed.clone()), &node, &mut memo).await.is_none());
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), MLS_SAVE_TRIES);
         assert!(released(after_mls_save(failed), &node, &mut memo).await.is_none(), "a copy left without its save");
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), MLS_SAVE_TRIES);
-        let fresh = released(after_mls_save(crate::crypto::SessionSaved::stored_for_test()), &node, &mut memo).await;
+        let fresh = released(after_mls_save(crate::crypto::MlsSaved::stored_for_test(10)), &node, &mut memo).await;
         assert!(fresh.is_some(), "a later frame with its own landed save stayed back");
     }
 
@@ -630,5 +665,304 @@ mod tests {
             "crypto_handler.rs: data: serde_json::to_vec(&encrypted_frame(olm, message_type, ciphertext)).unwrap_or_default(),",
         ];
         assert_eq!(uses, expected, "an Olm frame built outside crypto_handler::olm_frame");
+    }
+}
+
+/// The sealer's MLS save retries: one failure, one whole save.
+#[cfg(test)]
+mod g13_mls_save_retry {
+    use super::*;
+    use crate::crypto::{MlsSaved, Saved};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    const SOON: std::time::Duration = std::time::Duration::from_secs(10);
+
+    struct Disk {
+        _tmp: crate::test_tmp::TestDir,
+        path: String,
+        pass: String,
+    }
+
+    impl Disk {
+        fn new() -> Self {
+            let tmp = crate::test_tmp::tempdir().unwrap();
+            let path = tmp.path().join("m.db").to_string_lossy().into_owned();
+            let pass = "ab".repeat(32);
+            crate::storage::MessageStore::open(&path, &pass).unwrap();
+            Disk { _tmp: tmp, path, pass }
+        }
+
+        fn sql(&self, sql: &str) {
+            crate::storage::MessageStore::open(&self.path, &self.pass).unwrap().conn_execute_for_test(sql);
+        }
+
+        /// Every MLS save from now on fails at the disk.
+        fn refuse_mls(&self) {
+            self.sql("CREATE TRIGGER mls_down BEFORE INSERT ON mls_identity BEGIN SELECT RAISE(ABORT, 'down'); END;");
+        }
+
+        fn accept_mls(&self) {
+            self.sql("DROP TRIGGER IF EXISTS mls_down;");
+        }
+
+        /// The MLS rows a restart would load.
+        fn stored_state(&self) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+            let mut rows = crate::storage::MessageStore::open(&self.path, &self.pass).unwrap().load_mls_rows().unwrap();
+            rows.sort();
+            rows
+        }
+
+        /// Accepts MLS saves again when called, from anywhere.
+        fn healer(&self) -> impl Fn() + Send + 'static {
+            let (path, pass) = (self.path.clone(), self.pass.clone());
+            move || crate::storage::MessageStore::open(&path, &pass).unwrap().conn_execute_for_test("DROP TRIGGER IF EXISTS mls_down;")
+        }
+    }
+
+    /// Every row of the live group state, as a whole save would write it.
+    fn live_state(mls: &Shared) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+        let save = mls.lock().unwrap().take_whole_save().unwrap();
+        let mut rows: Vec<_> = save.rows.into_iter().filter_map(|(scope, k, v)| Some((scope, k, v?))).collect();
+        rows.sort();
+        rows
+    }
+
+    type Shared = Arc<Mutex<crate::crypto::MlsManager>>;
+
+    /// The node's half of a save ask, as swarm.rs answers it; counts the asks. `before`
+    /// runs ahead of each answer with the ask's number, from 1.
+    fn node_answers(
+        mut asks: tokio::sync::mpsc::UnboundedReceiver<super::super::frame_auth::CarryRequest>,
+        mls: Shared,
+        store: Arc<CryptoStore>,
+        before: impl Fn(usize) + Send + 'static,
+    ) -> Arc<AtomicUsize> {
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = count.clone();
+        tokio::spawn(async move {
+            while let Some((ask, done)) = asks.recv().await {
+                let WsCommand::MlsSaveAgain { after } = ask else { panic!("{ask:?}") };
+                before(seen.fetch_add(1, Ordering::SeqCst) + 1);
+                let saved = super::super::crypto_handler::mls_save_again(&mls.lock().unwrap(), &store, after);
+                let _ = done.send(vec![WsCommand::AfterMlsSave { saved, frame: Box::new(WsCommand::MlsSaveAgain { after }) }]);
+            }
+        });
+        count
+    }
+
+    fn frame(saved: MlsSaved, i: usize) -> WsCommand {
+        WsCommand::AfterMlsSave { saved, frame: Box::new(WsCommand::SendToRoom { room_code: "srv".into(), data: vec![i as u8] }) }
+    }
+
+    /// An encrypt and the save the frame it made waits on.
+    fn encrypt(mls: &Shared, store: &CryptoStore) -> MlsSaved {
+        let mut mgr = mls.lock().unwrap();
+        mgr.encrypt("srv", b"post").unwrap();
+        super::super::crypto_handler::persist_mls_state_awaited(&mgr, store)
+    }
+
+    async fn setup() -> (Disk, Shared, Arc<CryptoStore>) {
+        let disk = Disk::new();
+        let store = Arc::new(CryptoStore::open(disk.path.clone(), disk.pass.clone()).unwrap());
+        let (mut mls, _) = crate::crypto::mls_manager_test_keys::bound(1, 2);
+        mls.create_group("srv").unwrap();
+        let mls = Arc::new(Mutex::new(mls));
+        assert_eq!(super::super::crypto_handler::persist_mls_state_awaited(&mls.lock().unwrap(), &store).settled(SOON).await, Saved::Stored);
+        (disk, mls, store)
+    }
+
+    /// Five frames whose saves all failed at the disk.
+    async fn failed_burst(disk: &Disk, mls: &Shared, store: &CryptoStore) -> Vec<MlsSaved> {
+        disk.refuse_mls();
+        let saves: Vec<_> = (0..5).map(|_| encrypt(mls, store)).collect();
+        for saved in &saves {
+            assert_eq!(saved.settled(SOON).await, Saved::Failed);
+        }
+        saves
+    }
+
+    fn sent(out: &Option<WsCommand>, i: usize) -> bool {
+        matches!(out, Some(WsCommand::SendToRoom { data, .. }) if data == &[i as u8])
+    }
+
+    /// A burst of frames after one failed save costs one whole save, every frame goes
+    /// in order, and what went is what a restart loads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_burst_after_one_failed_save_asks_for_one_whole_save() {
+        let (disk, mls, store) = setup().await;
+        let saves = failed_burst(&disk, &mls, &store).await;
+        disk.accept_mls();
+        let wholes = store.whole_saves_for_test();
+        let live = live_state(&mls);
+        let (node, asks) = tokio::sync::mpsc::unbounded_channel();
+        let count = node_answers(asks, mls.clone(), store.clone(), |_| {});
+        let mut memo = MlsReleases::default();
+        for (i, saved) in saves.into_iter().enumerate() {
+            let out = released(frame(saved, i), &node, &mut memo).await;
+            assert!(sent(&out, i), "frame {i}: {out:?}");
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 1, "a burst behind one failed save asked for a whole save per frame");
+        assert_eq!(store.whole_saves_for_test() - wholes, 1);
+        assert_eq!(disk.stored_state(), live, "a frame went before the state that encrypted it was on disk");
+    }
+
+    /// Each further failure costs one more whole save, never one per frame.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_whole_save_costs_one_more() {
+        let (disk, mls, store) = setup().await;
+        let saves = failed_burst(&disk, &mls, &store).await;
+        let wholes = store.whole_saves_for_test();
+        let live = live_state(&mls);
+        let (node, asks) = tokio::sync::mpsc::unbounded_channel();
+        let heal = disk.healer();
+        let count = node_answers(asks, mls.clone(), store.clone(), move |n| if n == 2 { heal() });
+        let mut memo = MlsReleases::default();
+        for (i, saved) in saves.into_iter().enumerate() {
+            let out = released(frame(saved, i), &node, &mut memo).await;
+            assert!(sent(&out, i), "frame {i}: {out:?}");
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert_eq!(store.whole_saves_for_test() - wholes, 2, "one whole save per failure");
+        assert_eq!(disk.stored_state(), live);
+    }
+
+    /// A whole save the node already queued after the failure is the one waited on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_whole_save_queued_since_the_failure_is_reused() {
+        let (disk, mls, store) = setup().await;
+        let saves = failed_burst(&disk, &mls, &store).await;
+        disk.accept_mls();
+        // The next encrypt after a failure takes a whole save on its own.
+        let wholes = store.whole_saves_for_test();
+        let later = encrypt(&mls, &store);
+        assert_eq!(store.whole_saves_for_test() - wholes, 1);
+        let (node, asks) = tokio::sync::mpsc::unbounded_channel();
+        let count = node_answers(asks, mls.clone(), store.clone(), |_| {});
+        let mut memo = MlsReleases::default();
+        for (i, saved) in saves.into_iter().chain([later]).enumerate() {
+            let out = released(frame(saved, i), &node, &mut memo).await;
+            assert!(sent(&out, i), "frame {i}: {out:?}");
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(store.whole_saves_for_test() - wholes, 1, "a second whole save was taken behind the first");
+    }
+
+    /// A disk that keeps failing gives a frame up after its tries, and its copies with it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_disk_that_keeps_failing_gives_the_frame_up() {
+        let (disk, mls, store) = setup().await;
+        let mut saves = failed_burst(&disk, &mls, &store).await;
+        let wholes = store.whole_saves_for_test();
+        let (node, asks) = tokio::sync::mpsc::unbounded_channel();
+        let count = node_answers(asks, mls.clone(), store.clone(), |_| {});
+        let mut memo = MlsReleases::default();
+        let first = saves.remove(0);
+        assert!(released(frame(first.clone(), 0), &node, &mut memo).await.is_none(), "a frame went with no save of it on disk");
+        assert_eq!(count.load(Ordering::SeqCst), MLS_SAVE_TRIES);
+        assert_eq!(store.whole_saves_for_test() - wholes, MLS_SAVE_TRIES);
+        assert!(released(frame(first, 0), &node, &mut memo).await.is_none(), "a copy went without its save");
+        assert_eq!(count.load(Ordering::SeqCst), MLS_SAVE_TRIES, "a copy asked again");
+        // The next frame tries again on its own, and never waits on a whole save that failed.
+        assert!(released(frame(saves.remove(0), 1), &node, &mut memo).await.is_none());
+        assert_eq!(store.whole_saves_for_test() - wholes, 2 * MLS_SAVE_TRIES, "a failed whole save was waited on again");
+    }
+
+    /// A save that is only slow is waited on, never answered with a whole save.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_save_is_waited_on_without_asking_again() {
+        let (disk, mls, store) = setup().await;
+        crate::crypto::held_saves::hold_mls(&disk.path);
+        let saved = encrypt(&mls, &store);
+        let (node, asks) = tokio::sync::mpsc::unbounded_channel();
+        let count = node_answers(asks, mls.clone(), store.clone(), |_| {});
+        let sealer = tokio::spawn(async move { released(frame(saved, 0), &node, &mut MlsReleases::default()).await });
+        tokio::time::sleep(SAVE_WAIT + std::time::Duration::from_secs(1)).await;
+        assert!(!sealer.is_finished(), "a frame went before its save landed");
+        assert_eq!(count.load(Ordering::SeqCst), 0, "a slow save was answered with a whole save");
+        crate::crypto::held_saves::release(&disk.path, &disk.pass);
+        assert!(sealer.await.unwrap().is_some(), "the frame stayed back once its save landed");
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    /// A disk that never answers holds the sealer only for its patience.
+    #[tokio::test]
+    async fn a_save_that_never_settles_holds_the_sealer_for_its_patience() {
+        let (node, asks) = tokio::sync::mpsc::unbounded_channel();
+        let count = super::tests::answer_save_asks(asks, |after| MlsSaved::stored_for_test(after + 1));
+        let (_hung, saved) = MlsSaved::pending_for_test(1);
+        let mut memo = MlsReleases { patience: std::time::Duration::from_millis(300), ..Default::default() };
+        let out = tokio::time::timeout(SOON, released(frame(saved, 0), &node, &mut memo)).await.expect("the sealer stayed held");
+        assert!(out.is_none(), "a frame went with its save still pending");
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    /// A landed save covers only the frames encrypted before it was taken.
+    #[tokio::test]
+    async fn a_landed_save_covers_only_frames_taken_before_it() {
+        let (node, asks) = tokio::sync::mpsc::unbounded_channel();
+        let count = super::tests::answer_save_asks(asks, |after| if after < 5 { MlsSaved::stored_for_test(5) } else { MlsSaved::failed(after + 1) });
+        let mut memo = MlsReleases::default();
+        assert!(sent(&released(frame(MlsSaved::failed(1), 1), &node, &mut memo).await, 1));
+        assert!(sent(&released(frame(MlsSaved::failed(3), 3), &node, &mut memo).await, 3), "a frame the landed save covers stayed back");
+        assert_eq!(count.load(Ordering::SeqCst), 1, "a covered frame asked again");
+        assert!(released(frame(MlsSaved::failed(7), 7), &node, &mut memo).await.is_none(), "a save taken before a frame released it");
+        assert_eq!(count.load(Ordering::SeqCst), 1 + MLS_SAVE_TRIES);
+    }
+
+    /// An ask the node answers late counts as one try; the next ask still saves the frame.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_late_answer_to_a_save_ask_costs_one_try() {
+        let (node, mut asks) = tokio::sync::mpsc::unbounded_channel::<super::super::frame_auth::CarryRequest>();
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = count.clone();
+        tokio::spawn(async move {
+            let mut late = Vec::new();
+            while let Some((_, done)) = asks.recv().await {
+                if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    late.push(done);
+                } else {
+                    let stored = MlsSaved::stored_for_test(2);
+                    let _ = done.send(vec![WsCommand::AfterMlsSave { saved: stored, frame: Box::new(WsCommand::MlsSaveAgain { after: 1 }) }]);
+                }
+            }
+        });
+        let out = released(frame(MlsSaved::failed(1), 0), &node, &mut MlsReleases::default()).await;
+        assert!(out.is_some(), "a late answer gave the frame up with tries left");
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    /// Wire order is program order: the offline copy and the Olm twin of an MLS frame,
+    /// and whatever follows, wait behind the frame's save and then go in order.
+    #[tokio::test]
+    async fn frames_behind_an_mls_save_keep_their_order() {
+        let keypair = NativeKeypair::from_secret_bytes(&[9; 32]);
+        let (relay, mut wire) = tokio::sync::mpsc::unbounded_channel();
+        let (sealer, _carry) = super::super::frame_auth::spawn_sealer(keypair, relay);
+        let (settle, saved) = MlsSaved::pending_for_test(1);
+        sealer.send(frame(saved.clone(), 0)).unwrap();
+        let copy = WsCommand::SendChannelDirect { room_code: "srv".into(), target_peer: "x".into(), channel_id: "c".into(), mention: false, data: vec![1] };
+        sealer.send(WsCommand::AfterMlsSave { saved, frame: Box::new(copy) }).unwrap();
+        sealer.send(WsCommand::AfterSave {
+            saved: crate::crypto::SessionSaved::stored_for_test(),
+            frame: Box::new(WsCommand::SendDirect { room_code: "dm".into(), target_peer: "x".into(), data: vec![2] }),
+            device: "x".into(),
+            plaintext: "twin".into(),
+        })
+        .unwrap();
+        sealer.send(WsCommand::SendToRoom { room_code: "srv".into(), data: vec![3] }).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(wire.try_recv().is_err(), "a frame overtook an MLS frame waiting on its save");
+        settle.send(Saved::Stored).unwrap();
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            order.push(match tokio::time::timeout(SOON, wire.recv()).await.unwrap().unwrap() {
+                WsCommand::SendToRoom { .. } => "room",
+                WsCommand::SendChannelDirect { .. } => "copy",
+                WsCommand::SendDirect { .. } => "twin",
+                other => panic!("{other:?}"),
+            });
+        }
+        assert_eq!(order, ["room", "copy", "twin", "room"]);
     }
 }
