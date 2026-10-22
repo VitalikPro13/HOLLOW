@@ -3371,6 +3371,10 @@ pub(crate) struct RosterDigests {
     pub own: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
+    /// Recent removals from the sender's own roster (F2), so a reply after the sender
+    /// went offline skips the removed device. Ignored whole over the bound.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rm: Vec<crate::identity::roster::Removal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

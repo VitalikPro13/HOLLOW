@@ -20245,6 +20245,7 @@ impl SseDecode for crate::api::verification::SecurityAlertFfi {
         let mut var_detail = <String>::sse_decode(deserializer);
         let mut var_createdAt = <i64>::sse_decode(deserializer);
         let mut var_acknowledgedAt = <Option<i64>>::sse_decode(deserializer);
+        let mut var_resolvedAt = <Option<i64>>::sse_decode(deserializer);
         return crate::api::verification::SecurityAlertFfi {
             alert_id: var_alertId,
             peer_id: var_peerId,
@@ -20252,6 +20253,7 @@ impl SseDecode for crate::api::verification::SecurityAlertFfi {
             detail: var_detail,
             created_at: var_createdAt,
             acknowledged_at: var_acknowledgedAt,
+            resolved_at: var_resolvedAt,
         };
     }
 }
@@ -25348,6 +25350,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::verification::SecurityAlertFf
             self.detail.into_into_dart().into_dart(),
             self.created_at.into_into_dart().into_dart(),
             self.acknowledged_at.into_into_dart().into_dart(),
+            self.resolved_at.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -29317,6 +29320,7 @@ impl SseEncode for crate::api::verification::SecurityAlertFfi {
         <String>::sse_encode(self.detail, serializer);
         <i64>::sse_encode(self.created_at, serializer);
         <Option<i64>>::sse_encode(self.acknowledged_at, serializer);
+        <Option<i64>>::sse_encode(self.resolved_at, serializer);
     }
 }
 

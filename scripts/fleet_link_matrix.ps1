@@ -381,7 +381,10 @@ function Show-Channel($peer) {
 
 # Welcome > Link a device on an EMPTY peer.
 function Open-EnterCode($peer) {
-    Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 120000 } | Out-Null
+    # The terms come first since 0.12.2 (Apple 1.2), as in fleet_device_link.ps1.
+    Step $peer @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 120000 } | Out-Null
+    Step $peer @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 } | Out-Null
+    Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 } | Out-Null
     Step $peer @{ op = 'tap'; target = 'text:Link a device'; index = 0 } | Out-Null
     Step $peer @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 180000 } | Out-Null
 }

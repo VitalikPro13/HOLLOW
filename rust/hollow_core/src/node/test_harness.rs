@@ -50236,6 +50236,15 @@ async fn ar29_remove_behind_fs_back(relay: &MockRelay, d1: &TestNode, s: &TestNo
     );
 }
 
+/// The digests `from` holds for a DM to `to`, as a 0.12.2 sender sends them: no removals.
+fn ar29_digests_0122(from: &TestNode, to: &TestNode) -> super::types::RosterDigests {
+    super::types::RosterDigests {
+        own: super::roster_book::load(&from.store(), &from.master_id).map(|r| r.digest()),
+        peer: super::roster_book::load(&from.store(), &to.master_id).map(|r| r.digest()),
+        rm: Vec::new(),
+    }
+}
+
 async fn ar29_dm(from: &TestNode, to_master: &str, mid: &str, text: &str) {
     from.cmd_tx
         .send(NodeCommand::SendMessage {
@@ -50367,7 +50376,7 @@ async fn b3_ar29_a_dm_without_digests_asks_nothing() {
     sleep_ms(1500).await;
     assert_eq!(ar29_asks(&f, &d1.device_id).await, before, "a DM without digests must ask nothing");
 
-    let differs = super::types::RosterDigests { own: Some("ab".repeat(16)), peer: None };
+    let differs = super::types::RosterDigests { own: Some("ab".repeat(16)), peer: None, rm: Vec::new() };
     olm_envelope_as(&d1, &f, ar29_signed_dm(&d1, &f.master_id, "ar29-c-2", "with a digest", Some(differs))).await;
     assert!(ar29_got(&mut f, "with a digest", 20).await, "F takes the DM");
     assert!(
@@ -50547,7 +50556,7 @@ async fn b3_ar29_roster_asks_are_rate_bounded() {
     assert_eq!(ar29_asks(&f, &s.device_id).await, to_s + 1, "and S once");
 
     // A mismatch has a gate of its own: one ask, then it waits out its gap.
-    let differs = || Some(super::types::RosterDigests { own: Some("cd".repeat(16)), peer: None });
+    let differs = || Some(super::types::RosterDigests { own: Some("cd".repeat(16)), peer: None, rm: Vec::new() });
     relay.release_direct(&d1.device_id, &f.device_id);
     for i in 0..3 {
         let text = format!("mismatch {i}");
@@ -50655,7 +50664,7 @@ async fn b3_review_a_removed_device_cannot_keep_a_stale_contacts_clock_fresh() {
     f.store().set_roster_confirmed_for_test(&o_master, Some(super::roster_book::now_ms() - 40 * DAY_MS));
 
     carry_as(&s, &f, super::types::HavenMessage::RosterSync { roster: stale.clone(), reply: false, waiting: false }).await;
-    let rd = super::types::RosterDigests { own: Some(stale.digest()), peer: None };
+    let rd = super::types::RosterDigests { own: Some(stale.digest()), peer: None, rm: Vec::new() };
     olm_envelope_as(&s, &f, ar29_signed_dm(&s, &f.master_id, "b3r-1", "from the removed device", Some(rd))).await;
     assert!(ar29_got(&mut f, "from the removed device", 20).await, "precondition: F still takes S's DM");
 
@@ -50824,7 +50833,7 @@ async fn b3_fix_a_mismatch_ask_to_one_device_leaves_the_expiry_ask_to_another() 
     b3_age(&f, &o_master, 40);
     let (to_d1, to_s) = (ar29_asks(&f, &d1.device_id).await, ar29_asks(&f, &s.device_id).await);
 
-    let rd = super::types::RosterDigests { own: Some("ef".repeat(16)), peer: None };
+    let rd = super::types::RosterDigests { own: Some("ef".repeat(16)), peer: None, rm: Vec::new() };
     olm_envelope_as(&s, &f, ar29_signed_dm(&s, &f.master_id, "b3f-d-1", "a digest that differs", Some(rd))).await;
     assert!(ar29_got(&mut f, "a digest that differs", 20).await, "precondition: F takes S's DM");
     assert!(wait_until(10, async || ar29_asks(&f, &s.device_id).await > to_s).await, "precondition: F asks S");
@@ -50847,7 +50856,7 @@ async fn b3_fix_a_dm_read_before_asks_nothing() {
     let (d1, s, mut f) = ar29_cast(&relay, [211, 212, 213, 214]).await;
     let o_master = d1.master_id.clone();
     ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
-    let rd = |own: String| Some(super::types::RosterDigests { own: Some(own), peer: None });
+    let rd = |own: String| Some(super::types::RosterDigests { own: Some(own), peer: None, rm: Vec::new() });
 
     olm_envelope_as(&s, &f, ar29_signed_dm(&s, &f.master_id, "b3f-e-1", "first copy", None)).await;
     assert!(ar29_got(&mut f, "first copy", 20).await, "precondition: F takes S's DM");
@@ -51295,6 +51304,7 @@ async fn b3_phone_the_first_dm_after_a_push_wake_skips_a_device_removed_meanwhil
     let rd = super::types::RosterDigests {
         own: super::roster_book::load(&d1.store(), &o_master).map(|r| r.digest()),
         peer: super::roster_book::load(&d1.store(), &f.master_id).map(|r| r.digest()),
+        rm: Vec::new(),
     };
     super::roster_reach::fetch_on_dm(&f.store(), &f.master_id, &d1.device_id, &o_master, super::roster_book::now_ms(), Some(&rd));
     assert!(f.revoked_devices(&o_master).is_empty(), "precondition: F still counts S");
@@ -51322,8 +51332,9 @@ async fn b3_phone_the_first_dm_after_a_push_wake_skips_a_device_removed_meanwhil
     );
 }
 
-/// AR-29, the open app: F missed the removal, then D1's DM shows a different roster.
-/// F's reply right after must not reach S while the roster trade is still under way.
+/// AR-29, the open app: F missed the removal, then D1's DM shows a different roster
+/// and carries no removal (a 0.12.2 sender). F's reply right after must not reach S
+/// while the roster trade is still under way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn b3_phone_a_reply_right_after_a_differing_digest_skips_the_removed_device() {
@@ -51336,7 +51347,8 @@ async fn b3_phone_a_reply_right_after_a_differing_digest_skips_the_removed_devic
     ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
     super::roster_reach::set_jitter_for_test((5_000, 5_000));
 
-    ar29_dm(&d1, &f.master_id, "b3-phone-2", "hello after the removal").await;
+    let dm = ar29_signed_dm(&d1, &f.master_id, "b3-phone-2", "hello after the removal", Some(ar29_digests_0122(&d1, &f)));
+    send_envelope_as(&d1, &f, &dm).await;
     assert!(ar29_got(&mut f, "hello after the removal", 20).await, "F gets D1's DM");
     assert!(f.revoked_devices(&o_master).is_empty(), "precondition: the trade has not answered yet");
     drain_events(&mut s);
@@ -51349,8 +51361,9 @@ async fn b3_phone_a_reply_right_after_a_differing_digest_skips_the_removed_devic
     );
 }
 
-/// AR-29: F's mismatch ask already reached D1, whose answer sits out its jitter; F's
-/// DM then waits on its own ask, which D1 must answer at once, not after the hold ran out.
+/// AR-29: F's mismatch ask (D1's DM, from a 0.12.2 sender, carried no removal) already
+/// reached D1, whose answer sits out its jitter; F's DM then waits on its own ask, which
+/// D1 must answer at once, not after the hold ran out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn b3_phone_a_held_dm_is_answered_while_an_earlier_answer_still_waits() {
@@ -51365,7 +51378,8 @@ async fn b3_phone_a_held_dm_is_answered_while_an_earlier_answer_still_waits() {
     let jitter_ms = (super::roster_reach::DM_HOLD_MAX_MS + 4_000) as u64;
     super::roster_reach::set_jitter_for_test((jitter_ms, jitter_ms));
 
-    ar29_dm(&d1, &f.master_id, "b3-phone-4", "hello again").await;
+    let dm = ar29_signed_dm(&d1, &f.master_id, "b3-phone-4", "hello again", Some(ar29_digests_0122(&d1, &f)));
+    send_envelope_as(&d1, &f, &dm).await;
     assert!(ar29_got(&mut f, "hello again", 20).await, "F gets D1's DM");
     let d1_dev = d1.device_id.clone();
     assert!(
@@ -51410,6 +51424,7 @@ async fn b3_phone_a_dm_written_before_the_relay_session_waits_for_the_roster() {
     let rd = super::types::RosterDigests {
         own: super::roster_book::load(&d1.store(), &o_master).map(|r| r.digest()),
         peer: super::roster_book::load(&d1.store(), &f.master_id).map(|r| r.digest()),
+        rm: Vec::new(),
     };
     super::roster_reach::fetch_on_dm(&f.store(), &f.master_id, &d1.device_id, &o_master, super::roster_book::now_ms(), Some(&rd));
 
@@ -51447,7 +51462,7 @@ async fn b3_phone_a_dm_to_a_contact_that_left_is_not_held_forever() {
     let (mut d1, s, f) = ar29_cast(&relay, [201, 202, 203, 204]).await;
     let o_master = d1.master_id.clone();
     // D1 showed a roster F does not hold (any honest difference: F behind, or D1 behind).
-    let rd = super::types::RosterDigests { own: Some("ab".repeat(16)), peer: None };
+    let rd = super::types::RosterDigests { own: Some("ab".repeat(16)), peer: None, rm: Vec::new() };
     super::roster_reach::fetch_on_dm(&f.store(), &f.master_id, &d1.device_id, &o_master, super::roster_book::now_ms(), Some(&rd));
     let _ = f.store().take_roster_asks_due();
     // Both of O's devices go offline cleanly: F hears PeerLeft for each.
@@ -51501,11 +51516,10 @@ async fn b3_phone_a_dm_to_a_stale_contact_that_left_reaches_it_on_return() {
     assert!(ar29_got(&mut d1, "while you were away", 30).await, "a DM to a contact that left reached it only after OUR reconnect");
 }
 
-/// Residual (F2, planned for 0.13): D1's DM shows a roster F lacks, then D1 goes away
-/// before F replies. The hold waits only on online asked devices, so F's reply still
-/// reaches S until the removal rides inside the remover's DMs.
+/// F2 (0.13): D1's DM shows a roster F lacks, then D1 goes away before F replies. The
+/// hold waits only on online asked devices, so only the removal riding inside D1's DM
+/// keeps F's reply from S.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "known residual: a reply after the remover went offline reaches the removed device (0.13)"]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn b3_phone_a_reply_after_the_sender_left_skips_the_removed_device() {
     let _g = test_guard();
@@ -51520,7 +51534,11 @@ async fn b3_phone_a_reply_after_the_sender_left_skips_the_removed_device() {
     assert!(ar29_got(&mut f, "bye for now", 20).await, "F gets D1's DM");
     relay.set_online(&d1.device_id, false);
     assert!(wait_until(10, async || !relay.online_devices().contains(&d1.device_id)).await);
-    assert!(f.revoked_devices(&o_master).is_empty(), "precondition: the trade has not answered yet");
+    // The trade's jitter (5 s) has not run: only D1's DM itself can have taught F.
+    assert!(
+        f.revoked_devices(&o_master).contains(&s.device_id),
+        "F did not take S's removal from the DM that carried it",
+    );
     drain_events(&mut s);
     ar29_dm(&f, &o_master, "rv-b3-4", "a reply to a phone gone to sleep").await;
     // ABSENCE: a frame that never comes.
@@ -54399,6 +54417,411 @@ async fn g13s3_knocks_on_an_open_meeting_are_seated_together() {
     );
     let epochs = host.mls_epoch(&conf_sid).await.unwrap() - start;
     assert!(epochs < guests.len() as u64, "{epochs} commits for {} knocks sent together", guests.len());
+}
+
+// g13w2-c-roster
+
+/// Two identities of two devices each: ours (S1, S2) and a friend P (P1, P2), every
+/// roster phrase-rooted and held by all four, every pair with a confirmed session.
+async fn g13c_two_by_two(relay: &MockRelay, tags: [u8; 6]) -> (TestNode, TestNode, TestNode, TestNode) {
+    let [o_tag, s1_tag, s2_tag, p_tag, p1_tag, p2_tag] = tags;
+    let at = super::roster_book::now_ms() - 60_000;
+    let (o_roster, p_roster) = (protected_roster(o_tag, &[s1_tag, s2_tag], at), protected_roster(p_tag, &[p1_tag, p2_tag], at));
+    let (o_master, p_master) = (tag_kp(o_tag).peer_id(), tag_kp(p_tag).peer_id());
+    let spawn = async |master: u8, device: u8, friend: &str| {
+        let (own_master, own_dev) = (tag_kp(master).peer_id(), tag_kp(device).peer_id());
+        let (o_roster, p_roster) = (o_roster.clone(), p_roster.clone());
+        spawn_node_staged(relay, tag_kp(master), device, &[friend], move |st| {
+            super::roster_book::merge_for_test(st, &o_roster, &own_master, &own_dev);
+            super::roster_book::merge_for_test(st, &p_roster, &own_master, &own_dev);
+        })
+        .await
+    };
+    let s1 = spawn(o_tag, s1_tag, &p_master).await;
+    let s2 = spawn(o_tag, s2_tag, &p_master).await;
+    let p1 = spawn(p_tag, p1_tag, &o_master).await;
+    let p2 = spawn(p_tag, p2_tag, &o_master).await;
+    expect_siblings_ready(relay, &s1, &s2, 25).await;
+    for (a, b) in [(&s1, &p1), (&s1, &p2), (&s2, &p1), (&s2, &p2)] {
+        expect_dm_pair_ready(relay, a, b, 25).await;
+    }
+    (s1, s2, p1, p2)
+}
+
+/// B3 (a). Our sibling S2 learned that P1 removed P2; S1 did not. S2's DM to P echoes
+/// to S1 with a friend digest S1 does not hold, so S1's next DM to P waits for S2's view
+/// of P's roster (as a DM to a contact device whose digest differed does) and skips P2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13c_a_sibling_echo_with_a_newer_friend_roster_holds_the_next_dm() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut s1, s2, mut p1, mut p2) = g13c_two_by_two(&relay, [0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6]).await;
+    let p_master = p1.master_id.clone();
+
+    // P1 removes P2; S2 hears it, S1 and P2 hear nothing of it.
+    for from in [&p1.device_id, &p2.device_id, &s2.device_id] {
+        relay.swallow_direct(from, &s1.device_id);
+    }
+    relay.swallow_direct(&p1.device_id, &p2.device_id);
+    relay.set_broadcast_deaf(&s1.device_id, true);
+    relay.set_broadcast_deaf(&p2.device_id, true);
+    p1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: p2.device_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || s2.revoked_devices(&p_master).contains(&p2.device_id)).await,
+        "precondition: S2 learned P2's removal",
+    );
+    // ABSENCE: S2's own follow-ups to its sibling have no end signal of their own.
+    sleep_ms(2000).await;
+    // The harness resolver is shared: put back what S1's process still believes.
+    super::resolver::unmark_revoked(std::slice::from_ref(&p2.device_id));
+    super::resolver::update_many(&p_master, [p2.device_id.as_str()]);
+    for from in [&p1.device_id, &p2.device_id, &s2.device_id] {
+        relay.release_direct(from, &s1.device_id);
+    }
+    relay.set_broadcast_deaf(&s1.device_id, false);
+    assert!(s1.revoked_devices(&p_master).is_empty(), "precondition: S1 missed P2's removal");
+
+    // S1's own trade with S2 must not answer before S1 writes.
+    super::roster_reach::set_jitter_for_test((8_000, 8_000));
+    drain_events(&mut s1);
+    ar29_dm(&s2, &p_master, "g13c-a-1", "from the sibling that knows").await;
+    assert!(ar29_got(&mut s1, "from the sibling that knows", 20).await, "S1 got S2's echo");
+    assert!(s1.revoked_devices(&p_master).is_empty(), "precondition: the echo itself taught S1 nothing");
+
+    drain_events(&mut p2);
+    ar29_dm(&s1, &p_master, "g13c-a-2", "after the echo").await;
+    assert!(ar29_got(&mut p1, "after the echo", 25).await, "P's current device gets S1's DM");
+    // ABSENCE: a frame that never comes.
+    assert!(
+        !ar29_got(&mut p2, "after the echo", 4).await,
+        "S1's DM reached the device its sibling's echo showed was removed",
+    );
+    assert!(s1.revoked_devices(&p_master).contains(&p2.device_id), "S1 took S2's view of P's roster");
+    assert!(
+        s1.store().roster_confirmed_at(&p_master, &s2.device_id).is_some_and(|at| at > 0),
+        "S2's answer did not clear the void, so every DM to P would keep asking it",
+    );
+}
+
+/// B3 (a), the cost side: a sibling echo whose friend digest matches ours asks nothing
+/// and holds nothing, and a void a later matching echo clears holds no DM.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13c_a_matching_sibling_echo_clears_the_void() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut s1, s2, mut p1, _p2) = g13c_two_by_two(&relay, [0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC]).await;
+    let p_master = p1.master_id.clone();
+    let held = s1.store().load_roster(&p_master).unwrap().unwrap().digest();
+    let differs = super::types::RosterDigests { own: None, peer: Some("ab".repeat(16)), rm: Vec::new() };
+    let matches = super::types::RosterDigests { own: None, peer: Some(held), rm: Vec::new() };
+    super::roster_reach::set_jitter_for_test((30_000, 30_000));
+
+    let echo = |mid: &str, rd| {
+        let mut env = ar29_signed_dm(&s2, &p_master, mid, mid, Some(rd));
+        if let super::types::MessageEnvelope::DirectMessage { inner } = &mut env {
+            inner.convo = Some(p_master.clone());
+        }
+        env
+    };
+    send_envelope_as(&s2, &s1, &echo("g13c-a-3", differs)).await;
+    assert!(ar29_got(&mut s1, "g13c-a-3", 15).await);
+    assert_eq!(
+        s1.store().roster_confirmed_at(&p_master, &s2.device_id),
+        Some(0),
+        "a sibling echo with a friend digest we lack left no void",
+    );
+    send_envelope_as(&s2, &s1, &echo("g13c-a-4", matches)).await;
+    assert!(ar29_got(&mut s1, "g13c-a-4", 15).await);
+    assert!(
+        s1.store().roster_confirmed_at(&p_master, &s2.device_id).is_some_and(|at| at > 0),
+        "a later matching echo did not clear the void",
+    );
+    let waited = async |s1: &TestNode, s2: &TestNode| {
+        s1.carried_to(&s2.device_id).await.into_iter().any(|m| {
+            matches!(m, super::types::HavenMessage::RosterSync { waiting: true, .. })
+        })
+    };
+    ar29_dm(&s1, &p_master, "g13c-a-5", "nothing to wait for").await;
+    assert!(ar29_got(&mut p1, "nothing to wait for", 10).await);
+    assert!(!waited(&s1, &s2).await, "a cleared void held the DM for the sibling's answer");
+
+    // A sibling slot that only aged never holds: nothing the sibling showed differed.
+    let old = super::roster_book::now_ms() - super::roster_reach::ROSTER_REFRESH_AFTER_MS - 60_000;
+    s1.store().stamp_roster_confirmed(&p_master, &s2.device_id, old).unwrap();
+    ar29_dm(&s1, &p_master, "g13c-a-6", "an aged sibling slot").await;
+    assert!(ar29_got(&mut p1, "an aged sibling slot", 10).await);
+    assert!(!waited(&s1, &s2).await, "a sibling slot that only aged held the DM");
+}
+
+/// F2 (review H1). After S's removal, someone holding O's master key floods O's roster
+/// with joins whose own keys sign removals nobody counts. D1's DM still carries S's
+/// real removal, so F's reply after D1 went away skips S.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13c_a_flooded_roster_still_carries_the_real_removal() {
+    use crate::identity::roster;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 0xD1;
+    let (mut d1, mut s, mut f) = ar29_cast(&relay, [O, 0xD2, 0xD3, 0xD4]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+
+    let mut flood = super::roster_book::load(&d1.store(), &o_master).expect("D1's roster");
+    let base = flood.base();
+    for i in 0..6u8 {
+        let p = tag_kp(0xE0 + i);
+        flood.add_consent(roster::sign_consent(&p, &o_master));
+        flood.add_pending(roster::sign_pending(&tag_kp(O), &base, &p.peer_id()));
+        for j in 0..3u8 {
+            flood.add_removal(roster::sign_removal(&p, &o_master, &base, &tag_kp(0xF0 - i * 3 - j).peer_id(), &[]));
+        }
+    }
+    super::roster_book::merge_for_test(&d1.store(), &flood, &o_master, &d1.device_id);
+    let stored = super::roster_book::load(&d1.store(), &o_master).unwrap();
+    assert!(stored.removals.len() > roster::MAX_CARRIED_REMOVALS, "precondition: the flood is stored");
+    super::resolver::unmark_revoked(std::slice::from_ref(&s.device_id));
+    super::resolver::update_many(&o_master, [s.device_id.as_str()]);
+
+    super::roster_reach::set_jitter_for_test((5_000, 5_000));
+    ar29_dm(&d1, &f.master_id, "g13c-h1-1", "after the flood").await;
+    assert!(ar29_got(&mut f, "after the flood", 20).await, "F gets D1's DM");
+    relay.set_online(&d1.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&d1.device_id)).await);
+    assert!(f.revoked_devices(&o_master).contains(&s.device_id), "D1's DM did not carry S's real removal");
+    drain_events(&mut s);
+    ar29_dm(&f, &o_master, "g13c-h1-2", "a reply past the flood").await;
+    // ABSENCE: a frame that never comes.
+    assert!(!ar29_got(&mut s, "a reply past the flood", 6).await, "F's reply reached the removed device");
+    let _ = &mut d1;
+}
+
+/// F2 (review H2). F's app runs while another process (the iOS NSE, the push fetch)
+/// stores S's removal; the app's resolver never saw it. `carried`: the NSE read it from
+/// a carrying DM, else from a roster trade. `reconnect`: F's session goes down and up
+/// (the store is followed on session up, before any DM), else F stays on one session
+/// and simply replies (the store is followed by the DM gate).
+async fn g13c_nse_case(tags: [u8; 4], carried: bool, reconnect: bool) {
+    let relay = MockRelay::new();
+    let (d1, mut s, mut f) = ar29_cast(&relay, tags).await;
+    let o_master = d1.master_id.clone();
+    assert_eq!(f.olm_status(&s.device_id).await, "confirmed", "precondition: F holds a session with S");
+    relay.set_online(&f.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&f.device_id)).await);
+    relay.swallow_direct(&d1.device_id, &s.device_id);
+    relay.set_broadcast_deaf(&s.device_id, true);
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "precondition: D1 removed S",
+    );
+    let put_back = || {
+        super::resolver::unmark_revoked(std::slice::from_ref(&s.device_id));
+        super::resolver::update_many(&o_master, [s.device_id.as_str()]);
+    };
+    put_back();
+    relay.swallow_direct(&d1.device_id, &f.device_id);
+    relay.set_broadcast_deaf(&f.device_id, true);
+    if !reconnect {
+        relay.set_online(&f.device_id, true);
+        let room = super::types::dm_room_code(&o_master, &f.master_id);
+        assert!(wait_until(15, async || relay.room_devices(&room).contains(&f.device_id)).await, "F is back");
+        // ABSENCE: F's return exchange has no end signal of its own.
+        sleep_ms(2000).await;
+    }
+
+    let held = super::roster_book::load(&d1.store(), &o_master).expect("D1's roster");
+    if carried {
+        let rm = super::roster_book::counting_removals(&d1.store(), &held);
+        assert!(super::roster_book::ingest_carried_stored(&f.db_path, &f.passphrase, &f.master_id, &f.device_id, &d1.device_id, &o_master, &rm));
+    } else {
+        super::roster_reach::fetch_roster(&f.db_path, &f.passphrase, &f.master_id, &f.device_id, &d1.device_id, held, false);
+    }
+    assert!(f.revoked_devices(&o_master).contains(&s.device_id), "precondition: F's store holds S's removal");
+    // The NSE is another process: the app's resolver never saw it.
+    put_back();
+    drain_events(&mut f);
+
+    if reconnect {
+        relay.set_online(&f.device_id, true);
+        let room = super::types::dm_room_code(&o_master, &f.master_id);
+        assert!(wait_until(15, async || relay.room_devices(&room).contains(&f.device_id)).await, "F is back");
+        assert!(
+            wait_until(10, async || super::resolver::is_revoked(&s.device_id)).await,
+            "F's session came up and its resolver never followed the stored removal",
+        );
+    }
+    drain_events(&mut s);
+    ar29_dm(&f, &o_master, "g13c-h2-1", "reply after the nse").await;
+    // ABSENCE: a frame that never comes.
+    assert!(
+        !ar29_got(&mut s, "reply after the nse", 6).await,
+        "the running app's reply reached a device its own store already holds as removed",
+    );
+    // Review LOW-1: following the store also drops the removed device's session and
+    // tells the app its device list moved, whichever path followed it first.
+    assert!(
+        wait_until(10, async || f.olm_status(&s.device_id).await == "absent").await,
+        "the app followed the stored removal and kept its Olm session with the removed device",
+    );
+    assert!(
+        wait_event(&mut f, std::time::Duration::from_secs(5), |ev| {
+            matches!(ev, NetworkEvent::DeviceListUpdated { master_peer_id } if *master_peer_id == o_master)
+        })
+        .await,
+        "the app followed the stored removal and never told its device list",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13c_a_removal_the_nse_stored_reaches_the_running_app() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    g13c_nse_case([0xA1, 0xA2, 0xA3, 0xA4], false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13c_a_carried_removal_the_nse_stored_reaches_the_running_app() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    g13c_nse_case([0xA5, 0xA6, 0xA7, 0xA8], true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13c_a_session_up_follows_what_the_nse_stored() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    g13c_nse_case([0xA9, 0xAA, 0xAB, 0xAC], true, true).await;
+}
+
+/// F2 (review M1). The carry stops per contact DEVICE. S1 removes S2 while P is away;
+/// P1 comes back, folds the removal S1's DM carries and shows it holds it, P2 sleeps
+/// through all of it. S1's next DM still carries the removal, so P2's reply after S1
+/// went away skips S2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13c_a_carry_goes_on_until_every_contact_device_showed_it() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut s1, mut s2, mut p1, mut p2) = g13c_two_by_two(&relay, [0x91, 0x92, 0x93, 0x94, 0x95, 0x96]).await;
+    let (o_master, p_master) = (s1.master_id.clone(), p1.master_id.clone());
+    let room = super::types::dm_room_code(&o_master, &p_master);
+    // Nothing reaches P2 from its sibling, and the relay loses what S1 sends P2 while it
+    // sleeps (a bounded buffer): only S1's DMs after P2's return can teach it.
+    relay.swallow_direct(&p1.device_id, &p2.device_id);
+    relay.swallow_direct(&s1.device_id, &p2.device_id);
+
+    for p in [&p1, &p2] {
+        relay.set_online(&p.device_id, false);
+    }
+    assert!(wait_until(10, async || !relay.online_devices().contains(&p1.device_id) && !relay.online_devices().contains(&p2.device_id)).await);
+    relay.swallow_direct(&s1.device_id, &s2.device_id);
+    relay.set_broadcast_deaf(&s2.device_id, true);
+    s1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s2.device_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || s1.revoked_devices(&o_master).contains(&s2.device_id)).await,
+        "precondition: S1 removed S2",
+    );
+    // The harness resolver is shared: put back what P's processes still believe.
+    let put_back = || {
+        super::resolver::unmark_revoked(std::slice::from_ref(&s2.device_id));
+        super::resolver::update_many(&o_master, [s2.device_id.as_str()]);
+    };
+    put_back();
+    // A P device comes back hearing nothing S1 says outside its DMs.
+    let s1_dev = s1.device_id.clone();
+    let back = async |p: &TestNode| {
+        relay.swallow_direct(&s1_dev, &p.device_id);
+        relay.set_broadcast_deaf(&p.device_id, true);
+        relay.set_online(&p.device_id, true);
+        assert!(wait_until(15, async || relay.room_devices(&room).contains(&p.device_id)).await, "a P device is back");
+        // ABSENCE: the return exchange has no end signal of its own.
+        sleep_ms(2000).await;
+        relay.release_direct(&s1_dev, &p.device_id);
+        relay.set_broadcast_deaf(&p.device_id, false);
+        assert!(p.revoked_devices(&o_master).is_empty(), "precondition: a P device learned the removal while away");
+    };
+    back(&p1).await;
+    super::roster_reach::set_jitter_for_test((8_000, 8_000));
+
+    ar29_dm(&s1, &p_master, "g13c-m1-1", "first after the removal").await;
+    assert!(ar29_got(&mut p1, "first after the removal", 20).await, "P1 gets S1's DM");
+    assert!(p1.revoked_devices(&o_master).contains(&s2.device_id), "precondition: S1's DM carried the removal to P1");
+    drain_events(&mut s1);
+    ar29_dm(&p1, &o_master, "g13c-m1-2", "P1 holds it now").await;
+    assert!(ar29_got(&mut s1, "P1 holds it now", 20).await, "S1 gets P1's reply");
+    assert!(
+        s1.store().carry_confirms(&p_master).contains_key(&p1.device_id),
+        "precondition: P1's reply showed S1 it holds the removal",
+    );
+
+    put_back();
+    back(&p2).await;
+    put_back();
+    ar29_dm(&s1, &p_master, "g13c-m1-3", "to both of P's devices").await;
+    assert!(ar29_got(&mut p2, "to both of P's devices", 20).await, "P2 gets S1's DM");
+    relay.set_online(&s1.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&s1.device_id)).await);
+    assert!(
+        p2.revoked_devices(&o_master).contains(&s2.device_id),
+        "S1's DM stopped carrying the removal because P1, not P2, showed it held it",
+    );
+    drain_events(&mut s2);
+    ar29_dm(&p2, &o_master, "g13c-m1-4", "P2 replies late").await;
+    // ABSENCE: a frame that never comes.
+    assert!(!ar29_got(&mut s2, "P2 replies late", 6).await, "P2's reply reached the removed device");
+}
+
+/// F2 (review LOW-5). A DM that carries every removal the contact lacked brings it level
+/// with the sender's roster BEFORE its digest is judged: F stamps D1's slot and asks D1
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13c_a_carried_removal_lands_before_the_digest_is_judged() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, s, mut f) = ar29_cast(&relay, [0x97, 0x98, 0x99, 0x9A]).await;
+    let o_master = d1.master_id.clone();
+    ar29_remove_behind_fs_back(&relay, &d1, &s, &f).await;
+    super::roster_reach::set_jitter_for_test((300, 300));
+    let asks = async |f: &TestNode| {
+        f.carried_to(&d1.device_id)
+            .await
+            .into_iter()
+            .filter(|m| matches!(m, super::types::HavenMessage::RosterSync { reply: true, .. }))
+            .count()
+    };
+    let asked_before = asks(&f).await;
+    let stamped_before = f.store().roster_confirmed_at(&o_master, &d1.device_id).unwrap_or(0);
+
+    ar29_dm(&d1, &f.master_id, "g13c-o-1", "carry, then judge").await;
+    assert!(ar29_got(&mut f, "carry, then judge", 20).await, "F gets D1's DM");
+    assert!(f.revoked_devices(&o_master).contains(&s.device_id), "precondition: D1's DM carried S's removal");
+    assert!(
+        f.store().roster_confirmed_at(&o_master, &d1.device_id).is_some_and(|at| at > stamped_before),
+        "F judged D1's digest before the carried removal folded in: D1's slot is not stamped",
+    );
+    // ABSENCE: a jittered ask goes out within 300 ms.
+    sleep_ms(2000).await;
+    assert_eq!(asks(&f).await, asked_before, "F asked D1 for a roster its own DM had already brought level");
 }
 
 // g13w2-g-sync-fallback

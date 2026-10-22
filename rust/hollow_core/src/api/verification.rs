@@ -115,6 +115,9 @@ pub struct SecurityAlertFfi {
     pub created_at: i64,
     /// `None` while still unread.
     pub acknowledged_at: Option<i64>,
+    /// When the device it names left the identity (removed since); `None` while it is
+    /// still there. The alert stays unread until the person dismisses it.
+    pub resolved_at: Option<i64>,
 }
 
 /// All recorded alerts, newest first, read and dismissed alike.
@@ -133,6 +136,7 @@ pub fn get_security_alerts() -> Result<Vec<SecurityAlertFfi>, String> {
             detail: r.detail,
             created_at: r.created_at,
             acknowledged_at: r.acknowledged_at,
+            resolved_at: r.resolved_at,
         })
         .collect())
 }

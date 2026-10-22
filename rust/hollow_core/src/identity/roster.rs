@@ -42,6 +42,10 @@ const MAX_RECOVERY_TIES: usize = 4;
 const MAX_PHRASE_ADMITS: usize = 64;
 const MAX_LEGACY: usize = 64;
 pub(crate) const MAX_PENDING: usize = 16;
+/// Removals one DM carries at most (F2), and their size on the wire. A receiver
+/// ignores a carry over either whole.
+pub(crate) const MAX_CARRIED_REMOVALS: usize = 8;
+pub(crate) const MAX_CARRIED_REMOVAL_BYTES: usize = 4096;
 const MAX_CONSENTS: usize = 96;
 const MAX_UNNAMED_CONSENTS: usize = 8;
 
@@ -347,6 +351,25 @@ pub(crate) fn sign_removal(
     }
 }
 
+/// Whether `r` verifies alone for `master`: well formed and signed by `r.by`. Standing
+/// is judged where removals are compacted and folded, never here.
+pub(crate) fn removal_verifies(master: &str, r: &Removal) -> bool {
+    let id_ok = |d: &str| key_of(d).is_some();
+    let keep = sorted(&r.keep_vouched);
+    is_base_shape(&r.base)
+        && id_ok(&r.device)
+        && keep == r.keep_vouched
+        && keep.len() <= MAX_REMOVAL_KEEP
+        && keep.iter().all(|d| id_ok(d))
+        && verify_by(&r.by, &removal_payload(master, &r.base, &r.device, &keep), &r.sig)
+}
+
+/// Whether `rm` fits what one DM may carry: the ONE test sender and receiver share.
+pub(crate) fn carried_fits(rm: &[Removal]) -> bool {
+    rm.len() <= MAX_CARRIED_REMOVALS
+        && serde_json::to_vec(rm).is_ok_and(|b| b.len() <= MAX_CARRIED_REMOVAL_BYTES)
+}
+
 // -- The roster --
 
 /// `seed` and every device a member of the result vouched for, removals ignored.
@@ -384,6 +407,16 @@ struct Current {
     at: i64,
     keep: BTreeSet<String>,
     no_wait: bool,
+}
+
+struct Scope<'a> {
+    base: String,
+    no_wait: bool,
+    roots: BTreeSet<String>,
+    matured: BTreeSet<String>,
+    vouches: Vec<&'a Vouch>,
+    pendings: Vec<&'a Pending>,
+    rooted: BTreeSet<String>,
 }
 
 impl Roster {
@@ -505,20 +538,7 @@ impl Roster {
             .filter(|l| id_ok(&l.device) && verify(&mk, &legacy_payload(m, &l.device), &l.sig_m))
             .cloned()
             .collect();
-        out.removals = self
-            .removals
-            .iter()
-            .filter(|r| {
-                let keep = sorted(&r.keep_vouched);
-                is_base_shape(&r.base)
-                    && id_ok(&r.device)
-                    && keep == r.keep_vouched
-                    && keep.len() <= MAX_REMOVAL_KEEP
-                    && keep.iter().all(|d| id_ok(d))
-                    && verify_by(&r.by, &removal_payload(m, &r.base, &r.device, &keep), &r.sig)
-            })
-            .cloned()
-            .collect();
+        out.removals = self.removals.iter().filter(|r| removal_verifies(m, r)).cloned().collect();
         out.compacted()
     }
 
@@ -775,6 +795,57 @@ impl Roster {
     /// observer first saw a device's pending join, the clock its seven days run on.
     /// The roster must already be `verified`.
     pub(crate) fn fold(&self, first_seen: impl Fn(&str) -> Option<i64>, now_ms: i64) -> RosterState {
+        let scope = self.scope(&first_seen, now_ms);
+        let asked: BTreeSet<&str> = scope.pendings.iter().map(|p| p.device.as_str()).collect();
+
+        // A removed device keeps only the vouchees EVERY removal of it keeps: a device
+        // it vouched cannot keep itself by removing it too.
+        let mut removed: BTreeMap<String, String> = BTreeMap::new();
+        let mut kept_by: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for r in self.counting_removals_in(&scope) {
+            removed.entry(r.device.clone()).or_insert_with(|| r.by.clone());
+            let keep: BTreeSet<&str> = r.keep_vouched.iter().map(String::as_str).collect();
+            kept_by
+                .entry(r.device.as_str())
+                .and_modify(|k| k.retain(|d| keep.contains(d)))
+                .or_insert(keep);
+        }
+
+        // A removed voucher's vouches count only where its removers kept them.
+        let mut valid: BTreeSet<String> = scope.roots.union(&scope.matured).cloned().collect();
+        loop {
+            let before = valid.len();
+            for v in &scope.vouches {
+                if !valid.contains(&v.by) {
+                    continue;
+                }
+                let voucher_ok = !removed.contains_key(&v.by)
+                    || kept_by
+                        .get(v.by.as_str())
+                        .is_some_and(|k| k.contains(v.device.as_str()));
+                if voucher_ok {
+                    valid.insert(v.device.clone());
+                }
+            }
+            if valid.len() == before {
+                break;
+            }
+        }
+
+        let members: BTreeSet<String> =
+            valid.iter().filter(|d| !removed.contains_key(*d)).cloned().collect();
+        let pending: BTreeSet<String> = asked
+            .iter()
+            .filter(|d| !valid.contains(**d) && !removed.contains_key(**d))
+            .map(|d| d.to_string())
+            .collect();
+        let protected = self.current_recovery().is_some();
+        RosterState { base: scope.base.clone(), protected, no_wait: scope.no_wait, members, removed, pending }
+    }
+
+    /// What one fold works from: the current base, its roots and matured joins, the
+    /// vouches and joins it reads, and who may sign a removal.
+    fn scope<'a>(&'a self, first_seen: &impl Fn(&str) -> Option<i64>, now_ms: i64) -> Scope<'a> {
         let consented: BTreeSet<&str> = self.consents.iter().map(|c| c.device.as_str()).collect();
         let (current, mut roots) = self.base_roots();
         let base = current.as_ref().map_or_else(|| LEGACY_BASE.to_string(), |c| c.base.clone());
@@ -813,53 +884,23 @@ impl Roster {
 
         // Everyone with any admission path, removals ignored: who may sign a removal.
         let rooted = vouch_closure(roots.union(&matured).cloned().collect(), &vouches);
+        Scope { base, no_wait, roots, matured, vouches, pendings, rooted }
+    }
 
-        // A removed device keeps only the vouchees EVERY removal of it keeps: a device
-        // it vouched cannot keep itself by removing it too.
-        let asked: BTreeSet<&str> = pendings.iter().map(|p| p.device.as_str()).collect();
-        let mut removed: BTreeMap<String, String> = BTreeMap::new();
-        let mut kept_by: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        for r in self.removals.iter().filter(|r| r.base == base && rooted.contains(&r.by)) {
-            if !rooted.contains(&r.device) && !asked.contains(r.device.as_str()) {
-                continue;
-            }
-            removed.entry(r.device.clone()).or_insert_with(|| r.by.clone());
-            let keep: BTreeSet<&str> = r.keep_vouched.iter().map(String::as_str).collect();
-            kept_by
-                .entry(r.device.as_str())
-                .and_modify(|k| k.retain(|d| keep.contains(d)))
-                .or_insert(keep);
-        }
+    /// The removals that count in `scope`: in its base, signed by a rooted device, of a
+    /// rooted device or one asking to join.
+    fn counting_removals_in<'a>(&'a self, scope: &Scope<'_>) -> impl Iterator<Item = &'a Removal> {
+        let asked: BTreeSet<String> = scope.pendings.iter().map(|p| p.device.clone()).collect();
+        let (base, rooted) = (scope.base.clone(), scope.rooted.clone());
+        self.removals.iter().filter(move |r| {
+            r.base == base && rooted.contains(&r.by) && (rooted.contains(&r.device) || asked.contains(&r.device))
+        })
+    }
 
-        // A removed voucher's vouches count only where its removers kept them.
-        let mut valid: BTreeSet<String> = roots.union(&matured).cloned().collect();
-        loop {
-            let before = valid.len();
-            for v in &vouches {
-                if !valid.contains(&v.by) {
-                    continue;
-                }
-                let voucher_ok = !removed.contains_key(&v.by)
-                    || kept_by
-                        .get(v.by.as_str())
-                        .is_some_and(|k| k.contains(v.device.as_str()));
-                if voucher_ok {
-                    valid.insert(v.device.clone());
-                }
-            }
-            if valid.len() == before {
-                break;
-            }
-        }
-
-        let members: BTreeSet<String> =
-            valid.iter().filter(|d| !removed.contains_key(*d)).cloned().collect();
-        let pending: BTreeSet<String> = asked
-            .iter()
-            .filter(|d| !valid.contains(**d) && !removed.contains_key(**d))
-            .map(|d| d.to_string())
-            .collect();
-        RosterState { base, protected: current.is_some(), no_wait, members, removed, pending }
+    /// The removals that count for this observer: what [`Self::fold`] reads, never a
+    /// statement compaction keeps from a signer that stands only through a pending join.
+    pub(crate) fn counting_removals(&self, first_seen: impl Fn(&str) -> Option<i64>, now_ms: i64) -> Vec<Removal> {
+        self.counting_removals_in(&self.scope(&first_seen, now_ms)).cloned().collect()
     }
 
     /// Current members that `device` vouched for, the set an honest remover keeps.

@@ -42,7 +42,12 @@ class SecurityAlertBanner extends ConsumerWidget {
     // re-key, so with several outstanding the strongest one leads.
     final hasReappeared =
         alerts.any((a) => a.kind == SecurityAlertKind.identityReappeared);
-    final hasNewDevice =
+    final newDevices = alerts
+        .where((a) =>
+            a.kind == SecurityAlertKind.newDevice && a.resolvedAt == null)
+        .length;
+    final hasNewDevice = newDevices > 0;
+    final hadNewDevice =
         alerts.any((a) => a.kind == SecurityAlertKind.newDevice);
     final color = hasReappeared
         ? hollow.error
@@ -65,7 +70,7 @@ class SecurityAlertBanner extends ConsumerWidget {
           Icon(
             hasReappeared
                 ? LucideIcons.shieldX
-                : hasNewDevice
+                : hasNewDevice || hadNewDevice
                     ? LucideIcons.monitorSmartphone
                     : LucideIcons.rotateCw,
             size: 16,
@@ -74,7 +79,7 @@ class SecurityAlertBanner extends ConsumerWidget {
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: Text(
-              _message(hasReappeared, hasNewDevice, name, alerts.length),
+              _message(hasReappeared, newDevices, hadNewDevice, name),
               style: HollowTypography.bodySmall.copyWith(
                 color: hollow.textPrimary,
               ),
@@ -102,12 +107,16 @@ class SecurityAlertBanner extends ConsumerWidget {
   }
 
   String _message(
-      bool hasReappeared, bool hasNewDevice, String name, int count) {
+      bool hasReappeared, int count, bool hadNewDevice, String name) {
     if (hasReappeared) {
       return 'This identity was destroyed and has come back. Verify the '
           'safety number before trusting it.';
     }
-    if (!hasNewDevice) {
+    if (count == 0 && hadNewDevice) {
+      return '$name added a device and removed it again. Verify them if you '
+          'are not sure it was them.';
+    }
+    if (count == 0) {
       return '$name reinstalled or re-keyed a device. Their messages are still '
           'end-to-end encrypted.';
     }

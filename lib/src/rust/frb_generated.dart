@@ -19740,8 +19740,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SecurityAlertFfi dco_decode_security_alert_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return SecurityAlertFfi(
       alertId: dco_decode_String(arr[0]),
       peerId: dco_decode_String(arr[1]),
@@ -19749,6 +19749,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       detail: dco_decode_String(arr[3]),
       createdAt: dco_decode_i_64(arr[4]),
       acknowledgedAt: dco_decode_opt_box_autoadd_i_64(arr[5]),
+      resolvedAt: dco_decode_opt_box_autoadd_i_64(arr[6]),
     );
   }
 
@@ -24207,6 +24208,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_detail = sse_decode_String(deserializer);
     var var_createdAt = sse_decode_i_64(deserializer);
     var var_acknowledgedAt = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_resolvedAt = sse_decode_opt_box_autoadd_i_64(deserializer);
     return SecurityAlertFfi(
       alertId: var_alertId,
       peerId: var_peerId,
@@ -24214,6 +24216,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       detail: var_detail,
       createdAt: var_createdAt,
       acknowledgedAt: var_acknowledgedAt,
+      resolvedAt: var_resolvedAt,
     );
   }
 
@@ -28361,6 +28364,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.detail, serializer);
     sse_encode_i_64(self.createdAt, serializer);
     sse_encode_opt_box_autoadd_i_64(self.acknowledgedAt, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.resolvedAt, serializer);
   }
 
   @protected

@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use tokio::sync::mpsc;
 
 use crate::identity::native_identity::NativeKeypair;
-use crate::identity::roster::{self, Roster, RosterState};
+use crate::identity::roster::{self, Removal, Roster, RosterState};
 use crate::storage::MessageStore;
 
 use super::types::NetworkEvent;
@@ -48,6 +48,14 @@ pub(crate) fn fold(store: &MessageStore, roster: &Roster) -> RosterState {
     roster.fold(|d| seen.get(d).copied(), now_ms())
 }
 
+/// The removals of `roster` that count on this node's first-sight clock, sorted.
+pub(crate) fn counting_removals(store: &MessageStore, roster: &Roster) -> Vec<Removal> {
+    let seen = store.load_roster_seen(&roster.master, &roster.base()).unwrap_or_default();
+    let mut out = roster.counting_removals(|d| seen.get(d).copied(), now_ms());
+    out.sort();
+    out
+}
+
 /// Stamp when this node first saw each pending join in `roster`'s current base.
 fn stamp_pending(store: &MessageStore, roster: &Roster) {
     let now = now_ms();
@@ -76,43 +84,127 @@ fn save(
     local_master: &str,
     local_device: &str,
 ) -> Result<(), String> {
+    save_rows(store, roster, state, local_master, local_device)?;
+    point_resolver(&roster.master, state, local_master, local_device);
+    Ok(())
+}
+
+/// [`save`] without the resolver: inside a transaction the process-global resolver
+/// moves only once the rows committed ([`follow`]).
+fn save_rows(
+    store: &MessageStore,
+    roster: &Roster,
+    state: &RosterState,
+    local_master: &str,
+    local_device: &str,
+) -> Result<(), String> {
     let json = serde_json::to_string(roster).map_err(|e| format!("roster json: {e}"))?;
     let members: Vec<String> = state.members.iter().cloned().collect();
     store.save_device_list(&roster.master, &json, 0, &members, now_ms())?;
-    let held = super::resolver::devices_for(&roster.master).into_iter().chain([roster.master.clone()]);
+    super::security_alerts::resolve_departed(store, &roster.master, &state.members, |device| {
+        roster.removals.iter().any(|r| r.device == device && r.by == local_device)
+    });
+    // When we learned each of our own removals: our DMs carry it from then (F2).
+    if roster.master == local_master {
+        let mut devices: Vec<String> = counting_removals(store, roster).into_iter().map(|r| r.device).collect();
+        devices.dedup();
+        let _ = store.removal_carried_since(local_master, &state.base, &devices, now_ms());
+    }
+    revoked_rows(store, &roster.master, state, local_device);
+    Ok(())
+}
+
+/// `state`'s removed devices, never ourselves.
+fn removed_ids(state: &RosterState, local_device: &str) -> Vec<String> {
+    state.removed.keys().filter(|d| d.as_str() != local_device).cloned().collect()
+}
+
+/// Members the resolver still refuses: a recovery brought them back.
+fn back_ids(state: &RosterState) -> Vec<String> {
+    state.members.iter().filter(|d| super::resolver::is_revoked(d)).cloned().collect()
+}
+
+/// Record `state`'s removed devices as refused (the refusal survives a restart) and
+/// refuse no longer the members a recovery brought back.
+fn revoked_rows(store: &MessageStore, master: &str, state: &RosterState, local_device: &str) {
+    let removed = removed_ids(state, local_device);
+    if !removed.is_empty() {
+        let _ = store.record_revoked_devices(master, &removed);
+    }
+    let back = back_ids(state);
+    if !back.is_empty() {
+        let _ = store.clear_revoked_devices(&back);
+    }
+}
+
+/// Point `master`'s links at the members of `state` and refuse its removed devices.
+fn point_resolver(master: &str, state: &RosterState, local_master: &str, local_device: &str) {
+    let members: Vec<String> = state.members.iter().cloned().collect();
+    let held = super::resolver::devices_for(master).into_iter().chain([master.to_string()]);
     for d in held {
         if !state.members.contains(&d) {
             super::resolver::forget(&d);
         }
     }
-    super::resolver::note_roster(&roster.master);
-    if roster.master == local_master {
+    super::resolver::note_roster(master);
+    if master == local_master {
         super::resolver::seed_self(local_master, &members);
     } else {
-        super::resolver::update_many(&roster.master, members.iter().map(String::as_str));
+        super::resolver::update_many(master, members.iter().map(String::as_str));
     }
-    // Removed devices are refused everywhere and the refusal survives a restart; a
-    // member that a recovery brought back is refused no longer. Never ourselves.
-    let removed: Vec<String> = state
-        .removed
-        .keys()
-        .filter(|d| d.as_str() != local_device)
-        .cloned()
-        .collect();
+    let removed = removed_ids(state, local_device);
     if !removed.is_empty() {
         super::resolver::mark_revoked(&removed);
-        let _ = store.record_revoked_devices(&roster.master, &removed);
     }
-    let back: Vec<String> = members
-        .iter()
-        .filter(|d| super::resolver::is_revoked(d))
-        .cloned()
-        .collect();
+    let back = back_ids(state);
     if !back.is_empty() {
         super::resolver::unmark_revoked(&back);
-        let _ = store.clear_revoked_devices(&back);
     }
-    Ok(())
+}
+
+/// Point the resolver at a fold that just committed: in full when it changed the
+/// roster, else only its members (a roster now held).
+fn follow(master: &str, state: &RosterState, changed: bool, local_master: &str, local_device: &str) {
+    if changed {
+        point_resolver(master, state, local_master, local_device);
+        return;
+    }
+    super::resolver::note_roster(master);
+    if master == local_master {
+        super::resolver::seed_self(local_master, &state.members.iter().cloned().collect::<Vec<_>>());
+    } else {
+        super::resolver::update_many(master, state.members.iter().map(String::as_str));
+    }
+}
+
+/// What following the stored rosters did, for the caller to act on.
+#[derive(Default, Debug)]
+pub(crate) struct Reconciled {
+    /// Identities whose stored roster the resolver now follows: tell the app.
+    pub masters: Vec<String>,
+    /// Every device those rosters removed: drop their sessions and leaves (idempotent,
+    /// so a device another path already dropped costs nothing).
+    pub removed: Vec<String>,
+}
+
+/// Follow the contact rosters another process (the push fetch, the iOS NSE) changed
+/// in `store`: `master`'s only, or every marked one. The marks are taken.
+pub(crate) fn reconcile_dirty(
+    store: &MessageStore,
+    master: Option<&str>,
+    local_master: &str,
+    local_device: &str,
+) -> Reconciled {
+    let mut out = Reconciled::default();
+    for m in store.take_roster_dirty(master).iter().filter(|m| m.as_str() != local_master) {
+        let Some(roster) = load(store, m) else { continue };
+        let state = fold(store, &roster);
+        revoked_rows(store, m, &state, local_device);
+        point_resolver(m, &state, local_master, local_device);
+        out.removed.extend(removed_ids(&state, local_device));
+        out.masters.push(m.clone());
+    }
+    out
 }
 
 /// Merge `roster` into what `store` holds for its master and save it, the way an
@@ -687,9 +779,76 @@ pub(crate) async fn ingest(
     db_passphrase: &str,
 ) -> Ingested {
     Box::pin(ingest_inner(
-        event_tx, ws_cmd_tx, local_master, local_device, sender, incoming, db_path, db_passphrase, false,
+        event_tx, ws_cmd_tx, local_master, local_device, sender, incoming, db_path, db_passphrase, Source::Delivered,
     ))
     .await
+}
+
+/// Removals a DM carried (F2): `rm` from `sender`, a member of `master` (the DM's
+/// authenticated identity), judged exactly as any removal is once merged into the
+/// roster we hold for `master`. Never our own roster and never a first sight.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ingest_carried(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_master: &str,
+    local_device: &str,
+    sender: &str,
+    master: &str,
+    rm: &[Removal],
+    db_path: &str,
+    db_passphrase: &str,
+) -> Ingested {
+    let Some(incoming) = carried_roster(local_master, sender, master, rm) else { return Ingested::default() };
+    Box::pin(ingest_inner(
+        event_tx, ws_cmd_tx, local_master, local_device, sender, Some(incoming), db_path, db_passphrase, Source::Carried,
+    ))
+    .await
+}
+
+/// [`ingest_carried`] for the push fetch: the store half only, and the running app is
+/// told to re-read `master` (`roster_dirty`).
+pub(crate) fn ingest_carried_stored(
+    db_path: &str,
+    db_passphrase: &str,
+    local_master: &str,
+    local_device: &str,
+    sender: &str,
+    master: &str,
+    rm: &[Removal],
+) -> bool {
+    let Some(incoming) = carried_roster(local_master, sender, master, rm) else { return false };
+    stored_ingest(db_path, db_passphrase, local_master, local_device, sender, incoming, Source::Carried)
+}
+
+/// The partial roster a DM's carried removals stand for, each statement verified alone;
+/// `None` when nothing may be heard from it.
+fn carried_roster(local_master: &str, sender: &str, master: &str, rm: &[Removal]) -> Option<Roster> {
+    if rm.is_empty()
+        || master == local_master
+        || !super::resolver::is_device_of(sender, master)
+        || super::resolver::is_revoked(sender)
+    {
+        return None;
+    }
+    if !roster::carried_fits(rm) {
+        hollow_log!("[HOLLOW-SECURITY] Ignored {} carried removal(s) from {sender}: over the bound", rm.len());
+        return None;
+    }
+    let removals: Vec<Removal> = rm.iter().filter(|r| roster::removal_verifies(master, r)).cloned().collect();
+    hollow_log!("[HOLLOW-ROSTER] A DM from {sender} carried {} of {master}'s removal(s), {} verified", rm.len(), removals.len());
+    (!removals.is_empty()).then(|| Roster { removals, ..Roster::new(master) })
+}
+
+/// Where an ingested roster came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// A whole roster a device delivered.
+    Delivered,
+    /// A friend's roster our own sibling shared.
+    Sibling,
+    /// Removals a DM carried: a part of a roster, never all of it.
+    Carried,
 }
 
 /// [`ingest`] for a friend's roster one of our own devices shared with its friend list,
@@ -717,7 +876,7 @@ pub(crate) async fn ingest_friend_roster_from_sibling(
         return Ingested::default();
     }
     Box::pin(ingest_inner(
-        event_tx, ws_cmd_tx, local_master, local_device, sibling, Some(roster), db_path, db_passphrase, true,
+        event_tx, ws_cmd_tx, local_master, local_device, sibling, Some(roster), db_path, db_passphrase, Source::Sibling,
     ))
     .await
 }
@@ -732,14 +891,16 @@ async fn ingest_inner(
     incoming: Option<Roster>,
     db_path: &str,
     db_passphrase: &str,
-    from_sibling: bool,
+    source: Source,
 ) -> Ingested {
     let Some(incoming) = incoming else { return Ingested::default() };
     if serde_json::to_vec(&incoming).map(|b| b.len()).unwrap_or(usize::MAX) > MAX_ROSTER_BYTES {
         hollow_log!("[HOLLOW-SECURITY] Dropped an oversized roster from {sender}");
         return Ingested::default();
     }
-    let incoming = incoming.verified(now_ms());
+    // A carried part was verified statement by statement: verifying it as a roster
+    // would judge standing against the part alone and drop everything.
+    let incoming = if source == Source::Carried { incoming } else { incoming.verified(now_ms()) };
     let master = incoming.master.clone();
     if master.is_empty() {
         return Ingested::default();
@@ -747,7 +908,7 @@ async fn ingest_inner(
     let folded = {
         let (db, pass) = (db_path.to_string(), db_passphrase.to_string());
         let (from, our_master, our_device) = (sender.to_string(), local_master.to_string(), local_device.to_string());
-        tokio::task::spawn_blocking(move || fold_in(&db, &pass, &incoming, &from, &our_master, &our_device, from_sibling))
+        tokio::task::spawn_blocking(move || fold_in(&db, &pass, &incoming, &from, &our_master, &our_device, source))
             .await
             .ok()
             .flatten()
@@ -833,16 +994,32 @@ pub(crate) fn ingest_stored(
         return false;
     }
     let incoming = incoming.verified(now_ms());
+    stored_ingest(db_path, db_passphrase, local_master, local_device, sender, incoming, Source::Delivered)
+}
+
+fn stored_ingest(
+    db_path: &str,
+    db_passphrase: &str,
+    local_master: &str,
+    local_device: &str,
+    sender: &str,
+    incoming: Roster,
+    source: Source,
+) -> bool {
     let master = incoming.master.clone();
     if master.is_empty() || master == local_master {
         return false;
     }
-    let Some(Folded { prev, now, upgrade_admitted, .. }) =
-        fold_in(db_path, db_passphrase, &incoming, sender, local_master, local_device, false)
+    let Some(Folded { prev, now, upgrade_admitted, changed, .. }) =
+        fold_in(db_path, db_passphrase, &incoming, sender, local_master, local_device, source)
     else {
         return false;
     };
     let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return true };
+    // The running app holds the resolver this process just moved: it re-reads.
+    if changed {
+        let _ = store.mark_roster_dirty(&master, now_ms());
+    }
     if now.members.difference(&prev.members).next().is_some() {
         super::destroy::note_identity_reappeared_stored(&store, &master);
     }
@@ -908,13 +1085,60 @@ fn fold_in(
     sender: &str,
     local_master: &str,
     local_device: &str,
-    from_sibling: bool,
+    source: Source,
+) -> Option<Folded> {
+    let store = MessageStore::open(db_path, db_passphrase).ok()?;
+    // One writer from load to save: two processes (the app, the push fetch) folding at
+    // once would each save over the other, and a lost removal comes back unrevoked.
+    if let Err(e) = store.begin_transaction() {
+        hollow_log!("[HOLLOW-ROSTER] Dropped {}'s roster from {sender}: the store is busy ({e})", incoming.master);
+        return None;
+    }
+    let folded = fold_in_store(&store, incoming, sender, local_master, local_device, source);
+    if folded.is_some() {
+        if let Err(e) = commit(&store, db_path) {
+            hollow_log!("[HOLLOW-ROSTER] Failed to commit a roster fold: {e}");
+            let _ = store.rollback_transaction();
+            return None;
+        }
+    } else {
+        let _ = store.rollback_transaction();
+    }
+    // The process-global resolver follows only what is on disk.
+    if let Some(f) = &folded {
+        follow(&incoming.master, &f.now, f.changed, local_master, local_device);
+    }
+    folded
+}
+
+fn commit(store: &MessageStore, db_path: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if FAIL_COMMIT.lock().unwrap_or_else(|e| e.into_inner()).take_if(|p| p == db_path).is_some() {
+        return Err("COMMIT failed: injected".to_string());
+    }
+    let _ = db_path;
+    store.commit_transaction()
+}
+
+/// The store whose next roster fold fails to commit. Tests only.
+#[cfg(test)]
+static FAIL_COMMIT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn fold_in_store(
+    store: &MessageStore,
+    incoming: &Roster,
+    sender: &str,
+    local_master: &str,
+    local_device: &str,
+    source: Source,
 ) -> Option<Folded> {
     let master = incoming.master.as_str();
-    let store = MessageStore::open(db_path, db_passphrase).ok()?;
-    let stored = load(&store, master);
+    let stored = load(store, master);
     let known = stored.is_some() || store.load_device_list(master).ok().flatten().is_some();
-    if from_sibling {
+    if source == Source::Carried && stored.is_none() {
+        return None;
+    }
+    if source == Source::Sibling {
         let friend = store.get_friend_row(master).ok().flatten().is_some_and(|(status, ..)| status == "accepted");
         if !friend {
             hollow_log!("[HOLLOW-SECURITY] Dropped a roster for {master} from sibling {sender}: not an accepted friend");
@@ -930,44 +1154,45 @@ fn fold_in(
         }
     }
     let merged = if master == local_master {
-        merged_here(&store, stored.as_ref(), &heard_for_own(&store, master, incoming))
+        merged_here(store, stored.as_ref(), &heard_for_own(store, master, incoming))
     } else {
-        merged_here(&store, stored.as_ref(), incoming)
+        merged_here(store, stored.as_ref(), incoming)
     };
-    stamp_pending(&store, &merged);
+    stamp_pending(store, &merged);
     // Members as last saved, not re-folded now: a pending join that matured since
     // then is a member this ingest adds, and contacts are told.
     let prev = stored
         .as_ref()
         .map(|r| RosterState {
             members: store.device_links_for(master).unwrap_or_default(),
-            ..fold(&store, r)
+            ..fold(store, r)
         })
         .unwrap_or_default();
-    let now = fold(&store, &merged);
+    let now = fold(store, &merged);
     let changed = stored.as_ref() != Some(&merged) || prev != now;
 
-    if changed {
-        if let Err(e) = save(&store, &merged, &now, local_master, local_device) {
-            hollow_log!("[HOLLOW-ROSTER] Failed to save the roster for {master}: {e}");
-            return None;
-        }
-    } else if master == local_master {
-        super::resolver::note_roster(master);
-        super::resolver::seed_self(local_master, &now.members.iter().cloned().collect::<Vec<_>>());
-    } else {
-        super::resolver::note_roster(master);
-        super::resolver::update_many(master, now.members.iter().map(String::as_str));
+    if changed && let Err(e) = save_rows(store, &merged, &now, local_master, local_device) {
+        hollow_log!("[HOLLOW-ROSTER] Failed to save the roster for {master}: {e}");
+        return None;
     }
 
     // One of the identity's own devices showed us its roster and we now hold all of it
     // (AR-29): that confirms its own slot, never another device's. A sibling sharing a
     // friend's roster is not one of the friend's devices.
-    if master != local_master && now.is_member(sender) && !super::resolver::is_revoked(sender) {
-        super::roster_reach::stamp(&store, master, sender);
+    // The same holds for our own sibling's view of a contact's roster (B3 (a)). A
+    // carried part is never all of a roster: the DM's digest judges it after.
+    let sibling = sender != local_device
+        && sender != local_master
+        && super::resolver::is_device_of(sender, local_master);
+    // The resolver has not followed this fold yet: a member is never refused once it has.
+    if source != Source::Carried
+        && master != local_master
+        && (now.is_member(sender) || (sibling && !super::resolver::is_revoked(sender)))
+    {
+        super::roster_reach::stamp(store, master, sender);
     }
     for dev in now.members.iter().map(String::as_str).chain(std::iter::once(sender)) {
-        if super::resolver::resolve(dev) == master
+        if now.is_member(dev)
             && let Ok(true) = store.migrate_friend_to_master(dev, master)
         {
             hollow_log!("[HOLLOW-FRIENDS] Re-keyed friend {dev} -> master {master}");
@@ -979,7 +1204,7 @@ fn fold_in(
         vouched_by_a_sibling(&merged, &prev, &now, local_device, &upgrade)
             .into_iter()
             .filter_map(|(device, voucher)| {
-                let at = super::security_alerts::record_own_device_added(&store, master, &device, &voucher)?;
+                let at = super::security_alerts::record_own_device_added(store, master, &device, &voucher)?;
                 Some((device, voucher, at))
             })
             .collect()
@@ -2163,5 +2388,302 @@ mod tests {
         r.add_removal(sign_removal(&bob_dev, &bob_id, LEGACY_BASE, &linked.peer_id(), &[]));
         me.ingest(&bob_dev.peer_id(), &r).await;
         assert!(matches!(verdict(), Verdict::Refuse(_)), "the add of a removed device: {:?}", verdict());
+    }
+
+    /// (detail, read, resolved) of every alert of `kind` about `peer`.
+    fn alert_details(me: &Observer, peer: &str, kind: &str) -> BTreeSet<(String, bool, bool)> {
+        me.store()
+            .get_security_alerts()
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.peer_id == peer && a.kind == kind)
+            .map(|a| (a.detail, a.acknowledged_at.is_some(), a.resolved_at.is_some()))
+            .collect()
+    }
+
+    /// B3 (d). A contact's "added a new device" warning is marked removed once that
+    /// device leaves, live and through the push fetch's store-only ingest, and stays until
+    /// the person reads it; one already read keeps its read mark; a member's warning is
+    /// untouched; a device a recovery brings back warns again.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn g13c_a_contacts_new_device_alert_is_marked_removed_and_stays() {
+        use super::super::security_alerts::KIND_NEW_DEVICE;
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (bob, bob_dev, bob_rec) = (kp(0x60), kp(0x61), kp(0x66));
+        let [gone, dismissed, stays, fetched] = [kp(0x62), kp(0x63), kp(0x64), kp(0x65)];
+        let bob_id = bob.peer_id();
+        let mut r = Roster::legacy_for_test(&bob, &[&bob_dev]);
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        for d in [&gone, &dismissed, &stays, &fetched] {
+            r.add_consent(sign_consent(d, &bob_id));
+            r.add_vouch(sign_vouch(&bob_dev, &bob_id, LEGACY_BASE, &d.peer_id()));
+        }
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        let ids = [&gone, &dismissed, &stays, &fetched].map(|d| d.peer_id());
+        assert_eq!(
+            alert_details(&me, &bob_id, KIND_NEW_DEVICE),
+            ids.iter().map(|d| (d.clone(), false, false)).collect(),
+            "precondition: each new device warned once",
+        );
+        me.store().acknowledge_security_alert(&format!("{KIND_NEW_DEVICE}:{bob_id}:{}", ids[1])).unwrap();
+
+        for d in [&gone, &dismissed] {
+            r.add_removal(sign_removal(&bob_dev, &bob_id, LEGACY_BASE, &d.peer_id(), &[]));
+        }
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        assert_eq!(
+            alert_details(&me, &bob_id, KIND_NEW_DEVICE),
+            BTreeSet::from([
+                (ids[0].clone(), false, true),
+                (ids[1].clone(), true, true),
+                (ids[2].clone(), false, false),
+                (ids[3].clone(), false, false),
+            ]),
+            "a removed device's warning was not marked, went away, or was read for the person",
+        );
+
+        r.add_removal(sign_removal(&bob_dev, &bob_id, LEGACY_BASE, &ids[3], &[]));
+        assert!(ingest_stored(&me.db, &me.pass, &me.master.peer_id(), &me.device.peer_id(), &bob_dev.peer_id(), r.clone()));
+        assert!(
+            alert_details(&me, &bob_id, KIND_NEW_DEVICE).contains(&(ids[3].clone(), false, true)),
+            "the push fetch left a removed device's warning unmarked",
+        );
+
+        // Bob's phrase starts a base that keeps the device he removed: it warns again.
+        r.add_phrase_statement(
+            &crate::identity::roster::r_pub_of(&bob_rec),
+            Some(crate::identity::roster::sign_recovery(&bob, &bob_rec, now_ms(), &[bob_dev.peer_id(), ids[0].clone()], false)),
+            None,
+        )
+        .unwrap();
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        assert!(me.state_of(&bob_id).is_member(&ids[0]), "precondition: the recovery brought it back");
+        assert!(
+            alert_details(&me, &bob_id, KIND_NEW_DEVICE).contains(&(ids[0].clone(), false, false)),
+            "a device back after its removal did not warn again",
+        );
+    }
+
+    /// B3 (d). "A sibling added a device": once a SIBLING removes that device the alert
+    /// is marked removed and stays unread (a stolen device may add one and remove it
+    /// again); once THIS device removes it, the person acted here and it is read.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn g13c_an_own_device_alert_is_marked_removed_and_read_only_here() {
+        use super::super::security_alerts::KIND_OWN_DEVICE_ADDED;
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let recovery = kp(0x03);
+        write_bootstrap(&me.dir(), &Roster::genesis(&me.master, &recovery, &me.device, now_ms())).unwrap();
+        me.own();
+        let (sibling, by_sibling, by_me) = (kp(0x04), kp(0x05), kp(0x06));
+        let own = me.master.peer_id();
+        vouch(&me.master, &me.device, &sibling.peer_id(), &me.db, &me.pass).unwrap();
+        let mut roster = own_of(&me).0;
+        roster.add_consent(sign_consent(&sibling, &own));
+        for d in [&by_sibling, &by_me] {
+            roster.add_vouch(sign_vouch(&sibling, &own, &roster.base(), &d.peer_id()));
+            roster.add_consent(sign_consent(d, &own));
+        }
+        me.ingest(&sibling.peer_id(), &roster).await;
+        let detail = |d: &NativeKeypair| format!("{}:{}", d.peer_id(), sibling.peer_id());
+        assert_eq!(
+            alert_details(&me, &own, KIND_OWN_DEVICE_ADDED),
+            BTreeSet::from([(detail(&by_sibling), false, false), (detail(&by_me), false, false)]),
+            "precondition: both added devices were news",
+        );
+
+        roster = own_of(&me).0;
+        roster.add_removal(sign_removal(&sibling, &own, &roster.base(), &by_sibling.peer_id(), &[]));
+        me.ingest(&sibling.peer_id(), &roster).await;
+        assert_eq!(
+            alert_details(&me, &own, KIND_OWN_DEVICE_ADDED),
+            BTreeSet::from([(detail(&by_sibling), false, true), (detail(&by_me), false, false)]),
+            "a sibling's removal erased, read or left unmarked the alert about the device it removed",
+        );
+
+        remove(&me.master, &me.device, &by_me.peer_id(), &me.db, &me.pass).unwrap();
+        assert_eq!(
+            alert_details(&me, &own, KIND_OWN_DEVICE_ADDED),
+            BTreeSet::from([(detail(&by_sibling), false, true), (detail(&by_me), true, true)]),
+            "this device's own removal left the alert about the device it removed unread",
+        );
+    }
+
+    impl Observer {
+        async fn carry(&self, sender: &NativeKeypair, master: &str, rm: &[Removal]) -> Ingested {
+            ingest_carried(
+                &self.events, &self.ws, &self.master.peer_id(), &self.device.peer_id(),
+                &sender.peer_id(), master, rm, &self.db, &self.pass,
+            )
+            .await
+        }
+    }
+
+    /// F2. Removals a DM carried are judged as any removal: each verifies alone for the
+    /// DM's identity, only from a current member of a roster we already hold, never our
+    /// own, never over the bound; the signer must stand in the merged roster; a part
+    /// never confirms its sender's view of the roster.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn g13c_a_carried_removal_is_judged_as_any_removal() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        me.own();
+        let (bob, bob_dev, dev2, linked, junk) = (kp(0x60), kp(0x61), kp(0x62), kp(0x63), kp(0x64));
+        let bob_id = bob.peer_id();
+        let mut r = Roster::legacy_for_test(&bob, &[&bob_dev, &dev2]);
+        r.add_consent(sign_consent(&linked, &bob_id));
+        r.add_vouch(sign_vouch(&bob_dev, &bob_id, LEGACY_BASE, &linked.peer_id()));
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        assert!(me.state_of(&bob_id).is_member(&linked.peer_id()), "precondition");
+        let _ = me.store().unconfirm_roster(&bob_id, &bob_dev.peer_id(), 1);
+        let of_linked = |by: &NativeKeypair, master: &str| sign_removal(by, master, LEGACY_BASE, &linked.peer_id(), &[]);
+        let me_id = me.master.peer_id();
+
+        // Refused before any fold.
+        let nine: Vec<Removal> = (0..9).map(|i| sign_removal(&bob_dev, &bob_id, LEGACY_BASE, &kp(0x70 + i).peer_id(), &[])).collect();
+        assert!(carried_roster(&me_id, &bob_dev.peer_id(), &bob_id, &nine).is_none(), "a carry over the bound");
+        assert!(carried_roster(&me_id, &junk.peer_id(), &bob_id, &[of_linked(&bob_dev, &bob_id)]).is_none(), "a sender not of the identity");
+        let own_dev = me.device.peer_id();
+        assert!(super::super::resolver::is_device_of(&own_dev, &me_id), "precondition: our own device is ours");
+        assert!(carried_roster(&me_id, &own_dev, &me_id, &[of_linked(&bob_dev, &me_id)]).is_none(), "our own roster");
+        assert!(carried_roster(&me_id, &bob_dev.peer_id(), &bob_id, &[of_linked(&bob_dev, &kp(0x65).peer_id())]).is_none(), "a statement for another identity");
+
+        // Verifies alone, but its signer stands nowhere in Bob's roster.
+        me.carry(&bob_dev, &bob_id, &[of_linked(&junk, &bob_id)]).await;
+        assert!(me.state_of(&bob_id).is_member(&linked.peer_id()), "a removal from a signer without standing counted");
+
+        // The real one.
+        let out = me.carry(&bob_dev, &bob_id, &[of_linked(&bob_dev, &bob_id)]).await;
+        assert_eq!(out.newly_revoked, vec![linked.peer_id()], "a counting carried removal did not revoke");
+        assert!(super::super::resolver::is_revoked(&linked.peer_id()));
+        assert_eq!(
+            me.store().roster_confirmed_at(&bob_id, &bob_dev.peer_id()),
+            Some(0),
+            "a part of a roster confirmed its sender's view of all of it",
+        );
+
+        // A revoked sender is heard no more.
+        assert!(carried_roster(&me_id, &linked.peer_id(), &bob_id, &[of_linked(&bob_dev, &bob_id)]).is_none(), "a removed sender");
+
+        // Nothing gives first sight, not even of an identity whose only row is one a
+        // roster cannot read (a 0.11 device list): its devices are not ours to drop.
+        let (carol, carol_dev) = (kp(0x66), kp(0x67));
+        let carol_id = carol.peer_id();
+        let legacy = super::super::types::SignedDeviceList {
+            master_peer_id: carol_id.clone(),
+            devices: vec![carol_dev.peer_id()],
+            ..Default::default()
+        };
+        me.store().save_device_list(&carol_id, &serde_json::to_string(&legacy).unwrap(), 0, &[carol_dev.peer_id()], 1).unwrap();
+        super::super::resolver::update_many(&carol_id, [carol_dev.peer_id().as_str()]);
+        assert!(load(&me.store(), &carol_id).is_none() && me.store().load_device_list(&carol_id).unwrap().is_some(), "precondition");
+        me.carry(&carol_dev, &carol_id, &[sign_removal(&carol_dev, &carol_id, LEGACY_BASE, &kp(0x68).peer_id(), &[])]).await;
+        assert!(load(&me.store(), &carol_id).is_none(), "a carried part gave first sight of an identity");
+        assert!(super::super::resolver::is_device_of(&carol_dev.peer_id(), &carol_id), "a carried part dropped a known device");
+    }
+
+    /// F2, HOL-SEC-080 through a carry: a removed voucher keeps only the devices EVERY
+    /// removal of it keeps, so a carried removal keeping fewer narrows what one we held kept.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn g13c_a_carried_removal_keeps_only_what_every_removal_keeps() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        me.own();
+        let (bob, d1, d2, v, w) = (kp(0x60), kp(0x61), kp(0x62), kp(0x63), kp(0x64));
+        let bob_id = bob.peer_id();
+        let mut r = Roster::legacy_for_test(&bob, &[&d1, &d2]);
+        for d in [&v, &w] {
+            r.add_consent(sign_consent(d, &bob_id));
+        }
+        r.add_vouch(sign_vouch(&d2, &bob_id, LEGACY_BASE, &v.peer_id()));
+        r.add_vouch(sign_vouch(&v, &bob_id, LEGACY_BASE, &w.peer_id()));
+        r.add_removal(sign_removal(&d1, &bob_id, LEGACY_BASE, &v.peer_id(), &[w.peer_id()]));
+        me.ingest(&d1.peer_id(), &r).await;
+        assert!(me.state_of(&bob_id).is_member(&w.peer_id()), "precondition: the one removal we hold keeps w");
+        me.carry(&d2, &bob_id, &[sign_removal(&d2, &bob_id, LEGACY_BASE, &v.peer_id(), &[])]).await;
+        assert!(!me.state_of(&bob_id).is_member(&w.peer_id()), "HOL-SEC-080: w kept by one removal of v only");
+    }
+
+    /// F2, the push fetch twin: the store half keeps the removal and tells the running
+    /// app to re-read that identity.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn g13c_the_push_fetch_keeps_a_carried_removal_and_marks_it_for_the_app() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        me.own();
+        let (bob, bob_dev, linked) = (kp(0x60), kp(0x61), kp(0x63));
+        let bob_id = bob.peer_id();
+        let mut r = Roster::legacy_for_test(&bob, &[&bob_dev]);
+        r.add_consent(sign_consent(&linked, &bob_id));
+        r.add_vouch(sign_vouch(&bob_dev, &bob_id, LEGACY_BASE, &linked.peer_id()));
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        let rm = [sign_removal(&bob_dev, &bob_id, LEGACY_BASE, &linked.peer_id(), &[])];
+        assert!(ingest_carried_stored(&me.db, &me.pass, &me.master.peer_id(), &me.device.peer_id(), &bob_dev.peer_id(), &bob_id, &rm));
+        assert!(me.store().get_all_revoked_devices().unwrap().contains(&linked.peer_id()), "the fetch lost the removal");
+        assert_eq!(me.store().take_roster_dirty(None), vec![bob_id.clone()], "the running app was not told to re-read");
+    }
+
+    /// Review LOW-4. A fold whose COMMIT fails leaves the process-global resolver as it
+    /// was: memory never runs ahead of what is on disk.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn g13c_a_fold_that_fails_to_commit_moves_no_resolver() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        me.own();
+        let (bob, bob_dev, linked) = (kp(0x60), kp(0x61), kp(0x63));
+        let bob_id = bob.peer_id();
+        let mut r = Roster::legacy_for_test(&bob, &[&bob_dev]);
+        r.add_consent(sign_consent(&linked, &bob_id));
+        r.add_vouch(sign_vouch(&bob_dev, &bob_id, LEGACY_BASE, &linked.peer_id()));
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        assert!(super::super::resolver::is_device_of(&linked.peer_id(), &bob_id), "precondition");
+        let rm = [sign_removal(&bob_dev, &bob_id, LEGACY_BASE, &linked.peer_id(), &[])];
+
+        *FAIL_COMMIT.lock().unwrap() = Some(me.db.clone());
+        let (me_master, me_dev) = (me.master.peer_id(), me.device.peer_id());
+        assert!(!ingest_carried_stored(&me.db, &me.pass, &me_master, &me_dev, &bob_dev.peer_id(), &bob_id, &rm));
+        assert!(
+            super::super::resolver::is_device_of(&linked.peer_id(), &bob_id) && !super::super::resolver::is_revoked(&linked.peer_id()),
+            "a fold that never reached the disk moved the resolver",
+        );
+        assert!(!me.store().get_all_revoked_devices().unwrap().contains(&linked.peer_id()), "precondition: rolled back");
+
+        assert!(ingest_carried_stored(&me.db, &me.pass, &me_master, &me_dev, &bob_dev.peer_id(), &bob_id, &rm));
+        assert!(super::super::resolver::is_revoked(&linked.peer_id()), "control: the same fold lands once it commits");
+    }
+
+    /// F2. Our own removal is dated when this device learns it, not at its next DM, so
+    /// a contact that confirmed our roster in between is judged against the right time.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn g13c_our_removal_is_dated_when_we_learn_it() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let recovery = kp(0x03);
+        write_bootstrap(&me.dir(), &Roster::genesis(&me.master, &recovery, &me.device, now_ms())).unwrap();
+        me.own();
+        let other = kp(0x04);
+        vouch(&me.master, &me.device, &other.peer_id(), &me.db, &me.pass).unwrap();
+        let mut roster = own_of(&me).0;
+        roster.add_consent(sign_consent(&other, &me.master.peer_id()));
+        me.ingest(&other.peer_id(), &roster).await;
+        let before = now_ms();
+        let (_, state) = remove(&me.master, &me.device, &other.peer_id(), &me.db, &me.pass).unwrap();
+        let later = before + 60_000;
+        let since = me
+            .store()
+            .removal_carried_since(&me.master.peer_id(), &state.base, &[other.peer_id()], later)
+            .unwrap();
+        assert!(
+            since.get(&other.peer_id()).is_some_and(|at| *at >= before && *at < later),
+            "our removal was not dated when we made it: {since:?}",
+        );
     }
 }

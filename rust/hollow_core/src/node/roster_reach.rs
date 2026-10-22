@@ -12,10 +12,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::identity::roster::{self, Roster};
+use crate::identity::roster::{self, Removal, Roster};
 use crate::storage::MessageStore;
 
 use super::olm_lane::{self, NoSession};
+use super::roster_book::Reconciled;
 use super::social::Audience;
 use super::types::{HavenMessage, NodeCommand, RosterDigests, WsCmdTx, WsRoomPeers};
 
@@ -31,6 +32,8 @@ pub(crate) const ROSTER_ANSWER_GAP_MS: i64 = 60 * 1000;
 /// How long a mismatch ask or its answer waits, so its size and time do not pin it to
 /// the DM that caused it. An ask a DM waits for never waits.
 pub(crate) const MISMATCH_JITTER_MS: (u64, u64) = (1_000, 30_000);
+/// A removal rides our DMs at most this long after we learned it, whoever confirmed it.
+pub(crate) const CARRY_MAX_AGE_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 /// Roster asks the push fetch notes for the node at most.
 pub(crate) const ASKS_DUE_CAP: usize = 256;
 /// A refresh asks at most this many of the identity's devices at once.
@@ -138,12 +141,119 @@ pub(crate) fn judge(held: Option<&str>, wire: Option<&str>) -> Seen {
     }
 }
 
-/// The digests a DM to `recipient_master` carries.
-pub(crate) fn for_dm(local_master: &str, recipient_master: &str, db_path: &str, db_passphrase: &str) -> Option<RosterDigests> {
+/// The digests a DM to `recipient_master` carries, and our recent removals when our
+/// profile audience for the recipient may hear our roster at all (as `may_answer`).
+/// `audience` is asked only when there is something to carry.
+pub(crate) fn for_dm(
+    local_master: &str,
+    recipient_master: &str,
+    audience: impl FnOnce(&MessageStore) -> Audience,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<RosterDigests> {
     let store = MessageStore::open(db_path, db_passphrase).ok()?;
-    let own = held_digest(&store, local_master);
+    let own_roster = store.load_roster(local_master).ok().flatten().filter(|r| r.master == local_master);
+    let own = own_roster.as_ref().map(Roster::digest);
     let peer = (recipient_master != local_master).then(|| held_digest(&store, recipient_master)).flatten();
-    (own.is_some() || peer.is_some()).then_some(RosterDigests { own, peer })
+    let rm = match (&own_roster, &own) {
+        (Some(r), Some(d)) if recipient_master != local_master => {
+            let rm = carried_for(&store, r, d, recipient_master);
+            if rm.is_empty() || audience(&store) == Audience::None { Vec::new() } else { rm }
+        }
+        _ => Vec::new(),
+    };
+    (own.is_some() || peer.is_some()).then_some(RosterDigests { own, peer, rm })
+}
+
+/// Our counting removals a DM to `contact` carries (F2): those we learned after the
+/// newest DM of EACH of its devices showed it held our roster (one device that caught up
+/// says nothing of a sibling asleep), newest first, none older than
+/// [`CARRY_MAX_AGE_MS`], as many as [`roster::carried_fits`] allows. Every counting
+/// removal of one device travels together, so the HOL-SEC-080 intersection sees them.
+/// Reads only, but for a removal no `save` dated (stored before 0.13).
+fn carried_for(store: &MessageStore, own: &Roster, own_digest: &str, contact: &str) -> Vec<Removal> {
+    let confirms = store.carry_confirms(contact);
+    let mut devices: Vec<String> = store.device_links_for(contact).unwrap_or_default().into_iter().collect();
+    if devices.is_empty() {
+        devices = confirms.keys().cloned().collect();
+    }
+    let held: Vec<Option<&(String, i64)>> = devices.iter().map(|d| confirms.get(d)).collect();
+    if !held.is_empty() && held.iter().all(|c| c.is_some_and(|(digest, _)| digest == own_digest)) {
+        return Vec::new();
+    }
+    let groups = counting_groups(store, own, own_digest);
+    if groups.is_empty() {
+        return Vec::new();
+    }
+    let confirmed_at = held.iter().map(|c| c.map_or(i64::MIN, |(_, at)| *at)).min().unwrap_or(i64::MIN);
+    let now = super::roster_book::now_ms();
+    let base = own.base();
+    let mut since = store.removal_carried_at(&own.master, &base).unwrap_or_default();
+    let undated: Vec<String> = groups.iter().map(|(d, _)| d).filter(|d| !since.contains_key(*d)).cloned().collect();
+    if !undated.is_empty() && store.stamp_removal_carried(&own.master, &base, &undated, now).is_ok() {
+        since.extend(undated.into_iter().map(|d| (d, now)));
+    }
+    let mut picked: Vec<(i64, &String, &Vec<Removal>)> = groups
+        .iter()
+        .filter_map(|(device, removals)| {
+            let at = *since.get(device)?;
+            (at > confirmed_at && now.saturating_sub(at) < CARRY_MAX_AGE_MS).then_some((at, device, removals))
+        })
+        .collect();
+    picked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    let mut out = Vec::new();
+    'fill: for (_, _, removals) in picked {
+        for r in removals {
+            out.push(r.clone());
+            if !roster::carried_fits(&out) {
+                out.pop();
+                break 'fill;
+            }
+        }
+    }
+    out
+}
+
+type Groups = Vec<(String, Vec<Removal>)>;
+
+/// Counting removals by removed device, per (master, raw digest, hour): the fold
+/// behind them runs once per roster change, not once per DM.
+type GroupCache = HashMap<String, (String, i64, Groups)>;
+static GROUPS: OnceLock<Mutex<GroupCache>> = OnceLock::new();
+
+fn counting_groups(store: &MessageStore, own: &Roster, own_digest: &str) -> Groups {
+    let hour = super::roster_book::now_ms() / 3_600_000;
+    let cache = || GROUPS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, _, groups)) = cache().get(&own.master).filter(|(d, h, _)| d == own_digest && *h == hour) {
+        return groups.clone();
+    }
+    let mut groups: Groups = Vec::new();
+    for r in super::roster_book::counting_removals(store, own) {
+        match groups.iter_mut().find(|(device, _)| *device == r.device) {
+            Some((_, removals)) => removals.push(r),
+            None => groups.push((r.device.clone(), vec![r])),
+        }
+    }
+    cache().insert(own.master.clone(), (own_digest.to_string(), hour, groups.clone()));
+    groups
+}
+
+/// Whether a DM's carried removals hold any statement the roster stored for `master`
+/// lacks. Read raw (saved rosters were verified): nothing to fold, nothing re-verified.
+/// A master we hold no roster for is never news (no first sight from a part).
+pub(crate) fn carried_news(store: &MessageStore, master: &str, rm: &[Removal]) -> bool {
+    // Over the count bound the field is ignored whole, before any scan.
+    if rm.len() > roster::MAX_CARRIED_REMOVALS {
+        hollow_log!("[HOLLOW-SECURITY] Ignored {} carried removal(s) for {master}: over the bound", rm.len());
+        return false;
+    }
+    !rm.is_empty()
+        && store
+            .load_roster(master)
+            .ok()
+            .flatten()
+            .filter(|held| held.master == master)
+            .is_some_and(|held| rm.iter().any(|r| !held.removals.contains(r)))
 }
 
 /// Whether the DM `mid` is one we have not read before, judged before it is stored. A
@@ -245,10 +355,27 @@ pub(crate) fn on_dm(
         }
         _ => {}
     }
-    if peer_subject != own_subject
-        && judge(held_digest(store, peer_subject).as_deref(), rd.peer.as_deref()) == Seen::Differs
-    {
-        mismatch_ask(ws_cmd_tx, store, local_master, local_device, peer_subject, sender, now, audience);
+    if peer_subject == own_subject {
+        return;
+    }
+    // On an echo, `peer` is our sibling's view of the friend's roster: a sibling that
+    // holds one we lack holds the next DM to the friend like a friend device would (B3 (a)).
+    let held_peer = held_digest(store, peer_subject);
+    match judge(held_peer.as_deref(), rd.peer.as_deref()) {
+        Seen::Same if is_own_device => stamp_from_dm(store, peer_subject, sender, sent_ms),
+        // The contact holds our roster as we do now: our DMs to it carry nothing older.
+        Seen::Same => {
+            if let Some(digest) = held_peer {
+                let _ = store.set_carry_confirm(own_subject, sender, &digest, now);
+            }
+        }
+        Seen::Differs => {
+            if is_own_device {
+                unconfirm(store, peer_subject, sender, sent_ms);
+            }
+            mismatch_ask(ws_cmd_tx, store, local_master, local_device, peer_subject, sender, now, audience);
+        }
+        _ => {}
     }
 }
 
@@ -339,8 +466,36 @@ pub(crate) fn fetch_on_dm(
         }
         Seen::Unknown => {}
     }
-    if judge(held_digest(store, local_master).as_deref(), rd.peer.as_deref()) == Seen::Differs {
-        let _ = store.add_roster_ask_due(local_master, sender, now, ASKS_DUE_CAP);
+    let held_own = held_digest(store, local_master);
+    match judge(held_own.as_deref(), rd.peer.as_deref()) {
+        Seen::Differs => {
+            let _ = store.add_roster_ask_due(local_master, sender, now, ASKS_DUE_CAP);
+        }
+        Seen::Same => {
+            if let Some(digest) = held_own {
+                let _ = store.set_carry_confirm(convo, sender, &digest, now);
+            }
+        }
+        Seen::Unknown => {}
+    }
+}
+
+/// The removals a DM the push fetch read carried (F2): kept as a live DM's are, store
+/// half only, before the DM's digests are judged.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fetch_carried(
+    store: &MessageStore,
+    db_path: &str,
+    db_passphrase: &str,
+    local_master: &str,
+    local_device: &str,
+    sender: &str,
+    convo: &str,
+    rd: Option<&RosterDigests>,
+) {
+    let Some(rd) = rd else { return };
+    if carried_news(store, convo, &rd.rm) {
+        super::roster_book::ingest_carried_stored(db_path, db_passphrase, local_master, local_device, sender, convo, &rd.rm);
     }
 }
 
@@ -366,7 +521,10 @@ pub(crate) fn fetch_roster(
     }
 }
 
-/// Send the asks the push fetch noted, under the same rules as any mismatch ask.
+/// On every relay session (fresh or resumed): follow the contact rosters another
+/// process changed in the store, then send the asks the push fetch noted, under the
+/// same rules as any mismatch ask. Returns what was followed, for the caller to drop
+/// the removed devices' sessions and leaves and to tell the app.
 pub(crate) fn send_due_asks(
     ws_cmd_tx: &WsCmdTx,
     local_master: &str,
@@ -374,12 +532,14 @@ pub(crate) fn send_due_asks(
     db_path: &str,
     db_passphrase: &str,
     audience: &dyn Fn(&str) -> Audience,
-) {
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
+) -> Reconciled {
+    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return Reconciled::default() };
+    let revoked = super::roster_book::reconcile_dirty(&store, None, local_master, local_device);
     let now = super::roster_book::now_ms();
     for (subject, device) in store.take_roster_asks_due() {
         mismatch_ask(ws_cmd_tx, &store, local_master, local_device, &subject, &device, now, audience);
     }
+    revoked
 }
 
 // -- The hold: a DM to a roster gone stale waits for the devices asked --
@@ -397,6 +557,8 @@ struct Hold {
     /// Set while the relay has not listed the DM room this session: the asks wait for
     /// the listing, and the hold's clock with them.
     unplaced: Option<Unplaced>,
+    /// What following the store did before the hold, for the release to act on.
+    reconciled: Reconciled,
 }
 
 struct Unplaced {
@@ -449,10 +611,11 @@ pub(crate) enum Gate {
 }
 
 /// Every DM fan-out to `master` asks this first. A DM already held for `master` queues
-/// behind it. Else each target device of `master` whose slot ran out is asked for the
-/// roster (once per [`ROSTER_REFRESH_AFTER_MS`]); while one of those is online the DM
-/// waits for its answer, at most [`DM_HOLD_MAX_MS`], and `NodeCommand::ReleaseHeldDms`
-/// sends it. A device never stamped starts its clock and is not asked.
+/// behind it. Else each target device of `master` whose slot ran out, and each sibling
+/// of ours whose echo showed a roster of `master` we lack, is asked for the roster (once
+/// per [`ROSTER_REFRESH_AFTER_MS`]); while one of those is online the DM waits for its
+/// answer, at most [`DM_HOLD_MAX_MS`], and `NodeCommand::ReleaseHeldDms` sends it. A
+/// device never stamped starts its clock and is not asked.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hold_for_stale_roster(
     ws_cmd_tx: &WsCmdTx,
@@ -472,18 +635,21 @@ pub(crate) fn hold_for_stale_roster(
         return Gate::Held;
     }
     let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return Gate::Go };
+    let own_master = super::resolver::resolve(local_device);
+    // Another process (the push fetch, the iOS NSE) stored a roster change this
+    // process's resolver has not seen: follow it, and the release sends the DM again on
+    // fresh targets once the removed devices' sessions are gone.
+    if store.roster_dirty(master) {
+        let reconciled = super::roster_book::reconcile_dirty(&store, Some(master), &own_master, local_device);
+        hollow_log!("[HOLLOW-ROSTER] {master}'s stored roster moved under us: the DM goes to its members as stored");
+        holds().insert(key.clone(), Hold { waiting: HashSet::new(), queue: vec![dm()], unplaced: None, reconciled });
+        run_hold(key, master, &own_master, cmd_tx);
+        return Gate::Held;
+    }
     let now = super::roster_book::now_ms();
-    let slots = store.roster_confirm_slots(master);
-    let mut asks = Vec::new();
-    for device in targets {
-        if !super::resolver::is_device_of(device, master) || super::resolver::is_revoked(device) {
-            continue;
-        }
-        match slot(slots.get(device).copied(), now) {
-            Slot::New => stamp(&store, master, device),
-            Slot::Stale { ask_due: true } if asks.len() < MAX_REFRESH_ASKS => asks.push(device.clone()),
-            _ => {}
-        }
+    let (asks, new) = stale_asks(&store.roster_confirm_slots(master), targets, master, &own_master, local_device, now);
+    for device in &new {
+        stamp(&store, master, device);
     }
     if asks.is_empty() {
         return Gate::Go;
@@ -495,7 +661,7 @@ pub(crate) fn hold_for_stale_roster(
         hollow_log!("[HOLLOW-ROSTER] {master}'s roster is unconfirmed and the DM room is not listed yet: holding the DM");
         let id = next_wait_id();
         let unplaced = Unplaced { id, dm_room: dm_room.to_string(), asks };
-        holds().insert(key.clone(), Hold { waiting: HashSet::new(), queue: vec![dm()], unplaced: Some(unplaced) });
+        holds().insert(key.clone(), Hold { waiting: HashSet::new(), queue: vec![dm()], unplaced: Some(unplaced), reconciled: Reconciled::default() });
         let epoch = sessions().get(local_device).filter(|s| s.up).map(|s| s.epoch);
         if let Some(epoch) = epoch {
             arm_backstop(ws_cmd_tx, cmd_tx, local_device, key, id, epoch, db_path, db_passphrase);
@@ -508,9 +674,57 @@ pub(crate) fn hold_for_stale_roster(
     if waiting.is_empty() {
         return Gate::Go;
     }
-    holds().insert(key.clone(), Hold { waiting, queue: vec![dm()], unplaced: None });
-    run_hold(key, master, cmd_tx);
+    holds().insert(key.clone(), Hold { waiting, queue: vec![dm()], unplaced: None, reconciled: Reconciled::default() });
+    run_hold(key, master, &own_master, cmd_tx);
     Gate::Held
+}
+
+/// Which devices a DM to `master` waits on, from `slots` (our confirmation rows for
+/// `master`, keyed by device): each target of `master` whose slot ran out, then each
+/// sibling of ours whose echo voided its view of `master`. Also the targets never
+/// stamped, whose clock starts now. A row is a sibling's only while the device is ours.
+fn stale_asks(
+    slots: &HashMap<String, (i64, Option<i64>)>,
+    targets: &[String],
+    master: &str,
+    own_master: &str,
+    local_device: &str,
+    now: i64,
+) -> (Vec<String>, Vec<String>) {
+    let (mut asks, mut new) = (Vec::new(), Vec::new());
+    for device in targets {
+        if !super::resolver::is_device_of(device, master) || super::resolver::is_revoked(device) {
+            continue;
+        }
+        match slot(slots.get(device).copied(), now) {
+            Slot::New => new.push(device.clone()),
+            Slot::Stale { ask_due: true } if asks.len() < MAX_REFRESH_ASKS => asks.push(device.clone()),
+            _ => {}
+        }
+    }
+    // A sibling's slot only ever holds once its echo voided it: one aged out says nothing.
+    let mut siblings: Vec<&String> = slots
+        .iter()
+        .filter(|(device, stamps)| {
+            device.as_str() != local_device
+                && is_sibling(device, own_master)
+                && stamps.0 == 0
+                && slot(Some(**stamps), now) == Slot::Stale { ask_due: true }
+        })
+        .map(|(device, _)| device)
+        .collect();
+    siblings.sort();
+    for device in siblings {
+        if asks.len() < MAX_REFRESH_ASKS && !asks.contains(device) {
+            asks.push(device.clone());
+        }
+    }
+    (asks, new)
+}
+
+/// Whether `device` is another device of ours. Never a bare master id (G1).
+fn is_sibling(device: &str, own_master: &str) -> bool {
+    super::resolver::is_device_of(device, own_master) && !super::resolver::is_revoked(device)
 }
 
 /// Ask each of `asks` for `master`'s roster for a waiting DM. Each is marked asked
@@ -523,7 +737,9 @@ fn send_asks(ws_cmd_tx: &WsCmdTx, store: &MessageStore, master: &str, asks: &[St
     let Some(roster) = super::roster_book::load(store, master) else { return };
     let msg = HavenMessage::RosterSync { roster, reply: true, waiting: true };
     for device in asks {
-        olm_lane::carry(ws_cmd_tx, device, Some(dm_room), &msg, NoSession::Queue);
+        // Our own sibling routes like any sibling send, not by the friend's DM room.
+        let room = super::resolver::is_device_of(device, master).then_some(dm_room);
+        olm_lane::carry(ws_cmd_tx, device, room, &msg, NoSession::Queue);
     }
 }
 
@@ -537,13 +753,16 @@ fn online(ws_room_peers: &WsRoomPeers, asks: &[String]) -> HashSet<String> {
 
 /// Release the hold `key` once every device it waits on answered, or after
 /// [`DM_HOLD_MAX_MS`].
-fn run_hold(key: String, master: &str, cmd_tx: &tokio::sync::mpsc::Sender<NodeCommand>) {
-    let (cmd_tx, master) = (cmd_tx.clone(), master.to_string());
+fn run_hold(key: String, master: &str, own_master: &str, cmd_tx: &tokio::sync::mpsc::Sender<NodeCommand>) {
+    let (cmd_tx, master, own_master) = (cmd_tx.clone(), master.to_string(), own_master.to_string());
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(DM_HOLD_MAX_MS as u64);
         loop {
             let answered = holds().get_mut(&key).is_none_or(|hold| {
-                hold.waiting.retain(|d| super::resolver::is_device_of(d, &master) && !super::resolver::is_revoked(d));
+                hold.waiting.retain(|d| {
+                    (super::resolver::is_device_of(d, &master) || super::resolver::is_device_of(d, &own_master))
+                        && !super::resolver::is_revoked(d)
+                });
                 hold.waiting.is_empty()
             });
             if answered || tokio::time::Instant::now() >= deadline {
@@ -671,7 +890,7 @@ pub(crate) fn on_room_listed(
         if let Some(hold) = holds().get_mut(&key) {
             hold.waiting = waiting;
         }
-        run_hold(key, &master, cmd_tx);
+        run_hold(key, &master, &super::resolver::resolve(local_device), cmd_tx);
     }
 }
 
@@ -683,9 +902,13 @@ pub(crate) fn note_answer(local_device: &str, device: &str, master: &str) {
     }
 }
 
-/// The DMs held for `master`, in send order; the hold ends.
-pub(crate) fn release(local_device: &str, master: &str) -> Vec<HeldDm> {
-    holds().remove(&format!("{local_device}|{master}")).map(|hold| hold.queue).unwrap_or_default()
+/// The DMs held for `master`, in send order, and what following the store did before
+/// them; the hold ends.
+pub(crate) fn release(local_device: &str, master: &str) -> (Vec<HeldDm>, Reconciled) {
+    holds()
+        .remove(&format!("{local_device}|{master}"))
+        .map(|hold| (hold.queue, hold.reconciled))
+        .unwrap_or_default()
 }
 
 /// Whether the relay listed `room` to `local_device` this session. Tests only.
@@ -708,6 +931,9 @@ pub(crate) fn clear_for_test() {
     }
     holds().clear();
     sessions().clear();
+    if let Ok(mut groups) = GROUPS.get_or_init(Default::default).lock() {
+        groups.clear();
+    }
     if let Ok(mut j) = TEST_JITTER.lock() {
         *j = None;
     }
@@ -871,6 +1097,7 @@ mod tests {
         let differs = |own: bool| RosterDigests {
             own: own.then(|| "ab".repeat(16)),
             peer: (!own).then(|| "ab".repeat(16)),
+            rm: Vec::new(),
         };
         let none = |_: &str| Audience::None;
         let asked = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<super::super::ws_client::WsCommand>| {
@@ -916,7 +1143,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let later = || tokio::time::sleep(Duration::from_millis(jitter_range().1 + 300));
 
-        let rd = RosterDigests { own: Some("ab".repeat(16)), peer: None };
+        let rd = RosterDigests { own: Some("ab".repeat(16)), peer: None, rm: Vec::new() };
         on_dm(&tx, &store, me, me_dev, &o_dev, false, &o_master, 1, Some(&rd), &|_| Audience::Full);
         assert!(rx.try_recv().is_err(), "a mismatch ask left with the DM that caused it");
         later().await;
@@ -979,7 +1206,7 @@ mod tests {
         let room = "b3p-dm-room";
         let held = || HeldDm::Envelope { envelope_json: "{}".into(), sibling_json: None };
 
-        fetch_on_dm(&store, me, &o_dev, &o_master, 1, Some(&RosterDigests { own: Some("ab".repeat(16)), peer: None }));
+        fetch_on_dm(&store, me, &o_dev, &o_master, 1, Some(&RosterDigests { own: Some("ab".repeat(16)), peer: None, rm: Vec::new() }));
         let _ = store.take_roster_asks_due();
         let mut peers = WsRoomPeers::new();
         let targets = [o_dev.clone()];
@@ -999,7 +1226,7 @@ mod tests {
         note_answer(me_dev, &o_dev, &o_master);
         let released = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv()).await;
         assert!(matches!(released, Ok(Some(NodeCommand::ReleaseHeldDms { .. }))), "the answer releases the DM");
-        assert_eq!(release(me_dev, &o_master).len(), 2, "both DMs go out, in order");
+        assert_eq!(release(me_dev, &o_master).0.len(), 2, "both DMs go out, in order");
         clear_for_test();
         resolver::clear_for_test();
     }
@@ -1026,7 +1253,7 @@ mod tests {
         let now = super::super::roster_book::now_ms();
         super::super::roster_book::merge_for_test(&store, &Roster::genesis(&m, &rec, &dev, now - 60_000), me, me_dev);
         let (o_master, o_dev) = (m.peer_id(), dev.peer_id());
-        fetch_on_dm(&store, me, &o_dev, &o_master, 1, Some(&RosterDigests { own: Some("ab".repeat(16)), peer: None }));
+        fetch_on_dm(&store, me, &o_dev, &o_master, 1, Some(&RosterDigests { own: Some("ab".repeat(16)), peer: None, rm: Vec::new() }));
         let _ = store.take_roster_asks_due();
         VoidedCast { _tmp: tmp, path, pass, o_master, o_dev }
     }
@@ -1114,7 +1341,7 @@ mod tests {
         let released = tokio::time::timeout(hold_max * 2, cmd_rx.recv()).await;
         assert!(matches!(released, Ok(Some(NodeCommand::ReleaseHeldDms { .. }))), "a DM waiting for a listing never went out");
         assert!(rx.try_recv().is_ok(), "the backstop sends the asks too");
-        assert_eq!(release(me_dev, &c.o_master).len(), 1);
+        assert_eq!(release(me_dev, &c.o_master).0.len(), 1);
         let gate = hold_for_stale_roster(&tx, &cmd_tx, &peers, me_dev, &c.o_master, &targets, room, &c.path, &c.pass, held);
         assert_eq!(gate, Gate::Go, "the released DM waited again, forever");
 
@@ -1151,8 +1378,8 @@ mod tests {
         let (o_master, o_dev) = (m.peer_id(), dev.peer_id());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let held = held_digest(&store, &o_master);
-        let differs = RosterDigests { own: Some("ab".repeat(16)), peer: None };
-        let matches = RosterDigests { own: held, peer: None };
+        let differs = RosterDigests { own: Some("ab".repeat(16)), peer: None, rm: Vec::new() };
+        let matches = RosterDigests { own: held, peer: None, rm: Vec::new() };
         let full = |_: &str| Audience::Full;
 
         on_dm(&tx, &store, me, me_dev, &o_dev, false, &o_master, 2_000, Some(&differs), &full);
@@ -1182,5 +1409,347 @@ mod tests {
         }
         assert_eq!(pick_jitter(MISMATCH_JITTER_MS, 0).as_millis(), 1_000);
         assert_eq!(pick_jitter(MISMATCH_JITTER_MS, 29_000).as_millis(), 30_000);
+    }
+
+    /// F2 compat. A 0.12.2 receiver (its payload as shipped, copied here) reads a 0.13
+    /// DM whose `rd` carries removals: the digests survive and the new field is dropped.
+    #[test]
+    fn g13c_a_0122_receiver_reads_an_rd_carrying_removals() {
+        use super::super::types::{DirectMessagePayload, MessageEnvelope};
+        #[derive(serde::Deserialize)]
+        struct Shipped0122Rd {
+            #[serde(default)]
+            own: Option<String>,
+            #[serde(default)]
+            peer: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Shipped0122Payload {
+            text: String,
+            #[serde(default)]
+            rd: Option<Shipped0122Rd>,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "t")]
+        enum Shipped0122Envelope {
+            #[serde(rename = "dm")]
+            DirectMessage {
+                #[serde(flatten)]
+                inner: Box<Shipped0122Payload>,
+            },
+        }
+        let by = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x31; 32]);
+        let removed = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x32; 32]).peer_id();
+        let rm = vec![roster::sign_removal(&by, "m", roster::LEGACY_BASE, &removed, &[])];
+        let rd = RosterDigests { own: Some("ab".repeat(16)), peer: Some("cd".repeat(16)), rm };
+        let dm = MessageEnvelope::DirectMessage {
+            inner: Box::new(DirectMessagePayload {
+                text: "hi".into(), ts: 1, sig: None, pk: None, mid: Some("m1".into()), reply_to: None,
+                file_id: None, link_preview: None, convo: None, order_us: None, album: None, rd: Some(rd),
+            }),
+        };
+        let wire = serde_json::to_string(&dm).unwrap();
+        assert!(wire.contains("\"rm\""), "precondition: the removals ride the wire");
+        let Shipped0122Envelope::DirectMessage { inner } = serde_json::from_str(&wire).expect("0.12.2 refused a 0.13 DM");
+        let rd = inner.rd.expect("0.12.2 lost the digests");
+        assert_eq!((inner.text.as_str(), rd.own, rd.peer), ("hi", Some("ab".repeat(16)), Some("cd".repeat(16))));
+    }
+
+    /// F2 bound: the one size test sender and receiver share, at its edges.
+    #[test]
+    fn g13c_the_carry_bound_holds_at_its_edges() {
+        let by = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x33; 32]);
+        let one = |i: u8, keep: usize| {
+            let device = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[i; 32]).peer_id();
+            let keep: Vec<String> = (0..keep)
+                .map(|k| crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[i, k as u8 + 1, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7]).peer_id())
+                .collect();
+            roster::sign_removal(&by, "m", roster::LEGACY_BASE, &device, &keep)
+        };
+        let eight: Vec<Removal> = (1..=8).map(|i| one(i, 0)).collect();
+        assert!(roster::carried_fits(&eight), "eight plain removals fit");
+        let nine: Vec<Removal> = (1..=9).map(|i| one(i, 0)).collect();
+        assert!(!roster::carried_fits(&nine), "a ninth statement is over the bound");
+        // Grow one statement's keep list until the set crosses the byte bound.
+        let mut set: Vec<Removal> = vec![one(1, 0)];
+        let size = |rm: &[Removal]| serde_json::to_vec(rm).unwrap().len();
+        let mut k = 0;
+        while size(&set) <= roster::MAX_CARRIED_REMOVAL_BYTES && k < roster::MAX_REMOVAL_KEEP {
+            k += 1;
+            let wide = one(2, k);
+            set = vec![one(1, 0), wide.clone(), one(3, k), one(4, k), one(5, k)];
+        }
+        assert!(size(&set) > roster::MAX_CARRIED_REMOVAL_BYTES, "precondition: the set crossed the byte bound");
+        assert!(!roster::carried_fits(&set), "a set over 4096 bytes fit");
+        set.pop();
+        if size(&set) <= roster::MAX_CARRIED_REMOVAL_BYTES {
+            assert!(roster::carried_fits(&set), "a set under 4096 bytes did not fit");
+        }
+    }
+
+    struct Own {
+        _tmp: crate::test_tmp::TestDir,
+        store: MessageStore,
+        roster: Roster,
+        real: Removal,
+        digest: String,
+    }
+
+    /// Our own identity: the phrase keeps `owner` and `s`, then `owner` removed `s`; a
+    /// device holding the master key later flooded the roster with joins whose own keys
+    /// sign removals of ids nobody holds (stored, never counted).
+    fn own_with_flood() -> Own {
+        use crate::identity::native_identity::NativeKeypair;
+        use crate::identity::roster::{sign_consent, sign_pending};
+        let key = |t: u8| NativeKeypair::from_secret_bytes(&[t; 32]);
+        let (m, r, owner, s) = (key(0x41), key(0x42), key(0x43), key(0x44));
+        let master = m.peer_id();
+        let now = super::super::roster_book::now_ms();
+        let mut roster = Roster::genesis(&m, &r, &owner, now - 60_000);
+        roster.add_consent(sign_consent(&s, &master));
+        let base = roster.base();
+        roster.add_vouch(roster::sign_vouch(&owner, &master, &base, &s.peer_id()));
+        let real = roster::sign_removal(&owner, &master, &base, &s.peer_id(), &[]);
+        roster.add_removal(real.clone());
+        for i in 0..4u8 {
+            let p = key(0x50 + i);
+            roster.add_consent(sign_consent(&p, &master));
+            roster.add_pending(sign_pending(&m, &base, &p.peer_id()));
+            for j in 0..3u8 {
+                roster.add_removal(roster::sign_removal(&p, &master, &base, &key(0x60 + i * 3 + j).peer_id(), &[]));
+            }
+        }
+        let roster = roster.verified(now);
+        assert!(roster.removals.len() > 1, "precondition: the flood is stored");
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("own.db").to_string_lossy().into_owned();
+        let store = MessageStore::open(&path, &"cd".repeat(32)).unwrap();
+        let json = serde_json::to_string(&roster).unwrap();
+        store.save_device_list(&master, &json, 0, &[owner.peer_id()], now).unwrap();
+        let digest = roster.digest();
+        Own { _tmp: tmp, store, roster, real, digest }
+    }
+
+    /// F2 (review H1). Only removals that count ride a DM: a flood of statements the
+    /// stored roster keeps but the fold ignores never pushes out the real one.
+    #[test]
+    fn g13c_a_dm_carries_only_removals_that_count() {
+        let _g = super::super::resolver::test_lock();
+        clear_for_test();
+        let own = own_with_flood();
+        let rm = carried_for(&own.store, &own.roster, &own.digest, "contact");
+        assert_eq!(rm, vec![own.real.clone()], "the carry held something other than the one counting removal");
+    }
+
+    /// F2 (review M5, M1). A contact every device of which showed our roster as we hold
+    /// it now gets nothing; one that confirmed before we learned the removal still gets it,
+    /// and nothing rides past CARRY_MAX_AGE_MS.
+    #[test]
+    fn g13c_a_carry_stops_once_the_contact_showed_it_holds_it() {
+        let _g = super::super::resolver::test_lock();
+        clear_for_test();
+        let own = own_with_flood();
+        let now = super::super::roster_book::now_ms();
+        own.store.set_carry_confirm("caught-up", "caught-up-1", &own.digest, now).unwrap();
+        assert!(carried_for(&own.store, &own.roster, &own.digest, "caught-up").is_empty(), "a contact that holds it got it again");
+
+        assert_eq!(carried_for(&own.store, &own.roster, &own.digest, "silent"), vec![own.real.clone()], "precondition");
+        own.store.set_carry_confirm("behind", "behind-1", &"ee".repeat(16), now - 40 * DAY).unwrap();
+        assert_eq!(
+            carried_for(&own.store, &own.roster, &own.digest, "behind"),
+            vec![own.real.clone()],
+            "a contact silent since before the removal (past 35 days) got nothing",
+        );
+
+        // A contact that confirmed a later digest, after we learned it, holds it.
+        own.store.set_carry_confirm("later", "later-1", &"ff".repeat(16), now + 1_000).unwrap();
+        assert!(carried_for(&own.store, &own.roster, &own.digest, "later").is_empty(), "a later confirmation still got it");
+
+        // Learned past the age cap: it rides no more, whoever confirmed nothing.
+        let base = own.roster.base();
+        let device = own.real.device.clone();
+        let _ = own.store.removal_carried_since(&own.roster.master, &base, &[], now);
+        let old = now - CARRY_MAX_AGE_MS - DAY;
+        let _ = own.store.removal_carried_since(&own.roster.master, &base, std::slice::from_ref(&device), old);
+        assert!(carried_for(&own.store, &own.roster, &own.digest, "silent").is_empty(), "a removal past the age cap rode");
+    }
+
+    /// F2 (review M1). One contact device showing it holds our removal stops nothing for
+    /// its siblings: the removal rides until every device the contact's roster counts
+    /// showed it, whatever the order.
+    #[test]
+    fn g13c_the_carry_goes_on_until_every_contact_device_showed_it() {
+        let _g = super::super::resolver::test_lock();
+        clear_for_test();
+        let own = own_with_flood();
+        let now = super::super::roster_book::now_ms();
+        let (p, p1, p2) = ("g13c-p", "g13c-p-1", "g13c-p-2");
+        let held = serde_json::to_string(&Roster::new(p)).unwrap();
+        own.store.save_device_list(p, &held, 0, &[p1.to_string(), p2.to_string()], now).unwrap();
+
+        own.store.set_carry_confirm(p, p1, &own.digest, now).unwrap();
+        assert_eq!(
+            carried_for(&own.store, &own.roster, &own.digest, p),
+            vec![own.real.clone()],
+            "one device of the contact showing our roster stopped the carry to the other",
+        );
+        // A device the contact's roster no longer counts holds nothing back.
+        own.store.set_carry_confirm(p, "g13c-p-gone", &"ee".repeat(16), now - 40 * DAY).unwrap();
+        own.store.set_carry_confirm(p, p2, &own.digest, now).unwrap();
+        assert!(carried_for(&own.store, &own.roster, &own.digest, p).is_empty(), "every device showed it and it still rode");
+    }
+
+    /// F2 (review L9). Our removals ride only to whom our roster may go.
+    #[test]
+    fn g13c_no_carry_outside_our_profile_audience() {
+        let _g = super::super::resolver::test_lock();
+        clear_for_test();
+        let own = own_with_flood();
+        let dir = own._tmp.path().join("own.db").to_string_lossy().into_owned();
+        let pass = "cd".repeat(32);
+        let full = for_dm(&own.roster.master, "contact", |_| Audience::Full, &dir, &pass).unwrap();
+        assert_eq!(full.rm, vec![own.real.clone()], "precondition");
+        let none = for_dm(&own.roster.master, "contact", |_| Audience::None, &dir, &pass).unwrap();
+        assert!(none.rm.is_empty(), "our removals rode to someone our roster may not reach");
+        assert_eq!(none.own, full.own, "the digests still ride");
+    }
+
+    /// F2 (review LOW-2). A DM with nothing to carry costs no audience lookup, and the
+    /// carry itself writes nothing once `save` dated our removals.
+    #[test]
+    fn g13c_a_dm_with_nothing_to_carry_asks_no_audience_and_writes_nothing() {
+        let _g = super::super::resolver::test_lock();
+        clear_for_test();
+        let own = own_with_flood();
+        let dir = own._tmp.path().join("own.db").to_string_lossy().into_owned();
+        let pass = "cd".repeat(32);
+        let now = super::super::roster_book::now_ms();
+        own.store.set_carry_confirm("caught-up", "caught-up-1", &own.digest, now).unwrap();
+        let rd = for_dm(&own.roster.master, "caught-up", |_| panic!("asked the audience with nothing to carry"), &dir, &pass);
+        assert!(rd.is_some_and(|rd| rd.rm.is_empty()));
+
+        // Another process (the push fetch) holds the write lock: a carry that reads only
+        // never waits for it.
+        let device = own.real.device.clone();
+        let _ = own.store.removal_carried_since(&own.roster.master, &own.roster.base(), std::slice::from_ref(&device), now);
+        let writer = MessageStore::open(&dir, &pass).unwrap();
+        writer.conn_execute_for_test("BEGIN IMMEDIATE");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            carried_for(&own.store, &own.roster, &own.digest, "silent"),
+            vec![own.real.clone()],
+            "a DM's carry wrote to the store and lost to the lock",
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "a DM's carry waited on the write lock");
+        writer.conn_execute_for_test("ROLLBACK");
+    }
+
+    /// Review LOW-3. A carry over the statement bound is no news, scanned or not.
+    #[test]
+    fn g13c_an_oversized_carry_is_not_news() {
+        let _g = super::super::resolver::test_lock();
+        clear_for_test();
+        let own = own_with_flood();
+        let master = own.roster.master.clone();
+        let by = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x43; 32]);
+        let rm: Vec<Removal> = (0..=roster::MAX_CARRIED_REMOVALS as u8)
+            .map(|i| {
+                let device = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x70 + i; 32]).peer_id();
+                roster::sign_removal(&by, &master, &own.roster.base(), &device, &[])
+            })
+            .collect();
+        assert!(carried_news(&own.store, &master, &rm[..roster::MAX_CARRIED_REMOVALS]), "precondition: the statements are news");
+        assert!(!carried_news(&own.store, &master, &rm), "a carry over the bound was read as news");
+    }
+
+    /// B3 (a). A sibling's row in a friend's slots holds a DM only while it is void and
+    /// the device is ours: it is never taken for one of the friend's devices, and a
+    /// friend device's row is never taken for a sibling's.
+    #[test]
+    fn g13c_a_sibling_row_is_never_a_friends_device() {
+        use super::super::resolver;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        let (me, me_dev, sib, stranger) = ("g13c-me", "g13c-me-dev", "g13c-me-sib", "g13c-x-dev");
+        let (f, f1, f2) = ("g13c-f", "g13c-f-1", "g13c-f-2");
+        resolver::seed_self(me, &[me_dev.to_string(), sib.to_string()]);
+        resolver::update_many(f, [f1, f2]);
+        let now = super::super::roster_book::now_ms();
+        let void = (0, None);
+        let slots: HashMap<String, (i64, Option<i64>)> =
+            [(sib, void), (f1, void), (stranger, void), (me_dev, void)].into_iter().map(|(d, s)| (d.to_string(), s)).collect();
+
+        let (asks, new) = stale_asks(&slots, &[f1.to_string(), f2.to_string(), sib.to_string()], f, me, me_dev, now);
+        assert_eq!(asks, vec![f1.to_string(), sib.to_string()], "f1 as F's, the sibling as ours, nothing else");
+        assert_eq!(new, vec![f2.to_string()], "a sibling passed as a target was taken for F's device");
+
+        let fresh: HashMap<String, (i64, Option<i64>)> = [(sib.to_string(), (now, None))].into_iter().collect();
+        assert!(stale_asks(&fresh, &[], f, me, me_dev, now).0.is_empty(), "a confirmed sibling row held a DM");
+        let aged: HashMap<String, (i64, Option<i64>)> =
+            [(sib.to_string(), (now - ROSTER_REFRESH_AFTER_MS - 1, None))].into_iter().collect();
+        assert!(stale_asks(&aged, &[], f, me, me_dev, now).0.is_empty(), "a sibling row that only aged held a DM");
+        resolver::clear_for_test();
+    }
+
+    /// F2 (review M5). A contact's DM whose `peer` digest is our own roster as we hold
+    /// it records that it holds every removal we do, live and in the push fetch; one
+    /// that differs records nothing.
+    #[test]
+    fn g13c_a_dm_showing_our_roster_stops_the_carry_to_its_sender() {
+        use super::super::resolver;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        clear_for_test();
+        let own = own_with_flood();
+        let me = own.roster.master.clone();
+        let (c, c_dev, d, d_dev) = ("g13c-c", "g13c-c-dev", "g13c-d", "g13c-d-dev");
+        resolver::update_many(c, [c_dev]);
+        resolver::update_many(d, [d_dev]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let showing = |peer: &str| RosterDigests { own: None, peer: Some(peer.to_string()), rm: Vec::new() };
+        let none = |_: &str| Audience::None;
+
+        on_dm(&tx, &own.store, &me, "g13c-me-dev", c_dev, false, c, 1, Some(&showing(&"ab".repeat(16))), &none);
+        assert!(own.store.carry_confirms(c).is_empty(), "a differing view confirmed the carry");
+        on_dm(&tx, &own.store, &me, "g13c-me-dev", c_dev, false, c, 1, Some(&showing(&own.digest)), &none);
+        assert_eq!(own.store.carry_confirms(c).get(c_dev).map(|(digest, _)| digest), Some(&own.digest), "live");
+        assert!(carried_for(&own.store, &own.roster, &own.digest, c).is_empty());
+
+        fetch_on_dm(&own.store, &me, d_dev, d, 1, Some(&showing(&own.digest)));
+        assert_eq!(own.store.carry_confirms(d).get(d_dev).map(|(digest, _)| digest), Some(&own.digest), "push fetch");
+        clear_for_test();
+        resolver::clear_for_test();
+    }
+
+    /// B3 (a). An echo of our sibling's DM whose friend digest differs voids that
+    /// sibling's slot for the friend; a later echo that matches clears it, and an echo
+    /// the sibling sent before the one that differed does not.
+    #[test]
+    fn g13c_an_echo_voids_and_clears_its_siblings_slot() {
+        use super::super::resolver;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        clear_for_test();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("echo.db").to_string_lossy().into_owned();
+        let store = MessageStore::open(&path, &"cd".repeat(32)).unwrap();
+        let (me, me_dev, sib, f, f1) = ("g13c-me", "g13c-me-dev", "g13c-me-sib", "g13c-f", "g13c-f-1");
+        resolver::seed_self(me, &[me_dev.to_string(), sib.to_string()]);
+        resolver::update_many(f, [f1]);
+        let held = Roster::new(f);
+        store.save_device_list(f, &serde_json::to_string(&held).unwrap(), 0, &[f1.to_string()], 1).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let echo = |peer: String| RosterDigests { own: None, peer: Some(peer), rm: Vec::new() };
+        let none = |_: &str| Audience::None;
+
+        on_dm(&tx, &store, me, me_dev, sib, true, f, 10, Some(&echo("ab".repeat(16))), &none);
+        assert_eq!(store.roster_confirmed_at(f, sib), Some(0), "a differing echo left no void");
+        on_dm(&tx, &store, me, me_dev, sib, true, f, 5, Some(&echo(held.digest())), &none);
+        assert_eq!(store.roster_confirmed_at(f, sib), Some(0), "an echo sent before the differing one cleared the void");
+        on_dm(&tx, &store, me, me_dev, sib, true, f, 20, Some(&echo(held.digest())), &none);
+        assert!(store.roster_confirmed_at(f, sib).is_some_and(|at| at > 0), "a later matching echo left the void");
+        assert_eq!(store.roster_confirmed_at(f, f1), None, "an echo touched a friend device's slot");
+        clear_for_test();
+        resolver::clear_for_test();
     }
 }

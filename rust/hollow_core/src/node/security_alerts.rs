@@ -63,6 +63,36 @@ pub(crate) fn record_own_device_added(
     }
 }
 
+/// The device an alert of `kind` names.
+fn alerted_device<'a>(kind: &str, detail: &'a str) -> Option<&'a str> {
+    match kind {
+        KIND_NEW_DEVICE => Some(detail),
+        KIND_OWN_DEVICE_ADDED => detail.split_once(':').map(|(device, _)| device),
+        _ => None,
+    }
+}
+
+/// Device warnings about `master` whose device is no longer one of its `members` are
+/// marked resolved (B3 (d)) and stay until the person reads them: a device that adds
+/// one and removes it again must not erase the warning. Read at once only when this
+/// device made the removal (`removed_here`). A device that comes back warns again.
+pub(crate) fn resolve_departed(
+    store: &crate::storage::MessageStore,
+    master: &str,
+    members: &std::collections::BTreeSet<String>,
+    removed_here: impl Fn(&str) -> bool,
+) {
+    let now = now_ms();
+    for kind in [KIND_NEW_DEVICE, KIND_OWN_DEVICE_ADDED] {
+        for (alert_id, detail) in store.unresolved_security_alerts(master, kind).unwrap_or_default() {
+            let Some(device) = alerted_device(kind, &detail) else { continue };
+            if !members.contains(device) {
+                let _ = store.resolve_security_alert(&alert_id, now, removed_here(device));
+            }
+        }
+    }
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

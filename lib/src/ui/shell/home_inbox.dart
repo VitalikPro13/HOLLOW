@@ -26,6 +26,7 @@ import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/services/unified_push_service.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
+import 'package:hollow/src/rust/api/verification.dart' as verification_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -215,20 +216,22 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
     final profiles = ref.watch(profileProvider);
     // displayNameFor reads the nickname cache, so a rename must rebuild.
     ref.watch(localNicknameProvider);
-    final byPeer = <String, List<String>>{};
+    final byPeer = <String, List<verification_api.SecurityAlertFfi>>{};
     for (final a in alerts) {
       if (a.acknowledgedAt != null ||
           a.kind == SecurityAlertKind.ownDeviceAdded) {
         continue;
       }
-      (byPeer[a.peerId] ??= []).add(a.kind);
+      (byPeer[a.peerId] ??= []).add(a);
     }
     return [
-      for (final MapEntry(key: peerId, value: kinds) in byPeer.entries)
+      for (final MapEntry(key: peerId, value: peerAlerts) in byPeer.entries)
         () {
           final name = displayNameFor(profiles, peerId);
-          final newDevices =
-              kinds.where((k) => k == SecurityAlertKind.newDevice).length;
+          final kinds = peerAlerts.map((a) => a.kind).toList();
+          final added =
+              peerAlerts.where((a) => a.kind == SecurityAlertKind.newDevice);
+          final newDevices = added.where((a) => a.resolvedAt == null).length;
           final (title, body) = kinds.contains(SecurityAlertKind.identityReappeared)
               ? (
                   '$name came back after deleting their identity',
@@ -241,10 +244,15 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
                           : '$name added $newDevices new devices',
                       'Verify them before you share anything sensitive.',
                     )
-                  : (
-                      '$name reinstalled or re-keyed a device',
-                      'Their messages are still end-to-end encrypted.',
-                    );
+                  : added.isNotEmpty
+                      ? (
+                          '$name added a device and removed it again',
+                          'Verify them if you are not sure it was them.',
+                        )
+                      : (
+                          '$name reinstalled or re-keyed a device',
+                          'Their messages are still end-to-end encrypted.',
+                        );
           return _AttentionItem(
             id: 'security:$peerId',
             leading: HollowAvatar(peerId: peerId, size: _leadingSize),
@@ -281,9 +289,13 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
             leading:
                 _GlyphTile(LucideIcons.monitorSmartphone, size: _leadingSize),
             title: '${name(added.by)} added a device',
-            body: '${name(added.device)} joined your identity '
-                "${_addedLabel(a.createdAt.toInt())}. If you didn't add it, "
-                'remove it.',
+            body: a.resolvedAt == null
+                ? '${name(added.device)} joined your identity '
+                    "${_addedLabel(a.createdAt.toInt())}. If you didn't add it, "
+                    'remove it.'
+                : '${name(added.device)} joined your identity '
+                    '${_addedLabel(a.createdAt.toInt())} and has been removed '
+                    'since.',
             secondaryLabel: 'Dismiss',
             onSecondary: () => ref
                 .read(securityAlertsProvider.notifier)

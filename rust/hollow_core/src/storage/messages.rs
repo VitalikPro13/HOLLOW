@@ -1105,6 +1105,9 @@ impl MessageStore {
         ddl(conn, "idx_security_alerts_peer",
             "CREATE INDEX IF NOT EXISTS idx_security_alerts_peer
                 ON security_alerts (peer_id, acknowledged_at)")?;
+        // When the device a warning names left the roster (B3 (d)); the warning stays
+        // until the person dismisses it.
+        migrate(conn, "ALTER TABLE security_alerts ADD COLUMN resolved_at INTEGER");
 
         // The Curve25519 identity key first seen for a DEVICE. Keyed by device, not
         // master, because the Olm ratchet is per-device: each device legitimately has its
@@ -1301,6 +1304,34 @@ impl MessageStore {
                 device_peer_id TEXT NOT NULL,
                 due_ms         INTEGER NOT NULL,
                 PRIMARY KEY (subject_master, device_peer_id)
+            )")?;
+        // When this device first carried each counting removal of its own identity in
+        // its DMs (F2, 0.13): carried only until contacts show they hold it. Local.
+        ddl(conn, "roster_removal_carried table",
+            "CREATE TABLE IF NOT EXISTS roster_removal_carried (
+                master_peer_id TEXT NOT NULL,
+                base           TEXT NOT NULL,
+                device_peer_id TEXT NOT NULL,
+                first_ms       INTEGER NOT NULL,
+                PRIMARY KEY (master_peer_id, base, device_peer_id)
+            )")?;
+        // The newest DM of each contact DEVICE that showed our own roster exactly as we
+        // held it then, by our clock (F2): a removal stops riding to a contact only once
+        // every device of it showed it holds it. Local.
+        ddl(conn, "roster_carry_device_confirms table",
+            "CREATE TABLE IF NOT EXISTS roster_carry_device_confirms (
+                contact_master TEXT NOT NULL,
+                device_peer_id TEXT NOT NULL,
+                digest         TEXT NOT NULL,
+                at_ms          INTEGER NOT NULL,
+                PRIMARY KEY (contact_master, device_peer_id)
+            )")?;
+        // Contact rosters another process (the push fetch, the iOS NSE) changed in the
+        // store: the running node re-reads them before its next DM to that identity.
+        ddl(conn, "roster_dirty table",
+            "CREATE TABLE IF NOT EXISTS roster_dirty (
+                master_peer_id TEXT PRIMARY KEY,
+                at_ms          INTEGER NOT NULL
             )")?;
 
         // Local-only, unsigned human labels for devices (Step 8 Devices panel). NOT
@@ -6512,6 +6543,10 @@ impl MessageStore {
         created_at: i64,
     ) -> Result<bool, String> {
         let alert_id = format!("{kind}:{peer_id}:{detail}");
+        // A device that left and is back is news again.
+        self.conn
+            .execute("DELETE FROM security_alerts WHERE alert_id = ?1 AND resolved_at IS NOT NULL", params![alert_id])
+            .map_err(|e| format!("Failed to record security alert: {e}"))?;
         let changed = self
             .conn
             .execute(
@@ -6529,7 +6564,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT alert_id, peer_id, kind, detail, created_at, acknowledged_at
+                "SELECT alert_id, peer_id, kind, detail, created_at, acknowledged_at, resolved_at
                    FROM security_alerts ORDER BY created_at DESC",
             )
             .map_err(|e| format!("Failed to prepare security_alerts query: {e}"))?;
@@ -6542,6 +6577,7 @@ impl MessageStore {
                     detail: row.get(3)?,
                     created_at: row.get(4)?,
                     acknowledged_at: row.get(5)?,
+                    resolved_at: row.get(6)?,
                 })
             })
             .map_err(|e| format!("Failed to query security_alerts: {e}"))?;
@@ -6579,6 +6615,185 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to acknowledge security alerts: {e}"))?;
         Ok(())
+    }
+
+    /// Alerts of `kind` for `peer_id` not yet marked resolved, as (alert_id, detail).
+    pub fn unresolved_security_alerts(&self, peer_id: &str, kind: &str) -> Result<Vec<(String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT alert_id, detail FROM security_alerts
+                  WHERE peer_id = ?1 AND kind = ?2 AND resolved_at IS NULL",
+            )
+            .map_err(|e| format!("Failed to prepare security_alerts query: {e}"))?;
+        let rows = stmt
+            .query_map(params![peer_id, kind], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("Failed to query security_alerts: {e}"))?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// The device `alert_id` names left the roster at `at_ms`; `dismiss` also reads it
+    /// (the person removed it here). A read alert keeps its first read time.
+    pub fn resolve_security_alert(&self, alert_id: &str, at_ms: i64, dismiss: bool) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE security_alerts SET resolved_at = ?2,
+                    acknowledged_at = CASE WHEN ?3 THEN COALESCE(acknowledged_at, ?2) ELSE acknowledged_at END
+                  WHERE alert_id = ?1",
+                params![alert_id, at_ms, dismiss],
+            )
+            .map_err(|e| format!("Failed to resolve security alert: {e}"))?;
+        Ok(())
+    }
+
+    // ── F2: carried removals (0.13) ────────────────────────────────
+
+    /// When this device first carried each removal of `master`'s it was asked about,
+    /// stamping `now_ms` for those it never had; rows of devices not asked about go.
+    pub fn removal_carried_since(
+        &self,
+        master: &str,
+        base: &str,
+        devices: &[String],
+        now_ms: i64,
+    ) -> Result<HashMap<String, i64>, String> {
+        let mut out = HashMap::new();
+        let rows: Vec<(String, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare_cached("SELECT base, device_peer_id FROM roster_removal_carried WHERE master_peer_id = ?1")
+                .map_err(|e| format!("Failed to read roster_removal_carried: {e}"))?;
+            let rows = stmt
+                .query_map(params![master], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|e| format!("Failed to read roster_removal_carried: {e}"))?;
+            rows.flatten().collect()
+        };
+        for (b, d) in rows {
+            if b != base || !devices.contains(&d) {
+                self.conn
+                    .execute(
+                        "DELETE FROM roster_removal_carried WHERE master_peer_id = ?1 AND base = ?2 AND device_peer_id = ?3",
+                        params![master, b, d],
+                    )
+                    .map_err(|e| format!("Failed to prune roster_removal_carried: {e}"))?;
+            }
+        }
+        for d in devices {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO roster_removal_carried (master_peer_id, base, device_peer_id, first_ms)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![master, base, d, now_ms],
+                )
+                .map_err(|e| format!("Failed to stamp roster_removal_carried: {e}"))?;
+            let first: i64 = self
+                .conn
+                .query_row(
+                    "SELECT first_ms FROM roster_removal_carried
+                      WHERE master_peer_id = ?1 AND base = ?2 AND device_peer_id = ?3",
+                    params![master, base, d],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("Failed to read roster_removal_carried: {e}"))?;
+            out.insert(d.clone(), first);
+        }
+        Ok(out)
+    }
+
+    /// When this device first carried each removal of `master`'s in `base`, as stamped.
+    pub fn removal_carried_at(&self, master: &str, base: &str) -> Result<HashMap<String, i64>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT device_peer_id, first_ms FROM roster_removal_carried WHERE master_peer_id = ?1 AND base = ?2",
+            )
+            .map_err(|e| format!("Failed to read roster_removal_carried: {e}"))?;
+        let rows = stmt
+            .query_map(params![master, base], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("Failed to read roster_removal_carried: {e}"))?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// Stamp `now_ms` for each of `devices` that has no stamp yet in `base`.
+    pub fn stamp_removal_carried(&self, master: &str, base: &str, devices: &[String], now_ms: i64) -> Result<(), String> {
+        for d in devices {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO roster_removal_carried (master_peer_id, base, device_peer_id, first_ms)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![master, base, d, now_ms],
+                )
+                .map_err(|e| format!("Failed to stamp roster_removal_carried: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// A DM of `contact`'s device `device` showed our own roster as `digest`, which we
+    /// held at `at_ms`.
+    pub fn set_carry_confirm(&self, contact: &str, device: &str, digest: &str, at_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO roster_carry_device_confirms (contact_master, device_peer_id, digest, at_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(contact_master, device_peer_id) DO UPDATE
+                    SET digest = excluded.digest, at_ms = excluded.at_ms
+                    WHERE excluded.at_ms >= roster_carry_device_confirms.at_ms",
+                params![contact, device, digest, at_ms],
+            )
+            .map_err(|e| format!("Failed to stamp roster_carry_device_confirms: {e}"))?;
+        Ok(())
+    }
+
+    /// The newest (digest, at_ms) each device of `contact` confirmed of our own roster.
+    pub fn carry_confirms(&self, contact: &str) -> HashMap<String, (String, i64)> {
+        let Ok(mut stmt) = self.conn.prepare_cached(
+            "SELECT device_peer_id, digest, at_ms FROM roster_carry_device_confirms WHERE contact_master = ?1",
+        ) else {
+            return HashMap::new();
+        };
+        stmt.query_map(params![contact], |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?))))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+
+    /// Another process changed `master`'s roster in this store.
+    pub fn mark_roster_dirty(&self, master: &str, at_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO roster_dirty (master_peer_id, at_ms) VALUES (?1, ?2)
+                 ON CONFLICT(master_peer_id) DO UPDATE SET at_ms = excluded.at_ms",
+                params![master, at_ms],
+            )
+            .map_err(|e| format!("Failed to mark roster_dirty: {e}"))?;
+        Ok(())
+    }
+
+    pub fn roster_dirty(&self, master: &str) -> bool {
+        self.conn
+            .query_row("SELECT 1 FROM roster_dirty WHERE master_peer_id = ?1", params![master], |_| Ok(()))
+            .is_ok()
+    }
+
+    /// Take the dirty marks, of `master` only or of every identity.
+    pub fn take_roster_dirty(&self, master: Option<&str>) -> Vec<String> {
+        let taken: Vec<String> = match master {
+            Some(m) => self
+                .conn
+                .query_row("SELECT master_peer_id FROM roster_dirty WHERE master_peer_id = ?1", params![m], |row| row.get(0))
+                .ok()
+                .into_iter()
+                .collect(),
+            None => self
+                .conn
+                .prepare("SELECT master_peer_id FROM roster_dirty")
+                .and_then(|mut stmt| stmt.query_map([], |row| row.get(0)).map(|rows| rows.flatten().collect()))
+                .unwrap_or_default(),
+        };
+        for m in &taken {
+            let _ = self.conn.execute("DELETE FROM roster_dirty WHERE master_peer_id = ?1", params![m]);
+        }
+        taken
     }
 
     // ── Olm identity-key pins (Issue 1-C, TOFU) ────────────────────
@@ -7641,6 +7856,8 @@ pub struct SecurityAlertRow {
     pub created_at: i64,
     /// `None` while the alert is still unread.
     pub acknowledged_at: Option<i64>,
+    /// When the device it names left the roster; `None` while it is still there.
+    pub resolved_at: Option<i64>,
 }
 
 /// A persisted server join that has not completed yet. Survives restarts on purpose:

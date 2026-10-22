@@ -129,4 +129,33 @@ void main() {
     expect(container.read(peersWithSecurityAlertsProvider), isEmpty);
     expect(container.read(peerSecurityAlertsProvider('me')), isEmpty);
   });
+
+  testWidgets('an added device removed since stays, saying it was removed',
+      (tester) async {
+    const own = verification_api.SecurityAlertFfi(
+      alertId: 'own_device_added:me:$_added:$_desk',
+      peerId: 'me',
+      kind: SecurityAlertKind.ownDeviceAdded,
+      detail: '$_added:$_desk',
+      createdAt: 0,
+      resolvedAt: 1,
+    );
+    const contact = verification_api.SecurityAlertFfi(
+      alertId: 'new_device:bob:dev',
+      peerId: 'bob',
+      kind: SecurityAlertKind.newDevice,
+      detail: 'dev',
+      createdAt: 0,
+      resolvedAt: 1,
+    );
+    await _pump(tester, const HomeAttention(), extra: [
+      securityAlertsProvider.overrideWith(() => _Alerts(const [own, contact])),
+      deviceKindProvider.overrideWith(_Kinds.new),
+    ]);
+    expect(find.text('Desktop added a device'), findsOneWidget);
+    expect(find.textContaining('has been removed since'), findsOneWidget);
+    expect(find.textContaining('added a device and removed it again'), findsOneWidget);
+    expect(find.textContaining('added a new device'), findsNothing,
+        reason: 'a device removed since is not a new device');
+  });
 }

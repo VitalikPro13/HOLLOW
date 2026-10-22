@@ -1896,6 +1896,18 @@ pub(crate) fn profile_audience(
     })
 }
 
+/// [`profile_audience`] for a caller that already holds `store` open.
+pub(crate) fn profile_audience_in(
+    server_states: &HashMap<String, ServerState>,
+    local_master: &str,
+    peer: &str,
+    store: &crate::storage::MessageStore,
+) -> Audience {
+    profile_audience_known(server_states, local_master, peer).unwrap_or_else(|| {
+        audience_by_friend_status(store.get_friend_status(&super::resolver::resolve(peer)).ok().flatten().as_deref())
+    })
+}
+
 /// [`profile_audience`] as far as the in-memory state decides it; `None` when only
 /// the friend row can tell.
 pub(crate) fn profile_audience_known(

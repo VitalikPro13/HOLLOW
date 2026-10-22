@@ -1019,7 +1019,11 @@ pub(crate) async fn finish_send_file(
             device_keypair,
             device_peer_id,
             rd: super::roster_reach::for_dm(
-                local_peer_str, &super::resolver::resolve(&peer_str), db_path, db_passphrase,
+                local_peer_str,
+                &super::resolver::resolve(&peer_str),
+                |st| super::social::profile_audience_in(server_states, local_peer_str, &peer_str, st),
+                db_path,
+                db_passphrase,
             ),
         };
         send_dm_file_fanout(

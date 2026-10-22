@@ -285,6 +285,9 @@ pub(crate) async fn handle_send_message(
     message_id: String,
     reply_to_mid: Option<String>,
     link_preview: Option<LinkPreviewRef>,
+    // What our profile audience gives the recipient, asked only when our DM has removals
+    // to carry: they ride only where our roster may go (F2).
+    audience: &(dyn Fn(&crate::storage::MessageStore) -> super::social::Audience + Sync),
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -312,7 +315,7 @@ pub(crate) async fn handle_send_message(
         dm_timestamp, &extras, &text,
     );
     let recipient_master = super::resolver::resolve(&peer_id_str);
-    let rd = super::roster_reach::for_dm(&local_peer, &recipient_master, db_path, db_passphrase);
+    let rd = super::roster_reach::for_dm(&local_peer, &recipient_master, audience, db_path, db_passphrase);
     let build_dm = |convo: Option<String>| MessageEnvelope::DirectMessage {
         inner: Box::new(DirectMessagePayload {
             text: text.clone(),

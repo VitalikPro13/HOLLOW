@@ -917,7 +917,6 @@ fn try_decrypt_dm(
     if crate::node::blocklist::is_blocked(from) {
         return None;
     }
-
     match haven {
         HavenMessage::Encrypted {
             message_type,
@@ -926,6 +925,12 @@ fn try_decrypt_dm(
             identity_sig,
             identity_pk,
         } => {
+            // PHANTOM-CHAT GUARD, as live: a device removed (a DM earlier in this fetch
+            // may have carried its removal) gets nothing decrypted, stored or shown.
+            if crate::node::resolver::is_revoked(from) {
+                hollow_log!("[HOLLOW-REVOKE] Fetch dropped a DM from removed device {from}");
+                return None;
+            }
             let ciphertext = match OlmManager::decode_base64(&body) {
                 Ok(b) => b,
                 Err(e) => {
@@ -952,7 +957,7 @@ fn try_decrypt_dm(
             let text = String::from_utf8_lossy(&plaintext).to_string();
             match serde_json::from_str::<MessageEnvelope>(&text) {
                 Ok(MessageEnvelope::DirectMessage { inner }) => {
-                    handle_direct_message(from, &convo, local_master, *inner, db_path, db_passphrase)
+                    handle_direct_message(from, &convo, local_master, local_peer_id, *inner, db_path, db_passphrase)
                 }
                 Ok(MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, .. }) => {
                     handle_edit_message(&convo, local_master, mid, new_text, ts, sig, pk, db_path, db_passphrase)
@@ -1085,6 +1090,7 @@ fn handle_direct_message(
     from: &str,
     convo: &str,
     local_master: &str,
+    local_peer_id: &str,
     inner: DirectMessagePayload,
     db_path: &str,
     db_passphrase: &str,
@@ -1127,6 +1133,10 @@ fn handle_direct_message(
         db_path, db_passphrase,
     );
     if fresh && let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        // The carried removals land first, so the digests below are judged after them.
+        crate::node::roster_reach::fetch_carried(
+            &store, db_path, db_passphrase, local_master, local_peer_id, from, convo, rd.as_ref(),
+        );
         crate::node::roster_reach::fetch_on_dm(&store, local_master, from, convo, ts, rd.as_ref());
     }
 
@@ -2006,7 +2016,7 @@ mod tests {
         let mut push = b3_push();
         let (bm, b1) = (push.bm.peer_id(), push.b1.peer_id());
         let held = push.roster.digest();
-        let differs = || Some(RosterDigests { own: Some("ab".repeat(16)), peer: None });
+        let differs = || Some(RosterDigests { own: Some("ab".repeat(16)), peer: None, rm: Vec::new() });
 
         assert!(push.fetch(&push.dm("b3p-1", differs())).is_some(), "precondition: the DM opens");
         assert_eq!(push.store().take_roster_asks_due(), [(bm.clone(), b1.clone())], "a digest that differs notes an ask");
@@ -2014,12 +2024,55 @@ mod tests {
         assert!(push.store().take_roster_asks_due().is_empty(), "a DM read before notes nothing");
 
         assert_eq!(push.store().roster_confirmed_at(&bm, &b1), Some(0), "a digest that differs voids b1's slot");
-        let matches = || Some(RosterDigests { own: Some(held.clone()), peer: None });
+        let matches = || Some(RosterDigests { own: Some(held.clone()), peer: None, rm: Vec::new() });
         assert!(push.fetch(&push.dm_at("b3p-0", 500, matches())).is_some());
         assert_eq!(push.store().roster_confirmed_at(&bm, &b1), Some(0), "a DM b1 sent before the one that differed confirms nothing");
         assert!(push.fetch(&push.dm_at("b3p-2", 2_000, matches())).is_some());
         assert!(push.store().roster_confirmed_at(&bm, &b1).is_some_and(|at| at > 0), "a digest that matches stamps b1's slot");
         assert_eq!(push.store().roster_confirmed_at(&bm, &push.b2.peer_id()), None, "and no other");
+        crate::node::resolver::clear_all();
+    }
+
+    /// F2 (review M3). A DM the push fetch reads carries b1's removal of b2: the fetch
+    /// keeps it, and a DM from b2 later in the same fetch is dropped before it is
+    /// decrypted (no session opened, no one-time key spent), as live drops a removed
+    /// device's DM. Layered: the signed-device check refuses its PreKey frame too.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn g13c_the_push_fetch_drops_a_dm_from_a_device_a_carry_just_removed() {
+        use crate::node::types::RosterDigests;
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let mut push = b3_push();
+        let mut b2_olm = OlmManager::new();
+        crate::node::crypto_handler::bind_olm_identity(&mut b2_olm, &push.b2);
+        let otk = push.alice_olm.generate_one_time_key();
+        b2_olm.create_outbound_session(&push.a_dev, &push.alice_olm.identity_key_base64(), &otk).unwrap();
+        let mut from_b2 = |push: &mut B3Push, mid: &str| {
+            let json = serde_json::to_string(&push.dm(mid, None)).unwrap();
+            let (message_type, ciphertext) = b2_olm.encrypt(&push.a_dev, json.as_bytes()).unwrap();
+            let frame = serde_json::to_string(&crate::node::crypto_handler::encrypted_frame(&b2_olm, message_type, &ciphertext)).unwrap();
+            let crypto_store = CryptoStore::open(push.path.clone(), push.pass.clone()).unwrap();
+            let (path, pass, a, a_dev) = (push.path.clone(), push.pass.clone(), push.a.clone(), push.a_dev.clone());
+            try_decrypt_dm(&push.b2.peer_id(), &frame, crate::node::frame_auth::now_ms(), &mut push.alice_olm, &crypto_store, &path, &pass, &a_dev, &a)
+        };
+        let base = push.roster.base();
+        let rm = vec![crate::identity::roster::sign_removal(&push.b1, &push.bm.peer_id(), &base, &push.b2.peer_id(), &[])];
+        let carry = push.dm("g13c-f-1", Some(RosterDigests { own: None, peer: None, rm }));
+        assert!(push.fetch(&carry).is_some(), "precondition: the carrying DM opens");
+        let b2 = push.b2.peer_id();
+        assert!(crate::node::resolver::is_revoked(&b2), "the fetch did not keep the carried removal");
+        assert!(push.store().roster_dirty(&push.bm.peer_id()), "the running app was not told to re-read");
+
+        assert!(from_b2(&mut push, "g13c-f-2").is_none(), "the fetch read a DM from a device just removed");
+        assert!(push.store().get_dm_message_sig_row("g13c-f-2").is_none(), "and stored it");
+        assert!(!push.alice_olm.has_session(&b2), "the fetch decrypted a removed device's frame before dropping it");
+
+        // Control: the same session's next frame opens once b2 counts again.
+        crate::node::resolver::unmark_revoked(std::slice::from_ref(&b2));
+        crate::node::resolver::update_many(&push.bm.peer_id(), [b2.as_str()]);
+        assert!(from_b2(&mut push, "g13c-f-3").is_some(), "control: b2's frame opens while it is a member");
         crate::node::resolver::clear_all();
     }
 
@@ -2207,7 +2260,7 @@ mod tests {
                 file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None,
                 rd: None,
             };
-            handle_direct_message(&b, &b, &a, inner, &path, &pass)
+            handle_direct_message(&b, &b, &a, "a-dev", inner, &path, &pass)
         };
         let stored = |mid: &str| {
             crate::storage::MessageStore::open(&path, &pass).unwrap().get_dm_message_sig_row(mid).map(|r| r.text)

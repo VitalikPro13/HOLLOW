@@ -1623,7 +1623,8 @@ async fn run_event_loop(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
                             &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
-                            peer_id_str, text, message_id, reply_to_mid, link_preview,
+                            peer_id_str.clone(), text, message_id, reply_to_mid, link_preview,
+                            &|st| social::profile_audience_in(&server_states, &local_peer_str, &peer_id_str, st),
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -3306,7 +3307,12 @@ async fn run_event_loop(
 
                     // DMs a stale roster kept back (AR-29), in the order they were sent.
                     NodeCommand::ReleaseHeldDms { master } => {
-                        for held in super::roster_reach::release(&device_peer_id, &master) {
+                        let (held_dms, reconciled) = super::roster_reach::release(&device_peer_id, &master);
+                        follow_reconciled(
+                            &reconciled, &event_tx, &mut olm, &crypto_store, mls.as_ref(),
+                            &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
+                        ).await;
+                        for held in held_dms {
                             match held {
                                 super::roster_reach::HeldDm::Envelope { envelope_json, sibling_json } => {
                                     message_ops::log_released_fan_out(&olm, &ws_room_peers, &local_peer_str, &master);
@@ -3723,11 +3729,16 @@ async fn run_event_loop(
                                 );
                             }
                         }
-                        // Roster asks the push fetch noted while the app was away (AR-29).
-                        super::roster_reach::send_due_asks(
+                        // Rosters the push fetch changed and asks it noted while the app was
+                        // away (AR-29, F2).
+                        let removed = super::roster_reach::send_due_asks(
                             &ws_cmd_tx, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
                             &|to| social::profile_audience(&server_states, &local_peer_str, to, &db_path, &db_passphrase),
                         );
+                        follow_reconciled(
+                            &removed, &event_tx, &mut olm, &crypto_store, mls.as_ref(),
+                            &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
+                        ).await;
                         // ASYNC FRIENDING: re-deposit every still-pending outgoing request into the
                         // target's master-keyed mailbox. A target we hold no DEVICE for is unreachable
                         // by any targeted send, so the presence drains never fire for them and the
@@ -3855,6 +3866,16 @@ async fn run_event_loop(
                         super::roster_reach::on_session_up(&ws_cmd_tx, &cmd_tx, &device_peer_id, false, &db_path, &db_passphrase);
                         crypto_handler::ask_for_newer_olm_sessions(&mut olm, &crypto_store);
                         awaiting_inbox_answer = None;
+                        // A resumed app (an iOS app back from the background) follows what
+                        // the NSE stored and sends the asks it noted, as a fresh session does.
+                        let removed = super::roster_reach::send_due_asks(
+                            &ws_cmd_tx, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
+                            &|to| social::profile_audience(&server_states, &local_peer_str, to, &db_path, &db_passphrase),
+                        );
+                        follow_reconciled(
+                            &removed, &event_tx, &mut olm, &crypto_store, mls.as_ref(),
+                            &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
+                        ).await;
                         if gap {
                             Box::pin(sync_handler::repair_after_gap(
                                 &ws_cmd_tx, &crdt_store, &server_states, &ws_room_peers,
@@ -7184,6 +7205,25 @@ fn build_dm_sync_items(
     super::sync_handler::SyncPage { items, truncated }
 }
 
+/// Act on rosters followed from the store (another process changed them): drop the
+/// removed devices' sessions and leaves, and tell the app each device list moved.
+#[allow(clippy::too_many_arguments)]
+async fn follow_reconciled(
+    reconciled: &super::roster_book::Reconciled,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    mls: Option<&MlsManager>,
+    local_peer_str: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+) {
+    enforce_device_revocations(&reconciled.removed, olm, crypto_store, mls, local_peer_str, ws_room_peers, pending_mls_removals);
+    for master in &reconciled.masters {
+        let _ = event_tx.send(NetworkEvent::DeviceListUpdated { master_peer_id: master.clone() }).await;
+    }
+}
+
 /// Enforce device revocations just learned from an ingested device list. For
 /// each freshly-revoked device id:
 /// - **Olm (every node):** drop the in-RAM session AND delete the persisted
@@ -8670,8 +8710,12 @@ async fn handle_incoming_request_inner(
                     // dedups consistently. `is_own` flags an echo from our OWN device.
                     let mut is_new = true;
                     {
-                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                            let roster_news = super::roster_reach::first_signed_copy(&store, mid.as_deref());
+                        // Held across the carried-removal fold below, so its digests are
+                        // judged after it.
+                        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
+                        let mut roster_news = false;
+                        if let Some(store) = store.as_ref() {
+                            roster_news = super::roster_reach::first_signed_copy(store, mid.as_deref());
                             // Dedup by message_id (reconnect resend, pending drain,
                             // relay buffer). The content UNIQUE index is legacy-only
                             // now: it used to swallow distinct identical-text messages.
@@ -8698,13 +8742,29 @@ async fn handle_incoming_request_inner(
                                     }
                                 }
                             }
-                            if roster_news {
-                                super::roster_reach::on_dm(
-                                    ws_cmd_tx, &store, master_peer_str, device_peer_id, peer_str, is_own_device,
-                                    &convo_peer, ts, rd.as_ref(),
-                                    &|to| social::profile_audience(server_states, master_peer_str, to, db_path, db_passphrase),
-                                );
-                            }
+                        }
+                        // Removals the sender's DM carried (F2): never on an echo of our own,
+                        // and only what the roster we hold lacks.
+                        let carried = rd.as_ref().map(|rd| rd.rm.as_slice()).unwrap_or_default();
+                        if roster_news
+                            && !is_own_device
+                            && store.as_ref().is_some_and(|st| super::roster_reach::carried_news(st, &convo_peer, carried))
+                        {
+                            let outcome = super::roster_book::ingest_carried(
+                                event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str, &convo_peer, carried,
+                                db_path, db_passphrase,
+                            ).await;
+                            enforce_device_revocations(
+                                &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                                local_peer_str, ws_room_peers, pending_mls_removals,
+                            );
+                        }
+                        if roster_news && let Some(store) = store.as_ref() {
+                            super::roster_reach::on_dm(
+                                ws_cmd_tx, store, master_peer_str, device_peer_id, peer_str, is_own_device,
+                                &convo_peer, ts, rd.as_ref(),
+                                &|to| social::profile_audience(server_states, master_peer_str, to, db_path, db_passphrase),
+                            );
                         }
                     }
 

@@ -937,6 +937,8 @@ class EventStreamNotifier extends Notifier<bool> {
         // The ingest may have RE-KEYED a friend row from a device id to this master
         // (a friend added by temporary nickname was stranded under the device id).
         ref.read(friendsProvider.notifier).loadAll();
+        // A device that left the roster takes its "added a device" warning with it.
+        ref.read(securityAlertsProvider.notifier).refresh();
 
       case NetworkEvent_SecurityAlert(:final peerId, :final kind):
         // A contact's identity changed in a way worth showing. Rust already persisted

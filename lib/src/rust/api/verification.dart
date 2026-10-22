@@ -82,6 +82,10 @@ class SecurityAlertFfi {
   /// `None` while still unread.
   final PlatformInt64? acknowledgedAt;
 
+  /// When the device it names left the identity (removed since); `None` while it is
+  /// still there. The alert stays unread until the person dismisses it.
+  final PlatformInt64? resolvedAt;
+
   const SecurityAlertFfi({
     required this.alertId,
     required this.peerId,
@@ -89,6 +93,7 @@ class SecurityAlertFfi {
     required this.detail,
     required this.createdAt,
     this.acknowledgedAt,
+    this.resolvedAt,
   });
 
   @override
@@ -98,7 +103,8 @@ class SecurityAlertFfi {
       kind.hashCode ^
       detail.hashCode ^
       createdAt.hashCode ^
-      acknowledgedAt.hashCode;
+      acknowledgedAt.hashCode ^
+      resolvedAt.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -110,5 +116,6 @@ class SecurityAlertFfi {
           kind == other.kind &&
           detail == other.detail &&
           createdAt == other.createdAt &&
-          acknowledgedAt == other.acknowledgedAt;
+          acknowledgedAt == other.acknowledgedAt &&
+          resolvedAt == other.resolvedAt;
 }
