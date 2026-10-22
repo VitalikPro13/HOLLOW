@@ -53297,6 +53297,18 @@ async fn g13_joiner_sibling_gets_server_without_forward() {
     let mut a = spawn_node_with_friends(&relay, J, J1, &[]).await;
     sleep_ms(1500).await;
     let b = spawn_node_with_friends(&relay, J, J2, &[]).await;
+    // Each device's roster counts the other before the join, so the join ships both. The
+    // harness shares one resolver: O folding a roster without J2 would unlink J2 for A too.
+    assert!(
+        wait_until(20, async || {
+            [&a, &b].iter().all(|n| {
+                let held = n.store().device_links_for(&j_master).unwrap_or_default();
+                held.contains(&j1) && held.contains(&j2)
+            })
+        })
+        .await,
+        "J's devices never counted each other",
+    );
     let sid = create_server_and_wait(&mut o, "Joiner siblings").await;
     a.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
     assert!(
