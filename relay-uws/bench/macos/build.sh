@@ -44,7 +44,7 @@ done
 o="$out/obj/us_sni_tree.o"
 clang++ -std=c++20 $flags $inc -I"$us/src" -c "$us/src/crypto/sni_tree.cpp" -o "$o" & pids+=($!)
 objs+=("$o")
-for f in main crypto device_list license reports http_handlers snapshot ws_handler; do
+for f in main crypto license reports http_handlers snapshot ws_handler; do
     o="$out/obj/$f.o"
     clang++ -std=c++20 $relay_flags $inc -I"$uws/src" -I"$us/src" -I"$relay/src" \
         -c "$relay/src/$f.cpp" -o "$o" & pids+=($!)

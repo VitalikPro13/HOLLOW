@@ -13,6 +13,9 @@ type WsStream = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
+const RELAY_DOMAIN: &str = "relay.anonlisten.com";
+const RELAY_URL: &str = "wss://relay.anonlisten.com:443/ws";
+
 const B58_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 fn base58_encode(data: &[u8]) -> String {
@@ -46,7 +49,7 @@ fn derive_peer_id(raw_pub: &[u8; 32]) -> String {
     base58_encode(&multihash)
 }
 
-fn make_auth_message() -> String {
+fn make_auth_message(nonce: &str) -> String {
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
 
@@ -61,25 +64,46 @@ fn make_auth_message() -> String {
         .unwrap()
         .as_secs();
 
-    let sign_payload = format!("hollow-ws-auth:{}:{}", peer_id, timestamp);
+    // `auth_v2_message` (relay-uws/src/auth_frame.h): a full socket, no license key.
+    let sign_payload = format!("hollow-ws-auth2\n{RELAY_DOMAIN}\n{nonce}\n{peer_id}\n{timestamp}\nfull\n");
     let signature = signing_key.sign(sign_payload.as_bytes());
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
 
     json!({
         "type": "auth",
+        "v": 2,
         "peer_id": peer_id,
         "public_key": pub_b64,
         "timestamp": timestamp,
-        "signature": sig_b64
+        "signature": sig_b64,
+        "nonce": nonce,
+        "domain": RELAY_DOMAIN
     })
     .to_string()
+}
+
+/// Asks for this socket's one-use challenge and returns its nonce.
+async fn challenge_nonce(ws: &mut WsStream) -> Option<String> {
+    ws.send(Message::Text(r#"{"type":"auth_hello"}"#.to_string())).await.ok()?;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+            Ok(Some(Ok(Message::Text(txt)))) => {
+                let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+                if v["type"] == "auth_challenge" {
+                    return v["nonce"].as_str().map(str::to_string);
+                }
+            }
+            Ok(Some(Ok(_))) => continue,
+            _ => return None,
+        }
+    }
 }
 
 async fn connect_and_auth(
     tls_connector: &tokio_tungstenite::Connector,
 ) -> Option<WsStream> {
     let (mut ws, _) = tokio_tungstenite::connect_async_tls_with_config(
-        "wss://relay.anonlisten.com:443/ws",
+        RELAY_URL,
         None,
         false,
         Some(tls_connector.clone()),
@@ -87,8 +111,8 @@ async fn connect_and_auth(
     .await
     .ok()?;
 
-    let auth_msg = make_auth_message();
-    ws.send(Message::Text(auth_msg)).await.ok()?;
+    let nonce = challenge_nonce(&mut ws).await?;
+    ws.send(Message::Text(make_auth_message(&nonce))).await.ok()?;
 
     let timeout = tokio::time::timeout(Duration::from_secs(10), ws.next()).await;
     match timeout {

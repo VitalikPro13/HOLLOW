@@ -14,8 +14,8 @@ Binary name: `hollow-relay`
   (`auth_challenge`, which also carries the relay's unix seconds as `now`, as does every
   `hb_ack`; issue #72); the auth frame (`v:2`) signs `hollow-ws-auth2`, the relay's domain
   (`auth_domain(--domain)`: lowercase, no port), the nonce, device, time, mode
-  (`full`/`fetch`/`guest`) and SHA-256 of the license key. One attempt per nonce. v1 is
-  refused since 0.12 (`ACCEPT_AUTH_V1` = 0, deployed 2026-10-05).
+  (`full`/`fetch`/`guest`) and SHA-256 of the license key. One attempt per nonce. A frame
+  without `v` (the 0.11 v1 frame) does not parse: refused since 0.12, the code gone in 0.13.
 - **Fetch sockets**: rooms in `PerSocketData::fetch_rooms`, never over a full socket's
   slot, no roster/presence, never in `discover_peers`; `leave` passes the socket as
   `expected_ws`; close leaves only its own slots.
@@ -37,17 +37,17 @@ Binary name: `hollow-relay`
   re-join keeps an owner. A change drops every owner the fold stops counting
   (`drop_inbox_owners`, peer_left to the owners left). Registry: `FairShare`, 128 MB,
   charged to the member who last showed it; snapshot codec v7 (JSON + first-sight ages);
-  restore takes it as held, unverified. The 0.11 master-signed list (`inbox_proof`,
-  `inbox_owner_proved`, version marks) is read only while
-  `ACCEPT_DEVICE_LIST_INBOX_PROOF` (off since 0.12) and never for an identity whose
-  held roster is protected or for a device it removed. Crypto: `roster_crypto.h`
+  restore takes it as held, unverified. The 0.11 master-signed list (`inbox_proof`)
+  proves nothing: since 0.13 a join's `inbox_proof` is not read at all, and the
+  device-list check, its version marks and `device_list.cpp` are gone (the snapshot's
+  `marks` section is written empty and an older relay's is read and dropped). Crypto: `roster_crypto.h`
   (`peer_id_key` = base58 decode, refuses ids over 64 chars; `verify_ed25519_raw`).
 - **Rings** (`ring_auth.h`, `ring_evict.h`): control signed by the change key of the
   newest join-lock link as `hollow-ring2` (`"v":2`), which names the relay's
   `auth_domain` (the same `state.door_domain` auth v2 binds), because the client stamps
   it with relay time; `hollow-ring1` (0.12.1 clients) only while `ACCEPT_RING1_CONTROL`
-  (default 1, the one switch still ON); legacy rooms' topics carry the owner (below),
-  unsigned = refresh only once `ACCEPT_UNSIGNED_RING_CONTROL` is off; eviction by the
+  (default 1, the one switch left); legacy rooms' topics carry the owner (below),
+  unsigned = refresh only (it keeps an existing ring from idling out); eviction by the
   address share holding the most bytes, `MAX_RING_FRAME_BYTES` 256 KB, 512 rings per
   server, the heaviest share's least recently used ring at the global cap, per-frame
   retention; snapshot codec v7 (v6 shares, v7 rosters).
@@ -58,7 +58,7 @@ Binary name: `hollow-relay`
   holding the most. Waiting frames: ONE 512 MB budget over DM + ring frames, each weighed
   with `FRAME_OVERHEAD_BYTES` (1 KB), exact (`OfflineIndex::released(seq)` on every
   removal); the old per-sender key caps are gone. Rings (65,536), join lock chains (128 MB,
-  `JoinLocks::record_bytes`), destroy orders, device-list marks and push registrations
+  `JoinLocks::record_bytes`), destroy orders and push registrations
   (128 MB, `charge_registrations`) and failed link-code guess records (`link_guess.h`,
   65,536 per-/64 records, not in the snapshot) all ride it; per-target slots and a ring's frames evict
   the heaviest share. Subscriptions: 1,024 rooms / 16,384 topics per socket, past it that
@@ -69,23 +69,25 @@ Binary name: `hollow-relay`
   stop reaches only that owner's topics; `ring_namespace` counts the per-server cap per
   owner. The first-signer binding is gone.
 - **Nicknames**: `nickname_proof` holds the master's signature (`nickname_claim_message`
-  in validate.h); resolve returns it; unsigned claims only while
-  `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`.
-- **The 0.11 switches are OFF since 0.12 (deployed 2026-10-05)**: `ACCEPT_AUTH_V1`,
+  in validate.h); resolve returns it; an unsigned claim (0.11) gets
+  `nickname_error`/`invalid_claim` and binds nothing.
+- **Compatibility switches**: the four 0.11 switches (`ACCEPT_AUTH_V1`,
   `ACCEPT_UNSIGNED_RING_CONTROL`, `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`,
-  `ACCEPT_DEVICE_LIST_INBOX_PROOF`. Each is `HOLLOW_ACCEPT_<NAME>` (default 0,
-  overridable with `-D`); `test/run_live.sh` still builds both settings. The 0.12.2
-  switch `ACCEPT_RING1_CONTROL` defaults to 1 (0.12.1 clients sign ring1) and goes to 0
-  once those clients are gone; run_live.sh builds it with the others. The live
-  probes on the box (`~/relay-next/relay_probe.py`, `inbox_probe.py`) expect the
+  `ACCEPT_DEVICE_LIST_INBOX_PROOF`) were OFF from 0.12 (deployed 2026-10-05) and are
+  deleted in 0.13 with all the code behind them; each old form has a live refusal test
+  (`test_auth`, `test_nicknames`, `test_rings`, `test_inbox_proof`) and the parser test
+  refuses a frame without `v`. The one switch left, `ACCEPT_RING1_CONTROL`
+  (`HOLLOW_ACCEPT_RING1_CONTROL`, default 1, `-D` overridable: 0.12.1 clients sign
+  ring1), goes to 0 once those clients are gone; `test/run_live.sh` builds it both ways.
+  The live probes on the box (`~/relay-next/relay_probe.py`, `inbox_probe.py`) expect the
   refusals.
 - **Live handler tests (session 32)**: `test/run_live.sh` (called last by `run_tests.sh`)
-  builds the real relay twice, every switch 1 and every switch 0, listens on 127.0.0.1
+  builds the real relay twice, `ACCEPT_RING1_CONTROL` 1 and 0, listens on 127.0.0.1
   only (`HOLLOW_RELAY_TEST_LOOPBACK`), self-signed cert, random port, and drives it with
-  `test/test_relay_live.cpp` (a TLS WebSocket client doing real auth v2): the switches,
+  `test/test_relay_live.cpp` (a TLS WebSocket client doing real auth v2): the 0.11 refusals, ring1 per build,
   guest refusals, the fetch slot rule, inbox audiences, D1 door rooms, forwarder rooms,
-  hidden sockets' channel copies, the catch-up end mark, 192 checks per
-  build. Negative checks never sleep (a round trip from each side first); each socket
+  hidden sockets' channel copies, the catch-up end mark, 542 checks per
+  build (0.13). Negative checks never sleep (a round trip from each side first); each socket
   connects from its own 127.0.x.y; no push token is ever registered (the sidecar on
   127.0.0.1:3001 is production's). Needs the uWebSockets/uSockets submodules and the
   `openssl` CLI, else it skips. ~25 s plain, ~70 s under `SANITIZE=1`.
@@ -621,7 +623,7 @@ Fatal: if the port bind fails, the process calls `exit(1)` immediately.
 
 Everything the relay holds is RAM. A service restart used to empty it: three days of offline DM frames, the topic rings, and every offline phone's push token (RAM-only, never erased on disconnect, re-sent only on app launch). Now the state that an OFFLINE peer cannot re-send rides systemd's file descriptor store across the restart. Memory `project_relay_restart_persistence` has the decisions; this is the shape.
 
-**What is in the snapshot:** `offline_buffer` (room, frame, sender, age, is_image, is_channel, seq), `offline_optin`, `topic_buffers` (key, accepting, retention_secs, registered age, frames), `push_tokens`, `push_prefs`. Not: rooms and sockets, nickname and link-code claims (relay-scoped by design), push debounce counters, `device_list_max_version`, the two files. Since VERSION 9 also every resumable session, which carries its own rooms, subscriptions, nickname and link code (see Resumable sessions).
+**What is in the snapshot:** `offline_buffer` (room, frame, sender, age, is_image, is_channel, seq), `offline_optin`, `topic_buffers` (key, accepting, retention_secs, registered age, frames), `push_tokens`, `push_prefs`. Not: rooms and sockets, nickname and link-code claims (relay-scoped by design), push debounce counters, the two files. Since VERSION 9 also every resumable session, which carries its own rooms, subscriptions, nickname and link code (see Resumable sessions).
 
 **`snapshot_codec.h`** (header-only, no uWS, unit test `test/test_snapshot_codec.cpp`): `snapshot::Data` plus `encode`/`decode`. Magic `HRSN`, `VERSION` (9 since 2026-10-06; the header comment lists what each version added), six counted sections (the sixth is the kill list, read only at version 2 or later; a version 1 snapshot decodes with an empty kill list, so a deploy keeps the live buffers), trailer `HRSE`; little-endian fixed-width ints, u32-length strings capped at 64 MB, flags must be 0/1, a count larger than the remaining bytes is refused. `decode` is all-or-nothing: any truncation, bad byte or a version outside the accepted range returns false and leaves the output untouched. Timestamps travel as AGES in seconds; the reader rebuilds `at = now - age`.
 
@@ -813,7 +815,6 @@ The 30-second reload cycle means key revocation takes at most 30 seconds to take
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `AUTH_V1_SKEW_SECS` (`auth_frame.h`) | 60 | Max clock skew for a v1 auth timestamp; v2/v3 are judged by the nonce only (`auth_time_ok`, issue #72) |
 | `MAX_ROOMS_PER_PEER` | 2000 | Maximum rooms a single peer can join |
 
 ### ws_handler.cpp:setup_ws_handler() — WebSocket endpoint configuration
@@ -885,9 +886,9 @@ Authentication protocol (first message after WebSocket open):
 1. Parse JSON. Reject on parse failure.
 2. Check `type == "auth"`. Reject otherwise.
 3. Validate `peer_id`, `public_key`, `signature` are non-empty. Reject if any missing.
-4. Check timestamp skew for v1 only (`auth_time_ok`): `|now - timestamp| <= 60s`. A v2/v3 frame signs the socket's one-use nonce, so its timestamp is signed but never judged (since 0.12.1, issue #72: a device with a skewed clock logs in; the client signs relay time anyway).
-5. **SECURITY — bind `peer_id` to `public_key`:** recompute the peer_id via `derive_peer_id(public_key)` (crypto.cpp) and reject any mismatch. A peer_id is an identity multihash that INLINES the Ed25519 public key, so it is a pure function of that key. Without this check, step 6 proves only that the sender holds the private half of the key they supplied — NOT that they own the peer_id they claim. Anyone could mint a throwaway keypair, sign `hollow-ws-auth:<victim_peer_id>:<ts>` with it, and authenticate AS the victim; since a newer socket for an existing peer_id EVICTS the incumbent, that is a persistent remote deauth of any user (peer_ids are public — broadcast in `peer_joined` + member snapshots). Added 0.8.2 after an external report; the same check also guards both legacy HTTP register/unregister endpoints. **The derivation is duplicated in Rust and C++ and is pinned by matching known-answer tests** (`peer_id_derivation_known_answer` / `relay-uws/test/test_derive_peer_id.cpp`) — silent drift fails auth for EVERY client, so change both or neither.
-6. Build signed message: `"hollow-ws-auth:" + peer_id + ":" + timestamp`.
+4. `parse_auth_frame` refuses a frame without `"v":2` or `"v":3` (the 0.11 v1 frame). The timestamp is signed but never judged: the socket's one-use nonce is the freshness proof (since 0.12.1, issue #72: a device with a skewed clock logs in; the client signs relay time anyway).
+5. **SECURITY — bind `peer_id` to `public_key`:** recompute the peer_id via `derive_peer_id(public_key)` (crypto.cpp) and reject any mismatch. A peer_id is an identity multihash that INLINES the Ed25519 public key, so it is a pure function of that key. Without this check, step 6 proves only that the sender holds the private half of the key they supplied — NOT that they own the peer_id they claim. Anyone could mint a throwaway keypair, sign an auth frame naming the victim's peer_id with it, and authenticate AS the victim; since a newer socket for an existing peer_id EVICTS the incumbent, that is a persistent remote deauth of any user (peer_ids are public — broadcast in `peer_joined` + member snapshots). Added 0.8.2 after an external report; the same check also guards both legacy HTTP register/unregister endpoints. **The derivation is duplicated in Rust and C++ and is pinned by matching known-answer tests** (`peer_id_derivation_known_answer` / `relay-uws/test/test_derive_peer_id.cpp`) — silent drift fails auth for EVERY client, so change both or neither.
+6. Build the signed message: `auth_v2_message` / `auth_v3_message` over the relay's `auth_domain`, this socket's nonce (it must match, one attempt) and every flag.
 7. Verify Ed25519 signature via `verify_ed25519()`. Reject if invalid.
 7. Validate license key via `state.license.validate_key()`. Handle all `LicenseResult` cases:
    - `Ok` / `NotRequired`: continue.
@@ -1439,7 +1440,7 @@ The `deploy/` templates assume the repo cloned at `/opt/HOLLOW` and a `hollow` u
 | Auth not sent within 10s | `auth_timeout`, connection closed 1008 |
 | Invalid auth JSON | `auth_failed`, connection closed 1008 |
 | Bad Ed25519 signature | `auth_failed`, connection closed 1008 |
-| v1 timestamp skew > 60s | `auth_failed`, connection closed 1008 |
+| v1 frame (no `v`) | `auth_failed`, connection closed 1008 |
 | License key required but missing | `license_key_required`, connection closed 1008 |
 | License key invalid | `invalid_license_key`, connection closed 1008 |
 | License key already held by 5 other peers | `license_key_in_use`, connection closed 1008; the client keeps retrying with backoff and keeps its key |
@@ -1541,7 +1542,7 @@ iOS build/config: classic non-UIScene AppDelegate + firebase pinned below the iO
 - **Authenticated connections:** Every WebSocket connection requires a valid Ed25519 signature over a timestamped challenge. No anonymous connections.
 - **No metadata logging (source-enforced, 2026-06-23):** NO log statement in the relay prints a peer_id, room, push target/sender, channel, server, or push token. The entire `[push]` family (buffer/replay/send-push/token-register/prefs/channel-push/direct-not-in-room) and `[license] Key revoked for peer <id>` were stripped — the relay must not record who-talks-to-whom (a truncated `12D3KooW…` prefix still fingerprints). Only aggregate counts (`Swept N`, `Loaded N key(s)`), config-file paths in parse errors, and `[main]` startup/shutdown banners remain. peer_ids in `state.*` maps / protocol `send_json` responses / signature strings are routing logic, NOT logging. See `feedback_relay_no_metadata_logging.md`.
 - **Sender identity injection:** For binary types 0x02/0x03/0x04, the relay replaces/injects the sender's peer_id — peers cannot spoof their identity to the relay.
-- **Auth anti-replay:** the per-socket one-use nonce (v2/v3); the 60-second skew window now binds only v1 frames (off since 0.12) and the legacy signed HTTP requests. The client stamps relay-judged statements (login, ring control, nickname claims) with the relay's time (`node/relay_clock.rs`); anything a peer judges stays on the device clock.
+- **Auth anti-replay:** the per-socket one-use nonce (v2/v3); the 60-second skew window binds only the legacy signed HTTP requests (v1 frames are refused since 0.12). The client stamps relay-judged statements (login, ring control, nickname claims) with the relay's time (`node/relay_clock.rs`); anything a peer judges stays on the device clock.
 - **No rate limiting:** Removed — Ed25519 auth + license keys are the DoS protection layer.
 - **Room isolation:** Peers can only send to rooms they've joined. Non-members are silently rejected.
 - **License revocation:** Active connections can be terminated within 30 seconds by removing their key from `keys.json`.

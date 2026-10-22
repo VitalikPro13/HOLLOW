@@ -1,7 +1,7 @@
 #!/bin/bash
 # Live tests of the relay's dispatch gates (test_relay_live.cpp): builds the real relay
-# twice, with every compatibility switch on and every one off, runs each on 127.0.0.1
-# with a throwaway certificate and drives it over TLS.
+# twice, with the compatibility switch (ACCEPT_RING1_CONTROL) on and off, runs each on
+# 127.0.0.1 with a throwaway certificate and drives it over TLS.
 # run_tests.sh calls it with its scratch directory; SANITIZE=1 builds the relay and the
 # client with ASan and UBSan. Skips, saying why, when the vendored uWebSockets/uSockets
 # sources or the openssl tool are missing.
@@ -71,12 +71,9 @@ us_c="gcc -std=c11 $flags -DLIBUS_USE_OPENSSL -I../uSockets/src"
 # A session grace of seconds, so the tests watch one run out; three sockets fill an
 # address, so they fill one under its rate of ten new sockets a minute.
 relay_cxx="g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_GRACE_SECS=5 -DHOLLOW_RELAY_TEST_CONNS_PER_IP=3 -I../uWebSockets/src -I../uSockets/src -I../src"
-# Both builds set every switch, so flipping a default on release day changes neither.
+# Both builds set the switch, so flipping its default on release day changes neither.
 switches() {
-    local s
-    for s in AUTH_V1 UNSIGNED_RING_CONTROL UNSIGNED_NICKNAME_CLAIMS DEVICE_LIST_INBOX_PROOF RING1_CONTROL; do
-        printf -- "-DHOLLOW_ACCEPT_%s=%s " "$s" "$1"
-    done
+    printf -- "-DHOLLOW_ACCEPT_RING1_CONTROL=%s " "$1"
 }
 variants=${RELAY_LIVE_VARIANTS:-on off}
 
@@ -89,7 +86,7 @@ done
 compile us_sni_tree ../uSockets/src/crypto/sni_tree.cpp "$obj/us_sni_tree.o" \
     g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -I../uSockets/src
 objects+=("$obj/us_sni_tree.o")
-for f in main crypto device_list license reports http_handlers snapshot; do
+for f in main crypto license reports http_handlers snapshot; do
     compile "$f" "../src/$f.cpp" "$obj/$f.o" $relay_cxx
     objects+=("$obj/$f.o")
 done
@@ -97,7 +94,7 @@ for v in $variants; do
     if [ "$v" = on ]; then bit=1; else bit=0; fi
     compile "ws_handler_$v" ../src/ws_handler.cpp "$obj/ws_handler_$v.o" $relay_cxx $(switches $bit)
 done
-g++ -std=c++17 $flags -I../src test_relay_live.cpp ../src/crypto.cpp ../src/device_list.cpp \
+g++ -std=c++17 $flags -I../src test_relay_live.cpp ../src/crypto.cpp \
     -o "$dir/client" -lssl -lcrypto -lsodium > "$dir/client.build" 2>&1 &
 pids+=($!)
 names+=(client)

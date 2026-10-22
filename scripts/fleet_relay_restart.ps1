@@ -324,9 +324,21 @@ const raw = spki.subarray(spki.length - 32);
 const proto = Buffer.concat([Buffer.from([0x08, 0x01, 0x12, 0x20]), raw]);
 const peerId = base58(Buffer.concat([Buffer.from([0x00, 0x24]), proto]));
 const timestamp = Math.floor(Date.now() / 1000);
-const signature = crypto
-  .sign(null, Buffer.from(`hollow-ws-auth:${peerId}:${timestamp}`), privateKey)
-  .toString('base64');
+const mode = control ? 'full' : 'guest';
+
+// The relay's host as auth v2 signs it: lowercase, no port (auth_frame.h auth_domain).
+function authDomain(h) {
+  let host = h;
+  if (host.startsWith('[')) {
+    const close = host.indexOf(']');
+    if (close >= 0) host = host.slice(0, close + 1);
+  } else {
+    const colon = host.indexOf(':');
+    if (colon >= 0 && host.indexOf(':', colon + 1) < 0) host = host.slice(0, colon);
+  }
+  return host.toLowerCase();
+}
+const domain = authDomain(host);
 
 let verdict = null;
 const finish = (line) => {
@@ -344,16 +356,22 @@ if (overall.unref) overall.unref();
 ws.addEventListener('error', (e) => finish(`ERROR socket ${e.message || 'failed'}`));
 ws.addEventListener('close', () => { if (!verdict) finish('ERROR socket closed before a verdict'); });
 
-ws.addEventListener('open', () => {
-  ws.send(JSON.stringify({
-    type: 'auth', peer_id: peerId, public_key: proto.toString('base64'),
-    timestamp, signature, guest: !control,
-  }));
-});
+ws.addEventListener('open', () => ws.send(JSON.stringify({ type: 'auth_hello' })));
 
 ws.addEventListener('message', (ev) => {
   let msg;
   try { msg = JSON.parse(typeof ev.data === 'string' ? ev.data : ''); } catch (_) { return; }
+  if (msg.type === 'auth_challenge') {
+    // auth_v2_message: no license key, so the digest line is empty.
+    const nonce = String(msg.nonce || '');
+    const signed = `hollow-ws-auth2\n${domain}\n${nonce}\n${peerId}\n${timestamp}\n${mode}\n`;
+    const signature = crypto.sign(null, Buffer.from(signed), privateKey).toString('base64');
+    ws.send(JSON.stringify({
+      type: 'auth', v: 2, peer_id: peerId, public_key: proto.toString('base64'),
+      timestamp, signature, nonce, domain, guest: !control,
+    }));
+    return;
+  }
   if (msg.type === 'auth_failed') return finish(`ERROR auth_failed ${msg.error || ''}`);
   if (msg.type === 'auth_ok') {
     say(`${control ? 'control' : 'guest'} ${peerId}`);

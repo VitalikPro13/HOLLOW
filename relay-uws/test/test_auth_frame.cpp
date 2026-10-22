@@ -118,41 +118,31 @@ static void test_v3() {
     check("a prefix is no match", !session::sid_equal(sid, sid.substr(0, 31)) && !session::sid_equal(sid, ""));
 }
 
-// Issue #72: the nonce is a v2/v3 login's freshness, so only v1 is judged by time.
-static void test_time() {
-    const uint64_t now = 1790000000;
-    check("a v2 login an hour off passes", auth_time_ok(2, now - 3600, now) && auth_time_ok(2, now + 3600, now));
-    check("a v3 login an hour off passes", auth_time_ok(3, now - 3600, now) && auth_time_ok(3, now + 3600, now));
-    check("a v2 login with no timestamp passes", auth_time_ok(2, 0, now));
-    check("a v1 login inside a minute passes", auth_time_ok(1, now - 60, now) && auth_time_ok(1, now + 60, now));
-    check("a v1 login past a minute is refused", !auth_time_ok(1, now - 61, now) && !auth_time_ok(1, now + 61, now));
-}
-
 int main() {
     printf("auth frame\n");
 
     const std::string good =
-        R"({"type":"auth","peer_id":"12D3KooWA","public_key":"k","timestamp":1790000000,)"
+        R"({"type":"auth","v":2,"peer_id":"12D3KooWA","public_key":"k","timestamp":1790000000,)"
         R"("signature":"s","license_key":"L","guest":true,"fetch":false})";
     auto f = parse_auth_frame(good);
     check("a well-formed frame parses", f.has_value());
     check("its fields are read", f && f->peer_id == "12D3KooWA" && f->public_key == "k" &&
                                      f->timestamp == 1790000000 && f->signature == "s" &&
                                      f->license_key == "L" && f->guest && !f->fetch);
-    auto bare = parse_auth_frame(R"({"type":"auth","peer_id":"p"})");
+    auto bare = parse_auth_frame(R"({"type":"auth","v":2,"peer_id":"p"})");
     check("absent optional fields default", bare && bare->timestamp == 0 && !bare->guest &&
                                                 bare->license_key.empty());
 
     // I1: each of these crashed the relay before auth (value() throws on a type it
     // did not expect).
-    check("a numeric peer id is refused", !accepted(R"({"type":"auth","peer_id":1})"));
-    check("a string timestamp is refused", !accepted(R"({"type":"auth","timestamp":"x"})"));
-    check("a negative timestamp is refused", !accepted(R"({"type":"auth","timestamp":-5})"));
-    check("a fractional timestamp is refused", !accepted(R"({"type":"auth","timestamp":1.5})"));
-    check("a string guest flag is refused", !accepted(R"({"type":"auth","guest":"x"})"));
-    check("a null fetch flag is refused", !accepted(R"({"type":"auth","fetch":null})"));
-    check("an object signature is refused", !accepted(R"({"type":"auth","signature":{}})"));
-    check("an array license key is refused", !accepted(R"({"type":"auth","license_key":[1]})"));
+    check("a numeric peer id is refused", !accepted(R"({"type":"auth","v":2,"peer_id":1})"));
+    check("a string timestamp is refused", !accepted(R"({"type":"auth","v":2,"timestamp":"x"})"));
+    check("a negative timestamp is refused", !accepted(R"({"type":"auth","v":2,"timestamp":-5})"));
+    check("a fractional timestamp is refused", !accepted(R"({"type":"auth","v":2,"timestamp":1.5})"));
+    check("a string guest flag is refused", !accepted(R"({"type":"auth","v":2,"guest":"x"})"));
+    check("a null fetch flag is refused", !accepted(R"({"type":"auth","v":2,"fetch":null})"));
+    check("an object signature is refused", !accepted(R"({"type":"auth","v":2,"signature":{}})"));
+    check("an array license key is refused", !accepted(R"({"type":"auth","v":2,"license_key":[1]})"));
 
     check("a non-auth type is refused", !accepted(R"({"type":"join","peer_id":"p"})"));
     check("a numeric type is refused", !accepted(R"({"type":7})"));
@@ -161,10 +151,10 @@ int main() {
     check("text that is not JSON is refused", !accepted("not json at all"));
     check("an empty frame is refused", !accepted(""));
     check("a frame past the size cap is refused",
-          !accepted(R"({"type":"auth","peer_id":")" + std::string(MAX_AUTH_FRAME_BYTES, 'a') + R"("})"));
+          !accepted(R"({"type":"auth","v":2,"peer_id":")" + std::string(MAX_AUTH_FRAME_BYTES, 'a') + R"("})"));
     const std::string deep = std::string(6000, '[') + std::string(6000, ']');
     check("a frame nested past the depth cap is refused",
-          !accepted(R"({"type":"auth","peer_id":"p","x":)" + deep + "}") &&
+          !accepted(R"({"type":"auth","v":2,"peer_id":"p","x":)" + deep + "}") &&
               !is_auth_hello(R"({"type":"auth_hello","x":)" + deep + "}"));
 
     printf("auth v2\n");
@@ -180,7 +170,10 @@ int main() {
         R"("nonce":")" + nonce + R"(","domain":"relay.example.com","signature":"s","fetch":true})");
     check("a v2 frame parses", v2 && v2->version == 2 && v2->nonce == nonce &&
                                    v2->domain == "relay.example.com" && v2->fetch);
-    check("a frame without v is v1", f && f->version == 1);
+    // The 0.11 v1 frame: no challenge, so it would replay to any relay.
+    check("a frame without v is refused", !accepted(R"({"type":"auth","peer_id":"p","public_key":"k","signature":"s"})"));
+    check("a frame naming v1 is refused", !accepted(R"({"type":"auth","v":1,"peer_id":"p"})"));
+    check("a null version is refused", !accepted(R"({"type":"auth","v":null,"peer_id":"p"})"));
     check("an unknown version is refused", !accepted(R"({"type":"auth","v":4})"));
     check("a string version is refused", !accepted(R"({"type":"auth","v":"2"})"));
     check("a numeric nonce is refused", !accepted(R"({"type":"auth","v":2,"nonce":5})"));
@@ -211,13 +204,12 @@ int main() {
 
     printf("auth v3 (resumable sessions)\n");
     test_v3();
-    test_time();
 
     // nlohmann stops reading at a NUL: the relay took the frame before it and ignored the rest.
     {
         using namespace std::string_literals;
         const std::string hello = "{\"type\":\"auth_hello\"}\0junk"s;
-        const std::string auth = "{\"type\":\"auth\",\"peer_id\":\"p\",\"public_key\":\"k\",\"signature\":\"s\"}\0"s;
+        const std::string auth = "{\"type\":\"auth\",\"v\":2,\"peer_id\":\"p\",\"public_key\":\"k\",\"signature\":\"s\"}\0"s;
         check("a hello with bytes after a NUL is no hello", !is_auth_hello(hello));
         check("an auth frame ending in a NUL is refused", !accepted(auth));
         check("the same auth frame without the NUL parses", accepted(auth.substr(0, auth.size() - 1)));

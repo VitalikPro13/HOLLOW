@@ -1010,7 +1010,7 @@ pub(crate) fn verify_carried_bundle(
 /// The trailing revoked segment is present even when empty, so one signature
 /// covers adds AND removes under one version; a pre-Step-7 4-segment signature
 /// will not verify here, which is safe because lists are verified on receipt.
-/// Kept for the 0.11 lists the upgrade reads and the relay's pinned vector.
+/// Kept for the 0.11 lists the upgrade reads.
 #[cfg(test)]
 pub(crate) fn device_list_signing_payload(
     master_peer_id: &str,
@@ -1056,7 +1056,7 @@ pub(crate) fn build_signed_device_list(
 
 /// Verify a [`SignedDeviceList`]: the master pubkey must derive to the claimed
 /// `master_peer_id`, and the signature must validate over the canonical payload.
-/// Only the relay reads one now (the inbox proof); this is its check for the mock.
+/// Nothing outside tests reads one any more; this checks the 0.11 lists tests build.
 #[cfg(test)]
 pub(crate) fn verify_device_list(list: &SignedDeviceList) -> bool {
     use base64::engine::general_purpose::STANDARD as B64;
@@ -5128,11 +5128,10 @@ mod tests {
         );
     }
 
-    // -- Async friending: carried bundle + the shared SignedDeviceList KAT -----
+    // -- Async friending: carried bundle + the 0.11 SignedDeviceList KAT -------
 
-    /// Cross-agent KAT. The relay's C++ ownership check has to rebuild EXACTLY
-    /// these bytes to verify an `inbox_proof`, so the vector is pinned here and
-    /// mirrored there. Run with `--nocapture` to print the whole vector.
+    /// Pins the bytes a 0.11 device list is signed over, so the 0.11 lists tests
+    /// build stay the ones 0.11 signed. Run with `--nocapture` to print the vector.
     #[test]
     fn signed_device_list_kat_vector() {
         let master = kp(0x7a);

@@ -23,28 +23,23 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     for (char c : domain) FUZZ_CHECK(!(c >= 'A' && c <= 'Z'));
     if (!frame) return 0;
 
-    FUZZ_CHECK(frame->version >= 1 && frame->version <= 3);
+    FUZZ_CHECK(frame->version == 2 || frame->version == 3);
     const std::optional<std::string> mode = auth_mode(frame->guest, frame->fetch);
     if (frame->version == 3) {
         FUZZ_CHECK(mode.has_value());
         FUZZ_CHECK(session::auth_session_ok(*mode, frame->session));
     }
-    (void)auth_time_ok(frame->version, frame->timestamp, 1790000000);
     (void)is_auth_nonce_shape(frame->nonce);
 
     const std::string derived = derive_peer_id(frame->public_key);
     (void)(derived == frame->peer_id);
     const std::string digest = frame->license_key.empty() ? std::string() : sha256_hex(frame->license_key);
-    std::string signed_msg;
-    if (frame->version >= 2 && mode) {
-        signed_msg = frame->version == 3
-                         ? auth_v3_message(frame->domain, frame->nonce, frame->peer_id, frame->timestamp, *mode,
-                                           digest, frame->session, frame->in_h)
-                         : auth_v2_message(frame->domain, frame->nonce, frame->peer_id, frame->timestamp, *mode,
-                                           digest);
-    } else {
-        signed_msg = "hollow-ws-auth:" + frame->peer_id + ":" + std::to_string(frame->timestamp);
-    }
+    if (!mode) return 0;
+    const std::string signed_msg =
+        frame->version == 3
+            ? auth_v3_message(frame->domain, frame->nonce, frame->peer_id, frame->timestamp, *mode, digest,
+                              frame->session, frame->in_h)
+            : auth_v2_message(frame->domain, frame->nonce, frame->peer_id, frame->timestamp, *mode, digest);
     (void)verify_ed25519(frame->public_key, frame->signature, signed_msg);
     return 0;
 }

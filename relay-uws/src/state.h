@@ -143,10 +143,6 @@ static constexpr int LINK_RESOLVE_BLOCK_MAX_SECS = 900;     // 15 minutes
 static constexpr size_t MAX_LINK_GUESS_KEYS = 65536;
 static constexpr int LINK_GUESS_EXPIRE_SECS = 900;          // idle entries swept after 15 min
 
-// Per-master high-water mark on inbox-proof device-list versions (RELAY-6).
-// Past the cap the address share holding the most marks loses its least recently
-// used one, so marks minted for throwaway masters never push out a real one.
-static constexpr size_t MAX_DEVICE_LIST_VERSIONS = 262144;
 // How long one key hashes address blocks into share ids (fair_share.h).
 static constexpr int SHARE_KEY_LIFETIME_SECS = 3600;
 
@@ -467,15 +463,6 @@ struct RelayState {
     // Session sockets that dropped a write since the last session tick, to close then.
     // One entry per socket (`write_dead` is set once).
     std::vector<std::string> dropped_writes;
-
-    // Highest device-list version this relay has seen verify for each master
-    // (RELAY-6). A revoked device keeps its last master-signed list forever and
-    // that list still verifies, so without a high-water mark it can replay it
-    // to read the master's inbox mailbox for as long as it likes. The marks ride
-    // the restart snapshot, since a revoked device would otherwise read again
-    // after every deploy.
-    std::unordered_map<std::string, uint64_t> device_list_max_version;
-    FairShare<std::string> mark_ledger;
 
     // Every identity's roster, folded from the rosters shown on its inbox joins
     // (design ID-1R): who owns each inbox, removals no later roster takes back.

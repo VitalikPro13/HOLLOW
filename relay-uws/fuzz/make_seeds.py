@@ -35,7 +35,7 @@ def dumps(v):
 def auth_frames():
     base = {"type": "auth", "peer_id": PEER, "public_key": PUBKEY, "timestamp": 1790000000, "signature": SIG}
     yield dumps({"type": "auth_hello"})
-    yield dumps(base)
+    yield dumps(base)  # the 0.11 v1 frame (no `v`), which never parses
     yield dumps(dict(base, v=2, nonce=NONCE, domain="relay.example.com"))
     yield dumps(dict(base, v=2, nonce=NONCE, domain="relay.example.com", guest=True))
     yield dumps(dict(base, v=2, nonce=NONCE, domain="relay.example.com", fetch=True, license_key="KEY-1234"))

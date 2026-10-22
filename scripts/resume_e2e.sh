@@ -116,7 +116,7 @@ build_relay() {
     done
     compile "$obj/us_sni_tree.o" "$src/uSockets/src/crypto/sni_tree.cpp" g++ -std=c++20 $flags -I"$src/uSockets/src"
     objects+=("$obj/us_sni_tree.o")
-    for f in main crypto device_list license reports http_handlers snapshot ws_handler; do
+    for f in main crypto license reports http_handlers snapshot ws_handler; do
         compile "$obj/$f.o" "$src/src/$f.cpp" $cxx
         objects+=("$obj/$f.o")
     done

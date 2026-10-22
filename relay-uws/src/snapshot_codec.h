@@ -178,7 +178,9 @@ struct Data {
     std::vector<PushToken> push_tokens;
     std::vector<PushPref> push_prefs;
     std::vector<Kill> kills;
-    std::vector<Mark> marks;  // least recently used first, the eviction order
+    // Written empty since the 0.11 inbox proof went (0.13); kept so the format, and a
+    // rollback to an older relay, stay as they were.
+    std::vector<Mark> marks;
     std::vector<Lock> locks;  // least recently used first, the eviction order
     std::vector<Registration> registrations;  // v6; least recently used first
     std::vector<Roster> rosters;  // v7; least recently used first

@@ -92,10 +92,6 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
     for (const auto& [target, e] : st.kill_list.proven) {
         d.kills.push_back({target, e.issuer, e.blob, e.issued_at_ms, age_secs(e.stored_at, now), e.share, true});
     }
-    for (const auto* master : by_last_use(st.device_list_max_version, st.mark_ledger)) {
-        d.marks.push_back({*master, st.device_list_max_version.at(*master),
-                           st.mark_ledger.share_of(*master).value_or(snapshot::NO_SHARE)});
-    }
     for (const auto* key : by_last_use(st.join_locks.records, st.join_locks.ledger)) {
         d.locks.push_back({*key, join_lock::links_to_json(st.join_locks.records.at(*key)).dump(),
                            st.join_locks.ledger.share_of(*key).value_or(snapshot::NO_SHARE)});
@@ -182,11 +178,8 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now, int
                                  at_from_age(k.age_secs, now));
         }
     }
-    for (auto& m : d.marks) {
-        if (st.device_list_max_version.emplace(m.master, m.version).second) {
-            st.mark_ledger.put(m.master, share(m.share), 1);
-        }
-    }
+    // `marks` (device-list versions) guarded the 0.11 inbox proof, which no longer
+    // opens anything: an older relay's are read and dropped.
     for (auto& l : d.locks) {
         const nlohmann::json j = nlohmann::json::parse(l.links_json, nullptr, /*allow_exceptions=*/false);
         if (auto links = join_lock::links_from_json(j)) st.join_locks.restore(l.key, std::move(*links), share(l.share));

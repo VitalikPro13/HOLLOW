@@ -5,7 +5,6 @@
 #include "ring_evict.h"
 #include "ring_auth.h"
 #include "crypto.h"
-#include "device_list.h"
 #include "fwd_room.h"
 #include "ip_key.h"
 #include "kill_order.h"
@@ -352,15 +351,6 @@ static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* d
 static void send_kill_signals(RelayState& state, SSLWebSocket* ws, const std::string& peer);
 static void settle_ip_slot(RelayState& state, const PerSocketData* data);
 
-// Pre-0.12 clients sign only `hollow-ws-auth:{peer}:{ts}` and cannot ask for a
-// challenge, so a v1 frame captured by another relay would replay here: refused.
-// This and the other three 0.11 switches take a -D override so
-// test/run_live.sh can run the relay with them off as well as on.
-#ifndef HOLLOW_ACCEPT_AUTH_V1
-#define HOLLOW_ACCEPT_AUTH_V1 0
-#endif
-static constexpr bool ACCEPT_AUTH_V1 = HOLLOW_ACCEPT_AUTH_V1;
-
 // The one frame an unauthenticated socket may send besides `auth`. The nonce is
 // minted once per socket; asking again gets the same one. `door_key` is what this
 // socket's door proofs are made for; `session` says a v3 login may ask for one;
@@ -406,18 +396,12 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         return;
     }
 
-    if (!auth_time_ok(frame->version, timestamp, now_unix_secs())) {
-        send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
-        ws->end(1008, "bad_auth");
-        return;
-    }
-
     // SECURITY: bind the claimed peer_id to the supplied public key.
     //
     // The signature check below proves only that the sender holds the private
     // half of `public_key` — NOT that they own `peer_id`. Without this binding,
-    // anyone could mint a throwaway keypair, sign
-    // "hollow-ws-auth:<victim_peer_id>:<now>" with it, and authenticate AS the
+    // anyone could mint a throwaway keypair, sign an auth frame naming the
+    // victim's peer_id with it, and authenticate AS the
     // victim: peer_ids are public (broadcast in peer_joined + room member
     // snapshots), and a newer socket for an existing peer_id EVICTS the
     // incumbent below, so this was a persistent remote deauth of any user, plus
@@ -433,33 +417,25 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         return;
     }
 
-    // v2 binds the frame to this socket's challenge, this relay and every flag the
+    // The frame is bound to this socket's challenge, this relay and every flag the
     // relay acts on, so a captured frame opens nothing anywhere else: not another
     // relay, not a second socket here, not an invisible `fetch` socket beside the
     // live device.
-    std::string signed_msg;
-    if (frame->version >= 2) {
-        std::optional<std::string> mode = auth_mode(guest, fetch);
-        bool challenged = !data->auth_nonce.empty() && frame->nonce == data->auth_nonce;
-        if (!mode || !challenged || frame->domain != auth_domain(config.domain)) {
-            send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
-            ws->end(1008, "bad_auth");
-            return;
-        }
-        std::string license_digest = license_key_val.empty() ? std::string() : sha256_hex(license_key_val);
-        signed_msg = frame->version == 3
-                         ? auth_v3_message(frame->domain, frame->nonce, peer_id, timestamp, *mode, license_digest,
-                                           frame->session, frame->in_h)
-                         : auth_v2_message(frame->domain, frame->nonce, peer_id, timestamp, *mode, license_digest);
-    } else if (ACCEPT_AUTH_V1) {
-        signed_msg = "hollow-ws-auth:" + peer_id + ":" + std::to_string(timestamp);
-    } else {
+    std::optional<std::string> mode = auth_mode(guest, fetch);
+    bool challenged = !data->auth_nonce.empty() && frame->nonce == data->auth_nonce;
+    if (!mode || !challenged || frame->domain != auth_domain(config.domain)) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
         ws->end(1008, "bad_auth");
         return;
     }
+    std::string license_digest = license_key_val.empty() ? std::string() : sha256_hex(license_key_val);
+    const std::string signed_msg =
+        frame->version == 3
+            ? auth_v3_message(frame->domain, frame->nonce, peer_id, timestamp, *mode, license_digest, frame->session,
+                              frame->in_h)
+            : auth_v2_message(frame->domain, frame->nonce, peer_id, timestamp, *mode, license_digest);
     // One challenge, one attempt; door proofs stay bound to the one that logged in.
-    const std::string challenge = frame->version >= 2 ? data->auth_nonce : std::string();
+    const std::string challenge = data->auth_nonce;
     data->auth_nonce.clear();
     if (!verify_ed25519(public_key, signature, signed_msg)) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
@@ -624,13 +600,6 @@ static void send_kill_signals(RelayState& state, SSLWebSocket* ws, const std::st
 // deposited or read what (feedback_relay_rules).
 static constexpr char INBOX_ROOM_PREFIX[] = "inbox:";
 
-// 0.11 clients prove an inbox with a master-signed device list, which anyone
-// holding the master key can sign, so only the roster proves an inbox.
-#ifndef HOLLOW_ACCEPT_DEVICE_LIST_INBOX_PROOF
-#define HOLLOW_ACCEPT_DEVICE_LIST_INBOX_PROOF 0
-#endif
-static constexpr bool ACCEPT_DEVICE_LIST_INBOX_PROOF = HOLLOW_ACCEPT_DEVICE_LIST_INBOX_PROOF;
-
 static const RosterCrypto& relay_roster_crypto() {
     static const RosterCrypto c = roster_crypto();
     return c;
@@ -639,52 +608,6 @@ static const RosterCrypto& relay_roster_crypto() {
 static int64_t wall_now_ms() {
     return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
-}
-
-// Parse the optional `inbox_proof` object carried on a join into a
-// SignedDeviceList. Strict: every field must be present and the right shape.
-// A malformed proof is simply "no proof" — the join still succeeds, the
-// mailbox just never opens.
-static bool parse_inbox_proof(const json& j, SignedDeviceList& out) {
-    if (!j.is_object()) return false;
-
-    auto str_field = [&](const char* key, std::string& dst) {
-        auto it = j.find(key);
-        if (it == j.end() || !it->is_string()) return false;
-        dst = it->get<std::string>();
-        return true;
-    };
-    // Bounded: a join frame may be a megabyte of text, and an unbounded array
-    // here would let one join allocate tens of thousands of strings before the
-    // signature that governs them is even checked. No real master has anywhere
-    // near this many devices or tombstones. Deliberately NOT shape-checked:
-    // these ids are covered by the master's signature rather than chosen by the
-    // caller, and refusing an unexpected shape would lock a real user out of
-    // their own mailbox.
-    static constexpr size_t MAX_PROOF_IDS = 1024;
-    auto str_array = [&](const char* key, std::vector<std::string>& dst) {
-        auto it = j.find(key);
-        if (it == j.end() || !it->is_array()) return false;
-        if (it->size() > MAX_PROOF_IDS) return false;
-        for (const auto& e : *it) {
-            if (!e.is_string()) return false;
-            dst.push_back(e.get<std::string>());
-        }
-        return true;
-    };
-
-    if (!str_field("master_pubkey_b64", out.master_pubkey_b64)) return false;
-    if (!str_field("master_peer_id", out.master_peer_id)) return false;
-    if (!str_field("sig_b64", out.sig_b64)) return false;
-    if (!str_array("devices", out.devices)) return false;
-    if (!str_array("revoked", out.revoked)) return false;
-
-    auto vit = j.find("version");
-    // serde serializes the u64 version unsigned; anything else (negative,
-    // float, string) is not a list this relay can have the signed bytes for.
-    if (vit == j.end() || !vit->is_number_unsigned()) return false;
-    out.version = vit->get<uint64_t>();
-    return true;
 }
 
 // TTL-only mailbox replay: send every buffered frame for `mailbox_peer_id` that
@@ -714,80 +637,8 @@ static void replay_mailbox_no_delete(SSLWebSocket* ws,
     // No logging — which device read whose mailbox is social-graph metadata.
 }
 
-// Ownership check for an `inbox:{M}` join. ALL of these must hold, else replay
-// NOTHING — and say nothing: no error frame, no log line. A failed proof is
-// indistinguishable from a plain join, so a prober learns neither whether the
-// mailbox exists nor whether it holds anything.
-//
-//   a. the device list signature verifies under master_pubkey_b64;
-//   b. derive_peer_id(master_pubkey_b64) == master_peer_id  (inside verify);
-//   c. this socket's AUTHENTICATED device id is in `devices` and not `revoked`;
-//   d. the joined room string equals "inbox:" + master_peer_id.
-//   e. the list's `version` is not older than the newest this relay has seen
-//      verify for that master.
-//
-// (c) is what makes the proof non-transferable: the list is public-ish (it is
-// gossiped between devices), but replaying someone else's list only opens the
-// mailbox for a socket that already authenticated as one of ITS devices, and
-// auth binds peer_id to the key (handle_auth).
-//
-// (e) is what makes REVOCATION stick. A revoked device keeps the last list that
-// named it, that list is master-signed and verifies forever, and (c) passes
-// against it — so revocation was a client-side courtesy the relay never
-// enforced. `version` is inside the signed payload
-// ("hollow-devices:{master}:{version}:{devices}:{revoked}"), so a replayer
-// cannot raise it without the master's key, and the newer list that revoked it
-// necessarily carries a higher version. The mark is bumped from ANY list that
-// verifies for the master, whoever carries it, because only the master can mint
-// one — a third party presenting the current list can therefore raise the bar
-// but never lower it. The marks survive a restart through the snapshot.
 static bool is_inbox_room(const std::string& room) {
     return room.rfind(INBOX_ROOM_PREFIX, 0) == 0;
-}
-
-static bool inbox_owner_proved(PerSocketData* data, const std::string& room,
-                               const json& proof_json, RelayState& state) {
-    // Guests never own an identity, so they can never own a mailbox.
-    if (!ACCEPT_DEVICE_LIST_INBOX_PROOF || data->is_guest) return false;
-    if (!is_inbox_room(room)) return false;
-
-    SignedDeviceList dl;
-    if (!parse_inbox_proof(proof_json, dl)) return false;
-    if (!verify_signed_device_list(dl)) return false;                       // a + b
-    if (room != std::string(INBOX_ROOM_PREFIX) + dl.master_peer_id) return false;  // d
-    // Once the phrase roots the identity's roster, the master key proves nothing,
-    // and a device the roster removed never comes back through an old list.
-    if (const auto* held = state.roster_book.get(dl.master_peer_id)) {
-        auto st = state.roster_book.fold(*held, wall_now_ms(), relay_roster_crypto());
-        if (st.is_protected || st.removed.count(data->peer_id)) return false;
-    }
-
-    // (e) — before (c), so a current list raises the mark even when the socket
-    // carrying it turns out not to be one of its devices. No log line: a
-    // rejected replay must look exactly like a plain join.
-    auto vit = state.device_list_max_version.find(dl.master_peer_id);
-    if (vit != state.device_list_max_version.end()) {
-        if (dl.version < vit->second) return false;
-        vit->second = dl.version;
-    } else {
-        state.device_list_max_version[dl.master_peer_id] = dl.version;
-    }
-
-    const bool owns = device_list_owns_device(dl, data->peer_id);           // c
-    // Once one of the master's own devices proves, the mark is charged to it, so
-    // a third party presenting the list first never makes it theirs to lose.
-    if (owns || !state.mark_ledger.contains(dl.master_peer_id)) {
-        state.mark_ledger.put(dl.master_peer_id, socket_share(state, data), 1);
-    } else {
-        state.mark_ledger.touch(dl.master_peer_id);
-    }
-    while (state.mark_ledger.size() > MAX_DEVICE_LIST_VERSIONS) {
-        auto victim = state.mark_ledger.victim();
-        if (!victim) break;
-        state.device_list_max_version.erase(*victim);
-        state.mark_ledger.remove(*victim);
-    }
-    return owns;
 }
 
 // Owners of `room` that `state` (the held roster's fold) no longer counts lose the
@@ -823,8 +674,7 @@ static void drop_inbox_owners(RelayState& state, const std::string& room, const 
 }
 
 // Whether `proof` opens `door` for `peer` in `room`, bound to the challenge `nonce` its
-// socket logged in with (or its session was minted with). A socket that never asked
-// for a challenge (a 0.11 login) has no nonce to bind a proof to.
+// socket logged in with (or its session was minted with). An empty nonce binds nothing.
 static bool door_opens(const RelayState& state, const std::string& nonce, const std::string& peer,
                        const std::string& room, const std::string& door, const std::string& proof) {
     if (nonce.empty() || proof.size() != door_room::PROOF_TEXT_LEN) return false;
@@ -911,12 +761,10 @@ static void replay_grace_directs(SSLWebSocket* ws, PerSocketData* data, const st
     }
 }
 
-// `inbox_roster` (0.12) or `inbox_proof` (0.11) may be null: a plain JoinRoom
-// carries neither. They are only consulted for an `inbox:` room, `door_proof`
-// (empty = none) only for a door-locked server room.
+// `inbox_roster` may be null: a plain JoinRoom carries none. It is only consulted
+// for an `inbox:` room, `door_proof` (empty = none) only for a door-locked server room.
 static void handle_join(SSLWebSocket* ws, PerSocketData* data,
                          const std::string& room, RelayState& state,
-                         const json* inbox_proof = nullptr,
                          const json* inbox_roster = nullptr,
                          const std::string& door_proof = std::string()) {
     if (!is_valid_room_code(room)) {
@@ -935,8 +783,7 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
 
     // A shown roster decides on its own; only a plain re-join keeps an owner an owner.
     const bool shown = inbox_roster != nullptr;
-    const bool proved = shown ? inbox_owner_by_roster(data, room, *inbox_roster, state)
-                              : (inbox_proof && inbox_owner_proved(data, room, *inbox_proof, state));
+    const bool proved = shown && inbox_owner_by_roster(data, room, *inbox_roster, state);
 
     auto& ws_room = state.ws_rooms[room];
 
@@ -1852,14 +1699,6 @@ static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
     // No logging — reporter/target peer ids are user-identifying.
 }
 
-// Pre-0.12 members register rings unsigned. Only the server's authority
-// (ring_auth.h) creates, extends or stops a ring; an unsigned request only keeps
-// existing rings from idling out.
-#ifndef HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL
-#define HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL 0
-#endif
-static constexpr bool ACCEPT_UNSIGNED_RING_CONTROL = HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL;
-
 // 0.12.1 and older clients sign `hollow-ring1`, which names no relay; newer ones sign
 // `hollow-ring2`. Off once those clients are gone.
 #ifndef HOLLOW_ACCEPT_RING1_CONTROL
@@ -1957,10 +1796,8 @@ static void handle_set_topic_buffer(PerSocketData* data, const json& j, RelaySta
         return;
     }
 
-    if (ACCEPT_UNSIGNED_RING_CONTROL) {
-        apply_ring_control(state, c, prefix, socket_share(state, data));
-        return;
-    }
+    // Only the server's authority (ring_auth.h) creates, extends or stops a ring; an
+    // unsigned request only keeps existing rings from idling out.
     auto now = std::chrono::steady_clock::now();
     size_t n = 0;
     for (const auto& cid : c.channels) {
@@ -2566,12 +2403,6 @@ static bool nickname_binding_is_stale(RelayState& state, const std::string& nick
     return false;
 }
 
-// Pre-0.12 clients claim a nickname with a self-reported master and no signature.
-// A claim counts only when the master it names signed it for the claiming device.
-#ifndef HOLLOW_ACCEPT_UNSIGNED_NICKNAME_CLAIMS
-#define HOLLOW_ACCEPT_UNSIGNED_NICKNAME_CLAIMS 0
-#endif
-static constexpr bool ACCEPT_UNSIGNED_NICKNAME_CLAIMS = HOLLOW_ACCEPT_UNSIGNED_NICKNAME_CLAIMS;
 static constexpr int64_t NICKNAME_CLAIM_SKEW_MS = 300 * 1000;
 
 static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data, const json& j,
@@ -2585,25 +2416,20 @@ static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data, const j
         return;
     }
 
-    // A signed claim must be the named master's, for this socket's device, now.
+    // A claim counts only when the master it names signed it for this socket's
+    // device, now; an unsigned one (0.11) names a master nobody vouched for.
     RelayState::NicknameProof proof;
-    const bool is_signed = j.contains("sig");
-    if (is_signed) {
-        proof.master_key = json_text(j, "master_key");
-        proof.sig = json_text(j, "sig");
-        auto ts = j.find("ts");
-        proof.ts_ms = (ts != j.end() && ts->is_number_integer()) ? ts->get<int64_t>() : 0;
-        const int64_t now_ms = static_cast<int64_t>(now_unix_secs()) * 1000;
-        const int64_t skew = now_ms > proof.ts_ms ? now_ms - proof.ts_ms : proof.ts_ms - now_ms;
-        const bool ok = is_peer_id_shape(raw_master) && derive_peer_id(proof.master_key) == raw_master &&
-                        skew <= NICKNAME_CLAIM_SKEW_MS &&
-                        verify_ed25519(proof.master_key, proof.sig,
-                                       nickname_claim_message(nickname, data->peer_id, raw_master, proof.ts_ms));
-        if (!ok) {
-            send_json(ws, {{"type", "nickname_error"}, {"error", "invalid_claim"}, {"nickname", nickname}});
-            return;
-        }
-    } else if (!ACCEPT_UNSIGNED_NICKNAME_CLAIMS) {
+    proof.master_key = json_text(j, "master_key");
+    proof.sig = json_text(j, "sig");
+    auto ts = j.find("ts");
+    proof.ts_ms = (ts != j.end() && ts->is_number_integer()) ? ts->get<int64_t>() : 0;
+    const int64_t now_ms = static_cast<int64_t>(now_unix_secs()) * 1000;
+    const int64_t skew = now_ms > proof.ts_ms ? now_ms - proof.ts_ms : proof.ts_ms - now_ms;
+    const bool ok = !proof.sig.empty() && is_peer_id_shape(raw_master) &&
+                    derive_peer_id(proof.master_key) == raw_master && skew <= NICKNAME_CLAIM_SKEW_MS &&
+                    verify_ed25519(proof.master_key, proof.sig,
+                                   nickname_claim_message(nickname, data->peer_id, raw_master, proof.ts_ms));
+    if (!ok) {
         send_json(ws, {{"type", "nickname_error"}, {"error", "invalid_claim"}, {"nickname", nickname}});
         return;
     }
@@ -2625,14 +2451,10 @@ static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data, const j
     state.nickname_to_peer[nickname] = data->peer_id;
     state.peer_to_nickname[data->peer_id] = nickname;
     state.nickname_expiry[nickname] = now_unix_secs() + NICKNAME_TTL_SECS;
-    // Self-reported MASTER id, shape-checked (old clients send none). Stored
-    // and handed back verbatim on resolve, so it is a client-supplied peer id
-    // the relay keeps: it gets the same shape gate as every other one, plus the
-    // Ed25519-identity prefix real ids carry. Never used for relay-side routing.
-    if (is_peer_id_shape(raw_master) && raw_master.rfind("12D3KooW", 0) == 0) {
-        state.nickname_to_master[nickname] = raw_master;
-    }
-    if (is_signed) state.nickname_proof[nickname] = proof;
+    // Handed back verbatim on resolve with the signature, which resolvers check
+    // again. Never used for relay-side routing.
+    state.nickname_to_master[nickname] = raw_master;
+    state.nickname_proof[nickname] = proof;
     send_json(ws, {{"type", "nickname_claimed"}, {"nickname", nickname}});
 }
 
@@ -2866,15 +2688,13 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
     if (handle_session_control(ws, data, j, type, state)) return;
 
     if (type == "join") {
-        // An `inbox:{master}` join may show the device's roster (0.12) or a
-        // master-signed list (0.11); an ordinary join shows neither.
-        auto pit = j.find("inbox_proof");
-        const json* inbox_proof =
-            (pit != j.end() && pit->is_object()) ? &(*pit) : nullptr;
+        // An `inbox:{master}` join may show the device's roster; an ordinary join
+        // shows none. The 0.11 master-signed list (`inbox_proof`) proves nothing:
+        // anyone holding the master key can sign one.
         auto rit = j.find("inbox_roster");
         const json* inbox_roster =
             (rit != j.end() && rit->is_object()) ? &(*rit) : nullptr;
-        handle_join(ws, data, j.value("room", ""), state, inbox_proof, inbox_roster, json_text(j, "door_proof"));
+        handle_join(ws, data, j.value("room", ""), state, inbox_roster, json_text(j, "door_proof"));
     } else if (type == "leave") {
         // Only this socket's own slot: a fetch socket's leave must not unjoin the
         // device's full node.

@@ -18,24 +18,25 @@
 //
 // Auth v2 (0.12): the client asks for a challenge (`auth_hello`), the relay answers
 // with a fresh nonce (`auth_challenge`), and the client signs the nonce, the relay's
-// domain and every flag the relay acts on. A v1 frame signs only the peer id and a
-// timestamp, so one captured frame replays to any relay within a minute, and its
-// `fetch`, `guest` and license key ride unsigned.
+// domain and every flag the relay acts on. A frame without `v` is the pre-0.12 v1
+// frame, which signs only the peer id and a timestamp (one captured frame replays to
+// any relay, its `fetch`, `guest` and license key unsigned): it does not parse.
 //
 // Auth v3 is v2 plus the session it asks for (`"new"`, `"none"` or a sid to resume)
 // and how many stream frames the client received in it, both signed
 // (RESUMABLE_SESSIONS_PLAN.md section 9.1).
 struct AuthFrame {
-    // 1 = the pre-0.12 frame (no `v`), 2 = the challenge frame, 3 = with a session.
-    int version = 1;
+    // 2 = the challenge frame, 3 = with a session.
+    int version = 2;
     std::string peer_id;
     std::string public_key;
+    // Signed, never judged by time: the one-use nonce is the freshness proof, so a
+    // client whose clock is off still logs in (issue #72).
     uint64_t timestamp = 0;
     std::string signature;
     std::string license_key;
     bool guest = false;
     bool fetch = false;
-    // v2 and v3.
     std::string nonce;
     std::string domain;
     // v3 only.
@@ -58,17 +59,6 @@ inline std::optional<std::string> auth_mode(bool guest, bool fetch) {
     if (guest) return std::string("guest");
     if (fetch) return std::string("fetch");
     return std::string("full");
-}
-
-// How far a v1 frame's timestamp may sit from the relay's clock.
-static constexpr uint64_t AUTH_V1_SKEW_SECS = 60;
-
-// Only v1 is judged by time: v2 and v3 sign this socket's one-use nonce, which is
-// the freshness proof, so a client whose clock is off still logs in (issue #72).
-inline bool auth_time_ok(int version, uint64_t timestamp, uint64_t now) {
-    if (version >= 2) return true;
-    const uint64_t diff = now > timestamp ? now - timestamp : timestamp - now;
-    return diff <= AUTH_V1_SKEW_SECS;
 }
 
 namespace auth_detail {
@@ -140,12 +130,10 @@ inline std::optional<AuthFrame> parse_auth_frame(std::string_view message) {
     }
 
     auto v = j.find("v");
-    if (v != j.end()) {
-        if (!v->is_number_unsigned()) return std::nullopt;
-        const uint64_t version = v->get<uint64_t>();
-        if (version != 2 && version != 3) return std::nullopt;
-        f.version = static_cast<int>(version);
-    }
+    if (v == j.end() || !v->is_number_unsigned()) return std::nullopt;
+    const uint64_t version = v->get<uint64_t>();
+    if (version != 2 && version != 3) return std::nullopt;
+    f.version = static_cast<int>(version);
     if (f.version == 3 && !auth_detail::session_fields(j, f)) return std::nullopt;
     return f;
 }

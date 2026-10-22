@@ -65,7 +65,6 @@ fi
 run test_presence_view $LIBS
 run test_snapshot_codec
 run test_turn_uris
-run test_verify_device_list ../src/device_list.cpp ../src/crypto.cpp $LIBS
 # The fuzz targets (../fuzz) replayed over their seeds and every input that once broke
 # one; libFuzzer itself runs them in ClusterFuzzLite (.clusterfuzzlite).
 replay() {

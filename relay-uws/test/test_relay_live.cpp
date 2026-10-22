@@ -14,7 +14,6 @@
 
 #include "auth_frame.h"
 #include "crypto.h"
-#include "device_list.h"
 #include "door_room.h"
 #include "presence_view.h"
 #include "join_lock.h"
@@ -56,7 +55,8 @@ using json = nlohmann::json;
 static int failures = 0;
 static int g_port = 0;
 static std::string g_domain;
-static bool g_legacy = true;
+// The build under test accepts `hollow-ring1` ring control (ACCEPT_RING1_CONTROL).
+static bool g_ring1 = true;
 static SSL_CTX* g_ctx = nullptr;
 static int g_next_source = 0;
 // Non-negative: every new socket comes from this one source address (Socket::open).
@@ -678,10 +678,15 @@ static json legacy_roster(const Ident& master, const std::vector<const Ident*>& 
     return json::parse(roster::to_json(r).dump());
 }
 
+// The 0.11 master-signed device list a join once proved an inbox with (version 1,
+// nothing revoked; `devices` sorted).
 static json device_list_proof(const Ident& master, const std::vector<std::string>& devices) {
+    std::string listed;
+    for (const auto& d : devices) listed += (listed.empty() ? "" : ",") + d;
+    const std::string payload = "hollow-devices:" + master.peer + ":1:" + listed + ":";
     return {{"master_pubkey_b64", master.pub_b64}, {"master_peer_id", master.peer}, {"devices", devices},
             {"revoked", json::array()},            {"version", 1},
-            {"sig_b64", master.sign(device_list_signing_payload(master.peer, 1, devices, {}))}};
+            {"sig_b64", master.sign(payload)}};
 }
 
 static std::string room_name(const std::string& kind) { return kind + "-" + g_tag; }
@@ -689,7 +694,7 @@ static std::string room_name(const std::string& kind) { return kind + "-" + g_ta
 // ---------------------------------------------------------------------------
 
 static void test_auth() {
-    printf("auth (ACCEPT_AUTH_V1 %s)\n", g_legacy ? "on" : "off");
+    printf("auth\n");
     Ident id;
     auto v1 = open_socket(id);
     const uint64_t ts = now_unix_secs();
@@ -699,16 +704,11 @@ static void test_auth() {
         return j.value("type", "") == "auth_ok" || j.value("type", "") == "auth_failed";
     }));
     const bool accepted = r && r->value("type", "") == "auth_ok";
-    if (g_legacy) {
-        check("a v1 login (0.11 clients) is accepted while the switch is on", accepted);
-        check("and the socket works", accepted && sync(*v1));
-    } else {
-        check("a v1 login is refused once the switch is off", r && !accepted);
-        check("and the socket is closed", !next(*v1, typed("auth_ok"), 1000) && v1->ws.closed());
-    }
+    check("a v1 login (0.11 clients) is refused", r && !accepted);
+    check("and the socket is closed", !next(*v1, typed("auth_ok"), 1000) && v1->ws.closed());
 
     auto v2 = login(Ident());
-    check("a v2 login is accepted in either build", v2->ok);
+    check("a v2 login is accepted", v2->ok);
 
     Ident other;
     auto bad = open_socket(other);
@@ -731,25 +731,26 @@ static void test_auth() {
 }
 
 static void test_nicknames() {
-    printf("nicknames (ACCEPT_UNSIGNED_NICKNAME_CLAIMS %s)\n", g_legacy ? "on" : "off");
+    printf("nicknames\n");
     auto a = login(Ident());
     const std::string plain = "n" + g_tag + "a";
     a->send({{"type", "claim_nickname"}, {"nickname", plain}});
     auto r = next_json(*a, json_where([](const json& j) {
         return j.value("type", "") == "nickname_claimed" || j.value("type", "") == "nickname_error";
     }));
-    if (g_legacy) {
-        check("an unsigned claim is taken while the switch is on", r && r->value("type", "") == "nickname_claimed");
-    } else {
-        check("an unsigned claim is refused once the switch is off",
-              r && r->value("type", "") == "nickname_error" && r->value("error", "") == "invalid_claim");
-    }
+    check("an unsigned claim (0.11 clients) is refused",
+          r && r->value("type", "") == "nickname_error" && r->value("error", "") == "invalid_claim");
+    a->send({{"type", "resolve_nickname"}, {"nickname", plain}});
+    auto unbound = next_json(*a, json_where([](const json& j) {
+        return j.value("type", "") == "nickname_resolved" || j.value("type", "") == "nickname_error";
+    }));
+    check("and binds nothing", unbound && unbound->value("type", "") == "nickname_error");
 
     Ident master;
     auto b = login(Ident());
     const std::string nick = "n" + g_tag + "b";
     b->send(signed_nickname(nick, b->id, master));
-    check("a claim the named master signed is taken in either build", next(*b, typed("nickname_claimed")).has_value());
+    check("a claim the named master signed is taken", next(*b, typed("nickname_claimed")).has_value());
     a->send({{"type", "resolve_nickname"}, {"nickname", nick}});
     auto res = next_json(*a, typed("nickname_resolved"));
     check("and resolves with the master's signature", res && res->value("master_id", "") == master.peer &&
@@ -763,7 +764,7 @@ static void test_nicknames() {
 }
 
 static void test_rings() {
-    printf("rings (ACCEPT_UNSIGNED_RING_CONTROL, ACCEPT_RING1_CONTROL %s)\n", g_legacy ? "on" : "off");
+    printf("rings (ACCEPT_RING1_CONTROL %s)\n", g_ring1 ? "on" : "off");
     const std::string room = room_name("ring");
     auto a = login(Ident());
     auto b = login(Ident());
@@ -777,11 +778,7 @@ static void test_rings() {
     late->send(catchup(room, "c1"));
     settle({late.get()});
     const bool kept = got(*late, bin(frame(0x08, {room, "c1", a->id.peer}, "ring-unsigned")));
-    if (g_legacy) {
-        check("an unsigned control opens a ring while the switch is on", kept);
-    } else {
-        check("an unsigned control opens no ring once the switch is off", !kept);
-    }
+    check("an unsigned control (0.11 clients) opens no ring", !kept);
 
     // A legacy (32-hex) server: its ring topics carry the owner the control is signed for.
     Ident owner, change;
@@ -812,14 +809,14 @@ static void test_rings() {
     late->send(catchup(server, ring1));
     late->send(catchup(server, elsewhere));
     settle({late.get()});
-    check("a ring2 control the change key signed opens a ring in either build",
+    check("a ring2 control the change key signed opens a ring",
           got(*late, bin(frame(0x08, {server, topic, a->id.peer}, "ring-signed"))));
     check("a control signed by another key opens none",
           !got(*late, bin(frame(0x08, {server, forged, a->id.peer}, "ring-forged"))));
     check("a ring2 control signed for another relay opens none",
           !got(*late, bin(frame(0x08, {server, elsewhere, a->id.peer}, "ring-elsewhere"))));
     const bool one = got(*late, bin(frame(0x08, {server, ring1, a->id.peer}, "ring-one")));
-    if (g_legacy) {
+    if (g_ring1) {
         check("a ring1 control opens a ring while ACCEPT_RING1_CONTROL is on", one);
     } else {
         check("a ring1 control opens none once ACCEPT_RING1_CONTROL is off", !one);
@@ -907,7 +904,7 @@ static void test_catchup_end_mark() {
 }
 
 static void test_inbox_proof() {
-    printf("inbox proof (ACCEPT_DEVICE_LIST_INBOX_PROOF %s)\n", g_legacy ? "on" : "off");
+    printf("inbox proof (0.11 device lists)\n");
     Ident master, d1, d2;
     const std::string room = "inbox:" + master.peer;
     auto s = login(Ident());
@@ -918,12 +915,7 @@ static void test_inbox_proof() {
     auto a = login(d1);
     join(*a, room, {{"inbox_proof", device_list_proof(master, {d1.peer})}});
     settle({a.get()});
-    const bool read = got(*a, bin(mail));
-    if (g_legacy) {
-        check("a master-signed device list opens the mailbox while the switch is on", read);
-    } else {
-        check("a master-signed device list opens nothing once the switch is off", !read);
-    }
+    check("a master-signed device list naming the device opens nothing", !got(*a, bin(mail)));
 
     auto other = login(Ident());
     join(*other, room, {{"inbox_proof", device_list_proof(master, {d1.peer})}});
@@ -932,10 +924,8 @@ static void test_inbox_proof() {
 
     auto b = login(d2);
     auto m = join(*b, room, {{"inbox_roster", legacy_roster(master, {&d1, &d2})}});
-    check("a roster opens the mailbox in either build", next(*b, bin(mail)).has_value());
-    const bool sees = m && peers_of(*m).count(d1.peer) != 0;
-    check(g_legacy ? "and the list-proved device is a co-owner" : "and the list-shown device is no owner",
-          g_legacy ? sees : !sees);
+    check("a roster opens the mailbox", next(*b, bin(mail)).has_value());
+    check("and the list-shown device is no owner", m && peers_of(*m).count(d1.peer) == 0);
 }
 
 static void test_inbox_audience() {
@@ -1611,16 +1601,6 @@ static void test_clock() {
         check("a resume with a clock " + off + " off resumes", resumed(*a2));
     }
     g_clock_skew_secs = 0;
-
-    if (g_legacy) {
-        // v1 signs no nonce, so its timestamp is still its only freshness.
-        Ident id;
-        auto v1 = open_socket(id);
-        const uint64_t ts = now_unix_secs() - 300;
-        v1->send({{"type", "auth"}, {"peer_id", id.peer}, {"public_key", id.pub_b64}, {"timestamp", ts},
-                  {"signature", id.sign("hollow-ws-auth:" + id.peer + ":" + std::to_string(ts))}});
-        check("a v1 login 5 minutes off is still refused", next(*v1, typed("auth_failed")).has_value());
-    }
 }
 
 static void test_session_logins() {
@@ -4324,7 +4304,7 @@ int main(int argc, char** argv) {
     if (sodium_init() < 0) return 2;
     g_port = atoi(argv[1]);
     g_domain = argv[2];
-    g_legacy = std::string(argv[3]) == "on";
+    g_ring1 = std::string(argv[3]) == "on";
     g_tag = random_hex(4);
     g_ctx = SSL_CTX_new(TLS_client_method());
     SSL_CTX_set_verify(g_ctx, SSL_VERIFY_NONE, nullptr);
