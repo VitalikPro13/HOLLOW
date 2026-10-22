@@ -32,6 +32,9 @@ static constexpr size_t MAX_NEW_CONNS_PER_MIN_PER_IP = 10;
 // per push wake, and a busy minute passes ten of those.
 static constexpr size_t MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP = 30;
 static_assert(MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP >= MAX_NEW_CONNS_PER_MIN_PER_IP, "the window holds both");
+// Logins a minute at one full address that may end a neighbour's session in grace for its
+// slot (session_bounds::settle_login); past them the newcomer waits, as before sessions.
+static constexpr size_t MAX_GRACE_TAKEOVERS_PER_MIN_PER_IP = 3;
 // No byte quotas of any kind (the 10 GB/day per-IP budget was removed
 // 2026-08-28). Volume fairness lives BELOW the relay: the host shapes egress
 // with CAKE per destination host, so a saturated line is shared equally and
@@ -218,6 +221,12 @@ struct PerSocketData {
     // A write to this session's socket was dropped past maxBackpressure: it writes
     // nothing more and closes on the next session tick (RelayState::dropped_writes).
     bool write_dead = false;
+    // Any write to this socket uWS dropped (a socket without a session keeps writing).
+    bool write_dropped = false;
+    // The newest mailbox entry (its OfflineIndex seq) this socket was replayed: a later
+    // owning join replays only past it (AR-36). Never raised by a live deposit, so a
+    // socket that proves late still reads what arrived before.
+    uint64_t mailbox_mark = 0;
 };
 
 struct WsRoom {
@@ -238,6 +247,7 @@ struct WsRoom {
 struct IpState {
     uint32_t active_count = 0;
     conn_rate::Window<MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP> recent_connects;
+    conn_rate::Window<MAX_GRACE_TAKEOVERS_PER_MIN_PER_IP> takeovers;
 };
 
 // Delivery diagnostics (counters ONLY — the relay logs nothing, and these

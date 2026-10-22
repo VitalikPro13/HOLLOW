@@ -53,6 +53,7 @@ run test_reports ../src/reports.cpp ../src/crypto.cpp $LIBS
 run test_ring_auth
 run test_ring_evict
 run test_roster ../src/crypto.cpp $LIBS
+run test_server_stats
 run test_session
 # state.h includes App.h, so the session bounds need the uWebSockets headers.
 if [ -f ../uWebSockets/src/App.h ] && [ -f ../uSockets/src/libusockets.h ]; then
@@ -65,6 +66,11 @@ fi
 run test_presence_view $LIBS
 run test_snapshot_codec
 run test_turn_uris
+# The TURN port lock against real packets in a namespace of its own; it needs root and
+# says skip without it.
+timeout 120 bash test_turn_port_lock.sh > "$out/test_turn_port_lock.log" 2>&1 || fail=1
+grep -E '^(pass|skip|FAIL)' "$out/test_turn_port_lock.log" || { echo "FAIL test_turn_port_lock"; fail=1; }
+grep -E '^  FAIL' "$out/test_turn_port_lock.log"
 # The fuzz targets (../fuzz) replayed over their seeds and every input that once broke
 # one; libFuzzer itself runs them in ClusterFuzzLite (.clusterfuzzlite).
 replay() {

@@ -113,6 +113,13 @@ if [ -n "$not_root" ]; then
     closed=0
 fi
 [ "$closed" = 1 ] && ok "the services' settings and state are root-owned and closed to other accounts"
+# The report key lives only in memory and the restart snapshot; an older relay kept it here.
+old_report_keys=$(find /var/lib/hollow-relay -maxdepth 2 -name 'reports*.key' 2>/dev/null)
+if [ -z "$old_report_keys" ]; then
+    ok "no report key on the disk beside the reports"
+else
+    bad "a report key on the disk lets a copy of it test who reported whom: $(echo "$old_report_keys" | tr '\n' ' ')"
+fi
 if [ -d /etc/letsencrypt/renewal-hooks ] && grep -rqE 'chmod[^;]*(644|o\+r|a\+r)' /etc/letsencrypt/renewal-hooks 2>/dev/null; then
     bad "a certbot renewal hook makes certificate files readable by everyone again"
 fi
@@ -240,6 +247,46 @@ for pid in $turn_pids; do
         fi
     else
         bad "TURN may relay anywhere: the peer lock (deny every address, allow this host back) is missing"
+    fi
+    if has no-tcp-relay; then ok "TURN relays no TCP"; else bad "TURN relays TCP (no-tcp-relay is missing)"; fi
+
+    # The port lock (turn-port-lock.sh): on this host's own address TURN reaches coturn's
+    # relay ports and the forwarder's, nothing else listening there.
+    lock=/usr/local/sbin/hollow-turn-port-lock
+    [ -x "$lock" ] || lock=$(dirname "$0")/turn-port-lock.sh
+    min=$(sed -n 's/^min-port=//p' <<<"$settings" | tail -n 1)
+    max=$(sed -n 's/^max-port=//p' <<<"$settings" | tail -n 1)
+    fwd_ports=""
+    fwd_conf=/etc/hollow-forwarder/forwarder.toml
+    if [ -r "$fwd_conf" ]; then
+        fmin=$(sed -n 's/^udp_port_min *= *\([0-9]*\).*/\1/p' "$fwd_conf")
+        fmax=$(sed -n 's/^udp_port_max *= *\([0-9]*\).*/\1/p' "$fwd_conf")
+        fwd_ports="${fmin:-40000}-${fmax:-40199}"
+    fi
+    lock_out=$(TURN_USER=$(awk '/^Uid:/ { print $2 }' "/proc/$pid/status") \
+               TURN_PEERS="$(sed -n 's/^allowed-peer-ip=//p' <<<"$settings" | tr '\n' ' ')" \
+               TURN_PORTS="${min:-49152}-${max:-65535}" FORWARDER_PORTS="$fwd_ports" \
+               bash "$lock" check 2>&1)
+    lock_rc=$?
+    lock_failed=0
+    while read -r line; do
+        case "$line" in
+            "ok "*) ok "${line#ok    }" ;;
+            "FAIL "*) bad "${line#FAIL  }"; lock_failed=1 ;;
+            done) ;;
+            ?*) bad "$line"; lock_failed=1 ;;
+        esac
+    done <<<"$lock_out"
+    # A check that died part way printed only its first lines, every one of them ok.
+    if [ "$(tail -n 1 <<<"$lock_out")" != done ]; then
+        bad "the TURN port lock check stopped before its end (exit $lock_rc)"
+    elif [ "$lock_rc" != 0 ] && [ "$lock_failed" = 0 ]; then
+        bad "the TURN port lock check failed (exit $lock_rc)"
+    fi
+    if [ "$(systemctl is-active hollow-turn-port-lock-refresh.timer 2>/dev/null)" = active ]; then
+        ok "the TURN port lock loads again every minute"
+    else
+        bad "hollow-turn-port-lock-refresh.timer is not running: a flushed firewall leaves TURN unlocked"
     fi
 done
 

@@ -126,7 +126,7 @@ TURN_SECRET=your_secret ./build/hollow-relay \
 | `--port` | `443` | Listen port |
 | `--domain` | `relay.anonlisten.com` | Public host clients connect to. The TURN URIs handed to clients are built from it, so a self-hosted relay must set it |
 | `--keys-file` | `keys.json` | License keys JSON path |
-| `--reports-file` | `reports.json` | User report counts JSON path; the dedup key is created beside it as `<path>.key` |
+| `--reports-file` | `reports.json` | User report counts JSON path; the dedup key lives only in memory and the restart snapshot (a `<path>.key` left by an older relay is zeroed and removed) |
 | `--cert-file` | `/etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem` | TLS certificate chain |
 | `--key-file` | `/etc/letsencrypt/live/relay.anonlisten.com/privkey.pem` | TLS private key |
 | `--forwarder-peer-id` | *(none)* | Media forwarder peer_id advertised via `get_media_forwarder` (startup-load; restart on rotation) |

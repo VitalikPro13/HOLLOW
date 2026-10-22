@@ -1,0 +1,36 @@
+# Keeps TURN relaying to coturn's own ports and the media forwarder's on this
+# machine's own address (turn-port-lock.sh says why). Install:
+#   sudo install -m 0755 turn-port-lock.sh /usr/local/sbin/hollow-turn-port-lock
+#   sudo install -m 0644 hollow-turn-port-lock.service hollow-turn-port-lock-refresh.service \
+#       hollow-turn-port-lock-refresh.timer /etc/systemd/system/
+#   sudo install -D -m 0600 turn-port-lock.env.example /etc/hollow-relay/turn-port-lock.env
+#   (edit it: coturn's account, its allowed-peer-ip addresses, both port ranges)
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hollow-turn-port-lock hollow-turn-port-lock-refresh.timer
+# then, for a coturn unit of its own (the package's coturn.service, or hollow-coturn.service
+# "Without Docker"), coturn-port-lock.conf beside it, so coturn never runs without the lock.
+# Under Docker, coturn comes back with dockerd, so this unit starts before docker.service
+# instead, and the refresh timer puts the lock back within a minute if anything drops it.
+# After a change to an address or a range, edit the file and
+# `sudo systemctl restart hollow-turn-port-lock`.
+[Unit]
+Description=Keep TURN to coturn's and the forwarder's ports on this machine
+# In place before coturn relays its first packet.
+Before=coturn.service hollow-coturn.service docker.service
+After=nftables.service
+# nftables.service flushes the whole ruleset on a restart and on a reload: the lock
+# comes back with either.
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/hollow-relay/turn-port-lock.env
+ExecStart=/usr/local/sbin/hollow-turn-port-lock apply
+ExecReload=/usr/local/sbin/hollow-turn-port-lock apply
+ExecStop=/usr/local/sbin/hollow-turn-port-lock remove
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=nftables.service

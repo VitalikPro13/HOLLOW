@@ -5,6 +5,7 @@ Prints pass or FAIL the way run_live.sh does.
 
     python3 -I fdstore_restart.py <relay> <client> <live dir> [lo-hi ports]
 """
+import json
 import os
 import random
 import signal
@@ -15,6 +16,8 @@ import tempfile
 import time
 
 SANITIZER_MARKS = ("AddressSanitizer", "LeakSanitizer", "runtime error:")
+# test_relay_live.cpp RESTART_REPORT_TARGET
+REPORT_TARGET = "12D3KooWRestartReportTarget1111111111111111111111"
 
 
 def fail(why, work=None):
@@ -51,7 +54,7 @@ def main():
             args = [relay, "--port", str(port), "--domain", "relay.live.test",
                     "--cert-file", os.path.join(live, "cert.pem"), "--key-file", os.path.join(live, "key.pem"),
                     "--keys-file", os.path.join(work, "no-keys.json"),
-                    "--reports-file", os.path.join(work, log_name + ".reports.json")]
+                    "--reports-file", os.path.join(work, "reports.json")]
             child_env = dict(env)
             pass_fds = ()
             if stored is not None:
@@ -139,6 +142,14 @@ def main():
         fail("a sanitizer fired", work)
     if client_rc != 0 or rc1 != 0 or rc2 != 0:
         fail(f"client {client_rc}, relays {rc1} and {rc2}", work)
+    # The report key rides the snapshot and never a file, so the repeat after the restart
+    # was deduped against the fingerprint the first relay saved.
+    if os.path.exists(os.path.join(work, "reports.json.key")):
+        fail("a report key reached the disk", work)
+    with open(os.path.join(work, "reports.json"), encoding="utf-8") as f:
+        counts = json.load(f).get("counts", {})
+    if counts.get(REPORT_TARGET, {}).get("spam") != 1:
+        fail(f"the report counted {counts.get(REPORT_TARGET, {}).get('spam')} times across the restart", work)
     checks = sum(1 for l in logs["client.log"].splitlines() if l.startswith("  ok"))
     print(f"pass test_relay_restart ({checks} checks)")
 

@@ -88,8 +88,9 @@ int main(int argc, char** argv) {
     if (!state.license.load_from_file(config.keys_file)) {
         fprintf(stderr, "[main] No keys file, license system disabled\n");
     }
-    state.reports.load_from_file(config.reports_file);
+    // The report key rides the snapshot, so the reports file is judged after it.
     restore_from_fdstore(state, config.session_grace_secs);
+    state.reports.load_from_file(config.reports_file);
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);

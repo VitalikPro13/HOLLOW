@@ -1,5 +1,6 @@
 #include "http_handlers.h"
 #include "json.hpp"
+#include "server_stats.h"
 #include "version.h"
 #include <cmath>
 #include <cstdio>
@@ -43,7 +44,7 @@ static void handle_health(HttpResponse* res) {
 // been the client path since 0.7.1. Do not reintroduce an HTTP variant: there
 // is no caller identity at the HTTP layer to bind the credential to.
 
-static void handle_server_stats(HttpResponse* res, RelayState& state) {
+static void handle_server_stats(HttpResponse* res, RelayState& state, const Config& config) {
     cors_headers(res);
 
     if (state.stats_cache.has_prev && state.stats_cache.is_fresh()) {
@@ -133,6 +134,7 @@ static void handle_server_stats(HttpResponse* res, RelayState& state) {
         {"ghost_left_suppressed", state.diag.ghost_left_suppressed}
     };
 
+    server_stats::keep_public(resp, config.public_stats);
     state.stats_cache.cached_json = resp.dump();
     state.stats_cache.fetched_at = now;
     state.stats_cache.prev_rx_bytes = rx_bytes;
@@ -170,8 +172,8 @@ void setup_http_handlers(uWS::SSLApp& app, RelayState& state,
         handle_health(res);
     });
 
-    app.get("/server-stats", [&state](HttpResponse* res, HttpRequest* /*req*/) {
-        handle_server_stats(res, state);
+    app.get("/server-stats", [&state, &config](HttpResponse* res, HttpRequest* /*req*/) {
+        handle_server_stats(res, state, config);
     });
 
     app.get("/relay-status", [&state, &config](HttpResponse* res, HttpRequest* /*req*/) {

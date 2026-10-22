@@ -124,14 +124,16 @@ class _RelayLoadBarsState extends ConsumerState<RelayLoadBars> {
           value: stats.memLabel,
           progress: stats.memUsagePercent,
         ),
-        const SizedBox(height: HollowSpacing.sm),
-        StatBar(
-          hollow: hollow,
-          icon: LucideIcons.activity,
-          label: 'Bandwidth',
-          value: stats.bandwidthLabel,
-          progress: stats.bandwidthUsagePercent,
-        ),
+        if (stats.hasTraffic) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          StatBar(
+            hollow: hollow,
+            icon: LucideIcons.activity,
+            label: 'Bandwidth',
+            value: stats.bandwidthLabel,
+            progress: stats.bandwidthUsagePercent,
+          ),
+        ],
         const SizedBox(height: HollowSpacing.sm),
         RepaintBoundary(
           child: ValueListenableBuilder<double>(
@@ -149,29 +151,32 @@ class _RelayLoadBarsState extends ConsumerState<RelayLoadBars> {
             ),
           ),
         ),
-        const SizedBox(height: HollowSpacing.sm),
         // A third stat in the bars' own row style: inside a card titled Relay,
-        // "Online" already means on this relay.
-        Row(
-          children: [
-            Icon(LucideIcons.users, size: 12, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.xs),
-            Expanded(
-              child: Text(
-                'Online',
-                style: HollowTypography.micro
-                    .copyWith(color: hollow.textSecondary),
+        // "Online" already means on this relay. A relay that keeps the count
+        // private leaves it out, and so does the card.
+        if (stats.onlineUsers case final online?) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          Row(
+            children: [
+              Icon(LucideIcons.users, size: 12, color: hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.xs),
+              Expanded(
+                child: Text(
+                  'Online',
+                  style: HollowTypography.micro
+                      .copyWith(color: hollow.textSecondary),
+                ),
               ),
-            ),
-            Text(
-              '${stats.onlineUsers}',
-              style: HollowTypography.micro.copyWith(
-                color: hollow.textPrimary,
-                fontFeatures: const [FontFeature.tabularFigures()],
+              Text(
+                '$online',
+                style: HollowTypography.micro.copyWith(
+                  color: hollow.textPrimary,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
+        ],
       ],
     );
   }

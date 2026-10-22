@@ -6,6 +6,7 @@
 #include <string>
 
 #include "conn_rate_exempt.h"
+#include "server_stats.h"
 #include "session.h"
 
 struct Config {
@@ -28,6 +29,9 @@ struct Config {
     // HOLLOW_CONN_RATE_EXEMPT, read from the environment only: it names the operator's
     // own addresses, so it belongs in the root-only environment file, never a flag.
     conn_rate_exempt::List conn_rate_exempt;
+    // PUBLIC_STATS=off: /server-stats leaves out the online count and the activity
+    // counters (server_stats.h). On by default.
+    bool public_stats = true;
 #ifdef HOLLOW_RELAY_TEST_LOOPBACK
     // HOLLOW_RELAY_TEST_BACKPRESSURE: a send buffer the live tests drain inside one
     // session tick (run_live.sh). Never compiled into a relay that serves anyone.
@@ -74,6 +78,8 @@ inline Config parse_args(int argc, char** argv) {
 
     const char* turn_env = getenv("TURN_SECRET");
     if (turn_env) config.turn_secret = turn_env;
+    config.public_stats = server_stats::parse_public_stats(getenv("PUBLIC_STATS"));
+    if (!config.public_stats) fprintf(stderr, "[config] Public stats off: /server-stats shows memory only\n");
     const char* exempt = getenv("HOLLOW_CONN_RATE_EXEMPT");
     if (exempt && *exempt) {
 #ifdef HOLLOW_RELAY_TEST_LOOPBACK

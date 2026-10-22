@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <fcntl.h>
@@ -50,18 +51,6 @@ std::string ReportsState::secret_path_for(const std::string& reports_path) {
     return reports_path + ".key";
 }
 
-static bool read_exact(int fd, unsigned char* buf, size_t want, size_t& got) {
-    got = 0;
-    while (got < want) {
-        ssize_t n = ::read(fd, buf + got, want - got);
-        if (n < 0 && errno == EINTR) continue;
-        if (n < 0) return false;
-        if (n == 0) break;
-        got += static_cast<size_t>(n);
-    }
-    return true;
-}
-
 // Owner-only from creation (never a umask-wide window), then renamed into place.
 static bool write_private_file(const std::string& path, const void* data, size_t size) {
     std::string tmp = path + ".tmp";
@@ -84,52 +73,56 @@ static bool write_private_file(const std::string& path, const void* data, size_t
     return ok;
 }
 
-static bool write_secret_file(const std::string& path, const unsigned char* secret) {
-    return write_private_file(path, secret, ReportsState::SECRET_BYTES);
+// The key file a relay before 0.13 kept: overwritten with zeros, synced, then removed.
+// Its blocks may outlive this on an SSD, which is why its key is never used again.
+static void erase_old_key_file(const std::string& path) {
+    int fd = ::open(path.c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0 && errno == ENOENT) return;
+    if (fd >= 0) {
+        struct stat st {};
+        if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+            static const unsigned char zeros[4096] = {};
+            off_t left = st.st_size;
+            while (left > 0) {
+                const size_t chunk = static_cast<size_t>(std::min<off_t>(left, sizeof(zeros)));
+                ssize_t n = ::write(fd, zeros, chunk);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) break;
+                left -= n;
+            }
+            ::fsync(fd);
+        }
+        ::close(fd);
+    }
+    if (::unlink(path.c_str()) == 0) {
+        fprintf(stderr, "[reports] Erased the report key an older relay kept on disk; report dedup starts over\n");
+    } else if (errno != ENOENT) {
+        fprintf(stderr, "[reports] Cannot remove the old report key file %s\n", path.c_str());
+    }
 }
 
-bool ReportsState::load_or_create_secret(const std::string& path) {
-    int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd >= 0) {
-        // One byte past the size tells a longer foreign file from ours.
-        unsigned char buf[SECRET_BYTES + 1];
-        size_t got = 0;
-        bool read_ok = read_exact(fd, buf, sizeof(buf), got);
-        ::close(fd);
-        if (read_ok && got == SECRET_BYTES) {
-            std::memcpy(secret, buf, SECRET_BYTES);
-            sodium_memzero(buf, sizeof(buf));
-            return true;
-        }
-        sodium_memzero(buf, sizeof(buf));
-        if (!read_ok) {
-            randombytes_buf(secret, SECRET_BYTES);
-            fprintf(stderr, "[reports] Cannot read %s, using a report key for this run only\n",
-                    path.c_str());
-            return false;
-        }
-        fprintf(stderr, "[reports] %s is not a %zu-byte report key, replacing it\n",
-                path.c_str(), SECRET_BYTES);
-    } else if (errno != ENOENT) {
-        randombytes_buf(secret, SECRET_BYTES);
-        fprintf(stderr, "[reports] Cannot read %s, using a report key for this run only\n",
-                path.c_str());
-        return false;
-    }
-
-    randombytes_buf(secret, SECRET_BYTES);
-    if (!write_secret_file(path, secret)) {
-        fprintf(stderr, "[reports] Cannot write %s, using a report key for this run only\n",
-                path.c_str());
-        return false;
-    }
-    fprintf(stderr, "[reports] Created report key %s\n", path.c_str());
+bool ReportsState::adopt_key(const std::string& key) {
+    if (key.size() != SECRET_BYTES) return false;
+    std::memcpy(secret, key.data(), SECRET_BYTES);
+    has_key = true;
     return true;
+}
+
+std::string ReportsState::key_bytes() const {
+    if (!has_key) return std::string();
+    return std::string(reinterpret_cast<const char*>(secret), SECRET_BYTES);
+}
+
+void ReportsState::ensure_key() {
+    if (has_key) return;
+    randombytes_buf(secret, SECRET_BYTES);
+    has_key = true;
 }
 
 bool ReportsState::load_from_file(const std::string& path) {
     file_path = path;  // set even when absent so the first save creates it
-    load_or_create_secret(secret_path_for(path));
+    ensure_key();
+    erase_old_key_file(secret_path_for(path));
 
     std::ifstream f(path);
     if (!f.is_open()) return false;
@@ -160,8 +153,9 @@ bool ReportsState::load_from_file(const std::string& path) {
         return false;
     }
     if (dropped > 0) {
-        // Rewrite now so the old fingerprints leave the disk at the next flush.
+        // Rewritten at once, so fingerprints no key here can read leave the disk now.
         dirty = true;
+        save_if_dirty();
         fprintf(stderr, "[reports] Dropped %zu report fingerprint(s) not made with this relay's "
                         "report key; counts kept, a repeat of one of those reports counts again\n",
                 dropped);
@@ -211,6 +205,7 @@ bool ReportsState::is_category(const std::string& category) {
 
 bool ReportsState::add(const std::string& reporter, const std::string& target,
                        const std::string& category) {
+    ensure_key();
     std::string key = fingerprint(reporter, target, category);
     if (keys.count(key)) return false;
     if (keys.size() >= MAX_REPORT_KEYS) return false;

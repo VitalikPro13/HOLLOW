@@ -6,6 +6,7 @@
 #include "ws_handler.h"
 #include "ring_auth.h"
 
+#include <sodium.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -19,6 +20,15 @@ using Clock = std::chrono::steady_clock;
 static constexpr const char* FD_NAME = "snapshot";
 // Nothing legitimate is this big: the byte budget bounds a snapshot far below.
 static constexpr off_t MAX_SNAPSHOT_BYTES = 16ll * 1024 * 1024 * 1024;
+
+// Zeroes a string that held key bytes when it goes out of scope.
+struct Wiped {
+    std::string& s;
+    explicit Wiped(std::string& str) : s(str) {}
+    ~Wiped() { sodium_memzero(s.data(), s.size()); }
+    Wiped(const Wiped&) = delete;
+    Wiped& operator=(const Wiped&) = delete;
+};
 
 static uint32_t age_secs(Clock::time_point at, Clock::time_point now) {
     auto s = std::chrono::duration_cast<std::chrono::seconds>(now - at).count();
@@ -136,12 +146,15 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
         d.push_prefs.push_back(std::move(p));
     }
     session_snapshot::capture(st, d);
+    d.report_key = st.reports.key_bytes();
     return d;
 }
 
 // Only meaningful on an empty state: a fresh process, before it listens.
 static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now, int64_t grace_secs) {
     RestoredShares share;
+    if (!d.report_key.empty()) st.reports.adopt_key(d.report_key);
+    sodium_memzero(d.report_key.data(), d.report_key.size());
     for (auto& o : d.optin) st.offline_optin[o.peer] = o.retention_secs;
     for (auto& p : d.push_tokens) st.push_tokens[p.peer] = {std::move(p.token), std::move(p.platform)};
     for (auto& p : d.push_prefs) {
@@ -266,6 +279,9 @@ void snapshot_to_fdstore(RelayState& st) {
     auto now = Clock::now();
     snapshot::Data d = capture(st, now);
     std::string bytes = snapshot::encode(d);
+    // Both hold the report key: zeroed on the way out, best effort (a copy made while
+    // encoding, or a block freed by a reallocation, is not reached).
+    const Wiped wipe_key(d.report_key), wipe_bytes(bytes);
 
     int fd = memfd_create("hollow-relay-snapshot", MFD_CLOEXEC);
     if (fd < 0) {
@@ -311,6 +327,8 @@ void restore_from_fdstore(RelayState& st, int64_t session_grace_secs) {
     }
     std::string bytes;
     bytes.resize(static_cast<size_t>(sb.st_size));
+    // It holds the report key, on every way out of here.
+    const Wiped wipe_bytes(bytes);
     // The store's duplicate shares the file offset the writer left at the end.
     lseek(fd, 0, SEEK_SET);
     size_t off = 0;
@@ -330,6 +348,7 @@ void restore_from_fdstore(RelayState& st, int64_t session_grace_secs) {
         fprintf(stderr, "[snapshot] discarded an unreadable stored snapshot (%zu bytes)\n", bytes.size());
         return;
     }
+    sodium_memzero(bytes.data(), bytes.size());
     std::string().swap(bytes);
 
     size_t dm_frames = d.dm_frames(), dm_queues = d.dm.size();

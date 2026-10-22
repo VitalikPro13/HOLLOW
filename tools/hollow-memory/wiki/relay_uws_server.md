@@ -271,8 +271,11 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   ring.gap_after(in_h), reprove, grace_secs, hb_secs }`, acks the ring at the client's `in_h`, then
   in order: every waiting `kill_signal`, one `members` per session room (`proved` in locked rooms),
   the ring replay after `in_h`, on `gap` the `inbox:` mailbox of every inbox room it still owns
-  (`replay_mailbox_no_delete`; a resume joins nothing, so a deposit that fell into the gap would
-  never come back otherwise), and `peer_joined` only in rooms where its presence had gone (a live
+  (`replay_mailbox_no_delete(..., all=true)`; a resume joins nothing, so a deposit that fell into the
+  gap would never come back otherwise). Outside a gap a socket reads its mailbox once:
+  `PerSocketData::mailbox_mark` (the newest OfflineIndex seq replayed, never raised by a live
+  deposit or past a dropped write), carried through grace and a move in `Session::mailbox_mark`,
+  never snapshotted (a restore renumbers seqs), and `peer_joined` only in rooms where its presence had gone (a live
   transfer sends none). It also resets the channel-push offline cap for its rooms.
 - **Push in grace**: a device in grace is not in `peer_sockets`, so it is offline for push. A 0x04,
   0x08 or JSON `direct` into a grace ring also calls `try_push_notify` (debounced as before), unless
@@ -319,7 +322,7 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   (`nickname_binding_is_stale`).
 - **The hooks seam, `session_bounds.h`**: every ring mutation, mint and end goes through
   `ring_push`, `ring_ack`, `ring_take_all`, `make_room`, `hold_ip_slot`, `release_ip_slot`,
-  `grace_slot_victim`, `admits`, `settle_victim`. **CRITICAL: never mutate a `Ring` directly, nor
+  `grace_slot_victim`, `admits`, `settle_login`. **CRITICAL: never mutate a `Ring` directly, nor
   add or erase a session outside these**: the rings' pool, the book and the per-IP counts then
   drift silently. **Never `ring_push` while iterating a ring**: a push appends
   and may bury entries, which invalidates the deque's iterators (`resume_session` replays the ring
@@ -349,9 +352,14 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
 - **Per-IP slots**: a grace session keeps its socket's slot under `MAX_CONNS_PER_IP` (34) until
   gone. In `.open` the rate check (10 new per minute) runs first; at the cap a socket comes in only
   while the address has more grace slots than sockets over the cap (`admits`), and ends nobody
-  then: once its login is through, its own session resumed or ended, `settle_ip_slot` ends the
-  grace session there closest to its end while the address is still over (HOL-SEC-172), so a
-  device coming back takes back its own slot. `data->ip_key` is set only once the slot is taken,
+  then. Once its signature is checked and BEFORE any state changes (no session resumed or ended,
+  no supersede), `session_bounds::settle_login` judges every login (fresh, resume from anywhere,
+  fetch, guest): a slot the device frees itself (its own grace session or its own older socket at
+  this ip_key) settles it; else the grace session there closest to its end, never the logging device's own (its fetch
+  socket frees no slot but never ends its own session), gives way only if it is
+  past half its grace and the address has a takeover left (`MAX_GRACE_TAKEOVERS_PER_MIN_PER_IP` = 3,
+  `IpState::takeovers`); otherwise the login closes `1008 ip_limit` before any answer (0.12.2 backs
+  off on it). AR-36, g13; HOL-SEC-172 kept: a device coming back takes back its own slot. `data->ip_key` is set only once the slot is taken,
   so a refused socket gives nothing back on close. Restored sessions hold no slot (addresses are
   never snapshotted). The live tests build the relay with `-DHOLLOW_RELAY_TEST_CONNS_PER_IP=3`.
 - **Grace length**: `--session-grace-secs` (Docker `SESSION_GRACE_SECS`, `SELF_HOSTING.md`
@@ -446,6 +454,8 @@ no-tcp-relay
 
 A TURN allocation may only exchange packets with the relay host itself, i.e. another authenticated Hollow client's allocation on the same coturn. Before the lock the live config had NO `denied-peer-ip` at all and TCP relay (RFC 6062) enabled: an open UDP+TCP proxy for anyone holding 1-hour credentials. Calls lose nothing: `relay<->srflx` pairs now fail at CreatePermission (403) and libwebrtc prunes them, ICE settles on `relay<->relay`, same bytes on the line. Verified with `turnutils_uclient -W <secret>` on the VPS: external peer → `channel bind: error 403 (Forbidden IP)`; client-to-client (`-y`) → 20/20; TCP relay (`-T`) → `error 442`. Multi-relay future: every relay's addresses join the allow list (or each relay allows itself + siblings).
 
+**Port lock (0.13, AR-32, `deploy/turn-port-lock.sh` + `hollow-turn-port-lock.service` + `coturn-port-lock.conf`):** coturn's peer lists take addresses, never ports, so on its own address TURN reached every UDP service there. An nft table `inet hollow_turn` (output hook at RAW priority, so Docker's nat OUTPUT DNAT of published ports at -100 cannot rewrite the destination first) drops UDP from coturn's uid outside coturn's relay ports and the forwarder's to every local address but loopback (`fib daddr type local`, per family; covers a DHCP/DuckDNS box whose address changes) AND to its `allowed-peer-ip` addresses (hairpin NAT, not local); both ranges also go into `net.ipv4.ip_local_reserved_ports`. `nftables.service` flushes the ruleset on restart AND reload: the unit is `PartOf=` + `ReloadPropagatedFrom=` it (ExecReload = apply), and `hollow-turn-port-lock-refresh.timer` runs `turn-port-lock.sh refresh` every minute (apply, logging only when the table or reservation was missing or differed; Requisite on the lock unit, so a stop stays stopped). Side effects: a Hollow app ON the relay box loses TURN (coturn's replies to its ephemeral port below the band are dropped; direct candidates still work), and any host service under coturn's uid is held to the same ports. A coturn unit of its own `Requires=` the lock (`coturn-port-lock.conf`, fails closed); NEVER on the Docker compose unit (a lock restart would `docker compose down` the stack, and dockerd restarts coturn anyway): under Docker the lock starts `Before=docker.service`. `check-host.sh` checks priority, rules, uid, ranges, addresses, the reservation, the timer, `no-tcp-relay`, that only coturn or the forwarder listens in those ranges, and that the check printed its final `done` line (a check that died part way is a FAIL). Test: `relay-uws/test/test_turn_port_lock.sh` (root in a throwaway netns; ran in a privileged ubuntu:24.04 container on hollowvm).
+
 
 ### IPv6 (2026-07-05)
 
@@ -505,6 +515,8 @@ A room is a named group of connected WebSocket peers. Rooms are created implicit
 ### ServerStatsCache
 
 Caches `/server-stats` JSON for 5 seconds to avoid re-reading `/proc` on every request:
+
+`PUBLIC_STATS=off` (env, `.env` / `relay.env`, default on; `server_stats.h`; trimmed, any case, on/true/yes/1 and off/false/no/0, an unknown value = OFF) keeps only `mem_total_kb`, `bandwidth_cap_mbps` and `mem_used_kb` rounded down to whole percent of the total (an allowlist, so a field added later stays out); the 0.13 app then hides the online counter and the bandwidth bar. The official relay keeps the exact count (Vitalik, 10-22).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -726,16 +738,16 @@ The ONE thing the relay persists about peers — deliberately minimal.
 | Field | Type | Description |
 |-------|------|-------------|
 | `keys` | `unordered_set<string>` | hex `BLAKE2b(key = secret, reporter '\0' target '\0' category)` — dedup only, one report per (reporter, target, category) |
-| `secret` | `unsigned char[32]` | Random relay secret in its OWN file `<reports-file>.key` (0600, tmp+fsync+rename, created on first start, never logged); unreadable/unwritable = a key for this run only |
+| `secret` | `unsigned char[32]` | Random relay secret in RAM only (0.13, AR-32): carried across a service restart in the memfd snapshot (codec v10 `report_key`), fresh after a reboot or under Docker; never on disk, never logged. A `<reports-file>.key` an older relay left is zeroed, synced and unlinked at load, never read |
 | `counts` | `unordered_map<string, unordered_map<string, uint64_t>>` | target peer_id → category → count (the operator's view) |
 | `file_path` | `string` | From `--reports-file` (default `reports.json`; the official unit passes `/var/lib/hollow-relay/reports.json`, its StateDirectory) |
 | `dirty` | `bool` | Set by `add()`; cleared on successful save |
 
 - **WS command:** `{"type":"report","target":<peer_id>,"category":<cat>}` → `handle_report()` in ws_handler.cpp (beside `handle_set_offline_buffer`). Guest-guarded; `target` non-empty/≤128/≠self; category allow-list `ReportsState::is_category` (reports.h): `spam`, `harassment`, `illegal_content`, `impersonation`, and `blocked` (0.12.2, Apple 1.2: the count a client's block sends; same per-target count + keyed dedup, so the relay never holds anyone's block list). Unknown categories get no ack, and the client waits for none. Replies `{"type":"report_ack"}` even on dedup (idempotent from the client's view). NO logging — reporter/target ids are user-identifying.
-- **Persistence:** `save_if_dirty()` = nlohmann dump → `.tmp` → `rename()` (atomic); flushed on the 300s sweep timer + after `app.run()` returns (shutdown). `load_from_file()` in main() right after the license load; sets `file_path` even when the file is absent so the first save creates it.
+- **Persistence:** `save_if_dirty()` = nlohmann dump → `.tmp` → `rename()` (atomic); flushed on the 300s sweep timer + after `app.run()` returns (shutdown). `load_from_file()` in main() AFTER `restore_from_fdstore` (the key rides the snapshot, so the file is judged against it); sets `file_path` even when the file is absent so the first save creates it.
 - **Privacy invariant:** who-reported-whom never touches disk or logs; `keys` are KEYED since 2026-09-25 (`BLAKE2b(key = secret, reporter '\0' target '\0' category)`, the old unsalted sha256 let anyone holding the file confirm a guessed "A reported B"), so the file alone confirms nothing (the relay, holding the key, still can). Cap `MAX_REPORT_KEYS` (500k) bounds RAM/disk.
-- **File format v2:** `{"version":2,"salt_id":<8-byte keyed hex naming the secret>,"keys":[...],"counts":{...}}`. Load drops `keys` (keeps `counts`, marks dirty so the next flush rewrites) when `version != 2` (legacy unsalted) or `salt_id` differs (lost/replaced key file), logging only the dropped count. Consequence: a repeat of a pre-migration report counts once more. Tests: `relay-uws/test/test_reports.cpp` (g++, needs libsodium).
-- **Restart persistence:** the key is a DISK file like `reports.json` itself, loaded at startup; NOT part of the memfd snapshot.
+- **File format v2:** `{"version":2,"salt_id":<8-byte keyed hex naming the secret>,"keys":[...],"counts":{...}}`. Load drops `keys` (keeps `counts`, rewrites the file at once) when `version != 2` (legacy unsalted) or `salt_id` differs (lost/replaced key file), logging only the dropped count. Consequence: a repeat of a pre-migration report counts once more. Tests: `relay-uws/test/test_reports.cpp` (g++, needs libsodium).
+- **Restart persistence:** the key rides the memfd snapshot (v10); a reboot or a Docker restart starts a new key, so dedup starts over (counts kept). Rolling back to a v9 binary discards the whole v10 snapshot. `check-host.sh` fails on a `reports*.key` under `/var/lib/hollow-relay`.
 - **Client path:** FFI `report_user(target, category)` (api/network.rs) → `NodeCommand::ReportUser` → swarm arm → `WsCommand::ReportUser` → `send_command` json arm. One-shot: deliberately NOT cached in `track_room_change`, so never re-sent on reconnect.
 
 ## license.cpp / license.h — License Key System

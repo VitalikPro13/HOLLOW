@@ -129,6 +129,7 @@ The fields:
 | `OWN_CERT_DIR` | Advanced. A directory holding a `fullchain.pem` and `privkey.pem` you manage yourself. Set it and certbot is not used at all. |
 | `SESSION_GRACE_SECS` | Optional. How many seconds the relay waits for someone whose connection dropped, from 30 to 600. Leave it empty for 120. See [Dropped connections](#dropped-connections). |
 | `HOLLOW_CONN_RATE_EXEMPT` | Optional, and best left empty. The relay lets each address open 10 new connections a minute, or 30 while it has none open. To lift that one limit for your own machines, for example while you test with many copies of the app at once, list their public addresses here, separated by commas. An IPv6 address covers its whole /64. Every other limit still applies to them. The relay skips local, broadcast and multicast addresses on the list, such as 127.0.0.1 or ::1, since no outside machine connects from them. Without Docker, put the same line in `relay.env`. |
+| `PUBLIC_STATS` | Optional. `on` or `off`, empty means `on`, and a value the relay does not know counts as `off`. With `off`, the relay's public stats page leaves out how many people are online and its traffic figures, rounds the memory in use to whole percent, and the app's relay card shows only memory. Without Docker, put the same line in `relay.env`. |
 | `CERTBOT_STAGING` | Troubleshooting. Set to `1` to use the Let's Encrypt staging service while you get the setup right. |
 
 ## Start
@@ -338,6 +339,18 @@ and no new ports open.
 `harden-host.sh` opens exactly these. If your provider has its own firewall in
 front of the VPS, open them there too.
 
+TURN may relay only to this machine's own address, and coturn's settings cannot
+limit which ports there it reaches. `deploy/turn-port-lock.sh` adds a firewall
+rule that keeps TURN to coturn's relay ports and the forwarder's, and reserves
+those ports so no other program's connections land in them. The steps to install
+it are at the top of `deploy/hollow-turn-port-lock.service`, and
+`deploy/check-host.sh` checks it. Under Docker the lock starts before Docker
+does, and a timer loads it again every minute in case anything clears the
+firewall. Keep other services out of 49152 to 65535. Two things follow from the lock.
+A Hollow app running on the relay machine itself cannot use TURN, because coturn's
+replies to it are dropped, though its direct connections still work. And a service
+that runs under the same account as coturn is held to the same ports.
+
 ## Troubleshooting
 
 **`certbot-init` failed.** Read what it said:
@@ -422,11 +435,13 @@ The one thing the relay does write is a count of user reports, in
 `/data/reports.json` inside its volume, so you can see which peers have been
 reported and act on it. It records the reported peer and the category. To stop
 one person's report counting twice it also keeps a one-way fingerprint of each
-report, made with a random key the relay creates on its first start in
-`reports.json.key` beside it. Without that key the reports file can't confirm
-who reported whom, so leave the key out of any copy you share. A reports file
-from before the key loses its fingerprints on the next start and keeps its
-counts.
+report, made with a random key that exists only in the relay's memory and is
+never written to disk, so the reports file can't confirm who reported whom. The
+key is carried across a restart the same way the offline buffers are. Under
+Docker, and after a reboot, the relay starts with a new key, drops the old
+fingerprints and keeps the counts, so a repeat of an old report counts once
+more. Relays before 0.13 kept the key in `reports.json.key`; the
+first start of a newer relay overwrites that file with zeros and deletes it.
 
 ## Starting on boot
 

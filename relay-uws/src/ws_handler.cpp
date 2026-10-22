@@ -202,6 +202,7 @@ static void write_raw(SSLWebSocket* ws, std::string_view data, uWS::OpCode op) {
     }
     // Closed on the next session tick, never here: this runs inside loops over a room's
     // peers, and a close enters grace, which erases from them.
+    if (status == SSLWebSocket::SendStatus::DROPPED) d->write_dropped = true;
     if (status == SSLWebSocket::SendStatus::DROPPED && !d->sid.empty() && g_state) {
         d->write_dead = true;
         g_state->dropped_writes.push_back(d->peer_id);
@@ -349,7 +350,6 @@ static void mint_session(RelayState& state, SSLWebSocket* ws, PerSocketData* dat
 static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* data, session::Session& s,
                            uint64_t in_h, const std::string& challenge);
 static void send_kill_signals(RelayState& state, SSLWebSocket* ws, const std::string& peer);
-static void settle_ip_slot(RelayState& state, const PerSocketData* data);
 
 // The one frame an unauthenticated socket may send besides `auth`. The nonce is
 // minted once per socket; asking again gets the same one. `door_key` is what this
@@ -471,6 +471,29 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
             return;
     }
 
+    // A full address settles before anything is answered: a device back at its own address
+    // takes its own slot, a newcomer a neighbour's only within settle_login's bounds.
+    {
+        // A full login resumes or ends its own session and supersedes its own older socket,
+        // so either one held at this address is a slot it frees.
+        bool frees_own = false;
+        if (!fetch) {
+            const session::Session* own = grace_session(state, peer_id);
+            auto older = state.peer_sockets.find(peer_id);
+            frees_own = (own && own->ip_key == data->ip_key) ||
+                        (older != state.peer_sockets.end() && older->second != ws &&
+                         older->second->getUserData()->ip_key == data->ip_key);
+        }
+        const auto slot = session_bounds::settle_login(state, data->ip_key, peer_id, frees_own,
+                                                       std::chrono::seconds(g_grace_secs),
+                                                       std::chrono::steady_clock::now(), CONNS_PER_IP);
+        if (!slot.admit) {
+            ws->end(1008, "ip_limit");
+            return;
+        }
+        if (slot.victim) end_session(state, *slot.victim);
+    }
+
     // Auth succeeded
     data->peer_id = peer_id;
     data->authenticated = true;
@@ -507,7 +530,6 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
             resume_failed = "bad_h";
         } else {
             resume_session(state, ws, data, it->second, frame->in_h, challenge);
-            settle_ip_slot(state, data);
             return;
         }
     }
@@ -562,16 +584,7 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         send_json(ws, {{"type", "auth_ok"}});
     }
     send_kill_signals(state, ws, peer_id);
-    settle_ip_slot(state, data);
     // privacy: no connection logging
-}
-
-// A login from an address it came into over the cap is through, its own session resumed
-// or ended: while the address is still over, the grace session there closest to its end
-// gives its slot up, as on expiry.
-static void settle_ip_slot(RelayState& state, const PerSocketData* data) {
-    if (data->ip_key.empty()) return;
-    if (auto victim = session_bounds::settle_victim(state, data->ip_key, CONNS_PER_IP)) end_session(state, *victim);
 }
 
 // Out with the auth, before any join: a device whose identity is gone may never join a
@@ -610,27 +623,30 @@ static int64_t wall_now_ms() {
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
-// TTL-only mailbox replay: send every buffered frame for `mailbox_peer_id` that
-// belongs to `room`, and DO NOT remove it.
+// TTL-only mailbox replay: send the buffered frames for `mailbox_peer_id` that belong
+// to `room` and this socket was not already replayed, and DO NOT remove them.
 //
-// This is the one deliberate difference from replay_buffered_msgs (the
-// device-keyed DM replay, which deletes on delivery): every sibling device of
-// the master must be able to collect the same request on its own next boot, so
-// a read cannot consume the mailbox. The receiver dedups on its friends row (a
-// request already pending/accepted/declined is a no-op at ingest), and the TTL
-// sweep still expires the entry normally. Rejoining the same socket therefore
-// re-delivers — that is required, not a bug; do not add per-socket delivery
-// tracking to "fix" it.
+// Unlike replay_buffered_msgs (the device-keyed DM replay, which deletes on delivery),
+// every sibling device of the master must collect the same request on its own, so a
+// read never consumes the mailbox: each socket reads it once (PerSocketData::
+// mailbox_mark), siblings each on their own socket. A re-join on the same socket used to
+// replay it all again, turning a tiny join into the whole mailbox of egress (AR-36).
+// `all` (a gapped resume, where any of it may have been lost) replays everything.
 static void replay_mailbox_no_delete(SSLWebSocket* ws,
                                      const std::string& mailbox_peer_id,
                                      const std::string& room,
-                                     RelayState& state) {
+                                     RelayState& state,
+                                     bool all = false) {
     auto it = state.offline_buffer.find(mailbox_peer_id);
     if (it == state.offline_buffer.end()) return;
+    PerSocketData* data = ws->getUserData();
+    const uint64_t from = all ? 0 : data->mailbox_mark;
     for (const auto& m : it->second) {
-        if (m.room == room) {
+        if (m.room == room && m.seq > from) {
             // The mailbox keeps its copy, so the ring's never moves on expiry.
             send_stream(ws, m.frame, true, Meta{m.share});
+            // A dropped write was never read: past one the mark stays where it is.
+            if (!data->write_dropped && !data->write_dead) data->mailbox_mark = std::max(data->mailbox_mark, m.seq);
         }
     }
     // The byte budget is untouched on purpose: nothing left the buffer.
@@ -1681,8 +1697,8 @@ static void handle_set_offline_buffer(PerSocketData* data, const json& j, RelayS
 }
 
 // User report: one per (reporter, target, category), deduped via fingerprints
-// keyed by a relay secret kept outside the reports file, so the file alone
-// cannot confirm who reported whom; only per-target category totals are
+// keyed by a relay secret that never touches a disk, so the file cannot
+// confirm who reported whom; only per-target category totals are
 // readable (e.g. for restricting relay access).
 // Ack is sent even on dedup: from the client's view the report "is filed".
 static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
@@ -3030,6 +3046,7 @@ static void enter_grace(RelayState& state, SSLWebSocket* ws, PerSocketData* data
         go_offline(state, peer);
     }
     session_bounds::hold_ip_slot(state, s, data->ip_key);
+    s.mailbox_mark = data->mailbox_mark;
     s.state = session::State::Grace;
     s.unacked_in = 0;
     s.grace_until = std::chrono::steady_clock::now() + std::chrono::seconds(g_grace_secs);
@@ -3116,6 +3133,8 @@ static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* d
     s.state = session::State::Live;
     s.unacked_in = 0;
     data->sid = s.sid;
+    // What the device was already sent of its mailbox, from the socket it leaves.
+    data->mailbox_mark = old ? old->getUserData()->mailbox_mark : s.mailbox_mark;
     // Proofs stay bound to the nonce the session was minted with; one back from a
     // snapshot has no door standing left and proves again on this socket's challenge.
     const bool reprove = s.restored;
@@ -3187,7 +3206,7 @@ static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* d
     if (gap) {
         for (const auto& [room, owner] : s.rooms) {
             if (owner && is_inbox_room(room)) {
-                replay_mailbox_no_delete(ws, room.substr(sizeof(INBOX_ROOM_PREFIX) - 1), room, state);
+                replay_mailbox_no_delete(ws, room.substr(sizeof(INBOX_ROOM_PREFIX) - 1), room, state, /*all=*/true);
             }
         }
     }

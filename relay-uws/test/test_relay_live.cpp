@@ -160,7 +160,25 @@ class Socket {
 
     ~Socket() { drop(); }
 
-    bool open() {
+    // One plain HTTPS GET on its own connection: the body, or nothing.
+    std::optional<std::string> get(const std::string& path) {
+        if (!connect_tls()) return std::nullopt;
+        write_all("GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WAIT_MS);
+        for (;;) {
+            size_t end = rbuf_.find("\r\n\r\n");
+            if (end != std::string::npos) {
+                size_t at = rbuf_.find("Content-Length: ");
+                if (at != std::string::npos && at < end) {
+                    size_t want = std::stoul(rbuf_.substr(at + 16));
+                    if (rbuf_.size() >= end + 4 + want) return rbuf_.substr(end + 4, want);
+                }
+            }
+            if (left_ms(deadline) <= 0 || !fill(left_ms(deadline))) return std::nullopt;
+        }
+    }
+
+    bool connect_tls() {
         fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (fd_ < 0) return false;
         const int n = g_pin_source >= 0 ? g_pin_source : g_next_source++;
@@ -181,6 +199,11 @@ class Socket {
         ERR_clear_error();
         if (SSL_connect(ssl_) != 1) return false;
         fcntl(fd_, F_SETFL, fcntl(fd_, F_GETFL) | O_NONBLOCK);
+        return true;
+    }
+
+    bool open() {
+        if (!connect_tls()) return false;
 
         unsigned char key[16];
         randombytes_buf(key, sizeof(key));
@@ -2037,6 +2060,107 @@ static void test_session_inbox_recheck() {
 
 // A gapped resume joins nothing, so a mailbox deposit that fell out of the ring would
 // never reach the device: an inbox it owns replays its mailbox after the ring.
+// AR-36: one socket reads the mailbox once. A re-join, a roster re-show or a resume
+// sends only what this socket was not already sent from it; siblings still read it all.
+static void test_mailbox_read_once() {
+    printf("sessions: a socket reads its inbox's mailbox once\n");
+    Ident master, d1, d2;
+    const std::string inbox = "inbox:" + master.peer;
+    const json roster = legacy_roster(master, {&d1, &d2});
+    auto s = login(Ident());
+    join(*s, inbox);
+    s->send_bin(frame(0x04, {inbox, master.peer}, "mail-a"));
+    settle({s.get()});
+    const auto mail_a = bin(frame(0x06, {inbox, s->id.peer}, "mail-a"));
+    const auto mail_b = bin(frame(0x06, {inbox, s->id.peer}, "mail-b"));
+    const auto mail_c = bin(frame(0x06, {inbox, s->id.peer}, "mail-c"));
+
+    auto a = login3(d1, "new", 0);
+    join(*a, inbox, {{"inbox_roster", roster}});
+    settle({a.get()});
+    check("the first owning join reads the mailbox", count(*a, mail_a) == 1);
+    join(*a, inbox, {{"inbox_roster", roster}});
+    join(*a, inbox);
+    settle({a.get()});
+    check("a roster re-show or a plain re-join on the same socket reads nothing again", count(*a, mail_a) == 0);
+
+    s->send_bin(frame(0x04, {inbox, master.peer}, "mail-b"));
+    settle({s.get(), a.get()});
+    check("a deposit reaches the owner live", count(*a, mail_b) == 1);
+    join(*a, inbox, {{"inbox_roster", roster}});
+    settle({a.get()});
+    check("an older deposit is still not read again", count(*a, mail_a) == 0);
+    count(*a, mail_b);  // a live deposit may come once more, never more
+    join(*a, inbox, {{"inbox_roster", roster}});
+    settle({a.get()});
+    check("nor a live one past its one replay", count(*a, mail_a) == 0 && count(*a, mail_b) == 0);
+
+    auto sib = login3(d2, "new", 0);
+    join(*sib, inbox, {{"inbox_roster", roster}});
+    settle({sib.get()});
+    check("a sibling's own socket reads everything", count(*sib, mail_a) == 1 && count(*sib, mail_b) == 1);
+
+    const uint64_t read = a->ws.counted;
+    a->ws.abort();
+    settle({s.get()});
+    auto a2 = login3(d1, a->sid, read);
+    check("(the session resumes without a gap)", resumed(*a2) && !a2->answer.value("gap", true));
+    join(*a2, inbox, {{"inbox_roster", roster}});
+    settle({a2.get()});
+    check("a resumed session's re-join reads nothing it was already sent",
+          count(*a2, mail_a) == 0 && count(*a2, mail_b) == 0);
+
+    // The device's push isolate sits in the inbox unproved while the session is in
+    // grace; a deposit then, and its proof later, still reads every older deposit.
+    const uint64_t read2 = a2->ws.counted;
+    a2->ws.abort();
+    settle({s.get()});
+    auto f = login(d1, "fetch");
+    join(*f, inbox);
+    s->send_bin(frame(0x04, {inbox, master.peer}, "mail-c"));
+    settle({s.get(), f.get()});
+    join(*f, inbox, {{"inbox_roster", roster}});
+    settle({f.get()});
+    check("a fetch socket that proves after a live deposit reads every older one",
+          count(*f, mail_a) == 1 && count(*f, mail_b) == 1 && count(*f, mail_c) >= 1);
+    join(*f, inbox, {{"inbox_roster", roster}});
+    settle({f.get()});
+    check("and reads them once", count(*f, mail_a) == 0 && count(*f, mail_b) == 0);
+    (void)read2;
+}
+
+// A gap may swallow a deposit the socket was already sent (live and by a re-join), so
+// a gapped resume replays the whole mailbox, whatever the socket's mark says.
+static void test_mailbox_gap_after_read() {
+    printf("sessions: a gapped resume replays mail the socket had already been sent\n");
+    Ident master, d1;
+    const std::string inbox = "inbox:" + master.peer;
+    const std::string room = room_name("mail-gap-read");
+    const json roster = legacy_roster(master, {&d1});
+    auto a = login3(d1, "new", 0);
+    join(*a, inbox, {{"inbox_roster", roster}});
+    join(*a, room);
+    auto s = login(Ident());
+    join(*s, inbox);
+    join(*s, room);
+    settle({a.get()});
+    const uint64_t read = a->ws.counted;
+    // From here the device reads nothing: the deposit, live and from the re-join, sits
+    // in its ring unread, and the flood after it pushes both into a gap.
+    s->send_bin(frame(0x04, {inbox, master.peer}, "read-then-lost"));
+    settle({s.get()});
+    a->send({{"type", "join"}, {"room", inbox}, {"inbox_roster", roster}});
+    for (int i = 0; i < 8; i++) s->send_bin(frame(0x03, {room}, std::string(1024 * 1024, 'g') + std::to_string(i)));
+    settle({s.get()});
+    a->ws.abort();
+    check("the device left", next(*s, about("peer_left", room, d1.peer)).has_value());
+    auto a2 = login3(d1, a->sid, read);
+    check("the resume reports a gap", resumed(*a2) && a2->answer.value("gap", false));
+    const auto mail = bin(frame(0x06, {inbox, s->id.peer}, "read-then-lost"));
+    const auto upto = through(*a2, mail);
+    check("the mail it had been sent before the gap comes again", !upto.empty() && mail(upto.back()));
+}
+
 static void test_session_gap_mailbox() {
     printf("sessions: a gapped resume replays the mailbox of an inbox it owns\n");
     Ident master, d1;
@@ -3340,6 +3464,9 @@ static bool wait_for_file(const std::string& path, std::string& content, int tim
 // process): the restored session comes back with no door standing, so until it proves
 // its door again a locked room shows it nothing and nobody there sees it; an inbox the
 // roster took away during the new process's grace is gone; kill signals still come first.
+// fdstore_restart.py looks this peer up in the reports file.
+static const char RESTART_REPORT_TARGET[] = "12D3KooWRestartReportTarget1111111111111111111111";
+
 static void hs_restart(const std::string& dir) {
     printf("handshake review: a session restored from a snapshot proves its doors again\n");
     Ident owner, change, master, d1, d2;
@@ -3369,6 +3496,10 @@ static void hs_restart(const std::string& dir) {
     e->send({{"type", "inactive"}});
     check("(a second device hides)", next(*b, about("peer_left", plain, ide.peer)).has_value());
     const uint64_t e_read = e->ws.counted;
+    // A report before the restart; its repeat after it must not count again (fdstore_restart.py
+    // reads the reports file the two relays share).
+    b->send({{"type", "report"}, {"target", RESTART_REPORT_TARGET}, {"category", "spam"}});
+    check("(the report is filed)", next(*b, typed("report_ack")).has_value());
     // Written into its socket and never read: they are in its ring when the relay stops.
     b->send_bin(frame(0x03, {plain}, "rs-plain-before"));
     b->send_bin(frame(0x03, {locked}, "rs-locked-before"));
@@ -3388,6 +3519,8 @@ static void hs_restart(const std::string& dir) {
     auto b2 = login(idb);
     auto mb = join(*b2, locked, {{"door_proof", door_proof(*b2, locked, door)}});
     check("the lock survived the restart", mb && mb->value("proved", false));
+    b2->send({{"type", "report"}, {"target", RESTART_REPORT_TARGET}, {"category", "spam"}});
+    check("(the same report is filed again)", next(*b2, typed("report_ack")).has_value());
     join(*b2, plain);
     b2->send_bin(frame(0x03, {locked}, "rs-locked-after"));
     b2->send_bin(frame(0x03, {plain}, "rs-plain-after"));
@@ -3869,6 +4002,13 @@ struct PinnedSource {
     ~PinnedSource() { g_pin_source = -1; }
 };
 
+// A login the relay turns away with ip_limit before any answer: the address is full and
+// no session in grace there may give its slot up.
+static bool refused_at_login(const Ident& id) {
+    auto p = login3(id, "new", 0);
+    return !p->ok && closed_by_relay(*p) && p->ws.close_code == 1008 && p->ws.close_reason == "ip_limit";
+}
+
 // A socket the relay closes at once: the address is full.
 static bool refused_at_open(const Ident& id) {
     auto p = open_socket(id);
@@ -3878,6 +4018,7 @@ static bool refused_at_open(const Ident& id) {
 
 static void test_bounds_full_address() {
     printf("bounds: a full address and the grace slots it holds\n");
+    if (g_grace_secs == 0) g_grace_secs = login3(Ident(), "new", 0)->answer.value("grace_secs", 0);
     {
         PinnedSource pin(50001);
         const std::string room = room_name("full-own");
@@ -3925,12 +4066,81 @@ static void test_bounds_full_address() {
         const uint64_t read = d->ws.counted;
         d->ws.abort();
         check("(the device dropped)", next(*x, about("peer_left", room, idd.peer)).has_value());
+        check("a newcomer cannot end a session in its first half of grace", refused_at_login(Ident()));
+        sleep_ms(static_cast<int>(g_grace_secs * 1000 / 2 + 500));
         auto s = login(Ident());
         check("a newcomer to a full address gets the slot a session in grace held", s->ok);
         check("the address is full again", refused_at_open(Ident()));
         check("(the newcomer leaves)", s->ws.close_clean());
         auto d2 = login3(idd, d->sid, read);
         check("and that session is gone", answer_type(*d2) == "auth_ok" && resume_failed(*d2) == "unknown");
+    }
+    {
+        // Three takeovers a minute per address; past them the newcomer waits, never the neighbour.
+        PinnedSource pin(50007);
+        std::vector<Ident> ids(3);
+        std::vector<std::unique_ptr<Peer>> gone;
+        for (auto& id : ids) gone.push_back(login3(id, "new", 0));
+        for (auto& g : gone) g->ws.abort();
+        sleep_ms(static_cast<int>(g_grace_secs * 1000 / 2 + 500));
+        auto a = login(Ident());
+        auto b = login(Ident());
+        auto c = login(Ident());
+        check("three newcomers take the three grace slots", a->ok && b->ok && c->ok);
+        check("(one of them leaves)", c->ws.close_clean());
+        Ident idw;
+        auto w = login3(idw, "new", 0);
+        const uint64_t wread = w->ws.counted;
+        w->ws.abort();
+        sleep_ms(static_cast<int>(g_grace_secs * 1000 / 2 + 500));
+        check("a fourth takeover in the minute is refused", refused_at_login(Ident()));
+        auto w2 = login3(idw, w->sid, wread);
+        check("and the neighbour's session it would have ended resumes", resumed(*w2));
+    }
+    {
+        // A device whose older socket at the full address is still open frees that slot by
+        // logging in, fresh or by moving its session: it costs no neighbour anything.
+        PinnedSource pin(50008);
+        Ident idv, idd;
+        auto v = login3(idv, "new", 0);
+        const uint64_t vread = v->ws.counted;
+        v->ws.abort();
+        auto d = login3(idd, "new", 0);
+        auto x = login(Ident());
+        sleep_ms(200);
+        auto fresh = login3(idd, "new", 0);
+        check("a device logs in fresh beside its own open socket at a full address", fresh->ok);
+        auto moved = login3(idd, fresh->sid, fresh->ws.counted);
+        check("and moves its session there from its own open socket", resumed(*moved));
+        auto v2 = login3(idv, v->sid, vread);
+        check("neither cost the neighbour in grace its session", resumed(*v2));
+    }
+    {
+        // A session resumed from another address is a newcomer here: the same minimum.
+        Ident idr, idv;
+        std::unique_ptr<Peer> r;
+        uint64_t rread = 0;
+        {
+            PinnedSource elsewhere(50010);
+            r = login3(idr, "new", 0);
+            rread = r->ws.counted;
+            r->ws.abort();
+        }
+        PinnedSource pin(50009);
+        auto x = login(Ident());
+        auto y = login(Ident());
+        auto v = login3(idv, "new", 0);
+        const uint64_t vread = v->ws.counted;
+        v->ws.abort();
+        sleep_ms(200);
+        auto early = login3(idr, r->sid, rread);
+        check("a resume from another address cannot end a session in its first half of grace",
+              !early->ok && closed_by_relay(*early) && early->ws.close_code == 1008 &&
+                  early->ws.close_reason == "ip_limit");
+        sleep_ms(static_cast<int>(g_grace_secs * 1000 / 2 + 500));
+        auto late = login3(idr, r->sid, rread);
+        check("its session was left alone, and past the minimum it takes the slot", resumed(*late));
+        (void)vread;
     }
     {
         PinnedSource pin(50004);
@@ -4229,6 +4439,21 @@ static void test_bounds_drain() {
     check("a socket without a session is told nothing", count(*b, typed("reconnect")) == 0);
 }
 
+// /server-stats keeps every field unless the operator sets PUBLIC_STATS=off
+// (test_server_stats.cpp covers the off body).
+static void test_public_stats() {
+    printf("server stats: public by default\n");
+    auto a = login(Ident());
+    Socket s;
+    const auto body = s.get("/server-stats");
+    const json j = body ? json::parse(*body, nullptr, false) : json();
+    check("the relay answers /server-stats", j.is_object());
+    check("with the exact online count", j.is_object() && j.contains("online_users") && j["online_users"].is_number() &&
+                                             j["online_users"].get<int64_t>() >= 1);
+    check("and the activity fields", j.is_object() && j.contains("rx_mbps") && j.contains("tx_mbps") &&
+                                         j.contains("fwd_delivered") && j.contains("send_dropped"));
+}
+
 // --- New-connection rate (MAX_NEW_CONNS_PER_MIN_PER_IP) and HOLLOW_CONN_RATE_EXEMPT ---
 //
 // run_live.sh starts one more relay listing RATE_EXEMPT_SOURCE (127.0.241.3, written
@@ -4327,6 +4552,22 @@ int main(int argc, char** argv) {
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
     }
+    // =stats: what /server-stats tells anyone.
+    if (only && std::string(only) == "stats") {
+        test_public_stats();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =mailbox: the inbox mailbox reads.
+    if (only && std::string(only) == "mailbox") {
+        test_mailbox_read_once();
+        test_mailbox_gap_after_read();
+        test_session_gap_mailbox();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
     // =fetch_grace: what a fetch socket reads of a session in grace.
     if (only && std::string(only) == "fetch_grace") {
         test_session_fetch_in_grace();
@@ -4384,6 +4625,7 @@ int main(int argc, char** argv) {
     const bool bounds_only = only_cases == "bounds" || probe_only;
     const bool all = only_cases != "sessions" && !bounds_only;
     if (all) {
+        test_public_stats();
         test_auth();
         test_nicknames();
         test_rings();
@@ -4413,6 +4655,8 @@ int main(int argc, char** argv) {
         test_session_doors_and_kills();
         test_session_inbox_recheck();
         test_session_gap_mailbox();
+        test_mailbox_read_once();
+        test_mailbox_gap_after_read();
         test_session_push_in_grace();
         test_session_expiry();
         test_handshake_review();

@@ -1,0 +1,11 @@
+# Every minute, the TURN port lock loads again (hollow-turn-port-lock-refresh.service).
+[Unit]
+Description=Load the TURN port lock again every minute
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

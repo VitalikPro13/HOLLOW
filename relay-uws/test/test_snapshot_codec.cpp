@@ -123,6 +123,7 @@ static snapshot::Data sample() {
     c.sent = 5;
     c.acked = 5;
     d.sessions.push_back(c);
+    d.report_key = std::string("\x00report\x00key", 11) + std::string(21, '\x5a');
     return d;
 }
 
@@ -227,6 +228,7 @@ static snapshot::Data v1_sample() {
 }
 
 static bool same(const snapshot::Data& a, const snapshot::Data& b) {
+    if (a.report_key != b.report_key) return false;
     if (a.dm.size() != b.dm.size()) return false;
     for (size_t i = 0; i < a.dm.size(); i++) {
         if (a.dm[i].target != b.dm[i].target) return false;
@@ -343,9 +345,9 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
     return true;
 }
 
-// The bytes of the v9 `buffers` and `sessions` sections.
+// The bytes of the v9 `buffers` and `sessions` sections and the v10 report key after them.
 static size_t sessions_bytes(const snapshot::Data& d) {
-    size_t n = 4;
+    size_t n = 4 + 4 + d.report_key.size();
     for (const auto& b : d.buffers) n += 4 + b.size();
     n += 4;
     for (const auto& s : d.sessions) n += 4 + snapshot::detail::encode_session(s).size();
@@ -354,6 +356,7 @@ static size_t sessions_bytes(const snapshot::Data& d) {
 
 // `d` without what v9 added, as a v8 build held it.
 static snapshot::Data without_sessions(snapshot::Data d) {
+    d.report_key.clear();
     d.buffers.clear();
     d.sessions.clear();
     return d;
@@ -512,6 +515,33 @@ int main() {
         check("a v8 snapshot decodes under this reader", snapshot::decode(v8, out));
         check("and carries no sessions", out.sessions.empty() && out.buffers.empty() &&
                                              same(without_sessions(in), out));
+    }
+
+    // The relay that keeps its report key off the disk takes back what the v9 build
+    // running before it handed over: the same bytes, less the key, under version 9.
+    {
+        snapshot::Data in = sample();
+        std::string bytes = snapshot::encode(in);
+        std::string v9 = bytes.substr(0, bytes.size() - 4 - 4 - in.report_key.size()) + bytes.substr(bytes.size() - 4);
+        v9[4] = 9;
+        snapshot::Data out;
+        check("a v9 snapshot decodes under this reader", snapshot::decode(v9, out));
+        snapshot::Data no_key = in;
+        no_key.report_key.clear();
+        check("and carries no report key", out.report_key.empty() && same(no_key, out));
+    }
+
+    // The report key is 32 bytes or absent; any other length is corruption.
+    {
+        snapshot::Data in = sample();
+        snapshot::Data out;
+        in.report_key.clear();
+        check("a snapshot without a report key decodes", snapshot::decode(snapshot::encode(in), out) &&
+                                                         out.report_key.empty());
+        in.report_key = std::string(31, 'k');
+        check("a report key of another length is refused", !snapshot::decode(snapshot::encode(in), out));
+        in.report_key = std::string(33, 'k');
+        check("a longer one too", !snapshot::decode(snapshot::encode(in), out));
     }
 
     // A session record that does not parse is dropped alone; the snapshot and every

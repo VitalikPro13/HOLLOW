@@ -447,6 +447,9 @@ struct Session {
     bool inactive = false;
     uint64_t in_h = 0;  // stream frames received from the device
     Ring ring;          // stream frames sent to it and not acked
+    // PerSocketData::mailbox_mark of its socket, kept across grace. Never in the snapshot:
+    // a restore numbers the buffers afresh, so a session back from one reads it all again.
+    uint64_t mailbox_mark = 0;
     // The nonce it was minted with, its door-proof nonce within this process.
     std::string door_nonce;
     // The per-IP slot it holds while in grace, "" when its socket holds the slot.
@@ -558,10 +561,14 @@ public:
         auto it = by_ip_.find(ip_key);
         return it == by_ip_.end() ? 0 : it->second.size();
     }
-    std::optional<std::string> grace_slot_victim(const std::string& ip_key) const {
+    // `except` is the device logging in, whose own slot its login frees anyway.
+    std::optional<std::string> grace_slot_victim(const std::string& ip_key, const std::string& except = "") const {
         auto it = by_ip_.find(ip_key);
         if (it == by_ip_.end()) return std::nullopt;
-        return it->second.begin()->second;
+        for (const auto& [order, peer] : it->second) {
+            if (peer != except) return peer;
+        }
+        return std::nullopt;
     }
 
 private:

@@ -1,10 +1,11 @@
 // Unit tests for the relay's user-report store (src/reports.cpp).
 //
-// The property that matters: the reports file alone cannot confirm a guessed
-// "A reported B". Fingerprints are keyed by a secret in its own 0600 file,
-// dedup survives a restart, and a file whose fingerprints were not made with
-// the current secret (unsalted legacy, or a lost key) loses its fingerprints
-// but keeps its counts.
+// The property that matters: nothing on the disk can confirm a guessed "A reported
+// B". Fingerprints are keyed by a secret that lives only in memory and in the restart
+// snapshot, a key file an older relay left is wiped, dedup survives a restart that
+// hands the key over, and a file whose fingerprints were not made with the current
+// secret (unsalted legacy, a reboot, an old key) loses its fingerprints but keeps
+// its counts.
 //
 // Build + run from relay-uws/test (no uWebSockets, needs libsodium):
 //   g++ -std=c++17 -I../src test_reports.cpp ../src/reports.cpp ../src/crypto.cpp
@@ -20,6 +21,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -66,11 +68,7 @@ int main() {
     {
         ReportsState r;
         r.load_from_file(path);
-        struct stat st {};
-        check("first load creates the key file", ::stat(key_path.c_str(), &st) == 0);
-        check("the key file is 32 bytes", st.st_size == 32);
-        check("the key file is 0600", (st.st_mode & 0777) == 0600);
-        check("the key file is not the reports file", key_path != path);
+        check("loading writes no key file", ::access(key_path.c_str(), F_OK) != 0);
 
         check("a first report counts", r.add(A, B, "spam"));
         check("the same report is deduped", !r.add(A, B, "spam"));
@@ -79,6 +77,7 @@ int main() {
               r.fingerprint(A, B, "spam") != unsalted(A, B, "spam"));
         ::umask(022);
         r.save_if_dirty();
+        check("saving writes no key file", ::access(key_path.c_str(), F_OK) != 0);
         struct stat rst {};
         check("the reports file is 0600 whatever the umask",
               ::stat(path.c_str(), &rst) == 0 && (rst.st_mode & 0777) == 0600);
@@ -91,6 +90,60 @@ int main() {
         check("the file does not hold the key", file.find(hex_encode(r.secret, 32)) == std::string::npos);
         json j = json::parse(file);
         check("the file carries the version", j.value("version", 0) == ReportsState::FILE_VERSION);
+
+        // The restart snapshot is the only place the key goes.
+        const std::string key = r.key_bytes();
+        check("the key is 32 bytes", key.size() == ReportsState::SECRET_BYTES);
+        ReportsState again;
+        check("a handed-over key is taken", again.adopt_key(key));
+        again.load_from_file(path);
+        check("fingerprints survive a restart that hands the key over", again.keys.size() == 2);
+        check("dedup survives it", !again.add(A, B, "spam"));
+        check("counts survive it", again.counts[B]["spam"] == 1 && again.counts[B]["harassment"] == 1);
+        check("a clean load is not dirty", !again.dirty);
+        check("no key file after the restart either", ::access(key_path.c_str(), F_OK) != 0);
+
+        ReportsState bad;
+        check("a key of another length is refused", !bad.adopt_key(std::string(31, 'k')));
+        check("an empty one too", !bad.adopt_key(std::string()));
+    }
+
+    printf("reboot\n");
+    {
+        // No snapshot survives a reboot: a new key, so the old fingerprints say nothing.
+        ReportsState r;
+        r.load_from_file(path);
+        check("fingerprints from the lost key are dropped", r.keys.empty());
+        check("and leave the disk at once", json::parse(slurp(path))["keys"].empty() && !r.dirty);
+        check("counts are kept", r.counts[B]["spam"] == 1 && r.counts[B]["harassment"] == 1);
+        check("a repeat report counts again", r.add(A, B, "spam") && r.counts[B]["spam"] == 2);
+        r.save_if_dirty();
+    }
+
+    printf("a key file an older relay left\n");
+    {
+        // An older relay kept its key beside the file, and wrote fingerprints under it.
+        unsigned char old_key[32];
+        randombytes_buf(old_key, sizeof(old_key));
+        ReportsState old;
+        old.adopt_key(std::string(reinterpret_cast<const char*>(old_key), sizeof(old_key)));
+        old.file_path = path;
+        old.add(A, B, "impersonation");
+        old.save_if_dirty();
+        { std::ofstream f(key_path, std::ios::binary | std::ios::trunc);
+          f.write(reinterpret_cast<const char*>(old_key), sizeof(old_key)); }
+        // A second name for the same inode shows what was left in its blocks.
+        const std::string witness = dir + "/witness";
+        check("the witness link is made", ::link(key_path.c_str(), witness.c_str()) == 0);
+
+        ReportsState r;
+        r.load_from_file(path);
+        check("the old key file is gone", ::access(key_path.c_str(), F_OK) != 0);
+        check("its bytes were zeroed first", slurp(witness) == std::string(32, '\0'));
+        check("the old key is not taken", std::memcmp(r.secret, old_key, sizeof(old_key)) != 0);
+        check("fingerprints made under it are dropped", r.keys.empty());
+        check("its counts are kept", r.counts[B]["impersonation"] == 1);
+        ::unlink(witness.c_str());
     }
 
     printf("categories\n");
@@ -118,16 +171,6 @@ int main() {
         check("the counts are keyed by the blocked person only", only_targets);
     }
 
-    printf("restart\n");
-    {
-        ReportsState r;
-        r.load_from_file(path);
-        check("fingerprints survive a restart", r.keys.size() == 2);
-        check("dedup survives a restart", !r.add(A, B, "spam"));
-        check("counts survive a restart", r.counts[B]["spam"] == 1 && r.counts[B]["harassment"] == 1);
-        check("a clean load is not dirty", !r.dirty);
-    }
-
     printf("different secrets\n");
     {
         ReportsState x, y;
@@ -150,33 +193,11 @@ int main() {
         r.load_from_file(path);
         check("unsalted keys are dropped", r.keys.empty());
         check("counts are kept", r.counts[B]["spam"] == 1);
-        check("the load is dirty so the old keys leave the disk", r.dirty);
-        r.save_if_dirty();
         check("the rewritten file holds no unsalted key",
               slurp(path).find(unsalted(A, B, "spam")) == std::string::npos);
         check("a repeat report counts again after migration", r.add(A, B, "spam") &&
                                                              r.counts[B]["spam"] == 2);
         r.save_if_dirty();
-    }
-
-    printf("lost key\n");
-    {
-        ::unlink(key_path.c_str());
-        ReportsState r;
-        r.load_from_file(path);
-        check("a new key is created", ::access(key_path.c_str(), F_OK) == 0);
-        check("fingerprints from the old key are dropped", r.keys.empty());
-        check("counts are kept", r.counts[B]["spam"] == 2);
-    }
-
-    printf("malformed key file\n");
-    {
-        { std::ofstream f(key_path, std::ios::trunc); f << "short"; }
-        ReportsState r;
-        check("a short key file is replaced", r.load_or_create_secret(key_path));
-        struct stat st {};
-        ::stat(key_path.c_str(), &st);
-        check("the replacement is 32 bytes and 0600", st.st_size == 32 && (st.st_mode & 0777) == 0600);
     }
 
     std::string cmd = "rm -rf '" + dir + "'";

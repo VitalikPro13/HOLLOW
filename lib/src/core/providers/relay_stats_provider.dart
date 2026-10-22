@@ -12,7 +12,13 @@ class RelayStats {
   final double rxMbps;
   final double txMbps;
   final int bandwidthCapMbps;
-  final int onlineUsers;
+
+  /// Null when the relay leaves the count out (a self-hosted relay with
+  /// `PUBLIC_STATS=off`): the UI then shows no counter at all.
+  final int? onlineUsers;
+
+  /// False when the relay leaves its traffic rates out (`PUBLIC_STATS=off`).
+  final bool hasTraffic;
   final int fetchCount;
 
   /// Wall-clock time of the last SUCCESSFUL fetch. Null until the first one
@@ -26,7 +32,8 @@ class RelayStats {
     this.rxMbps = 0,
     this.txMbps = 0,
     this.bandwidthCapMbps = 1000,
-    this.onlineUsers = 0,
+    this.onlineUsers,
+    this.hasTraffic = true,
     this.fetchCount = 0,
     this.lastSuccessAt,
   });
@@ -36,6 +43,22 @@ class RelayStats {
   bool get isFresh =>
       lastSuccessAt != null &&
       DateTime.now().difference(lastSuccessAt!) < const Duration(seconds: 20);
+
+  /// One `/server-stats` body. A relay with `PUBLIC_STATS=off` leaves the
+  /// count and the traffic rates out.
+  factory RelayStats.fromServerStats(Map<String, dynamic> json,
+          {required int fetchCount, required DateTime at}) =>
+      RelayStats(
+        memTotalKb: (json['mem_total_kb'] as num?)?.toInt() ?? 0,
+        memUsedKb: (json['mem_used_kb'] as num?)?.toInt() ?? 0,
+        rxMbps: (json['rx_mbps'] as num?)?.toDouble() ?? 0,
+        txMbps: (json['tx_mbps'] as num?)?.toDouble() ?? 0,
+        bandwidthCapMbps: (json['bandwidth_cap_mbps'] as num?)?.toInt() ?? 1000,
+        onlineUsers: (json['online_users'] as num?)?.toInt(),
+        hasTraffic: json['rx_mbps'] is num && json['tx_mbps'] is num,
+        fetchCount: fetchCount,
+        lastSuccessAt: at,
+      );
 
   double get memUsagePercent =>
       memTotalKb > 0 ? (memUsedKb / memTotalKb).clamp(0.0, 1.0) : 0.0;
@@ -100,17 +123,8 @@ class RelayStatsNotifier extends AutoDisposeNotifier<RelayStats> {
       if (response.statusCode == 200) {
         final body = await response.transform(utf8.decoder).join();
         final json = jsonDecode(body) as Map<String, dynamic>;
-        state = RelayStats(
-          memTotalKb: (json['mem_total_kb'] as num?)?.toInt() ?? 0,
-          memUsedKb: (json['mem_used_kb'] as num?)?.toInt() ?? 0,
-          rxMbps: (json['rx_mbps'] as num?)?.toDouble() ?? 0,
-          txMbps: (json['tx_mbps'] as num?)?.toDouble() ?? 0,
-          bandwidthCapMbps:
-              (json['bandwidth_cap_mbps'] as num?)?.toInt() ?? 1000,
-          onlineUsers: (json['online_users'] as num?)?.toInt() ?? 0,
-          fetchCount: state.fetchCount + 1,
-          lastSuccessAt: DateTime.now(),
-        );
+        state = RelayStats.fromServerStats(json,
+            fetchCount: state.fetchCount + 1, at: DateTime.now());
       }
     } catch (_) {
       // Keep last known stats on failure but re-emit so `isFresh` recomputes, or
@@ -122,6 +136,7 @@ class RelayStatsNotifier extends AutoDisposeNotifier<RelayStats> {
         txMbps: state.txMbps,
         bandwidthCapMbps: state.bandwidthCapMbps,
         onlineUsers: state.onlineUsers,
+        hasTraffic: state.hasTraffic,
         fetchCount: state.fetchCount,
         lastSuccessAt: state.lastSuccessAt,
       );

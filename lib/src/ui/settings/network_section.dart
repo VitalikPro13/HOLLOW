@@ -265,7 +265,7 @@ class _ActiveRelayRow extends ConsumerWidget {
           ),
         )
       else ...[
-        if (stats.isFresh)
+        if (stats.isFresh && stats.onlineUsers != null)
           TextSpan(
               text: stats.onlineUsers == 1
                   ? '1 person online'

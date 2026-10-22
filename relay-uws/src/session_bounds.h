@@ -200,7 +200,7 @@ inline std::optional<std::string> grace_slot_victim(RelayState& st, const std::s
 }
 
 // Whether a new socket from `ip_key` may come in: under the cap, or over it by fewer
-// sockets than the address has grace slots for the logins to settle (settle_victim).
+// sockets than the address has grace slots for the logins to settle (settle_login).
 inline bool admits(RelayState& st, const std::string& ip_key, size_t cap = MAX_CONNS_PER_IP) {
     auto it = st.ip_states.find(ip_key);
     const size_t count = it == st.ip_states.end() ? 0 : it->second.active_count;
@@ -234,15 +234,35 @@ inline Admission admit_socket(RelayState& st, const std::string& ip_key, bool ra
     return Admission::In;
 }
 
-// A login from `ip_key` is through, its own session resumed or ended: while the address
-// is still over the cap, the grace session there closest to its end gives its slot up.
-// Only now, once the device is known, so a device coming back takes back its own slot
-// instead of costing another device its session.
-inline std::optional<std::string> settle_victim(RelayState& st, const std::string& ip_key,
-                                                size_t cap = MAX_CONNS_PER_IP) {
+// What a login of `device` from `ip_key` does to the address once the device is known. An
+// address lets a socket in over its cap while it holds grace slots (admits), and the login
+// settles it back: a device coming back takes its own slot (`frees_own`), else the session
+// closest to its end gives way, but only one past half its grace and at most
+// MAX_GRACE_TAKEOVERS_PER_MIN_PER_IP times a minute, and never the device's own (its fetch
+// socket frees nothing). Otherwise the newcomer is refused and waits, as at a full address
+// before sessions (AR-36): a neighbour behind the same address cannot end other people's
+// sessions at will.
+struct LoginVerdict {
+    bool admit = true;
+    std::optional<std::string> victim;
+};
+
+inline LoginVerdict settle_login(RelayState& st, const std::string& ip_key, const std::string& device,
+                                 bool frees_own, std::chrono::seconds grace, conn_rate::Clock::time_point now,
+                                 size_t cap = MAX_CONNS_PER_IP) {
     auto it = st.ip_states.find(ip_key);
-    if (it == st.ip_states.end() || it->second.active_count <= cap) return std::nullopt;
-    return grace_slot_victim(st, ip_key);
+    if (it == st.ip_states.end()) return {};
+    IpState& ip = it->second;
+    const size_t count = ip.active_count - (frees_own && ip.active_count != 0 ? 1 : 0);
+    if (count <= cap) return {};
+    auto victim = detail::book(st).grace_slot_victim(ip_key, device);
+    if (!victim) return {};
+    auto vit = st.sessions.find(*victim);
+    if (vit == st.sessions.end() || vit->second.grace_until - now > grace / 2) return {false, std::nullopt};
+    ip.takeovers.prune(now);
+    if (ip.takeovers.full()) return {false, std::nullopt};
+    ip.takeovers.push(now);
+    return {true, victim};
 }
 
 }  // namespace session_bounds

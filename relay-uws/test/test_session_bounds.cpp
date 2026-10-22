@@ -548,6 +548,97 @@ static void ip_slot_tests() {
     printf("\n");
 }
 
+// A login at a full address (settle_login): which grace slot gives way, when none may,
+// and the takeovers an address gets a minute.
+static void takeover_tests() {
+    printf("grace slot takeovers at a full address\n");
+    using namespace std::chrono;
+    const auto t0 = steady_clock::now();
+    const auto grace = seconds(10);
+    const std::string ip_key = "10.0.0.9";
+    // `left[i]` seconds of grace left for peer(i), each holding a slot; then one newcomer.
+    auto fill = [&](RelayState& st, std::initializer_list<int> left) {
+        Ip ip{st};
+        int i = 0;
+        for (int l : left) {
+            Session& s = mint(st, peer(i++), 1);
+            ip.open(ip_key);
+            s.state = session::State::Grace;
+            s.grace_until = t0 + seconds(l);
+            session_bounds::hold_ip_slot(st, s, ip_key);
+        }
+        ip.open(ip_key);
+    };
+
+    {
+        RelayState st;
+        fill(st, {4, 5, 5});
+        auto v = session_bounds::settle_login(st, ip_key, "", false, grace, t0, 3);
+        check("past half its grace, the session closest to its end gives its slot up",
+              v.admit && v.victim && *v.victim == peer(0));
+    }
+    {
+        RelayState st;
+        fill(st, {6, 7, 8});
+        auto v = session_bounds::settle_login(st, ip_key, "", false, grace, t0, 3);
+        check("in its first half of grace no session gives way: the newcomer is refused", !v.admit && !v.victim);
+        check("and a refusal spends no takeover", st.ip_states[ip_key].takeovers.empty());
+        auto later = session_bounds::settle_login(st, ip_key, "", false, grace, t0 + seconds(2), 3);
+        check("once it is past half, it does", later.admit && later.victim && *later.victim == peer(0));
+    }
+    {
+        RelayState st;
+        fill(st, {1, 1, 1});
+        bool three = true;
+        for (int i = 0; i < 3; i++) {
+            auto v = session_bounds::settle_login(st, ip_key, "", false, grace, t0, 3);
+            three = three && v.admit && v.victim;
+        }
+        check("an address gets three takeovers a minute", three);
+        auto fourth = session_bounds::settle_login(st, ip_key, "", false, grace, t0 + seconds(30), 3);
+        check("the fourth in the minute refuses the newcomer", !fourth.admit && !fourth.victim);
+        auto next = session_bounds::settle_login(st, ip_key, "", false, grace, t0 + seconds(61), 3);
+        check("a minute on it may take one again", next.admit && next.victim);
+    }
+    {
+        RelayState st;
+        fill(st, {4, 5, 5});
+        auto v = session_bounds::settle_login(st, ip_key, peer(1), true, grace, t0, 3);
+        check("a device back at its own address takes its own slot back, no one else's",
+              v.admit && !v.victim && st.ip_states[ip_key].takeovers.empty());
+    }
+    {
+        RelayState st;
+        fill(st, {4, 5, 5});
+        Ip{st}.open(ip_key);  // a second newcomer: over the cap even with the own slot back
+        auto v = session_bounds::settle_login(st, ip_key, peer(0), true, grace, t0, 3);
+        check("a device's own session is never the one that gives way for it",
+              v.admit && v.victim && *v.victim == peer(1));
+    }
+    {
+        RelayState st;
+        fill(st, {4, 5, 5});
+        auto v = session_bounds::settle_login(st, ip_key, peer(0), false, grace, t0, 3);
+        check("a device's fetch socket never ends that device's own session in grace",
+              v.admit && v.victim && *v.victim == peer(1));
+    }
+    {
+        RelayState st;
+        fill(st, {4});
+        auto v = session_bounds::settle_login(st, ip_key, peer(0), false, grace, t0, 1);
+        check("and with only its own slot there, it comes in beside it", v.admit && !v.victim);
+    }
+    {
+        RelayState st;
+        Ip ip{st};
+        ip.open(ip_key);
+        ip.open(ip_key);
+        auto v = session_bounds::settle_login(st, ip_key, "", false, grace, t0, 3);
+        check("under the cap nothing is settled", v.admit && !v.victim);
+    }
+    printf("\n");
+}
+
 // The new-connection rate as .open and .close keep it (admit_socket, free_ip_slot).
 static void test_rate_limit_idle_address() {
     printf("the new-connection rate of an address holding no socket\n");
@@ -658,6 +749,7 @@ static void snapshot_tests() {
     a.in_h = 17;
     a.door_nonce = "nonce";
     a.ip_key = "10.0.0.1";
+    a.mailbox_mark = 99;
     session_bounds::ring_push(st, a, frame(buf(50), 4));
     session_bounds::ring_push(st, a, frame(fan, 4));
     session_bounds::ring_push(st, a, frame(buf(300), 5, Kind::Direct, "dmroom"));
@@ -710,6 +802,8 @@ static void snapshot_tests() {
               ra.grace_until == now + std::chrono::seconds(300) && r.sessions[peer(3)].restored);
     check("the door nonce and the per-IP slot stay behind",
           ra.door_nonce.empty() && ra.ip_key.empty());
+    // A restore numbers the buffers afresh: a mark from before would skip new entries.
+    check("so does the mailbox mark: a restored session reads its mailbox again", ra.mailbox_mark == 0);
     check("rooms with owner flags, subscriptions, counters and flags come back",
           ra.rooms == a.rooms && ra.subscriptions == a.subscriptions && ra.in_h == 17 && ra.inactive &&
               ra.sid == a.sid && ra.share == 31);
@@ -911,6 +1005,7 @@ int main() {
     budget_tests();
     table_tests();
     ip_slot_tests();
+    takeover_tests();
     test_rate_limit_idle_address();
     snapshot_tests();
     drain_tests();

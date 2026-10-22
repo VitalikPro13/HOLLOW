@@ -27,12 +27,20 @@ struct ReportsState {
     // One log line per unwritable path, not one every flush.
     bool save_failed_logged = false;
 
-    // Lives in its own file (secret_path_for) so the reports file alone
-    // proves nothing; never logged.
+    // Only in memory and the restart snapshot (snapshot_codec.h), never on a disk, so
+    // a copy of the disk cannot test a guessed pair; never logged.
     unsigned char secret[SECRET_BYTES] = {};
+    bool has_key = false;
 
-    // Loads (or creates) the secret first; keys made under another secret or
-    // before the salt existed are dropped, counts kept.
+    // The key a previous process of this service handed over. Call before
+    // load_from_file; false (and nothing taken) unless it is SECRET_BYTES long.
+    bool adopt_key(const std::string& key);
+    // The key for the restart snapshot; empty while there is none.
+    std::string key_bytes() const;
+
+    // A fresh key unless one was adopted. Keys made under another secret or before the
+    // salt existed are dropped, counts kept. A key file an older relay left beside the
+    // reports is zeroed and removed, never read.
     bool load_from_file(const std::string& path);
     // Atomic write (tmp + rename); no-op unless dirty. Keeps dirty set on
     // failure so the next flush retries.
@@ -49,12 +57,11 @@ struct ReportsState {
     std::string fingerprint(const std::string& reporter, const std::string& target,
                             const std::string& category) const;
 
+    // Where relays before 0.13 kept the key.
     static std::string secret_path_for(const std::string& reports_path);
-    // false = the file could not be read or written; a key for this run only
-    // is in place, so fingerprints saved now will not match after a restart.
-    bool load_or_create_secret(const std::string& path);
 
 private:
+    void ensure_key();
     // Names the secret in the reports file without revealing it, so a file
     // paired with a different secret is detected on load.
     std::string salt_id() const;

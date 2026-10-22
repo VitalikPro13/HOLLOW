@@ -1,0 +1,12 @@
+# Loads the TURN port lock again (hollow-turn-port-lock-refresh.timer): a `flush ruleset`
+# from anything but nftables.service would otherwise leave TURN unlocked until a reboot.
+# Runs only while hollow-turn-port-lock.service is up, so stopping that one stays stopped.
+[Unit]
+Description=Load the TURN port lock again
+Requisite=hollow-turn-port-lock.service
+After=hollow-turn-port-lock.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/hollow-relay/turn-port-lock.env
+ExecStart=/usr/local/sbin/hollow-turn-port-lock refresh

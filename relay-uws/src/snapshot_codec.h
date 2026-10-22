@@ -24,14 +24,17 @@ namespace snapshot {
 // roster with when the relay first saw each pending join (`rosters`, design
 // ID-1R), 8 which parked destroy signals the target identity's phrase stands
 // behind (`proven`, D5), 9 every resumable session with the fan-out buffers its
-// ring shares (`buffers`, `sessions`). An older snapshot still decodes, without the
+// ring shares (`buffers`, `sessions`), 10 the report fingerprints' key
+// (`report_key`), which stays off every disk. An older snapshot still decodes, without the
 // newer fields, so a relay coming up on this build keeps the buffers the previous
 // one handed over.
-static constexpr uint32_t VERSION = 9;
+static constexpr uint32_t VERSION = 10;
 static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
 static constexpr uint32_t MAX_STRING_BYTES = 64u * 1024 * 1024;
+
+static constexpr size_t REPORT_KEY_BYTES = 32;
 
 // A share of NO_SHARE came from a snapshot older than version 6.
 static constexpr uint64_t NO_SHARE = 0;
@@ -188,6 +191,9 @@ struct Data {
     // so the restored rings share it again and the budget charges it once.
     std::vector<std::string> buffers;
     std::vector<SessionRec> sessions;  // v9
+    // v10: the key of the report fingerprints (reports.h), which never touches a disk;
+    // empty when the relay had none.
+    std::string report_key;
     // Records decode left out because they did not parse. Each record is its own
     // length-prefixed string, so a bad one costs that session alone.
     size_t sessions_dropped = 0;
@@ -524,6 +530,7 @@ inline std::string encode(const Data& d) {
     for (const auto& b : d.buffers) w.str(b);
     w.count(d.sessions.size());
     for (const auto& s : d.sessions) w.str(detail::encode_session(s));
+    w.str(d.report_key);
 
     w.out.append("HRSE", 4);
     return w.out;
@@ -709,6 +716,11 @@ inline bool decode(std::string_view bytes, Data& out) {
                 d.sessions_dropped++;
             }
         }
+    }
+
+    if (version >= 10) {
+        if (!r.str(d.report_key)) return false;
+        if (!d.report_key.empty() && d.report_key.size() != REPORT_KEY_BYTES) return false;
     }
 
     if (!r.tag("HRSE") || r.left() != 0) return false;
