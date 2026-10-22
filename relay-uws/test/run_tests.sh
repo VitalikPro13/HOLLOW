@@ -62,6 +62,7 @@ else
     echo "skip test_session_bounds (no uWebSockets/uSockets sources; git submodule update --init)"
     echo "skip test_session_hostile (no uWebSockets/uSockets sources)"
 fi
+run test_presence_view $LIBS
 run test_snapshot_codec
 run test_turn_uris
 run test_verify_device_list ../src/device_list.cpp ../src/crypto.cpp $LIBS

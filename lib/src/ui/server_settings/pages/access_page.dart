@@ -23,6 +23,20 @@ import 'package:hollow/src/ui/server_settings/server_settings_widgets.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 
+/// What the member limit row says: the upper bound a blank field means, or that
+/// the server is full.
+String _memberLimitText(crdt_api.ServerCapacityFfi? capacity) {
+  if (capacity == null) {
+    return 'Blank means no limit. Nobody already here is removed.';
+  }
+  if (serverIsFull(capacity)) {
+    final members = capacity.limit == 1 ? 'member' : 'members';
+    return 'This server is full (${capacity.limit} $members). New people can '
+        'join once someone leaves.';
+  }
+  return 'Blank means up to ${capacity.hardCap}. Nobody already here is removed.';
+}
+
 /// Absent means on at three days, matching Rust's `relay_catchup_secs()`.
 const int _kCatchupDefaultDays = 3;
 
@@ -156,6 +170,7 @@ class _AccessPageState extends ConsumerState<AccessPage> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final draft = ref.read(serverSettingsDraftProvider(_sid).notifier);
+    final capacity = ref.watch(serverCapacityProvider(_sid));
     final twitchOn = _flag('twitch_verification_enabled');
     final catchup = _catchupDays;
     final channelName = _values['twitch_channel_name'] ?? '';
@@ -205,12 +220,12 @@ class _AccessPageState extends ConsumerState<AccessPage> {
             ),
             SettingsRow(
               title: 'Member limit',
-              subtitle: 'Blank means no limit. Nobody already here is removed.',
+              subtitle: _memberLimitText(capacity),
               trailing: SizedBox(
                 width: 112,
                 child: HollowTextField(
                   controller: draft.maxMembers,
-                  hintText: 'No limit',
+                  hintText: capacity == null ? 'No limit' : 'Up to ${capacity.hardCap}',
                   isDense: true,
                   keyboardType: TextInputType.number,
                   inputFormatters: [FilteringTextInputFormatter.digitsOnly],

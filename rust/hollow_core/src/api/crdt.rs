@@ -450,6 +450,38 @@ pub fn get_server_setting(server_id: String, key: String) -> Result<String, Stri
         .unwrap_or_default())
 }
 
+/// How full a server is: its identities, the cap in force (the owner's limit or the
+/// hard cap, whichever is lower) and the hard cap a limit cannot exceed.
+pub struct ServerCapacityFfi {
+    pub members: u32,
+    pub limit: u32,
+    pub hard_cap: u32,
+}
+
+/// The most members any server admits (`node::member_cap::MEMBER_CAP`): the bound a
+/// member limit cannot exceed. Reads no server state.
+#[frb(sync)]
+pub fn server_member_hard_cap() -> u32 {
+    crate::node::member_cap::hard_cap()
+}
+
+/// The member cap of `server_id` as join admission reads it (`node::member_cap`).
+#[frb(sync)]
+pub fn server_capacity(server_id: String) -> Result<ServerCapacityFfi, String> {
+    let store_guard = super::storage::get_store().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let store = store_guard.as_ref().ok_or("Message store is not open")?;
+    let state_json = store
+        .load_server_state(&server_id)?
+        .ok_or(format!("Server {server_id} not found"))?;
+    let state = serde_json::from_str::<crate::crdt::server_state::ServerState>(&state_json)
+        .map_err(|e| format!("Failed to parse server state: {e}"))?;
+    Ok(ServerCapacityFfi {
+        members: state.members.len() as u32,
+        limit: crate::node::member_cap::effective_cap(&state),
+        hard_cap: crate::node::member_cap::hard_cap(),
+    })
+}
+
 /// Rename a server.
 #[frb]
 pub fn rename_server(server_id: String, new_name: String) -> Result<(), String> {

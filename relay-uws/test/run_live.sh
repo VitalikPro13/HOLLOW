@@ -111,13 +111,17 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=relay.live.test \
 
 domain=relay.live.test
 fail=0
-# A third argument is HOLLOW_CONN_RATE_EXEMPT for that run, which runs only the rate cases.
+# A third argument is HOLLOW_CONN_RATE_EXEMPT for that run, which runs only the rate cases;
+# a fourth the relay's send buffer in bytes, which runs only the dropped-write case.
 run_variant() {
-    local v=$1 name=${2:-$1} exempt=${3-} port tries=0 log=$dir/relay_${2:-$1}.log
+    local v=$1 name=${2:-$1} exempt=${3-} backpressure=${4-} port tries=0 log=$dir/relay_${2:-$1}.log
     local extra=() only=${RELAY_LIVE_ONLY-}
     if [ -n "$exempt" ]; then
         extra=(HOLLOW_CONN_RATE_EXEMPT="$exempt")
         only=rate_exempt
+    elif [ -n "$backpressure" ]; then
+        extra=(HOLLOW_RELAY_TEST_BACKPRESSURE="$backpressure")
+        only=dropped_write
     fi
     while :; do
         if [ -n "$RELAY_LIVE_PORTS" ]; then
@@ -127,7 +131,7 @@ run_variant() {
         fi
         # Never under a systemd fd store, never near the real push sidecar's token.
         env -u NOTIFY_SOCKET -u LISTEN_PID -u LISTEN_FDS -u LISTEN_FDNAMES -u HOLLOW_PUSH_TOKEN \
-            -u HOLLOW_CONN_RATE_EXEMPT "${extra[@]}" TURN_SECRET=live-test "$dir/relay_$v" --port "$port" --domain "$domain" \
+            -u HOLLOW_CONN_RATE_EXEMPT -u HOLLOW_RELAY_TEST_BACKPRESSURE "${extra[@]}" TURN_SECRET=live-test "$dir/relay_$v" --port "$port" --domain "$domain" \
             --cert-file "$dir/cert.pem" --key-file "$dir/key.pem" \
             --keys-file "$dir/no-keys.json" --reports-file "$dir/reports_$name.json" > "$log" 2>&1 &
         relay_pid=$!
@@ -151,7 +155,7 @@ run_variant() {
 
     # The client's last case sends the relay SIGTERM itself (the drain hint); its pid
     # also lets a probe read the relay's memory. Under ASan the run takes about 96 s.
-    RELAY_LIVE_ONLY=$only RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" "$v" \
+    RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" "$v" \
         > "$dir/client_$name.log" 2>&1
     local rc=$?
     # A relay that does not exit on SIGTERM is down until systemd kills it.
@@ -204,4 +208,6 @@ for v in $variants; do
 done
 # The exemption list: a v4 address written v4-mapped, beside three entries it ignores.
 run_variant "${variants%% *}" exempt "::ffff:127.0.241.3, not-an-address,127.0.241, 0.0.0.0"
+# A 1 MiB send buffer: a test drains it and writes again inside one session tick.
+run_variant "${variants%% *}" backpressure "" 1048576
 exit $fail

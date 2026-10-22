@@ -153,6 +153,22 @@ final serverMembersProvider =
   (ref, serverId) => crdt_api.getServerMembers(serverId: serverId),
 );
 
+/// How full a server is as join admission counts it (Rust `member_cap`): its
+/// members, the limit in force and the hard cap. Null without the Rust library.
+final serverCapacityProvider = Provider.autoDispose
+    .family<crdt_api.ServerCapacityFfi?, String>((ref, serverId) {
+  ref.watch(serverMembersProvider(serverId));
+  try {
+    return crdt_api.serverCapacity(serverId: serverId);
+  } catch (_) {
+    return null;
+  }
+});
+
+/// Whether [capacity] says the server takes nobody new.
+bool serverIsFull(crdt_api.ServerCapacityFfi? capacity) =>
+    capacity != null && capacity.members >= capacity.limit;
+
 /// All labels defined in a server (cosmetic + access). Invalidated on
 /// ServerUpdated via the event provider (label CRUD emits it).
 final serverLabelsProvider =

@@ -626,6 +626,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ServerBannerData dco_decode_server_banner_data(dynamic raw);
 
   @protected
+  ServerCapacityFfi dco_decode_server_capacity_ffi(dynamic raw);
+
+  @protected
   ServerEmote dco_decode_server_emote(dynamic raw);
 
   @protected
@@ -1475,6 +1478,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ServerBannerData sse_decode_server_banner_data(SseDeserializer deserializer);
+
+  @protected
+  ServerCapacityFfi sse_decode_server_capacity_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ServerEmote sse_decode_server_emote(SseDeserializer deserializer);
@@ -2601,6 +2609,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_server_banner_data(
     ServerBannerData self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_server_capacity_ffi(
+    ServerCapacityFfi self,
     SseSerializer serializer,
   );
 

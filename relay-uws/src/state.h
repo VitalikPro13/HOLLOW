@@ -216,6 +216,12 @@ struct PerSocketData {
     // resolve clears both. See handle_resolve_link_code.
     uint32_t link_resolve_failures = 0;
     std::chrono::steady_clock::time_point link_resolve_block_until{};
+
+    // This socket's share of a presence digest (presence_view.h), cached on first use.
+    uint64_t presence_tag = 0;
+    // A write to this session's socket was dropped past maxBackpressure: it writes
+    // nothing more and closes on the next session tick (RelayState::dropped_writes).
+    bool write_dead = false;
 };
 
 struct WsRoom {
@@ -458,6 +464,9 @@ struct RelayState {
     std::string door_domain;
     // Rooms with a prover in its grace, for sweep_door_grace.
     std::unordered_set<std::string> door_grace_rooms;
+    // Session sockets that dropped a write since the last session tick, to close then.
+    // One entry per socket (`write_dead` is set once).
+    std::vector<std::string> dropped_writes;
 
     // Highest device-list version this relay has seen verify for each master
     // (RELAY-6). A revoked device keeps its last master-signed list forever and

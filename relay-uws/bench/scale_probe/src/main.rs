@@ -676,7 +676,7 @@ async fn main() {
     let out = a.0.get("out").cloned();
     let domain = a.s("domain", "relay.bench.test");
     if port == 0 || pid == 0 {
-        eprintln!("usage: relay_scale_probe --port P --relay-pid PID --scenario storm|joinone|churn|bcast|topic --n N ...");
+        eprintln!("usage: relay_scale_probe --port P --relay-pid PID --scenario storm|joinone|churn|bcast|topic|discover --n N ...");
         std::process::exit(2);
     }
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -858,6 +858,33 @@ async fn main() {
                 end_phase(&probe, ph, n, json!({"rate": rate, "sent": sent, "payload": size, "send_secs": round3(send_secs),
                     "deliveries": got, "expected": sent * n as u64, "drained": drained,
                     "lat_p50_us": STATS.lat_pct(0.5), "lat_p99_us": STATS.lat_pct(0.99), "tag": tag}), &out);
+            }
+        }
+        "discover" => {
+            // One audit round per member, `--discover-rounds` times: the peer discovery a
+            // room costs. `legacy` asks for the list (0.12.2), `digest` for the digest (0.13).
+            let rounds: usize = a.get("discover-rounds", 3);
+            let answers = || STATS.other_types.lock().unwrap().get("discovered_peers").copied().unwrap_or(0);
+            for mode in a.s("discover", "legacy,digest").split(',') {
+                let before = answers();
+                let ph = phase(&probe, &format!("discover_{mode}"));
+                for _ in 0..rounds {
+                    for c in &room {
+                        let mut v = json!({"type": "discover_peers", "room": ROOM});
+                        if mode == "digest" {
+                            v["digest"] = json!(true);
+                        }
+                        c.send_text(v);
+                    }
+                }
+                let want = (rounds * room.len()) as u64;
+                let start = Instant::now();
+                while answers() - before < want && start.elapsed() < Duration::from_secs(300) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                settle(Duration::from_secs(1), Duration::from_secs(120)).await;
+                end_phase(&probe, ph, n, json!({"asks": want, "answers": answers() - before, "mode": mode,
+                    "rounds": rounds, "tag": tag}), &out);
             }
         }
         other => eprintln!("unknown scenario {other}"),

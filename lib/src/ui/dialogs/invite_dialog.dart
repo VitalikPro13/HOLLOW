@@ -12,6 +12,7 @@ void showInviteDialog(BuildContext context, String link, String serverId) {
     context: context,
     builder: (_) => Consumer(builder: (context, ref, _) {
       final name = ref.watch(serverListProvider)[serverId]?.name ?? '';
+      final full = serverIsFull(ref.watch(serverCapacityProvider(serverId)));
       return HollowDialog(
         title: 'Invite link',
         showClose: true,
@@ -25,6 +26,11 @@ void showInviteDialog(BuildContext context, String link, String serverId) {
                 : 'Anyone with this link can join $name.'),
             const SizedBox(height: HollowSpacing.lg),
             HollowCopyField(value: link, name: 'invite link', wrap: false),
+            if (full) ...[
+              const SizedBox(height: HollowSpacing.md),
+              const HollowDialogText(
+                  'This server is full. New people can join once someone leaves.'),
+            ],
           ],
         ),
       );

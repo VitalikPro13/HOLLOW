@@ -437,14 +437,27 @@ pub(super) fn on_verified_sibling(
     );
 }
 
+/// The rooms whose presence is audited (presence_audit.rs): every server room of ours and
+/// the active room, once each.
+fn audited_rooms(server_states: &HashMap<String, ServerState>, active_room: Option<&str>) -> Vec<String> {
+    let mut rooms: Vec<String> = server_states.keys().cloned().collect();
+    if let Some(room) = active_room.filter(|r| !server_states.contains_key(*r)) {
+        rooms.push(room.to_string());
+    }
+    rooms.sort();
+    rooms
+}
+
 /// Room presence after the resolver moved (G1): a master id that turned bare leaves it,
-/// and if one left out earlier is a device now, every room is asked for its members.
+/// and if one left out earlier is a device now, every room is asked for its members:
+/// each audited room too, where no peer is listed (only the master id was there).
 async fn settle_bare_presence(
     bare_presence: &mut super::roster_book::BarePresence,
     ws_room_peers: &mut HashMap<String, std::collections::HashSet<String>>,
     synced_peers: &mut std::collections::HashSet<String>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    audited: Vec<String>,
 ) {
     let (bare, admitted) = bare_presence.settle(ws_room_peers);
     for peer_id in bare {
@@ -453,7 +466,9 @@ async fn settle_bare_presence(
         let _ = event_tx.send(NetworkEvent::PeerDisconnected { peer_id }).await;
     }
     if admitted {
-        for room_code in ws_room_peers.keys().cloned() {
+        let mut rooms: std::collections::BTreeSet<String> = ws_room_peers.keys().cloned().collect();
+        rooms.extend(audited);
+        for room_code in rooms {
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code });
         }
     }
@@ -1385,6 +1400,7 @@ async fn run_event_loop(
 
     let mut rebootstrap_timer = tokio::time::interval(Duration::from_secs(30));
     rebootstrap_timer.tick().await; // consume immediate first tick
+    let mut audit_tick: u64 = 0;
     let mut eviction_counter: u32 = 0;
 
     // Vault rebalance + retention enforcement timer (30 min safety net).
@@ -1475,7 +1491,8 @@ async fn run_event_loop(
             loop_stall.check(arm, name, t0);
         }
         if bare_presence.stale() {
-            Box::pin(settle_bare_presence(&mut bare_presence, &mut ws_room_peers, &mut synced_peers, &event_tx, &ws_cmd_tx)).await;
+            let audited = audited_rooms(&server_states, active_room.as_deref());
+            Box::pin(settle_bare_presence(&mut bare_presence, &mut ws_room_peers, &mut synced_peers, &event_tx, &ws_cmd_tx, audited)).await;
         }
         // A device its roster just stopped counting loses its seat in our meetings now.
         if seat_watch.moved()
@@ -5264,6 +5281,14 @@ async fn run_event_loop(
                             }
                         }
                     }
+                    // ws_client found what we were told of a room still differs from what
+                    // the relay lists to us: a re-join brings the authoritative members.
+                    WsEvent::PresenceDrift { room } => {
+                        hollow_log!("[HOLLOW-WS] Presence drift in {room}");
+                        if audited_rooms(&server_states, active_room.as_deref()).contains(&room) {
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: room });
+                        }
+                    }
                     WsEvent::NicknameClaimed { nickname } => {
                         let _ = event_tx.send(NetworkEvent::NicknameClaimed { nickname }).await;
                     }
@@ -6146,23 +6171,14 @@ async fn run_event_loop(
                 if let Some(nickname) = nick_hold.due(std::time::Instant::now()) {
                     super::nick_claim::send_claim(&ws_cmd_tx, &master_keypair, &device_peer_id, &nickname);
                 }
-                // Primary peer discovery rides the LIVE WS connection, with no fresh TLS
-                // handshake. The HTTP bootstrap below is a non-fatal legacy fallback; its
-                // failures are logged quietly and never surfaced.
-                if let Some(room) = &active_room {
-                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::DiscoverPeers {
-                        room_code: room.clone(),
-                    });
-                }
-                for sid in server_states.keys() {
-                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::DiscoverPeers {
-                        room_code: sid.clone(),
-                    });
-                }
-
-                if let Some(room) = &active_room {
-                }
-                for sid in server_states.keys() {
+                // Presence audits (g13): each audited room is checked against a digest
+                // once per period, spread over the ticks; ws_client re-joins nothing
+                // unless what it was told differs (presence_audit.rs).
+                audit_tick = audit_tick.wrapping_add(1);
+                for room_code in audited_rooms(&server_states, active_room.as_deref()) {
+                    if super::presence_audit::due_on_tick(&room_code, &device_peer_id, audit_tick) {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::DiscoverPeers { room_code });
+                    }
                 }
 
                 // -- Olm session reconciliation sweep (self-heal) --
@@ -6191,6 +6207,13 @@ async fn run_event_loop(
                             .and_then(|s| s.load_friends(Some("accepted")).ok())
                             .map(|v| v.into_iter().map(|(pid, ..)| pid).collect())
                             .unwrap_or_default();
+                    // Co-present devices of the audited rooms (a server room of ours or the
+                    // active room), placed or not: the peers the 30 s full-list ask used to re-key.
+                    let co_present_peers: std::collections::HashSet<&String> = audited_rooms(&server_states, active_room.as_deref())
+                        .iter()
+                        .filter_map(|r| ws_room_peers.get(r))
+                        .flatten()
+                        .collect();
                     for peer in &online {
                         // Only reconcile peers we actually have a relationship with: a shared-server
                         // member, an accepted friend, a peer with queued DMs, or one with a
@@ -6200,7 +6223,8 @@ async fn run_event_loop(
                         let is_friend = accepted_friends.contains(&super::resolver::resolve(peer));
                         let has_pending = pending_messages.contains_key(peer);
                         let half_session = olm.has_unconfirmed_session(peer);
-                        if !(is_member || is_friend || has_pending || half_session) {
+                        let co_present = co_present_peers.contains(peer);
+                        if !(is_member || is_friend || has_pending || half_session || co_present) {
                             continue;
                         }
                         if olm.has_confirmed_session(peer) {
@@ -10735,6 +10759,29 @@ async fn handle_incoming_request_inner(
                     return;
                 }
 
+                // Private, then full: final answers, given before anyone is asked for a
+                // Twitch proof or adult-content consent. Returning members and our own
+                // devices are never refused.
+                if !is_sibling && !already_member && state.is_private() {
+                    hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is private");
+                    let reason = format!("server_private:{}", state.name());
+                    if requested_at != 0 {
+                        join_resolutions.insert(resolution_key, requested_at);
+                    }
+                    sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
+                    return;
+                }
+                if !is_sibling && !already_member && super::member_cap::is_full(state) {
+                    let cap = super::member_cap::effective_cap(state);
+                    hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is full ({cap} max)");
+                    let reason = format!("server_full:{}:{}", state.name(), cap);
+                    if requested_at != 0 {
+                        join_resolutions.insert(resolution_key, requested_at);
+                    }
+                    sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
+                    return;
+                }
+
                 // Twitch verification gate, offline against the root pinned in
                 // `support_creds.rs`. The joiner ships a blind-signed follow
                 // credential bound to its own MASTER; we contact nobody and learn
@@ -10809,19 +10856,6 @@ async fn handle_incoming_request_inner(
                 let mut admitted_op_json: Option<String> = None;
 
                 if !already_member {
-                    // Private-server gate: an invite-only server rejects new joiners,
-                    // while existing members re-joining short-circuit above. A sibling
-                    // (our own device) is exempt, since it co-owns the server.
-                    if !is_sibling && state.is_private() {
-                        hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is private");
-                        let reason = format!("server_private:{}", state.name());
-                        if requested_at != 0 {
-                            join_resolutions.insert(resolution_key, requested_at);
-                        }
-                        sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
-                        return;
-                    }
-
                     // NSFW consent gate. Unlike private or full this is not a hard
                     // rejection: we reject ONCE with an `nsfw_confirm:` reason carrying
                     // the server name, the joiner's client shows the consent dialog, and
@@ -10832,20 +10866,6 @@ async fn handle_incoming_request_inner(
                         let reason = format!("nsfw_confirm:{}", state.name());
                         sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
                         return;
-                    }
-
-                    // Member-cap gate: reject if the server is at its configured
-                    // max member count. None = unlimited.
-                    if let Some(max) = state.max_members() {
-                        if state.members_list().len() as u32 >= max {
-                            hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is full ({max} max)");
-                            let reason = format!("server_full:{}:{}", state.name(), max);
-                            if requested_at != 0 {
-                                join_resolutions.insert(resolution_key.clone(), requested_at);
-                            }
-                            sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
-                            return;
-                        }
                     }
 
                     // Add the new member via CRDT op, keyed by the MASTER identity.
@@ -14814,6 +14834,30 @@ async fn handle_incoming_request_inner(
 mod tests {
     use super::*;
     use crate::identity::native_identity::NativeKeypair;
+
+    /// g13 (LOW-7): when a master id left out of presence is a device again, every
+    /// audited room is asked for its members too, not only the rooms that list a peer:
+    /// one where that id was the only other device lists nobody.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver lock serializes tests sharing it
+    async fn an_admitted_master_rejoins_every_audited_room() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let mut presence = super::super::roster_book::BarePresence::holding_for_test(&["12D3KooWNowADevice"]);
+        let mut ws_room_peers: HashMap<String, std::collections::HashSet<String>> =
+            HashMap::from([("dm".to_string(), std::collections::HashSet::from(["p".to_string()]))]);
+        let mut synced = std::collections::HashSet::new();
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let (ws_cmd_tx, mut ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        settle_bare_presence(&mut presence, &mut ws_room_peers, &mut synced, &event_tx, &ws_cmd_tx, vec!["server".into(), "dm".into()]).await;
+        let mut joined = Vec::new();
+        while let Ok(cmd) = ws_cmd_rx.try_recv() {
+            if let super::super::ws_client::WsCommand::JoinRoom { room_code } = cmd {
+                joined.push(room_code);
+            }
+        }
+        assert_eq!(joined, vec!["dm".to_string(), "server".to_string()], "each room once, the empty server room too");
+    }
 
     /// HOL-SEC-032 and design ID-1. A device holding our master key is ours only when
     /// our roster makes it a member: a removed device, or one that restored a backup and

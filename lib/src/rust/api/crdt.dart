@@ -89,6 +89,15 @@ Future<String> getServerSetting({
   key: key,
 );
 
+/// The most members any server admits (`node::member_cap::MEMBER_CAP`): the bound a
+/// member limit cannot exceed. Reads no server state.
+int serverMemberHardCap() =>
+    RustLib.instance.api.crateApiCrdtServerMemberHardCap();
+
+/// The member cap of `server_id` as join admission reads it (`node::member_cap`).
+ServerCapacityFfi serverCapacity({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtServerCapacity(serverId: serverId);
+
 /// Rename a server.
 Future<void> renameServer({
   required String serverId,
@@ -962,6 +971,32 @@ class ServerBannerData {
           hash == other.hash &&
           animated == other.animated &&
           bytes == other.bytes;
+}
+
+/// How full a server is: its identities, the cap in force (the owner's limit or the
+/// hard cap, whichever is lower) and the hard cap a limit cannot exceed.
+class ServerCapacityFfi {
+  final int members;
+  final int limit;
+  final int hardCap;
+
+  const ServerCapacityFfi({
+    required this.members,
+    required this.limit,
+    required this.hardCap,
+  });
+
+  @override
+  int get hashCode => members.hashCode ^ limit.hashCode ^ hardCap.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ServerCapacityFfi &&
+          runtimeType == other.runtimeType &&
+          members == other.members &&
+          limit == other.limit &&
+          hardCap == other.hardCap;
 }
 
 /// Server info for FFI (Dart-visible).

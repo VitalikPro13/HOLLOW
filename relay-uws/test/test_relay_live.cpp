@@ -16,6 +16,7 @@
 #include "crypto.h"
 #include "device_list.h"
 #include "door_room.h"
+#include "presence_view.h"
 #include "join_lock.h"
 #include "json.hpp"
 #include "ring_auth.h"
@@ -27,6 +28,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <poll.h>
 #include <signal.h>
@@ -42,6 +44,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -58,6 +61,8 @@ static SSL_CTX* g_ctx = nullptr;
 static int g_next_source = 0;
 // Non-negative: every new socket comes from this one source address (Socket::open).
 static int g_pin_source = -1;
+// Positive: every new socket asks the kernel for this receive buffer (Socket::open).
+static int g_rcvbuf = 0;
 static int g_sync = 0;
 static std::string g_tag;
 
@@ -167,11 +172,13 @@ class Socket {
         dst.sin_port = htons(static_cast<uint16_t>(g_port));
         dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         if (bind(fd_, reinterpret_cast<sockaddr*>(&src), sizeof(src)) != 0) return false;
+        if (g_rcvbuf > 0) setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &g_rcvbuf, sizeof(g_rcvbuf));
         if (connect(fd_, reinterpret_cast<sockaddr*>(&dst), sizeof(dst)) != 0) return false;
         int one = 1;
         setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         ssl_ = SSL_new(g_ctx);
         SSL_set_fd(ssl_, fd_);
+        ERR_clear_error();
         if (SSL_connect(ssl_) != 1) return false;
         fcntl(fd_, F_SETFL, fcntl(fd_, F_GETFL) | O_NONBLOCK);
 
@@ -273,6 +280,7 @@ class Socket {
         auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(WAIT_MS + static_cast<int64_t>(data.size() / 1024));
         while (off < data.size()) {
+            ERR_clear_error();
             int n = SSL_write(ssl_, data.data() + off, static_cast<int>(data.size() - off));
             if (n > 0) {
                 off += static_cast<size_t>(n);
@@ -293,6 +301,9 @@ class Socket {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         for (;;) {
             char buf[65536];
+            // The error queue is per thread: one socket's stale error turns another's
+            // WANT_READ into SSL_ERROR_SSL.
+            ERR_clear_error();
             int n = SSL_read(ssl_, buf, sizeof(buf));
             if (n > 0) {
                 rbuf_.append(buf, static_cast<size_t>(n));
@@ -3462,6 +3473,397 @@ static void hs_restart(const std::string& dir) {
     check("until it says active", next(*b2, about("peer_joined", plain, ide.peer)).has_value());
 }
 
+// ---------------------------------------------------------------------------
+// Presence digests (g13): what `discover_peers` with `digest` answers is the tag sum of
+// exactly what the socket's rosters and presence frames named, read in arrival order.
+
+// What one socket was told of each room, frame by frame in arrival order, as ws_client
+// keeps it. `lose_joined` drops that many `peer_joined` frames, as a lost write would.
+struct Told {
+    std::string me;
+    std::map<std::string, std::set<std::string>> rooms;
+    int lose_joined = 0;
+
+    void apply(const json& j) {
+        const std::string t = j.value("type", ""), room = j.value("room", "");
+        if (t == "members") {
+            auto peers = peers_of(j);
+            peers.erase(me);
+            rooms[room] = peers;
+        } else if (t == "peer_joined") {
+            if (lose_joined > 0) {
+                lose_joined--;
+                return;
+            }
+            rooms[room].insert(j.value("peer_id", ""));
+        } else if (t == "peer_left") {
+            rooms[room].erase(j.value("peer_id", ""));
+        }
+    }
+
+    presence::Digest digest(const std::string& room) const {
+        presence::Digest d;
+        auto it = rooms.find(room);
+        if (it != rooms.end()) {
+            for (const auto& p : it->second) d.add(presence::tag(p));
+        }
+        return d;
+    }
+};
+
+enum class Audit { NoAnswer, Same, Differs, NotJoined };
+
+// Reads every frame up to `p`'s next digest answer for `room` in order, presence into
+// `told`, and compares at the answer. Other frames are dropped.
+static Audit read_audit(Peer& p, Told& told, const std::string& room, int timeout_ms = WAIT_MS) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        while (!p.ws.inbox.empty()) {
+            Frame f = std::move(p.ws.inbox.front());
+            p.ws.inbox.pop_front();
+            auto j = as_json(f);
+            if (!j) continue;
+            if (j->value("type", "") == "discovered_peers" && j->value("room", "") == room &&
+                (j->contains("digest") || j->contains("joined"))) {
+                if (!j->value("joined", true)) return Audit::NotJoined;
+                if (!j->value("peers", json::array()).empty()) return Audit::Differs;
+                const presence::Digest d = told.digest(room);
+                return j->value("digest", uint64_t{0}) == d.sum && j->value("count", uint64_t{0}) == d.count ? Audit::Same
+                                                                                                         : Audit::Differs;
+            }
+            told.apply(*j);
+        }
+        if (left_ms(deadline) <= 0 || !p.ws.pump(left_ms(deadline))) return Audit::NoAnswer;
+    }
+}
+
+static Audit audit(Peer& p, Told& told, const std::string& room) {
+    p.send({{"type", "discover_peers"}, {"room", room}, {"digest", true}});
+    return read_audit(p, told, room);
+}
+
+// `p` joins `room` with `extra`; the members answer lands in `told` at the next audit.
+static void told_join(Peer& p, const std::string& room, const json& extra = json::object()) {
+    json j = {{"type", "join"}, {"room", room}};
+    for (auto it = extra.begin(); it != extra.end(); ++it) j[it.key()] = it.value();
+    p.send(j);
+}
+
+static void test_presence_digest() {
+    printf("presence digest: the tag sum of what the socket was told\n");
+    const std::string room = room_name("digest");
+    Ident ido;
+    auto o = login3(ido, "new", 0);
+    Told told{ido.peer, {}, 0};
+    auto a = login(Ident());
+    join(*a, room);
+    told_join(*o, room);
+    check("a lone member's digest is of the others", audit(*o, told, room) == Audit::Same && told.rooms[room].size() == 1);
+    o->send({{"type", "discover_peers"}, {"room", room}, {"digest", true}});
+    auto raw = next_json(*o, typed("discovered_peers", room));
+    check("the answer names nobody, as a u64 digest and a count",
+          raw && (*raw)["peers"].is_array() && (*raw)["peers"].empty() && (*raw)["digest"].is_number_unsigned() &&
+              raw->value("count", 0) == 1 && (*raw)["digest"].get<uint64_t>() == presence::tag(a->id.peer));
+    auto b = login(Ident());
+    join(*b, room);
+    check("a join is in it", audit(*o, told, room) == Audit::Same && told.rooms[room].size() == 2);
+
+    auto g = login(Ident(), "guest");
+    join(*g, room);
+    Ident idf;
+    auto ff = login(idf);
+    join(*ff, room);
+    auto fx = login(idf, "fetch");
+    fx->send({{"type", "join"}, {"room", room}});
+    Ident idh;
+    auto h = login3(idh, "new", 0);
+    join(*h, room);
+    h->send({{"type", "inactive"}});
+    sync(*h);
+    sleep_ms(PRESENCE_PACE_MS + 200);
+    check("guests, fetch sockets and hidden sessions are not in it",
+          audit(*o, told, room) == Audit::Same && told.rooms[room] == std::set<std::string>{a->id.peer, b->id.peer, idf.peer});
+    h->send({{"type", "active"}});
+    sleep_ms(200);
+    check("a session shown again is", audit(*o, told, room) == Audit::Same && told.rooms[room].count(idh.peer));
+
+    check("a room the socket is not in: not joined", audit(*o, told, room_name("digest-elsewhere")) == Audit::NotJoined);
+    Ident idd;
+    auto dfetch = login(idd, "fetch");
+    dfetch->send({{"type", "join"}, {"room", room}});
+    sync(*dfetch);
+    auto dfull = login(idd);
+    Told dtold{idd.peer, {}, 0};
+    check("nor one its own fetch socket holds the slot of", audit(*dfull, dtold, room) == Audit::NotJoined);
+    told_join(*dfull, room);
+    check("joined, it is", audit(*dfull, dtold, room) == Audit::Same);
+
+    // Old clients: a window of the same filter, never more than the cap.
+    std::vector<std::unique_ptr<Peer>> crowd;
+    const std::string big = room_name("digest-big");
+    told_join(*o, big);
+    for (int i = 0; i < 70; i++) {
+        crowd.push_back(login(Ident()));
+        join(*crowd.back(), big);
+    }
+    std::set<std::string> union_seen;
+    bool capped = true;
+    for (int i = 0; i < 40; i++) {
+        auto ids = discover(*crowd[0], big);
+        capped = capped && ids.size() <= presence::LEGACY_CAP;
+        union_seen.insert(ids.begin(), ids.end());
+    }
+    check("an old client's answer is capped", capped && discover(*crowd[0], big).size() == presence::LEGACY_CAP);
+    check("its windows cover the room", union_seen.size() == 70 && !union_seen.count(crowd[0]->id.peer));
+    check("and the digest counts every member", audit(*o, told, big) == Audit::Same && told.rooms[big].size() == 70);
+    crowd.clear();
+    check("(they all left)", audit(*o, told, big) == Audit::Same && told.rooms[big].empty());
+
+    // An inbox: a non-owner is told nobody, an owner the other owners.
+    Ident master, d1, d2;
+    const std::string inbox = "inbox:" + master.peer;
+    auto s1 = login(d1);
+    join(*s1, inbox, {{"inbox_roster", legacy_roster(master, {&d1, &d2})}});
+    told_join(*o, inbox);
+    check("a non-owner's inbox digest is empty", audit(*o, told, inbox) == Audit::Same && told.rooms[inbox].empty());
+    auto s2 = login(d2);
+    Told t2{d2.peer, {}, 0};
+    told_join(*s2, inbox, {{"inbox_roster", legacy_roster(master, {&d1, &d2})}});
+    check("an owner's names the other owner", audit(*s2, t2, inbox) == Audit::Same && t2.rooms[inbox] == std::set<std::string>{d1.peer});
+    check("and the non-owner still nobody", audit(*o, told, inbox) == Audit::Same && told.rooms[inbox].empty());
+
+    // A forwarder room pairs each member with the forwarder alone.
+    auto x = login(Ident());
+    const std::string fwd = "fwd:" + x->id.peer;
+    join(*x, fwd);
+    auto y = login(Ident());
+    join(*y, fwd);
+    told_join(*o, fwd);
+    check("a forwarder room member's digest is the forwarder's",
+          audit(*o, told, fwd) == Audit::Same && told.rooms[fwd] == std::set<std::string>{x->id.peer});
+
+    // Churn: joins, leaves, hidden toggles and dropped sockets that resume, an audit
+    // after each step; nothing may differ.
+    std::vector<Ident> ids(6);
+    std::vector<std::unique_ptr<Peer>> live(ids.size());
+    int differs = 0, asked = 0;
+    for (int step = 0; step < 48; step++) {
+        const size_t i = static_cast<size_t>(step * 7 + step / 6) % ids.size();
+        auto& p = live[i];
+        switch (step % 4) {
+            case 0:
+                if (!p) {
+                    p = login3(ids[i], "new", 0);
+                    join(*p, room);
+                } else {
+                    p->send({{"type", "leave"}, {"room", room}});
+                    sync(*p);
+                    p.reset();
+                }
+                break;
+            case 1:
+                if (p) p->send({{"type", (step / 4) % 2 ? "active" : "inactive"}});
+                break;
+            case 2:
+                if (p && !p->sid.empty()) {
+                    const std::string sid = p->sid;
+                    const uint64_t counted = p->ws.counted;
+                    p->ws.abort();
+                    sleep_ms(50);
+                    p = login3(ids[i], sid, counted);
+                }
+                break;
+            default:
+                b->send_bin(frame(0x03, {room}, "churn"));
+                break;
+        }
+        asked++;
+        if (audit(*o, told, room) != Audit::Same) differs++;
+    }
+    check("under churn no audit differs (" + std::to_string(asked) + " asked)", differs == 0);
+
+    // A lost peer_joined: exactly one difference, gone after a re-join.
+    told.lose_joined = 1;
+    auto late = login(Ident());
+    join(*late, room);
+    check("a lost frame shows as a difference", audit(*o, told, room) == Audit::Differs);
+    check("and again until the socket re-joins", audit(*o, told, room) == Audit::Differs);
+    told_join(*o, room);
+    check("the re-join's members settle it", audit(*o, told, room) == Audit::Same && told.rooms[room].count(late->id.peer));
+
+    // The socket drops with an ask in flight: the resume's members come before the
+    // replayed answer, so a client voiding the ask on members never compares a stale one.
+    o->send({{"type", "discover_peers"}, {"room", room}, {"digest", true}});
+    sync(*b);
+    o->ws.abort();
+    late->send({{"type", "leave"}, {"room", room}});
+    sync(*late);
+    auto o2 = login3(ido, o->sid, o->ws.counted);
+    check("(the observer resumes)", resumed(*o2));
+    bool members_first = false, answer_seen = false;
+    const auto upto = through(*o2, typed("discovered_peers", room));
+    for (const auto& f : upto) {
+        auto j = as_json(f);
+        if (!j) continue;
+        if (j->value("type", "") == "members" && j->value("room", "") == room && !answer_seen) members_first = true;
+        if (j->value("type", "") == "discovered_peers") answer_seen = true;
+        else told.apply(*j);
+    }
+    check("the replayed answer comes after the room's members", answer_seen && members_first);
+    check("and a fresh audit matches", audit(*o2, told, room) == Audit::Same && !told.rooms[room].count(late->id.peer));
+    // The resume's members obey the same filter: a non-owner of an inbox is told nobody.
+    check("a resume tells an inbox non-owner nobody", audit(*o2, told, inbox) == Audit::Same && told.rooms[inbox].empty());
+    check("nor a forwarder room member anyone but the forwarder",
+          audit(*o2, told, fwd) == Audit::Same && told.rooms[fwd] == std::set<std::string>{x->id.peer});
+}
+
+// Locked rooms: a relock and, with `through_grace`, the door grace running out; the
+// digest never runs ahead of the presence frames.
+static void test_presence_digest_door(bool through_grace) {
+    printf("presence digest: a locked room%s\n", through_grace ? ", through the door's grace" : "");
+    Ident owner, change, change2;
+    Door door, door2;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    const json base = base_link(room, door, change, owner, nonce, true);
+    auto b = login(Ident());
+    b->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", base}});
+    next(*b, typed("lock_chain"));
+    join(*b, room, {{"door_proof", door_proof(*b, room, door)}});
+    Ident ido;
+    auto o = login(ido);
+    Told told{ido.peer, {}, 0};
+    told_join(*o, room, {{"door_proof", door_proof(*o, room, door)}});
+    check("a prover's digest names the provers", audit(*o, told, room) == Audit::Same && told.rooms[room] == std::set<std::string>{b->id.peer});
+    auto q = login(Ident());
+    Told tq{q->id.peer, {}, 0};
+    told_join(*q, room);
+    check("a hidden socket's is empty", audit(*q, tq, room) == Audit::Same && tq.rooms[room].empty());
+    check("and the prover's leaves it out", audit(*o, told, room) == Audit::Same && !told.rooms[room].count(q->id.peer));
+    auto c = login(Ident());
+    join(*c, room, {{"door_proof", door_proof(*c, room, door2)}});
+    json links = base;
+    links.push_back(successor_link(room, 2, door2, change2, change));
+    b->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", links}});
+    next(*b, typed("lock_chain"));
+    check("after a relock the prover's digest matches", audit(*o, told, room) == Audit::Same && told.rooms[room].count(c->id.peer));
+    check("so does the newly proved socket's", [&] {
+        Told tc{c->id.peer, {}, 0};
+        told_join(*c, room, {{"door_proof", door_proof(*c, room, door2)}});
+        return audit(*c, tc, room) == Audit::Same;
+    }());
+    if (!through_grace) return;
+    // The old door's grace runs out for o and b; the audit asked right then still matches
+    // what they were told, however the sweep and the ask interleave.
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(door_room::GRACE_MS + 7000);
+    int differs = 0;
+    while (left_ms(until) > 0) {
+        sleep_ms(std::min(1000, left_ms(until)));
+        if (audit(*o, told, room) != Audit::Same) differs++;
+        sync(*b);
+        sync(*c);
+    }
+    check("no audit differs while the grace runs out", differs == 0);
+    check("and o, past its grace, is told nobody", told.rooms[room].empty());
+}
+
+// A write the relay drops past maxBackpressure: the socket closes on the next session
+// tick (not 1008), so the session resumes from the client's own count, never shifted.
+static void hs_dropped_write_resumes_cleanly() {
+    printf("handshake review: a dropped write closes the socket, and the resume is not shifted\n");
+    const std::string room = room_name("hs-dropped");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    next(*a, about("peer_joined", room, b->id.peer));
+    sync(*a);
+    const uint64_t read = a->ws.counted;
+    // a reads nothing more: three 30 MiB directs fill the relay's buffer for it past
+    // 64 MiB, so the markers behind them are dropped or never written.
+    for (int i = 0; i < 3; i++) b->send_bin(frame(0x04, {room, ida.peer}, std::string(1, char('0' + i)) + std::string(30u << 20, 'x')));
+    for (int i = 0; i < 3; i++) b->send_bin(frame(0x04, {room, ida.peer}, "marker-" + std::to_string(i)));
+    check("the relay closes the socket at once: the room sees it leave",
+          next(*b, about("peer_left", room, ida.peer), 8000).has_value());
+    a->ws.abort();
+    auto a2 = login3(ida, a->sid, read);
+    check("the session resumes", resumed(*a2));
+    const auto upto = through(*a2, bin(frame(0x06, {room, b->id.peer}, "marker-2")), 30000);
+    std::vector<std::string> got_markers;
+    bool dup = false;
+    std::set<std::string> seen;
+    for (const auto& f : upto) {
+        if (f.text) continue;
+        if (!seen.insert(f.data.substr(0, 160) + "#" + std::to_string(f.data.size())).second) dup = true;
+        if (f.data.find("marker-") != std::string::npos) got_markers.push_back(f.data.substr(f.data.find("marker-")));
+    }
+    check("every marker after its count arrives once, in order",
+          got_markers == std::vector<std::string>{"marker-0", "marker-1", "marker-2"});
+    check("and nothing twice", !dup);
+    b->send_bin(frame(0x04, {room, ida.peer}, "after"));
+    check("the resumed socket takes new frames", next(*a2, bin(frame(0x06, {room, b->id.peer}, "after"))).has_value());
+}
+
+// Against a relay with a small send buffer (run_live.sh): after a dropped write the
+// client drains everything written and a new frame comes before the session tick. A
+// socket still writing would hand it that frame, counted in the dropped one's place, so
+// its resume would repeat one frame and skip another. Rounds, because the tick may land
+// first; at least one must see the drain finish before it.
+static void hs_dropped_write_writes_nothing_more() {
+    printf("handshake review: past a dropped write nothing more is written, even once the buffer drains\n");
+    const char* bp = getenv("RELAY_LIVE_BACKPRESSURE");
+    const size_t limit = bp ? strtoull(bp, nullptr, 10) : 0;
+    if (limit == 0 || limit > (4u << 20)) {
+        check("(the relay runs with a small send buffer)", false);
+        return;
+    }
+    const std::string room = room_name("hs-drained");
+    auto b = login(Ident());
+    join(*b, room);
+    int raced = 0;
+    for (int round = 0; round < 5; round++) {
+        Ident ida;
+        g_rcvbuf = 64 << 10;
+        auto a = login3(ida, "new", 0);
+        g_rcvbuf = 0;
+        join(*a, room);
+        next(*b, about("peer_joined", room, ida.peer));
+        sync(*a);
+        const std::string m0 = "m0-" + std::to_string(round), m1 = "m1-" + std::to_string(round);
+        const std::string f0 = frame(0x06, {room, b->id.peer}, m0), f1 = frame(0x06, {room, b->id.peer}, m1);
+        // A small receive window keeps the kernel's share small: six buffers' worth while
+        // a reads nothing overflow the relay's, and stay inside the session ring.
+        for (int i = 0; i < 6; i++) b->send_bin(frame(0x04, {room, ida.peer}, std::string(limit, char('a' + i))));
+        b->send_bin(frame(0x04, {room, ida.peer}, m0));
+        sync(*b);
+        while (a->ws.pump(20)) {}
+        if (!a->ws.closed()) raced++;
+        b->send_bin(frame(0x04, {room, ida.peer}, m1));
+        while (a->ws.pump(50)) {}
+        check("(the relay closes the socket)", closed_by_relay(*a) && next(*b, about("peer_left", room, ida.peer), 8000).has_value());
+        std::vector<std::string> markers;
+        for (const auto& f : a->ws.inbox) {
+            if (!f.text && (f.data == f0 || f.data == f1)) markers.push_back(f.data == f0 ? m0 : m1);
+        }
+        auto a2 = login3(ida, a->sid, a->ws.counted);
+        check("(the session resumes)", resumed(*a2));
+        auto upto = through(*a2, bin(f1));
+        sync(*a2);
+        upto.insert(upto.end(), a2->ws.inbox.begin(), a2->ws.inbox.end());
+        for (const auto& f : upto) {
+            if (!f.text && (f.data == f0 || f.data == f1)) markers.push_back(f.data == f0 ? m0 : m1);
+        }
+        std::string got;
+        for (const auto& m : markers) got += " " + m;
+        check("round " + std::to_string(round) + ": each frame once, in order, live and resumed together (got" + got + ")",
+              markers == std::vector<std::string>{m0, m1});
+        a2->ws.close_clean();
+        next(*b, about("peer_left", room, ida.peer));
+    }
+    check("at least one round drained before the session tick (" + std::to_string(raced) + " of 5)", raced > 0);
+}
+
 static void test_handshake_review() {
     hs_sids();
     hs_replays_and_shapes();
@@ -3940,6 +4342,7 @@ int main(int argc, char** argv) {
     if (only && std::string(only) == "door_grace") {
         hs_door_moved_in_grace();
         test_hidden_door_rooms(true);
+        test_presence_digest_door(true);
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
@@ -3949,6 +4352,27 @@ int main(int argc, char** argv) {
         test_session_fetch_in_grace();
         hs_fetch_reads_grace_dms();
         hs_fetch_reads_grace_once();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =dropped_write: the dropped-write case for this relay's send buffer, the small one
+    // run_live.sh starts a relay with or the real 64 MiB.
+    if (only && std::string(only) == "dropped_write") {
+        if (getenv("RELAY_LIVE_BACKPRESSURE") && *getenv("RELAY_LIVE_BACKPRESSURE")) {
+            hs_dropped_write_writes_nothing_more();
+        } else {
+            hs_dropped_write_resumes_cleanly();
+        }
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =digest: the presence digest cases and the dropped-write close.
+    if (only && std::string(only) == "digest") {
+        test_presence_digest();
+        test_presence_digest_door(false);
+        hs_dropped_write_resumes_cleanly();
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
@@ -4013,6 +4437,9 @@ int main(int argc, char** argv) {
         test_session_expiry();
         test_handshake_review();
         test_hidden();
+        test_presence_digest();
+        test_presence_digest_door(false);
+        hs_dropped_write_resumes_cleanly();
     }
     if (!probe_only) {
         test_bounds_full_address();

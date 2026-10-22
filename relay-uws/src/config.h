@@ -28,6 +28,11 @@ struct Config {
     // HOLLOW_CONN_RATE_EXEMPT, read from the environment only: it names the operator's
     // own addresses, so it belongs in the root-only environment file, never a flag.
     conn_rate_exempt::List conn_rate_exempt;
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+    // HOLLOW_RELAY_TEST_BACKPRESSURE: a send buffer the live tests drain inside one
+    // session tick (run_live.sh). Never compiled into a relay that serves anyone.
+    unsigned int test_max_backpressure = 0;
+#endif
 };
 
 // --session-grace-secs: a number outside 30..600 is held to the nearer end, and
@@ -79,6 +84,12 @@ inline Config parse_args(int argc, char** argv) {
         fprintf(stderr, "[config] New-connection rate exemption: %zu address block(s), %zu entry(s) ignored\n",
                 config.conn_rate_exempt.keys.size(), config.conn_rate_exempt.ignored);
     }
+
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+    if (const char* bp = getenv("HOLLOW_RELAY_TEST_BACKPRESSURE")) {
+        config.test_max_backpressure = static_cast<unsigned int>(strtoul(bp, nullptr, 10));
+    }
+#endif
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];

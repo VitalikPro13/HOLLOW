@@ -9,6 +9,7 @@
 #include "fwd_room.h"
 #include "ip_key.h"
 #include "kill_order.h"
+#include "presence_view.h"
 #include "roster_crypto.h"
 #include "validate.h"
 #include "turn_uris.h"
@@ -191,10 +192,20 @@ static void write_raw(SSLWebSocket* ws, std::string_view data, uWS::OpCode op) {
     // uWS silently returns DROPPED past maxBackpressure — count it or a
     // delivery failure leaves zero trace anywhere (field 2026-08-06: large
     // frames to the forwarder vanished with every hop looking healthy).
+    PerSocketData* d = ws->getUserData();
+    // Past a dropped write a session's socket writes nothing more, or the client would
+    // count a later frame in the dropped one's place and every resume would shift.
+    if (d->write_dead) return;
     auto status = ws->send(data, op);
     if (g_diag) {
         if (status == SSLWebSocket::SendStatus::DROPPED) g_diag->send_dropped++;
         else if (status == SSLWebSocket::SendStatus::BACKPRESSURE) g_diag->send_backpressure++;
+    }
+    // Closed on the next session tick, never here: this runs inside loops over a room's
+    // peers, and a close enters grace, which erases from them.
+    if (status == SSLWebSocket::SendStatus::DROPPED && !d->sid.empty() && g_state) {
+        d->write_dead = true;
+        g_state->dropped_writes.push_back(d->peer_id);
     }
 }
 
@@ -821,13 +832,25 @@ static bool door_opens(const RelayState& state, const std::string& nonce, const 
     return door_proof_opens(state.door_key, door, msg, proof);
 }
 
+// The peers presence may name to `peer` in `room` (presence_view.h): the ONE filter
+// every roster, presence answer and digest reads. `peer_sees` says whether it sees the
+// room at all.
+static std::vector<std::string> visible_peers(const WsRoom& room, const Audience& aud, const std::string& peer,
+                                              bool peer_sees) {
+    std::vector<std::string> out;
+    presence::for_each_visible(room.peers, peer, peer_sees, [&](const std::string& pid) { return aud.shares(pid, peer); },
+                               [&](const std::string& pid, SSLWebSocket*) { out.push_back(pid); });
+    return out;
+}
+
+// Whether a socket of `peer` sees `room` now: an inbox as an owner, a locked room as a prover.
+static bool peer_sees_room(const WsRoom& room, const Audience& aud, const std::string& peer, bool owner) {
+    return presence::viewer_sees(aud.inbox, owner, aud.locked, aud.locked && room.doors.sees(peer, aud.now_ms));
+}
+
 // The room as `peer` sees it now that it sees it: the visible peers, itself last.
 static std::vector<std::string> roster_for(const WsRoom& room, const Audience& aud, const std::string& peer) {
-    std::vector<std::string> out;
-    for (const auto& [pid, sock] : room.peers) {
-        const auto* pd = sock->getUserData();
-        if (pid != peer && !pd->is_guest && !pd->is_fetch && !pd->hidden && aud.sees(pid)) out.push_back(pid);
-    }
+    std::vector<std::string> out = visible_peers(room, aud, peer, true);
     out.push_back(peer);
     return out;
 }
@@ -850,15 +873,7 @@ static json members_of(const RelayState& state, const std::string& room_name, co
                        const std::string& peer, bool owner) {
     const Audience aud = audience(state, room, room_name);
     const bool proved = !aud.locked || room.doors.sees(peer, aud.now_ms);
-    std::vector<std::string> peers;
-    if ((!aud.inbox || owner) && proved) {
-        for (const auto& [pid, sock] : room.peers) {
-            const auto* pd = sock->getUserData();
-            if (pid != peer && !pd->is_guest && !pd->is_fetch && !pd->hidden && aud.shares(pid, peer)) {
-                peers.push_back(pid);
-            }
-        }
-    }
+    std::vector<std::string> peers = visible_peers(room, aud, peer, peer_sees_room(room, aud, peer, owner));
     peers.push_back(peer);
     json j = {{"type", "members"}, {"room", room_name}, {"peers", peers}};
     if (aud.locked) j["proved"] = proved;
@@ -974,16 +989,7 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     // Collect existing non-guest peer IDs before adding. In an inbox room a
     // non-owner sees nobody and an owner sees only the other owners; in a locked
     // room the same holds for provers.
-    std::vector<std::string> existing_peers;
-    if (visible) {
-        for (auto& [pid, peer_ws] : ws_room.peers) {
-            auto* pd = peer_ws->getUserData();
-            if (pid != data->peer_id && !pd->is_guest && !pd->is_fetch && !pd->hidden &&
-                aud.shares(pid, data->peer_id)) {
-                existing_peers.push_back(pid);
-            }
-        }
-    }
+    std::vector<std::string> existing_peers = visible_peers(ws_room, aud, data->peer_id, visible);
 
     // Was this peer already in the room BEFORE this join? A client re-joins a
     // room it never left (the PeerLeft "still listed → refreshing membership"
@@ -1438,6 +1444,23 @@ void sweep_kill_list(RelayState& state) {
     state.kill_list.sweep(std::chrono::steady_clock::now());
 }
 
+// The door grace of `room` that ran out by `now_ms`: those who stopped seeing are told,
+// and so is everyone who saw them. Whether provers are still in their grace.
+static bool expire_door_grace(RelayState& state, const std::string& room, WsRoom& r, int64_t now_ms) {
+    const Audience aud = audience(state, r, room);
+    // A lock gone from the relay leaves the room open: nobody to hide anyone from.
+    for (const auto& peer : r.doors.expire(now_ms)) {
+        auto pit = r.peers.find(peer);
+        // A session in grace left presence already; its fetch socket learns nothing.
+        if (!aud.locked || pit == r.peers.end() || pit->second->getUserData()->is_fetch) continue;
+        // So did a hidden device, which still learns it stopped seeing.
+        if (!pit->second->getUserData()->hidden) announce_door_change(r, aud, room, peer, "peer_left");
+        send_presence(pit->second, room,
+                      json{{"type", "members"}, {"room", room}, {"peers", json::array({peer})}, {"proved", false}}.dump());
+    }
+    return r.doors.in_grace();
+}
+
 void sweep_door_grace(RelayState& state) {
     const int64_t now_ms = steady_ms();
     for (auto it = state.door_grace_rooms.begin(); it != state.door_grace_rooms.end();) {
@@ -1446,20 +1469,7 @@ void sweep_door_grace(RelayState& state) {
             it = state.door_grace_rooms.erase(it);
             continue;
         }
-        const std::string& room = rit->first;
-        WsRoom& r = rit->second;
-        const Audience aud = audience(state, r, room);
-        // A lock gone from the relay leaves the room open: nobody to hide anyone from.
-        for (const auto& peer : r.doors.expire(now_ms)) {
-            auto pit = r.peers.find(peer);
-            // A session in grace left presence already; its fetch socket learns nothing.
-            if (!aud.locked || pit == r.peers.end() || pit->second->getUserData()->is_fetch) continue;
-            // So did a hidden device, which still learns it stopped seeing.
-            if (!pit->second->getUserData()->hidden) announce_door_change(r, aud, room, peer, "peer_left");
-            send_presence(pit->second, room,
-                          json{{"type", "members"}, {"room", room}, {"peers", json::array({peer})}, {"proved", false}}.dump());
-        }
-        it = r.doors.in_grace() ? std::next(it) : state.door_grace_rooms.erase(it);
+        it = expire_door_grace(state, rit->first, rit->second, now_ms) ? std::next(it) : state.door_grace_rooms.erase(it);
     }
 }
 
@@ -2926,37 +2936,52 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                        {"online", online_peers},
                        {"active_rooms", json::array()}});
     } else if (type == "discover_peers") {
-        // Peer discovery over the LIVE WS connection (replaces the HTTP /bootstrap
-        // poll, which paid a fresh TLS handshake per request and could stall under
-        // a WS frame burst on the single event loop). Returns the peers currently
-        // connected to the given WS room. Cheap: one map lookup + bounded copy, no
-        // new connection, no blocking I/O.
+        // Members only: a room code is no roster lookup. Guests, fetch sockets and hidden
+        // sessions are never named.
         const std::string room = j.value("room", "");
-        json peers = json::array();
-        if (!room.empty()) {
-            auto rit = state.ws_rooms.find(room);
-            // Members only. Without this the reply was a roster dump for ANY
-            // room whose code the caller knew: hand it a deterministic DM room
-            // code and it returned exactly which peers were in that DM. Clients
-            // only ever discover in rooms they have already joined
-            // (`active_room` + their own server ids), so requiring membership
-            // costs nothing legitimate.
-            // Guests and fetch sockets are never listed: a push isolate in a DM
-            // room says when that phone was woken. Nor is a hidden device.
-            if (rit != state.ws_rooms.end() &&
-                rit->second.peers.count(data->peer_id)) {
-                const Audience aud = audience(state, rit->second, room);
-                const bool sees = aud.sees(data->peer_id);
-                for (const auto& [pid, sock] : rit->second.peers) {
-                    const auto* pd = sock->getUserData();
-                    if (sees && pid != data->peer_id && !pd->is_guest && !pd->is_fetch && !pd->hidden &&
-                        aud.shares(pid, data->peer_id)) {
-                        peers.push_back(pid);
-                    }
-                }
+        const auto flag = j.find("digest");
+        const bool digest = flag != j.end() && flag->is_boolean() && flag->get<bool>();
+        auto rit = room.empty() ? state.ws_rooms.end() : state.ws_rooms.find(room);
+        json answer = {{"type", "discovered_peers"}, {"room", room}, {"peers", json::array()}};
+        if (digest) {
+            // The digest of what this socket's rosters and presence frames name (0.13): the
+            // client compares it with what it was told and re-joins only on a difference.
+            const SSLWebSocket* slot = nullptr;
+            if (rit != state.ws_rooms.end()) {
+                auto pit = rit->second.peers.find(data->peer_id);
+                if (pit != rit->second.peers.end()) slot = pit->second;
             }
+            if (slot != ws) {
+                answer["joined"] = false;
+            } else {
+                WsRoom& r = rit->second;
+                const int64_t now_ms = steady_ms();
+                // A door grace that ran out is told first, so the digest never runs ahead
+                // of the presence frames it sums.
+                if (state.door_grace_rooms.count(room) && !expire_door_grace(state, room, r, now_ms)) {
+                    state.door_grace_rooms.erase(room);
+                }
+                Audience aud = audience(state, r, room);
+                aud.now_ms = now_ms;
+                const bool sees = peer_sees_room(r, aud, data->peer_id, r.owners.count(data->peer_id) != 0);
+                const presence::Digest d = presence::digest_of(
+                    r.peers, data->peer_id, sees, [&](const std::string& pid) { return aud.shares(pid, data->peer_id); });
+                answer["digest"] = d.sum;
+                answer["count"] = d.count;
+            }
+        } else if (rit != state.ws_rooms.end() && rit->second.peers.count(data->peer_id)) {
+            // A client before 0.13 asks every 30 s and only adds what it hears: a random
+            // window of the room keeps each answer bounded and still covers the room.
+            const WsRoom& r = rit->second;
+            const Audience aud = audience(state, r, room);
+            json& peers = answer["peers"];
+            presence::window_visible(
+                r.peers, data->peer_id, aud.sees(data->peer_id),
+                [&](const std::string& pid) { return aud.shares(pid, data->peer_id); },
+                r.peers.bucket_count() ? randombytes_uniform(static_cast<uint32_t>(r.peers.bucket_count())) : 0,
+                presence::LEGACY_CAP, [&](const std::string& pid) { peers.push_back(pid); });
         }
-        send_json(ws, {{"type", "discovered_peers"}, {"room", room}, {"peers", peers}});
+        send_json(ws, answer);
     } else if (type == "subscribe") {
         static const json no_topics = json::array();
         auto topics = j.find("topics");
@@ -3442,6 +3467,14 @@ static bool handle_session_control(SSLWebSocket* ws, PerSocketData* data, const 
 // gives its earliest deadline first, so a tick with nothing due reads three fronts.
 static void sweep_sessions(RelayState& state) {
     const auto now = std::chrono::steady_clock::now();
+    // A socket that dropped a write: closed abnormally (not 1008), so its session enters
+    // grace and the client resumes from the frames it counted.
+    std::vector<std::string> dropped;
+    dropped.swap(state.dropped_writes);
+    for (const auto& peer : dropped) {
+        auto it = state.peer_sockets.find(peer);
+        if (it != state.peer_sockets.end() && it->second->getUserData()->write_dead) it->second->close();
+    }
     session_bounds::sweep_rate_windows(state, now);
     while (!state.presence_due.empty() && state.presence_due.top().first <= now) {
         const std::string peer = state.presence_due.top().second;
@@ -3506,6 +3539,14 @@ static std::string json_type(const json& j) {
 // and never closed (closing one would take a poll count it never added).
 static struct us_timer_t* g_session_timer = nullptr;
 static constexpr int SESSION_TICK_MS = 250;
+static constexpr unsigned int MAX_BACKPRESSURE = 64 * 1024 * 1024;
+
+static unsigned int max_backpressure([[maybe_unused]] const Config& config) {
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+    if (config.test_max_backpressure) return config.test_max_backpressure;
+#endif
+    return MAX_BACKPRESSURE;
+}
 
 void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config) {
     g_diag = &state.diag;
@@ -3533,7 +3574,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
         .maxPayloadLength = 64 * 1024 * 1024,
         // Clients beat every 15 s, so a silent socket is a dead one well before this.
         .idleTimeout = 45,
-        .maxBackpressure = 64 * 1024 * 1024,
+        .maxBackpressure = max_backpressure(config),
         .sendPingsAutomatically = true,
 
         .open = [&state, &config](SSLWebSocket* ws) {

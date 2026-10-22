@@ -1057,6 +1057,12 @@ impl BarePresence {
         true
     }
 
+    /// One holding `ids` out, last settled at a resolver epoch that never was.
+    #[cfg(test)]
+    pub(crate) fn holding_for_test(ids: &[&str]) -> Self {
+        Self { held: ids.iter().map(|s| s.to_string()).collect(), epoch: u64::MAX }
+    }
+
     /// The resolver moved since the last [`Self::settle`].
     pub(crate) fn stale(&self) -> bool {
         super::resolver::epoch() != self.epoch

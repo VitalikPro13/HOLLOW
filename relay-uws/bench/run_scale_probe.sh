@@ -11,6 +11,7 @@
 #   bcast    room of N, one sender at each of --rates R1,R2 msg/s (0x03), --payload B
 #   topic    as bcast over a subscribed channel topic (0x07)
 #   rejoin_all  every member re-joins the room it holds (door change, membership refresh)
+#   discover every member asks --discover-rounds times, --discover legacy,digest (0.12.2 list, 0.13 digest)
 # --fill hidden fills the room with inactive (hidden) members: no presence, same
 # delivery, so a big room fills without the quadratic storm. Default: visible.
 #

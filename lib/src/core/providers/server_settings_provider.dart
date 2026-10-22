@@ -67,6 +67,12 @@ final serverSettingsAccessProvider =
   return (perms: perms.value ?? 0, role: role.value ?? 'member');
 });
 
+/// What a member limit above the hard cap is told, or null when it fits.
+String? memberLimitAboveCap(int limit, int? hardCap) =>
+    hardCap != null && limit > hardCap
+        ? "The limit can't be more than $hardCap."
+        : null;
+
 /// A draft save that failed for a reason the person can fix.
 class ServerDraftError implements Exception {
   final String message;
@@ -219,6 +225,14 @@ class ServerSettingsDraftNotifier
       final parsed = int.tryParse(sent.max.trim()) ?? 0;
       final maxValue = parsed > 0 ? '$parsed' : '0';
       if (sent.max != _baseline.max && parsed > 0) {
+        int? hardCap;
+        try {
+          hardCap = crdt_api.serverMemberHardCap();
+        } catch (_) {
+          // No Rust library: the node refuses past the cap anyway.
+        }
+        final tooHigh = memberLimitAboveCap(parsed, hardCap);
+        if (tooHigh != null) throw ServerDraftError(tooHigh);
         // The live count is the authority; a cached one may be stale.
         final count =
             (await crdt_api.getServerMembers(serverId: sid)).length;

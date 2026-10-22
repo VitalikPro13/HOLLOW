@@ -38,7 +38,7 @@ const _pagePadding = EdgeInsets.fromLTRB(
 /// Either way every region touches an edge of the window. In Classic the place
 /// covers the channel sidebar, so your user bar stays under the rail; Dock
 /// needs none, the dock holds you.
-class SettingsPlaceFrame extends ConsumerWidget {
+class SettingsPlaceFrame extends ConsumerStatefulWidget {
   final Widget rail;
 
   /// The page on screen; keyed by the caller so a switch resets its state.
@@ -71,17 +71,44 @@ class SettingsPlaceFrame extends ConsumerWidget {
     this.bottomBar,
   });
 
+  @override
+  ConsumerState<SettingsPlaceFrame> createState() => _SettingsPlaceFrameState();
+}
+
+class _SettingsPlaceFrameState extends ConsumerState<SettingsPlaceFrame> {
+  @override
+  void initState() {
+    super.initState();
+    FocusManager.instance.addLateKeyEventHandler(_onUnhandledKey);
+  }
+
+  @override
+  void dispose() {
+    FocusManager.instance.removeLateKeyEventHandler(_onUnhandledKey);
+    super.dispose();
+  }
+
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent ||
         event.logicalKey != LogicalKeyboardKey.escape) {
       return KeyEventResult.ignored;
     }
-    if (!(onEscape?.call() ?? false)) onClose();
+    if (!(widget.onEscape?.call() ?? false)) widget.onClose();
     return KeyEventResult.handled;
   }
 
+  /// Escape nothing took, with focus outside the place (the autofocus loses
+  /// to a node the scope already focused): still the place's, unless a route
+  /// covers it.
+  KeyEventResult _onUnhandledKey(KeyEvent event) {
+    if (!mounted || !(ModalRoute.of(context)?.isCurrent ?? true)) {
+      return KeyEventResult.ignored;
+    }
+    return _onKey(FocusManager.instance.rootScope, event);
+  }
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final classic = ref.watch(layoutModeProvider) == LayoutMode.classic;
     return Focus(
@@ -115,7 +142,7 @@ class SettingsPlaceFrame extends ConsumerWidget {
                               SizedBox(
                                   width: bleed,
                                   child: ColoredBox(color: hollow.surface)),
-                            rail,
+                            widget.rail,
                           ],
                         ),
                       ),
@@ -127,7 +154,7 @@ class SettingsPlaceFrame extends ConsumerWidget {
                 if (bleed > 0)
                   SizedBox(
                       width: bleed, child: ColoredBox(color: hollow.surface)),
-                rail,
+                widget.rail,
               ],
               Expanded(
                 child: Stack(
@@ -136,11 +163,11 @@ class SettingsPlaceFrame extends ConsumerWidget {
                       child: FocusTraversalGroup(
                         policy: ReadingOrderTraversalPolicy(),
                         child: SettingsScrollView(
-                          controller: scroll,
+                          controller: widget.scroll,
                           padding: _pagePadding,
                           maxWidth: kSettingsPageMaxWidth,
-                          slivers: sliverPage,
-                          page: page,
+                          slivers: widget.sliverPage,
+                          page: widget.page,
                         ),
                       ),
                     ),
@@ -149,12 +176,12 @@ class SettingsPlaceFrame extends ConsumerWidget {
                       right: HollowSpacing.lg,
                       child: HollowIconButton(
                         icon: LucideIcons.x,
-                        label: closeLabel,
-                        tooltip: closeTooltip,
-                        onPressed: onClose,
+                        label: widget.closeLabel,
+                        tooltip: widget.closeTooltip,
+                        onPressed: widget.onClose,
                       ),
                     ),
-                    if (bottomBar != null)
+                    if (widget.bottomBar != null)
                       Positioned(
                         left: HollowSpacing.xxl,
                         right: HollowSpacing.xxxl,
@@ -164,7 +191,7 @@ class SettingsPlaceFrame extends ConsumerWidget {
                           child: ConstrainedBox(
                             constraints: const BoxConstraints(
                                 maxWidth: kSettingsPageMaxWidth),
-                            child: bottomBar,
+                            child: widget.bottomBar,
                           ),
                         ),
                       ),

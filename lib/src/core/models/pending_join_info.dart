@@ -41,6 +41,15 @@ class PendingJoinInfo {
   }
 }
 
+/// The server name and member limit of a `server_full:{name}:{max}` reason. The
+/// name may itself hold colons, so the limit is what follows the last one.
+({String name, int? max}) serverFullReason(String reason) {
+  final rest = reason.substring('server_full:'.length);
+  final at = rest.lastIndexOf(':');
+  final max = at < 0 ? null : int.tryParse(rest.substring(at + 1));
+  return (name: (max == null ? rest : rest.substring(0, at)).trim(), max: max);
+}
+
 /// Turns a wire rejection reason into the one sentence the user reads.
 ///
 /// ONE function, shared by the toast, the desktop menu and the mobile sheet.
@@ -53,9 +62,7 @@ String pendingJoinReasonText(String reason) {
   }
 
   if (reason.startsWith('server_full:')) {
-    // server_full:{name}:{max}
-    final parts = reason.split(':');
-    final name = parts.length > 1 ? parts[1].trim() : '';
+    final name = serverFullReason(reason).name;
     return name.isEmpty ? 'This server is full' : '$name is full';
   }
 

@@ -25,6 +25,7 @@ use super::ws_client::{WsCommand, WsEvent};
 pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     let g = super::resolver::test_lock();
     super::resolver::clear_for_test();
+    super::member_cap::set_cap_for_test(None);
     super::roster_reach::clear_for_test();
     g
 }
@@ -40,6 +41,38 @@ struct Conn {
     online: bool,
     /// The node's ws_client, which the broker stands in for.
     client: ClientWire,
+    /// ws_client's record of the presence its socket was told (presence_audit.rs).
+    told: std::cell::RefCell<super::presence_audit::Audit>,
+    /// room -> `PeerJoined` frames to lose on the way there, as writes the relay drops.
+    lose_joined: std::cell::RefCell<HashMap<String, u32>>,
+}
+
+impl Conn {
+    fn new(event_tx: mpsc::UnboundedSender<WsEvent>) -> Self {
+        Conn { event_tx, online: true, client: ClientWire::default(), told: Default::default(), lose_joined: Default::default() }
+    }
+
+    /// An event reaching the node through ws_client, which records presence first.
+    fn deliver(&self, dev: &str, ev: WsEvent) {
+        {
+            let mut told = self.told.borrow_mut();
+            match &ev {
+                WsEvent::PeerJoined { room, peer_id } => {
+                    if let Some(n) = self.lose_joined.borrow_mut().get_mut(room).filter(|n| **n > 0) {
+                        *n -= 1;
+                        return;
+                    }
+                    told.on_joined(room, peer_id);
+                }
+                WsEvent::PeerLeft { room, peer_id } => told.on_left(room, peer_id),
+                WsEvent::RoomMembers { room, peers } => told.on_members(room, peers, dev, std::time::Instant::now()),
+                WsEvent::LeftRoom { room } => told.forget(room),
+                WsEvent::SessionLost => told.clear(),
+                _ => {}
+            }
+        }
+        let _ = self.event_tx.send(ev);
+    }
 }
 
 /// ws_client's half of a resumable session (RESUMABLE_SESSIONS_PLAN.md section 9).
@@ -273,6 +306,11 @@ struct RelayInner {
     /// Opt-in: a join by a socket already in the room announces nothing to the others,
     /// as the relay does (`already_present` in `ws_handler.cpp`).
     quiet_rejoins: bool,
+    /// A relay answering `discover_peers` with the peer list (what an ask without the 0.13
+    /// digest flag gets): the tests of what discovery may name.
+    legacy_discovery: bool,
+    /// Every (device, room) audit whose digest differed from what the device was told.
+    drifts_told: Vec<(String, String)>,
     /// (sender, target) pairs whose direct frames the relay swallows: it keeps what
     /// it read (recording still sees it) and delivers nothing.
     swallowed_directs: HashSet<(String, String)>,
@@ -543,7 +581,7 @@ impl MockRelay {
     ) {
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.conns.insert(peer_id.clone(), Conn { event_tx: event_tx.clone(), online: true, client: ClientWire::default() });
+            inner.conns.insert(peer_id.clone(), Conn::new(event_tx.clone()));
             let session = MockSession::fresh(inner.ring_cap);
             inner.sessions.insert(peer_id.clone(), session);
             // The relay's door grace sweep, as its 5 s timer.
@@ -799,7 +837,7 @@ impl MockRelay {
     pub(crate) fn inject_presence(&self, target: &str, room: &str, peer: &str) {
         let inner = self.inner.lock().unwrap();
         if let Some(conn) = inner.conns.get(target) {
-            let _ = conn.event_tx.send(WsEvent::PeerJoined { room: room.to_string(), peer_id: peer.to_string() });
+            conn.deliver(target, WsEvent::PeerJoined { room: room.to_string(), peer_id: peer.to_string() });
         }
     }
 
@@ -884,7 +922,7 @@ impl MockRelay {
             // ...), so on reconnect the `is_new` guard suppresses the proactive sync and key
             // exchange and the reconnect flow silently does nothing.
             if let Some(conn) = inner.conns.get(peer_id) {
-                let _ = conn.event_tx.send(WsEvent::SessionLost);
+                conn.deliver(peer_id, WsEvent::SessionLost);
             }
         } else {
             // Coming back online: re-emit Connected so the node re-runs its
@@ -1200,6 +1238,39 @@ impl MockRelay {
         self.inner.lock().unwrap().quiet_rejoins = on;
     }
 
+    pub(crate) fn set_legacy_discovery(&self, on: bool) {
+        self.inner.lock().unwrap().legacy_discovery = on;
+    }
+
+    /// Lose the next `n` `PeerJoined` frames to `dev` in `room`, as writes the relay drops.
+    pub(crate) fn lose_peer_joined(&self, dev: &str, room: &str, n: u32) {
+        if let Some(conn) = self.inner.lock().unwrap().conns.get(dev) {
+            conn.lose_joined.borrow_mut().insert(room.to_string(), n);
+        }
+    }
+
+    /// The relay forgets `dev` in `room` and tells nobody, as a ghost eviction does.
+    pub(crate) fn forget_silently(&self, room: &str, dev: &str) {
+        if let Some(s) = self.inner.lock().unwrap().rooms.get_mut(room) {
+            s.remove(dev);
+        }
+    }
+
+    /// What `dev`'s ws_client was told of `room`.
+    pub(crate) fn told(&self, dev: &str, room: &str) -> Option<HashSet<String>> {
+        self.inner.lock().unwrap().conns.get(dev).and_then(|c| c.told.borrow().told(room).cloned())
+    }
+
+    /// The audits that found a difference, in order.
+    pub(crate) fn drifts_told(&self) -> Vec<(String, String)> {
+        self.inner.lock().unwrap().drifts_told.clone()
+    }
+
+    /// `dev`'s audit of `room`, asked now rather than on its tick.
+    pub(crate) fn audit_now(&self, dev: &str, room: &str) {
+        self.inner.lock().unwrap().receive(dev, WsCommand::DiscoverPeers { room_code: room.to_string() }, CmdSource::Client);
+    }
+
 }
 
 impl RelayInner {
@@ -1431,7 +1502,29 @@ impl RelayInner {
                             .collect()
                     })
                     .unwrap_or_default();
-                inner.write(from, WsEvent::DiscoveredPeers { room: room_code, peers });
+                if inner.legacy_discovery {
+                    inner.write(from, WsEvent::DiscoveredPeers { room: room_code, peers });
+                    return;
+                }
+                // 0.13: the relay's digest of what it lists to `from`, judged by its
+                // ws_client against what it was told. A hidden device is told no
+                // presence and sends no audit.
+                if inner.hidden.contains(from) {
+                    return;
+                }
+                let joined = inner.rooms.get(&room_code).is_some_and(|s| s.contains(from));
+                let Some(conn) = inner.conns.get(from) else { return };
+                let told = conn.told.borrow();
+                let differs = match told.told(&room_code) {
+                    None => false,
+                    Some(_) if !joined => true,
+                    Some(record) => super::presence_audit::digest(record) != super::presence_audit::digest(peers.iter()),
+                };
+                drop(told);
+                if differs {
+                    inner.drifts_told.push((from.to_string(), room_code.clone()));
+                    inner.local(from, WsEvent::PresenceDrift { room: room_code });
+                }
             }
             WsCommand::CheckPeers { peers, rooms } => {
                 inner.check_peers_log.push((from.to_string(), peers.clone()));
@@ -1770,6 +1863,8 @@ impl RelayInner {
     /// room does the same for its provers.
     fn join(&mut self, from: &str, room: &str, owner: bool) {
         let inbox = room.starts_with("inbox:");
+        // A re-join is quiet only for a socket the room already saw (`already_present`).
+        let saw_before = self.peer_in_room(room, from) && (self.room_door(room).is_none() || self.sees_door(room, from));
         // A connection that proved it once stays an owner through a plain re-join.
         let owner = owner || (inbox && self.peer_in_room(room, from) && self.receives(room, from));
         if inbox {
@@ -1805,7 +1900,7 @@ impl RelayInner {
         } else {
             Vec::new()
         };
-        let rejoin = self.quiet_rejoins && self.peer_in_room(room, from);
+        let rejoin = self.quiet_rejoins && saw_before;
         self.rooms.entry(room.to_string()).or_default().insert(from.to_string());
 
         // members snapshot to the joiner (includes self, like the relay).
@@ -2274,7 +2369,7 @@ impl RelayInner {
             // Online with no session: a device back without rejoining anything.
             if conn.online {
                 g1_probe::note_delivery(&ev);
-                let _ = conn.event_tx.send(ev);
+                conn.deliver(dev, ev);
                 return true;
             }
             return false;
@@ -2286,7 +2381,7 @@ impl RelayInner {
                 session.acked = session.out_h;
                 conn.client.in_h += 1;
                 g1_probe::note_delivery(&ev);
-                let _ = conn.event_tx.send(ev);
+                conn.deliver(dev, ev);
                 true
             }
             Socket::Zombie | Socket::Gone => {
@@ -2306,7 +2401,7 @@ impl RelayInner {
         match self.conns.get(dev).filter(|c| c.online && live) {
             Some(conn) => {
                 g1_probe::note_delivery(&ev);
-                let _ = conn.event_tx.send(ev);
+                conn.deliver(dev, ev);
                 true
             }
             None => false,
@@ -2316,7 +2411,7 @@ impl RelayInner {
     /// An event ws_client raises itself, whatever its socket is doing.
     fn local(&self, dev: &str, ev: WsEvent) {
         if let Some(conn) = self.conns.get(dev) {
-            let _ = conn.event_tx.send(ev);
+            conn.deliver(dev, ev);
         }
     }
 
@@ -20918,6 +21013,8 @@ async fn authz_a_stranger_in_a_forwarder_room_meets_only_the_forwarder() {
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
+    // Discovery as an ask without the digest flag gets it: the list this test judges.
+    relay.set_legacy_discovery(true);
 
     // F, a real node, hosts its own room as an embedded forwarder does.
     let f = spawn_node_with_friends(&relay, 191, 191, &[]).await;
@@ -22626,6 +22723,8 @@ async fn declined_request_does_not_resurrect_on_mailbox_redelivery() {
 async fn authz_an_inbox_shows_its_devices_only_to_each_other() {
     let _g = test_guard();
     let relay = MockRelay::new();
+    // Discovery as an ask without the digest flag gets it: the list this test judges.
+    relay.set_legacy_discovery(true);
 
     let m_kp = NativeKeypair::from_secret_bytes(&seed_bytes(91));
     let m = m_kp.peer_id();
@@ -40579,6 +40678,8 @@ async fn authz_an_outsider_holding_a_server_id_sees_nobody_in_its_room() {
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
+    // Discovery as an ask without the digest flag gets it: the list this test judges.
+    relay.set_legacy_discovery(true);
     let (o, mut m, j, server_id) = owner_member_and_joiner(&relay, 201, 202, 203).await;
     assert!(expect_sees_room(&relay, &server_id, &o.device_id).await, "the owner proves the newest door");
     assert!(expect_sees_room(&relay, &server_id, &m.device_id).await, "and so does the member");
@@ -40649,6 +40750,8 @@ async fn authz_a_socket_the_room_hides_leaves_no_channel_copy() {
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
+    // Discovery as an ask without the digest flag gets it: the list this test judges.
+    relay.set_legacy_discovery(true);
     let mut o = spawn_node_with_friends(&relay, 216, 216, &[]).await;
     let server_id = create_server_and_wait(&mut o, "Door Server").await;
     assert!(expect_sees_room(&relay, &server_id, &o.device_id).await, "the owner proves the newest door");
@@ -52292,4 +52395,377 @@ async fn a_holder_never_serves_a_blob_its_image_check_refused() {
     );
     assert!(!j.store().has_emote_blob(&bad_hash).unwrap());
     drop((o, j));
+}
+
+// g13-s1b
+
+/// An owner and two members, each a friend of the owner only (strangers to each other,
+/// the shape of a big server), all seated. Re-joins announce nothing, as on the relay.
+async fn g13_server_of_three(relay: &MockRelay, tags: [u8; 3]) -> (TestNode, TestNode, TestNode, String) {
+    relay.set_quiet_rejoins(true);
+    let o_master = tag_kp(tags[0]).peer_id();
+    let masters: Vec<String> = tags[1..].iter().map(|t| tag_kp(*t).peer_id()).collect();
+    let mut o = spawn_node_with_friends(relay, tags[0], tags[0], &[&masters[0], &masters[1]]).await;
+    let mut b = spawn_node_with_friends(relay, tags[1], tags[1], &[&o_master]).await;
+    expect_dm_pair_ready(relay, &o, &b, 15).await;
+    let server_id = create_server_and_wait(&mut o, "g13 three").await;
+    join_and_wait(&mut b, &server_id).await;
+    let mut c = spawn_node_with_friends(relay, tags[2], tags[2], &[&o_master]).await;
+    expect_dm_pair_ready(relay, &o, &c, 15).await;
+    join_and_wait(&mut c, &server_id).await;
+    for dev in [&b.device_id, &c.device_id] {
+        assert!(wait_until(20, async || relay.sees_room(&server_id, dev)).await, "{dev} proves its door");
+    }
+    drain_events(&mut o);
+    (o, b, c, server_id)
+}
+
+async fn g13_rejoined(relay: &MockRelay, dev: &str, room: &str, mark: usize) -> bool {
+    wait_until(10, async || g13_joined_room(relay, dev, room, mark)).await
+}
+
+fn g13_joined_room(relay: &MockRelay, dev: &str, room: &str, mark: usize) -> bool {
+    relay.joins_since(dev, mark).iter().any(|j| j.starts_with(&format!("join {room} ")))
+}
+
+// A presence frame the relay dropped (a write past its backpressure limit) left B
+// without C. B's audit sees its record differ from the relay's digest, re-joins, and
+// the authoritative members bring C back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn g13_drift_audit_heals_a_dropped_peer_joined() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.set_quiet_rejoins(true);
+    let (o_master, c_master) = (tag_kp(150).peer_id(), tag_kp(152).peer_id());
+    let mut o = spawn_node_with_friends(&relay, 150, 150, &[&tag_kp(151).peer_id(), &c_master]).await;
+    let mut b = spawn_node_with_friends(&relay, 151, 151, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &b, 15).await;
+    let server_id = create_server_and_wait(&mut o, "g13 drop").await;
+    join_and_wait(&mut b, &server_id).await;
+
+    relay.lose_peer_joined(&b.device_id, &server_id, 1);
+    let mut c = spawn_node_with_friends(&relay, 152, 152, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &c, 15).await;
+    join_and_wait(&mut c, &server_id).await;
+    assert!(
+        wait_until(20, async || relay.sees_room(&server_id, &c.device_id)).await,
+        "C proves its door: the relay shows it to B"
+    );
+    assert!(
+        !relay.told(&b.device_id, &server_id).unwrap_or_default().contains(&c.device_id),
+        "B never heard C come"
+    );
+
+    let mark = relay.log_mark();
+    relay.audit_now(&b.device_id, &server_id);
+    assert_eq!(relay.drifts_told(), vec![(b.device_id.clone(), server_id.clone())], "one audit, one drift");
+    assert!(g13_rejoined(&relay, &b.device_id, &server_id, mark).await, "the drift makes B re-join the room");
+    assert!(
+        wait_until(10, async || relay.told(&b.device_id, &server_id).unwrap_or_default().contains(&c.device_id)).await,
+        "the re-join's members bring C back"
+    );
+    drop((o, b, c));
+}
+
+// The relay forgot C without telling anyone (a ghost eviction): B still lists it. The
+// old 30 s ask only ever added peers, so it could never take C out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn g13_drift_audit_heals_a_peer_the_relay_forgot() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, mut b, c, server_id) = g13_server_of_three(&relay, [153, 154, 155]).await;
+    assert!(
+        wait_until(20, async || relay.told(&b.device_id, &server_id).unwrap_or_default().contains(&c.device_id)).await,
+        "B is told C came once C proves its door"
+    );
+    drain_events(&mut b);
+
+    relay.forget_silently(&server_id, &c.device_id);
+    let mark = relay.log_mark();
+    relay.audit_now(&b.device_id, &server_id);
+    assert!(g13_rejoined(&relay, &b.device_id, &server_id, mark).await, "B re-joins on the drift");
+    assert!(
+        wait_until(10, async || !relay.told(&b.device_id, &server_id).unwrap_or_default().contains(&c.device_id)).await,
+        "the relay's members no longer name C"
+    );
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == c.device_id
+        ))
+        .await,
+        "and B's node takes C out of presence"
+    );
+    drop((o, b, c));
+}
+
+// The relay lost B in a room B believes it holds: the stale self-left room that
+// blackholes targeted sends. The audit answers "not joined" and B joins again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn g13_drift_audit_rejoins_a_room_the_relay_lost_us_in() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, b, c, server_id) = g13_server_of_three(&relay, [156, 157, 158]).await;
+    relay.forget_silently(&server_id, &b.device_id);
+    assert!(!relay.room_devices(&server_id).contains(&b.device_id));
+    let mark = relay.log_mark();
+    relay.audit_now(&b.device_id, &server_id);
+    assert!(g13_rejoined(&relay, &b.device_id, &server_id, mark).await, "B re-joins");
+    assert!(
+        wait_until(10, async || relay.room_devices(&server_id).contains(&b.device_id)).await,
+        "and the relay holds it in the room again"
+    );
+    drop((o, b, c));
+}
+
+// A settled server: every audit matches, nobody re-joins, and no id goes on the wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn g13_matching_audit_sends_nothing_more() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, b, c, server_id) = g13_server_of_three(&relay, [159, 160, 161]).await;
+    let mark = relay.log_mark();
+    // The mock judges an audit as it reads it: a match raises nothing for any node to act on.
+    for dev in [&o.device_id, &b.device_id, &c.device_id] {
+        relay.audit_now(dev, &server_id);
+        assert!(relay.drifts_told().is_empty(), "{dev}'s matching audit raised a drift");
+        assert!(!g13_joined_room(&relay, dev, &server_id, mark), "{dev} re-joined a room whose presence matched");
+    }
+    drop((o, b, c));
+}
+
+// The old full-list answer key-exchanged with every room peer every 30 s, placed or
+// not. The sweep keeps that for a co-present device we cannot place as a member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn g13_sweep_rekeys_an_unplaced_room_peer() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let b = spawn_node_with_friends(&relay, 163, 163, &[]).await;
+    // B's active room, where X is a stranger: no relationship and nothing queued for it,
+    // so only its presence in an audited room asks the sweep to re-key it.
+    let room = "g13-active-room".to_string();
+    b.cmd_tx.send(NodeCommand::JoinRoom { room_code: room.clone() }).await.unwrap();
+    assert!(wait_until(10, async || relay.room_devices(&room).contains(&b.device_id)).await);
+    let x = tag_kp(164).peer_id();
+    let (x_tx, _x_rx) = relay.attach_raw(&x);
+    relay.set_recording(&b.device_id, true);
+    x_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
+    assert!(wait_until(10, async || relay.told(&b.device_id, &room).unwrap_or_default().contains(&x)).await);
+    // Whatever the join itself asked, the first sweep tick past its freshness (10 s) asks
+    // again: X never answers and no full peer list comes any more.
+    let asked = key_requests(&relay, &b.device_id, &x);
+    assert!(
+        wait_until(45, async || key_requests(&relay, &b.device_id, &x) > asked).await,
+        "the sweep re-keys a room peer it holds no session with"
+    );
+    drop(b);
+}
+
+/// A join of `node` into `server_id` that a member refuses: the reason it gets.
+async fn g13_refusal(node: &mut TestNode, server_id: &str) -> Option<String> {
+    node.cmd_tx.send(join_cmd(server_id)).await.unwrap();
+    let mut reason = None;
+    wait_event(node, std::time::Duration::from_secs(15), |ev| match ev {
+        NetworkEvent::TwitchJoinRejected { server_id: sid, reason: r } if sid == server_id => {
+            reason = Some(r.clone());
+            true
+        }
+        NetworkEvent::ServerJoined { server_id: sid, .. } if sid == server_id => true,
+        _ => false,
+    })
+    .await;
+    reason
+}
+
+// The cap counts identities: an owner and one member fill a server capped at 2; a third
+// person is refused with the full reason, live; a returning member and a member's own
+// new device are not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn g13_member_cap_refuses_past_the_cap() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    super::member_cap::set_cap_for_test(Some(2));
+    let o_master = tag_kp(165).peer_id();
+    let mut o = spawn_node_with_friends(&relay, 165, 165, &[&tag_kp(166).peer_id(), &tag_kp(167).peer_id()]).await;
+    let mut a = spawn_node_with_friends(&relay, 166, 166, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &a, 15).await;
+    let server_id = create_server_and_wait(&mut o, "g13 full").await;
+    join_and_wait(&mut a, &server_id).await;
+
+    let mut j = spawn_node_with_friends(&relay, 167, 167, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    let reason = g13_refusal(&mut j, &server_id).await;
+    assert_eq!(reason.as_deref(), Some("server_full:g13 full:2"), "a third identity is refused as full");
+    assert!(!o.raw_crdt_member_keys(&server_id).contains(&tag_kp(167).peer_id()), "and never admitted");
+
+    // A member already in counts as one and asks again freely.
+    assert_eq!(g13_refusal(&mut a, &server_id).await, None, "a member asking again is not refused");
+
+    // An owner's lower limit wins; a higher one is clipped to the hard cap.
+    super::member_cap::set_cap_for_test(Some(3));
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "max_members".into(), value: "2".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || o.server_setting(&server_id, "max_members").as_deref() == Some("2")).await);
+    assert_eq!(g13_refusal(&mut j, &server_id).await.as_deref(), Some("server_full:g13 full:2"), "the owner's lower limit holds");
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "max_members".into(), value: "100".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || o.server_setting(&server_id, "max_members").as_deref() == Some("100")).await);
+    assert!(expect_joined_after(&mut j, &server_id).await, "room under the hard cap of 3 admits the third");
+    drop((o, a, j));
+}
+
+async fn expect_joined_after(node: &mut TestNode, server_id: &str) -> bool {
+    node.cmd_tx.send(join_cmd(server_id)).await.unwrap();
+    expect_joined(node, server_id, 15).await
+}
+
+// A member with two devices is one identity: its second device joins a full server, and
+// the server still counts two members.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn g13_member_cap_counts_identities_not_devices() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    super::member_cap::set_cap_for_test(Some(2));
+    const O: u8 = 169;
+    const A: u8 = 170;
+    let (a1, a2) = (171u8, 172u8);
+    let now = super::roster_book::now_ms();
+    let (o_master, a_master) = (tag_kp(O).peer_id(), tag_kp(A).peer_id());
+    let a_roster = protected_roster(A, &[a1, a2], now - 60_000);
+    let mut o = spawn_node_seeded(&relay, O, O, &[&a_master, &tag_kp(173).peer_id()], Some(protected_roster(O, &[O], now - 60_000))).await;
+    let mut d1 = spawn_node_seeded(&relay, A, a1, &[&o_master], Some(a_roster.clone())).await;
+    let server_id = create_server_and_wait(&mut o, "g13 devices").await;
+    join_and_wait(&mut d1, &server_id).await;
+    let mut d2 = spawn_node_seeded(&relay, A, a2, &[&o_master], Some(a_roster)).await;
+    assert_eq!(g13_refusal(&mut d2, &server_id).await, None, "a member's second device is not refused");
+    assert!(
+        wait_until(15, async || d2.servers().contains(&server_id)).await,
+        "and gets the server"
+    );
+    assert_eq!(o.raw_crdt_member_keys(&server_id).len(), 2, "two identities, three devices");
+    let mut j = spawn_node_with_friends(&relay, 173, 173, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    assert_eq!(g13_refusal(&mut j, &server_id).await.as_deref(), Some("server_full:g13 devices:2"));
+    drop((o, d1, d2, j));
+}
+
+// Private, then full, before any consent is asked: a full server never asks a joiner to
+// confirm adult content, and a private one says so first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn g13_full_server_refuses_before_nsfw_consent() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    super::member_cap::set_cap_for_test(Some(1));
+    let o_master = tag_kp(174).peer_id();
+    let mut o = spawn_node_with_friends(&relay, 174, 174, &[&tag_kp(175).peer_id()]).await;
+    let mut j = spawn_node_with_friends(&relay, 175, 175, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    let server_id = create_server_and_wait(&mut o, "g13 adult").await;
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "is_nsfw".into(), value: "true".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || o.server_setting(&server_id, "is_nsfw").as_deref() == Some("true")).await);
+    assert_eq!(g13_refusal(&mut j, &server_id).await.as_deref(), Some("server_full:g13 adult:1"), "full before consent");
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "is_private".into(), value: "true".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || o.server_setting(&server_id, "is_private").as_deref() == Some("true")).await);
+    assert_eq!(g13_refusal(&mut j, &server_id).await.as_deref(), Some("server_private:g13 adult"), "private before full");
+    drop((o, j));
+}
+
+// The cap is an admission rule, never a fold rule: a member past it that an older
+// answerer admitted is still a member on every replica, so the two never disagree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn g13_member_cap_is_not_a_fold_rule() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    super::member_cap::set_cap_for_test(Some(2));
+    let o_master = tag_kp(176).peer_id();
+    let mut o = spawn_node_with_friends(&relay, 176, 176, &[&tag_kp(177).peer_id()]).await;
+    let mut a = spawn_node_with_friends(&relay, 177, 177, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &a, 15).await;
+    let server_id = create_server_and_wait(&mut o, "g13 fold").await;
+    join_and_wait(&mut a, &server_id).await;
+    let j = tag_kp(178);
+    let admit = forge_crdt_op(&server_id, &a.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: j.peer_id(), display_name: "j".into(), follow: None,
+        ask: join_ask(&server_id, super::roster_book::now_ms(), &j),
+    }, 0, Some(&a.master_kp));
+    carry_as(&a, &o, crdt_broadcast(&server_id, &admit)).await;
+    assert!(
+        wait_until(15, async || o.raw_crdt_member_keys(&server_id).contains(&j.peer_id())).await,
+        "an admission past the cap folds in like any other"
+    );
+    drop((o, a));
+}
+
+// A parked join into a full server: the member back from away refuses it from the ring
+// with the full reason, and nobody is admitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn g13_member_cap_refuses_a_parked_join() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    super::member_cap::set_cap_for_test(Some(2));
+    let (o_master, a_master) = (tag_kp(179).peer_id(), tag_kp(180).peer_id());
+    let mut o = spawn_node_with_friends(&relay, 179, 179, &[&a_master]).await;
+    let mut a = spawn_node_with_friends(&relay, 180, 180, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &a, 15).await;
+    let server_id = create_server_and_wait(&mut o, "g13 parked").await;
+    join_and_wait(&mut a, &server_id).await;
+    expect_mls_group(&[&o, &a], &server_id, 20).await;
+    drain_events(&mut a);
+    relay.set_online(&o.device_id, false);
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == o.device_id
+        ))
+        .await
+    );
+    go_offline(&relay, &a, &server_id).await;
+    let mut b = spawn_node_with_friends(&relay, 181, 182, &[]).await;
+    b.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_parked(&mut b, &server_id).await, "the join parks");
+    expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
+    go_offline(&relay, &b, &server_id).await;
+    super::resolver::forget_for_test(&b.device_id);
+    relay.set_online(&a.device_id, true);
+    expect_ring_resolution(&relay, &server_id, &a.device_id, &tag_kp(181).peer_id(), false).await;
+    assert!(!a.raw_crdt_member_keys(&server_id).contains(&tag_kp(181).peer_id()), "nobody past the cap");
+    drop((o, a, b));
 }

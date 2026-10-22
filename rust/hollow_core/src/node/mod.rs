@@ -37,6 +37,7 @@ pub(crate) mod link_handler;
 pub(crate) mod link_pake;
 pub(crate) mod link_preview;
 pub(crate) mod media_strip;
+pub(crate) mod member_cap;
 pub(crate) mod message_ops;
 pub(crate) mod nick_claim;
 pub(crate) mod olm_lane;
@@ -44,6 +45,7 @@ pub(crate) mod overlay_server;
 pub(crate) mod mls_authority;
 pub(crate) mod overlay;
 pub(crate) mod overlay_look;
+pub(crate) mod presence_audit;
 pub(crate) mod profile_card;
 pub(crate) mod recovery_pool;
 pub(crate) mod relay_clock;
@@ -72,6 +74,8 @@ pub(crate) mod webp_anim;
 mod kill_vectors;
 #[cfg(test)]
 mod resume_e2e;
+#[cfg(test)]
+mod presence_e2e;
 #[cfg(test)]
 mod store_open_floor;
 #[cfg(test)]

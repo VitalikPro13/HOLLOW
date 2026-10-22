@@ -1855,10 +1855,11 @@ class EventStreamNotifier extends Notifier<bool> {
             );
           }
         } else if (reason.startsWith('server_full:')) {
-          // Format: "server_full:{server_name}:{max}"
-          final parts = reason.split(':');
-          final serverName = parts.length > 1 ? parts[1] : '';
-          final max = parts.length > 2 ? parts[2] : '';
+          final full = serverFullReason(reason);
+          final serverName = full.name;
+          final max = full.max == null
+              ? ''
+              : '${full.max} ${full.max == 1 ? 'member' : 'members'}';
           final handled = handleTwitchJoinResult(
               success: false, error: 'This server is full.');
           if (!handled) {
@@ -1867,7 +1868,7 @@ class EventStreamNotifier extends Notifier<bool> {
               title: 'Server is full',
               message:
                   '${serverName.isEmpty ? 'This server' : '“$serverName”'} has '
-                  'reached its member limit${max.isEmpty ? '' : ' ($max members)'}.',
+                  'reached its member limit${max.isEmpty ? '' : ' ($max)'}.',
             );
           }
         } else if (reason == 'invite_outdated') {

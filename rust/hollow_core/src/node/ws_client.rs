@@ -285,8 +285,11 @@ pub enum WsEvent {
     RoomCapHit { room: String },
     /// Response to CheckPeers — which peers/rooms are actually alive.
     PeerStatus { online: Vec<String>, active_rooms: Vec<String> },
-    /// Response to DiscoverPeers — peers currently in the given room.
+    /// Response to DiscoverPeers from a relay older than 0.13: peers currently in the room.
     DiscoveredPeers { room: String, peers: Vec<String> },
+    /// What this socket was told of a room still differs from what the relay would list
+    /// to it after a second look ([`super::presence_audit`]): the node re-joins it.
+    PresenceDrift { room: String },
     /// Response to GetTurnCredentials — time-limited TURN credentials.
     TurnCredentials { username: String, password: String, ttl: u64, uris: Vec<String> },
     /// Response to GetMediaForwarder — the relay's advertised media forwarder.
@@ -342,6 +345,7 @@ impl WsEvent {
             Self::RoomCapHit { .. } => "RoomCapHit",
             Self::PeerStatus { .. } => "PeerStatus",
             Self::DiscoveredPeers { .. } => "DiscoveredPeers",
+            Self::PresenceDrift { .. } => "PresenceDrift",
             Self::TurnCredentials { .. } => "TurnCredentials",
             Self::MediaForwarderInfo { .. } => "MediaForwarderInfo",
             Self::NicknameClaimed { .. } => "NicknameClaimed",
@@ -414,7 +418,15 @@ enum ServerMsg {
     // removed (it let anyone holding two peer_ids ask whether their deterministic
     // DM room was live). Defaulted so a relay dropping the field deserializes.
     PeerStatus { online: Vec<String>, #[serde(default)] active_rooms: Vec<String> },
-    DiscoveredPeers { room: String, peers: Vec<String> },
+    /// A 0.13 relay answers an ask with `digest` with the digest and count of what this
+    /// socket was told of the room, or `joined: false`; an older one with the peers.
+    DiscoveredPeers {
+        room: String,
+        #[serde(default)] peers: Vec<String>,
+        #[serde(default)] digest: Option<u64>,
+        #[serde(default)] count: Option<u64>,
+        #[serde(default)] joined: Option<bool>,
+    },
     TurnCredentials {
         #[serde(default)] username: String,
         #[serde(default)] password: String,
@@ -731,6 +743,8 @@ struct Rooms {
     offline_optin: Option<(bool, i64)>,
     /// The room of the last join written, rolled back if the relay says the cap is hit.
     last_join_attempt: Option<String>,
+    /// What this socket was told of each room, and the presence audits in flight.
+    audit: super::presence_audit::Audit,
 }
 
 type WsSink = SplitSink<WsStream, Message>;
@@ -975,6 +989,9 @@ impl Client {
             consider(self.reconnect_at);
         }
         consider(self.suspending.as_ref().map(|s| s.until));
+        if self.socket.is_some() && !self.background {
+            consider(self.rooms.audit.next_due());
+        }
         at
     }
 
@@ -1012,7 +1029,16 @@ impl Client {
                 self.rooms.joined.insert(room_code.clone());
                 true
             }
+            WsCommand::DiscoverPeers { room_code } => {
+                // The node's periodic audit: nothing goes out while the relay withholds
+                // presence from us, or while this room's check is already under way.
+                if self.background || !self.rooms.audit.start(room_code, Instant::now()) {
+                    return;
+                }
+                false
+            }
             WsCommand::LeaveRoom { room_code } => {
+                self.rooms.audit.forget(room_code);
                 self.rooms.joined.remove(room_code);
                 self.rooms.subscriptions.remove(room_code);
                 self.rooms.inbox_rosters.remove(room_code);
@@ -1128,6 +1154,7 @@ impl Client {
             && replayed == text
             && now.saturating_duration_since(at) <= self.timing.replay_echo
         {
+            self.rooms.audit.rejoin_dropped(room);
             return None;
         }
         self.rooms.last_join_attempt = Some(room.to_string());
@@ -1272,7 +1299,15 @@ impl Client {
                 hollow_log!("[HOLLOW-WS] The relay is restarting: resuming in {}ms", wait.as_millis());
                 self.drain_at = Some(Instant::now() + wait);
             }
-            other => handle_server_message(&self.event_tx, other, &mut self.rooms, &mut self.replayed_joins, &self.relay_host),
+            other => handle_server_message(
+                &self.event_tx,
+                other,
+                &mut self.rooms,
+                &mut self.replayed_joins,
+                &self.relay_host,
+                &self.dial.peer_id,
+                self.background,
+            ),
         }
     }
 
@@ -1339,6 +1374,11 @@ impl Client {
         if now >= self.next_beat {
             self.on_beat(now).await;
         }
+        if self.socket.is_some() && !self.background {
+            for room_code in self.rooms.audit.due(now) {
+                self.push(WsCommand::DiscoverPeers { room_code });
+            }
+        }
         let reconnect =
             self.socket.is_none() && self.attempt.is_none() && self.reconnect_at.is_some_and(|at| now >= at);
         if reconnect {
@@ -1399,6 +1439,9 @@ impl Client {
             Control::Nudge { reason, external } => self.nudge(&reason, external).await,
             Control::Background(background) => {
                 self.background = background;
+                if background {
+                    self.rooms.audit.pause();
+                }
                 self.next_beat = Instant::now() + self.beat_every();
                 if !self.sync_flag().await {
                     return;
@@ -1768,6 +1811,7 @@ impl Client {
     /// The session is gone: its unacked data waits for the next one, its numbers and
     /// joins start over.
     fn lose_session(&mut self) {
+        self.rooms.audit.clear();
         self.out.lose_session();
         self.inbound = Inbound::default();
         self.suspended_at = None;
@@ -2003,7 +2047,9 @@ fn command_frame(cmd: &WsCommand) -> Option<Frame> {
             Some(binary_frame(0x09, &[room_code, target_peer, channel_id], &flagged))
         }
         WsCommand::CheckPeers { peers, rooms } => json(serde_json::json!({ "type": "check_peers", "peers": peers, "rooms": rooms })),
-        WsCommand::DiscoverPeers { room_code } => json(serde_json::json!({ "type": "discover_peers", "room": room_code })),
+        WsCommand::DiscoverPeers { room_code } => {
+            json(serde_json::json!({ "type": "discover_peers", "room": room_code, "digest": true }))
+        }
         WsCommand::GetTurnCredentials => json(serde_json::json!({ "type": "get_turn_credentials" })),
         WsCommand::GetMediaForwarder => json(serde_json::json!({ "type": "get_media_forwarder" })),
         WsCommand::Subscribe { room_code, topics } => {
@@ -2529,24 +2575,59 @@ fn dispatch_binary(event_tx: &mpsc::UnboundedSender<WsEvent>, data: &[u8]) {
 
 // -- Server message handling --
 
+/// Presence-audit hooks for the end-to-end test (`presence_e2e.rs`): a `peer_joined`
+/// to lose on the way to one client, and every verdict its audits reach.
+#[cfg(test)]
+pub(crate) mod presence_hooks {
+    use super::super::presence_audit::Verdict;
+    use std::sync::Mutex;
+
+    pub(crate) static LOSE_JOINED: Mutex<Option<(String, u32)>> = Mutex::new(None);
+    pub(crate) static VERDICTS: Mutex<Vec<(String, String, Verdict)>> = Mutex::new(Vec::new());
+
+    pub(super) fn lose(me: &str) -> bool {
+        let mut lose = LOSE_JOINED.lock().unwrap_or_else(|e| e.into_inner());
+        match lose.as_mut() {
+            Some((who, n)) if who == me && *n > 0 => {
+                *n -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn note(me: &str, room: &str, verdict: Verdict) {
+        VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).push((me.to_string(), room.to_string(), verdict));
+    }
+}
+
 fn handle_server_message(
     event_tx: &mpsc::UnboundedSender<WsEvent>,
     msg: ServerMsg,
     rooms: &mut Rooms,
     replayed_joins: &mut HashMap<String, (String, Instant)>,
     relay_host: &str,
+    me: &str,
+    background: bool,
 ) {
     let event = match msg {
         ServerMsg::PeerJoined { room, peer_id } => {
             hollow_log!("[HOLLOW-WS] Peer joined {room}: {peer_id}");
+            #[cfg(test)]
+            if presence_hooks::lose(me) {
+                return;
+            }
+            rooms.audit.on_joined(&room, &peer_id);
             WsEvent::PeerJoined { room, peer_id }
         }
         ServerMsg::PeerLeft { room, peer_id } => {
             hollow_log!("[HOLLOW-WS] Peer left {room}: {peer_id}");
+            rooms.audit.on_left(&room, &peer_id);
             WsEvent::PeerLeft { room, peer_id }
         }
         ServerMsg::Members { room, peers, proved } => {
             hollow_log!("[HOLLOW-WS] Room {room} members: {} peers", peers.len());
+            rooms.audit.on_members(&room, &peers, me, Instant::now());
             // An open room hides nobody: every roster says where we stand.
             let _ = event_tx.send(WsEvent::DoorStatus { room: room.clone(), proved: proved.unwrap_or(true) });
             WsEvent::RoomMembers { room, peers }
@@ -2556,9 +2637,36 @@ fn handle_server_message(
             hollow_log!("[HOLLOW-WS] PeerStatus: {} online, {} active rooms", online.len(), active_rooms.len());
             WsEvent::PeerStatus { online, active_rooms }
         }
-        ServerMsg::DiscoveredPeers { room, peers } => {
-            hollow_log!("[HOLLOW-WS] DiscoveredPeers: {} peers in room {room}", peers.len());
-            WsEvent::DiscoveredPeers { room, peers }
+        ServerMsg::DiscoveredPeers { room, peers, digest, count, joined } => {
+            use super::presence_audit::{Answer, Verdict};
+            let answer = match (joined, digest, count) {
+                (Some(false), _, _) => Answer::NotJoined,
+                (_, Some(sum), Some(count)) => Answer::Digest { sum, count },
+                // A relay older than 0.13: today's list, which only adds presence.
+                _ => {
+                    hollow_log!("[HOLLOW-WS] DiscoveredPeers: {} peers in room {room}", peers.len());
+                    let _ = event_tx.send(WsEvent::DiscoveredPeers { room, peers });
+                    return;
+                }
+            };
+            if background {
+                return;
+            }
+            let now = Instant::now();
+            let verdict = rooms.audit.on_answer(&room, answer, rooms.joined.contains(&room), now);
+            #[cfg(test)]
+            presence_hooks::note(me, &room, verdict);
+            match verdict {
+                Verdict::Drift => {
+                    hollow_log!("[HOLLOW-WS] Presence of {room} differs from what we were told: re-joining it");
+                    WsEvent::PresenceDrift { room }
+                }
+                Verdict::Backoff(wait) => {
+                    hollow_log!("[HOLLOW-WS] Presence of {room} still differs after its re-join: next audit in {}s", wait.as_secs());
+                    return;
+                }
+                Verdict::Ignored | Verdict::Same | Verdict::Recheck => return,
+            }
         }
         ServerMsg::TurnCredentials { username, password, ttl, uris, error } => {
             if let Some(err) = error {
@@ -2594,6 +2702,7 @@ fn handle_server_message(
                 let room = rooms.last_join_attempt.take().unwrap_or_default();
                 if !room.is_empty() {
                     rooms.joined.remove(&room);
+                    rooms.audit.forget(&room);
                     replayed_joins.remove(&room);
                     let _ = event_tx.send(WsEvent::RoomBudgetUpdate { joined: rooms.joined.len() as u32, limit: ROOM_BUDGET_LIMIT });
                     let _ = event_tx.send(WsEvent::RoomCapHit { room });
@@ -2661,6 +2770,106 @@ mod wire_tests;
 mod tests {
     use super::*;
 
+    fn feed(tx: &mpsc::UnboundedSender<WsEvent>, rooms: &mut Rooms, background: bool, frame: &str) {
+        let mut joins = HashMap::new();
+        handle_server_message(tx, serde_json::from_str(frame).unwrap(), rooms, &mut joins, "", "me", background);
+    }
+
+    fn digest_answer(room: &str, ids: &[&str]) -> String {
+        let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        let (sum, count) = super::super::presence_audit::digest(ids.iter());
+        format!(r#"{{"type":"discovered_peers","room":"{room}","peers":[],"digest":{sum},"count":{count}}}"#)
+    }
+
+    fn drifts(rx: &mut mpsc::UnboundedReceiver<WsEvent>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let WsEvent::PresenceDrift { room } = ev {
+                out.push(room);
+            }
+        }
+        out
+    }
+
+    /// g13: the audit asks for a digest, and old asks are gone from the wire.
+    #[test]
+    fn an_audit_asks_for_the_digest() {
+        let Frame::Text(t) = command_frame(&WsCommand::DiscoverPeers { room_code: "r".into() }).unwrap() else { panic!() };
+        let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
+        assert_eq!(v, serde_json::json!({ "type": "discover_peers", "room": "r", "digest": true }));
+    }
+
+    /// g13: the record comes from the presence frames as read; an answer that matches it
+    /// raises nothing, one that differs twice raises a drift, and a `members` between an
+    /// ask and its answer voids the answer.
+    #[tokio::test]
+    async fn presence_frames_feed_the_audit_and_a_difference_drifts() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut rooms = Rooms::default();
+        rooms.joined.insert("r".into());
+        feed(&tx, &mut rooms, false, r#"{"type":"members","room":"r","peers":["a","me"]}"#);
+        feed(&tx, &mut rooms, false, r#"{"type":"peer_joined","room":"r","peer_id":"b"}"#);
+        feed(&tx, &mut rooms, false, r#"{"type":"peer_left","room":"r","peer_id":"a"}"#);
+        assert_eq!(rooms.audit.told("r").unwrap().iter().collect::<Vec<_>>(), vec!["b"]);
+
+        let now = Instant::now();
+        assert!(rooms.audit.start("r", now));
+        feed(&tx, &mut rooms, false, &digest_answer("r", &["b"]));
+        assert!(drifts(&mut rx).is_empty(), "a matching answer raises nothing");
+
+        assert!(rooms.audit.start("r", now));
+        feed(&tx, &mut rooms, false, &digest_answer("r", &["b", "c"]));
+        assert!(drifts(&mut rx).is_empty(), "a first difference is only rechecked");
+        let at = rooms.audit.next_due().unwrap();
+        assert_eq!(rooms.audit.due(at), vec!["r".to_string()]);
+        feed(&tx, &mut rooms, false, &digest_answer("r", &["b", "c"]));
+        assert_eq!(drifts(&mut rx), vec!["r".to_string()], "a second one drifts");
+
+        let mut rooms = Rooms::default();
+        rooms.joined.insert("r".into());
+        feed(&tx, &mut rooms, false, r#"{"type":"members","room":"r","peers":["me"]}"#);
+        assert!(rooms.audit.start("r", now));
+        feed(&tx, &mut rooms, false, r#"{"type":"members","room":"r","peers":["x","me"]}"#);
+        feed(&tx, &mut rooms, false, &digest_answer("r", &[]));
+        assert!(rooms.audit.next_due().is_none() && drifts(&mut rx).is_empty(), "an answer older than a members is void");
+    }
+
+    /// g13: an answer read while the relay withholds presence from us is ignored, and an
+    /// old relay's peer list is handed on as before.
+    #[tokio::test]
+    async fn background_answers_are_ignored_and_old_relays_pass_through() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut rooms = Rooms::default();
+        rooms.joined.insert("r".into());
+        feed(&tx, &mut rooms, false, r#"{"type":"members","room":"r","peers":["me"]}"#);
+        assert!(rooms.audit.start("r", Instant::now()));
+        feed(&tx, &mut rooms, true, &digest_answer("r", &["ghost"]));
+        assert!(rooms.audit.next_due().is_none() && drifts(&mut rx).is_empty());
+
+        feed(&tx, &mut rooms, false, r#"{"type":"discovered_peers","room":"r","peers":["p"]}"#);
+        let Ok(WsEvent::DiscoveredPeers { room, peers }) = rx.try_recv() else { panic!("the old answer passes through") };
+        assert_eq!((room.as_str(), peers), ("r", vec!["p".to_string()]));
+    }
+
+    /// g13: `joined: false` for a room we hold is a difference; for one we left, not.
+    #[tokio::test]
+    async fn not_joined_drifts_only_for_a_held_room() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut rooms = Rooms::default();
+        let now = Instant::now();
+        let gone = r#"{"type":"discovered_peers","room":"r","peers":[],"joined":false}"#;
+        assert!(rooms.audit.start("r", now));
+        feed(&tx, &mut rooms, false, gone);
+        assert!(rooms.audit.next_due().is_none(), "a room we do not hold is no difference");
+        rooms.joined.insert("r".into());
+        assert!(rooms.audit.start("r", now));
+        feed(&tx, &mut rooms, false, gone);
+        let at = rooms.audit.next_due().expect("rechecked");
+        rooms.audit.due(at);
+        feed(&tx, &mut rooms, false, gone);
+        assert_eq!(drifts(&mut rx), vec!["r".to_string()]);
+    }
+
     /// D5: the relay names who parked each kill signal, and turning one away echoes it.
     #[tokio::test]
     async fn a_kill_signal_keeps_its_issuer_for_the_ack() {
@@ -2668,7 +2877,7 @@ mod tests {
         let mut joins = HashMap::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let frame = r#"{"type":"kill_signal","blob":"b","issued_at_ms":5,"issuer":"12D3KooWJunk"}"#;
-        handle_server_message(&tx, serde_json::from_str(frame).unwrap(), &mut rooms, &mut joins, "");
+        handle_server_message(&tx, serde_json::from_str(frame).unwrap(), &mut rooms, &mut joins, "", "me", false);
         let Ok(WsEvent::KillSignal { signal, .. }) = rx.try_recv() else { panic!("no kill signal") };
         assert_eq!(signal, KillSignalId { issuer: "12D3KooWJunk".into(), issued_at_ms: 5 });
         assert_eq!(
@@ -2946,7 +3155,7 @@ mod tests {
         let mut joins = HashMap::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mark = r#"{"type":"topic_catchup_done","room":"srv","channel":"~join"}"#;
-        handle_server_message(&tx, serde_json::from_str(mark).unwrap(), &mut rooms, &mut joins, "");
+        handle_server_message(&tx, serde_json::from_str(mark).unwrap(), &mut rooms, &mut joins, "", "me", false);
         let Ok(WsEvent::TopicCatchupDone { room, channel }) = rx.try_recv() else { panic!("no end mark") };
         assert_eq!((room.as_str(), channel.as_str()), ("srv", "~join"));
     }
