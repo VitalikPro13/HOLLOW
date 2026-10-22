@@ -8,7 +8,10 @@ import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/ui/components/ime_keys.dart';
 import 'package:hollow/src/ui/components/snapshot_paste.dart';
+
+export 'package:hollow/src/ui/components/ime_keys.dart';
 
 /// Handles keyboard shortcuts for the chat input field.
 ///
@@ -28,6 +31,7 @@ KeyEventResult handleChatInputKey(
   if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
     return KeyEventResult.ignored;
   }
+  if (keyBelongsToIme(event, controller.value)) return KeyEventResult.ignored;
 
   if (onEditLast != null && _isEditLastKey(event, controller)) {
     return onEditLast() ? KeyEventResult.handled : KeyEventResult.ignored;
@@ -47,14 +51,17 @@ KeyEventResult handleChatInputKey(
     return _handlePasteKey(focusNode, onPasteImage);
   }
 
-  return _handleFormattingKey(
+  final formatted = _handleFormattingKey(
       event, controller, formatBindings ?? kAppShortcutDefaults);
+  // Where the field's own Enter action sends (enterSubmitsAction), the line
+  // break Ctrl+Enter used to get from the engine is made here.
+  if (formatted == KeyEventResult.ignored &&
+      isEnterKey(event.logicalKey) &&
+      enterSubmitsAction != null) {
+    return _handleEnterKey(controller, onSend, true);
+  }
+  return formatted;
 }
-
-/// The main Enter or the numpad's. One the composer leaves unhandled reaches
-/// the text input client, which breaks the line in a multiline field.
-bool isEnterKey(LogicalKeyboardKey key) =>
-    key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter;
 
 /// A bare Up press in an empty composer, as in Discord and Slack. A draft,
 /// even a space, keeps Up for the caret; a held key opens the edit once.

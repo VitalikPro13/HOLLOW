@@ -11,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/showcase_blocks.dart';
+import 'package:hollow/src/ui/components/ime_keys.dart';
 import 'package:hollow/src/ui/dialogs/showcase_editor_draft.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -90,7 +91,8 @@ class _EscapeCancels extends StatelessWidget {
     skipTraversal: true,
     onKeyEvent: (_, event) {
       if (event is KeyDownEvent &&
-          event.logicalKey == LogicalKeyboardKey.escape) {
+          event.logicalKey == LogicalKeyboardKey.escape &&
+          !keyBelongsToFocusedIme(event)) {
         onCancel();
         return KeyEventResult.handled;
       }

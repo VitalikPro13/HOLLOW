@@ -2506,6 +2506,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
           : 'Message #${widget.channelName}',
       onChanged: _onTextChanged,
       onKey: _handleComposerKey,
+      enterSends: true,
       // Conference chat is RAM-only text, so a file or voice send would ride
       // the persisting channel pipeline. Hidden, not disabled.
       onAttach: _isConference ? null : _pickAndStageFile,
@@ -2555,7 +2556,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
   /// one, so the next handler gets it.
   KeyEventResult? _handleMentionOverlayKey(KeyEvent event) {
     if (_mentionOverlay == null ||
-        (event is! KeyDownEvent && event is! KeyRepeatEvent)) {
+        (event is! KeyDownEvent && event is! KeyRepeatEvent) ||
+        keyBelongsToIme(event, _controller.value, withTab: true)) {
       return null;
     }
     if (event.logicalKey == LogicalKeyboardKey.arrowDown) {

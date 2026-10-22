@@ -42,6 +42,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
+import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -1644,6 +1645,8 @@ Widget chatComposerField(
   required ValueChanged<String> onChanged,
   Widget? trailing,
   bool autofocus = true,
+  TextInputAction? textInputAction,
+  VoidCallback? onEditingComplete,
 }) {
   return ChatTextScale(
     child: HollowTextField(
@@ -1663,6 +1666,8 @@ Widget chatComposerField(
           .copyWith(color: hollow.textPrimary),
       trailing: trailing,
       onChanged: onChanged,
+      textInputAction: textInputAction,
+      onEditingComplete: onEditingComplete,
     ),
   );
 }
@@ -1697,6 +1702,11 @@ class ChatComposerRow extends StatelessWidget {
   /// Off on a phone, where focus raises the keyboard over half the chat.
   final bool autofocus;
 
+  /// Whether [onKey] sends on Enter. Only then does the field declare
+  /// [enterSubmitsAction]; a composer whose return adds a line (the mobile
+  /// shell, also on a narrow desktop) keeps the newline key.
+  final bool enterSends;
+
   const ChatComposerRow({
     super.key,
     required this.controller,
@@ -1712,6 +1722,7 @@ class ChatComposerRow extends StatelessWidget {
     this.hasStaged = false,
     this.beforeSend,
     this.autofocus = true,
+    this.enterSends = false,
   });
 
   @override
@@ -1741,6 +1752,10 @@ class ChatComposerRow extends StatelessWidget {
                 hintText: hintText,
                 onChanged: onChanged,
                 autofocus: autofocus,
+                textInputAction: enterSends ? enterSubmitsAction : null,
+                onEditingComplete: enterSends && enterSubmitsAction != null
+                    ? () => runPlatformEnter(controller, onKey)
+                    : null,
                 trailing: Padding(
                   padding: const EdgeInsets.only(right: HollowSpacing.xs),
                   child: Builder(

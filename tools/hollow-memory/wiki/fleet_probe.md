@@ -59,6 +59,12 @@ powershell -File scripts/fleet_send.ps1 -Command '[
  {"peer":"b","op":"look"}]'
 ```
 
+`key` takes modifiers (`"shift+enter"`, `"ctrl+enter"`, also `alt`, `meta`; `numpadEnter`
+has no Windows code in the key simulator) and reports `(handled)` or `(unhandled)`;
+`"value":"submit"` sends the field's action (`"action":"send"`, default `done`). `ime` plays
+the input method on the focused field: `{"op":"ime","value":"にほんご","composing":true}` is
+marked text, `false` committed text.
+
 Steps run strictly in order, each waiting for its answer before the next is sent. Ten steps across
 two instances, including a `capture`, measured at 14s.
 

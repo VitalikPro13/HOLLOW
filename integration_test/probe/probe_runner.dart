@@ -568,14 +568,55 @@ class ProbeRunner {
         // What Enter does in a single-line field: the engine sends the
         // field's action, which a synthetic key event never produces.
         if (step['value'] == 'submit') {
-          await tester.testTextInput.receiveAction(TextInputAction.done);
+          final name = '${step['action'] ?? 'done'}';
+          final action = TextInputAction.values
+              .where((a) => a.name == name)
+              .firstOrNull;
+          if (action == null) {
+            throw _ProbeFailure('unknown action "$name". Known: '
+                '${TextInputAction.values.map((a) => a.name).join(", ")}');
+          }
+          await tester.testTextInput.receiveAction(action);
           await settle(frames: step['frames'] as int? ?? 15);
-          return 'submitted the focused field';
+          return 'submitted the focused field ($action)';
         }
-        final key = _key('${step['value']}');
-        await tester.sendKeyEvent(key);
+        final parts = '${step['value']}'.split('+');
+        final modifiers = [
+          for (final m in parts.take(parts.length - 1)) _modifier(m),
+        ];
+        final key = _key(parts.last);
+        final held = <LogicalKeyboardKey>[];
+        final bool handled;
+        try {
+          for (final m in modifiers) {
+            await tester.sendKeyDownEvent(m);
+            held.add(m);
+          }
+          handled = await tester.sendKeyEvent(key);
+        } finally {
+          // A modifier left down would ride every later step of the run.
+          for (final m in held.reversed) {
+            await tester.sendKeyUpEvent(m);
+          }
+        }
         await settle(frames: step['frames'] as int? ?? 15);
-        return 'pressed ${step['value']}';
+        return 'pressed ${step['value']} (${handled ? 'handled' : 'unhandled'})';
+
+      case 'ime':
+        // What an input method sends the focused field: `value` as marked
+        // text when `composing` is true, else as committed text.
+        final text = '${step['value']}';
+        tester.testTextInput.updateEditingValue(TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: text.length),
+          composing: step['composing'] == true
+              ? TextRange(start: 0, end: text.length)
+              : TextRange.empty,
+        ));
+        await settle(frames: step['frames'] as int? ?? 10);
+        return step['composing'] == true
+            ? 'composing "$text"'
+            : 'committed "$text"';
 
       case 'wheel':
         final finder = _finder(step);
@@ -1849,10 +1890,19 @@ class ProbeRunner {
     return anchor + Offset(dx, dy);
   }
 
+  LogicalKeyboardKey _modifier(String name) => switch (name) {
+        'shift' => LogicalKeyboardKey.shiftLeft,
+        'ctrl' => LogicalKeyboardKey.controlLeft,
+        'alt' => LogicalKeyboardKey.altLeft,
+        'meta' => LogicalKeyboardKey.metaLeft,
+        _ => throw _ProbeFailure('unknown modifier "$name"'),
+      };
+
   LogicalKeyboardKey _key(String name) {
     const keys = <String, LogicalKeyboardKey>{
       'escape': LogicalKeyboardKey.escape,
       'enter': LogicalKeyboardKey.enter,
+      'numpadEnter': LogicalKeyboardKey.numpadEnter,
       'tab': LogicalKeyboardKey.tab,
       'space': LogicalKeyboardKey.space,
       'backspace': LogicalKeyboardKey.backspace,

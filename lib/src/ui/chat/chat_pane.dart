@@ -1879,6 +1879,7 @@ class _ChatPaneState extends ConsumerState<ChatPane>
       onExpressions: _openExpressions,
       onSend: _handleSend,
       hasStaged: _staged.isNotEmpty || _stagedPreviewUrl != null,
+      enterSends: true,
     );
   }
 }

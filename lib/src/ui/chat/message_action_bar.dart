@@ -167,37 +167,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
   void initState() {
     super.initState();
     _editController = TextEditingController(text: widget.currentText);
-    _editFocusNode = FocusNode(
-      onKeyEvent: (node, event) {
-        if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
-          return KeyEventResult.ignored;
-        }
-        if (event.logicalKey == LogicalKeyboardKey.escape) {
-          widget.onEditCancel?.call();
-          return KeyEventResult.handled;
-        }
-        if (isEnterKey(event.logicalKey)) {
-          if (HardwareKeyboard.instance.isShiftPressed) {
-            final sel = _editController.selection;
-            final text = _editController.text;
-            final newText = text.replaceRange(sel.start, sel.end, '\n');
-            _editController.value = TextEditingValue(
-              text: newText,
-              selection: TextSelection.collapsed(offset: sel.start + 1),
-            );
-            return KeyEventResult.handled;
-          }
-          final trimmed = _editController.text.trim();
-          if (trimmed.isNotEmpty && trimmed != widget.currentText) {
-            widget.onEditSubmit?.call(trimmed);
-          } else {
-            widget.onEditCancel?.call();
-          }
-          return KeyEventResult.handled;
-        }
-        return KeyEventResult.ignored;
-      },
-    );
+    _editFocusNode = FocusNode(onKeyEvent: (_, event) => _onEditKey(event));
     if (widget.isEditing) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -207,6 +177,39 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
         );
       });
     }
+  }
+
+  KeyEventResult _onEditKey(KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    if (keyBelongsToIme(event, _editController.value)) {
+      return KeyEventResult.ignored;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      widget.onEditCancel?.call();
+      return KeyEventResult.handled;
+    }
+    if (isEnterKey(event.logicalKey)) {
+      if (HardwareKeyboard.instance.isShiftPressed) {
+        final sel = _editController.selection;
+        final text = _editController.text;
+        final newText = text.replaceRange(sel.start, sel.end, '\n');
+        _editController.value = TextEditingValue(
+          text: newText,
+          selection: TextSelection.collapsed(offset: sel.start + 1),
+        );
+        return KeyEventResult.handled;
+      }
+      final trimmed = _editController.text.trim();
+      if (trimmed.isNotEmpty && trimmed != widget.currentText) {
+        widget.onEditSubmit?.call(trimmed);
+      } else {
+        widget.onEditCancel?.call();
+      }
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   @override
@@ -635,6 +638,10 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
             minLines: 1,
             isDense: true,
             inputFormatters: [MessageByteLimitFormatter()],
+            textInputAction: enterSubmitsAction,
+            onEditingComplete: enterSubmitsAction == null
+                ? null
+                : () => runPlatformEnter(_editController, _onEditKey),
             onTapOutside: (_) => widget.onEditCancel?.call(),
           ),
           const SizedBox(height: HollowSpacing.xs),

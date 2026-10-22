@@ -317,6 +317,9 @@ class EmoteAutocomplete {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
+    if (keyBelongsToIme(event, controller.value, withTab: true)) {
+      return KeyEventResult.ignored;
+    }
     if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
       _selected = (_selected + 1).clamp(0, _candidates.length - 1);
       _entry?.markNeedsBuild();

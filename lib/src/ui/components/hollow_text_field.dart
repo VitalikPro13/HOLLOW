@@ -92,6 +92,7 @@ class HollowTextField extends StatefulWidget {
   final bool quietFocus;
 
   final TextInputAction? textInputAction;
+  final VoidCallback? onEditingComplete;
   final TapRegionCallback? onTapOutside;
 
   const HollowTextField({
@@ -117,6 +118,7 @@ class HollowTextField extends StatefulWidget {
     this.trailing,
     this.quietFocus = false,
     this.textInputAction,
+    this.onEditingComplete,
     this.onTapOutside,
   });
 
@@ -134,6 +136,15 @@ final TextSelectionControls _selectionControls = MaterialTextSelectionControls()
 class _HollowTextFieldState extends State<HollowTextField>
     with SingleTickerProviderStateMixin {
   late final FocusNode _focusNode;
+
+  /// Up and Down stay the field's own caret move inside a SelectionArea (the
+  /// message edit box sits in its row's). SelectableRegion overrides the
+  /// vertical move for its own selection and casts the field's action to the
+  /// wrong intent type, which threw on every press; this nearer override
+  /// hands the move straight back to the field.
+  late final Map<Type, Action<Intent>> _keepVerticalMoveInField = {
+    ExtendSelectionVerticallyToAdjacentLineIntent: _FieldVerticalMove(),
+  };
   int _charCount = 0;
 
   AnimationController? _shakeController;
@@ -216,6 +227,7 @@ class _HollowTextFieldState extends State<HollowTextField>
       onSubmitted: widget.onSubmitted,
       onChanged: widget.onChanged,
       textInputAction: widget.textInputAction,
+      onEditingComplete: widget.onEditingComplete,
       onTapOutside: widget.onTapOutside,
       cursorColor: hollow.accent,
       cursorWidth: HollowCaret.width,
@@ -322,6 +334,23 @@ class _HollowTextFieldState extends State<HollowTextField>
       );
     }
 
-    return field;
+    return Actions(actions: _keepVerticalMoveInField, child: field);
   }
+}
+
+
+/// Typed on [DirectionalCaretMovementIntent] because that is the type the
+/// field's overridable action looks overrides up by.
+class _FieldVerticalMove extends ContextAction<DirectionalCaretMovementIntent> {
+  @override
+  bool isEnabled(DirectionalCaretMovementIntent intent, [BuildContext? context]) =>
+      callingAction?.isEnabled(intent) ?? false;
+
+  @override
+  bool consumesKey(DirectionalCaretMovementIntent intent) =>
+      callingAction?.consumesKey(intent) ?? false;
+
+  @override
+  Object? invoke(DirectionalCaretMovementIntent intent, [BuildContext? context]) =>
+      callingAction?.invoke(intent);
 }

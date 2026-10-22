@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/call/share_tile.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
+import 'package:hollow/src/ui/components/ime_keys.dart';
 import 'package:hollow/src/ui/media/fullscreen_media_chrome.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -141,7 +142,8 @@ class _CallStageState extends ConsumerState<CallStage> {
     if (event is! KeyDownEvent) return false;
     if (!mounted || ModalRoute.of(context)?.isCurrent != true) return false;
     if (ref.read(keybindCaptureActiveProvider)) return false;
-    if (event.logicalKey == LogicalKeyboardKey.escape) {
+    if (event.logicalKey == LogicalKeyboardKey.escape &&
+        !keyBelongsToFocusedIme(event)) {
       _close();
       return true;
     }

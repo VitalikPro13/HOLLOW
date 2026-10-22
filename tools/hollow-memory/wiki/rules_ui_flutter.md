@@ -156,6 +156,28 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 
 ## Input and shortcuts
 
+- The macOS and Linux engines show a key to the framework BEFORE the IME, so an
+  `onKeyEvent` that takes Enter, Escape or an arrow in a text field asks
+  `keyBelongsToIme(event, controller.value)` first (`components/ime_keys.dart`: macOS
+  and Linux only, a composing range not collapsed; suggestion overlays pass
+  `withTab: true`), or a Japanese confirm sends the half-composed text. With macOS
+  Live Conversion (on by default) the converted 日本語 is still marked text with the
+  candidate list open, so the first Enter only confirms there too. A handler ABOVE
+  the field (the Settings place's Escape) asks `keyBelongsToFocusedIme(event)`. Windows
+  is left out on purpose (IME keys arrive as VK_PROCESSKEY, so an Enter it shows over a
+  range is a stale range that must still send), phones too (Gboard composes every word).
+  A composer whose Enter sends passes `ChatComposerRow(enterSends: true)` so its field
+  declares `enterSubmitsAction` and an Enter the IME hands back (Korean, Vietnamese)
+  reaches `runPlatformEnter`; a range still open at that point is kept as text and
+  NOTHING is sent (macOS `insertNewline:` commits without telling the framework). The
+  mobile shell's composer keeps its newline key. `onSubmitted` fields are safe as is.
+  `test/widget/ime_enter_test.dart` (incl. a per-handler source scan with a
+  no-text-field allowlist), `settings_escape_test.dart`, fleet `ime_enter_desktop.json`.
+- A text field inside a `SelectionArea` (the message edit box in its row's) threw on every
+  Up/Down: SelectableRegion overrides the vertical caret move and casts the field's action
+  to the wrong intent type (Flutter 3.47). `HollowTextField` wraps itself in a nearer
+  override (`_FieldVerticalMove`) that hands the move back to the field; another field
+  type inside a SelectionArea needs the same. `test/widget/field_in_selection_area_test.dart`.
 - Every Hollow input draws `HollowCaret` (as tall as the glyphs, a gap after the last
   one) through `HollowCaretScope`: on macOS AND iOS the field alone sees Linux/Fuchsia,
   because Material shifts an Apple caret 2 px into the last glyph with no parameter to

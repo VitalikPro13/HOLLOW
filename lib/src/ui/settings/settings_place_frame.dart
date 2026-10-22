@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/ime_keys.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/shell/user_bar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -90,7 +91,8 @@ class _SettingsPlaceFrameState extends ConsumerState<SettingsPlaceFrame> {
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent ||
-        event.logicalKey != LogicalKeyboardKey.escape) {
+        event.logicalKey != LogicalKeyboardKey.escape ||
+        keyBelongsToFocusedIme(event)) {
       return KeyEventResult.ignored;
     }
     if (!(widget.onEscape?.call() ?? false)) widget.onClose();

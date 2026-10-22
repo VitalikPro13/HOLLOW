@@ -121,4 +121,36 @@ void main() {
     await tester.pump();
     expect((taken, closed), (1, 0));
   });
+
+  testWidgets('Escape over marked text cancels the conversion, not settings',
+      (tester) async {
+    var closed = 0;
+    final controller = TextEditingController();
+    final focus = FocusNode();
+    await tester.pumpWidget(_app(_frame(
+      () => closed++,
+      page: HollowTextField(controller: controller, focusNode: focus, hintText: 'Name'),
+    )));
+    await tester.pumpAndSettle();
+    await tester.showKeyboard(find.byType(EditableText));
+    tester.testTextInput.updateEditingValue(const TextEditingValue(
+      text: 'にほんご',
+      selection: TextSelection.collapsed(offset: 4),
+      composing: TextRange(start: 0, end: 4),
+    ));
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(closed, 0);
+
+    tester.testTextInput.updateEditingValue(const TextEditingValue(
+      text: '日本語',
+      selection: TextSelection.collapsed(offset: 3),
+    ));
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(closed, 1);
+  }, variant: const TargetPlatformVariant(
+      {TargetPlatform.macOS, TargetPlatform.linux}));
 }
