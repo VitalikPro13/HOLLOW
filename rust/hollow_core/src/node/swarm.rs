@@ -1071,6 +1071,7 @@ async fn run_event_loop(
         ),
         Err(_) => super::crdt_resync::CrdtResync::load_none(crdt_store.clone(), crate::api::updater::APP_VERSION),
     };
+    crdt_resync.op_sync.set_local(&device_peer_id);
 
     // -- MLS state --
     let mut mls: Option<MlsManager> = {
@@ -3414,7 +3415,7 @@ async fn run_event_loop(
                             let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
                             #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
                             let fwd_bridge: FwdBridge = std::marker::PhantomData;
-                            handle_incoming_request(
+                            super::gossip_relay::VIA_MESH.scope((), handle_incoming_request(
                                 &mut olm, &crypto_store, &crdt_store, &mut crdt_resync, &event_tx,
                                 &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                                 &mut server_states, &bundle_keypair,
@@ -3466,7 +3467,7 @@ async fn run_event_loop(
                                 HavenMessage::CrdtOpBroadcast { server_id, op_json },
                                 super::frame_auth::now_ms(),
                                 &mut None,
-                            ).await;
+                            )).await;
                         }
                     }
 
@@ -3637,6 +3638,7 @@ async fn run_event_loop(
                         snap.ws_transfers = pending_ws_transfers.keys().cloned().collect();
                         snap.rate_dropped = frame_budget.limiter.dropped_totals();
                         (snap.resync_marks, snap.resync_asks) = crdt_resync.debug();
+                        snap.digest_caps = crdt_resync.op_sync.debug_caps();
                         let _ = reply.send(snap);
                     }
                 }
@@ -3841,7 +3843,7 @@ async fn run_event_loop(
                         if gap {
                             Box::pin(sync_handler::repair_after_gap(
                                 &ws_cmd_tx, &crdt_store, &server_states, &ws_room_peers,
-                                &pending_server_joins, &mut relay_catchup_done, &mut join_hold,
+                                &pending_server_joins, &mut relay_catchup_done, &mut join_hold, &mut crdt_resync,
                                 &|room: &str| door_rooms.is_hidden(room), &mut sync_coordinator, &mut frame_budget,
                                 mls.as_ref(), &master_keypair, &local_peer_str, &db_path, &db_passphrase,
                             ))
@@ -3880,6 +3882,7 @@ async fn run_event_loop(
                         peer_auto_dl.clear();
                         relay_catchup_done.clear();
                         join_hold.went_away(&server_states);
+                        crdt_resync.op_sync.went_away();
                         // A new socket means a fresh mailbox replay burst, so the
                         // answer re-send is re-armed with it (see `answer_resent`).
                         answer_resent.clear();
@@ -3930,6 +3933,7 @@ async fn run_event_loop(
                             continue;
                         }
                         let arrived_here = ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
+                        carry_unseen_ops(&mut crdt_resync, &server_states, &ws_cmd_tx, &ws_room_peers, &local_peer_str, &room);
 
                         // A holder we could not reach earlier just turned up:
                         // ask it for anything still pending on the asset rail.
@@ -4231,23 +4235,13 @@ async fn run_event_loop(
                                     // as a member of many servers would overrun the peer's bucket.
                                     for (sid, state) in server_states.iter() {
                                         if state.members.keys().any(|k| super::resolver::same_identity(&peer_id, k)) {
-                                            let our_vector = StateVector::from_server_state(state);
-                                            if let Ok(sv_json) = serde_json::to_string(&our_vector) {
-                                                // Olm, never MLS, for the post-reconnection SyncReq:
-                                                // the peer's MLS epoch may be stale, causing silent decrypt failure.
-                                                super::frame_budget::pace_carried(
-                                                    &mut frame_budget, &ws_cmd_tx, &device_peer_id, &peer_id,
-                                                    &HavenMessage::SyncRequest {
-                                                        server_id: sid.clone(),
-                                                        state_vector_json: sv_json,
-                                                        // Epoch hint: lets the responder detect
-                                                        // us (or itself) stale on first contact.
-                                                        mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
-                                                        nonce: Some(join_hold.ask()),
-                                                        full: None,
-                                                    },
-                                                );
-                                            }
+                                            // Olm, never MLS, for the post-reconnection SyncReq:
+                                            // the peer's MLS epoch may be stale, causing silent decrypt failure.
+                                            // The epoch hint lets the responder detect us (or itself) stale.
+                                            let ask = crdt_resync.sync_ask(
+                                                state, &peer_id, Some(join_hold.ask()), mls.as_ref().and_then(|m| m.epoch(sid).ok()),
+                                            );
+                                            super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &peer_id, &ask);
 
                                             {
                                                 if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
@@ -4563,6 +4557,7 @@ async fn run_event_loop(
                             }
                         }
                         ws_room_peers.insert(room.clone(), room_set);
+                        carry_unseen_ops(&mut crdt_resync, &server_states, &ws_cmd_tx, &ws_room_peers, &local_peer_str, &room);
                         super::roster_reach::on_room_listed(
                             &ws_cmd_tx, &cmd_tx, &ws_room_peers, &device_peer_id, &room, &db_path, &db_passphrase,
                         );
@@ -4704,20 +4699,6 @@ async fn run_event_loop(
                             }
                         }
 
-                        // Pre-compute StateVectors once per server (reused across all peers).
-                        // Skipped entirely for a fwd room — serializing every server's
-                        // state vector for a peer that will never receive one is pure waste.
-                        let sv_cache: std::collections::HashMap<&str, String> = if is_fwd_room {
-                            std::collections::HashMap::new()
-                        } else {
-                            server_states.iter()
-                                .filter_map(|(sid, state)| {
-                                    let sv = StateVector::from_server_state(state);
-                                    serde_json::to_string(&sv).ok().map(|json| (sid.as_str(), json))
-                                })
-                                .collect()
-                        };
-
                         for pid_str in &peers {
                             if !is_fwd_room && pid_str != &local_peer && pid_str.as_str() != device_peer_id {
                                 let _ = event_tx.send(NetworkEvent::PeerDiscovered {
@@ -4816,21 +4797,11 @@ async fn run_event_loop(
 
                                     for (sid, state) in server_states.iter() {
                                         if state.is_member(pid_str) {
-                                            if let Some(sv_json) = sv_cache.get(sid.as_str()) {
-                                                // Paced like the PeerJoined twin.
-                                                super::frame_budget::pace_carried(
-                                                    &mut frame_budget, &ws_cmd_tx, &device_peer_id, pid_str,
-                                                    &HavenMessage::SyncRequest {
-                                                        server_id: sid.clone(),
-                                                        state_vector_json: sv_json.clone(),
-                                                        // Epoch hint: lets the responder detect
-                                                        // us (or itself) stale on first contact.
-                                                        mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
-                                                        nonce: Some(join_hold.ask()),
-                                                        full: None,
-                                                    },
-                                                );
-                                            }
+                                            // Paced like the PeerJoined twin.
+                                            let ask = crdt_resync.sync_ask(
+                                                state, pid_str, Some(join_hold.ask()), mls.as_ref().and_then(|m| m.epoch(sid).ok()),
+                                            );
+                                            super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, pid_str, &ask);
 
                                             // Channel message sync via coordinator (same as PeerJoined).
                                             // Without this, the joining peer never probes for missed
@@ -6094,7 +6065,7 @@ async fn run_event_loop(
                                 );
                                 after_welcome_joined(
                                     mls_mgr, &master_keypair, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                                    &crdt_store, &server_states, &mut mls_bootstrap_requested,
+                                    &crdt_store, &server_states, &mut crdt_resync, &mut mls_bootstrap_requested,
                                     &mut mls_welcome_grace, &mut awaiting_mls_after_parked_join,
                                     &mut relay_catchup_done, &db_path, &db_passphrase, &local_peer_str,
                                     sync_peer, &server_id, &channel_id, &group_key,
@@ -6342,6 +6313,27 @@ async fn run_event_loop(
                 for (device, ask) in resync_asks {
                     super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &ask);
                 }
+                let (silent, joined) = crdt_resync.op_sync.tick(std::time::Instant::now(), &|device| frame_budget.lane_holds(device));
+                for (sid, device, nonce, epoch) in silent {
+                    if let Some(state) = server_states.get(&sid) {
+                        hollow_log!("[HOLLOW-CRDT] {device} left a digest ask for {sid} unanswered: asking with the state vector");
+                        let ask = super::op_sync::vector_ask(state, nonce, epoch);
+                        super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &ask);
+                    }
+                }
+                for sid in joined {
+                    let Some(state) = server_states.get(&sid).filter(|s| s.is_member(&local_peer_str)) else { continue };
+                    let mut devices: Vec<String> = ws_room_peers.get(&sid).into_iter().flatten()
+                        .filter(|d| !super::resolver::same_identity(d, &local_peer_str) && state.is_member(d))
+                        .cloned()
+                        .collect();
+                    devices.sort();
+                    devices.truncate(super::op_sync::JOIN_FOLLOW_UP_PEERS);
+                    for device in devices {
+                        let ask = crdt_resync.sync_ask(state, &device, None, None);
+                        super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &ask);
+                    }
+                }
 
                 // A sender whose frames the rate limit dropped and that stopped: ask it
                 // again, and send it the DM copies we hold, as the ask it sent us may have
@@ -6349,7 +6341,7 @@ async fn run_event_loop(
                 let now = std::time::Instant::now();
                 for (peer, lost) in frame_budget.limiter.due_repairs(now) {
                     let (servers, dm) = Box::pin(sync_handler::repair_after_drops(
-                        &peer, &ws_cmd_tx, &server_states, &ws_room_peers, &join_hold, &mut sync_coordinator,
+                        &peer, &ws_cmd_tx, &server_states, &ws_room_peers, &join_hold, &mut crdt_resync, &mut sync_coordinator,
                         &mut frame_budget, mls.as_ref(), &local_peer_str, &db_path, &db_passphrase,
                     ))
                     .await;
@@ -7253,6 +7245,46 @@ async fn leave_evicted_server(
     }).await;
 }
 
+/// Ops we authored on `room`'s server before it showed us any member go out once it shows
+/// one (a listing before our door proof shows nobody); no receiver forwards them.
+fn carry_unseen_ops(
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
+    server_states: &HashMap<String, ServerState>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    room: &str,
+) {
+    let Some(state) = server_states.get(room) else { return };
+    let shows_a_member = ws_room_peers
+        .get(room)
+        .is_some_and(|peers| peers.iter().any(|d| !super::resolver::same_identity(d, local_peer_str) && state.is_member(d)));
+    if !shows_a_member {
+        return;
+    }
+    for msg in crdt_resync.op_sync.listed(room) {
+        if let Some(json) = super::olm_lane::carried_json(&msg) {
+            super::olm_lane::carry_to_identities(
+                ws_cmd_tx, ws_room_peers, state.members.keys(), local_peer_str, &json, super::olm_lane::NoSession::Queue,
+            );
+        }
+    }
+}
+
+/// What a non-member asking to sync `state` is told: a deleted server's tombstone, else
+/// the op that removed it and the ranks its own fold needs (HOL-SEC-114). `lacks` narrows
+/// those to ops the asker may not hold.
+fn former_member_ops<'a>(
+    state: &'a ServerState,
+    peer: &str,
+    lacks: &dyn Fn(&crate::crdt::operations::CrdtOp) -> bool,
+) -> Vec<&'a crate::crdt::operations::CrdtOp> {
+    if state.is_deleted() {
+        return state.op_log.iter().filter(|op| matches!(op.payload, CrdtPayload::ServerDeleted { .. }) && lacks(op)).collect();
+    }
+    super::door_room::speaks_for(peer).map(|master| crdt_sync::removal_notice(state, &master, lacks)).unwrap_or_default()
+}
+
 /// Apply ONE remotely-authored CRDT op: the single ingest path for a
 /// `CrdtOpBroadcast` and for the `MemberAdded` op a `ServerJoinResolved` carries.
 /// Author-validated by `op_allowed`, never sender-validated (the sender may
@@ -7362,25 +7394,29 @@ async fn apply_remote_crdt_op_inner(
 
         if op_is_new {
 
-            // Forward the validated, NEW op onward, preferring the WebRTC mesh: the old
-            // per-member SendDirect re-forward made every receiving node pay
-            // O(members x devices) relay uploads per op. Op-newness gates this block, so a
-            // node re-floods a given op at most once. Falls back to the relay fan-out.
-            if super::gossip_relay::flood_crdt_op(
+            // The author's own fan-out (MLS, the carried twin to every member device and our
+            // siblings, catch-up sync) delivers the op; a receiver only re-floods the mesh,
+            // at most once per op. A relay re-forward by every receiver was N^2 frames.
+            let flooded = super::gossip_relay::flood_crdt_op(
                 gossip_overlays, event_tx, &server_id, &op_json, Some(peer_str),
-            ) == 0 {
-                let crdt_msg = HavenMessage::CrdtOpBroadcast {
-                    server_id: server_id.clone(),
-                    op_json: op_json.clone(),
-                };
-                if let Some(json) = super::olm_lane::carried_json(&crdt_msg) {
-                    for member_peer_str in state.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            if dev == peer_str { continue; } // don't echo back to the sender device
-                            super::olm_lane::carry_json(ws_cmd_tx, &dev, None, json.clone(), super::olm_lane::NoSession::Queue);
-                        }
-                    }
+            );
+            // An older author that flooded the mesh sent no carried twin: while none of its
+            // devices is known to read digests, the first receiver off the mesh carries it on.
+            let via_mesh = super::gossip_relay::via_mesh();
+            let author_reads_digest = crdt_resync.op_sync.identity_reads_digest(&op.author);
+            let online: Vec<String> = if via_mesh && flooded == 0 && !author_reads_digest {
+                state.members.keys()
+                    .filter(|m| !super::resolver::same_identity(m, local_peer_str) && !super::resolver::same_identity(m, &op.author))
+                    .flat_map(|m| crate::node::crypto_handler::online_devices_for(ws_room_peers, m))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let targets = super::gossip_relay::hand_on_to(via_mesh, flooded, author_reads_digest, online, peer_str);
+            let msg = HavenMessage::CrdtOpBroadcast { server_id: server_id.clone(), op_json: op_json.clone() };
+            if let Some(json) = (!targets.is_empty()).then(|| super::olm_lane::carried_json(&msg)).flatten() {
+                for dev in &targets {
+                    super::olm_lane::carry_json(ws_cmd_tx, dev, None, json.clone(), super::olm_lane::NoSession::Queue);
                 }
             }
 
@@ -7661,6 +7697,7 @@ async fn after_welcome_joined(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     crdt_store_actor: &super::crdt_store::CrdtStore,
     server_states: &HashMap<String, ServerState>,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
     mls_welcome_grace: &mut HashMap<String, std::time::Instant>,
     awaiting_mls_after_parked_join: &mut std::collections::HashSet<String>,
@@ -7761,21 +7798,9 @@ async fn after_welcome_joined(
     // the skew is otherwise lost forever: per-channel sync cannot find it.
     if channel_id.is_none() {
         if let Some(state) = server_states.get(server_id) {
-            let our_vector = StateVector::from_server_state(state);
-            if let Ok(sv) = serde_json::to_string(&our_vector) {
-                super::olm_lane::carry(
-                    ws_cmd_tx, sync_peer, None,
-                    &HavenMessage::SyncRequest {
-                        server_id: server_id.to_string(),
-                        state_vector_json: sv,
-                        // Freshly Welcomed — current by construction.
-                        mls_epoch: mls_mgr.epoch(server_id).ok(),
-                        nonce: None,
-                        full: None,
-                    },
-                    super::olm_lane::NoSession::Queue,
-                );
-            }
+            // Freshly Welcomed: the epoch hint is current by construction.
+            let ask = crdt_resync.sync_ask(state, sync_peer, None, mls_mgr.epoch(server_id).ok());
+            super::olm_lane::carry(ws_cmd_tx, sync_peer, None, &ask, super::olm_lane::NoSession::Queue);
         }
     }
 
@@ -10096,8 +10121,28 @@ async fn handle_incoming_request_inner(
 
         // -- CRDT sync message handlers --
 
-        HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce, full } => {
+        HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce, full, mut digest, dg } => {
             hollow_log!("[HOLLOW-CRDT] SyncRequest from {peer_str} for server {server_id}");
+            if crdt_resync.op_sync.is_old() {
+                digest = None;
+            }
+
+            // A request without the digest mark comes from an older build: our open
+            // digest asks to that device go again in the form it reads.
+            // Only a member of a server we hold teaches us what its device reads.
+            let heard: Vec<(String, Option<u64>, Option<u64>)> = if server_states.values().any(|s| s.is_member(peer_str)) {
+                crdt_resync.op_sync.heard_request(peer_str, dg)
+            } else {
+                Vec::new()
+            };
+            for (sid, ask_nonce, ask_epoch) in heard {
+                if let Some(state) = server_states.get(&sid) {
+                    super::frame_budget::pace_carried(
+                        frame_budget, ws_cmd_tx, device_peer_id, peer_str,
+                        &super::op_sync::vector_ask(state, ask_nonce, ask_epoch),
+                    );
+                }
+            }
 
             // A member asking for one page of our whole log, to get back ops its older
             // build skipped (`crdt_resync`).
@@ -10108,7 +10153,9 @@ async fn handle_incoming_request_inner(
                 let (ops_json, page) = crdt_resync.serve(state, ask, peer_str, std::time::Instant::now());
                 super::frame_budget::pace_answer(
                     frame_budget, ws_cmd_tx, device_peer_id, peer_str,
-                    &HavenMessage::SyncResponse { server_id: server_id.clone(), ops_json, nonce, page: Some(page) },
+                    &HavenMessage::SyncResponse {
+                        server_id: server_id.clone(), ops_json, nonce, page: Some(page), digest: None, dg: crdt_resync.op_sync.mark(),
+                    },
                 );
                 return;
             }
@@ -10118,30 +10165,48 @@ async fn handle_incoming_request_inner(
             // just the owner's deletion op, all a reconnecting former member needs. A
             // former member of a live server gets the op that removed it and the ranks
             // its own fold needs to admit that op (HOL-SEC-114).
-            if let Some(state) = server_states.get(&server_id)
-                && let Ok(their_vector) = serde_json::from_str::<StateVector>(&state_vector_json)
-            {
+            if let Some(state) = server_states.get(&server_id) {
                 let member = state.is_member(peer_str);
-                let delta = if member {
-                    crdt_sync::compute_delta(&state.op_log, &their_vector)
-                } else if state.is_deleted() {
-                    let mut delta = crdt_sync::compute_delta(&state.op_log, &their_vector);
-                    delta.retain(|op| matches!(op.payload, CrdtPayload::ServerDeleted { .. }));
-                    delta
-                } else {
-                    super::door_room::speaks_for(peer_str)
-                        .map(|master| crdt_sync::removal_notice(state, &master, &their_vector))
-                        .unwrap_or_default()
+                let reply_to = |ask: &crate::crdt::digest::OpDigest, vector: bool| crate::crdt::digest::DigestReply {
+                    ask: ask.ask, round: ask.round, groups: Vec::new(), vector,
                 };
-                // A member hears back even when nothing is missing: that answer is how a
-                // member just back knows it has caught up (`join_hold`).
-                if (member || !delta.is_empty())
-                    && let Ok(ops_json) = serde_json::to_string(&delta)
-                {
-                    hollow_log!("[HOLLOW-CRDT] Sending {} delta ops to {peer_str}", delta.len());
+                let answer: Option<(String, Option<crate::crdt::digest::DigestReply>)> = match &digest {
+                    // A legacy log applies in arrival order and is capped: only the vector
+                    // says what such a replica may hand over.
+                    Some(ask) if member && state.anchor() == crate::crdt::server_state::Anchor::Legacy => {
+                        Some(("[]".to_string(), Some(reply_to(ask, true))))
+                    }
+                    Some(ask) if member => match crdt_resync.answer_digest(state, ask) {
+                        Some((ops_json, reply)) => Some((ops_json, Some(reply))),
+                        None => {
+                            hollow_log!("[HOLLOW-SECURITY] Left a malformed sync digest from {peer_str} for {server_id} unanswered");
+                            None
+                        }
+                    },
+                    // A non-member is never told counts or fingerprints of the log.
+                    Some(ask) => {
+                        let ops = former_member_ops(state, peer_str, &|_| true);
+                        (!ops.is_empty()).then(|| (serde_json::to_string(&ops).unwrap_or_default(), Some(reply_to(ask, false))))
+                    }
+                    None => serde_json::from_str::<StateVector>(&state_vector_json).ok().and_then(|their_vector| {
+                        let ops = if member {
+                            crdt_sync::compute_delta(&state.op_log, &their_vector)
+                        } else {
+                            former_member_ops(state, peer_str, &crdt_sync::vector_lacks(&their_vector))
+                        };
+                        // A member hears back even when nothing is missing: that answer is
+                        // how a member just back knows it has caught up (`join_hold`).
+                        (member || !ops.is_empty()).then(|| (serde_json::to_string(&ops).unwrap_or_default(), None))
+                    }),
+                };
+                let mark = crdt_resync.op_sync.mark();
+                if let Some((ops_json, reply)) = answer {
+                    hollow_log!("[HOLLOW-CRDT] Answering {peer_str}'s sync of {server_id} ({} bytes of ops)", ops_json.len());
                     super::olm_lane::carry(
                         ws_cmd_tx, peer_str, None,
-                        &HavenMessage::SyncResponse { server_id: server_id.clone(), ops_json, nonce, page: None },
+                        &HavenMessage::SyncResponse {
+                            server_id: server_id.clone(), ops_json, nonce, page: None, digest: reply, dg: mark,
+                        },
                         super::olm_lane::NoSession::Queue,
                     );
                 }
@@ -10210,8 +10275,14 @@ async fn handle_incoming_request_inner(
             }
         }
 
-        HavenMessage::SyncResponse { server_id, ops_json, nonce, page } => {
+        HavenMessage::SyncResponse { server_id, ops_json, nonce, page, mut digest, dg } => {
             hollow_log!("[HOLLOW-CRDT] SyncResponse from {peer_str} for server {server_id}");
+            if crdt_resync.op_sync.is_old() {
+                digest = None;
+            } else if (dg.is_some() || digest.is_some()) && server_states.values().any(|s| s.is_member(peer_str)) {
+                crdt_resync.op_sync.learn(peer_str, true);
+            }
+            let digest_sid = digest.as_ref().map(|_| server_id.clone());
 
             // A page of a whole log counts only as the answer to the page we asked that
             // device for; any other is dropped, never taken as a delta.
@@ -10309,6 +10380,9 @@ async fn handle_incoming_request_inner(
                         if let Some(completed) = pending_server_joins.remove(&server_id) {
                             let server_name = state.name().to_string();
                             hollow_log!("[HOLLOW-CRDT] Server join completed: {server_id}");
+                            // An op a member authored while our admission was in flight
+                            // named no seat of ours: ask more members shortly.
+                            crdt_resync.op_sync.joined(&server_id);
 
                             // The persisted tile is done with. A PARKED join owes
                             // the UI two more beats: admitted (said BEFORE
@@ -10421,6 +10495,18 @@ async fn handle_incoming_request_inner(
                                                 ws_cmd_tx, ws_room_peers, state.members.keys(), &local_peer, &json,
                                                 super::olm_lane::NoSession::Queue,
                                             );
+                                        }
+                                        // No receiver forwards it on: our siblings hear it from us, and
+                                        // the members of a room we are only now joining once it is listed.
+                                        super::olm_lane::carry_to_own_siblings(
+                                            ws_cmd_tx, ws_room_peers, &local_peer, device_peer_id, &pledge,
+                                            super::olm_lane::NoSession::Queue,
+                                        );
+                                        let sees_a_member = ws_room_peers.get(&server_id).is_some_and(|peers| {
+                                            peers.iter().any(|d| !super::resolver::same_identity(d, &local_peer) && state.is_member(d))
+                                        });
+                                        if !sees_a_member {
+                                            crdt_resync.op_sync.carry_when_listed(&server_id, pledge.clone());
                                         }
                                     }
                                 }
@@ -10567,6 +10653,25 @@ async fn handle_incoming_request_inner(
             {
                 let vouched = unread.into_iter().filter(|u| super::crdt_resync::vouched(u, state)).collect();
                 crdt_resync.note_skipped(&sid, vouched);
+            }
+
+            // A digest answer that split ranges: compare them against what we hold now and
+            // ask again, only for the ask it names.
+            if let (Some(reply), Some(sid)) = (&digest, &digest_sid)
+                && let Some(state) = server_states.get(sid)
+            {
+                match crdt_resync.digest_answered(state, peer_str, reply) {
+                    super::op_sync::Step::Again(next) => {
+                        super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, device_peer_id, peer_str, &next);
+                    }
+                    super::op_sync::Step::Unasked => {
+                        hollow_log!("[HOLLOW-CRDT] Dropped a digest answer for {sid} from {peer_str} that continues no open ask");
+                    }
+                    super::op_sync::Step::Malformed => {
+                        hollow_log!("[HOLLOW-SECURITY] Dropped a malformed digest answer for {sid} from {peer_str}");
+                    }
+                    super::op_sync::Step::Done => {}
+                }
             }
         }
 
@@ -11043,6 +11148,8 @@ async fn handle_incoming_request_inner(
                         ops_json,
                         nonce: None,
                         page: None,
+                        digest: None,
+                        dg: None,
                     });
                 }
 
@@ -12051,22 +12158,10 @@ async fn handle_incoming_request_inner(
                             if !channel_sync_sent.get(&op_dedup).is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
                                 channel_sync_sent.insert(op_dedup, std::time::Instant::now());
                                 if let Some(state) = server_states.get(&server_id) {
-                                    let our_vector = StateVector::from_server_state(state);
-                                    if let Ok(sv) = serde_json::to_string(&our_vector) {
-                                        super::olm_lane::carry(
-                                            ws_cmd_tx, peer_str, None,
-                                            &HavenMessage::SyncRequest {
-                                                server_id: server_id.clone(),
-                                                state_vector_json: sv,
-                                                // A decrypt failure often IS epoch skew —
-                                                // let the responder catch us up.
-                                                mls_epoch: mls_mgr.epoch(&server_id).ok(),
-                                                nonce: None,
-                                                full: None,
-                                            },
-                                            super::olm_lane::NoSession::Queue,
-                                        );
-                                    }
+                                    // A decrypt failure often IS epoch skew: the hint
+                                    // lets the responder catch us up.
+                                    let ask = crdt_resync.sync_ask(state, peer_str, None, mls_mgr.epoch(&server_id).ok());
+                                    super::olm_lane::carry(ws_cmd_tx, peer_str, None, &ask, super::olm_lane::NoSession::Queue);
                                 }
                             }
                         }
@@ -12289,7 +12384,7 @@ async fn handle_incoming_request_inner(
                         );
                         after_welcome_joined(
                             mls_mgr, master_keypair, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
-                            crdt_store_actor, server_states, mls_bootstrap_requested,
+                            crdt_store_actor, server_states, crdt_resync, mls_bootstrap_requested,
                             mls_welcome_grace, awaiting_mls_after_parked_join, relay_catchup_done,
                             db_path, db_passphrase, local_peer_str, sync_peer,
                             &server_id, &wl_channel_id, &group_key, welcome_leaf.as_ref().map(|s| s.master.as_str()),
@@ -12311,7 +12406,7 @@ async fn handle_incoming_request_inner(
             hollow_log!("[HOLLOW-MLS] MlsCommit from {peer_str} for {server_id} (cid={cm_channel_id:?})");
             if let Some(mls_mgr) = mls {
                 let outcome = crate::node::crypto_handler::handle_mls_commit_frame(
-                    mls_mgr, crypto_store, server_states, ws_cmd_tx, ws_room_peers,
+                    mls_mgr, crypto_store, server_states, crdt_resync, ws_cmd_tx, ws_room_peers,
                     mls_bootstrap_requested, mls_epoch_hint_cooldown, event_tx, local_peer_str,
                     peer_str, &server_id, &commit, &cm_channel_id, cm_epoch,
                 ).await;
@@ -12380,7 +12475,7 @@ async fn handle_incoming_request_inner(
                         break;
                     }
                     match crate::node::crypto_handler::handle_mls_commit_frame(
-                        mls_mgr, crypto_store, server_states, ws_cmd_tx, ws_room_peers,
+                        mls_mgr, crypto_store, server_states, crdt_resync, ws_cmd_tx, ws_room_peers,
                         mls_bootstrap_requested, mls_epoch_hint_cooldown, event_tx, local_peer_str,
                         peer_str, &server_id, &commit_b64, &cu_channel_id, Some(entry_epoch),
                     ).await {

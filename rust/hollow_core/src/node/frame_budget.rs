@@ -804,7 +804,7 @@ mod tests {
         let rooms = HashMap::from([("room".to_string(), std::collections::HashSet::from(in_room))]);
         let (ws_cmd_tx, mut ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut b = FrameBudget::default();
-        let ask = HavenMessage::SyncRequest { server_id: "s".into(), state_vector_json: "{}".into(), mls_epoch: None, nonce: None, full: None };
+        let ask = HavenMessage::SyncRequest { server_id: "s".into(), state_vector_json: "{}".into(), mls_epoch: None, nonce: None, full: None, digest: None, dg: None };
         let key_ask = HavenMessage::MlsKeyPackageRequest { server_id: "s".into(), channel_id: None };
         pace_carried(&mut b, &ws_cmd_tx, "pace-me", "pace-friend-a", &ask);
         pace_carried(&mut b, &ws_cmd_tx, "pace-me", "pace-sibling", &ask);

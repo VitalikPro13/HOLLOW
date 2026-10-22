@@ -250,8 +250,7 @@ impl DoorRooms {
         ws_cmd_tx: &WsCmdTx,
     ) -> bool {
         // A door ask carries no state vector, so the notice reaches back to the anchor.
-        let nothing_held = crate::crdt::sync::StateVector { server_id: room.to_string(), entries: HashMap::new() };
-        let notice = crate::crdt::sync::removal_notice(state, master, &nothing_held);
+        let notice = crate::crdt::sync::removal_notice(state, master, &|_| true);
         let Some(removal) = notice.last().map(|op| op.hlc.clone()) else {
             hollow_log!("[HOLLOW-SECURITY] Not answering a door ask in {room} from {asker}: no device of a member");
             return false;
@@ -273,7 +272,7 @@ impl DoorRooms {
             ws_cmd_tx,
             asker,
             Some(room),
-            &HavenMessage::SyncResponse { server_id: room.to_string(), ops_json, nonce: None, page: None },
+            &HavenMessage::SyncResponse { server_id: room.to_string(), ops_json, nonce: None, page: None, digest: None, dg: Some(super::op_sync::DG) },
             super::olm_lane::NoSession::Drop,
         );
         true

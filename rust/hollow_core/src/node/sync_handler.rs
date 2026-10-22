@@ -62,13 +62,13 @@ pub(crate) fn fan_to_own_siblings(
     sent
 }
 
-/// Carry a `CrdtOpBroadcast` to every member device inside Olm: the path that does
-/// not depend on anyone's MLS epoch.
+/// Carry a `CrdtOpBroadcast` to every member device and to our own online siblings
+/// inside Olm: the path that does not depend on anyone's MLS epoch, and the author's
+/// guarantee, since no receiver forwards an op on over the relay.
 ///
-/// Tier 2 (`reports/shipped/relay-and-sync/LARGE_SERVER_SCALING_2026.md`): when the server's gossip
-/// overlay has live data channels the op floods over the P2P mesh instead, so the
-/// sender stops paying O(members x devices) relay uploads. Falls back to the relay
-/// fan-out whenever the mesh cannot carry it.
+/// The WebRTC mesh gets it too when the server's overlay has live data channels; it is a
+/// faster path, never the only one (`reports/shipped/relay-and-sync/LARGE_SERVER_SCALING_2026.md`).
+#[allow(clippy::too_many_arguments)]
 fn broadcast_crdt_op_to_members(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -76,15 +76,15 @@ fn broadcast_crdt_op_to_members(
     event_tx: &mpsc::Sender<NetworkEvent>,
     state: &ServerState,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: &str,
     op_json: &str,
 ) {
-    if super::gossip_relay::flood_crdt_op(gossip_overlays, event_tx, server_id, op_json, None) > 0 {
-        return;
-    }
-    carry_to_members(
-        ws_cmd_tx, ws_room_peers, state, local_peer_str,
-        &HavenMessage::CrdtOpBroadcast { server_id: server_id.to_string(), op_json: op_json.to_string() },
+    super::gossip_relay::flood_crdt_op(gossip_overlays, event_tx, server_id, op_json, None);
+    let msg = HavenMessage::CrdtOpBroadcast { server_id: server_id.to_string(), op_json: op_json.to_string() };
+    carry_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, &msg);
+    super::olm_lane::carry_to_own_siblings(
+        ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, &msg, super::olm_lane::NoSession::Queue,
     );
 }
 
@@ -150,8 +150,9 @@ fn broadcast_op_mls_first(
             hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed, the Olm twin still goes: {e}");
         }
     }
+    // The room peer lists never hold this device, so skipping it needs no device id.
     broadcast_crdt_op_to_members(
-        ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, server_id, &op_json,
+        ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, "", server_id, &op_json,
     );
 }
 
@@ -172,12 +173,7 @@ fn broadcast_op_with_fan(
 ) {
     let Ok(op_json) = serde_json::to_string(op) else { return };
     broadcast_crdt_op_to_members(
-        ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, server_id, &op_json,
-    );
-    super::olm_lane::carry_to_own_siblings(
-        ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id,
-        &HavenMessage::CrdtOpBroadcast { server_id: server_id.to_string(), op_json },
-        super::olm_lane::NoSession::Queue,
+        ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, local_device_id, server_id, &op_json,
     );
 }
 
@@ -1073,6 +1069,7 @@ pub(crate) async fn repair_after_gap(
     pending_server_joins: &HashMap<String, PendingJoin>,
     relay_catchup_done: &mut std::collections::HashSet<(String, String)>,
     join_hold: &mut super::join_hold::JoinHold,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
     hidden: &(dyn Fn(&str) -> bool + Sync),
     sync_coordinator: &mut SyncCoordinator,
     budget: &mut super::frame_budget::FrameBudget,
@@ -1084,6 +1081,7 @@ pub(crate) async fn repair_after_gap(
 ) {
     relay_catchup_done.clear();
     join_hold.went_away(server_states);
+    crdt_resync.op_sync.went_away();
     let rooms: std::collections::BTreeSet<String> =
         server_states.keys().chain(pending_server_joins.keys()).cloned().collect();
     for room in &rooms {
@@ -1123,8 +1121,8 @@ pub(crate) async fn repair_after_gap(
     dm_peers.dedup();
 
     ask_peers_to_fill(
-        ws_cmd_tx, server_states, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, budget, mls, local_peer,
-        db_path, db_passphrase,
+        ws_cmd_tx, server_states, crdt_resync, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, budget, mls,
+        local_peer, db_path, db_passphrase,
     )
     .await;
     hollow_log!(
@@ -1144,6 +1142,7 @@ pub(crate) async fn repair_after_drops(
     server_states: &ServerStates,
     ws_room_peers: &WsRoomPeers,
     join_hold: &super::join_hold::JoinHold,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
     sync_coordinator: &mut SyncCoordinator,
     budget: &mut super::frame_budget::FrameBudget,
     mls: Option<&MlsManager>,
@@ -1162,8 +1161,8 @@ pub(crate) async fn repair_after_drops(
         .into_iter()
         .collect();
     ask_peers_to_fill(
-        ws_cmd_tx, server_states, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, budget, mls, local_peer,
-        db_path, db_passphrase,
+        ws_cmd_tx, server_states, crdt_resync, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, budget, mls,
+        local_peer, db_path, db_passphrase,
     )
     .await;
     (server_peers.len(), !dm_peers.is_empty())
@@ -1176,6 +1175,7 @@ pub(crate) async fn repair_after_drops(
 async fn ask_peers_to_fill(
     ws_cmd_tx: &WsCmdTx,
     server_states: &ServerStates,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
     server_peers: &[(String, String)],
     dm_peers: &[String],
     nonce: u64,
@@ -1222,18 +1222,8 @@ async fn ask_peers_to_fill(
 
     for (sid, device) in server_peers {
         let Some(state) = server_states.get(sid) else { continue };
-        if let Ok(state_vector_json) = serde_json::to_string(&crate::crdt::sync::StateVector::from_server_state(state)) {
-            super::frame_budget::pace_carried(
-                budget, ws_cmd_tx, local_peer, device,
-                &HavenMessage::SyncRequest {
-                    server_id: sid.clone(),
-                    state_vector_json,
-                    mls_epoch: mls.and_then(|m| m.epoch(sid).ok()),
-                    nonce: Some(nonce),
-                    full: None,
-                },
-            );
-        }
+        let ask = crdt_resync.sync_ask(state, device, Some(nonce), mls.and_then(|m| m.epoch(sid).ok()));
+        super::frame_budget::pace_carried(budget, ws_cmd_tx, local_peer, device, &ask);
         sync_coordinator.register_peer(sid, device, channel_ts.get(sid).cloned().unwrap_or_default());
     }
     for (device, (since_timestamp, gap)) in dm_peers.iter().zip(anchors) {
@@ -2216,13 +2206,6 @@ pub(crate) fn author_join_lock_op(
         return;
     };
     broadcast_op_mls_first(mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, server_id, &op, crypto_store);
-    if let Ok(op_json) = serde_json::to_string(&op) {
-        super::olm_lane::carry_to_own_siblings(
-            ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id,
-            &HavenMessage::CrdtOpBroadcast { server_id: server_id.to_string(), op_json },
-            super::olm_lane::NoSession::Queue,
-        );
-    }
     // A new server's siblings are in no room of it yet, so this is how they learn it
     // exists.
     if first_lock && state.join_lock.has_lock() {
@@ -4458,5 +4441,41 @@ mod tests {
         assert!(page.contains(&"before-end".to_string()), "a gap row inside the page stays");
         assert!(!page.contains(&"past-end".to_string()), "a gap row past the page's end waits for the next page");
         assert_eq!(page.iter().filter(|m| m.starts_with('t')).count(), 200);
+    }
+}
+
+#[cfg(test)]
+mod g13_twin_tests {
+    use super::*;
+    use crate::crdt::testkeys::keys;
+
+    /// The author's carried twin goes over the relay to every member device even when the
+    /// mesh took the op: no receiver hands it on.
+    #[test]
+    fn broadcast_twin_goes_over_the_relay_even_when_the_mesh_took_it() {
+        let (kp, owner, pk) = keys(1);
+        let (mut state, _) = ServerState::found("S".into(), owner.clone(), kp, pk);
+        let sid = state.server_id.clone();
+        let member = keys(2).1;
+        let ask = crate::crdt::operations::JoinAsk::sign(&sid, 1, &keys(2).0);
+        state
+            .author_checked(CrdtPayload::MemberAdded { peer_id: member.clone(), display_name: "m".into(), follow: None, ask: Some(ask) })
+            .expect("the owner admits");
+        let rooms: WsRoomPeers = HashMap::from([(sid.clone(), std::collections::HashSet::from([member.clone()]))]);
+        let mut overlay = super::super::gossip::GossipOverlay::new(sid.clone());
+        overlay.add_known_peer("neighbour");
+        overlay.peer_scores.get_mut("neighbour").expect("scored").mark_connected();
+        let mut overlays: GossipOverlays = HashMap::from([(sid.clone(), overlay)]);
+        let (event_tx, mut events) = tokio::sync::mpsc::channel(8);
+        let (ws_tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        broadcast_crdt_op_to_members(&ws_tx, &rooms, &mut overlays, &event_tx, &state, &owner, "our-device", &sid, "{}");
+        assert!(matches!(events.try_recv(), Ok(NetworkEvent::GossipRelayOp { .. })), "the mesh took the op");
+        let mut carried_to = Vec::new();
+        while let Ok(cmd) = ws_rx.try_recv() {
+            if let super::super::ws_client::WsCommand::Carry { device, .. } = cmd {
+                carried_to.push(device);
+            }
+        }
+        assert_eq!(carried_to, [member], "the member got no carried twin over the relay");
     }
 }

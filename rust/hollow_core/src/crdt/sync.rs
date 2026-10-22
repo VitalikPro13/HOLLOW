@@ -55,16 +55,18 @@ pub fn compute_delta<'a>(our_ops: &'a [CrdtOp], their_vector: &StateVector) -> V
         .collect()
 }
 
+/// Whether `their_vector` leaves `op` unseen: what `compute_delta` sends.
+pub fn vector_lacks(their_vector: &StateVector) -> impl Fn(&CrdtOp) -> bool + '_ {
+    |op| their_vector.entries.get(&op.author).is_none_or(|latest| op.hlc > *latest)
+}
+
 /// What a former member asking to sync is told: the op that ended its membership and,
-/// of the ops before it that `their_vector` lacks, those deciding who belongs and at
-/// what rank for the identities that op rests on. Never an op stamped after it, and
-/// nothing for an identity the log never shows as a member.
-pub fn removal_notice<'a>(state: &'a ServerState, master: &str, their_vector: &StateVector) -> Vec<&'a CrdtOp> {
+/// of the ops before it the asker `lacks`, those deciding who belongs and at what rank
+/// for the identities that op rests on. Never an op stamped after it, and nothing for an
+/// identity the log never shows as a member.
+pub fn removal_notice<'a>(state: &'a ServerState, master: &str, lacks: &dyn Fn(&CrdtOp) -> bool) -> Vec<&'a CrdtOp> {
     let Some(removal) = membership_end(state, master) else { return Vec::new() };
-    let mut earlier: Vec<&CrdtOp> = compute_delta(&state.op_log, their_vector)
-        .into_iter()
-        .filter(|op| op.hlc < removal.hlc)
-        .collect();
+    let mut earlier: Vec<&CrdtOp> = state.op_log.iter().filter(|op| op.hlc < removal.hlc && lacks(op)).collect();
     earlier.push(removal);
     // Grown by the author of every op picked for one of its identities until stable.
     let mut chain: HashSet<&str> = HashSet::from([master, removal.author.as_str()]);
@@ -439,8 +441,8 @@ mod tests {
         s
     }
 
-    fn nothing_held(sid: &str) -> StateVector {
-        StateVector { server_id: sid.into(), entries: HashMap::new() }
+    fn nothing_held(_sid: &str) -> impl Fn(&CrdtOp) -> bool {
+        |_| true
     }
 
     /// B left while X was a plain member; X was made a moderator and kicked B, then was
@@ -468,7 +470,8 @@ mod tests {
         let members = folded(&sid, &[before.clone(), after].concat());
         assert!(!members.is_member(&id(b)) && members.is_banned(&id(b)));
 
-        let notice = removal_notice(&members, &id(b), &StateVector::from_server_state(&away));
+        let away_vector = StateVector::from_server_state(&away);
+        let notice = removal_notice(&members, &id(b), &vector_lacks(&away_vector));
         let kinds: Vec<&str> = notice.iter().map(|op| payload_name(&op.payload)).collect();
         assert_eq!(kinds, ["RoleChanged", "MemberRemoved"], "only the kick and the promotion behind it");
         assert!(notice.iter().all(|op| op.hlc <= kick.hlc), "an op from after the removal was handed over");

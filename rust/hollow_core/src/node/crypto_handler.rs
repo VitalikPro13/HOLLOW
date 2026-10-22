@@ -3018,6 +3018,8 @@ pub(crate) async fn handle_mls_commit_frame(
     mls_mgr: &mut MlsManager,
     crypto_store: &CryptoStore,
     server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
+    // g13-s1a: the CRDT sync ask a held commit sends goes through the shared builder.
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
@@ -3086,21 +3088,10 @@ pub(crate) async fn handle_mls_commit_frame(
             // The committer's view is ahead of ours: pull its ops so the batch tick's
             // retry can pass.
             let state = server_states.get(server_id);
-            if let (Some(state), Some((partner, _))) = (state, mls_sync_partner(state, committer.as_ref(), Some(frame_sender)))
-                && let Ok(sv) = serde_json::to_string(&crate::crdt::sync::StateVector::from_server_state(state))
-            {
-                // No epoch hint, we already hold its commit.
-                super::olm_lane::carry(
-                    ws_cmd_tx, partner, None,
-                    &HavenMessage::SyncRequest {
-                        server_id: server_id.to_string(),
-                        state_vector_json: sv,
-                        mls_epoch: None,
-                        nonce: None,
-                        full: None,
-                    },
-                    super::olm_lane::NoSession::Queue,
-                );
+            if let (Some(state), Some((partner, _))) = (state, mls_sync_partner(state, committer.as_ref(), Some(frame_sender))) {
+                // No epoch hint, we already hold its commit. (g13-s1a: the shared sync ask.)
+                let ask = crdt_resync.sync_ask(state, partner, None, None);
+                super::olm_lane::carry(ws_cmd_tx, partner, None, &ask, super::olm_lane::NoSession::Queue);
             }
             CommitApplyOutcome::Held
         }

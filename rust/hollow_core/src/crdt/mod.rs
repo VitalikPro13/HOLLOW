@@ -1,5 +1,6 @@
 pub(crate) mod admin_lww;
 pub(crate) mod anchor;
+pub(crate) mod digest;
 pub(crate) mod fold;
 pub(crate) mod hlc;
 pub(crate) mod lock_state;

@@ -1676,6 +1676,8 @@ pub(crate) struct DebugSnapshotReply {
     pub resync_marks: std::collections::HashMap<String, super::crdt_resync::Mark>,
     /// server_id -> the device asked for its whole log now.
     pub resync_asks: std::collections::HashMap<String, String>,
+    /// Device -> whether its sync frames show it reads digests (`op_sync`).
+    pub digest_caps: std::collections::HashMap<String, bool>,
 }
 
 // -- Wire protocol types (v2: encrypted) --
@@ -1761,6 +1763,13 @@ pub(crate) enum HavenMessage {
         /// client ignores it and answers the state vector without a `page`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         full: Option<super::crdt_resync::FullAsk>,
+        /// What the asker holds as a range digest; when present the vector is ignored
+        /// (`crdt::digest`). An older client ignores it and finds the vector empty.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest: Option<crate::crdt::digest::OpDigest>,
+        /// Set by a sender that reads digests (`op_sync::DG`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dg: Option<u8>,
     },
 
     #[serde(rename = "sync_response")]
@@ -1773,6 +1782,12 @@ pub(crate) enum HavenMessage {
         /// Set on the answer to a `full` ask.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         page: Option<super::crdt_resync::FullPage>,
+        /// Set on the answer to a digest ask.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest: Option<crate::crdt::digest::DigestReply>,
+        /// Set by a sender that reads digests (`op_sync::DG`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dg: Option<u8>,
     },
 
     /// Full server state snapshot, sent alongside the op log when serving a join.
@@ -5355,7 +5370,7 @@ mod epoch_catchup_wire_tests {
     fn sync_request_without_epoch_parses_to_none() {
         let json = r#"{"type":"sync_request","server_id":"srv1","state_vector_json":"{}"}"#;
         match serde_json::from_str::<HavenMessage>(json) {
-            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce: None, full: None }) => {
+            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce: None, full: None, digest: None, dg: None }) => {
                 assert_eq!(server_id, "srv1");
                 assert_eq!(state_vector_json, "{}");
                 assert!(mls_epoch.is_none());
@@ -5374,9 +5389,47 @@ mod epoch_catchup_wire_tests {
             mls_epoch: None,
             nonce: None,
             full: None,
+            digest: None,
+            dg: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"sync_request","server_id":"s","state_vector_json":"{}"}"#);
+    }
+
+    /// A 0.12.2 build reads a digest ask as a vector ask whose vector it cannot parse, so it
+    /// stays silent, and reads a digest answer as a plain answer to its ask.
+    #[test]
+    fn digest_frames_parse_in_the_0_12_2_shape() {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type")]
+        enum Old {
+            #[serde(rename = "sync_request")]
+            SyncRequest { state_vector_json: String },
+            #[serde(rename = "sync_response")]
+            SyncResponse { ops_json: String, #[serde(default)] nonce: Option<u64> },
+        }
+        let digest = crate::crdt::digest::OpDigest {
+            ask: 1, salt: crate::crdt::digest::new_salt(), base: None, from: Some(0), ranges: Vec::new(), round: 0,
+        };
+        let ask = HavenMessage::SyncRequest {
+            server_id: "s".into(), state_vector_json: String::new(), mls_epoch: Some(3), nonce: Some(9), full: None,
+            digest: Some(digest), dg: Some(1),
+        };
+        match serde_json::from_str::<Old>(&serde_json::to_string(&ask).unwrap()).unwrap() {
+            Old::SyncRequest { state_vector_json } => {
+                assert!(serde_json::from_str::<crate::crdt::sync::StateVector>(&state_vector_json).is_err());
+            }
+            Old::SyncResponse { .. } => panic!("wrong variant"),
+        }
+        let reply = HavenMessage::SyncResponse {
+            server_id: "s".into(), ops_json: "[]".into(), nonce: Some(9), page: None,
+            digest: Some(crate::crdt::digest::DigestReply { ask: 1, round: 0, groups: Vec::new(), vector: false }),
+            dg: Some(1),
+        };
+        match serde_json::from_str::<Old>(&serde_json::to_string(&reply).unwrap()).unwrap() {
+            Old::SyncResponse { ops_json, nonce } => assert_eq!((ops_json.as_str(), nonce), ("[]", Some(9))),
+            Old::SyncRequest { .. } => panic!("wrong variant"),
+        }
     }
 
     #[test]
@@ -5387,6 +5440,8 @@ mod epoch_catchup_wire_tests {
             mls_epoch: Some(6),
             nonce: None,
             full: None,
+            digest: None,
+            dg: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""mls_epoch":6"#), "epoch missing from wire: {json}");

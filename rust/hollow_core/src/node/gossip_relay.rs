@@ -101,6 +101,27 @@ pub(crate) fn flood_crdt_op(
     }
 }
 
+tokio::task_local! {
+    /// Set while a CRDT op that arrived over the WebRTC mesh is ingested.
+    pub(crate) static VIA_MESH: ();
+}
+
+/// Whether the op being ingested arrived over the WebRTC mesh.
+pub(crate) fn via_mesh() -> bool {
+    VIA_MESH.try_with(|_| ()).is_ok()
+}
+
+/// Who a receiver hands a NEW op on to: nobody, except that an op that came over the mesh
+/// and could not be flooded on, from an author none of whose devices is known to read
+/// digests (an older build, which sends no carried copy when its mesh took the op), goes
+/// to the `online` member devices, as every receiver once did.
+pub(crate) fn hand_on_to(via_mesh: bool, flooded: usize, author_reads_digest: bool, online: Vec<String>, sender: &str) -> Vec<String> {
+    if !via_mesh || flooded > 0 || author_reads_digest {
+        return Vec::new();
+    }
+    online.into_iter().filter(|d| d != sender).collect()
+}
+
 /// Ingest gate for a gossip CRDT-op frame received on a data channel (0x04):
 /// parse and dedup by broadcast_id. `Some((server_id, op_json))` when the frame
 /// is fresh, and the caller ingests it through the SAME validated path as a relay
@@ -218,5 +239,19 @@ mod tests {
             ttl < MAX_BROADCAST_TTL,
             "relayed ttl {ttl} must be under MAX_BROADCAST_TTL ({MAX_BROADCAST_TTL})",
         );
+    }
+}
+
+#[cfg(test)]
+mod g13_tests {
+    use super::*;
+
+    #[test]
+    fn only_an_older_authors_mesh_op_nobody_else_carried_is_handed_on() {
+        let online = || vec!["a".to_string(), "sender".to_string()];
+        assert!(hand_on_to(false, 0, false, online(), "sender").is_empty(), "a relay op was handed on");
+        assert!(hand_on_to(true, 2, false, online(), "sender").is_empty(), "a flooded mesh op was handed on");
+        assert!(hand_on_to(true, 0, true, online(), "sender").is_empty(), "a 0.13 author's mesh op was handed on");
+        assert_eq!(hand_on_to(true, 0, false, online(), "sender"), ["a"]);
     }
 }

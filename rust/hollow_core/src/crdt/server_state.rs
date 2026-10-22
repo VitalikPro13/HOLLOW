@@ -350,6 +350,8 @@ pub struct ServerState {
     /// can race ahead of the role grant or admission it depends on.
     #[serde(skip)]
     pub(super) held: Vec<(CrdtOp, std::time::Instant)>,
+    #[serde(skip)]
+    pub(crate) id_memo: super::digest::IdMemo,
     /// Set by the node right after `set_hlc` on any state that authors ops.
     /// Never persisted and never sent: it is our own secret.
     #[serde(skip)]
@@ -373,7 +375,7 @@ impl ServerState {
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
             member_record, join_secret, join_lock, owner_pin, checkpoint_hlc,
-            op_log: _, hlc: _, op_log_dedup: _, held: _, signer: _,
+            op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, signer: _,
         } = self;
         ServerState {
             server_id: server_id.clone(),
@@ -405,6 +407,7 @@ impl ServerState {
             hlc: None,
             op_log_dedup: HashSet::new(),
             held: Vec::new(),
+            id_memo: Default::default(),
             signer: None,
         }
     }
@@ -442,6 +445,7 @@ impl ServerState {
             hlc: None,
             op_log_dedup: HashSet::new(),
             held: Vec::new(),
+            id_memo: Default::default(),
             signer: None,
         }
     }
@@ -804,7 +808,7 @@ impl ServerState {
             channel_layout: _, labels: _, label_assignments: _, emotes: _,
             stickers: _, deleted: _, member_record: _, owner_pin: _,
             checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _, held: _,
-            signer: _,
+            id_memo: _, signer: _,
         } = self;
 
         if name.clamp_hlc(max_ms) {
@@ -887,11 +891,7 @@ impl ServerState {
     pub(super) fn prune_before_checkpoint(&mut self) {
         let Some(base) = self.checkpoint_hlc.clone() else { return };
         let genesis = super::anchor::is_genesis_id(&self.server_id);
-        self.op_log.retain(|o| match &o.payload {
-            CrdtPayload::ServerCheckpoint { covers, .. } => *covers >= base,
-            CrdtPayload::ServerCreated { .. } if genesis => true,
-            _ => o.hlc > base,
-        });
+        self.op_log.retain(|o| retained_under(o, &base, genesis));
         self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
     }
 
@@ -1367,7 +1367,7 @@ impl ServerState {
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
             member_record, join_secret, join_lock,
             owner_pin: _, checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _,
-            held: _, signer: _,
+            held: _, id_memo: _, signer: _,
         } = base;
         self.name = name;
         self.channels = channels;
@@ -1415,7 +1415,7 @@ impl ServerState {
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
             member_record, join_secret, join_lock, checkpoint_hlc,
-            owner_pin: _, op_log: _, hlc: _, op_log_dedup: _, held: _, signer: _,
+            owner_pin: _, op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, signer: _,
         } = fresh;
         self.name = name;
         self.channels = channels;
@@ -2212,6 +2212,16 @@ impl ServerState {
 /// covers and after any op at that same clock (the op it covered).
 pub(super) fn fold_order(a: &CrdtOp, b: &CrdtOp) -> std::cmp::Ordering {
     fold_key(a).cmp(&fold_key(b))
+}
+
+/// Whether a checkpoint at `base` leaves `op` in the log: a checkpoint covering at least
+/// `base`, the founding op of a self-certifying id, and anything after `base`.
+pub(crate) fn retained_under(op: &CrdtOp, base: &HlcTimestamp, genesis: bool) -> bool {
+    match &op.payload {
+        CrdtPayload::ServerCheckpoint { covers, .. } => covers >= base,
+        CrdtPayload::ServerCreated { .. } if genesis => true,
+        _ => op.hlc > *base,
+    }
 }
 
 /// An op's place in the fold: a checkpoint sits at what it covers.

@@ -418,6 +418,23 @@ The core convergence function. Every mutation to ServerState goes through this s
 
 ---
 
+## Range Digest Sync (`digest.rs`, `node/op_sync.rs`, 0.13)
+
+Catch-up sync between 0.13 devices compares SETS, not per-author tips. The asker sends
+about log2(ops) ranges of its retained ops plus the unread ops `crdt_resync` keeps (by fold
+MILLISECOND, filtered by its own checkpoint `base`), each as (count, wrapping sum of one
+AES-128 block per op id under a salt the asker picks per peer), and "everything at or after
+`from`" (its newest ms + 1). The answerer sends its ops in a differing range when it holds at
+most 32 there, else splits it (budget 256 sub-ranges per answer) and the asker compares
+again for the same ask id; round 6 always sends. Non-members are never fingerprinted (the
+removal notice only). Per-device form: a frame's `dg` mark says the sender reads digests; an
+unknown device gets the digest with an empty vector (a 0.12.2 build cannot parse it and stays
+silent), so silence for 5 s, or the device's own request without the mark, re-asks it with
+the vector. Legacy-anchored replicas keep the vector. The per-author vector LOSES ops (an
+author's op older than its newest one we hold is never sent: sibling clocks, expired held
+ops); tests `sibling_op_older_than_the_vector_tip_still_syncs`,
+`held_op_expired_after_a_later_op_still_syncs`. The vector path goes in 0.14.
+
 ## State Vector Sync Protocol (`sync.rs`)
 
 Efficient delta-based synchronization between peers. Instead of exchanging full state, peers exchange compact state vectors and then only send the operations the other side is missing.

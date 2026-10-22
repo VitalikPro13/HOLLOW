@@ -220,6 +220,8 @@ pub(crate) struct CrdtResync {
     partial_seen: HashSet<(String, String)>,
     serving: ServeBudget,
     next_tick: Option<Instant>,
+    /// Digest asks and what each peer device reads (`op_sync`).
+    pub(crate) op_sync: super::op_sync::OpSync,
 }
 
 impl CrdtResync {
@@ -314,7 +316,48 @@ impl CrdtResync {
             partial_seen: HashSet::new(),
             serving: ServeBudget::default(),
             next_tick: None,
+            op_sync: Default::default(),
         }
+    }
+
+    /// The signed ops of `server_id` we keep unread: part of what a digest compares.
+    fn kept_refs<'k>(kept: &'k HashMap<String, Vec<Kept>>, server_id: &str) -> Vec<crate::crdt::digest::KeptRef<'k>> {
+        kept
+            .get(server_id)
+            .map(|kept| {
+                kept.iter().map(|k| crate::crdt::digest::KeptRef { author: &k.author, hlc: &k.hlc, raw: &k.raw }).collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The CRDT sync ask for `state` to `device`, in the form that device reads.
+    pub(crate) fn sync_ask(&mut self, state: &ServerState, device: &str, nonce: Option<u64>, mls_epoch: Option<u64>) -> HavenMessage {
+        let kept = Self::kept_refs(&self.kept, &state.server_id);
+        self.op_sync.ask(state, &kept, device, nonce, mls_epoch)
+    }
+
+    /// The next step after a digest answer from `device`.
+    pub(crate) fn digest_answered(
+        &mut self,
+        state: &ServerState,
+        device: &str,
+        reply: &crate::crdt::digest::DigestReply,
+    ) -> super::op_sync::Step {
+        let kept = Self::kept_refs(&self.kept, &state.server_id);
+        self.op_sync.answered(state, &kept, device, reply)
+    }
+
+    /// A member's digest answered from our log and kept ops: the ops JSON and the reply.
+    /// `None` for an ask no honest member sends.
+    pub(crate) fn answer_digest(
+        &self,
+        state: &ServerState,
+        ask: &crate::crdt::digest::OpDigest,
+    ) -> Option<(String, crate::crdt::digest::DigestReply)> {
+        let kept = Self::kept_refs(&self.kept, &state.server_id);
+        let entries = crate::crdt::digest::entries(state, &kept, ask.base.as_ref());
+        let (items, reply) = crate::crdt::digest::answer(&entries, ask)?;
+        Some((crate::crdt::digest::items_json(&items), reply))
     }
 
     /// Signed ops of `server_id` this build cannot read were skipped (vouched by the
@@ -735,6 +778,8 @@ fn request(server_id: &str, state_vector_json: String, nonce: u64, after: Option
         mls_epoch: None,
         nonce: Some(nonce),
         full: Some(FullAsk { after }),
+        digest: None,
+        dg: Some(super::op_sync::DG),
     }
 }
 

@@ -644,7 +644,12 @@ CRDT ops flood the WebRTC mesh instead of paying the relay's O(N) egress
   `GossipOverlay::connected_relay_targets()` (neighbors whose data channel is
   LIVE per `PeerScore.connected_since`), emitted as ONE
   `NetworkEvent::GossipRelayOp { targets, payload }` (Dart fans the frame out).
-  Returns 0 → caller falls back to the per-identity relay `SendDirect` loop.
+  Since g13 (0.13) the author ALSO always carries the Olm twin to every member device
+  and its own siblings over the relay: the mesh is a speed-up, never the only path, and
+  no receiver re-forwards over the relay (that was N x (N-1) frames per leave/kick/ban,
+  `SCALE_PROBE_2026_10.md` 2.4). A receiver re-floods the mesh once per new op; an op that
+  ARRIVED over the mesh and could not be flooded on goes to `leafless_member_devices()`
+  only (`gossip_relay::hand_on_to`), the crutch for a 0.12.2 author that sent no twin.
   Uses `event_tx.try_send` so it stays callable from sync helpers.
 - **Receive:** Dart hands `0x04` frames to `webrtc_gossip_op_received()` FFI →
   `NodeCommand::WebRtcGossipOpReceived` → `gossip_relay.rs:accept_gossip_op()`
