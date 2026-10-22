@@ -342,9 +342,10 @@ impl CrdtResync {
         state: &ServerState,
         device: &str,
         reply: &crate::crdt::digest::DigestReply,
+        epoch_now: Option<u64>,
     ) -> super::op_sync::Step {
         let kept = Self::kept_refs(&self.kept, &state.server_id);
-        self.op_sync.answered(state, &kept, device, reply)
+        self.op_sync.answered(state, &kept, device, reply, epoch_now)
     }
 
     /// A member's digest answered from our log and kept ops: the ops JSON and the reply.

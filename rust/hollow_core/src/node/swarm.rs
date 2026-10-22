@@ -6404,12 +6404,31 @@ async fn run_event_loop(
                 for (device, ask) in resync_asks {
                     super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &ask);
                 }
-                let (silent, joined) = crdt_resync.op_sync.tick(std::time::Instant::now(), &|device| frame_budget.lane_holds(device));
-                for (sid, device, nonce, epoch) in silent {
-                    if let Some(state) = server_states.get(&sid) {
-                        hollow_log!("[HOLLOW-CRDT] {device} left a digest ask for {sid} unanswered: asking with the state vector");
-                        let ask = super::op_sync::vector_ask(state, nonce, epoch);
-                        super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &ask);
+                let (silent, joined) = crdt_resync.op_sync.tick(
+                    std::time::Instant::now(),
+                    &|device| frame_budget.lane_holds(device) || pending_messages.get(device).is_some_and(|q| !q.is_empty()),
+                    &|sid| mls.as_ref().and_then(|m| m.epoch(sid).ok()),
+                );
+                for step in silent {
+                    match step {
+                        super::op_sync::Silent::Again(sid, device, ask) => {
+                            // A device that left the server, or that no room reaches now, is not asked.
+                            if server_states.get(&sid).is_some_and(|s| s.is_member(&device))
+                                && super::crypto_handler::send_room_for_peer(&ws_room_peers, &device).is_some()
+                            {
+                                super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &ask);
+                            }
+                        }
+                        super::op_sync::Silent::Vector(sid, device, nonce, epoch) => {
+                            if let Some(state) = server_states.get(&sid) {
+                                hollow_log!("[HOLLOW-CRDT] {device} left a digest ask for {sid} unanswered: asking with the state vector");
+                                let ask = super::op_sync::vector_ask(state, nonce, epoch);
+                                super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &ask);
+                            }
+                        }
+                        super::op_sync::Silent::Closed(sid, device) => {
+                            hollow_log!("[HOLLOW-CRDT] {device} left every copy of a digest ask for {sid} unanswered: no more copies");
+                        }
                     }
                 }
                 for sid in joined {
@@ -10222,7 +10241,7 @@ async fn handle_incoming_request_inner(
             // digest asks to that device go again in the form it reads.
             // Only a member of a server we hold teaches us what its device reads.
             let heard: Vec<(String, Option<u64>, Option<u64>)> = if server_states.values().any(|s| s.is_member(peer_str)) {
-                crdt_resync.op_sync.heard_request(peer_str, dg)
+                crdt_resync.op_sync.heard_request(peer_str, dg, &|sid| mls.as_ref().and_then(|m| m.epoch(sid).ok()))
             } else {
                 Vec::new()
             };
@@ -10751,7 +10770,7 @@ async fn handle_incoming_request_inner(
             if let (Some(reply), Some(sid)) = (&digest, &digest_sid)
                 && let Some(state) = server_states.get(sid)
             {
-                match crdt_resync.digest_answered(state, peer_str, reply) {
+                match crdt_resync.digest_answered(state, peer_str, reply, mls.as_ref().and_then(|m| m.epoch(sid).ok())) {
                     super::op_sync::Step::Again(next) => {
                         super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, device_peer_id, peer_str, &next);
                     }

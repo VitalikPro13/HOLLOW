@@ -54400,3 +54400,199 @@ async fn g13s3_knocks_on_an_open_meeting_are_seated_together() {
     let epochs = host.mls_epoch(&conf_sid).await.unwrap() - start;
     assert!(epochs < guests.len() as u64, "{epochs} commits for {} knocks sent together", guests.len());
 }
+
+// g13w2-g-sync-fallback
+
+/// The CRDT sync asks `node` aimed at `device`: (digest asks, state vector asks).
+async fn g13w2_sync_asks(node: &TestNode, device: &str) -> (usize, usize) {
+    node.carried_to(device).await.into_iter().fold((0, 0), |(d, v), msg| match msg {
+        super::types::HavenMessage::SyncRequest { digest: Some(_), .. } => (d + 1, v),
+        super::types::HavenMessage::SyncRequest { digest: None, full: None, state_vector_json, .. } if !state_vector_json.is_empty() => {
+            (d, v + 1)
+        }
+        _ => (d, v),
+    })
+}
+
+/// The digest sync answers `node` aimed at `device`.
+async fn g13w2_digest_answers(node: &TestNode, device: &str) -> usize {
+    node.carried_to(device)
+        .await
+        .into_iter()
+        .filter(|m| matches!(m, super::types::HavenMessage::SyncResponse { digest: Some(_), .. }))
+        .count()
+}
+
+/// Lose every Olm frame held from `from` to `to` once those `from` aimed at `to` since
+/// `noted` reached the relay, then stop holding.
+async fn g13w2_lose_held(relay: &MockRelay, from: &TestNode, to: &str, noted: usize) {
+    assert!(
+        wait_until(15, async || relay.held_kinds(&from.device_id, to).len() >= from.carried_to(to).await.len() - noted).await,
+        "the frames never reached the relay",
+    );
+    relay.discard_held_kind(&from.device_id, to, "encrypted");
+    relay.release_held(&from.device_id, to);
+}
+
+/// A 0.13 device whose digest answers come late (after the old 2 s fallback) is never
+/// asked with the per-author state vector: the ask goes again unchanged, and the late
+/// answer still counts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w2_a_late_digest_answer_brings_no_vector() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, sid) = three_member_server(&relay, 247, 248, 249).await;
+    go_offline(&relay, &x, &sid).await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: sid.clone(), channel_id: "while-away".into(), name: "w".into(), category: None, channel_type: "text".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || m.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("while-away"))).await,
+        "M took the op",
+    );
+    // Only catch-up sync may deliver, and every answer to X is late. A restart forgets
+    // what each device reads, as a joiner has never learned it.
+    relay.expire_mailbox(&x.device_id);
+    for from in [&o.device_id, &m.device_id] {
+        relay.hold_direct(from, &x.device_id);
+    }
+    let x = restart_node(&relay, x, 249, 249).await;
+    assert!(
+        wait_until(20, async || {
+            g13w2_sync_asks(&x, &o.device_id).await.0 >= 1 && g13w2_sync_asks(&x, &m.device_id).await.0 >= 1
+        })
+        .await,
+        "X never asked the members",
+    );
+    // Past the first copy's wait (and the 2 s after which X used to send the vector).
+    sleep_ms(4_500).await;
+    assert!(!x.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("while-away")), "control: nothing reached X");
+    for from in [&o.device_id, &m.device_id] {
+        relay.release_held(from, &x.device_id);
+    }
+    assert!(
+        wait_until(20, async || x.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("while-away"))).await,
+        "X never caught up from the late answers",
+    );
+    for (who, device) in [("O", &o.device_id), ("M", &m.device_id)] {
+        let (digest, vector) = g13w2_sync_asks(&x, device).await;
+        assert_eq!(vector, 0, "{who}, a 0.13 device that answered late, was asked with the state vector");
+        assert!(digest >= 2, "X never sent {who} its silent ask again ({digest})");
+    }
+}
+
+/// A 0.12.2 device that never shows its form and leaves every copy of the digest ask
+/// unanswered is still asked with the state vector, and the asker catches up from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w2_a_silent_old_peer_still_gets_the_vector() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let _old = super::op_sync::act_old_for_test(&NativeKeypair::from_secret_bytes(&seed_bytes(251)).peer_id());
+    let (o, m, x, sid) = three_member_server(&relay, 250, 251, 252).await;
+    go_offline(&relay, &x, &sid).await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: sid.clone(), channel_id: "from-owner".into(), name: "f".into(), category: None, channel_type: "text".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || m.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("from-owner"))).await,
+        "the old build took the op live",
+    );
+    go_offline(&relay, &o, &sid).await;
+    relay.expire_mailbox(&x.device_id);
+    // X forgets what M reads, and hears nothing from M (whose own requests would show it)
+    // until it asks with the vector.
+    relay.hold_direct(&m.device_id, &x.device_id);
+    let x = restart_node(&relay, x, 252, 252).await;
+    assert!(wait_until(20, async || g13w2_sync_asks(&x, &m.device_id).await.0 >= 1).await, "X never asked M");
+    assert!(wait_until(45, async || g13w2_sync_asks(&x, &m.device_id).await.1 >= 1).await, "the silent old build never got the vector");
+    let (digest, _) = g13w2_sync_asks(&x, &m.device_id).await;
+    assert!(digest >= 3, "the vector went before every copy of the digest ask waited ({digest})");
+    relay.release_held(&m.device_id, &x.device_id);
+    assert!(
+        wait_until(20, async || x.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("from-owner"))).await,
+        "the 0.13 member never caught up from the silent old build",
+    );
+}
+
+/// A digest answer that is lost is not the end: the silent ask goes again, and the
+/// asker catches up without the state vector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w2_a_lost_digest_answer_is_asked_again() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, sid) = three_member_server(&relay, 253, 254, 255).await;
+    let caps = async |n: &TestNode| n.debug_snapshot().await.expect("the loop answers").digest_caps;
+    assert!(wait_until(15, async || caps(&x).await.get(&m.device_id) == Some(&true)).await, "X knows M reads digests");
+    go_offline(&relay, &x, &sid).await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: sid.clone(), channel_id: "lost-answer".into(), name: "l".into(), category: None, channel_type: "text".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || m.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("lost-answer"))).await,
+        "M took the op",
+    );
+    go_offline(&relay, &o, &sid).await;
+    relay.expire_mailbox(&x.device_id);
+    relay.hold_direct(&m.device_id, &x.device_id);
+    let answered_before = g13w2_digest_answers(&m, &x.device_id).await;
+    let noted = m.carried_to(&x.device_id).await.len();
+    relay.set_online(&x.device_id, true);
+    assert!(
+        wait_until(20, async || g13w2_digest_answers(&m, &x.device_id).await > answered_before).await,
+        "M never answered X's digest ask",
+    );
+    g13w2_lose_held(&relay, &m, &x.device_id, noted).await;
+    assert!(
+        wait_until(25, async || x.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("lost-answer"))).await,
+        "X never caught up after its digest answer was lost",
+    );
+    assert_eq!(g13w2_sync_asks(&x, &m.device_id).await.1, 0, "X asked a device that reads digests with the state vector");
+}
+
+/// A silent ask is never sent again to a device that left the server meanwhile: the copy
+/// would show a non-member our log's fingerprints.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w2_no_copy_goes_to_a_device_kicked_meanwhile() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, sid) = three_member_server(&relay, 244, 245, 246).await;
+    let caps = async |n: &TestNode| n.debug_snapshot().await.expect("the loop answers").digest_caps;
+    assert!(wait_until(15, async || caps(&x).await.get(&m.device_id) == Some(&true)).await, "X knows M reads digests");
+    go_offline(&relay, &x, &sid).await;
+    relay.expire_mailbox(&x.device_id);
+    relay.hold_direct(&m.device_id, &x.device_id);
+    let before = g13w2_sync_asks(&x, &m.device_id).await.0;
+    relay.set_online(&x.device_id, true);
+    assert!(wait_until(20, async || g13w2_sync_asks(&x, &m.device_id).await.0 > before).await, "X never asked M");
+    let asked = std::time::Instant::now();
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: sid.clone(), peer_id: m.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || x.live_server_state(&sid).await.is_some_and(|s| !s.is_member(&m.master_id))).await,
+        "X never saw the kick",
+    );
+    assert!(asked.elapsed() < std::time::Duration::from_millis(2_500), "the kick landed after the first copy was due");
+    sleep_ms(7_000).await; // ABSENCE: past the first copy's wait and into the second's
+    assert_eq!(g13w2_sync_asks(&x, &m.device_id).await.0, before + 1, "X sent its silent ask again to a kicked device");
+    relay.release_held(&m.device_id, &x.device_id);
+}
