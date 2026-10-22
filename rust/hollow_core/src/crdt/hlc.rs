@@ -42,65 +42,109 @@ impl PartialOrd for HlcTimestamp {
     }
 }
 
+/// How many counter lanes the siblings of one identity spread over. A WIRE constant:
+/// every device of an identity must agree on it, so it never changes.
+pub(crate) const LANES: u32 = 1 << 24;
+
+/// The counter lane a device mints in. Siblings share the HLC actor (the master, which
+/// `verify_signed` binds to the author), so without their own lanes two of them can
+/// mint the same (master, stamp), and replicas keep whichever copy arrived first.
+pub(crate) fn lane_of(device_peer_id: &str) -> u32 {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("hollow-hlc-lane1:{device_peer_id}").as_bytes());
+    u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % LANES
+}
+
 /// Hybrid Logical Clock — generates monotonically increasing timestamps.
 #[derive(Debug, Clone)]
 pub struct Hlc {
     latest: HlcTimestamp,
     actor: String,
+    /// `None` = the lane-less clock of 0.12.2 and earlier, kept for tests of that shape.
+    lane: Option<u32>,
 }
 
 impl Hlc {
-    /// Create a new HLC seeded with the current wall clock.
+    /// The clock a device signs its master's ops with: every counter it mints is
+    /// congruent to its own lane, so no sibling can mint the same stamp.
+    pub fn for_device(master: String, device_peer_id: &str) -> Self {
+        Self::seeded(master, Some(lane_of(device_peer_id)))
+    }
+
+    /// A lane-less clock, as every client before 0.13 ran.
+    #[cfg(test)]
     pub fn new(actor: String) -> Self {
-        let physical_ms = wall_clock_ms();
+        Self::seeded(actor, None)
+    }
+
+    fn seeded(actor: String, lane: Option<u32>) -> Self {
         Self {
-            latest: HlcTimestamp {
-                physical_ms,
-                counter: 0,
-                actor: actor.clone(),
-            },
+            latest: HlcTimestamp { physical_ms: wall_clock_ms(), counter: 0, actor: actor.clone() },
             actor,
+            lane,
         }
     }
 
-    /// Restore an HLC from persisted state.
+    /// A device's clock last stepped at `(physical_ms, 0)`.
+    #[cfg(test)]
+    pub fn for_device_at(master: String, device_peer_id: &str, physical_ms: u64) -> Self {
+        let mut hlc = Self::for_device(master, device_peer_id);
+        hlc.step_to((physical_ms, 0));
+        hlc
+    }
+
+    /// The lane this clock mints in, `None` for a lane-less one.
+    #[cfg(test)]
+    pub fn lane(&self) -> Option<u32> {
+        self.lane
+    }
+
+    /// A lane-less clock restored at a given point.
+    #[cfg(test)]
     pub fn from_saved(physical_ms: u64, counter: u32, actor: String) -> Self {
         Self {
-            latest: HlcTimestamp {
-                physical_ms,
-                counter,
-                actor: actor.clone(),
-            },
+            latest: HlcTimestamp { physical_ms, counter, actor: actor.clone() },
             actor,
+            lane: None,
         }
     }
 
     /// Generate a new timestamp, guaranteed to be greater than all previously
     /// generated or witnessed timestamps.
     pub fn now(&mut self) -> HlcTimestamp {
-        let wall = wall_clock_ms();
-        if wall > self.latest.physical_ms {
-            self.latest = HlcTimestamp {
-                physical_ms: wall,
-                counter: 0,
-                actor: self.actor.clone(),
-            };
+        self.now_at(wall_clock_ms())
+    }
+
+    fn now_at(&mut self, wall: u64) -> HlcTimestamp {
+        let next = if wall > self.latest.physical_ms {
+            (wall, self.lane.unwrap_or(0))
         } else {
-            self.step_to(successor(self.latest.physical_ms, self.latest.counter));
-        }
+            self.next_after(self.latest.physical_ms, self.latest.counter)
+        };
+        self.step_to(next);
         self.latest.clone()
     }
 
     /// Update the clock after observing a remote timestamp.
     /// Ensures our next `now()` will be strictly greater.
     pub fn witness(&mut self, other: &HlcTimestamp) {
-        let wall = wall_clock_ms();
+        self.witness_at(other, wall_clock_ms());
+    }
 
+    fn witness_at(&mut self, other: &HlcTimestamp, wall: u64) {
         // SECURITY: a peer that advanced our HLC to the far future would give their LWW
         // values permanent precedence. This protects OUR clock only; the op itself is
         // refused against the same bound by `ServerState::ingest_remote`.
         if other.physical_ms > wall + MAX_DRIFT_MS {
             hollow_log!("[HOLLOW-SECURITY] HLC drift rejected: remote physical_ms {} is {} ms ahead of wall clock {}", other.physical_ms, other.physical_ms - wall, wall);
+            return;
+        }
+        if self.lane.is_some() {
+            // Only remember the newest point seen: `now_at` steps past it into our lane,
+            // so a sync batch of old ops cannot stride our counter into the next ms.
+            if (other.physical_ms, other.counter) > (self.latest.physical_ms, self.latest.counter) {
+                self.step_to((other.physical_ms, other.counter));
+            }
             return;
         }
 
@@ -124,20 +168,28 @@ impl Hlc {
         self.step_to(next);
     }
 
+    /// The first stamp after `(physical_ms, counter)` that is ours to mint.
+    fn next_after(&self, physical_ms: u64, counter: u32) -> (u64, u32) {
+        let Some(lane) = self.lane else { return successor(physical_ms, counter) };
+        let (counter, lane64, lanes) = (u64::from(counter), u64::from(lane), u64::from(LANES));
+        let in_block = counter - counter % lanes + lane64;
+        let next = if in_block > counter { in_block } else { in_block + lanes };
+        match u32::try_from(next) {
+            Ok(next) => (physical_ms, next),
+            Err(_) => (physical_ms.saturating_add(1), lane),
+        }
+    }
+
     fn step_to(&mut self, (physical_ms, counter): (u64, u32)) {
         self.latest.physical_ms = physical_ms;
         self.latest.counter = counter;
         self.latest.actor = self.actor.clone();
     }
 
-    /// Current latest timestamp (for persistence).
+    /// The millisecond of the newest stamp minted or witnessed.
+    #[cfg(test)]
     pub fn physical_ms(&self) -> u64 {
         self.latest.physical_ms
-    }
-
-    /// Current counter value (for persistence).
-    pub fn counter(&self) -> u32 {
-        self.latest.counter
     }
 
     /// The actor ID for this clock.
@@ -222,6 +274,88 @@ mod tests {
         assert_ne!(t_a, t_b);
         // Deterministic order: "peer_a" < "peer_b"
         assert!(t_a < t_b);
+    }
+
+    /// Two siblings' clocks, last stepped just before `wall`.
+    fn two_lanes(wall: u64) -> (Hlc, Hlc) {
+        let (mut a, mut b) = (Hlc::for_device("M".into(), "desktop"), Hlc::for_device("M".into(), "phone"));
+        assert_ne!(a.lane, b.lane, "fixture devices must hash to different lanes");
+        a.step_to((wall - 1, 0));
+        b.step_to((wall - 1, 0));
+        (a, b)
+    }
+
+    fn in_lane(hlc: &Hlc, ts: &HlcTimestamp) -> bool {
+        ts.counter % LANES == hlc.lane.unwrap()
+    }
+
+    /// g13-h: the reviewer's probe. Two siblings witnessed the same op from a peer whose
+    /// clock runs ahead, then mint seconds apart: the lane-less clocks mint one stamp.
+    #[test]
+    fn siblings_after_a_peer_ahead_mint_distinct_stamps() {
+        let wall = 1_000_000_000;
+        let ahead = HlcTimestamp { physical_ms: wall + 120_000, counter: 0, actor: "other".into() };
+
+        let (mut old_desktop, mut old_phone) = (Hlc::new("M".into()), Hlc::new("M".into()));
+        old_desktop.witness_at(&ahead, wall);
+        old_phone.witness_at(&ahead, wall);
+        assert_eq!(old_desktop.now_at(wall + 37), old_phone.now_at(wall + 537), "control: the 0.12.2 clock collides");
+
+        let (mut desktop, mut phone) = two_lanes(wall);
+        desktop.witness_at(&ahead, wall);
+        phone.witness_at(&ahead, wall);
+        let (a, b) = (desktop.now_at(wall + 37), phone.now_at(wall + 537));
+        assert_ne!(a, b);
+        assert!(a > ahead && b > ahead, "both still follow what they witnessed");
+        assert!(in_lane(&desktop, &a) && in_lane(&phone, &b));
+    }
+
+    /// g13-h: two siblings minting in the same wall millisecond.
+    #[test]
+    fn siblings_in_one_millisecond_mint_distinct_stamps() {
+        let wall = 1_000_000_000;
+        let (mut old_a, mut old_b) = (Hlc::from_saved(wall - 1, 0, "M".into()), Hlc::from_saved(wall - 1, 0, "M".into()));
+        assert_eq!(old_a.now_at(wall), old_b.now_at(wall), "control: the 0.12.2 clock collides");
+
+        let (mut a, mut b) = two_lanes(wall);
+        for _ in 0..300 {
+            let (ta, tb) = (a.now_at(wall), b.now_at(wall));
+            assert_ne!(ta, tb);
+            assert!(in_lane(&a, &ta) && in_lane(&b, &tb));
+        }
+    }
+
+    /// g13-h: whatever the clock witnesses, each stamp is in the device's lane and above
+    /// everything before it, including at the counter's ceiling.
+    #[test]
+    fn every_stamp_stays_in_the_lane_and_climbs() {
+        let wall = 1_000_000_000;
+        let (mut hlc, _) = two_lanes(wall);
+        let mut last = hlc.now_at(wall);
+        assert!(in_lane(&hlc, &last));
+        let seen = [0, 1, LANES - 1, LANES, LANES + 1, 7 * LANES + 3, u32::MAX - 1, u32::MAX];
+        for counter in seen {
+            let remote = HlcTimestamp { physical_ms: last.physical_ms, counter, actor: "r".into() };
+            hlc.witness_at(&remote, wall);
+            let ts = hlc.now_at(wall);
+            assert!(ts > last && ts > remote, "{ts:?} after {last:?} and {remote:?}");
+            assert!(in_lane(&hlc, &ts), "{ts:?} left the lane");
+            last = ts;
+        }
+    }
+
+    /// g13-h: old stamps a sync batch replays do not stride the counter: the next mint is
+    /// one lane step, not one per witnessed op.
+    #[test]
+    fn witnessing_older_stamps_does_not_move_the_clock() {
+        let wall = 1_000_000_000;
+        let (mut hlc, _) = two_lanes(wall);
+        let first = hlc.now_at(wall);
+        for i in 0..1000u32 {
+            hlc.witness_at(&HlcTimestamp { physical_ms: wall - 1, counter: i, actor: "r".into() }, wall);
+        }
+        let next = hlc.now_at(wall);
+        assert_eq!((next.physical_ms, next.counter), (wall, first.counter + LANES));
     }
 
     #[test]

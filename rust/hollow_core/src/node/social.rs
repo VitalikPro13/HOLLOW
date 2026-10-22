@@ -593,14 +593,16 @@ pub(crate) fn take_sibling_blocks(
             continue;
         }
         let at = entry.at.min(ceiling);
-        if newest.get(&master).is_none_or(|(_, seen)| *seen < at) {
+        // Two devices can block and unblock one person at one stamp: the block wins the
+        // tie everywhere, here and against a lifting we hold.
+        if newest.get(&master).is_none_or(|(_, seen)| *seen < at || (*seen == at && entry.blocked)) {
             newest.insert(master, (entry.blocked, at));
         }
     }
     for (master, (blocked, at)) in newest {
         let blocked_since = held.get(&master).copied();
         if blocked {
-            if blocked_since.is_none() && at > store.block_lifted_at(&master) && store.block_peer_at(&master, at).is_ok() {
+            if blocked_since.is_none() && at >= store.block_lifted_at(&master) && store.block_peer_at(&master, at).is_ok() {
                 hollow_log!("[HOLLOW-MULTIDEV] Blocked {master}, as our other device did");
                 super::overlay::forget_blocked(&store, &master);
                 changed.push((master, true));
@@ -2249,8 +2251,8 @@ fn own_fields<'a>(
 /// our cached blobs for this identity, pull the full profile once via
 /// ProfileRequest.
 ///
-/// Cooldown-deduped per identity (10 min, keyed by OUR device id so harness
-/// nodes sharing one process do not share buckets), so an oversized or
+/// Cooldown-deduped per identity and advertised hashes (10 min, keyed by OUR device
+/// id so harness nodes sharing one process do not share buckets), so an oversized or
 /// undeliverable blob cannot become a request loop. An EMPTY incoming hash
 /// while we cache a blob is deliberately NOT stale: clears ride the full send.
 #[allow(clippy::too_many_arguments)]
@@ -2294,11 +2296,15 @@ pub(crate) fn maybe_request_full_profile(
     static PULLS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
         std::sync::OnceLock::new();
     let pulls = PULLS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let key = format!("{local_device_peer_id}:{profile_master}");
+    // Keyed on what was advertised: a newer profile at a tied stamp names other blobs,
+    // and waiting out the last pull would keep the losing copy's avatar.
+    let key = format!("{local_device_peer_id}:{profile_master}:{avatar_hash}:{banner_hash}:{showcase_assets_hash}");
+    let cooldown = std::time::Duration::from_secs(600);
     if let Ok(mut m) = pulls.lock() {
-        if m.get(&key).is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(600)) {
+        if m.get(&key).is_some_and(|t| t.elapsed() < cooldown) {
             return;
         }
+        m.retain(|_, t| t.elapsed() < cooldown);
         m.insert(key, std::time::Instant::now());
     }
     hollow_log!("[HOLLOW-PROFILE] Cached avatar/banner stale for {profile_master} — pulling full profile from {sender_peer_id}");
@@ -2616,8 +2622,10 @@ pub(crate) async fn handle_profile_relay(
         return;
     };
     let limit = crate::storage::messages::stored_profile_stamp_limit();
-    if store.load_profile_light(source).ok().flatten().is_some_and(|existing| {
-        existing.updated_at >= relayed.updated_at && existing.updated_at <= limit
+    // At one stamp only a higher signature replaces what we hold, as `save_profile`
+    // decides, so the copy we already have is never re-saved.
+    if store.profile_stamp_sig(source).is_some_and(|(at, held_sig)| {
+        at <= limit && (at > relayed.updated_at || (at == relayed.updated_at && held_sig.is_some_and(|h| h.as_str() >= sig)))
     }) {
         hollow_log!("[HOLLOW-PROFILE] Skipped relayed profile for {source} (already have newer)");
         return;
@@ -3619,5 +3627,138 @@ mod tests {
         assert!(f.announce(now, Some(&f.field), Some(&sig)), "a genuine announce replaces a planted stamp");
         assert_eq!(f.stored_creds(), f.field, "the signed field was kept off a planted row");
         crate::node::resolver::clear_all();
+    }
+
+    // g13-h: two devices of one identity stamp from one stored stamp (own edits ratchet
+    // past it), so they can write different values at one stamp.
+
+    #[test]
+    fn sibling_profiles_at_one_stamp_converge() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let pass = "ab".repeat(32);
+        let at = crate::node::frame_auth::now_ms();
+        fn sig(s: &str) -> crate::storage::ProfileProof<'_> {
+            crate::storage::ProfileProof { sig: s, pk: "pk", avatar_hash: "", banner_hash: "", assets_hash: "" }
+        }
+        let replica = |name: &str, order: [(&str, &str); 2]| {
+            let db = tmp.path().join(name).to_str().unwrap().to_string();
+            crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+            for (display, s) in order {
+                store.save_profile("m", display, "", "", at, None, None, "", None, None, Some(sig(s)), None, None, None, None).unwrap();
+                let card = crate::storage::messages::StoredCard {
+                    master: "m".into(), display_name: display.into(), updated_at: at, avatar_hash: String::new(), sig: s.into(), pk: "pk".into(),
+                };
+                store.save_signed_card(&card).unwrap();
+            }
+            let profile = store.load_profile("m").unwrap().unwrap().display_name;
+            let card = store.load_signed_card("m").unwrap().display_name;
+            let resaved = store.save_profile("m", "Phone", "", "", at, None, None, "", None, None, Some(sig("bbbb")), None, None, None, None).unwrap();
+            (profile, card, resaved)
+        };
+        let (desk, phone) = (("Desk", "aaaa"), ("Phone", "bbbb"));
+        let forward = replica("forward.db", [desk, phone]);
+        let reverse = replica("reverse.db", [phone, desk]);
+        assert_eq!(forward, reverse, "arrival order picked the profile");
+        assert_eq!(forward, ("Phone".to_string(), "Phone".to_string(), true), "the higher signature stays and its own full copy still lands");
+    }
+
+    /// Cards of two devices at one stamp, in either order: the higher signature is the
+    /// card row every replica keeps.
+    #[test]
+    fn sibling_cards_at_one_stamp_converge() {
+        use base64::Engine as _;
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let pass = "ab".repeat(32);
+        let owner = NativeKeypair::from_secret_bytes(&[0x73; 32]);
+        let card = |name: &str| {
+            let master = owner.peer_id();
+            let payload = crate::node::crypto_handler::card_signing_payload(&master, 7, name, "");
+            let pk = base64::engine::general_purpose::STANDARD.encode(owner.public_key_protobuf());
+            let (Some(sig), Some(pk)) = crate::node::crypto_handler::sign_message(&owner, &pk, &payload) else { panic!("signing never fails") };
+            crate::node::types::SignedCard { master, display_name: name.into(), avatar_hash: String::new(), updated_at: 7, sig, pk, stream_overlay: None }
+        };
+        let (desk, phone) = (card("Desk"), card("Phone"));
+        let mut held = Vec::new();
+        for (file, order) in [("fwd.db", [&desk, &phone]), ("rev.db", [&phone, &desk])] {
+            let db = tmp.path().join(file).to_str().unwrap().to_string();
+            crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+            for c in order {
+                crate::node::profile_card::store_card(c, None, i64::MAX, &db, &pass);
+            }
+            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+            held.push(store.load_profile(&owner.peer_id()).unwrap().unwrap().display_name);
+        }
+        assert_eq!(held[0], held[1], "arrival order picked the card");
+    }
+
+    /// The same pair of profiles, handed on by a third person in either order.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sibling_profiles_relayed_at_one_stamp_converge() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let pass = "ab".repeat(32);
+        let (subject, me) = (NativeKeypair::from_secret_bytes(&[0x71; 32]), NativeKeypair::from_secret_bytes(&[0x72; 32]));
+        let now = crate::node::frame_auth::now_ms();
+        let ceiling = crate::node::frame_auth::stamp_ceiling(now);
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut held = Vec::new();
+        for (file, order) in [("fwd.db", ["Desk", "Phone"]), ("rev.db", ["Phone", "Desk"])] {
+            let db = tmp.path().join(file).to_str().unwrap().to_string();
+            crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+            let mut states = std::collections::HashMap::new();
+            for name in order {
+                super::handle_profile_relay(&tx, &mut states, md_relayed(&subject, now, name), &me.peer_id(), ceiling, &db, &pass).await;
+            }
+            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+            held.push(store.load_profile(&subject.peer_id()).unwrap().unwrap().display_name);
+        }
+        crate::node::resolver::clear_all();
+        assert_eq!(held[0], held[1], "arrival order picked the relayed profile");
+    }
+
+    /// After a tie the winning profile names other blobs: its pull may not wait out the
+    /// cooldown the losing copy's pull started, while the same blobs stay deduped.
+    #[test]
+    fn a_profile_naming_other_blobs_is_pulled_inside_the_cooldown() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let pass = "ab".repeat(32);
+        let db = tmp.path().join("pull.db").to_str().unwrap().to_string();
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let peers = std::collections::HashMap::new();
+        let mut pulls = |avatar_hash: &str| {
+            super::maybe_request_full_profile(&tx, &peers, "sender-device", "g13h-pulled-master", "", "", avatar_hash, "", "", "", "g13h-me", &db, &pass);
+            std::iter::from_fn(|| rx.try_recv().ok()).count()
+        };
+        assert_eq!(pulls("hash-of-the-losing-copy"), 1, "control: a stale avatar is pulled");
+        assert_eq!(pulls("hash-of-the-losing-copy"), 0, "the same blobs are pulled twice inside the cooldown");
+        assert_eq!(pulls("hash-of-the-winning-copy"), 1, "the winner's blobs waited out the loser's cooldown");
+    }
+
+    #[test]
+    fn sibling_block_and_unblock_at_one_stamp_converge() {
+        use super::super::types::BlockEntry;
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let pass = "ab".repeat(32);
+        let (x, me) = ("g13h-blocked-master", "g13h-local-master");
+        let at = crate::node::frame_auth::now_ms();
+        let ceiling = crate::node::frame_auth::stamp_ceiling(at);
+        let entry = |blocked: bool| BlockEntry { peer_id: x.to_string(), blocked, at };
+        let replica = |name: &str, lists: &[Vec<BlockEntry>]| {
+            let db = tmp.path().join(name).to_str().unwrap().to_string();
+            crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+            for list in lists {
+                super::take_sibling_blocks(list, ceiling, me, &db, &pass);
+            }
+            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+            store.blocked_rows().unwrap().iter().any(|(p, _)| p == x)
+        };
+        let block_then_lift = replica("a.db", &[vec![entry(true)], vec![entry(false)]]);
+        let lift_then_block = replica("b.db", &[vec![entry(false)], vec![entry(true)]]);
+        let one_list = replica("c.db", &[vec![entry(false), entry(true)]]);
+        assert_eq!((block_then_lift, lift_then_block, one_list), (true, true, true), "the block must win a tie on every device");
     }
 }

@@ -817,6 +817,7 @@ pub(crate) async fn handle_create_server(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    device_peer_id: &str,
     name: String,
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
@@ -824,8 +825,8 @@ pub(crate) async fn handle_create_server(
     // A self-certifying id: our master key and the founding op's nonce hash to it,
     // so any joiner can prove who owns the server without trusting who answers.
     let pk_b64 = base64::engine::general_purpose::STANDARD.encode(bundle_keypair.public_key_protobuf());
-    let (state, founding) = ServerState::found(
-        name.clone(), local_peer_str.to_string(), bundle_keypair.clone(), pk_b64,
+    let (state, founding) = ServerState::found_on(
+        name.clone(), local_peer_str.to_string(), device_peer_id, bundle_keypair.clone(), pk_b64,
     );
     let server_id = state.server_id.clone();
     hollow_log!("[HOLLOW-CRDT] Creating server {server_id}");

@@ -51863,3 +51863,100 @@ async fn a_blocked_friends_call_never_rings() {
     );
     drop((a, b));
 }
+
+// g13-h
+
+/// Siblings share their master as HLC actor. Both devices of the owner witnessed one op
+/// from a member whose clock runs two minutes ahead, then each renames the server: with
+/// one counter for both, they minted the same (master, stamp), every replica kept the
+/// copy it heard first, and the owner's own two devices showed different names forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13h_siblings_after_a_peer_ahead_converge_on_both_writes() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const M_MASTER: u8 = 211;
+    const B_DEV: u8 = 212;
+    const C_DEV: u8 = 213;
+    const V_MASTER: u8 = 214;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let v_master = NativeKeypair::from_secret_bytes(&seed_bytes(V_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    assert_ne!(crate::crdt::hlc::lane_of(&b_dev), crate::crdt::hlc::lane_of(&c_dev), "fixture: two lanes");
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&v_master]).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&v_master]).await;
+    let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&m_master]).await;
+    expect_siblings_ready(&relay, &b, &c, 30).await;
+    expect_olm_confirmed(&v, &b, 30).await;
+    expect_olm_confirmed(&v, &c, 30).await;
+
+    let server_id = create_server_and_wait(&mut b, "Lanes").await;
+    for joiner in [&mut v, &mut c] {
+        joiner.cmd_tx
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+            .await
+            .unwrap();
+        let joined = wait_event(joiner, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "{} joins", joiner.device_id);
+    }
+    for node in [&b, &c, &v] {
+        assert!(
+            wait_until(20, async || node.live_server_state(&server_id).await
+                .is_some_and(|s| s.members.contains_key(&v_master) && s.members.contains_key(&m_master))).await,
+            "{} holds both identities as members", node.device_id,
+        );
+    }
+
+    let ahead = forge_crdt_op(
+        &server_id,
+        &v_master,
+        crate::crdt::operations::CrdtPayload::NicknameChanged { peer_id: v_master.clone(), nickname: "ahead".into() },
+        120_000,
+        Some(&v.master_kp),
+    );
+    for sibling in [&b, &c] {
+        carry_as(&v, sibling, crdt_broadcast(&server_id, &ahead)).await;
+    }
+    for sibling in [&b, &c] {
+        assert!(
+            wait_until(15, async || sibling.live_server_state(&server_id).await
+                .is_some_and(|s| s.op_log.iter().any(|o| o.hlc == ahead.hlc))).await,
+            "{} witnessed the op from the member running ahead", sibling.device_id,
+        );
+    }
+
+    for (sibling, name) in [(&b, "desk"), (&c, "phone")] {
+        sibling.cmd_tx
+            .send(NodeCommand::RenameServer { server_id: server_id.clone(), new_name: name.into() })
+            .await
+            .unwrap();
+    }
+
+    let renames = |s: &ServerState| {
+        s.op_log.iter()
+            .filter(|o| matches!(o.payload, crate::crdt::operations::CrdtPayload::ServerRenamed { .. }) && o.author == m_master)
+            .map(|o| o.hlc.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let mut seen = Vec::new();
+    for node in [&b, &c, &v] {
+        let both = wait_until(20, async || node.live_server_state(&server_id).await
+            .is_some_and(|s| renames(&s).iter().filter(|h| **h > ahead.hlc).count() == 2)).await;
+        let state = node.live_server_state(&server_id).await.expect("state");
+        assert!(both, "{} holds both siblings' renames, has {:?}", node.device_id, renames(&state));
+        seen.push((node.device_id.clone(), state.name().to_string(), renames(&state)));
+    }
+    for (device, name, ops) in &seen[1..] {
+        assert_eq!((name, ops), (&seen[0].1, &seen[0].2), "{device} diverged from {}", seen[0].0);
+    }
+    drop((b, c, v));
+}

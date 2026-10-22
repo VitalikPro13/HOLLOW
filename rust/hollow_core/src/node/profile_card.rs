@@ -241,8 +241,16 @@ pub(crate) fn store_card(card: &SignedCard, avatar: Option<&[u8]>, ceiling: i64,
     crate::storage::MessageStore::open(db_path, db_passphrase)
         .ok()
         .and_then(|st| {
+            // Two devices of one identity can sign different cards at one stamp; the
+            // higher signature replaces the other, as `save_signed_card` decides.
+            let won_tie = st.load_signed_card(&card.master).is_some_and(|held| held.updated_at == card.updated_at && card.sig > held.sig);
             let _ = st.save_signed_card(&stored(card));
-            let written = st.save_profile_card(&card.master, &card.display_name, card.updated_at, &card.avatar_hash, avatar).ok();
+            let written = if won_tie {
+                st.replace_tied_profile_card(&card.master, &card.display_name, card.updated_at, &card.avatar_hash, avatar)
+            } else {
+                st.save_profile_card(&card.master, &card.display_name, card.updated_at, &card.avatar_hash, avatar)
+            }
+            .ok();
             // After the card, so a first card made the row the field lives on.
             super::overlay::ingest_field(&st, &card.master, card.stream_overlay.as_deref(), ceiling, None);
             written

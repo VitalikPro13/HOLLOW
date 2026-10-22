@@ -1382,7 +1382,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Keep a card the caller verified, unless we hold one at least as new.
+    /// Keep a card the caller verified, unless we hold one at least as new. Of two
+    /// cards at one stamp (two devices of one identity) the higher signature stays.
     pub fn save_signed_card(&self, card: &StoredCard) -> Result<bool, String> {
         self.conn
             .execute(
@@ -1391,7 +1392,9 @@ impl MessageStore {
                  ON CONFLICT(master) DO UPDATE SET
                     display_name = excluded.display_name, updated_at = excluded.updated_at,
                     avatar_hash = excluded.avatar_hash, sig = excluded.sig, pk = excluded.pk
-                 WHERE excluded.updated_at > signed_cards.updated_at OR signed_cards.updated_at > ?7",
+                 WHERE excluded.updated_at > signed_cards.updated_at
+                    OR (excluded.updated_at = signed_cards.updated_at AND excluded.sig > signed_cards.sig)
+                    OR signed_cards.updated_at > ?7",
                 params![card.master, card.display_name, card.updated_at, card.avatar_hash, card.sig, card.pk, stored_profile_stamp_limit()],
             )
             .map(|n| n > 0)
@@ -1991,7 +1994,7 @@ impl MessageStore {
                 "SELECT {DM_MSG_COLS}
                  FROM messages
                  WHERE peer_id = ?1 AND hidden_at IS NULL
-                 ORDER BY timestamp DESC, COALESCE(order_us, timestamp * 1000) DESC, id DESC
+                 ORDER BY timestamp DESC, COALESCE(order_us, timestamp * 1000) DESC, message_id DESC, id DESC
                  LIMIT ?2",
             ))
             .map_err(|e| format!("Failed to prepare query: {e}"))?;
@@ -2053,7 +2056,7 @@ impl MessageStore {
                 "SELECT {DM_MSG_COLS}
                  FROM messages
                  WHERE peer_id = ?1 AND is_mine = 1 AND (timestamp >= ?2 OR updated_at >= ?2)
-                 ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
+                 ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC, message_id ASC
                  LIMIT ?3",
             ),
             &[&peer_id, &since_timestamp, &limit],
@@ -2111,7 +2114,7 @@ impl MessageStore {
                 "SELECT {DM_MSG_COLS}
                  FROM messages
                  WHERE peer_id = ?1 AND (timestamp > ?2 OR updated_at >= ?2)
-                 ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
+                 ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC, message_id ASC
                  LIMIT ?3",
             ),
             &[&peer_id, &since_timestamp, &limit],
@@ -2232,7 +2235,7 @@ impl MessageStore {
                  WHERE peer_id = ?1 AND timestamp >= ?2 AND timestamp < ?3
                    AND message_id IS NOT NULL{mine_filter}
                    AND (timestamp / {DAY_MS}) IN ({days})
-                 ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
+                 ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC, message_id ASC
                  LIMIT ?4",
             ),
             &[&peer_id, &theirs.from, &theirs.until, &limit],
@@ -2546,7 +2549,7 @@ impl MessageStore {
                 "SELECT {CHANNEL_MSG_COLS}
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2 AND hidden_at IS NULL
-                 ORDER BY timestamp DESC, COALESCE(order_us, timestamp * 1000) DESC, sender_id DESC, id DESC
+                 ORDER BY timestamp DESC, COALESCE(order_us, timestamp * 1000) DESC, sender_id DESC, message_id DESC, id DESC
                  LIMIT ?3",
             ))
             .map_err(|e| format!("Failed to prepare channel_messages query: {e}"))?;
@@ -2995,7 +2998,7 @@ impl MessageStore {
             "SELECT {CHANNEL_MSG_COLS}
              FROM channel_messages
              WHERE server_id = ?1 AND channel_id = ?2 AND ({where_clause})
-             ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
+             ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC, message_id ASC
              LIMIT ?{}",
             param_values.len() + 1,
         );
@@ -3597,7 +3600,9 @@ impl MessageStore {
 
     /// Upsert a user profile, ours or a peer's. Nothing older than the stored row is
     /// written: a device back from away re-announces the profile it last held, and
-    /// that copy must not undo an edit made on another device meanwhile.
+    /// that copy must not undo an edit made on another device meanwhile. Two devices
+    /// of one identity can sign different profiles at one stamp: of two signed copies
+    /// the higher signature stays, so every replica keeps the same one.
     ///
     /// `avatar`, `banner`, `showcase_board`, `avatar_frame`, `avatar_anim` and
     /// `banner_anim` are three-state: `None` preserves what is stored (an update from a
@@ -3660,7 +3665,10 @@ impl MessageStore {
                     avatar_anim = COALESCE(?15, user_profiles.avatar_anim),
                     banner_anim = COALESCE(?16, user_profiles.banner_anim),
                     support_creds = COALESCE(?17, user_profiles.support_creds)
-                 WHERE excluded.updated_at >= user_profiles.updated_at OR user_profiles.updated_at > ?20",
+                 WHERE excluded.updated_at > user_profiles.updated_at
+                    OR (excluded.updated_at = user_profiles.updated_at
+                        AND (?11 IS NULL OR user_profiles.profile_sig IS NULL OR ?11 >= user_profiles.profile_sig))
+                    OR user_profiles.updated_at > ?20",
                 params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash, stored_profile_stamp_limit()],
             )
             .map_err(|e| format!("Failed to save profile: {e}"))?;
@@ -3696,6 +3704,17 @@ impl MessageStore {
         Ok(true)
     }
 
+    /// The stamp and owner signature of the profile stored for `peer_id`.
+    pub fn profile_stamp_sig(&self, peer_id: &str) -> Option<(i64, Option<String>)> {
+        self.conn
+            .query_row(
+                "SELECT updated_at, profile_sig FROM user_profiles WHERE peer_id = ?1",
+                params![peer_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .ok()
+    }
+
     /// Store a profile CARD (A28): only the name and avatar of someone we are not close
     /// to. An empty `avatar_hash` clears the avatar and bytes set it; with neither the
     /// stored still stays until pulled. Nothing older than the row is written, and a
@@ -3709,6 +3728,31 @@ impl MessageStore {
         avatar_hash: &str,
         avatar: Option<&[u8]>,
     ) -> Result<bool, String> {
+        self.upsert_profile_card(peer_id, display_name, updated_at, avatar_hash, avatar, false)
+    }
+
+    /// [`Self::save_profile_card`] for a card that won its stamp's tie (its signature
+    /// outranks the card stored at the same stamp): it replaces a card row at that stamp.
+    pub fn replace_tied_profile_card(
+        &self,
+        peer_id: &str,
+        display_name: &str,
+        updated_at: i64,
+        avatar_hash: &str,
+        avatar: Option<&[u8]>,
+    ) -> Result<bool, String> {
+        self.upsert_profile_card(peer_id, display_name, updated_at, avatar_hash, avatar, true)
+    }
+
+    fn upsert_profile_card(
+        &self,
+        peer_id: &str,
+        display_name: &str,
+        updated_at: i64,
+        avatar_hash: &str,
+        avatar: Option<&[u8]>,
+        won_tie: bool,
+    ) -> Result<bool, String> {
         let avatar = avatar.filter(|b| !b.is_empty());
         let written = self.conn
             .execute(
@@ -3720,8 +3764,10 @@ impl MessageStore {
                     avatar = CASE WHEN ?5 = '' THEN NULL ELSE COALESCE(excluded.avatar, user_profiles.avatar) END,
                     profile_sig = NULL, profile_pk = NULL, profile_avatar_hash = NULL,
                     profile_banner_hash = NULL, profile_assets_hash = NULL
-                 WHERE excluded.updated_at > user_profiles.updated_at OR user_profiles.updated_at > ?6",
-                params![peer_id, display_name, updated_at, avatar, avatar_hash, stored_profile_stamp_limit()],
+                 WHERE excluded.updated_at > user_profiles.updated_at
+                    OR (?7 AND excluded.updated_at = user_profiles.updated_at AND user_profiles.profile_sig IS NULL)
+                    OR user_profiles.updated_at > ?6",
+                params![peer_id, display_name, updated_at, avatar, avatar_hash, stored_profile_stamp_limit(), won_tie],
             )
             .map_err(|e| format!("Failed to save profile card: {e}"))?;
         if written > 0 {
@@ -8158,6 +8204,30 @@ mod tests {
             vec!["P1", "P2", "P3", "A1", "A2", "A3"],
             "same-ms burst must group by sender in true send order (order_us), not ping-pong"
         );
+    }
+
+    /// g13-h: two senders (or two devices of one identity) that saw the same message
+    /// stamped ahead both mint the next microsecond. Rows tied on every sender stamp list
+    /// by message id, never by the local insert order, so replicas show one order.
+    #[test]
+    fn chat_rows_tied_on_order_us_list_by_message_id() {
+        let (ms, ous) = (1_000i64, 1_000_007i64);
+        let dm = |first: &str, second: &str| {
+            let store = mem_store();
+            for mid in [first, second] {
+                store.insert("peer", mid, false, ms, None, None, Some(mid), None, None, Some(ous), None).unwrap();
+            }
+            store.load_for_peer("peer", 10).unwrap().into_iter().map(|m| m.text).collect::<Vec<_>>()
+        };
+        assert_eq!(dm("aa", "bb"), dm("bb", "aa"), "DM rows listed in arrival order");
+        let channel = |first: &str, second: &str| {
+            let store = mem_store();
+            for mid in [first, second] {
+                store.insert_channel_message("s", "c", "master", mid, false, ms, None, None, Some(mid), None, None, Some(ous), None).unwrap();
+            }
+            store.load_channel_messages("s", "c", 10).unwrap().into_iter().map(|m| m.text).collect::<Vec<_>>()
+        };
+        assert_eq!(channel("aa", "bb"), channel("bb", "aa"), "channel rows listed in arrival order");
     }
 
     /// Legacy rows with NULL order_us still sort deterministically, falling back to

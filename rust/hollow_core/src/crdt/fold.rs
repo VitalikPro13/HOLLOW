@@ -743,4 +743,168 @@ mod tests {
         let keys_of = |s: &ServerState| s.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect::<Vec<_>>();
         assert_eq!(keys_of(&restarted), keys_of(&live), "the logs differ after the late op");
     }
+
+    // g13-h: siblings share the master as HLC actor, and op identity is (author, hlc).
+
+    /// The owner's two devices, both holding `owner`'s replica, each with its own clock
+    /// last stepped at `at`, and a member's replica that has `founding`.
+    fn siblings_and_member(at: u64) -> (ServerState, ServerState, ServerState) {
+        let (owner, founding) = founded(1);
+        let mut member = joiner(&owner.server_id, 2);
+        member.ingest_remote(&[founding]);
+        let (mut desktop, mut phone) = (owner.clone(), owner);
+        desktop.set_hlc(Hlc::for_device_at(id(1), "desktop", at));
+        phone.set_hlc(Hlc::for_device_at(id(1), "phone", at));
+        (desktop, phone, member)
+    }
+
+    /// What a replica converged to: the name, the settings and every op it holds.
+    type Converged = (String, Vec<(String, String)>, Vec<(String, HlcTimestamp)>);
+
+    fn converged(s: &ServerState) -> Converged {
+        let mut settings: Vec<_> = s.settings.iter().map(|(k, v)| (k.clone(), v.read().clone())).collect();
+        settings.sort();
+        let ops = s.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+        (s.name().to_string(), settings, ops)
+    }
+
+    /// Both orders at the member and the exchange between the siblings end in one state
+    /// that holds both ops.
+    fn assert_both_survive(desktop: &mut ServerState, phone: &mut ServerState, member: &ServerState, a: CrdtOp, b: CrdtOp) {
+        assert_ne!(a.hlc, b.hlc, "two siblings minted one stamp");
+        let (mut forward, mut reverse) = (member.clone(), member.clone());
+        assert_eq!(forward.ingest_remote(std::slice::from_ref(&a)).admitted.len(), 1);
+        assert_eq!(forward.ingest_remote(std::slice::from_ref(&b)).admitted.len(), 1, "the second sibling's op was taken for the first's");
+        assert_eq!(reverse.ingest_remote(std::slice::from_ref(&b)).admitted.len(), 1);
+        assert_eq!(reverse.ingest_remote(std::slice::from_ref(&a)).admitted.len(), 1);
+        desktop.apply_op(&a).unwrap();
+        desktop.ingest_remote(std::slice::from_ref(&b));
+        phone.apply_op(&b).unwrap();
+        phone.ingest_remote(&[a]);
+        let want = converged(&forward);
+        assert_eq!(converged(&reverse), want, "arrival order changed the member's state");
+        assert_eq!(converged(desktop), want, "the desktop diverged");
+        assert_eq!(converged(phone), want, "the phone diverged");
+    }
+
+    #[test]
+    fn two_siblings_same_ms_ops_both_survive() {
+        let at = crate::crdt::hlc::wall_clock_ms() + 60_000;
+        let (mut desktop, mut phone, member) = siblings_and_member(at);
+        let a = desktop.create_op(P::ServerRenamed { new_name: "desk".into() });
+        let b = phone.create_op(P::ServerSettingChanged { key: "twitch_verification_enabled".into(), value: "true".into() });
+        assert_eq!(a.hlc.physical_ms, b.hlc.physical_ms, "fixture: one millisecond");
+        assert_both_survive(&mut desktop, &mut phone, &member, a, b);
+    }
+
+    /// The reviewer's probe: both devices last witnessed one op from a member whose
+    /// clock runs ahead, then each writes the same register.
+    #[test]
+    fn two_siblings_after_a_peer_ahead_both_survive() {
+        let wall = crate::crdt::hlc::wall_clock_ms();
+        let (mut desktop, mut phone, mut member) = siblings_and_member(wall);
+        let sid = member.server_id.clone();
+        let admit = desktop.create_op(add(&sid, 2));
+        let ahead = op_at(2, &sid, wall + 120_000, P::NicknameChanged { peer_id: id(2), nickname: "n".into() });
+        for replica in [&mut desktop, &mut phone, &mut member] {
+            replica.ingest_remote(std::slice::from_ref(&admit));
+            assert_eq!(replica.ingest_remote(std::slice::from_ref(&ahead)).admitted.len(), 1);
+        }
+        let a = desktop.create_op(P::ServerRenamed { new_name: "desk".into() });
+        let b = phone.create_op(P::ServerRenamed { new_name: "phone".into() });
+        assert!(a.hlc > ahead.hlc && b.hlc > ahead.hlc);
+        assert_both_survive(&mut desktop, &mut phone, &member, a, b);
+    }
+
+    /// A sibling still on the lane-less clock and one on a lane, after the same peer ahead.
+    #[test]
+    fn a_legacy_sibling_and_a_laned_sibling_both_survive() {
+        let wall = crate::crdt::hlc::wall_clock_ms();
+        let (mut legacy, mut phone, mut member) = siblings_and_member(wall);
+        legacy.set_hlc(Hlc::new(id(1)));
+        assert!(phone.hlc.as_ref().unwrap().lane().unwrap() > 2, "fixture lane must not meet the legacy counters");
+        let sid = member.server_id.clone();
+        let admit = legacy.create_op(add(&sid, 2));
+        let ahead = op_at(2, &sid, wall + 120_000, P::NicknameChanged { peer_id: id(2), nickname: "n".into() });
+        for replica in [&mut legacy, &mut phone, &mut member] {
+            replica.ingest_remote(std::slice::from_ref(&admit));
+            replica.ingest_remote(std::slice::from_ref(&ahead));
+        }
+        let a = legacy.create_op(P::ServerRenamed { new_name: "old".into() });
+        let b = phone.create_op(P::ServerRenamed { new_name: "new".into() });
+        assert_both_survive(&mut legacy, &mut phone, &member, a, b);
+    }
+
+    /// A restart reseeds the clock from the wall: whichever order the node installs the
+    /// clock and the stored log in, the next op sits above every op we already hold.
+    #[test]
+    fn a_restarted_clock_sits_above_its_own_log() {
+        let ahead = crate::crdt::hlc::wall_clock_ms() + 120_000;
+        let (mut live, _, _) = siblings_and_member(ahead);
+        for name in ["a", "b", "c"] {
+            let op = live.create_op(P::ServerRenamed { new_name: name.into() });
+            live.apply_op(&op).unwrap();
+        }
+        let newest = live.op_log.iter().map(|o| o.hlc.clone()).max().unwrap();
+
+        let mut clock_first = live.clone();
+        clock_first.op_log.clear();
+        clock_first.op_log_dedup.clear();
+        clock_first.set_hlc(Hlc::for_device(id(1), "desktop"));
+        clock_first.restore_op_log(live.op_log.clone());
+        assert!(clock_first.create_op(P::ServerRenamed { new_name: "d".into() }).hlc > newest, "clock then log");
+
+        let mut log_first = live.clone();
+        log_first.set_hlc(Hlc::for_device(id(1), "desktop"));
+        assert!(log_first.create_op(P::ServerRenamed { new_name: "d".into() }).hlc > newest, "log then clock");
+    }
+
+    /// A wall stepped back past the drift bound: our clock may not adopt our own newer
+    /// ops, and must still never mint a stamp one of them holds.
+    #[test]
+    fn a_stamp_we_already_hold_is_never_minted_again() {
+        let far = crate::crdt::hlc::wall_clock_ms() + crate::crdt::hlc::MAX_DRIFT_MS + 600_000;
+        let (mut live, _, _) = siblings_and_member(far);
+        let mut held = Vec::new();
+        for name in ["a", "b", "c"] {
+            let op = live.create_op(P::ServerRenamed { new_name: name.into() });
+            live.apply_op(&op).unwrap();
+            held.push(op.hlc);
+        }
+        live.set_hlc(Hlc::for_device_at(id(1), "desktop", far));
+        let next = live.create_op(P::ServerRenamed { new_name: "d".into() });
+        assert!(!held.contains(&next.hlc), "re-minted {:?}", next.hlc);
+    }
+
+    /// A restart witnesses the newest stamp the drift bound lets in, once: an own op
+    /// past the bound (a wall that stepped back) does not hide the ones inside it.
+    #[test]
+    fn a_restart_witnesses_the_newest_stamp_inside_the_bound() {
+        let wall = crate::crdt::hlc::wall_clock_ms();
+        let (mut live, _, _) = siblings_and_member(wall + 60_000);
+        let near = live.create_op(P::ServerRenamed { new_name: "near".into() });
+        live.apply_op(&near).unwrap();
+        live.set_hlc(Hlc::for_device_at(id(1), "desktop", wall + crate::crdt::hlc::MAX_DRIFT_MS + 600_000));
+        let far = live.create_op(P::ServerRenamed { new_name: "far".into() });
+        live.apply_op(&far).unwrap();
+
+        live.set_hlc(Hlc::for_device(id(1), "desktop"));
+        assert!(live.create_op(P::ServerRenamed { new_name: "next".into() }).hlc > near.hlc, "the op inside the bound was not witnessed");
+    }
+
+    /// Only admitted ops move our clock: a held op, refused for now, does not date the
+    /// next write after a restart either.
+    #[test]
+    fn a_held_op_does_not_date_our_clock_after_a_restart() {
+        let (owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[founding]);
+        let wall = crate::crdt::hlc::wall_clock_ms();
+        let early = op_at(2, &sid, wall + 120_000, P::NicknameChanged { peer_id: id(2), nickname: "n".into() });
+        assert!(r.ingest_remote(&[early]).admitted.is_empty());
+        assert!(!r.held.is_empty(), "fixture: the op of a member not yet admitted is held");
+        r.set_hlc(Hlc::for_device(id(9), "device"));
+        assert!(r.create_op(P::ServerRenamed { new_name: "x".into() }).hlc.physical_ms < wall + 60_000, "a held op moved our clock");
+    }
 }

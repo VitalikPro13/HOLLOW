@@ -1007,7 +1007,7 @@ async fn run_event_loop(
                     for (server_id, json) in rows {
                         match serde_json::from_str::<ServerState>(&json) {
                             Ok(mut state) => {
-                                state.set_hlc(Hlc::new(local_peer_str.to_string()));
+                                state.set_hlc(Hlc::for_device(local_peer_str.to_string(), &device_peer_id));
                                 install_op_signer(&mut state, &bundle_keypair);
                                 // Restore op_log from crdt_ops table (no longer serialized in state JSON).
                                 // An anchored server is rebuilt from every op since its anchor.
@@ -1622,7 +1622,7 @@ async fn run_event_loop(
                         let before: std::collections::HashSet<String> = server_states.keys().cloned().collect();
                         sync_handler::handle_create_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &bundle_keypair, &local_peer_str, name,
+                            &bundle_keypair, &local_peer_str, &device_peer_id, name,
                             &crypto_store, &crdt_store,
                         ).await;
                         // Its first join lock, before any invite can be used.
@@ -10151,7 +10151,7 @@ async fn handle_incoming_request_inner(
                     .map_err(str::to_string));
             match parsed {
                 Ok(mut snap) => {
-                    snap.set_hlc(Hlc::new(local_peer_str.to_string()));
+                    snap.set_hlc(Hlc::for_device(local_peer_str.to_string(), device_peer_id));
                     install_op_signer(&mut snap, bundle_keypair);
                     // SECURITY (CRDT-2): a snapshot is adopted wholesale from ONE
                     // responder, so its registers are only as honest as that peer.
@@ -10225,7 +10225,7 @@ async fn handle_incoming_request_inner(
                     // pinned owner). The responder is just our sync source.
                     let mut s = ServerState::skeleton(server_id.clone());
                     s.owner_pin = pending_server_joins.get(&server_id).and_then(|p| p.owner_pin.clone());
-                    s.set_hlc(Hlc::new(local_peer_str.to_string()));
+                    s.set_hlc(Hlc::for_device(local_peer_str.to_string(), device_peer_id));
                     install_op_signer(&mut s, bundle_keypair);
                     s
                 });

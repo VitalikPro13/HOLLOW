@@ -459,13 +459,20 @@ impl ServerState {
         s
     }
 
+    /// [`ServerState::found_on`] for a single-device owner.
+    #[cfg(test)]
+    pub(crate) fn found(name: String, owner_peer_id: String, keypair: NativeKeypair, pk_b64: String) -> (Self, CrdtOp) {
+        let device = owner_peer_id.clone();
+        Self::found_on(name, owner_peer_id, &device, keypair, pk_b64)
+    }
+
     /// Found a new server with a self-certifying id: the founder's signed
     /// `ServerCreated`, already applied, is the first op of its log.
-    pub(crate) fn found(name: String, owner_peer_id: String, keypair: NativeKeypair, pk_b64: String) -> (Self, CrdtOp) {
+    pub(crate) fn found_on(name: String, owner_peer_id: String, device_peer_id: &str, keypair: NativeKeypair, pk_b64: String) -> (Self, CrdtOp) {
         let nonce = super::anchor::new_nonce();
         let server_id = super::anchor::derive_server_id(&owner_peer_id, &nonce);
         let mut s = Self::skeleton(server_id);
-        s.set_hlc(Hlc::new(owner_peer_id.clone()));
+        s.set_hlc(Hlc::for_device(owner_peer_id.clone(), device_peer_id));
         s.set_signer(keypair, pk_b64);
         let op = s.create_op(CrdtPayload::ServerCreated { name, owner_peer_id, nonce });
         debug_assert!(s.op_allowed(&op), "a fresh founding op must pass its own rule");
@@ -556,9 +563,23 @@ impl ServerState {
         self.member_record.get(master)?.last().filter(|s| s.until_ms == u64::MAX).map(|s| s.from_ms)
     }
 
-    /// Restore from persistence (HLC set separately via `set_hlc`).
+    /// Install our clock. A fresh clock reseeds from the wall, so it witnesses the newest
+    /// op this state retains: a wall that stepped back would otherwise re-mint at or below
+    /// our own earlier stamps.
     pub fn set_hlc(&mut self, hlc: Hlc) {
         self.hlc = Some(hlc);
+        self.witness_retained();
+    }
+
+    /// Only admitted ops move our clock (as in `ingest_remote`); `create_op` keeps us
+    /// off the stamps of held ones. One witness of the newest stamp the drift bound
+    /// lets in: one per op would log a refusal per op on every start.
+    fn witness_retained(&mut self) {
+        let Some(hlc) = self.hlc.as_mut() else { return };
+        let bound = super::hlc::wall_clock_ms().saturating_add(super::hlc::MAX_DRIFT_MS);
+        if let Some(newest) = self.op_log.iter().map(|op| &op.hlc).filter(|h| h.physical_ms <= bound).max() {
+            hlc.witness(newest);
+        }
     }
 
     /// Install the MASTER keypair this replica signs its own ops with. Goes hand in hand
@@ -704,6 +725,7 @@ impl ServerState {
         for op in &self.op_log {
             self.op_log_dedup.insert((op.author.clone(), op.hlc.clone()));
         }
+        self.witness_retained();
     }
 
     /// Generate a new CrdtOp with our HLC, signed with our master key, but do NOT apply
@@ -713,11 +735,19 @@ impl ServerState {
     /// every peer, so a missing signer must fail loudly rather than emit ops that
     /// silently vanish on the network.
     pub fn create_op(&mut self, payload: CrdtPayload) -> CrdtOp {
+        self.ensure_dedup();
         let hlc = self
             .hlc
             .as_mut()
             .expect("HLC must be set before creating ops");
-        let ts = hlc.now();
+        // A wall stepped back past the drift bound leaves our clock below ops we hold,
+        // and a stamp we already used would make this op a duplicate of that one.
+        let mut ts = hlc.now();
+        while self.op_log_dedup.contains(&(hlc.actor().to_string(), ts.clone()))
+            || self.held.iter().any(|(h, _)| h.author == hlc.actor() && h.hlc == ts)
+        {
+            ts = hlc.now();
+        }
         let mut op = CrdtOp {
             server_id: self.server_id.clone(),
             hlc: ts,
