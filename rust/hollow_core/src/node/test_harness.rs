@@ -42677,23 +42677,14 @@ async fn a_channel_sync_page_continues_past_a_post_that_arrived_while_paging() {
     plant_signed_channel_rows(&o.store(), O, &server_id, &general, &rows);
 
     relay.hold_direct(&o.device_id, &j.device_id);
-    // Not J's join-time ask, and asked again until answered: O used to answer one ask
-    // from J per channel and two seconds.
-    let ask = super::types::HavenMessage::ChannelSyncRequest {
-        server_id: server_id.clone(),
-        channel_id: general.clone(),
-        since_timestamp: 1,
-        sender_timestamps: HashMap::new(),
-        gap: None,
-    };
-    let mut answered = false;
-    for _ in 0..4 {
-        send_envelope_as(&j, &o, &carried(ask.clone())).await;
-        answered = wait_until(3, async || !relay.held_kinds(&o.device_id, &j.device_id).is_empty()).await;
-        if answered {
-            break;
-        }
-    }
+    // Not J's join-time ask: J opens the channel once that one is behind it. Only pages
+    // J itself asked for are followed, and an answer held past the ask's silence still is.
+    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await;
+    j.cmd_tx
+        .send(NodeCommand::RequestChannelSync { server_id: server_id.clone(), channel_id: general.clone() })
+        .await
+        .unwrap();
+    let answered = wait_until(10, async || !relay.held_kinds(&o.device_id, &j.device_id).is_empty()).await;
     assert!(answered, "O never answered J's ask");
     o.cmd_tx
         .send(NodeCommand::SendChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), text: "live while paging".into(), message_id: "ch-live-while-paging".into(), reply_to_mid: None, link_preview: None })
@@ -55716,4 +55707,355 @@ async fn g13w3_a_repair_asks_an_unplaced_member_device_for_its_profile() {
     assert_eq!(profile_asks(&j, &x).await, 0, "J asked a stranger outside the server's room for its profile");
     assert_eq!(profile_asks(&j, &removed).await, 0, "J asked a removed device for its profile");
     assert_eq!(profile_asks(&j, &master).await, 0, "J asked a master id for its profile");
+}
+
+// g13w3-sync-cost
+
+/// The channel sync asks `node` carried to `device`.
+async fn g13w3_channel_asks_to(node: &TestNode, device: &str) -> usize {
+    node.carried_to(device)
+        .await
+        .iter()
+        .filter(|m| matches!(m, super::types::HavenMessage::ChannelSyncRequest { .. }))
+        .count()
+}
+
+/// Rows `node` holds in one channel. Opens the store, so callers poll it slowly.
+fn g13w3_rows(node: &TestNode, server_id: &str, channel_id: &str) -> i64 {
+    node.store().count_channel_messages_since(server_id, channel_id, 0).unwrap_or(0) as i64
+}
+
+/// Wait up to `secs` for `node` to hold `want` rows of a channel, one look a second.
+async fn g13w3_until_rows(nodes: &mut [&mut TestNode], who: usize, server_id: &str, channel_id: &str, want: i64, secs: u64) -> bool {
+    for _ in 0..secs {
+        for n in nodes.iter_mut() {
+            drain_events(n);
+        }
+        if g13w3_rows(nodes[who], server_id, channel_id) >= want {
+            return true;
+        }
+        sleep_ms(1_000).await;
+    }
+    false
+}
+
+/// A member joins while two members hold a channel's history and opens the channel at
+/// once: the history comes once, from one holder, not once per holder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_opening_a_channel_while_joining_takes_one_copy_of_its_history() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    const ROWS: i64 = 1_200;
+    let relay = MockRelay::new();
+    let (o_tag, k_tag, l_tag) = (246u8, 247u8, 248u8);
+    let (o_m, k_m, l_m) = (keys(o_tag).peer_id(), keys(k_tag).peer_id(), keys(l_tag).peer_id());
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&k_m, &l_m]).await;
+    let mut k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&o_m, &l_m]).await;
+    let mut l = spawn_node_with_friends(&relay, l_tag, l_tag, &[&o_m, &k_m]).await;
+    expect_dm_pair_ready(&relay, &o, &k, 15).await;
+    expect_dm_pair_ready(&relay, &o, &l, 15).await;
+    expect_dm_pair_ready(&relay, &k, &l, 15).await;
+    let server_id = create_server_and_wait(&mut o, "One copy").await;
+    let general = general_channel_of(&server_id);
+    let founded = o
+        .live_server_state(&server_id)
+        .await
+        .and_then(|s| s.op_log.iter().map(|op| op.hlc.physical_ms as i64).min())
+        .expect("the owner holds its server");
+    assert!(wait_until(10, async || founded + ROWS + 1 < super::types::now_ms()).await);
+    {
+        let store = o.store();
+        store.begin_transaction().unwrap();
+        for i in 0..ROWS {
+            plant_signed_channel_row(&store, o_tag, &server_id, &general, true, founded + 1 + i, &format!("g13w3-{i}"), &format!("history {i}"));
+        }
+        store.commit_transaction().unwrap();
+    }
+
+    // K joins while only O holds the history: the cost of one copy.
+    relay.reset_meter();
+    k.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(g13w3_until_rows(&mut [&mut k, &mut o, &mut l], 0, &server_id, &general, ROWS, 60).await, "K takes the history");
+    sleep_ms(3_000).await; // ABSENCE: no late copy
+    let one_copy = relay.meter().unwrap().bytes_out;
+
+    // L joins with O and K holding it and opens the channel the moment it has the server.
+    relay.reset_meter();
+    l.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    let opened = wait_until(30, async || {
+        drain_events(&mut o);
+        drain_events(&mut k);
+        drain_events(&mut l);
+        l.live_server_state(&server_id).await.is_some()
+    })
+    .await;
+    assert!(opened, "L holds the server");
+    l.cmd_tx
+        .send(NodeCommand::RequestChannelSync { server_id: server_id.clone(), channel_id: general.clone() })
+        .await
+        .unwrap();
+    assert!(g13w3_until_rows(&mut [&mut l, &mut o, &mut k], 0, &server_id, &general, ROWS, 60).await, "L takes the history");
+    sleep_ms(5_000).await; // ABSENCE: no second copy still on its way
+    let second = relay.meter().unwrap().bytes_out;
+    let asks = g13w3_channel_asks_to(&l, &o.device_id).await + g13w3_channel_asks_to(&l, &k.device_id).await;
+    let pages = (ROWS / 200 + 1) as usize;
+    crate::hollow_log!("[g13w3] joining with one holder: {one_copy} relay bytes; with two and an open: {second}");
+    assert!(asks <= pages + 2, "L asked {asks} pages of a {pages}-page history");
+    // The owner that added L does not ask a member that joined this minute for the
+    // channel either: L would only send back what it just took.
+    assert_eq!(g13w3_channel_asks_to(&o, &l.device_id).await, 0, "the owner asked its new member for the history");
+    assert!((second as f64) < 1.5 * one_copy as f64, "opening while joining took {second} bytes, one copy is {one_copy}");
+}
+
+/// The holder a channel ask went to says nothing: the ask moves to the next holder and
+/// the history arrives from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_a_silent_channel_holder_hands_the_ask_to_the_next() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    const ROWS: i64 = 500;
+    let relay = MockRelay::new();
+    let (o_tag, k_tag, l_tag) = (249u8, 250u8, 251u8);
+    let (o_m, k_m, l_m) = (keys(o_tag).peer_id(), keys(k_tag).peer_id(), keys(l_tag).peer_id());
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&k_m, &l_m]).await;
+    let mut k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&o_m, &l_m]).await;
+    let mut l = spawn_node_with_friends(&relay, l_tag, l_tag, &[&o_m, &k_m]).await;
+    expect_dm_pair_ready(&relay, &o, &k, 15).await;
+    expect_dm_pair_ready(&relay, &o, &l, 15).await;
+    expect_dm_pair_ready(&relay, &k, &l, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Silent holder").await;
+    let general = general_channel_of(&server_id);
+    join_and_wait(&mut k, &server_id).await;
+    join_and_wait(&mut l, &server_id).await;
+    expect_mls_leaf(&o, &server_id, &l.device_id, 15).await;
+    expect_mls_leaf(&o, &server_id, &k.device_id, 15).await;
+
+    // O and K hold the history; L, already a member, holds none of it.
+    let start = super::types::now_ms() - 60_000;
+    for node in [&o, &k] {
+        let store = node.store();
+        store.begin_transaction().unwrap();
+        for i in 0..ROWS {
+            plant_signed_channel_row(&store, o_tag, &server_id, &general, node.device_id == o.device_id, start + i, &format!("g13w3s-{i}"), &format!("held {i}"));
+        }
+        store.commit_transaction().unwrap();
+    }
+    // ABSENCE: past the open de-dup and the quiet after L's join-time history came in.
+    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await;
+
+    relay.hold_direct(&o.device_id, &l.device_id);
+    relay.hold_direct(&k.device_id, &l.device_id);
+    let before = (g13w3_channel_asks_to(&l, &o.device_id).await, g13w3_channel_asks_to(&l, &k.device_id).await);
+    drain_events(&mut l);
+    l.cmd_tx
+        .send(NodeCommand::RequestChannelSync { server_id: server_id.clone(), channel_id: general.clone() })
+        .await
+        .unwrap();
+    let mut first = None;
+    assert!(
+        wait_until(10, async || {
+            let now = (g13w3_channel_asks_to(&l, &o.device_id).await, g13w3_channel_asks_to(&l, &k.device_id).await);
+            if now.0 > before.0 {
+                first = Some(o.device_id.clone());
+            } else if now.1 > before.1 {
+                first = Some(k.device_id.clone());
+            }
+            first.is_some()
+        })
+        .await,
+        "L asks a holder",
+    );
+    let silent = first.unwrap();
+    let next = if silent == o.device_id { k.device_id.clone() } else { o.device_id.clone() };
+    let asked_at = std::time::Instant::now();
+    assert_eq!(
+        g13w3_channel_asks_to(&l, &next).await,
+        if next == o.device_id { before.0 } else { before.1 },
+        "the open asked one holder, not both",
+    );
+    relay.release_held(&next, &l.device_id);
+
+    let (mut filled, mut progress_total) = (false, 0u64);
+    wait_until(20, async || {
+        while let Ok(ev) = l.event_rx.try_recv() {
+            match ev {
+                NetworkEvent::MessageSyncProgress { server_id: sid, channel_id, total_count, .. }
+                    if sid == server_id && channel_id == general => progress_total += u64::from(total_count),
+                NetworkEvent::MessageSyncCompleted { server_id: sid, .. } if sid == server_id => filled = true,
+                _ => {}
+            }
+        }
+        filled
+    })
+    .await;
+    assert!(filled, "the history arrives from the next holder");
+    assert_eq!(progress_total, ROWS as u64, "the progress line counts what is left once, from the first page");
+    assert!(
+        asked_at.elapsed() >= std::time::Duration::from_secs(2),
+        "the ask moved on before the holder had time to answer",
+    );
+    assert!(g13w3_until_rows(&mut [&mut l, &mut o, &mut k], 0, &server_id, &general, ROWS, 20).await, "every row is there");
+    relay.release_held(&silent, &l.device_id);
+}
+
+/// A member that answers none of our asks and sends a page nobody asked for every
+/// second never keeps a channel's ask: it moves on, and the history comes from the owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_pages_nobody_asked_for_never_keep_a_channel_ask() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    const ROWS: i64 = 300;
+    let relay = MockRelay::new();
+    let (o_tag, k_tag, l_tag) = (240u8, 241u8, 242u8);
+    let (o_m, k_m, l_m) = (keys(o_tag).peer_id(), keys(k_tag).peer_id(), keys(l_tag).peer_id());
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&k_m, &l_m]).await;
+    let mut k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&o_m, &l_m]).await;
+    let mut l = spawn_node_with_friends(&relay, l_tag, l_tag, &[&o_m, &k_m]).await;
+    expect_dm_pair_ready(&relay, &o, &k, 15).await;
+    expect_dm_pair_ready(&relay, &o, &l, 15).await;
+    expect_dm_pair_ready(&relay, &k, &l, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Unasked pages").await;
+    let general = general_channel_of(&server_id);
+    let offtopic = crate::node::new_channel_id(&server_id);
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: offtopic.clone(),
+            name: "offtopic".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    join_and_wait(&mut k, &server_id).await;
+    join_and_wait(&mut l, &server_id).await;
+    expect_mls_leaf(&o, &server_id, &l.device_id, 15).await;
+    expect_mls_leaf(&o, &server_id, &k.device_id, 15).await;
+    let has_offtopic = async |n: &TestNode| n.live_server_state(&server_id).await.is_some_and(|s| s.channels.contains_key(&offtopic));
+    assert!(wait_until(15, async || has_offtopic(&k).await && has_offtopic(&l).await).await, "the second channel reaches K and L");
+
+    // Only O holds the history; L, already a member, holds none of it.
+    let start = super::types::now_ms() - 60_000;
+    {
+        let store = o.store();
+        store.begin_transaction().unwrap();
+        for i in 0..ROWS {
+            plant_signed_channel_row(&store, o_tag, &server_id, &general, true, start + i, &format!("g13w3u-{i}"), &format!("held {i}"));
+        }
+        store.commit_transaction().unwrap();
+    }
+    // ABSENCE: past the quiet after L's join-time history came in.
+    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await;
+
+    // K never hears L's asks; L's first ask to O is lost.
+    relay.hold_direct(&l.device_id, &k.device_id);
+    relay.hold_direct(&l.device_id, &o.device_id);
+    let unasked = || super::types::MessageEnvelope::ChannelSyncBatch {
+        sid: server_id.clone(),
+        cid: offtopic.clone(),
+        messages: Vec::new(),
+        total: 0,
+        has_more: None,
+        target: None,
+    };
+    let before = (g13w3_channel_asks_to(&l, &o.device_id).await, g13w3_channel_asks_to(&l, &k.device_id).await);
+    let (mut asked_both, mut lost_first_ask, mut got) = (None, false, false);
+    // A page from K every second, well inside the 3 s it may stay silent.
+    for step in 0..60u32 {
+        olm_envelope_as(&k, &l, unasked()).await;
+        if step % 6 == 0 {
+            l.cmd_tx
+                .send(NodeCommand::RequestChannelSync { server_id: server_id.clone(), channel_id: general.clone() })
+                .await
+                .unwrap();
+        }
+        // Once the first ask went to both, and has had a second to reach the relay, the
+        // one O holds is lost.
+        if asked_both.is_none()
+            && g13w3_channel_asks_to(&l, &o.device_id).await > before.0
+            && g13w3_channel_asks_to(&l, &k.device_id).await > before.1
+        {
+            asked_both = Some(step);
+        }
+        if !lost_first_ask && asked_both.is_some_and(|at| step > at) {
+            for kind in relay.held_kinds(&l.device_id, &o.device_id) {
+                relay.discard_held_kind(&l.device_id, &o.device_id, &kind);
+            }
+            relay.release_held(&l.device_id, &o.device_id);
+            lost_first_ask = true;
+        }
+        for n in [&mut o, &mut k, &mut l] {
+            drain_events(n);
+        }
+        if step % 2 == 1 && g13w3_rows(&l, &server_id, &general) >= ROWS {
+            got = true;
+            break;
+        }
+        sleep_ms(1_000).await;
+    }
+    assert!(lost_first_ask, "L asked O and K");
+    assert!(got, "L took the history from O while K sent pages nobody asked for");
+    relay.release_held(&l.device_id, &k.device_id);
+}
+
+/// A page claiming more follows that nobody asked for is never followed, over Olm or
+/// MLS: its sender cannot make us ask it page after page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_a_page_nobody_asked_for_is_never_followed() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_tag, k_tag, l_tag) = (237u8, 238u8, 239u8);
+    let (o_m, k_m, l_m) = (keys(o_tag).peer_id(), keys(k_tag).peer_id(), keys(l_tag).peer_id());
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&k_m, &l_m]).await;
+    let mut k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&o_m, &l_m]).await;
+    let mut l = spawn_node_with_friends(&relay, l_tag, l_tag, &[&o_m, &k_m]).await;
+    expect_dm_pair_ready(&relay, &o, &k, 15).await;
+    expect_dm_pair_ready(&relay, &o, &l, 15).await;
+    expect_dm_pair_ready(&relay, &k, &l, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Unasked more").await;
+    let general = general_channel_of(&server_id);
+    join_and_wait(&mut k, &server_id).await;
+    join_and_wait(&mut l, &server_id).await;
+    expect_mls_leaf(&o, &server_id, &l.device_id, 15).await;
+    expect_mls_leaf(&o, &server_id, &k.device_id, 15).await;
+    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await; // ABSENCE: join-time asks done
+
+    let l_device = l.device_id.clone();
+    let more = |end: i64| super::types::MessageEnvelope::ChannelSyncBatch {
+        sid: server_id.clone(),
+        cid: general.clone(),
+        messages: [end - 1, end]
+            .iter()
+            .map(|ts| serde_json::from_value(serde_json::json!({ "s": k_m, "t": "more", "ts": ts })).unwrap())
+            .collect(),
+        total: 400,
+        has_more: Some(true),
+        target: Some(l_device.clone()),
+    };
+    for (lane, end) in [("Olm", 7_000_002i64), ("MLS", 8_000_002)] {
+        if lane == "Olm" {
+            olm_envelope_as(&k, &l, more(end)).await;
+        } else {
+            mls_envelope_as(&k, &server_id, more(end)).await;
+        }
+        let seen = wait_until(4, async || {
+            for n in [&mut o, &mut k, &mut l] {
+                drain_events(n);
+            }
+            l.carried_to(&k.device_id).await.iter().any(|m| {
+                matches!(m, super::types::HavenMessage::ChannelSyncRequest { since_timestamp, .. } if *since_timestamp == end)
+            })
+        })
+        .await;
+        assert!(!seen, "L asked K for the next page of a page it never asked for ({lane})");
+    }
 }

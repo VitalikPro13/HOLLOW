@@ -323,6 +323,35 @@ fn collect_rows<T>(
     Ok(out)
 }
 
+/// One sender of a channel: its oldest row (or, for a per-sender ask, its first row
+/// the ask serves) and its newest row.
+#[derive(Clone)]
+struct SenderSpan {
+    sender: String,
+    first: i64,
+    last: i64,
+}
+
+/// Senders a per-sender page reads one by one, past which a pass of the timestamp
+/// index is cheap: at most this many.
+const MAX_EARLY_SENDERS: usize = 64;
+
+/// Where a per-sender page splits `spans` (sorted by `first`): the senders before the
+/// split have no row at or after the split's first row, so the timestamp pass starts
+/// there. The latest such split, so a sender that went quiet long ago never makes the
+/// pass walk the rows everyone posted since.
+fn early_sender_split(spans: &[SenderSpan]) -> usize {
+    let mut split = 0;
+    let mut newest = i64::MIN;
+    for (i, span) in spans.iter().enumerate().take(MAX_EARLY_SENDERS + 1) {
+        if i > 0 && newest < span.first {
+            split = i;
+        }
+        newest = newest.max(span.last);
+    }
+    split
+}
+
 /// A signed per-message evidence row: (emoji, peer_id, at_ms, signature,
 /// public_key) — shape shared by reaction sync rows and reaction removals.
 pub(crate) type SignedEmojiRow = (String, String, i64, Option<String>, Option<String>);
@@ -3206,32 +3235,57 @@ impl MessageStore {
         server_id: &str,
         channel_id: &str,
     ) -> Result<HashMap<String, i64>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT sender_id, MAX(timestamp) FROM channel_messages
-                 WHERE server_id = ?1 AND channel_id = ?2
-                 GROUP BY sender_id",
-            )
-            .map_err(|e| format!("Failed to prepare per_sender_timestamps query: {e}"))?;
-        let rows = stmt
-            .query_map(params![server_id, channel_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(|e| format!("Failed to query per_sender_timestamps: {e}"))?;
         let mut map = HashMap::new();
-        for row in rows {
-            let (sender, ts) = row.map_err(|e| format!("Failed to read per_sender row: {e}"))?;
+        for span in self.channel_sender_spans(server_id, channel_id)? {
             // Lookback overlap: a MAX(timestamp) watermark permanently skips a message MISSED
             // while a newer one arrived, so ask from `watermark - LOOKBACK`. The overlap is
             // deduplicated by message_id on receipt.
-            map.insert(sender, (ts - SYNC_LOOKBACK_MS).max(0));
+            map.insert(span.sender, (span.last - SYNC_LOOKBACK_MS).max(0));
         }
         Ok(map)
     }
 
+    /// Every sender of one channel with its oldest and newest row. Two index seeks per
+    /// sender on the `(server_id, channel_id, sender_id, timestamp, ...)` unique index,
+    /// never a pass over the channel's rows: sync asks this once per page.
+    fn channel_sender_spans(&self, server_id: &str, channel_id: &str) -> Result<Vec<SenderSpan>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "WITH RECURSIVE senders(id) AS (
+                     SELECT (SELECT MIN(sender_id) FROM channel_messages
+                             WHERE server_id = ?1 AND channel_id = ?2)
+                     UNION ALL
+                     SELECT (SELECT MIN(sender_id) FROM channel_messages
+                             WHERE server_id = ?1 AND channel_id = ?2 AND sender_id > senders.id)
+                     FROM senders WHERE senders.id IS NOT NULL
+                 )
+                 SELECT id,
+                        (SELECT MIN(timestamp) FROM channel_messages
+                         WHERE server_id = ?1 AND channel_id = ?2 AND sender_id = senders.id),
+                        (SELECT MAX(timestamp) FROM channel_messages
+                         WHERE server_id = ?1 AND channel_id = ?2 AND sender_id = senders.id)
+                 FROM senders WHERE id IS NOT NULL",
+            )
+            .map_err(|e| format!("Failed to prepare channel senders query: {e}"))?;
+        let rows = stmt
+            .query_map(params![server_id, channel_id], |row| {
+                Ok(SenderSpan { sender: row.get(0)?, first: row.get(1)?, last: row.get(2)? })
+            })
+            .map_err(|e| format!("Failed to query channel senders: {e}"))?;
+        collect_rows(rows, "channel senders")
+    }
+
     /// Channel messages filling gaps from per-sender timestamps: known senders from
-    /// their timestamp, unknown senders in full.
+    /// their timestamp (inclusive, to catch same-millisecond messages), unknown senders
+    /// in full, oldest first.
+    ///
+    /// Senders whose rows all come before the rest are read one by one (up to `limit`
+    /// rows each), the others in one pass of the timestamp index from their first
+    /// qualifying row. For the asks sync sends (a next page from where the last ended, a
+    /// catch-up from recent watermarks) that reads about `limit` rows however deep in the
+    /// history it starts; an ask naming a watermark far behind the others walks every
+    /// row in between, as every page did before.
     pub fn get_channel_messages_since_per_sender(
         &self,
         server_id: &str,
@@ -3243,66 +3297,103 @@ impl MessageStore {
             // No known senders — return everything.
             return self.get_channel_messages_since(server_id, channel_id, 0, limit);
         }
+        let senders = self.channel_sender_spans(server_id, channel_id)?;
+        let mut spans = self.qualifying_spans(server_id, channel_id, &senders, sender_timestamps)?;
+        if spans.is_empty() || limit <= 0 {
+            return Ok(Vec::new());
+        }
+        spans.sort_by_key(|s| s.first);
+        let split = early_sender_split(&spans);
+        let scan_from = spans[split].first;
 
-        let (where_clause, mut param_values) =
-            Self::per_sender_where(server_id, channel_id, sender_timestamps);
+        let mut rows = Vec::new();
+        let mut early = self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT {CHANNEL_MSG_COLS} FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND sender_id = ?3 AND timestamp >= ?4
+                 ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC, message_id ASC
+                 LIMIT ?5",
+            ))
+            .map_err(|e| format!("Failed to prepare per_sender early query: {e}"))?;
+        for span in &spans[..split] {
+            let found = early
+                .query_map(params![server_id, channel_id, span.sender, span.first, limit], channel_message_from_row)
+                .map_err(|e| format!("Failed to query per_sender early: {e}"))?;
+            rows.extend(collect_rows(found, "per_sender early")?);
+        }
+
+        // From `scan_from` on, a row is out only when its sender is known and the row is
+        // older than that sender's watermark. Watermarks of senders this channel does not
+        // hold name no row.
+        let behind: Vec<(&String, i64)> = senders
+            .iter()
+            .filter_map(|s| sender_timestamps.get(&s.sender).map(|ts| (&s.sender, *ts)))
+            .filter(|(_, ts)| *ts > scan_from)
+            .collect();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(server_id.to_string()), Box::new(channel_id.to_string()), Box::new(scan_from)];
+        let mut excluded = Vec::new();
+        for (sender, ts) in &behind {
+            excluded.push(format!("(sender_id = ?{} AND timestamp < ?{})", param_values.len() + 1, param_values.len() + 2));
+            param_values.push(Box::new((*sender).clone()));
+            param_values.push(Box::new(*ts));
+        }
+        let exclusion = if excluded.is_empty() { String::new() } else { format!(" AND NOT ({})", excluded.join(" OR ")) };
         let sql = format!(
             "SELECT {CHANNEL_MSG_COLS}
              FROM channel_messages
-             WHERE server_id = ?1 AND channel_id = ?2 AND ({where_clause})
+             WHERE server_id = ?1 AND channel_id = ?2 AND timestamp >= ?3{exclusion}
              ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC, message_id ASC
              LIMIT ?{}",
             param_values.len() + 1,
         );
         param_values.push(Box::new(limit));
-
         let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-
         let mut stmt = self.conn.prepare(&sql)
             .map_err(|e| format!("Failed to prepare per_sender_since query: {e}"))?;
-        let rows = stmt
+        let found = stmt
             .query_map(params_ref.as_slice(), channel_message_from_row)
             .map_err(|e| format!("Failed to query per_sender_since: {e}"))?;
+        rows.extend(collect_rows(found, "per_sender")?);
 
-        collect_rows(rows, "per_sender")
+        rows.sort_by(|a, b| {
+            let key = |m: &StoredChannelMessage| (m.timestamp, m.order_us.unwrap_or(m.timestamp * 1000));
+            key(a).cmp(&key(b)).then_with(|| a.message_id.cmp(&b.message_id)).then_with(|| a.id.cmp(&b.id))
+        });
+        rows.truncate(limit as usize);
+        Ok(rows)
     }
 
-    /// Build the dynamic per-sender WHERE fragment and parameters shared by the
-    /// per-sender sync query and its count: known senders match from their latest
-    /// (inclusive, to catch same-millisecond messages), unknown senders match
-    /// everything. Params ?1/?2 are server_id/channel_id.
-    fn per_sender_where(
+    /// Senders with a row a per-sender ask serves, each with the timestamp of its first
+    /// such row and of its newest row.
+    fn qualifying_spans(
+        &self,
         server_id: &str,
         channel_id: &str,
+        senders: &[SenderSpan],
         sender_timestamps: &HashMap<String, i64>,
-    ) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
-        let mut conditions = Vec::new();
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        param_values.push(Box::new(server_id.to_string()));
-        param_values.push(Box::new(channel_id.to_string()));
-
-        let known_senders: Vec<&String> = sender_timestamps.keys().collect();
-        let mut param_idx = 3;
-
-        for (sender, ts) in sender_timestamps {
-            conditions.push(format!("(sender_id = ?{} AND timestamp >= ?{})", param_idx, param_idx + 1));
-            param_values.push(Box::new(sender.clone()));
-            param_values.push(Box::new(*ts));
-            param_idx += 2;
-        }
-
-        if !known_senders.is_empty() {
-            let placeholders: Vec<String> = known_senders.iter().enumerate().map(|(i, _)| {
-                let idx = param_idx + i;
-                format!("?{idx}")
-            }).collect();
-            conditions.push(format!("(sender_id NOT IN ({}))", placeholders.join(",")));
-            for s in &known_senders {
-                param_values.push(Box::new(s.to_string()));
+    ) -> Result<Vec<SenderSpan>, String> {
+        let mut first_from = self
+            .conn
+            .prepare_cached(
+                "SELECT MIN(timestamp) FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND sender_id = ?3 AND timestamp >= ?4",
+            )
+            .map_err(|e| format!("Failed to prepare per_sender first query: {e}"))?;
+        let mut spans = Vec::new();
+        for span in senders {
+            let mut span = span.clone();
+            if let Some(since) = sender_timestamps.get(&span.sender) {
+                let first: Option<i64> = first_from
+                    .query_row(params![server_id, channel_id, span.sender, since], |row| row.get(0))
+                    .map_err(|e| format!("Failed to query per_sender first: {e}"))?;
+                let Some(first) = first else { continue };
+                span.first = first;
             }
+            spans.push(span);
         }
-
-        (conditions.join(" OR "), param_values)
+        Ok(spans)
     }
 
     /// Count channel messages that would be returned by per-sender sync.
@@ -3315,19 +3406,22 @@ impl MessageStore {
         if sender_timestamps.is_empty() {
             return self.count_channel_messages_since(server_id, channel_id, 0);
         }
-
-        let (where_clause, param_values) =
-            Self::per_sender_where(server_id, channel_id, sender_timestamps);
-        let sql = format!(
-            "SELECT COUNT(*) FROM channel_messages
-             WHERE server_id = ?1 AND channel_id = ?2 AND ({where_clause})",
-        );
-
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-
-        let count: i64 = self.conn.query_row(&sql, params_ref.as_slice(), |row| row.get(0))
-            .map_err(|e| format!("Failed to count per_sender messages: {e}"))?;
-        Ok(count as u32)
+        let mut count_from = self
+            .conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND sender_id = ?3 AND timestamp >= ?4",
+            )
+            .map_err(|e| format!("Failed to prepare per_sender count: {e}"))?;
+        let mut total = 0i64;
+        let senders = self.channel_sender_spans(server_id, channel_id)?;
+        for span in self.qualifying_spans(server_id, channel_id, &senders, sender_timestamps)? {
+            let n: i64 = count_from
+                .query_row(params![server_id, channel_id, span.sender, span.first], |row| row.get(0))
+                .map_err(|e| format!("Failed to count per_sender messages: {e}"))?;
+            total += n;
+        }
+        Ok(total as u32)
     }
 
     /// Load HLC state, if saved.
@@ -9730,5 +9824,186 @@ mod g13w3_revoked_marks {
         store.clear_revoked_devices("master-y", &["dev".to_string()]).unwrap();
         assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev", "master-o")], "another master's lift erased the old row");
         assert_eq!(store.revoked_marks().unwrap(), vec![pair("dev", "master-o")]);
+    }
+}
+
+#[cfg(test)]
+mod g13w3_sync_cost {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// The per-sender WHERE 0.12.2 served pages with: one disjunct per known sender plus
+    /// every unknown sender. The reference the page query must keep matching.
+    fn old_where(sender_timestamps: &HashMap<String, i64>) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+        let mut conditions = Vec::new();
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new("srv".to_string()), Box::new("ch".to_string())];
+        for (sender, ts) in sender_timestamps {
+            conditions.push(format!("(sender_id = ?{} AND timestamp >= ?{})", values.len() + 1, values.len() + 2));
+            values.push(Box::new(sender.clone()));
+            values.push(Box::new(*ts));
+        }
+        let start = values.len() + 1;
+        let marks: Vec<String> = (0..sender_timestamps.len()).map(|i| format!("?{}", start + i)).collect();
+        conditions.push(format!("(sender_id NOT IN ({}))", marks.join(",")));
+        values.extend(sender_timestamps.keys().map(|s| Box::new(s.clone()) as Box<dyn rusqlite::types::ToSql>));
+        (conditions.join(" OR "), values)
+    }
+
+    fn old_page(store: &MessageStore, wm: &HashMap<String, i64>, limit: i32) -> (Vec<i64>, u32) {
+        let (clause, mut values) = old_where(wm);
+        let sql = format!(
+            "SELECT id FROM channel_messages WHERE server_id = ?1 AND channel_id = ?2 AND ({clause})
+             ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC, message_id ASC LIMIT ?{}",
+            values.len() + 1
+        );
+        values.push(Box::new(limit));
+        let refs: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+        let mut stmt = store.conn.prepare(&sql).unwrap();
+        let ids = stmt.query_map(refs.as_slice(), |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        let (clause, values) = old_where(wm);
+        let refs: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+        let n: i64 = store
+            .conn
+            .query_row(&format!("SELECT COUNT(*) FROM channel_messages WHERE server_id = ?1 AND channel_id = ?2 AND ({clause})"), refs.as_slice(), |r| r.get(0))
+            .unwrap();
+        (ids, n as u32)
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % n.max(1)
+        }
+    }
+
+    /// `rows` posts by `senders` authors, a few of whom posted only long ago, with
+    /// same-millisecond bursts told apart by their send stamps.
+    fn channel(rows: i64, senders: u64, seed: u64) -> MessageStore {
+        let store = MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+        let mut rng = Rng(seed);
+        store.begin_transaction().unwrap();
+        let mut ts = 1_000_000i64;
+        for i in 0..rows {
+            ts += rng.below(3) as i64;
+            let quiet = i < rows / 10 && rng.below(4) == 0;
+            let sender = if quiet { format!("quiet{}", rng.below(5)) } else { format!("author{:03}", rng.below(senders)) };
+            let order_us = ts * 1000 + rng.below(1000) as i64;
+            store
+                .insert_channel_message("srv", "ch", &sender, &format!("post {i}"), false, ts, None, None, Some(&format!("m{i:06}")), None, None, Some(order_us), None)
+                .unwrap();
+        }
+        store.commit_transaction().unwrap();
+        store
+    }
+
+    fn new_page(store: &MessageStore, wm: &HashMap<String, i64>, limit: i32) -> (Vec<i64>, u32) {
+        let ids = store.get_channel_messages_since_per_sender("srv", "ch", wm, limit).unwrap().iter().map(|m| m.id).collect();
+        (ids, store.count_channel_messages_since_per_sender("srv", "ch", wm).unwrap())
+    }
+
+    #[test]
+    fn per_sender_pages_serve_exactly_what_the_old_query_served() {
+        let store = channel(3_000, 25, 7);
+        let senders: Vec<String> = store.get_per_sender_timestamps("srv", "ch").unwrap().into_keys().collect();
+        let (lo, hi) = (1_000_000i64, 1_000_000 + 3_000 * 2);
+        let mut rng = Rng(99);
+        let mut asks: Vec<HashMap<String, i64>> = Vec::new();
+        for _ in 0..60 {
+            let mut wm = HashMap::new();
+            for s in &senders {
+                if rng.below(3) > 0 {
+                    wm.insert(s.clone(), lo + rng.below((hi - lo) as u64) as i64);
+                }
+            }
+            if rng.below(4) == 0 {
+                wm.insert(format!("stranger{}", rng.below(9)), lo + rng.below((hi - lo) as u64) as i64);
+            }
+            if wm.is_empty() {
+                wm.insert("stranger".into(), 0);
+            }
+            asks.push(wm);
+        }
+        asks.push(senders.iter().map(|s| (s.clone(), hi + 10)).collect());
+        asks.push(senders.iter().map(|s| (s.clone(), 0)).collect());
+        // Our own watermarks, as a catch-up sends them.
+        asks.push(store.get_per_sender_timestamps("srv", "ch").unwrap());
+        for wm in &asks {
+            for limit in [1, 200, 201] {
+                assert_eq!(new_page(&store, wm, limit), old_page(&store, wm, limit), "ask {wm:?} limit {limit}");
+            }
+        }
+
+        // An empty asker paging through to the end, as `channel_next_page_request` asks.
+        let first = store.get_channel_messages_since("srv", "ch", 0, 200).unwrap();
+        let mut known: std::collections::HashSet<String> = first.iter().map(|m| m.sender_id.clone()).collect();
+        let mut last = first.iter().map(|m| m.timestamp).max().unwrap();
+        let mut served: std::collections::HashSet<i64> = first.iter().map(|m| m.id).collect();
+        loop {
+            let wm: HashMap<String, i64> = known.iter().map(|s| (s.clone(), last)).collect();
+            let page = store.get_channel_messages_since_per_sender("srv", "ch", &wm, 200).unwrap();
+            assert_eq!(page.iter().map(|m| m.id).collect::<Vec<_>>(), old_page(&store, &wm, 200).0);
+            served.extend(page.iter().map(|m| m.id));
+            if page.len() < 200 {
+                break;
+            }
+            last = page.iter().map(|m| m.timestamp).max().unwrap();
+            known.extend(page.into_iter().map(|m| m.sender_id));
+        }
+        let served = served.len();
+        assert!(served >= 3_000, "the walk reached the end ({served})");
+    }
+
+    extern "C" fn count_ops(counter: *mut std::ffi::c_void) -> std::ffi::c_int {
+        // SAFETY: `vm_ops` passes a pointer to an AtomicU64 that outlives the handler.
+        unsafe { (*(counter as *const AtomicU64)).fetch_add(1, Ordering::Relaxed) };
+        0
+    }
+
+    /// SQLite virtual-machine steps (in hundreds) that `f` costs on `store`.
+    fn vm_ops(store: &MessageStore, f: impl FnOnce()) -> u64 {
+        let counter = AtomicU64::new(0);
+        // SAFETY: the handler is removed before `counter` goes out of scope.
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(store.conn.handle(), 100, Some(count_ops), &counter as *const AtomicU64 as *mut std::ffi::c_void);
+        }
+        f();
+        unsafe { rusqlite::ffi::sqlite3_progress_handler(store.conn.handle(), 0, None, std::ptr::null_mut()) };
+        counter.load(Ordering::Relaxed)
+    }
+
+    /// The page an asker halfway through the history asks for next, and the
+    /// watermarks it reads to ask: what each costs must not grow with the history.
+    #[test]
+    fn a_channel_page_costs_the_same_however_long_the_history() {
+        let cost = |rows: i64| {
+            let store = channel(rows, 100, 3);
+            let senders: Vec<String> = store.get_per_sender_timestamps("srv", "ch").unwrap().into_keys().collect();
+            let mid: i64 = store
+                .conn
+                .query_row("SELECT timestamp FROM channel_messages ORDER BY timestamp LIMIT 1 OFFSET ?1", [rows / 2], |r| r.get(0))
+                .unwrap();
+            let wm: HashMap<String, i64> = senders.into_iter().map(|s| (s, mid)).collect();
+            let page = vm_ops(&store, || assert_eq!(store.get_channel_messages_since_per_sender("srv", "ch", &wm, 201).unwrap().len(), 201));
+            let marks = vm_ops(&store, || assert!(!store.get_per_sender_timestamps("srv", "ch").unwrap().is_empty()));
+            // A catch-up of the newest posts from an asker that holds the rest, among them
+            // the quiet authors' posts from long ago.
+            let newest: Vec<(String, i64)> = {
+                let mut stmt = store
+                    .conn
+                    .prepare("SELECT sender_id, MAX(timestamp) FROM channel_messages WHERE timestamp < ?1 GROUP BY sender_id")
+                    .unwrap();
+                stmt.query_map([mid + (rows / 3)], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect()
+            };
+            let held: HashMap<String, i64> = newest.into_iter().map(|(s, ts)| (s, ts - 5)).collect();
+            let catch_up = vm_ops(&store, || assert_eq!(store.get_channel_messages_since_per_sender("srv", "ch", &held, 201).unwrap().len(), 201));
+            (page, marks, catch_up)
+        };
+        let (small, large) = (cost(2_000), cost(20_000));
+        assert!(large.0 < small.0 * 2, "a page costs {} at 20k rows, {} at 2k", large.0, small.0);
+        assert!(large.1 < small.1 * 2, "the watermarks cost {} at 20k rows, {} at 2k", large.1, small.1);
+        assert!(large.2 < small.2 * 2, "a catch-up page costs {} at 20k rows, {} at 2k", large.2, small.2);
     }
 }

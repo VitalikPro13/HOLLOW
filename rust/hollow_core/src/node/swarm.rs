@@ -1378,8 +1378,9 @@ async fn run_event_loop(
     // MLS decrypt failure counter per server — triggers recovery after 3 consecutive failures.
 
     // Multi-peer fan-out sync coordinator.
-    // Collects connected peers for 500ms, then assigns channels evenly across peers.
+    // Collects connected peers for 500ms, then asks each channel of one of them.
     let mut sync_coordinator = SyncCoordinator::new();
+    let mut channel_asks = super::channel_asks::ChannelAsks::default();
 
     let mut sync_dispatch_timer = tokio::time::interval(Duration::from_millis(100));
     sync_dispatch_timer.tick().await; // consume immediate first tick
@@ -1557,6 +1558,7 @@ async fn run_event_loop(
                     &ws_cmd_tx, &ws_room_peers,
                     &webrtc_peers, &share_registry, &mut pending_webrtc_sends,
                     &mut channel_sync_sent,
+                    &mut channel_asks,
                     &mut slow_mode_clock,
                     &mut gossip_overlays,
                     &mut voice_channel_participants,
@@ -2426,7 +2428,8 @@ async fn run_event_loop(
                         if sync_handler::handle_request_channel_sync(
                             &server_states, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &bundle_keypair, &local_peer_str,
-                            &mut channel_sync_sent, server_id, channel_id,
+                            &mut channel_sync_sent, &mut channel_asks, &mut frame_budget, &device_peer_id,
+                            server_id, channel_id,
                             &crdt_store,
                             &db_path, &db_passphrase,
                         ).await { continue; }
@@ -3451,6 +3454,7 @@ async fn run_event_loop(
                                 &ws_cmd_tx, &ws_room_peers,
                                 &webrtc_peers, &share_registry, &mut pending_webrtc_sends,
                                 &mut channel_sync_sent,
+                                &mut channel_asks,
                                 &mut slow_mode_clock,
                                 &mut gossip_overlays,
                                 &mut voice_channel_participants,
@@ -5202,6 +5206,7 @@ async fn run_event_loop(
                                 &ws_cmd_tx, &ws_room_peers,
                                 &webrtc_peers, &share_registry, &mut pending_webrtc_sends,
                                 &mut channel_sync_sent,
+                                &mut channel_asks,
                                 &mut slow_mode_clock,
                                 &mut gossip_overlays,
                                 &mut voice_channel_participants,
@@ -5755,6 +5760,7 @@ async fn run_event_loop(
                                             &ws_cmd_tx, &ws_room_peers,
                                             &webrtc_peers, &share_registry, &mut pending_webrtc_sends,
                                             &mut channel_sync_sent,
+                                            &mut channel_asks,
                                             &mut slow_mode_clock,
                                             &mut gossip_overlays,
                                             &mut voice_channel_participants,
@@ -6093,15 +6099,18 @@ async fn run_event_loop(
                                 Some(cid) => vec![cid.clone()],
                                 None => state.channels.keys().cloned().collect(),
                             };
-                            for peer_id_str in &done.added {
-                                if !peer_is_reachable(&ws_room_peers, peer_id_str) { continue; }
-                                for cid in &sync_cids {
-                                    super::olm_lane::carry(
-                                        &ws_cmd_tx, peer_id_str, None,
-                                        &sync_handler::channel_sync_request(&store, &server_id, cid, true),
-                                        super::olm_lane::NoSession::Queue,
-                                    );
-                                }
+                            let asks = super::channel_asks::post_commit_asks(
+                                state, &done.added, &removals, &add_masters, &sync_cids,
+                                super::types::now_ms().max(0) as u64,
+                                |device| peer_is_reachable(&ws_room_peers, device),
+                            );
+                            for (peer_id_str, cid) in &asks {
+                                channel_asks.asked_aside(&server_id, cid, peer_id_str, std::time::Instant::now());
+                                super::olm_lane::carry(
+                                    &ws_cmd_tx, peer_id_str, None,
+                                    &sync_handler::channel_sync_request(&store, &server_id, cid, true),
+                                    super::olm_lane::NoSession::Queue,
+                                );
                             }
                         }
                     }
@@ -6194,7 +6203,7 @@ async fn run_event_loop(
                                 );
                                 after_welcome_joined(
                                     mls_mgr, &master_keypair, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                                    &crdt_store, &server_states, &mut crdt_resync, &mut mls_bootstrap_requested,
+                                    &crdt_store, &server_states, &mut crdt_resync, &mut channel_asks, &mut mls_bootstrap_requested,
                                     &mut mls_welcome_grace, &mut awaiting_mls_after_parked_join,
                                     &mut relay_catchup_done, &db_path, &db_passphrase, &local_peer_str,
                                     sync_peer, &server_id, &channel_id, &group_key,
@@ -6394,44 +6403,37 @@ async fn run_event_loop(
             _ = sync_dispatch_timer.tick() => {
                 arm_started = Some(("timer", "sync_dispatch", std::time::Instant::now()));
                 let ready = sync_coordinator.collect_ready();
-                for (server_id, assignments) in &ready {
-                    let total_channels: usize = assignments.iter().map(|(_, chs)| chs.len()).sum();
-                    let total_peers = assignments.len();
+                for (server_id, peers, channels) in &ready {
                     hollow_log!(
-                        "[HOLLOW-SYNC] Fan-out dispatch for server {server_id}: {total_channels} channel probes across {total_peers} peers"
+                        "[HOLLOW-SYNC] Catch-up for server {server_id}: {} channels, one of {} peers each",
+                        channels.len(), peers.len()
                     );
 
                     let sync_store = crate::storage::MessageStore::lease(&db_path, &db_passphrase).ok();
+                    let state = server_states.get(server_id);
+                    for (channel_id, our_latest) in channels {
+                        let Some(state) = state else { continue };
+                        let holders = super::channel_asks::holders_among(state, peers.iter(), channel_id);
+                        let Some(holder) = channel_asks.start_catch_up(server_id, channel_id, &holders, std::time::Instant::now()) else {
+                            continue;
+                        };
 
-                    for (peer, channels) in assignments {
-                        let peer_str = peer.to_string();
-                        for (channel_id, our_latest) in channels {
-                            // Dedup: skip if we already sent a sync probe for this channel recently.
-                            let dedup_key = format!("{server_id}:{channel_id}");
-                            if let Some(last) = channel_sync_sent.get(&dedup_key) {
-                                if last.elapsed() < Duration::from_secs(5) {
-                                    continue;
-                                }
-                            }
-                            channel_sync_sent.insert(dedup_key, std::time::Instant::now());
-
-                            // A ChannelSyncRequest over Olm rather than an MLS ChannelProbe: an MLS
-                            // probe silently fails at a stale epoch after reconnection, so sync never
-                            // completes. The response handler uses MLS if available, Olm otherwise.
-                            let request = match sync_store.as_ref() {
-                                Some(store) => sync_handler::channel_sync_request(store, server_id, channel_id, true),
-                                None => HavenMessage::ChannelSyncRequest {
-                                    server_id: server_id.clone(),
-                                    channel_id: channel_id.clone(),
-                                    since_timestamp: *our_latest,
-                                    sender_timestamps: HashMap::new(),
-                                    gap: None,
-                                },
-                            };
-                            // One ask per channel: paced, as a server of many channels would
-                            // overrun the peer's bucket.
-                            super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &peer_str, &request);
-                        }
+                        // A ChannelSyncRequest over Olm rather than an MLS ChannelProbe: an MLS
+                        // probe silently fails at a stale epoch after reconnection, so sync never
+                        // completes. The response handler uses MLS if available, Olm otherwise.
+                        let request = match sync_store.as_ref() {
+                            Some(store) => sync_handler::channel_sync_request(store, server_id, channel_id, true),
+                            None => HavenMessage::ChannelSyncRequest {
+                                server_id: server_id.clone(),
+                                channel_id: channel_id.clone(),
+                                since_timestamp: *our_latest,
+                                sender_timestamps: HashMap::new(),
+                                gap: None,
+                            },
+                        };
+                        // One ask per channel: paced, as a server of many channels would
+                        // overrun the peer's bucket.
+                        super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &holder, &request);
                     }
 
                     let _ = event_tx.send(NetworkEvent::MessageSyncStarted {
@@ -6439,6 +6441,17 @@ async fn run_event_loop(
                         peer_id: "fan-out".to_string(),
                     }).await;
                 }
+                let moved = channel_asks.sweep(
+                    std::time::Instant::now(),
+                    &|device: &str| super::channel_asks::reachable(&ws_room_peers, device),
+                    &|sid: &str, cid: &str| {
+                        server_states
+                            .get(sid)
+                            .map(|state| super::channel_asks::holders(&ws_room_peers, state, &local_peer_str, cid))
+                            .unwrap_or_default()
+                    },
+                );
+                sync_handler::ask_channel_holders(&mut frame_budget, &ws_cmd_tx, &device_peer_id, moved, &db_path, &db_passphrase);
 
                 sync_coordinator.cleanup_stale();
 
@@ -7820,6 +7833,7 @@ async fn apply_remote_crdt_op_inner(
 #[allow(clippy::too_many_arguments)]
 fn ask_sender_for_channels(
     channel_sync_sent: &mut HashMap<String, std::time::Instant>,
+    channel_asks: &mut super::channel_asks::ChannelAsks,
     subscribed_channels: &HashMap<String, Vec<String>>,
     server_states: &HashMap<String, ServerState>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -7848,6 +7862,7 @@ fn ask_sender_for_channels(
     }
     let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     for cid in &sync_cids {
+        channel_asks.asked_aside(server_id, cid, peer_str, std::time::Instant::now());
         super::olm_lane::carry(
             ws_cmd_tx, peer_str, None,
             &super::sync_handler::channel_sync_request(&store, server_id, cid, true),
@@ -7872,6 +7887,7 @@ async fn after_welcome_joined(
     crdt_store_actor: &super::crdt_store::CrdtStore,
     server_states: &HashMap<String, ServerState>,
     crdt_resync: &mut super::crdt_resync::CrdtResync,
+    channel_asks: &mut super::channel_asks::ChannelAsks,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
     mls_welcome_grace: &mut HashMap<String, std::time::Instant>,
     awaiting_mls_after_parked_join: &mut std::collections::HashSet<String>,
@@ -7987,7 +8003,13 @@ async fn after_welcome_joined(
                 Some(cid) => vec![cid.clone()],
                 None => state.channels.keys().cloned().collect(),
             };
-            for cid in sync_cids.iter().filter(|c| state.can_see_channel(&peer_master, c)) {
+            // The member whose Welcome let us in is asked first, unless an ask of the
+            // channel is already under way (opening it while the join completed).
+            let now = std::time::Instant::now();
+            for cid in sync_cids
+                .iter()
+                .filter(|c| state.can_see_channel(&peer_master, c) && channel_asks.start_with(server_id, c, sync_peer, &peer_master, now))
+            {
                 super::olm_lane::carry(
                     ws_cmd_tx, sync_peer, None,
                     &super::sync_handler::channel_sync_request(&store, server_id, cid, true),
@@ -8045,6 +8067,7 @@ async fn handle_incoming_request(
     share_registry: &super::share_handler::ShareRegistry,
     pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
     channel_sync_sent: &mut HashMap<String, std::time::Instant>,
+    channel_asks: &mut super::channel_asks::ChannelAsks,
     slow_mode_clock: &mut message_ops::SlowModeClock,
     gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
@@ -8088,7 +8111,7 @@ async fn handle_incoming_request(
         relay_catchup_done, pending_file_streams, pending_shard_streams, early_file_streams,
         pending_link_snapshots, vault_shard_asks, link, decrypt_fail_cooldown, pending_mls_key_packages,
         pending_mls_removals, mls_epoch_hint_cooldown, ws_cmd_tx, ws_room_peers, webrtc_peers, share_registry,
-        pending_webrtc_sends, channel_sync_sent, slow_mode_clock, gossip_overlays, voice_channel_participants,
+        pending_webrtc_sends, channel_sync_sent, channel_asks, slow_mode_clock, gossip_overlays, voice_channel_participants,
         voice_channel_gossip_mode, call_book, conference_host, vc_signal_rate_tokens, mls_dirty, guest_rooms,
         subscribed_channels, db_path, db_passphrase, local_peer_str, peer_str, is_invisible,
         pending_friend_accepts, pending_friend_requests, pending_friend_removals, answer_resent,
@@ -8143,6 +8166,7 @@ async fn handle_incoming_request_inner(
     share_registry: &super::share_handler::ShareRegistry,
     pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
     channel_sync_sent: &mut HashMap<String, std::time::Instant>,
+    channel_asks: &mut super::channel_asks::ChannelAsks,
     slow_mode_clock: &mut message_ops::SlowModeClock,
     gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
@@ -8605,6 +8629,9 @@ async fn handle_incoming_request_inner(
                         return;
                     }
                     let page_end = if has_more == Some(true) { super::sync_handler::ChannelPageEnd::of(&messages) } else { None };
+                    let page = super::channel_asks::Page::of(has_more, page_end.as_ref());
+                    let heard = channel_asks.heard(&sid, &cid, peer_str, page, std::time::Instant::now());
+                    let page_end = page_end.filter(|_| heard.follow);
                     crypto_handler::backfill_filter(server_states.get(&sid), &mut messages);
                     let local_peer = local_peer_str.to_string();
                     let mut new_count = 0u32;
@@ -8637,18 +8664,20 @@ async fn handle_incoming_request_inner(
                                         super::olm_lane::NoSession::Queue,
                                     );
                                 }
-                                None => hollow_log!("[HOLLOW-SYNC] Channel page for {cid} from {peer_str} cannot advance; the next catch-up takes the rest"),
+                                None => hollow_log!("[HOLLOW-SYNC] Not following the channel page for {cid} from {peer_str}; the next catch-up takes the rest"),
                             }
                         }
                     }
 
-                    // Emit progress so the UI can show "Syncing 47/120..."
-                    if total > 0 {
+                    // Emit progress so the UI can show "Syncing 47/120...". The progress line adds
+                    // up every page, so only a chain's first page brings what is left to sync.
+                    let total_count = if heard.continued { 0 } else { total };
+                    if total_count > 0 || (heard.continued && received_count > 0) {
                         let _ = event_tx.send(NetworkEvent::MessageSyncProgress {
                             server_id: sid.clone(),
                             channel_id: cid.clone(),
                             received_count,
-                            total_count: total,
+                            total_count,
                         }).await;
                     }
 
@@ -11821,7 +11850,7 @@ async fn handle_incoming_request_inner(
                     // used, so this frame's twin may be a message we never read.
                     Ok(crate::crypto::Decrypted::Replay) => {
                         ask_sender_for_channels(
-                            channel_sync_sent, subscribed_channels, server_states, ws_cmd_tx,
+                            channel_sync_sent, channel_asks, subscribed_channels, server_states, ws_cmd_tx,
                             db_path, db_passphrase, &server_id, &msg_channel_id, &group_key, peer_str,
                         );
                     }
@@ -12093,6 +12122,9 @@ async fn handle_incoming_request_inner(
                             MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, .. } => {
                                 if crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), &sender_master, &cid) {
                                     let page_end = if has_more == Some(true) { sync_handler::ChannelPageEnd::of(&messages) } else { None };
+                                    let page = super::channel_asks::Page::of(has_more, page_end.as_ref());
+                                    let follow = channel_asks.heard(&sid, &cid, &sender_peer_id, page, std::time::Instant::now()).follow;
+                                    let page_end = page_end.filter(|_| follow);
                                     crypto_handler::backfill_filter(server_states.get(&sid), &mut messages);
                                     sync_handler::handle_envelope_channel_sync_batch(
                                         olm, bundle_keypair, event_tx, ws_cmd_tx,
@@ -12336,7 +12368,7 @@ async fn handle_incoming_request_inner(
                         hollow_log!("[HOLLOW-MLS] Decrypt failed for {group_key}: {e}");
 
                         ask_sender_for_channels(
-                            channel_sync_sent, subscribed_channels, server_states, ws_cmd_tx,
+                            channel_sync_sent, channel_asks, subscribed_channels, server_states, ws_cmd_tx,
                             db_path, db_passphrase, &server_id, &msg_channel_id, &group_key, peer_str,
                         );
 
@@ -12584,7 +12616,7 @@ async fn handle_incoming_request_inner(
                         );
                         after_welcome_joined(
                             mls_mgr, master_keypair, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
-                            crdt_store_actor, server_states, crdt_resync, mls_bootstrap_requested,
+                            crdt_store_actor, server_states, crdt_resync, channel_asks, mls_bootstrap_requested,
                             mls_welcome_grace, awaiting_mls_after_parked_join, relay_catchup_done,
                             db_path, db_passphrase, local_peer_str, sync_peer,
                             &server_id, &wl_channel_id, &group_key, welcome_leaf.as_ref().map(|s| s.master.as_str()),

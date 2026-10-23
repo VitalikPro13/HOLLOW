@@ -19,6 +19,7 @@ pub(crate) mod emotes;
 pub(crate) mod fetch;
 pub(crate) mod frame_auth;
 pub(crate) mod frame_budget;
+pub(crate) mod channel_asks;
 pub(crate) mod file_asks;
 pub(crate) mod file_commit;
 pub(crate) mod file_handler;

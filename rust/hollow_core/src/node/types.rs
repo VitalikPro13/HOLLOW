@@ -5231,6 +5231,9 @@ pub(crate) struct PendingServerSync {
     pub dispatched: bool,
 }
 
+/// A server ready for its catch-up: (server, peers, channels with our newest timestamp).
+pub(crate) type ReadySync = (String, Vec<String>, Vec<(String, i64)>);
+
 /// Coordinates multi-peer fan-out sync across servers and channels.
 pub(crate) struct SyncCoordinator {
     /// Servers waiting for sync: server_id → PendingServerSync.
@@ -5271,55 +5274,22 @@ impl SyncCoordinator {
         }
     }
 
-    /// Check which servers are ready to dispatch (collection window elapsed).
-    /// Returns: Vec<(server_id, assignments)> where assignments = Vec<(peer_str, Vec<(channel_id, our_latest)>)>
-    pub(crate) fn collect_ready(&mut self) -> Vec<(String, Vec<(String, Vec<(String, i64)>)>)> {
+    /// Servers whose collection window has elapsed, as (server, peers, channels to sync
+    /// with our newest timestamp in each). Each channel is then asked of ONE holder
+    /// (`channel_asks`); a silent one hands it on, so no backup is asked up front.
+    pub(crate) fn collect_ready(&mut self) -> Vec<ReadySync> {
         let now = Instant::now();
         let mut ready = Vec::new();
-
         for (server_id, sync) in self.pending.iter_mut() {
-            if sync.dispatched {
-                continue;
-            }
-            if now.duration_since(sync.started_at) >= self.collection_window
+            if !sync.dispatched
+                && now.duration_since(sync.started_at) >= self.collection_window
                 && !sync.available_peers.is_empty()
                 && !sync.channels.is_empty()
             {
                 sync.dispatched = true;
-
-                // Each channel goes to a primary peer and, where there are enough peers, a
-                // backup as well, so one silent peer cannot stall a channel's sync.
-                let peers = &sync.available_peers;
-                let peer_count = peers.len();
-                let use_backup = peer_count >= 3;
-
-                let mut assignments: HashMap<String, Vec<(String, i64)>> = HashMap::new();
-
-                for (i, (cid, ts)) in sync.channels.iter().enumerate() {
-                    let primary_idx = i % peer_count;
-                    assignments
-                        .entry(peers[primary_idx].clone())
-                        .or_default()
-                        .push((cid.clone(), *ts));
-
-                    // Offset by half the peer count so primary and backup rarely coincide.
-                    if use_backup {
-                        let backup_idx = (i + peer_count / 2 + 1) % peer_count;
-                        if backup_idx != primary_idx {
-                            assignments
-                                .entry(peers[backup_idx].clone())
-                                .or_default()
-                                .push((cid.clone(), *ts));
-                        }
-                    }
-                }
-
-                let assignment_vec: Vec<(String, Vec<(String, i64)>)> =
-                    assignments.into_iter().collect();
-                ready.push((server_id.clone(), assignment_vec));
+                ready.push((server_id.clone(), sync.available_peers.clone(), sync.channels.clone()));
             }
         }
-
         ready
     }
 

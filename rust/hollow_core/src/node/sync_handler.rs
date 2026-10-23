@@ -633,6 +633,11 @@ pub(crate) struct ChannelPageEnd {
 }
 
 impl ChannelPageEnd {
+    /// The newest timestamp the page served.
+    pub(crate) fn last(&self) -> i64 {
+        self.last
+    }
+
     /// `None` when a page from this end would serve the whole page again (one
     /// millisecond fills it): paging stops there and the next catch-up takes the rest.
     pub(crate) fn of(items: &[SyncMessageItem]) -> Option<Self> {
@@ -758,11 +763,16 @@ pub(crate) fn build_channel_sync_batch(
     // still missing at the next sync and is served then.
     gap: Option<&GapDigest>,
 ) -> Result<(MessageEnvelope, usize), String> {
-    let mut messages = if !sender_timestamps.is_empty() {
-        store.get_channel_messages_since_per_sender(sid, cid, sender_timestamps, 200)
+    // One row past the page says whether more follow, without counting what is left:
+    // a count on every page made a long first sync quadratic.
+    let (mut messages, per_sender_more) = if !sender_timestamps.is_empty() {
+        let mut rows = store.get_channel_messages_since_per_sender(sid, cid, sender_timestamps, 201)?;
+        let more = rows.len() > 200;
+        rows.truncate(200);
+        (rows, more)
     } else {
-        store.get_channel_messages_since(sid, cid, since_timestamp, 200)
-    }?;
+        (store.get_channel_messages_since(sid, cid, since_timestamp, 200)?, false)
+    };
     let tail_len = messages.len();
     if let Some(gap) = gap {
         let paged: std::collections::HashSet<String> =
@@ -779,17 +789,23 @@ pub(crate) fn build_channel_sync_batch(
     }
     let gap_len = (messages.len() - tail_len) as u32;
     let SyncPage { items, truncated } = channel_sync_items(store, &messages);
-    let tail_total = if !sender_timestamps.is_empty() {
-        store.count_channel_messages_since_per_sender(sid, cid, sender_timestamps)
-            .unwrap_or(tail_len as u32)
-    } else {
+    // `total` only drives the asker's progress line, so the ask for a next page (every
+    // sender from where the last page ended) counts just this page.
+    let next_page = gap.is_none() && sender_timestamps.values().all(|ts| *ts == since_timestamp);
+    let tail_total = if sender_timestamps.is_empty() {
         store.count_channel_messages_since(sid, cid, since_timestamp)
+            .unwrap_or(tail_len as u32)
+    } else if next_page {
+        tail_len as u32
+    } else {
+        store.count_channel_messages_since_per_sender(sid, cid, sender_timestamps)
             .unwrap_or(tail_len as u32)
     };
     let total = tail_total + gap_len;
     // `truncated` = the preview budget ended the page before the query did, so
     // there is definitely more to serve even though the page is short.
-    let has_more = if truncated || (tail_len >= 200 && tail_total > 200) {
+    let more_rows = if sender_timestamps.is_empty() { tail_len >= 200 && tail_total > 200 } else { per_sender_more };
+    let has_more = if truncated || more_rows {
         Some(true)
     } else {
         None
@@ -3581,6 +3597,9 @@ pub(crate) async fn handle_request_channel_sync(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     channel_sync_sent: &mut HashMap<String, std::time::Instant>,
+    channel_asks: &mut super::channel_asks::ChannelAsks,
+    frame_budget: &mut super::frame_budget::FrameBudget,
+    device_peer_id: &str,
     server_id: String,
     channel_id: String,
     _crdt_store: &CrdtStore,
@@ -3595,14 +3614,35 @@ pub(crate) async fn handle_request_channel_sync(
     }
     channel_sync_sent.insert(dedup_key, std::time::Instant::now());
     if let Some(state) = server_states.get(&server_id) {
-        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
-            carry_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str,
-                &channel_sync_request(&store, &server_id, &channel_id, true),
-            );
+        let holders = super::channel_asks::holders(ws_room_peers, state, local_peer_str, &channel_id);
+        if let Some(holder) = channel_asks.start(&server_id, &channel_id, &holders, std::time::Instant::now()) {
+            ask_channel_holders(frame_budget, ws_cmd_tx, device_peer_id, vec![(server_id, channel_id, holder)], db_path, db_passphrase);
         }
     }
     false
+}
+
+/// Send each `(server, channel, holder)` the ask for what we miss in that channel,
+/// paced to the holder's bucket: a sweep can move several asks to one holder at once.
+pub(crate) fn ask_channel_holders(
+    frame_budget: &mut super::frame_budget::FrameBudget,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    device_peer_id: &str,
+    asks: Vec<(String, String, String)>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if asks.is_empty() {
+        return;
+    }
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
+    for (server_id, channel_id, holder) in asks {
+        hollow_log!("[HOLLOW-SYNC] Asking {holder} for channel {channel_id} in {server_id}");
+        super::frame_budget::pace_carried(
+            frame_budget, ws_cmd_tx, device_peer_id, &holder,
+            &channel_sync_request(&store, &server_id, &channel_id, true),
+        );
+    }
 }
 
 // ── 13. UpdateChannelLayout ───────────────────────────────────────────
@@ -4048,7 +4088,8 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     messages: Vec<SyncMessageItem>,
     _total: u32,
     has_more: Option<bool>,
-    // Where the page ended as served, read before the caller filtered it.
+    // Where the page ended as served, read before the caller filtered it; `None` when
+    // the next page is not ours to ask for (see `ChannelAsks::heard`).
     page_end: Option<ChannelPageEnd>,
     crypto_store: &CryptoStore,
     _crdt_store: &CrdtStore,
@@ -4080,7 +4121,7 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
                 &channel_next_page_request(&store, &sid, &cid, end),
                 super::olm_lane::NoSession::Queue,
             ),
-            None => hollow_log!("[HOLLOW-SYNC] Channel page for {cid} from {sender_peer_id} cannot advance; the next catch-up takes the rest"),
+            None => hollow_log!("[HOLLOW-SYNC] Not following the channel page for {cid} from {sender_peer_id}; the next catch-up takes the rest"),
         }
     }
     if has_more != Some(true) {
@@ -4456,6 +4497,37 @@ mod tests {
         assert!(page.contains(&"before-end".to_string()), "a gap row inside the page stays");
         assert!(!page.contains(&"past-end".to_string()), "a gap row past the page's end waits for the next page");
         assert_eq!(page.iter().filter(|m| m.starts_with('t')).count(), 200);
+    }
+
+    /// A next-page ask (every sender from where the last page ended) is served without
+    /// counting the rest of the history; any other ask still gets the full count, and
+    /// both say whether more follow exactly as a count would.
+    #[test]
+    fn a_next_page_is_served_without_counting_what_is_left() {
+        let store = store();
+        for i in 0..450 {
+            channel_row(&store, if i % 3 == 0 { "a" } else { "b" }, 1_000 + i, &format!("r{i}"));
+        }
+        let batch = |since: i64, wm: &HashMap<String, i64>| {
+            let (env, _) = build_channel_sync_batch(&store, "srv", "ch", since, wm, None).unwrap();
+            let MessageEnvelope::ChannelSyncBatch { messages, total, has_more, .. } = env else { panic!("a batch") };
+            (messages.len(), total, has_more, messages.iter().map(|m| m.ts).max().unwrap_or(0))
+        };
+        let (n, total, more, end) = batch(0, &HashMap::new());
+        assert_eq!((n, total, more), (200, 450, Some(true)), "a first page counts everything");
+        let next = |end: i64| HashMap::from([("a".to_string(), end), ("b".to_string(), end)]);
+        let (n, total, more, end) = batch(end, &next(end));
+        assert_eq!((n, total, more), (200, 200, Some(true)), "a next page counts itself only");
+        let (n, total, more, _) = batch(end, &next(end));
+        assert_eq!((n, total, more), (52, 52, None), "the last page says so");
+        let catch_up = HashMap::from([("a".to_string(), 1_100), ("b".to_string(), 1_300)]);
+        let (n, total, more, _) = batch(1_449, &catch_up);
+        assert_eq!((n, more), (200, Some(true)));
+        assert_eq!(total, store.count_channel_messages_since_per_sender("srv", "ch", &catch_up).unwrap(), "a catch-up is counted");
+        let (n, _, more, _) = batch(1_449, &HashMap::from([("a".to_string(), 2_000), ("b".to_string(), 1_150)]));
+        assert_eq!((n, more), (200, None), "exactly 200 rows left is one page");
+        let (_, _, more, _) = batch(1_449, &HashMap::from([("a".to_string(), 2_000), ("b".to_string(), 1_149)]));
+        assert_eq!(more, Some(true), "201 is two");
     }
 }
 
