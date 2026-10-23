@@ -28015,6 +28015,7 @@ async fn support_credential_replicates_and_transplant_is_dropped() {
 
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
     let mut a2 = spawn_node_with_friends(&relay, A_MASTER, A_DEV2, &[&b_master]).await;
+    expect_siblings_counted(&[&a, &a2], &a_master, &[&a.device_id, &a2.device_id], 20).await;
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
     assert!(
         wait_until(15, || async {
@@ -53000,6 +53001,7 @@ async fn g13_sibling_gets_mls_first_op_without_any_forward() {
     let mut b = spawn_node_with_friends(&relay, M, B, &[]).await;
     sleep_ms(1500).await;
     let mut c = spawn_node_with_friends(&relay, M, C, &[]).await;
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
     let mut x = spawn_node_with_friends(&relay, X, X, &[]).await;
     let sid = create_server_and_wait(&mut b, "Siblings").await;
     for joiner in [&mut c, &mut x] {
@@ -53049,19 +53051,21 @@ async fn g13_join_sync_request_is_constant_size() {
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut run = g13_run(&relay, 5).await;
+    // Caps the settles only: a sample needs no silent server, and the idle background
+    // never counts as settled here (`allowed` 0), so a loaded machine sat out each cap.
+    run.max_secs = 60;
     let sid = run.server_id.clone();
     let mut per_ask = Vec::new();
     for members in [5usize, 12] {
         run.grow(members, 3).await;
         let p = run.spawn().await;
-        run.begin().await;
+        g1_quiet(&mut run.nodes, run.quiet_ms, 20, run.allowed).await;
+        g1_probe::take();
         run.nodes[p].cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
         assert!(g1_wait_seated(&mut run.nodes, &sid, &[p], true, 90).await, "the probe join at {members}");
-        g1_quiet(&mut run.nodes, run.quiet_ms, 90, run.allowed).await;
-        let book = g1_probe::take();
-        let asks = book.kinds.get("direct:encrypted>carried/sync_request").cloned().unwrap_or_default();
-        assert!(asks.deliveries > 0, "no sync asks were metered at {members}");
-        per_ask.push((members, asks.bytes_out / asks.deliveries));
+        let (bytes, deliveries) = g13_sync_asks_until_still(&mut run.nodes, 2_000, 30).await;
+        assert!(deliveries > 0, "no sync asks were metered at {members}");
+        per_ask.push((members, bytes / deliveries));
     }
     let (small, large) = (per_ask[0].1, per_ask[1].1);
     assert!(large * 4 <= small * 5, "a sync ask grew with the server: {per_ask:?}");
@@ -53089,6 +53093,7 @@ async fn g13_hidden_sibling_drops_server_after_leave() {
     let mut b = spawn_node_with_friends(&relay, M, B, &[]).await;
     sleep_ms(1500).await;
     let mut c = spawn_node_with_friends(&relay, M, C, &[]).await;
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
     let sid = create_server_and_wait(&mut o, "Hidden").await;
     for joiner in [&mut b, &mut c] {
         joiner.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
@@ -55018,4 +55023,102 @@ async fn g13w2_no_copy_goes_to_a_device_kicked_meanwhile() {
     sleep_ms(7_000).await; // ABSENCE: past the first copy's wait and into the second's
     assert_eq!(g13w2_sync_asks(&x, &m.device_id).await.0, before + 1, "X sent its silent ask again to a kicked device");
     relay.release_held(&m.device_id, &x.device_id);
+}
+
+// g13w3-followups
+
+/// A device key removed from one identity that consents into another stays refused for
+/// the first: the second identity's roster lifts nothing the first one removed. The
+/// harness shares one resolver, so this proves memory; the units prove each disk layer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_a_removed_device_joining_another_identity_stays_refused_for_its_old_one() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const F: u8 = 231;
+    const O: u8 = 232;
+    const O1: u8 = 233;
+    const T: u8 = 234;
+    const X: u8 = 235;
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (f_master, o_master, x_master, t_dev) = (id(F), id(O), id(X), id(T));
+    let f = spawn_node_with_friends(&relay, F, F, &[&o_master, &x_master]).await;
+    let o = spawn_node_full(&relay, O, O1, &[&f_master], Some(&[O1, T])).await;
+    let mut t = spawn_node_full(&relay, O, T, &[&f_master], Some(&[O1, T])).await;
+    assert!(
+        wait_until(20, async || f.known_devices(&o_master).contains(&t_dev)).await,
+        "precondition: the friend holds the device as O's",
+    );
+    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t_dev.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut t, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::DeviceRemoved { .. })).await,
+        "the removed device learns it",
+    );
+    assert!(
+        wait_until(20, async || f.revoked_devices(&o_master).contains(&t_dev)).await,
+        "the friend learns the removal",
+    );
+    drop(t);
+    assert!(super::resolver::is_revoked(&t_dev), "precondition: the removal is enforced");
+
+    // The removed key consents into another identity, whose roster counts it.
+    let x = spawn_node_full(&relay, X, T, &[&f_master], Some(&[T])).await;
+    assert!(
+        wait_until(20, async || x.known_devices(&x_master).contains(&t_dev)).await,
+        "precondition: X's roster counts the key",
+    );
+    assert!(
+        wait_until(20, async || f.known_devices(&x_master).contains(&t_dev)).await,
+        "precondition: the friend holds X's roster counting the key",
+    );
+    assert!(super::resolver::is_revoked_by(&o_master, &t_dev), "another identity's roster lifted O's removal");
+    assert!(!super::resolver::is_device_of(&t_dev, &o_master), "the removed key is O's device again");
+    assert!(
+        f.store().revoked_marks().unwrap().contains(&(t_dev.clone(), o_master.clone())),
+        "the friend's disk lost O's removal",
+    );
+    drop((f, o, x));
+}
+
+/// Wait until each of `nodes` holds `master`'s roster counting every one of `devices` and
+/// the shared resolver links them all. The harness shares ONE resolver: a node that first
+/// meets a sibling before the siblings counted each other folds a roster missing one and
+/// unlinks it for every node, where real apps keep one resolver per process.
+async fn expect_siblings_counted(nodes: &[&TestNode], master: &str, devices: &[&String], secs: u64) {
+    assert!(
+        wait_until(secs, async || {
+            nodes.iter().all(|n| {
+                let held = n.store().device_links_for(master).unwrap_or_default();
+                devices.iter().all(|d| held.contains(*d))
+            }) && devices.iter().all(|d| super::resolver::is_device_of(d, master))
+        })
+        .await,
+        "{master}'s devices never counted each other",
+    );
+}
+
+/// Server sync asks metered from now until none arrived for `still_ms` (at most
+/// `max_secs`), as (bytes out, deliveries).
+async fn g13_sync_asks_until_still(nodes: &mut [TestNode], still_ms: u64, max_secs: u64) -> (u64, u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_secs);
+    let (mut bytes, mut deliveries) = (0, 0);
+    let mut last_new = std::time::Instant::now();
+    loop {
+        g1_drain_all(nodes);
+        sleep_ms(200).await;
+        let book = g1_probe::take();
+        if let Some(asks) = book.kinds.get("direct:encrypted>carried/sync_request") {
+            bytes += asks.bytes_out;
+            deliveries += asks.deliveries;
+            if asks.deliveries > 0 {
+                last_new = std::time::Instant::now();
+            }
+        }
+        let still = last_new.elapsed() >= std::time::Duration::from_millis(still_ms);
+        if (deliveries > 0 && still) || std::time::Instant::now() >= deadline {
+            return (bytes, deliveries);
+        }
+    }
 }

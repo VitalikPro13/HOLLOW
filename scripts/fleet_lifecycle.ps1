@@ -26,10 +26,17 @@
 # | net_off    | zombie proxy: freeze route  | zombie proxy: freeze      | svc wifi + svc data disable   | zombie proxy      |
 # | net_on     | zombie proxy: thaw or drop  | zombie proxy: thaw / drop | svc wifi + svc data enable    | zombie proxy      |
 # | kill       | not supported               | not supported             | am kill (background only)     | not supported     |
+# | gcm_heart- | not supported               | not supported             | MCS_HEARTBEAT broadcast to    | not supported     |
+# | beat       |                             |                           | Google Play services          |                   |
 #
 # `kill` is the OS dropping a backgrounded app: the process dies but the app is not
 # stopped, so FCM still wakes it (`am force-stop` would block every push). Send
 # `background` first; bring the peer back with `fleet.ps1 -Live -ReuseData`.
+#
+# `gcm_heartbeat` makes the emulator's Play services check its Google push connection
+# now. The emulator's network drops that idle connection silently, and a push then
+# waits at Google for the next scheduled heartbeat, minutes later. It wakes nothing
+# itself: send it right after the act a push should follow; the app need not run.
 #
 # Windows never activates a fleet window: an activation hands the person at this
 # machine's keyboard to the probe (wiki fleet_probe, "The probe never takes the
@@ -47,7 +54,7 @@
 # have yet (see Start-FleetProxy); until it does, net_off refuses with the reason
 # instead of silently cutting nothing.
 
-$script:FleetHostOps = @('background', 'foreground', 'pause', 'resume', 'net_off', 'net_on', 'kill')
+$script:FleetHostOps = @('background', 'foreground', 'pause', 'resume', 'net_off', 'net_on', 'kill', 'gcm_heartbeat')
 # What each peer was last sent to, for reports and for Restore-FleetPeer.
 $script:FleetPeerAway = @{}
 
@@ -256,6 +263,11 @@ function Invoke-AndroidLifecycle($peer, $proc, $op) {
             Invoke-Adb $peer 'shell' 'svc wifi enable; svc data enable' | Out-Null
             return 'emulator Wi-Fi and mobile data on'
         }
+        'gcm_heartbeat' {
+            $out = "$(Invoke-Adb $peer 'shell' 'am broadcast -a com.google.android.intent.action.MCS_HEARTBEAT' 2>&1)"
+            if ($out -notmatch 'Broadcast completed') { throw "the heartbeat broadcast failed: $out" }
+            return 'asked Play services to check its push connection'
+        }
         'kill' {
             if ((Get-AndroidTop $peer) -match [regex]::Escape("$package/")) { throw 'Hollow is on top: send background first' }
             Invoke-Adb $peer 'shell' "am kill $package" | Out-Null
@@ -411,7 +423,8 @@ function Invoke-FleetHostOp($peer, $step) {
     # A cut is the emulator's or the proxy's, never the app's: a link restarts the app
     # mid-cut, and the network must still come back.
     $netOp = $op -eq 'net_off' -or $op -eq 'net_on'
-    if (-not $proc -and -not $netOp) { return (New-HostAnswer $op $false "peer $peer is not running" $started) }
+    if ($op -eq 'gcm_heartbeat' -and -not (Test-AndroidBackend $peer)) { return (New-HostAnswer $op $false 'gcm_heartbeat is for Android emulators only' $started) }
+    if (-not $proc -and -not $netOp -and $op -ne 'gcm_heartbeat') { return (New-HostAnswer $op $false "peer $peer is not running" $started) }
     try {
         if (($op -eq 'net_off' -or $op -eq 'net_on') -and -not (Test-AndroidBackend $peer)) {
             $message = Invoke-ProxyNet $peer $op $step

@@ -786,6 +786,9 @@ try {
             Close-Devices $P
             $deadStill = (Get-PeerStatus $F).pid -eq 0 -or -not (Get-PeerStatus $F).live
             Set-Gate 'P1' $(if ($gone.ok -and (Get-Members $sP5).Count -eq 1) { 'PASS' } else { 'FAIL' })
+            # The emulator's push connection dies idle and a wake waits at Google for its
+            # next heartbeat; asking for one now delivers it (the push itself still wakes).
+            Soft $F @{ op = 'gcm_heartbeat' } | Out-Null
             # The removal's own wake and fetch, then the DM's (the relay waits 10 s between wakes).
             Start-Sleep -Seconds 30
             # ---- the presenter DMs the dead friend --------------------------------------
@@ -793,7 +796,12 @@ try {
             Step $P @{ op = 'seed_dm'; contact = $masterF; text = "dm P while F away $runTag" } | Out-Null
             $deadline = (Get-Date).AddSeconds(120)
             $fetched = @()
+            $beatAt = [datetime]::MinValue
             while ((Get-Date) -lt $deadline) {
+                if (((Get-Date) - $beatAt).TotalSeconds -ge 20) {
+                    Soft $F @{ op = 'gcm_heartbeat' } | Out-Null
+                    $beatAt = Get-Date
+                }
                 $fetched = @(Get-LogSince $F '[HOLLOW-FETCH] Fetch complete' $dmSentAt)
                 if ($fetched.Count -gt 0) { break }
                 Start-Sleep -Seconds 3

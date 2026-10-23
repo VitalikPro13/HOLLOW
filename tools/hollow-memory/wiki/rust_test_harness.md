@@ -241,7 +241,10 @@ days on an observer's clock (`pending_seen` reads it; both use the roster's CURR
 the clock is per base since HOL-SEC-082). A "stolen backup" is a node seeded with the owner's stored roster
 (`roster_book::load(&owner.store(), ..)`) under a new device tag. The resolver is shared, so
 wait on it (in memory) for the shared view and check each node's own roster with
-`known_devices`/`revoked_devices` (they fold its DB). MockRelay models link codes (claim,
+`known_devices`/`revoked_devices` (they fold its DB). Two devices of one master spawned
+apart each start with a one-device roster; a third node that meets one before they count
+each other folds that partial roster and unlinks the other device for EVERY node. Before
+a third party meets them, `expect_siblings_counted(&[&b, &c], &master, &[&b_dev, &c_dev], 20)`. MockRelay models link codes (claim,
 one-shot resolve, release, `taken`/`not_found`); a hostile relay is a `raw_socket` whose key is
 `register_key`ed, reading frames from the wiretap and answering with `inject_direct`.
 `spawn_presenter_in_data_root` puts a presenter's identity and DB in `HOLLOW_DATA_DIR`, where an

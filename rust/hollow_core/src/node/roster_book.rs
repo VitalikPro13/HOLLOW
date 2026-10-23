@@ -119,9 +119,9 @@ fn removed_ids(state: &RosterState, local_device: &str) -> Vec<String> {
     state.removed.keys().filter(|d| d.as_str() != local_device).cloned().collect()
 }
 
-/// Members the resolver still refuses: a recovery brought them back.
-fn back_ids(state: &RosterState) -> Vec<String> {
-    state.members.iter().filter(|d| super::resolver::is_revoked(d)).cloned().collect()
+/// Members `master`'s own removal still refuses: its recovery brought them back.
+fn back_ids(master: &str, state: &RosterState) -> Vec<String> {
+    state.members.iter().filter(|d| super::resolver::is_revoked_by(master, d)).cloned().collect()
 }
 
 /// Record `state`'s removed devices as refused (the refusal survives a restart) and
@@ -131,9 +131,9 @@ fn revoked_rows(store: &MessageStore, master: &str, state: &RosterState, local_d
     if !removed.is_empty() {
         let _ = store.record_revoked_devices(master, &removed);
     }
-    let back = back_ids(state);
+    let back = back_ids(master, state);
     if !back.is_empty() {
-        let _ = store.clear_revoked_devices(&back);
+        let _ = store.clear_revoked_devices(master, &back);
     }
 }
 
@@ -154,11 +154,11 @@ fn point_resolver(master: &str, state: &RosterState, local_master: &str, local_d
     }
     let removed = removed_ids(state, local_device);
     if !removed.is_empty() {
-        super::resolver::mark_revoked(&removed);
+        super::resolver::mark_revoked_by(master, &removed);
     }
-    let back = back_ids(state);
+    let back = back_ids(master, state);
     if !back.is_empty() {
-        super::resolver::unmark_revoked(&back);
+        super::resolver::unmark_revoked_by(master, &back);
     }
 }
 
@@ -2685,5 +2685,56 @@ mod tests {
             since.get(&other.peer_id()).is_some_and(|at| *at >= before && *at < later),
             "our removal was not dated when we made it: {since:?}",
         );
+    }
+
+    /// A device key removed from one identity that consents into another stays refused
+    /// for the first: each identity lifts only the refusals its own roster made, so the
+    /// order rosters save in never decides, in memory or on disk.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn g13c_a_removed_device_joining_another_identity_stays_refused_for_its_old_one() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        me.own();
+        let (bob, bob_dev, bob_rec, linked) = (kp(0x60), kp(0x61), kp(0x62), kp(0x63));
+        let (carol, carol_dev) = (kp(0x70), kp(0x71));
+        let (bob_id, carol_id, gone) = (bob.peer_id(), carol.peer_id(), linked.peer_id());
+        let revoked_here = |me: &Observer| me.store().get_all_revoked_devices().unwrap().contains(&gone);
+        let mut b = Roster::legacy_for_test(&bob, &[&bob_dev, &linked]);
+        b.add_removal(sign_removal(&bob_dev, &bob_id, LEGACY_BASE, &gone, &[]));
+        me.ingest(&bob_dev.peer_id(), &b).await;
+        assert!(super::super::resolver::is_revoked(&gone) && revoked_here(&me), "precondition: Bob removed it");
+
+        let mut c = Roster::legacy_for_test(&carol, &[&carol_dev, &linked]);
+        me.ingest(&carol_dev.peer_id(), &c).await;
+        assert!(me.state_of(&carol_id).is_member(&gone), "precondition: it stands in Carol's roster");
+        assert!(super::super::resolver::is_revoked(&gone), "another identity's roster lifted Bob's refusal");
+        assert!(revoked_here(&me), "another identity's roster erased Bob's refusal from the disk");
+        super::super::resolver::clear_all();
+        super::super::resolver::warm_from_store(&me.store());
+        assert!(super::super::resolver::is_revoked(&gone), "Bob's refusal did not survive a restart");
+        assert!(!super::super::resolver::is_device_of(&gone, &bob_id), "the removed device is Bob's again");
+
+        // Both refuse it; Bob's phrase brings it back: Carol's refusal stands.
+        c.add_removal(sign_removal(&carol_dev, &carol_id, LEGACY_BASE, &gone, &[]));
+        me.ingest(&carol_dev.peer_id(), &c).await;
+        b.add_phrase_statement(
+            &crate::identity::roster::r_pub_of(&bob_rec),
+            Some(crate::identity::roster::sign_recovery(&bob, &bob_rec, now_ms(), &[bob_dev.peer_id(), gone.clone()], false)),
+            None,
+        )
+        .unwrap();
+        me.ingest(&bob_dev.peer_id(), &b).await;
+        assert!(me.state_of(&bob_id).is_member(&gone), "precondition: Bob's recovery brought it back");
+        assert!(super::super::resolver::is_revoked(&gone), "Bob's recovery lifted Carol's refusal");
+        assert!(revoked_here(&me), "Bob's recovery erased Carol's refusal from the disk");
+        assert!(
+            !super::super::resolver::is_revoked_by(&bob_id, &gone) && super::super::resolver::is_revoked_by(&carol_id, &gone),
+            "Bob's recovery did not lift exactly Bob's own removal",
+        );
+        assert_eq!(me.store().revoked_marks().unwrap(), vec![(gone.clone(), carol_id.clone())], "the disk holds the wrong removals");
+        super::super::resolver::clear_all();
+        super::super::resolver::warm_from_store(&me.store());
+        assert!(super::super::resolver::is_revoked(&gone), "Carol's refusal did not survive a restart");
     }
 }

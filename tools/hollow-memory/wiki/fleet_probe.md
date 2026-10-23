@@ -760,6 +760,15 @@ FLEET_BACKEND=android pwsh scripts/fleet_send.ps1 -Command "$(cat /tmp/cmd.json)
   DNS failures: the relay sees the phone go, its nickname with it. That was the real behaviour
   for anyone who did not grant the battery exemption. Since wave 2 of resumable sessions the
   app closes the socket itself 10 s after HOME (`relay_suspend`) and the relay holds the session.
+- **An FCM wake to a killed app can wait minutes.** The emulator's network drops Play
+  services' idle push connection without telling it, so a wake sits at Google until the
+  next GCM heartbeat (2 min 19 s measured, the interval is 10+ min). The app, token,
+  relay, sidecar and sealed wake were all fine: the wake landed with the heartbeat and
+  the fetch stored the DM. Send the host op `{"peer":"v","op":"gcm_heartbeat"}` (an
+  `MCS_HEARTBEAT` broadcast; the app need not run) right after the act a push should
+  follow; `fleet_link_matrix` roster_push does, and repeats it every 20 s while it waits.
+  A system_server dead from `FinalizerWatchdogDaemon ... timed out` / `DeadSystemException`
+  is the mini overloaded (load near 50), not the app: boot emulators when load is low.
 - **Hollow's own battery-exemption prompt** (`RequestIgnoreBatteryOptimizations`) sat on top of
   the app after launch and came back in front on every return, wedging the probe until
   `KEYCODE_BACK`. Wave 2 removed the prompt and its permission; `fleet_lifecycle.ps1` still

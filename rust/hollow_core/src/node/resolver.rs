@@ -21,12 +21,13 @@ fn links() -> &'static RwLock<HashMap<String, String>> {
     LINKS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Device peer_ids whose signed tombstone we enforced, warmed from the store at
-/// boot. Cleared on `clear_all`; our own running device id is never here.
-static REVOKED: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+/// Device peer_id -> the masters whose roster removed it, warmed from the store at
+/// boot. Keyed by master so one identity's recovery lifts only its own removal.
+/// Cleared on `clear_all`; our own running device id is never here.
+static REVOKED: OnceLock<RwLock<HashMap<String, HashSet<String>>>> = OnceLock::new();
 
-fn revoked() -> &'static RwLock<HashSet<String>> {
-    REVOKED.get_or_init(|| RwLock::new(HashSet::new()))
+fn revoked() -> &'static RwLock<HashMap<String, HashSet<String>>> {
+    REVOKED.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
 /// Masters whose roster this process holds: their own id is a device only when that
@@ -167,8 +168,10 @@ pub(crate) fn warm_from_store(store: &crate::storage::MessageStore) {
             note_roster(master);
         }
     }
-    if let Ok(revoked) = store.get_all_revoked_devices() {
-        mark_revoked(&revoked);
+    if let Ok(marks) = store.revoked_marks() {
+        for (device, master) in marks {
+            mark_revoked_by(&master, std::slice::from_ref(&device));
+        }
     }
     if let Ok(blocked) = store.load_blocked_peers() {
         super::blocklist::warm(&blocked);
@@ -212,13 +215,13 @@ pub(crate) fn forget(device_peer_id: &str) {
     changed();
 }
 
-/// Mark device ids revoked for this process: DMs, typing and key exchange refuse
-/// them. Persist through `record_revoked_devices` as well. A revoked device is no
-/// one's device, so its link goes too and [`same_identity`] never counts it.
-pub(crate) fn mark_revoked(device_peer_ids: &[String]) {
-    if let Ok(mut set) = revoked().write() {
+/// Mark device ids `master`'s roster removed, for this process: DMs, typing and key
+/// exchange refuse them. Persist through `record_revoked_devices` as well. A revoked
+/// device is no one's device, so its link goes too and [`same_identity`] never counts it.
+pub(crate) fn mark_revoked_by(master: &str, device_peer_ids: &[String]) {
+    if let Ok(mut map) = revoked().write() {
         for d in device_peer_ids {
-            set.insert(d.clone());
+            map.entry(d.clone()).or_default().insert(master.to_string());
         }
     }
     if let Ok(mut map) = links().write() {
@@ -229,22 +232,54 @@ pub(crate) fn mark_revoked(device_peer_ids: &[String]) {
     changed();
 }
 
-/// Lift the mark from devices a recovery brought back.
-pub(crate) fn unmark_revoked(device_peer_ids: &[String]) {
-    if let Ok(mut set) = revoked().write() {
+/// Lift `master`'s mark from devices its recovery brought back; another identity's
+/// removal of the same key stands.
+pub(crate) fn unmark_revoked_by(master: &str, device_peer_ids: &[String]) {
+    if let Ok(mut map) = revoked().write() {
         for d in device_peer_ids {
-            set.remove(d);
+            if let Some(masters) = map.get_mut(d) {
+                masters.remove(master);
+                if masters.is_empty() {
+                    map.remove(d);
+                }
+            }
         }
     }
 }
 
-/// True iff this device id was seen revoked in a signed tombstone; callers drop
-/// inbound DMs and typing from it. Unknown ids are false.
+/// True iff some roster we hold removed this device id; callers drop inbound DMs and
+/// typing from it. Any identity's removal counts: an install mints a fresh key for
+/// every identity it joins, so a removed key standing in another roster is refused
+/// there too. Unknown ids are false.
 pub(crate) fn is_revoked(device_peer_id: &str) -> bool {
     revoked()
         .read()
-        .map(|s| s.contains(device_peer_id))
+        .map(|m| m.contains_key(device_peer_id))
         .unwrap_or(false)
+}
+
+/// True iff `master`'s roster is one that removed this device id.
+pub(crate) fn is_revoked_by(master: &str, device_peer_id: &str) -> bool {
+    revoked()
+        .read()
+        .map(|m| m.get(device_peer_id).is_some_and(|masters| masters.contains(master)))
+        .unwrap_or(false)
+}
+
+/// [`mark_revoked_by`] for tests that need a refused device and no roster behind it.
+#[cfg(test)]
+pub(crate) fn mark_revoked(device_peer_ids: &[String]) {
+    mark_revoked_by("", device_peer_ids);
+}
+
+/// Lift every identity's mark from these devices. Tests only.
+#[cfg(test)]
+pub(crate) fn unmark_revoked(device_peer_ids: &[String]) {
+    if let Ok(mut map) = revoked().write() {
+        for d in device_peer_ids {
+            map.remove(d);
+        }
+    }
 }
 
 /// The gate of every answer only our own devices get and every row only they may
@@ -435,6 +470,20 @@ mod tests {
         assert!(!is_own_unrevoked_device("M", "M"), "the bare master counted as our device");
         assert!(is_disowned_own_id("M", "M"));
         assert!(!is_disowned_own_id("devF", "M"), "a stranger is no id of ours");
+    }
+
+    /// One identity lifting its removal of a key leaves another identity's removal of
+    /// the same key standing.
+    #[test]
+    fn g13c_a_lifting_by_one_master_leaves_anothers_removal() {
+        let _g = guarded();
+        mark_revoked_by("O", &["devK".into()]);
+        mark_revoked_by("X", &["devK".into()]);
+        unmark_revoked_by("X", &["devK".into()]);
+        assert!(is_revoked("devK") && is_revoked_by("O", "devK"), "X lifted O's removal");
+        assert!(!is_revoked_by("X", "devK"));
+        unmark_revoked_by("O", &["devK".into()]);
+        assert!(!is_revoked("devK"), "every removal lifted, still refused");
     }
 
     #[test]

@@ -1260,14 +1260,26 @@ impl MessageStore {
         ddl(conn, "device_links index",
             "CREATE INDEX IF NOT EXISTS idx_device_links_master ON device_links (master_peer_id)")?;
 
-        // Devices whose revocation we ENFORCED (their master held them). A revoked id
-        // resolves to itself once forgotten, so without this row it looks like a
-        // stranger after a restart and passes key exchange.
+        // Devices whose revocation we ENFORCED, one row per master whose roster removed
+        // it. A revoked id resolves to itself once forgotten, so without this row it
+        // looks like a stranger after a restart and passes key exchange. Per master so
+        // one identity's recovery never lifts another's removal of the same key.
+        ddl(conn, "revoked_marks table",
+            "CREATE TABLE IF NOT EXISTS revoked_marks (
+                device_peer_id TEXT NOT NULL,
+                master_peer_id TEXT NOT NULL,
+                PRIMARY KEY (device_peer_id, master_peer_id)
+            )")?;
+        // The one-row-per-device table 0.12 reads stays dual-written until 0.14, so a
+        // downgrade, a restored backup or a linked 0.12 install keeps every refusal; its
+        // rows are copied in at every start, and reads take both, so a failed copy refuses.
         ddl(conn, "revoked_devices table",
             "CREATE TABLE IF NOT EXISTS revoked_devices (
                 device_peer_id TEXT PRIMARY KEY,
                 master_peer_id TEXT NOT NULL
             )")?;
+        migrate(conn, "INSERT OR IGNORE INTO revoked_marks (device_peer_id, master_peer_id)
+                       SELECT device_peer_id, master_peer_id FROM revoked_devices");
 
         // When THIS node first saw a device's pending join in a base: the clock its seven
         // days run on (design ID-1). Per base, so a recovery restarts it. Local by
@@ -3666,13 +3678,25 @@ impl MessageStore {
         collect_rows(rows, "rostered_master")
     }
 
-    /// Forget the revocation of devices a recovery signed with the phrase brought back:
-    /// only the phrase can do that.
-    pub fn clear_revoked_devices(&self, devices: &[String]) -> Result<(), String> {
+    /// Forget `master`'s revocation of devices its recovery, signed with the phrase,
+    /// brought back: only the phrase can do that, and only for its own identity.
+    ///
+    /// The old table's row is `master`'s only if it names it: it moves to a master whose
+    /// removal stands, or goes with the last one, else the copy at open revives it.
+    pub fn clear_revoked_devices(&self, master_peer_id: &str, devices: &[String]) -> Result<(), String> {
         for dev in devices {
-            self.conn
-                .execute("DELETE FROM revoked_devices WHERE device_peer_id = ?1", [dev])
-                .map_err(|e| format!("Failed to clear revoked device: {e}"))?;
+            for sql in [
+                "DELETE FROM revoked_marks WHERE device_peer_id = ?1 AND master_peer_id = ?2",
+                "UPDATE revoked_devices SET master_peer_id =
+                    (SELECT master_peer_id FROM revoked_marks WHERE device_peer_id = ?1 ORDER BY 1 LIMIT 1)
+                 WHERE device_peer_id = ?1 AND master_peer_id = ?2
+                   AND EXISTS (SELECT 1 FROM revoked_marks WHERE device_peer_id = ?1)",
+                "DELETE FROM revoked_devices WHERE device_peer_id = ?1 AND master_peer_id = ?2",
+            ] {
+                self.conn
+                    .execute(sql, rusqlite::params![dev, master_peer_id])
+                    .map_err(|e| format!("Failed to clear revoked device: {e}"))?;
+            }
         }
         Ok(())
     }
@@ -3681,27 +3705,38 @@ impl MessageStore {
     /// recovery brings the device back.
     pub fn record_revoked_devices(&self, master_peer_id: &str, devices: &[String]) -> Result<(), String> {
         for dev in devices {
-            self.conn
-                .execute(
-                    "INSERT OR IGNORE INTO revoked_devices (device_peer_id, master_peer_id)
-                     VALUES (?1, ?2)",
-                    rusqlite::params![dev, master_peer_id],
-                )
-                .map_err(|e| format!("Failed to record revoked device: {e}"))?;
+            for sql in [
+                "INSERT OR IGNORE INTO revoked_marks (device_peer_id, master_peer_id) VALUES (?1, ?2)",
+                "INSERT OR IGNORE INTO revoked_devices (device_peer_id, master_peer_id) VALUES (?1, ?2)",
+            ] {
+                self.conn
+                    .execute(sql, rusqlite::params![dev, master_peer_id])
+                    .map_err(|e| format!("Failed to record revoked device: {e}"))?;
+            }
         }
         Ok(())
     }
 
-    /// Every device id recorded by [`Self::record_revoked_devices`].
-    pub fn get_all_revoked_devices(&self) -> Result<Vec<String>, String> {
+    /// Every (device, master) recorded by [`Self::record_revoked_devices`], with any old
+    /// row the copy at open has not reached.
+    pub fn revoked_marks(&self) -> Result<Vec<(String, String)>, String> {
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT device_peer_id FROM revoked_devices")
-            .map_err(|e| format!("Failed to prepare get_all_revoked_devices: {e}"))?;
+            .prepare_cached(
+                "SELECT device_peer_id, master_peer_id FROM revoked_marks
+                 UNION SELECT device_peer_id, master_peer_id FROM revoked_devices ORDER BY 1, 2",
+            )
+            .map_err(|e| format!("Failed to prepare revoked_marks: {e}"))?;
         let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("Failed to query revoked_devices: {e}"))?;
-        collect_rows(rows, "revoked_device")
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| format!("Failed to query revoked_marks: {e}"))?;
+        collect_rows(rows, "revoked_mark")
+    }
+
+    /// Every revoked device id, whoever removed it.
+    #[cfg(test)]
+    pub fn get_all_revoked_devices(&self) -> Result<Vec<String>, String> {
+        Ok(self.revoked_marks()?.into_iter().map(|(device, _)| device).collect())
     }
 
     // ── Device labels (Step 8 Devices panel — local-only, unsigned) ──
@@ -9380,5 +9415,129 @@ mod md_link_paths {
         assert_eq!((outside.disk_path, outside.seeding), (None, false), "a share serves the database");
         let inside = store.load_share(&"bb".repeat(32)).unwrap().unwrap();
         assert!(inside.disk_path.is_some() && inside.seeding, "a share in its own folder was dropped");
+    }
+}
+
+#[cfg(test)]
+mod g13w3_revoked_marks {
+    use super::*;
+
+    const KEY: &str = "abababababababababababababababababababababababababababababababab";
+
+    fn pair(d: &str, m: &str) -> (String, String) {
+        (d.to_string(), m.to_string())
+    }
+
+    /// The raw rows of a (device, master) table, sorted; never the merged read.
+    fn rows(store: &MessageStore, table: &str) -> Vec<(String, String)> {
+        let mut stmt = store
+            .conn
+            .prepare(&format!("SELECT device_peer_id, master_peer_id FROM {table} ORDER BY 1, 2"))
+            .unwrap();
+        let out = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        out.map(|r| r.unwrap()).collect()
+    }
+
+    /// A database as 0.12 leaves it, plus `extra` SQL, before this build opens the file.
+    fn old_db(db: &std::path::Path, extra: &str) {
+        let old = Connection::open(db).unwrap();
+        old.execute_batch(&format!(
+            "PRAGMA key = \"x'{KEY}'\";
+             CREATE TABLE revoked_devices (device_peer_id TEXT PRIMARY KEY, master_peer_id TEXT NOT NULL);
+             INSERT INTO revoked_devices VALUES ('dev-old', 'master-o');
+             {extra}"
+        ))
+        .unwrap();
+    }
+
+    /// A database from before revocations were kept per master keeps every refusal
+    /// across the upgrade, keeps the old table for a downgrade, and one identity's
+    /// lifting leaves another's removal standing.
+    #[test]
+    fn g13w3_revoked_devices_survive_the_move_to_per_master_marks() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("messages.db");
+        let open = || MessageStore::open(db.to_str().unwrap(), KEY).unwrap();
+        old_db(&db, "");
+        let store = open();
+        assert_eq!(rows(&store, "revoked_marks"), vec![pair("dev-old", "master-o")], "the old rows were not copied");
+        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev-old", "master-o")], "the old table lost its rows: a downgrade forgets them");
+
+        store.record_revoked_devices("master-x", &["dev-old".to_string()]).unwrap();
+        store.clear_revoked_devices("master-x", &["dev-old".to_string()]).unwrap();
+        assert_eq!(store.revoked_marks().unwrap(), vec![pair("dev-old", "master-o")], "one identity lifted another's removal");
+        drop(store);
+        assert_eq!(open().revoked_marks().unwrap().len(), 1, "a second open lost a mark");
+    }
+
+    /// A copy that fails at open (a busy or full disk) loses nothing: the old rows still
+    /// refuse in that session and the next start copies them.
+    #[test]
+    fn g13w3_a_failed_copy_keeps_the_old_revocations() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("messages.db");
+        let open = || MessageStore::open(db.to_str().unwrap(), KEY).unwrap();
+        old_db(
+            &db,
+            "CREATE TABLE revoked_marks (device_peer_id TEXT NOT NULL, master_peer_id TEXT NOT NULL, PRIMARY KEY (device_peer_id, master_peer_id));
+             CREATE TRIGGER fail_copy BEFORE INSERT ON revoked_marks BEGIN SELECT RAISE(ABORT, 'copy failed'); END;",
+        );
+        let store = open();
+        assert!(rows(&store, "revoked_marks").is_empty(), "precondition: the copy failed");
+        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev-old", "master-o")], "a failed copy lost the old rows");
+        assert_eq!(store.revoked_marks().unwrap(), vec![pair("dev-old", "master-o")], "a failed copy stopped refusing in this session");
+        store.conn.execute_batch("DROP TRIGGER fail_copy").unwrap();
+        // The next process's first open.
+        MessageStore::init_schema(&store.conn).unwrap();
+        assert_eq!(rows(&store, "revoked_marks"), vec![pair("dev-old", "master-o")], "the next start never copied");
+    }
+
+    /// Every refusal also lands in the old table, the first master's row kept as 0.12
+    /// kept it, so a downgrade or a 0.12 install restoring this database still refuses.
+    #[test]
+    fn g13w3_revocations_are_dual_written_first_master_wins() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = MessageStore::open(tmp.path().join("messages.db").to_str().unwrap(), KEY).unwrap();
+        store.record_revoked_devices("master-o", &["dev".to_string()]).unwrap();
+        store.record_revoked_devices("master-x", &["dev".to_string()]).unwrap();
+        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev", "master-o")]);
+        assert_eq!(rows(&store, "revoked_marks"), vec![pair("dev", "master-o"), pair("dev", "master-x")]);
+    }
+
+    /// A lift moves the old table's row to a master whose removal stands, and erases it
+    /// with the last one, so the copy at open never brings a lifted removal back.
+    #[test]
+    fn g13w3_a_lift_keeps_the_old_table_in_step() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("messages.db");
+        let open = || MessageStore::open(db.to_str().unwrap(), KEY).unwrap();
+        let store = open();
+        store.record_revoked_devices("master-o", &["dev".to_string()]).unwrap();
+        store.record_revoked_devices("master-x", &["dev".to_string()]).unwrap();
+        store.clear_revoked_devices("master-o", &["dev".to_string()]).unwrap();
+        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev", "master-x")], "the old table forgot a removal that stands");
+        drop(store);
+        let store = open();
+        assert_eq!(store.revoked_marks().unwrap(), vec![pair("dev", "master-x")], "an open brought a lifted removal back");
+        store.clear_revoked_devices("master-x", &["dev".to_string()]).unwrap();
+        assert!(rows(&store, "revoked_devices").is_empty(), "the old table kept a device every roster lifted");
+        drop(store);
+        assert!(open().revoked_marks().unwrap().is_empty(), "an open brought a lifted removal back");
+    }
+
+    /// An old row the copy has not reached yet is another master's removal: a lift by
+    /// someone else leaves it.
+    #[test]
+    fn g13w3_a_lift_spares_another_masters_uncopied_row() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = MessageStore::open(tmp.path().join("messages.db").to_str().unwrap(), KEY).unwrap();
+        store.conn.execute_batch("INSERT INTO revoked_devices VALUES ('dev', 'master-o')").unwrap();
+        store.record_revoked_devices("master-x", &["dev".to_string()]).unwrap();
+        store.record_revoked_devices("master-y", &["dev".to_string()]).unwrap();
+        store.clear_revoked_devices("master-x", &["dev".to_string()]).unwrap();
+        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev", "master-o")], "another master's lift moved the old row");
+        store.clear_revoked_devices("master-y", &["dev".to_string()]).unwrap();
+        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev", "master-o")], "another master's lift erased the old row");
+        assert_eq!(store.revoked_marks().unwrap(), vec![pair("dev", "master-o")]);
     }
 }

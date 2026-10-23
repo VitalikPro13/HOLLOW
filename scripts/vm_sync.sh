@@ -29,8 +29,11 @@ vm "mkdir -p ~/$dest"
 if [ -n "$base" ] && git cat-file -e "$base^{tree}" 2> /dev/null; then
     [ "$(git rev-parse "$base^{tree}")" = "$tree" ] && { echo "$dest: up to date on $host"; exit 0; }
     git diff --no-renames --name-status "$base" "$tree" > "$idx.list"
-    mapfile -t changed < <(awk -F'\t' '$1 != "D" {print $2}' "$idx.list")
-    mapfile -t gone < <(awk -F'\t' '$1 == "D" {print $2}' "$idx.list")
+    # No mapfile: the Mac's /bin/bash is 3.2.
+    changed=() gone=()
+    while IFS=$'\t' read -r status path; do
+        if [ "$status" = D ]; then gone+=("$path"); else changed+=("$path"); fi
+    done < "$idx.list"
     if [ ${#changed[@]} -gt 400 ]; then
         export_git archive "$tree" | vm "tar -xf - -C ~/$dest"
     elif [ ${#changed[@]} -gt 0 ]; then
@@ -43,7 +46,8 @@ if [ -n "$base" ] && git cat-file -e "$base^{tree}" 2> /dev/null; then
 else
     echo "$dest: first sync to $host (whole tree)"
     export_git archive "$tree" | vm "tar -xf - -C ~/$dest"
-    mapfile -t changed < <(git ls-tree -r --name-only "$tree")
+    changed=()
+    while IFS= read -r path; do changed+=("$path"); done < <(git ls-tree -r --name-only "$tree")
 fi
 
 if [ ${#changed[@]} -gt 0 ]; then
