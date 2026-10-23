@@ -5,6 +5,8 @@
 #include "flutter_peerconnection.h"
 #ifdef _WIN32
 #include "flutter_voice_redirect.h"
+
+#include <mmdeviceapi.h>
 #endif
 
 #include "helper.h"
@@ -37,6 +39,36 @@ std::string EnvValue(const char* name) {
   return value ? std::string(value) : std::string();
 #endif
 }
+
+#ifdef _WIN32
+// The endpoint id the ADM reports as that speaker's guid.
+std::string DefaultCommunicationsSpeakerId() {
+  IMMDeviceEnumerator* enumerator = nullptr;
+  if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                              CLSCTX_ALL, IID_PPV_ARGS(&enumerator)))) {
+    return std::string();
+  }
+  std::string out;
+  IMMDevice* device = nullptr;
+  if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eCommunications,
+                                                    &device))) {
+    LPWSTR id = nullptr;
+    if (SUCCEEDED(device->GetId(&id))) {
+      const int size =
+          WideCharToMultiByte(CP_UTF8, 0, id, -1, nullptr, 0, nullptr, nullptr);
+      if (size > 1) {
+        out.resize(size - 1);
+        WideCharToMultiByte(CP_UTF8, 0, id, -1, out.data(), size, nullptr,
+                            nullptr);
+      }
+      CoTaskMemFree(id);
+    }
+    device->Release();
+  }
+  enumerator->Release();
+  return out;
+}
+#endif
 
 void InstallStderrLogSink() {
   libwebrtc::RTCLoggingSeverity severity = libwebrtc::Warning;
@@ -195,6 +227,40 @@ FlutterVoiceRedirect* FlutterWebRTCBase::voice_redirect() {
     voice_redirect_ = std::make_unique<FlutterVoiceRedirect>();
   }
   return voice_redirect_.get();
+}
+
+void FlutterWebRTCBase::OnMediaEngineStarted() {
+  // The engine has just reset the speaker to the communications role, and
+  // with it any speaker Dart picked.
+  playout_device_chosen_ = false;
+  default_playout_index_ = -1;
+  FollowDefaultPlayoutDevice();
+}
+
+void FlutterWebRTCBase::FollowDefaultPlayoutDevice() {
+  if (playout_device_chosen_) {
+    return;
+  }
+  const std::string want = DefaultCommunicationsSpeakerId();
+  if (want.empty()) {
+    return;
+  }
+  char name[RTCAudioDevice::kAdmMaxDeviceNameSize + 1] = {0};
+  char guid[RTCAudioDevice::kAdmMaxGuidSize + 1] = {0};
+  const int count = audio_device_->PlayoutDevices();
+  for (int i = 0; i < count; i++) {
+    if (audio_device_->PlayoutDeviceName(static_cast<uint16_t>(i), name,
+                                         guid) != 0 ||
+        want != guid) {
+      continue;
+    }
+    // Re-selecting restarts a running stream, so only a moved index does.
+    if (i != default_playout_index_) {
+      audio_device_->SetPlayoutDevice(static_cast<uint16_t>(i));
+      default_playout_index_ = i;
+    }
+    return;
+  }
 }
 #endif
 

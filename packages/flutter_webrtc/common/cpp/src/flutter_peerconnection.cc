@@ -388,9 +388,20 @@ void FlutterPeerConnection::CreateRTCPeerConnection(
       base_->ParseMediaConstraints(constraintsMap);
 
   std::string uuid = base_->GenerateUUID();
+#ifdef _WIN32
+  // The media engine runs while any native connection exists, and Close()
+  // releases it even though its observer lives on until dispose, so only
+  // the open-connection map tells whether this one starts the engine again.
+  const bool starts_media_engine = base_->peerconnections_.empty();
+#endif
   scoped_refptr<RTCPeerConnection> pc =
       base_->factory_->Create(base_->configuration_, constraints);
   base_->peerconnections_[uuid] = pc;
+#ifdef _WIN32
+  if (starts_media_engine) {
+    base_->OnMediaEngineStarted();
+  }
+#endif
 
   std::string event_channel = "FlutterWebRTC/peerConnectionEvent" + uuid;
 

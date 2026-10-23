@@ -57,6 +57,13 @@ FlutterMediaStream::FlutterMediaStream(FlutterWebRTCBase* base) : base_(base) {
     EncodableMap info;
     info[EncodableValue("event")] = "onDeviceChange";
     base_->event_channel()->Success(EncodableValue(info), false);
+#ifdef _WIN32
+    // Arrives on a COM notification thread; the device list may have
+    // reordered under the index the default speaker is held by.
+    FlutterWebRTCBase* base = base_;
+    base_->task_runner_->EnqueueTask(
+        [base] { base->FollowDefaultPlayoutDevice(); });
+#endif
   });
 }
 
@@ -240,6 +247,9 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
               SanitizeDeviceIdFromAudioBuffers(strPlayoutName,
                                                strPlayoutGuid)) {
         base_->audio_device_->SetPlayoutDevice(i);
+#ifdef _WIN32
+        base_->OnPlayoutDeviceChosen();
+#endif
       }
     }
 
@@ -490,6 +500,9 @@ void FlutterMediaStream::SelectAudioOutput(
         SanitizeDeviceIdFromAudioBuffers(deviceName, deviceGuid);
     if (device_id != "" && device_id == cur_device_id) {
       base_->audio_device_->SetPlayoutDevice(i);
+#ifdef _WIN32
+      base_->OnPlayoutDeviceChosen();
+#endif
       found = true;
       break;
     }

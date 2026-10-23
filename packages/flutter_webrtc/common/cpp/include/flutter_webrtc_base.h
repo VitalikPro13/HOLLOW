@@ -110,6 +110,15 @@ class FlutterWebRTCBase {
   // that the screen capture excludes (anti-echo) while Hollow's own media is
   // still captured. Lazily constructed on first use.
   FlutterVoiceRedirect* voice_redirect();
+
+  // Windows ducks every other app while a stream is open on the
+  // communications ROLE, which is how the media engine opens the speaker
+  // each time it starts (#118). The same device opened by index does not
+  // duck, so until Dart picks a speaker we hold the default communications
+  // speaker by index, re-resolved whenever the device list changes.
+  void OnMediaEngineStarted();
+  void FollowDefaultPlayoutDevice();
+  void OnPlayoutDeviceChosen() { playout_device_chosen_ = true; }
 #endif
 
   virtual scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id);
@@ -186,6 +195,8 @@ class FlutterWebRTCBase {
   // Owned; lazily created. Its dtor (which tears down the child process + writer
   // thread) runs from ~FlutterWebRTCBase, where the type is complete.
   std::unique_ptr<FlutterVoiceRedirect> voice_redirect_;
+  bool playout_device_chosen_ = false;
+  int default_playout_index_ = -1;
 #endif
   RTCConfiguration configuration_;
 
