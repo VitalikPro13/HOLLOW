@@ -80,6 +80,146 @@ fn removed_at(store: &crate::storage::MessageStore, master: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// KV key prefix of the stamps our own accepts gave friendships whose request alone
+/// would sort before a removal we hold.
+const ACCEPTED_HERE_PREFIX: &str = "friend_accepted_here:";
+
+/// KV value of such a stamp: `{request stamp}:{accept stamp}`, so it weighs only the row
+/// it was made for and a later friendship's row ignores it.
+fn accept_mark(value: &str) -> Option<(i64, i64)> {
+    let (row, at) = value.split_once(':')?;
+    Some((row.parse().ok()?, at.parse().ok()?))
+}
+
+/// Record that our accept, stamped `accepted_at`, made the friendship whose request was
+/// stamped `since`, when that request sits at or before the removal we hold: a request
+/// inside the clock window before a removal is taken as newer, and our devices must
+/// weigh the friendship by our consent, or a strict sibling ends it again.
+fn note_accept(store: &crate::storage::MessageStore, master: &str, since: i64, accepted_at: i64) {
+    let ended = removed_at(store, master);
+    if ended > 1 && since <= ended && accepted_at > since {
+        let _ = store.save_setting(&format!("{ACCEPTED_HERE_PREFIX}{master}"), &format!("{since}:{accepted_at}"));
+    }
+}
+
+/// The mark [`note_accept`] made on a sibling, which told us its accept `accepted_at`, for
+/// the row we hold for `master`: that device held the removal, which may reach us later.
+pub(crate) fn note_sibling_accept(store: &crate::storage::MessageStore, master: &str, accepted_at: i64) {
+    if let Ok(Some((_, _, since))) = store.get_friend_row(master)
+        && accepted_at > since
+    {
+        let _ = store.save_setting(&format!("{ACCEPTED_HERE_PREFIX}{master}"), &format!("{since}:{accepted_at}"));
+    }
+}
+
+/// Every accept stamp [`note_accept`] holds, by master.
+fn accept_marks(store: &crate::storage::MessageStore) -> HashMap<String, (i64, i64)> {
+    store
+        .load_settings_with_prefix(ACCEPTED_HERE_PREFIX)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(key, value)| Some((key.strip_prefix(ACCEPTED_HERE_PREFIX)?.to_string(), accept_mark(&value)?)))
+        .collect()
+}
+
+fn accept_of(mark: Option<(i64, i64)>, since: i64) -> Option<i64> {
+    mark.filter(|(row, at)| *row == since && *at > since).map(|(_, at)| at)
+}
+
+fn weigh(mark: Option<(i64, i64)>, since: i64) -> i64 {
+    accept_of(mark, since).unwrap_or(since)
+}
+
+/// Our accept of the friendship with `master` whose row is stamped `since`, where it
+/// sorts after the request ([`note_accept`]).
+pub(crate) fn accepted_here(store: &crate::storage::MessageStore, master: &str, since: i64) -> Option<i64> {
+    let mark = store.load_setting(&format!("{ACCEPTED_HERE_PREFIX}{master}")).ok().flatten();
+    accept_of(mark.as_deref().and_then(accept_mark), since)
+}
+
+/// [`accepted_here`] for any number of rows, the marks read once.
+pub(crate) fn accepts_here(store: &crate::storage::MessageStore) -> impl Fn(&str, i64) -> Option<i64> {
+    let marks = accept_marks(store);
+    move |master, since| accept_of(marks.get(master).copied(), since)
+}
+
+/// When our identity's friendship with `master`, whose row is stamped `since`, began:
+/// the row's stamp, or our accept of it where that sorts later.
+pub(crate) fn friendship_since(store: &crate::storage::MessageStore, master: &str, since: i64) -> i64 {
+    accepted_here(store, master, since).unwrap_or(since)
+}
+
+/// [`friendship_since`] for any number of rows, the marks read once.
+pub(crate) fn friendships_since(store: &crate::storage::MessageStore) -> impl Fn(&str, i64) -> i64 {
+    let marks = accept_marks(store);
+    move |master, since| weigh(marks.get(master).copied(), since)
+}
+
+/// KV key prefix of the ends the friends' own removals named.
+const THEIR_REMOVAL_PREFIX: &str = "friend_removed_by_them:";
+
+/// The newest end `master`'s own removal of us named: every friendship stamped before it
+/// ended, whatever our accept of it.
+fn their_end(store: &crate::storage::MessageStore, master: &str) -> Option<i64> {
+    store.load_setting(&format!("{THEIR_REMOVAL_PREFIX}{master}")).ok().flatten().and_then(|v| v.parse().ok())
+}
+
+fn note_their_end(store: &crate::storage::MessageStore, master: &str, end: i64) {
+    let end = their_end(store, master).map_or(end, |held| held.max(end));
+    let _ = store.save_setting(&format!("{THEIR_REMOVAL_PREFIX}{master}"), &end.to_string());
+}
+
+/// The end a friend's removal sealed at `sealed_ms` names, held to the frame and to our
+/// clock at `now_ms`: a seal may already sit the skew ahead of us.
+pub(crate) fn named_end(sealed_ms: i64, at: Option<i64>, now_ms: i64) -> Option<i64> {
+    at.map(|at| at.min(super::frame_auth::stamp_ceiling(sealed_ms.min(now_ms))))
+}
+
+/// The mark a friend's removal leaves: its seal, or the end it names where later.
+pub(crate) fn removal_mark(sealed_ms: i64, at: Option<i64>, now_ms: i64) -> i64 {
+    named_end(sealed_ms, at, now_ms).map_or(sealed_ms, |at| sealed_ms.max(at))
+}
+
+/// Record a friend's removal of us: the mark it leaves and the end it names, both
+/// returned for our siblings.
+pub(crate) fn note_friend_removal(
+    store: &crate::storage::MessageStore,
+    master: &str,
+    sealed_ms: i64,
+    at: Option<i64>,
+) -> (i64, Option<i64>) {
+    let now = super::frame_auth::now_ms();
+    let ended = removal_mark(sealed_ms, at, now);
+    note_removal(store, master, ended);
+    let theirs = named_end(sealed_ms, at, now);
+    if let Some(end) = theirs {
+        note_their_end(store, master, end);
+    }
+    (ended, theirs)
+}
+
+/// Whether a friend's removal that ended its friendship at `at` ended one before ours,
+/// stamped `since`: a removal of ours is past our stamp on all their devices, so this is a
+/// late copy of an earlier one, held back by the relay or left in our mailbox.
+pub(crate) fn removal_predates_friendship(at: Option<i64>, since: i64) -> bool {
+    at.is_some_and(|at| at <= since)
+}
+
+/// When a removal of `master` we make at `now_ms` ends the friendship: past it, even one
+/// stamped by a clock ahead of ours or by our accept, so every device of ours and of
+/// theirs counts that friendship as ended.
+fn removal_stamp(store: &crate::storage::MessageStore, master: &str, now_ms: i64) -> i64 {
+    match store.get_friend_row(master) {
+        Ok(Some((_, _, since))) => now_ms.max(friendship_since(store, master, since).saturating_add(1)),
+        _ => now_ms,
+    }
+}
+
+/// The removal a queued drain sends `master`: when we ended the friendship.
+pub(crate) fn queued_friend_remove(store: &crate::storage::MessageStore, master: &str) -> HavenMessage {
+    HavenMessage::FriendRemove { at: Some(removed_at(store, master)).filter(|at| *at > 1) }
+}
+
 /// Record that a friendship with `master` ended at `at_ms`; a late older removal
 /// never moves the mark back.
 pub(crate) fn note_removal(store: &crate::storage::MessageStore, master: &str, at_ms: i64) {
@@ -91,6 +231,23 @@ pub(crate) fn note_removal(store: &crate::storage::MessageStore, master: &str, a
 /// before the friendship last ended, so it belongs to the one that ended.
 pub(crate) fn older_than_removal(store: &crate::storage::MessageStore, master: &str, requested_at: i64) -> bool {
     requested_at.saturating_add(super::frame_auth::LIVE_SKEW_MS) < removed_at(store, master)
+        || ended_by_them(store, master, requested_at)
+}
+
+/// Whether the friend's own removal of us ended a friendship or request stamped `since`.
+fn ended_by_them(store: &crate::storage::MessageStore, master: &str, since: i64) -> bool {
+    their_end(store, master).is_some_and(|end| since < end)
+}
+
+/// The stamp for a request or friendship we make with `master` now: past the removal we
+/// hold for them, which may carry the remover's clock, so no late copy of it ends the
+/// re-add, yet never past the ceiling a receiver holds our stamp to.
+pub(crate) fn readd_stamp(master: &str, db_path: &str, db_passphrase: &str) -> i64 {
+    let now = super::frame_auth::change_stamp_ms();
+    let ended = crate::storage::MessageStore::lease(db_path, db_passphrase)
+        .map(|store| removed_at(&store, master))
+        .unwrap_or(0);
+    now.max(ended.saturating_add(1).min(super::frame_auth::stamp_ceiling(now)))
 }
 
 /// KV key of when THIS device removed `master` itself: a stamp from our own clock,
@@ -99,14 +256,17 @@ fn removed_here_key(master: &str) -> String {
     format!("friend_removed_here:{master}")
 }
 
-/// Whether a friendship our own device lists, stamped `since`, is the one our identity
-/// ended. A removal made on this device judges strictly (it is stamped past the
-/// friendship it ends); with only the skew slack, a friendship removed minutes after it
-/// was made came back from a sibling's older list, and the two devices then undid each
-/// other's removal for good.
-pub(crate) fn ended_by_removal(store: &crate::storage::MessageStore, master: &str, since: i64) -> bool {
+/// Whether a friendship our own device lists, stamped `since` and accepted at `accepted`,
+/// is one that ended. A removal made on this device judges strictly (it is stamped past
+/// the friendship it ends); with only the skew slack, a friendship removed minutes after
+/// it was made came back from a sibling's older list, and the two devices then undid
+/// each other's removal for good. Our removals weigh our accept, the friend's the request.
+pub(crate) fn ended_by_removal(store: &crate::storage::MessageStore, master: &str, since: i64, accepted: Option<i64>) -> bool {
+    let judged = accepted.map_or(since, |at| since.max(at));
     let here = store.load_setting(&removed_here_key(master)).ok().flatten().and_then(|v| v.parse::<i64>().ok());
-    older_than_removal(store, master, since) || here.is_some_and(|at| since < at)
+    judged.saturating_add(super::frame_auth::LIVE_SKEW_MS) < removed_at(store, master)
+        || here.is_some_and(|at| judged < at)
+        || ended_by_them(store, master, since)
 }
 
 /// [`older_than_removal`] for a friend request from `sender`, logged. Out of line so
@@ -131,16 +291,39 @@ pub(crate) fn request_predates_removal(
 const MAX_SHARED_REMOVALS: usize = 256;
 
 /// The friendships we ended, newest first, as our own devices tell each other. A legacy
-/// tombstone holds no time and is left out.
+/// tombstone holds no time and is left out. One a friendship or request of ours here
+/// outlived is told just below it, so it still ends the friendship an away device holds
+/// (a pending request is in no shared list) and never the re-add, though it may sit
+/// ahead of the clock.
 pub(crate) fn friend_removals(store: &crate::storage::MessageStore) -> Vec<FriendRemoval> {
+    let since_of = friendships_since(store);
+    let outlived: HashMap<String, (i64, i64)> = store
+        .load_friends(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, status, direction, ..)| status == "accepted" || (status == "pending" && direction == "outgoing"))
+        .map(|(peer_id, _, _, row, _)| {
+            let since = since_of(&peer_id, row);
+            (peer_id, (row, since))
+        })
+        .collect();
+    let theirs: HashMap<String, i64> = store
+        .load_settings_with_prefix(THEIR_REMOVAL_PREFIX)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(key, end)| Some((key.strip_prefix(THEIR_REMOVAL_PREFIX)?.to_string(), end.parse().ok()?)))
+        .collect();
     let mut out: Vec<FriendRemoval> = store
         .load_settings_with_prefix(REMOVED_PREFIX)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|(key, at)| {
             let peer_id = key.strip_prefix(REMOVED_PREFIX)?.to_string();
-            let at = at.parse::<i64>().ok().filter(|at| *at > 1)?;
-            Some(FriendRemoval { peer_id, at })
+            let at = at.parse::<i64>().ok()?;
+            let row = outlived.get(&peer_id);
+            let at = row.map_or(at, |(_, since)| at.min(since.saturating_sub(1)));
+            let theirs = theirs.get(&peer_id).map(|end| row.map_or(*end, |(row, _)| (*end).min(*row)));
+            (at > 1).then_some(FriendRemoval { peer_id, at, theirs })
         })
         .collect();
     out.sort_unstable_by_key(|r| std::cmp::Reverse(r.at));
@@ -157,10 +340,11 @@ pub(crate) fn share_removal_with_siblings(
     device_peer_id: &str,
     master: &str,
     at: i64,
+    theirs: Option<i64>,
 ) {
     let msg = HavenMessage::FriendListSync {
         friends: Vec::new(),
-        removed: vec![FriendRemoval { peer_id: master.to_string(), at }],
+        removed: vec![FriendRemoval { peer_id: master.to_string(), at, theirs }],
         blocks: Vec::new(),
     };
     super::olm_lane::carry_to_own_siblings(
@@ -190,9 +374,17 @@ pub(crate) fn take_sibling_removals(
         let master = super::resolver::resolve(&removal.peer_id);
         let at = removal.at.min(ceiling);
         note_removal(&store, &master, at);
+        let theirs = removal.theirs.map(|end| end.min(ceiling));
+        if let Some(end) = theirs {
+            note_their_end(&store, &master, end);
+        }
         match store.get_friend_row(&master) {
             Ok(Some((status, _, since))) if status == "accepted" || status == "pending" => {
-                if since >= at {
+                let outlived = match theirs {
+                    Some(end) => since >= end,
+                    None => friendship_since(&store, &master, since) >= at,
+                };
+                if outlived {
                     hollow_log!("[HOLLOW-FRIENDS] Kept {master}: the friendship is newer than a sibling's removal");
                     continue;
                 }
@@ -456,10 +648,11 @@ pub(crate) fn share_friend_with_siblings(
 ) {
     let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     let Some((status, direction, requested_at)) = store.get_friend_row(master).ok().flatten() else { return };
+    let accepted_at = accepted_here(&store, master, requested_at);
     let roster = super::roster_book::load(&store, master);
     drop(store);
     let msg = HavenMessage::FriendListSync {
-        friends: vec![FriendListEntry { peer_id: master.to_string(), status, direction, requested_at, roster }],
+        friends: vec![FriendListEntry { peer_id: master.to_string(), status, direction, requested_at, accepted_at, roster }],
         removed: Vec::new(),
         blocks: Vec::new(),
     };
@@ -721,10 +914,7 @@ pub(crate) async fn handle_send_friend_request(
 
     hollow_log!("[HOLLOW-FRIENDS] Sending friend request to {peer_id_str}");
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+    let now = readd_stamp(&super::resolver::resolve(&peer_id_str), db_path, db_passphrase);
 
     // CANCEL any pending REMOVAL for this person: re-adding a friend you just
     // removed must not also fire the queued FriendRemove, or both drains fire on
@@ -836,10 +1026,7 @@ pub(crate) async fn handle_accept_friend_request(
     // accept and the peer would remove us back.
     pending_friend_removals.remove(&master);
     pending_friend_removals.remove(&peer_id_str);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+    let now = readd_stamp(&master, db_path, db_passphrase);
     // The accept names the request it answers; `save_friend` freezes that stamp on
     // the row, so it is read back after the write.
     let mut answered_at = 0i64;
@@ -855,6 +1042,7 @@ pub(crate) async fn handle_accept_friend_request(
                 .flatten()
                 .map(|(_, _, t)| t)
                 .unwrap_or(0);
+            note_accept(&store, &master, answered_at, now);
         }
     }
     share_friend_with_siblings(
@@ -1105,11 +1293,7 @@ pub(crate) async fn handle_remove_friend(
     // it. Also clean up any legacy device-stranded row so no duplicate survives.
     let mut ended_at = super::frame_auth::now_ms();
     if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
-        // Past the friendship it ends, even one stamped by a clock ahead of ours, so
-        // every device of ours counts that friendship as ended.
-        if let Ok(Some((_, _, since))) = store.get_friend_row(&master) {
-            ended_at = ended_at.max(since.saturating_add(1));
-        }
+        ended_at = removal_stamp(&store, &master, ended_at);
         note_removal(&store, &master, ended_at);
         let _ = store.save_setting(&removed_here_key(&master), &ended_at.to_string());
         let _ = store.remove_friend(&master);
@@ -1117,7 +1301,7 @@ pub(crate) async fn handle_remove_friend(
             let _ = store.remove_friend(&peer_id_str);
         }
     }
-    share_removal_with_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &master, ended_at);
+    share_removal_with_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &master, ended_at, None);
 
     // Notify the friend. The bare master authenticates as NO socket, so fan the
     // FriendRemove to every online device of theirs. If none are reachable, queue
@@ -1133,14 +1317,14 @@ pub(crate) async fn handle_remove_friend(
         // so the removal also waits in their mailbox for their next boot.
         let inbox_room = format!("inbox:{master}");
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: inbox_room.clone() });
-        send_message_to_peer_in_room(ws_cmd_tx, &inbox_room, &master, HavenMessage::FriendRemove);
+        send_message_to_peer_in_room(ws_cmd_tx, &inbox_room, &master, HavenMessage::FriendRemove { at: Some(ended_at) });
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: inbox_room });
         hollow_log!("[HOLLOW-FRIENDS] Friend {master} not reachable, queued removal and deposited it in inbox:{master}");
     } else {
         for t in &targets {
             send_message_to_peer(
                 &ws_cmd_tx, &ws_room_peers,
-                t, HavenMessage::FriendRemove,
+                t, HavenMessage::FriendRemove { at: Some(ended_at) },
             );
         }
         hollow_log!("[HOLLOW-FRIENDS] Sent FriendRemove for {master} to {} device(s)", targets.len());
@@ -2901,7 +3085,7 @@ mod tests {
         ] {
             store.save_friend(peer, status, "", since).unwrap();
         }
-        let removal = |peer: &str, at: i64| FriendRemoval { peer_id: peer.to_string(), at };
+        let removal = |peer: &str, at: i64| FriendRemoval { peer_id: peer.to_string(), at, theirs: None };
         let removed = [
             removal("old", ended),
             removal("asked", ended),
@@ -2918,6 +3102,185 @@ mod tests {
         assert!(store.get_friend_row("ahead").unwrap().is_some(), "a stamp past its frame ended a friendship made after the frame");
         assert_eq!(super::removed_at(&store, "ahead"), ended + 1_000, "the mark is held to the frame");
         assert_eq!(super::removed_at(&store, "zero"), 0, "a legacy mark was recorded");
+    }
+
+    /// A tombstone a re-add outlived here is shared only below the friendship or request
+    /// that outlived it, and a re-add is stamped past the tombstone we hold, up to the
+    /// ceiling a receiver holds it to.
+    #[test]
+    fn a_readd_outlives_the_tombstone_it_supersedes() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("readd.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let now = crate::node::frame_auth::now_ms();
+        let ahead = now + 4 * 60_000;
+
+        for (peer, status, direction) in [
+            ("friend", "accepted", ""),
+            ("asked", "pending", "outgoing"),
+            ("asking", "pending", "incoming"),
+            ("declined", "declined", ""),
+        ] {
+            store.save_friend(peer, status, direction, now).unwrap();
+        }
+        for peer in ["friend", "asked", "asking", "declined", "gone"] {
+            super::note_removal(&store, peer, ahead);
+        }
+        let mut shared: Vec<(String, i64)> = super::friend_removals(&store).into_iter().map(|r| (r.peer_id, r.at)).collect();
+        shared.sort();
+        let told = |peer: &str, at: i64| (peer.to_string(), at);
+        assert_eq!(
+            shared,
+            [told("asked", now - 1), told("asking", ahead), told("declined", ahead), told("friend", now - 1), told("gone", ahead)],
+            "a tombstone was not told, or told past the friendship or request of ours that outlived it"
+        );
+
+        assert!(super::readd_stamp("gone", &db, &pass) > ahead, "a re-add sorts before the removal we hold");
+        super::note_removal(&store, "planted", now + 86_400_000);
+        let capped = super::readd_stamp("planted", &db, &pass);
+        assert!(
+            capped <= crate::node::frame_auth::stamp_ceiling(crate::node::frame_auth::now_ms() + crate::node::frame_auth::SEAL_LEAD_MS),
+            "a re-add ran past what any receiver holds it to"
+        );
+        assert!(super::readd_stamp("stranger", &db, &pass) >= now, "a first request is stamped now");
+    }
+
+    /// The friend's own removal ends every friendship stamped before the end it names,
+    /// whatever our accept of it, on the device it reached and on our siblings; our own
+    /// removals still weigh our accept.
+    #[test]
+    fn a_friends_own_removal_ends_what_it_names_whatever_our_accept() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("theirs.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let ours = crate::node::frame_auth::now_ms();
+        let (asked, accepted) = (ours - 3_000, ours + 5);
+        let removal = |at: i64, theirs: Option<i64>| [super::super::types::FriendRemoval { peer_id: "b".into(), at, theirs }];
+        let entry_of = || crate::node::crypto_handler::accepted_friend_entries(&db, &pass).into_iter().find(|f| f.peer_id == "b");
+
+        super::note_removal(&store, "b", ours);
+        store.save_friend("b", "accepted", "", asked).unwrap();
+        super::note_accept(&store, "b", asked, accepted);
+        assert!(super::take_sibling_removals(&removal(ours, None), ours, &db, &pass).is_empty(), "our own removal ended our later accept");
+        assert!(!super::ended_by_removal(&store, "b", asked, Some(accepted)), "our own removal ended our later accept");
+        assert!(entry_of().is_some_and(|f| f.accepted_at == Some(accepted)));
+
+        let end = accepted - 1;
+        assert_eq!(
+            super::take_sibling_removals(&removal(end, Some(end)), end, &db, &pass),
+            ["b".to_string()],
+            "our accept outweighed the friend's own removal"
+        );
+        assert!(super::ended_by_removal(&store, "b", asked, Some(accepted)), "a sibling's list brings back what the friend ended");
+        assert!(super::older_than_removal(&store, "b", end - 1), "a request stamped before the friend's end");
+        assert!(!super::older_than_removal(&store, "b", end), "a re-add at the end the friend named");
+        assert!(!super::ended_by_removal(&store, "b", end, None), "a re-add at the end the friend named");
+        let told = super::friend_removals(&store).into_iter().find(|r| r.peer_id == "b").and_then(|r| r.theirs);
+        assert_eq!(told, Some(end), "our siblings are not told the friend's end");
+
+        assert_eq!(super::note_friend_removal(&store, "c", ours, Some(ours - 1)), (ours, Some(ours - 1)));
+        assert_eq!(super::their_end(&store, "c"), Some(ours - 1), "the friend's end was not kept");
+        assert_eq!(super::note_friend_removal(&store, "d", ours, None), (ours, None));
+        assert_eq!(super::their_end(&store, "d"), None, "a legacy removal named an end");
+        let (_, named) = super::note_friend_removal(&store, "b", end - 9, Some(end - 9));
+        assert_eq!(named, Some(end - 9));
+        assert_eq!(super::their_end(&store, "b"), Some(end), "an older removal moved the end back");
+        store.save_friend("b", "accepted", "", end - 5).unwrap();
+        let told = super::friend_removals(&store).into_iter().find(|r| r.peer_id == "b").and_then(|r| r.theirs);
+        assert_eq!(told, Some(end - 5), "the end is told past a friendship of ours that outlived it");
+    }
+
+    /// A 0.12 sibling's list parses with no accept and no friend's end, and ours names
+    /// them only when set, so a 0.12 sibling reads it as before.
+    #[test]
+    fn a_sibling_list_without_the_new_stamps_reads_as_before() {
+        use super::super::types::{FriendListEntry, FriendRemoval};
+        let entry: FriendListEntry = serde_json::from_str(r#"{"peer_id":"b","status":"accepted","direction":"","requested_at":7}"#).unwrap();
+        assert_eq!((entry.requested_at, entry.accepted_at), (7, None));
+        let removal: FriendRemoval = serde_json::from_str(r#"{"peer_id":"b","at":7}"#).unwrap();
+        assert_eq!((removal.at, removal.theirs), (7, None));
+        let plain = serde_json::to_string(&FriendListEntry { peer_id: "b".into(), requested_at: 7, ..Default::default() }).unwrap();
+        assert!(!plain.contains("accepted_at"), "{plain}");
+        let plain = serde_json::to_string(&FriendRemoval { peer_id: "b".into(), at: 7, theirs: None }).unwrap();
+        assert!(!plain.contains("theirs"), "{plain}");
+    }
+
+    /// Our accept of a request stamped inside the clock window before a removal we hold
+    /// stamps the friendship for our devices, only on the row it was made for.
+    #[test]
+    fn an_accept_past_a_removal_stamps_the_friendship_for_our_devices() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("accept.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let ended = crate::node::frame_auth::now_ms();
+        let (asked, accepted) = (ended - 3_000, ended + 5);
+
+        super::note_removal(&store, "late", ended);
+        store.save_friend("late", "accepted", "", asked).unwrap();
+        super::note_accept(&store, "late", asked, accepted);
+        assert_eq!(super::friendship_since(&store, "late", asked), accepted, "our accept does not stamp the friendship");
+        assert_eq!(super::friendship_since(&store, "late", asked + 1), asked + 1, "the mark weighed another row");
+        let told = super::friend_removals(&store).into_iter().find(|r| r.peer_id == "late").map(|r| r.at);
+        assert_eq!(told, Some(ended), "the removal is told at its own time, below the accept");
+        let removal = [super::super::types::FriendRemoval { peer_id: "late".into(), at: ended, theirs: None }];
+        assert!(super::take_sibling_removals(&removal, ended, &db, &pass).is_empty(), "a sibling's removal ended our accept");
+        assert!(store.get_friend_row("late").unwrap().is_some());
+
+        store.save_friend("fresh", "accepted", "", asked).unwrap();
+        super::note_accept(&store, "fresh", asked, accepted);
+        super::note_removal(&store, "newer", asked - 1);
+        super::note_accept(&store, "newer", asked, accepted);
+        assert_eq!(super::friendship_since(&store, "fresh", asked), asked, "an accept with no removal held stamped the row");
+        let entry = crate::node::crypto_handler::accepted_friend_entries(&db, &pass).into_iter().find(|f| f.peer_id == "late");
+        assert_eq!(
+            entry.map(|f| (f.requested_at, f.accepted_at)),
+            Some((asked, Some(accepted))),
+            "our devices are not told both the request's stamp and our accept"
+        );
+        assert!(super::removal_stamp(&store, "late", ended) > accepted, "our removal sorts before our own accept");
+        assert!(matches!(
+            super::queued_friend_remove(&store, "late"),
+            super::super::types::HavenMessage::FriendRemove { at: Some(at) } if at == ended
+        ), "a queued removal names no end");
+        assert_eq!(super::friendship_since(&store, "newer", asked), asked, "a request past the removal was restamped");
+    }
+
+    /// A removal names when it ended the friendship; one at or before ours is a late copy.
+    #[test]
+    fn a_removal_names_the_friendship_it_ended() {
+        let since = 1_000_000;
+        assert!(super::removal_predates_friendship(Some(since), since));
+        assert!(super::removal_predates_friendship(Some(since - 1), since));
+        assert!(!super::removal_predates_friendship(Some(since + 1), since), "a removal of this friendship was ignored");
+        assert!(!super::removal_predates_friendship(None, since), "a legacy removal names nothing");
+        let skew = crate::node::frame_auth::LIVE_SKEW_MS;
+        let now = since + 10 * skew;
+        assert_eq!(super::removal_mark(since, None, now), since);
+        assert_eq!(super::removal_mark(since, Some(since - 9), now), since, "a removal marked before its seal");
+        assert_eq!(super::removal_mark(since, Some(since + 9), now), since + 9);
+        assert_eq!(super::removal_mark(since, Some(since + 10 * skew), now), since + skew, "a removal marked past its frame");
+        assert_eq!(super::named_end(since, Some(since + 9), now), Some(since + 9));
+        assert_eq!(super::named_end(since, None, now), None, "a legacy removal named an end");
+    }
+
+    /// A removal sealed ahead of our clock names no end past our clock's own ceiling, so
+    /// its tombstone never outruns what a re-add can be stamped.
+    #[test]
+    fn a_removal_sealed_ahead_names_no_end_past_our_ceiling() {
+        let now = 1_000_000_000;
+        let skew = crate::node::frame_auth::LIVE_SKEW_MS;
+        let ceiling = crate::node::frame_auth::stamp_ceiling(now);
+        let sealed = now + skew;
+        assert_eq!(super::named_end(sealed, Some(sealed + skew), now), Some(ceiling), "a seal ahead stretched the end");
+        assert_eq!(super::removal_mark(sealed, Some(sealed + skew), now), ceiling, "a seal ahead stretched the tombstone");
+        assert_eq!(super::removal_mark(sealed, None, now), sealed, "a seal ahead is a tombstone of its own");
+        assert_eq!(super::named_end(now - 5, Some(now + skew), now), Some(now - 5 + skew), "a seal behind our clock lost its ceiling");
     }
 
     /// HOL-SEC-038 (N1, N2). The avatar is signed by hash only, and a plaintext

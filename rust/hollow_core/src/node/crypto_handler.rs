@@ -93,14 +93,17 @@ pub(crate) fn send_read_markers_to_sibling(
     n
 }
 
-/// Our accepted friends as the sibling lane carries them.
+/// Our accepted friends as the sibling lane carries them: each request's stamp and our
+/// accept of it where that sorts later.
 pub(crate) fn accepted_friend_entries(db_path: &str, db_passphrase: &str) -> Vec<FriendListEntry> {
-    crate::storage::MessageStore::lease(db_path, db_passphrase)
-        .ok()
-        .and_then(|s| s.load_friends(Some("accepted")).ok())
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return Vec::new() };
+    let accept_of = super::social::accepts_here(&store);
+    store
+        .load_friends(Some("accepted"))
         .unwrap_or_default()
         .into_iter()
         .map(|(peer_id, status, direction, requested_at, _updated)| FriendListEntry {
+            accepted_at: accept_of(&peer_id, requested_at),
             peer_id, status, direction, requested_at, roster: None,
         })
         .collect()
@@ -5532,10 +5535,24 @@ mod tests {
         enum LegacyWire {
             #[serde(rename = "friend_accept")]
             FriendAccept,
+            #[serde(rename = "friend_remove")]
+            FriendRemove,
         }
         assert!(matches!(
             serde_json::from_str::<LegacyWire>(r#"{"type":"friend_accept","requested_at":7}"#).unwrap(),
             LegacyWire::FriendAccept,
+        ));
+
+        // A removal names when it ended the friendship; a bare one is the old frame.
+        assert_eq!(serde_json::to_string(&HavenMessage::FriendRemove { at: None }).unwrap(), r#"{"type":"friend_remove"}"#);
+        assert_eq!(serde_json::to_string(&HavenMessage::FriendRemove { at: Some(9) }).unwrap(), r#"{"type":"friend_remove","at":9}"#);
+        assert!(matches!(
+            serde_json::from_str::<HavenMessage>(r#"{"type":"friend_remove"}"#).unwrap(),
+            HavenMessage::FriendRemove { at: None },
+        ));
+        assert!(matches!(
+            serde_json::from_str::<LegacyWire>(r#"{"type":"friend_remove","at":9}"#).unwrap(),
+            LegacyWire::FriendRemove,
         ));
 
         let device = kp(0x1b);
@@ -6339,10 +6356,10 @@ mod tests {
     fn md_a_friend_list_is_split_into_frames_within_the_budget() {
         let roster = |tag: usize| crate::identity::roster::Roster { master: format!("{tag}{}", "r".repeat(150_000)), ..Default::default() };
         let friends: Vec<FriendListEntry> = (0..9)
-            .map(|i| FriendListEntry { peer_id: format!("friend-{i}"), status: "accepted".into(), direction: String::new(), requested_at: i, roster: Some(roster(i as usize)) })
-            .chain((9..12).map(|i| FriendListEntry { peer_id: format!("friend-{i}"), status: "accepted".into(), direction: String::new(), requested_at: i, roster: None }))
+            .map(|i| FriendListEntry { peer_id: format!("friend-{i}"), status: "accepted".into(), direction: String::new(), requested_at: i, accepted_at: None, roster: Some(roster(i as usize)) })
+            .chain((9..12).map(|i| FriendListEntry { peer_id: format!("friend-{i}"), status: "accepted".into(), direction: String::new(), requested_at: i, accepted_at: None, roster: None }))
             .collect();
-        let removed = vec![FriendRemoval { peer_id: "gone".into(), at: 5 }];
+        let removed = vec![FriendRemoval { peer_id: "gone".into(), at: 5, theirs: None }];
         let blocks = vec![BlockEntry { peer_id: "blocked".into(), blocked: true, at: 6 }];
         let frames = friend_list_frames(friends, removed, blocks);
         assert!(frames.len() >= 3, "nine rosters of 150 KB rode {} frame(s)", frames.len());
@@ -6355,7 +6372,7 @@ mod tests {
             seen.extend(friends.iter().map(|f| f.peer_id.clone()));
         }
         assert_eq!(seen, (0..12).map(|i| format!("friend-{i}")).collect::<Vec<_>>(), "every friend once, in order");
-        let empty = friend_list_frames(Vec::new(), vec![FriendRemoval { peer_id: "gone".into(), at: 5 }], Vec::new());
+        let empty = friend_list_frames(Vec::new(), vec![FriendRemoval { peer_id: "gone".into(), at: 5, theirs: None }], Vec::new());
         assert_eq!(empty.len(), 1, "removals alone still go out");
 
         let tmp = crate::test_tmp::tempdir().unwrap();

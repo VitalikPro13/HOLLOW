@@ -230,6 +230,10 @@ pub(crate) struct FriendListEntry {
     pub direction: String,
     #[serde(default)]
     pub requested_at: i64,
+    /// Our accept, where it sorts after the request (`social::note_accept`): it weighs
+    /// our own removals, while the friend's removals weigh the request alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at: Option<i64>,
     /// The friend's roster as the sharing device holds it, so a device that lost its
     /// database places the friend's devices. Verified on its own on arrival.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,6 +248,10 @@ pub(crate) struct FriendRemoval {
     pub peer_id: String,
     #[serde(default)]
     pub at: i64,
+    /// Set when the friend ended it: the end their removal named, which ends every
+    /// friendship stamped before it, whatever our accept of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theirs: Option<i64>,
 }
 
 /// A block (or its lifting) our identity made, as our own devices tell each other:
@@ -2412,7 +2420,13 @@ pub(crate) enum HavenMessage {
     },
 
     #[serde(rename = "friend_remove")]
-    FriendRemove,
+    FriendRemove {
+        /// When the remover ended the friendship: past that friendship's stamp on every
+        /// device of theirs, whatever its clock, so a receiver whose friendship is newer
+        /// knows a late copy of an earlier removal. Absent from pre-0.13 senders.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<i64>,
+    },
 
     /// A master-signed destruction order told to a FRIEND, whose contact is gone.
     /// Our own devices get [`MessageEnvelope::DestroyIdentityOrder`] or the relay's
@@ -4343,7 +4357,7 @@ impl HavenMessage {
             | Self::FriendCard { .. }
             | Self::FriendAccept { .. }
             | Self::FriendReject { .. }
-            | Self::FriendRemove
+            | Self::FriendRemove { .. }
             | Self::IdentityDestroyed { .. }
             | Self::PublicChannelMessage { .. }
             | Self::PublicChannelEdit { .. }
@@ -4564,7 +4578,7 @@ impl HavenMessage {
             | Self::FriendCard { .. }
             | Self::FriendAccept { .. }
             | Self::FriendReject { .. }
-            | Self::FriendRemove
+            | Self::FriendRemove { .. }
             | Self::PublicChannelMessage { .. }
             | Self::PublicChannelEdit { .. }
             | Self::PublicLinkPreviewSet { .. }

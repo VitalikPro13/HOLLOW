@@ -105,6 +105,13 @@ pub(crate) fn seal_stamp_ms() -> i64 {
     with_test_clock(stamp_after(last, wall))
 }
 
+/// The stamp for a change this process makes that receivers weigh against the seal time
+/// of our earlier frames (a friend request or accept): taken from the seal sequence,
+/// because during a burst the wall clock sorts before frames we already sent.
+pub(crate) fn change_stamp_ms() -> i64 {
+    seal_stamp_ms()
+}
+
 fn stamp_after(last: i64, wall: i64) -> i64 {
     last.saturating_add(1).clamp(wall, wall.saturating_add(SEAL_LEAD_MS))
 }
@@ -776,6 +783,13 @@ mod tests {
         assert_eq!(stamp_after(NOW + 3, NOW), NOW + 4);
         assert_eq!(stamp_after(NOW + SEAL_LEAD_MS, NOW), NOW + SEAL_LEAD_MS, "a burst stops at the lead");
         assert_eq!(stamp_after(i64::MAX, i64::MAX), i64::MAX);
+    }
+
+    #[test]
+    fn a_change_stamp_never_sorts_before_a_frame_already_sealed() {
+        let last = (0..SEAL_LEAD_MS).map(|_| seal_stamp_ms()).max().unwrap();
+        assert!(last > now_ms(), "precondition: the burst ran the seals ahead of the wall clock");
+        assert!(change_stamp_ms() >= last, "a change made after a frame sorts before it");
     }
 
     #[test]

@@ -3624,7 +3624,7 @@ mod tests {
             super::super::frame_auth::seal_at(&kp, "r", route, at, [7; 16], &serde_json::to_vec(msg).unwrap())
         };
         let live = seal(&super::super::types::HavenMessage::FriendListRequest, "12D3KooWTarget");
-        let kept = seal(&super::super::types::HavenMessage::FriendRemove, "12D3KooWTarget");
+        let kept = seal(&super::super::types::HavenMessage::FriendRemove { at: None }, "12D3KooWTarget");
         assert_eq!(sealed_class(&live), Class::LiveOnly { sealed_ms: at });
         assert_eq!(sealed_class(&kept), Class::Ordinary);
         assert_eq!(sealed_class(b"{\"plain\":true}"), Class::Ordinary);

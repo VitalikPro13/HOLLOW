@@ -4199,11 +4199,10 @@ async fn run_event_loop(
                                     if let Some(key) = removal_key {
                                         pending_friend_removals.remove(&key);
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (master {key}), sending queued friend removal");
-                                        send_message_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            &peer_id, HavenMessage::FriendRemove,
-                                        );
-                                        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
+                                        let store = crate::storage::MessageStore::lease(&db_path, &db_passphrase).ok();
+                                        let removal = store.as_ref().map_or(HavenMessage::FriendRemove { at: None }, |st| social::queued_friend_remove(st, &key));
+                                        send_message_to_peer(&ws_cmd_tx, &ws_room_peers, &peer_id, removal);
+                                        if let Some(store) = store {
                                             let _ = store.remove_friend(&key);
                                         }
                                     }
@@ -5026,11 +5025,10 @@ async fn run_event_loop(
                                     if let Some(key) = removal_key {
                                         pending_friend_removals.remove(&key);
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers (master {key}), sending queued friend removal");
-                                        send_message_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            pid_str, HavenMessage::FriendRemove,
-                                        );
-                                        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
+                                        let store = crate::storage::MessageStore::lease(&db_path, &db_passphrase).ok();
+                                        let removal = store.as_ref().map_or(HavenMessage::FriendRemove { at: None }, |st| social::queued_friend_remove(st, &key));
+                                        send_message_to_peer(&ws_cmd_tx, &ws_room_peers, pid_str, removal);
+                                        if let Some(store) = store {
                                             let _ = store.remove_friend(&key);
                                         }
                                     }
@@ -13413,16 +13411,16 @@ async fn handle_incoming_request_inner(
             }).await;
         }
 
-        HavenMessage::FriendRemove => {
+        HavenMessage::FriendRemove { at } => {
             // The remover sends from a DEVICE id while the friendship is keyed by their
             // MASTER on our side, so resolve or the DELETE misses and the removal is
             // asymmetric. Delete both keys for any legacy device-stranded row.
             let master = super::resolver::resolve(&peer_str);
             let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
-            // A removal sealed before this friendship began belongs to an earlier one,
-            // held back or replayed by the relay.
+            // A removal sealed or stamped before this friendship began belongs to an
+            // earlier one, held back or replayed by the relay.
             if let Ok(Some((status, direction, since))) = store.get_friend_row(&master) {
-                if frame_ts_ms + super::frame_auth::LIVE_SKEW_MS < since {
+                if frame_ts_ms + super::frame_auth::LIVE_SKEW_MS < since || social::removal_predates_friendship(at, since) {
                     hollow_log!("[HOLLOW-SECURITY] Ignored a removal from {peer_str} older than the friendship");
                     return;
                 }
@@ -13438,13 +13436,13 @@ async fn handle_incoming_request_inner(
                 }
             }
             hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str} (master {master})");
-            social::note_removal(&store, &master, frame_ts_ms);
+            let (ended, theirs) = social::note_friend_removal(&store, &master, frame_ts_ms, at);
             let _ = store.remove_friend(&master);
             if master != peer_str {
                 let _ = store.remove_friend(&peer_str);
             }
             // The friend reaches only our devices online now, and its queued copy only the first back.
-            social::share_removal_with_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &master, frame_ts_ms);
+            social::share_removal_with_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &master, ended, theirs);
 
             // CRITICAL: clear our OWN queued accept and request for this person. A
             // `pending_friend_accepts` entry is re-seeded from accepted friends at every
@@ -13553,10 +13551,11 @@ async fn handle_incoming_request_inner(
                     // v1 shares only accepted friends; persist as accepted. The stamp says
                     // which of the friend's removals are older than the friendship, so it
                     // never runs ahead of the frame (the friendship itself is real).
-                    let since = entry.requested_at.min(super::frame_auth::stamp_ceiling(frame_ts_ms));
+                    let since = entry.requested_at.min(ceiling);
+                    let accepted = entry.accepted_at.map(|at| at.min(ceiling)).filter(|at| *at > since);
                     // A sibling that missed our removal still lists the friendship it
                     // ended, whose stamp is frozen from before it; a re-add is newer.
-                    if social::ended_by_removal(&store, &fmaster, since) {
+                    if social::ended_by_removal(&store, &fmaster, since, accepted) {
                         continue;
                     }
                     if store
@@ -13564,6 +13563,9 @@ async fn handle_incoming_request_inner(
                         .is_ok()
                     {
                         inserted += 1;
+                        if let Some(at) = accepted {
+                            social::note_sibling_accept(&store, &fmaster, at);
+                        }
                     }
                     backfilled.push((entry.peer_id.clone(), fmaster));
                 }

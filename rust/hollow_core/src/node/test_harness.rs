@@ -3740,7 +3740,7 @@ async fn wait_until(secs: u64, mut cond: impl AsyncFnMut() -> bool) -> bool {
         if tokio::time::Instant::now() >= deadline {
             return false;
         }
-        sleep_ms(interval).await;
+        sleep_ms(interval).await; // BUDGET: 0, a poll step the condition ends
         interval = (interval * 2).min(250);
     }
 }
@@ -3755,7 +3755,7 @@ async fn sleep_until_ms(deadline_ms: u64, grace_ms: u64) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    sleep_ms(deadline_ms.saturating_sub(now) + grace_ms).await;
+    sleep_ms(deadline_ms.saturating_sub(now) + grace_ms).await; // BUDGET: 0, a caller's deadline this scan cannot see
 }
 
 /// Wait until `a` and `b` hold a CONFIRMED Olm session with each other, and panic
@@ -27325,18 +27325,56 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // cooldown boundary move nothing, the forged-fork absence proof and a wait past the probe
     // spacing that shows a responder serving a catch-up stays our responder (+68.2 s measured,
     // the 1.0 s slack spent, total 941.89 s).
-    const BUDGET_MS: u64 = 941_900;
+    // 2026-10-23: g13w3-readd: the scan read `1_000`-style literals and expression lengths
+    // as zero; it now counts them (40.5 s of underscored literals, four 9 s waits past the
+    // channel ask's recently-synced window). No sleep was added (+76.5 s on its base).
+    // 2026-10-23 merge of g13w3-readd onto f-authority, g2 and rmlive: the same recount
+    // finds 8.0 s of underscored literals in g2's tests (+84.5 s, total 1026.39 s, slack 1.0 s).
+    const BUDGET_MS: u64 = 1_027_400;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
     let needle = concat!("sleep_", "ms(");
 
+    let note = concat!("BUDGET", ": ");
+
+    /// What each sleep on `line` costs; `None` for one whose length the scan cannot read.
+    /// A sleep whose length is an expression names its cost in a trailing note.
+    fn sleep_costs(line: &str) -> Vec<Option<u64>> {
+        let (needle, note) = (concat!("sleep_", "ms("), concat!("BUDGET", ": "));
+        let ms_of = |text: &str| text.replace('_', "").parse::<u64>().ok();
+        let noted = line.find(note).map(|at| {
+            line[at + note.len()..].chars().take_while(|c| c.is_ascii_digit() || *c == '_').collect::<String>()
+        });
+        let mut costs = Vec::new();
+        let mut rest = line;
+        while let Some(at) = rest.find(needle) {
+            let defines = rest[..at].ends_with("fn ");
+            rest = &rest[at + needle.len()..];
+            if defines {
+                continue;
+            }
+            // A call split over lines is read only through a note on its first line.
+            let length = rest.find(')').map_or("", |close| &rest[..close]);
+            costs.push(ms_of(length).or_else(|| noted.as_deref().and_then(ms_of)));
+        }
+        costs
+    }
+    let sample = |text: &str| sleep_costs(&text.replace("SLEEP(", needle).replace("NOTE", note));
+    assert_eq!(sample("SLEEP(1_500).await;"), [Some(1_500)], "a grouped literal counts in full");
+    assert_eq!(sample("SLEEP(x + 1).await; // NOTE9_000, why"), [Some(9_000)], "a noted expression counts its note");
+    assert_eq!(sample("SLEEP(x).await;"), [None], "an unnoted expression is unreadable");
+    assert_eq!(sample("SLEEP("), [None], "a call split over lines is unreadable");
+    assert_eq!(sample("SLEEP( // NOTE2_000"), [Some(2_000)], "a split call counts the note on its first line");
+    assert!(sample("async fn SLEEP(ms: u64) {").is_empty(), "the helper's own definition costs nothing");
+
     let mut total = 0u64;
     let mut calls = 0usize;
     let mut current = "<file scope>";
     let mut per_fn: Vec<(&str, u64)> = Vec::new();
+    let mut unread: Vec<String> = Vec::new();
 
-    for line in src.lines() {
+    for (no, line) in src.lines().enumerate() {
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix("async fn ").or_else(|| trimmed.strip_prefix("fn ")) {
             if let Some(name) = rest.split('(').next() {
@@ -27346,11 +27384,11 @@ fn harness_fixed_sleep_budget_does_not_grow() {
         if trimmed.starts_with("//") {
             continue;
         }
-        let mut rest = line;
-        while let Some(at) = rest.find(needle) {
-            rest = &rest[at + needle.len()..];
-            let Some(close) = rest.find(')') else { break };
-            let Ok(ms) = rest[..close].parse::<u64>() else { continue };
+        for cost in sleep_costs(line) {
+            let Some(ms) = cost else {
+                unread.push(format!("line {}: {}", no + 1, line.trim()));
+                continue;
+            };
             total += ms;
             calls += 1;
             match per_fn.iter_mut().find(|(f, _)| *f == current) {
@@ -27360,11 +27398,17 @@ fn harness_fixed_sleep_budget_does_not_grow() {
         }
     }
 
+    assert!(
+        unread.is_empty(),
+        "a sleep_ms length the budget cannot read counts as nothing; give it a trailing `// {note}<ms>` naming what it costs:\n{}",
+        unread.join("\n"),
+    );
+
     // A direct tokio sleep would slip past the scan above.
     assert_eq!(
         src.matches(concat!("tokio::time::", "sleep(")).count(),
         1,
-        "fixed sleeps go through sleep_ms so this budget can see them;          found a second direct tokio::time::sleep call"
+        "fixed sleeps go through sleep_ms so this budget can see them; found a second direct tokio::time::sleep call"
     );
 
     per_fn.sort_by(|a, b| b.1.cmp(&a.1));
@@ -27376,7 +27420,7 @@ fn harness_fixed_sleep_budget_does_not_grow() {
 
     assert!(
         total <= BUDGET_MS,
-        "harness fixed-sleep budget grew to {:.1}s across {} calls (cap {:.1}s).          Worst: {}. Wait for the condition instead: wait_until / expect_olm_confirmed /          expect_mls_leaf / expect_mls_group / expect_no_mls_leaf. If the settle really has          no pollable signal (an ABSENCE proof, or a row in a running node's DB), say so at          the call site and raise BUDGET_MS deliberately.",
+        "harness fixed-sleep budget grew to {:.1}s across {} calls (cap {:.1}s). Worst: {}. Wait for the condition instead: wait_until / expect_olm_confirmed / expect_mls_leaf / expect_mls_group / expect_no_mls_leaf. If the settle really has no pollable signal (an ABSENCE proof, or a row in a running node's DB), say so at the call site and raise BUDGET_MS deliberately.",
         total as f64 / 1000.0,
         calls,
         BUDGET_MS as f64 / 1000.0,
@@ -33352,7 +33396,7 @@ fn is_friend(node: &TestNode, master: &str) -> bool {
 }
 
 fn removal() -> Vec<u8> {
-    serde_json::to_vec(&super::types::HavenMessage::FriendRemove).unwrap()
+    serde_json::to_vec(&super::types::HavenMessage::FriendRemove { at: None }).unwrap()
 }
 
 /// Wait until `to` has handled every frame delivered to it so far: relay events reach
@@ -34021,6 +34065,7 @@ async fn authz_a_stale_siblings_friend_list_never_brings_back_a_removed_friend()
         status: "accepted".into(),
         direction: String::new(),
         requested_at,
+        accepted_at: None,
         roster: None,
     };
     let backfilled = async |b: &mut TestNode| {
@@ -34076,7 +34121,7 @@ fn removals(entries: &[(&str, i64)]) -> super::types::HavenMessage {
         friends: Vec::new(),
         removed: entries
             .iter()
-            .map(|(peer, at)| super::types::FriendRemoval { peer_id: peer.to_string(), at: *at })
+            .map(|(peer, at)| super::types::FriendRemoval { peer_id: peer.to_string(), at: *at, theirs: None })
             .collect(),
         blocks: Vec::new(),
     }
@@ -34165,23 +34210,75 @@ async fn authz_a_removal_reaches_an_online_sibling_and_never_undoes_a_readd() {
     let dropped = carry_and_settle(&a1, &mut a2, removals(&[(&b_master, ended)])).await;
     assert!(dropped.is_empty() && is_friend(&a2, &b_master), "a late removal undid the friendship made since");
 
-    // A removal stamped far ahead of its frame never outlives a friendship made after it.
+    // A removal stamped far ahead of its frame does not outlive a friendship made after it,
+    // even one made while a burst runs A1's seals ahead of the wall clock.
+    let [third, fourth] = [156, 157].map(|s| NativeKeypair::from_secret_bytes(&seed_bytes(s)).peer_id());
+    let _burst = (0..super::frame_auth::SEAL_LEAD_MS).map(|_| super::frame_auth::seal_stamp_ms()).max();
     let far = super::frame_auth::now_ms() + 24 * 3600 * 1000;
-    let dropped = carry_and_settle(&a1, &mut a2, removals(&[(&other, far)])).await;
+    let dropped = carry_and_settle(&a1, &mut a2, removals(&[(&other, far), (&third, far)])).await;
     assert_eq!(dropped, vec![other.clone()], "our own device's removal lands");
-    let readd = HavenMessage::FriendListSync {
+    let removal_sealed = a2
+        .store()
+        .load_setting(&format!("friend_removed:{third}"))
+        .unwrap()
+        .and_then(|v| v.parse::<i64>().ok())
+        .expect("A2 holds the far removal to its frame")
+        - super::frame_auth::LIVE_SKEW_MS;
+    a1.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: third.clone() }).await.unwrap();
+    a1.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: fourth.clone() }).await.unwrap();
+    let stamp_of = |peer: &str| a1.store().get_friend_row(peer).ok().flatten().map(|(_, _, at)| at);
+    assert!(
+        wait_until(10, async || stamp_of(&third).is_some() && stamp_of(&fourth).is_some()).await,
+        "A1 records its request and its accept"
+    );
+    let (asked, accepted) = (stamp_of(&third).unwrap(), stamp_of(&fourth).unwrap());
+    assert!(asked >= removal_sealed, "a friend request sorts before a frame sealed ahead of it");
+    assert!(accepted >= removal_sealed, "an accept sorts before a frame sealed ahead of it");
+    let friendship = |peer: &str, since: i64| HavenMessage::FriendListSync {
         friends: vec![FriendListEntry {
-            peer_id: other.clone(),
+            peer_id: peer.to_string(),
             status: "accepted".into(),
             direction: String::new(),
-            requested_at: super::frame_auth::now_ms(),
+            requested_at: since,
+            accepted_at: None,
             roster: None,
         }],
         removed: Vec::new(),
         blocks: Vec::new(),
     };
-    carry_and_settle(&a1, &mut a2, readd).await;
-    assert!(is_friend(&a2, &other), "a removal stamped ahead of its frame outlived the friendship made since");
+    carry_and_settle(&a1, &mut a2, friendship(&third, asked)).await;
+    assert!(is_friend(&a2, &third), "a removal stamped ahead of its frame outlived the friendship made since");
+
+    // Nor when A1's own tombstone sits that far ahead and its full list goes out in a
+    // later frame: the friendship that outlived the tombstone keeps it home.
+    let fifth = NativeKeypair::from_secret_bytes(&seed_bytes(158)).peer_id();
+    a1.store().save_setting(&format!("friend_removed:{third}"), &far.to_string()).unwrap();
+    a1.store().save_friend(&third, "accepted", "", asked).unwrap();
+    a1.store().save_friend(&fifth, "accepted", "", super::frame_auth::now_ms()).unwrap();
+    carry_as(&a2, &a1, HavenMessage::FriendListRequest).await;
+    assert!(wait_until(15, async || is_friend(&a2, &fifth)).await, "A1's full list reaches A2");
+    assert!(is_friend(&a2, &third), "a far removal re-shared in a later frame undid the re-add");
+
+    // A removal we hold from a friend whose clock runs ahead of ours: asking them again
+    // is stamped past it, so a late copy of it never ends the re-add on A2.
+    let [sixth, seventh] = [159, 160].map(|s| NativeKeypair::from_secret_bytes(&seed_bytes(s)).peer_id());
+    let ahead = super::frame_auth::now_ms() + 4 * 60_000;
+    for peer in [&sixth, &seventh] {
+        a1.store().save_setting(&format!("friend_removed:{peer}"), &ahead.to_string()).unwrap();
+    }
+    carry_and_settle(&a1, &mut a2, removals(&[(&sixth, ahead)])).await;
+    a1.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: sixth.clone() }).await.unwrap();
+    a1.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: seventh.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || stamp_of(&sixth).is_some() && stamp_of(&seventh).is_some()).await,
+        "A1 asks the friend again"
+    );
+    let readded = stamp_of(&sixth).unwrap();
+    assert!(readded > ahead, "a re-add sorts before the removal it supersedes");
+    assert!(stamp_of(&seventh).unwrap() > ahead, "an accept sorts before the removal it supersedes");
+    carry_and_settle(&a1, &mut a2, friendship(&sixth, readded)).await;
+    let dropped = carry_and_settle(&a1, &mut a2, removals(&[(&sixth, ahead)])).await;
+    assert!(dropped.is_empty() && is_friend(&a2, &sixth), "a late copy of a removal from a clock ahead ended the re-add");
 
     // B removes us and its frame reaches only A1: A1 passes it on.
     relay.swallow_direct(&b.device_id, &a2.device_id);
@@ -37680,7 +37777,7 @@ async fn authz_a_sibling_lane_stamp_never_runs_ahead_of_its_frame() {
     assert!(ts_of("dm:far").is_some_and(|ts| ts <= ceiling), "a far-future marker ran ahead: {:?}", ts_of("dm:far"));
 
     carry_as(&c, &b, HavenMessage::FriendListSync {
-        friends: vec![FriendListEntry { peer_id: friend.clone(), status: "accepted".into(), direction: String::new(), requested_at: far, roster: None }],
+        friends: vec![FriendListEntry { peer_id: friend.clone(), status: "accepted".into(), direction: String::new(), requested_at: far, accepted_at: None, roster: None }],
         removed: Vec::new(),
         blocks: Vec::new(),
     })
@@ -37999,6 +38096,7 @@ async fn c24_a_plaintext_copy_of_an_olm_only_message_is_dropped() {
             status: "accepted".into(),
             direction: "outgoing".into(),
             requested_at: 1,
+            accepted_at: None,
             roster: None,
         }],
         removed: Vec::new(),
@@ -42728,7 +42826,7 @@ async fn a_channel_sync_page_continues_past_a_post_that_arrived_while_paging() {
     relay.hold_direct(&o.device_id, &j.device_id);
     // Not J's join-time ask: J opens the channel once that one is behind it. Only pages
     // J itself asked for are followed, and an answer held past the ask's silence still is.
-    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await;
+    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await; // BUDGET: 9_000, the 8 s test window and 1 s
     j.cmd_tx
         .send(NodeCommand::RequestChannelSync { server_id: server_id.clone(), channel_id: general.clone() })
         .await
@@ -47242,6 +47340,7 @@ async fn authz_a_repaired_sibling_still_refuses_a_tampered_row_or_a_misnamed_ros
         status: "accepted".into(),
         direction: String::new(),
         requested_at: super::frame_auth::now_ms() - 1_000,
+        accepted_at: None,
         roster: Some(roster),
     };
     let list = |entries: Vec<super::types::FriendListEntry>| super::types::HavenMessage::FriendListSync {
@@ -47442,7 +47541,7 @@ async fn md_a_sibling_list_never_brings_back_a_friend_we_just_removed() {
     d1.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: x.master_id.clone() }).await.unwrap();
     assert!(wait_until(10, async || d1.friend_row(&x.master_id).is_none()).await, "precondition: device 1 removed the friend");
     let entry = |since: i64| super::types::FriendListEntry {
-        peer_id: x.master_id.clone(), status: "accepted".into(), direction: String::new(), requested_at: since, roster: None,
+        peer_id: x.master_id.clone(), status: "accepted".into(), direction: String::new(), requested_at: since, accepted_at: None, roster: None,
     };
     let list = |since: i64, removed: Vec<super::types::FriendRemoval>| {
         super::types::HavenMessage::FriendListSync { friends: vec![entry(since)], removed, blocks: Vec::new() }
@@ -47452,7 +47551,7 @@ async fn md_a_sibling_list_never_brings_back_a_friend_we_just_removed() {
     let fresh = super::frame_auth::now_ms() - 2_000;
     carry_and_settle(&d2, &mut d1, list(fresh, Vec::new())).await;
     assert_eq!(d1.friend_row(&x.master_id), None, "a sibling's list from before our removal brought back a friendship made seconds before it");
-    let removal = vec![super::types::FriendRemoval { peer_id: x.master_id.clone(), at: fresh + 1 }];
+    let removal = vec![super::types::FriendRemoval { peer_id: x.master_id.clone(), at: fresh + 1, theirs: None }];
     carry_and_settle(&d2, &mut d1, list(fresh, removal)).await;
     assert_eq!(d1.friend_row(&x.master_id), None, "a list naming the friendship and its removal brought the friend back");
     drop((d2, x));
@@ -56039,7 +56138,7 @@ async fn g13w3_a_silent_channel_holder_hands_the_ask_to_the_next() {
         store.commit_transaction().unwrap();
     }
     // ABSENCE: past the open de-dup and the quiet after L's join-time history came in.
-    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await;
+    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await; // BUDGET: 9_000, the 8 s test window and 1 s
 
     relay.hold_direct(&o.device_id, &l.device_id);
     relay.hold_direct(&k.device_id, &l.device_id);
@@ -56145,7 +56244,7 @@ async fn g13w3_pages_nobody_asked_for_never_keep_a_channel_ask() {
         store.commit_transaction().unwrap();
     }
     // ABSENCE: past the quiet after L's join-time history came in.
-    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await;
+    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await; // BUDGET: 9_000, the 8 s test window and 1 s
 
     // K never hears L's asks; L's first ask to O is lost.
     relay.hold_direct(&l.device_id, &k.device_id);
@@ -56221,7 +56320,7 @@ async fn g13w3_a_page_nobody_asked_for_is_never_followed() {
     join_and_wait(&mut l, &server_id).await;
     expect_mls_leaf(&o, &server_id, &l.device_id, 15).await;
     expect_mls_leaf(&o, &server_id, &k.device_id, 15).await;
-    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await; // ABSENCE: join-time asks done
+    sleep_ms(super::channel_asks::RECENTLY_SYNCED.as_millis() as u64 + 1_000).await; // BUDGET: 9_000, ABSENCE: join-time asks done
 
     let l_device = l.device_id.clone();
     let more = |end: i64| super::types::MessageEnvelope::ChannelSyncBatch {
@@ -57698,4 +57797,369 @@ fn g13w3_the_arrival_notice_alone_skips_a_bare_master() {
     assert_eq!(notices_to(&removed), 1, "control: a removed device hears the roster");
     assert_eq!(notices_to(&master), 0, "the bare master id heard our roster");
     super::resolver::unmark_revoked(&[master, removed]);
+}
+
+// g13w3-readd-review
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_removal_reaches_an_away_sibling_while_we_ask_again() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let gone = NativeKeypair::from_secret_bytes(&seed_bytes(225)).peer_id();
+    let marker = NativeKeypair::from_secret_bytes(&seed_bytes(226)).peer_id();
+    let (mut a1, mut a2, mut b) = siblings_and_friend(&relay, [220, 221, 222, 223, 224], &[&gone, &marker]).await;
+    assert!(is_friend(&a2, &gone) && is_friend(&a2, &marker), "precondition");
+
+    relay.set_online(&a2.device_id, false);
+    relay.swallow_direct(&b.device_id, &a2.device_id);
+    flush_frames(&relay, &mut a1).await;
+    flush_frames(&relay, &mut b).await;
+
+    // While A2 is away, A1 ends both friendships, then asks one of them again.
+    a1.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: gone.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a1, &gone).await, "A1 removes gone");
+    a1.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: marker.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a1, &marker).await, "A1 removes marker");
+    a1.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: gone.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || a1.store().get_friend_row(&gone).ok().flatten().is_some_and(|(s, d, _)| s == "pending" && d == "outgoing")).await,
+        "A1 asks gone again"
+    );
+
+    drain_events(&mut a2);
+    relay.set_online(&a2.device_id, true);
+    assert!(drops_friend(&mut a2, &marker).await, "A2 back from away takes A1's list");
+    assert!(
+        !is_friend(&a2, &gone),
+        "a sibling back from away kept a friendship we ended because we asked them again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn an_accept_inside_the_skew_of_a_sibling_removal_stands() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut a1, mut a2, b) = siblings_and_friend(&relay, [230, 231, 232, 233, 234], &[]).await;
+    let b_master = b.master_id.clone();
+
+    // A2 removes B; A1, online, takes it.
+    drain_events(&mut a1);
+    a2.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: b_master.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a1, &b_master).await, "A1 takes A2's removal");
+    let ended: i64 = a2.store().load_setting(&format!("friend_removed:{b_master}")).unwrap()
+        .and_then(|v| v.parse().ok()).expect("A2 records the removal");
+
+    // B, whose clock runs 3 s behind (or a 0.12 build that stamps the wall clock), asks again.
+    drain_events(&mut a1);
+    let room = super::types::dm_room_code(&a1.master_id, &b_master);
+    send_as(&relay, &room, &b, &a1, super::types::HavenMessage::FriendRequest {
+        requested_at: ended - 3_000,
+        carried_bundle: None,
+        device_list: None,
+        sealed_card: None,
+    }).await;
+    assert!(
+        wait_until(10, async || a1.store().get_friend_row(&b_master).ok().flatten().is_some_and(|(s, d, _)| s == "pending" && d == "incoming")).await,
+        "A1 shows B's new request (inside the skew slack)"
+    );
+    a1.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    assert!(wait_until(10, async || is_friend(&a1, &b_master)).await, "A1 accepts");
+
+    // The accept reaches A2, and A2's full list later reaches A1.
+    let a2_took = wait_until(10, async || is_friend(&a2, &b_master)).await;
+    carry_as(&a1, &a2, super::types::HavenMessage::FriendListRequest).await;
+    let a1_dropped = drops_friend(&mut a1, &b_master).await;
+    assert!(a2_took && !a1_dropped, "the accept never reached A2 ({a2_took}) or A2's list undid it on A1 ({a1_dropped})");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_late_copy_of_the_friends_removal_never_ends_our_readd() {
+    late_removal_copy_after_readd([250, 251, 252, 253, 254], 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_late_copy_of_a_removal_of_a_friendship_stamped_ahead_never_ends_our_readd() {
+    late_removal_copy_after_readd([195, 196, 197, 198, 199], 3 * 60_000).await;
+}
+
+/// B removes us, its copy to A2 is held back, we ask again and B accepts, then the held
+/// copy reaches A2. The friendship B ended is stamped `ahead_ms` past the clock, so the
+/// removal names an end past its own seal.
+async fn late_removal_copy_after_readd(seeds: [u8; 5], ahead_ms: i64) {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut a1, mut a2, mut b) = siblings_and_friend(&relay, seeds, &[]).await;
+    let (m_master, b_master) = (a1.master_id.clone(), b.master_id.clone());
+    if ahead_ms > 0 {
+        let since = super::frame_auth::now_ms() + ahead_ms;
+        for (node, friend) in [(&a1, &b_master), (&a2, &b_master), (&b, &m_master)] {
+            node.store().remove_friend(friend).unwrap();
+            node.store().save_friend(friend, "accepted", "", since).unwrap();
+        }
+    }
+
+    // B removes us; its copy to A2 is held back, and A2 learns it from A1.
+    relay.hold_direct(&b.device_id, &a2.device_id);
+    drain_events(&mut a2);
+    b.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: m_master.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a1, &b_master).await, "A1 takes B's removal");
+    assert!(drops_friend(&mut a2, &b_master).await, "A2 hears it from A1");
+
+    // A1 asks B again, B accepts, and the friendship reaches A2.
+    drain_events(&mut b);
+    a1.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    let mut asker = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(15), |ev| match ev {
+            NetworkEvent::FriendRequestReceived { peer_id } => { asker = Some(peer_id.clone()); true }
+            _ => false,
+        }).await,
+        "B hears the request"
+    );
+    b.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: asker.unwrap() }).await.unwrap();
+    assert!(wait_until(15, async || is_friend(&a1, &b_master) && is_friend(&a2, &b_master)).await, "the re-add reaches both our devices");
+
+    // The removal's own copy to A2 arrives late.
+    drain_events(&mut a2);
+    relay.release_held(&b.device_id, &a2.device_id);
+    let dropped = drops_friend(&mut a2, &b_master).await;
+    assert!(!dropped && is_friend(&a2, &b_master), "a late copy of the removal our re-add superseded ended it on A2");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_removal_names_the_friendship_it_ends_whatever_the_seal_clock() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut a1, mut a2, mut b) = siblings_and_friend(&relay, [205, 206, 207, 208, 209], &[]).await;
+    let (m_master, b_master) = (a1.master_id.clone(), b.master_id.clone());
+    let b_key = NativeKeypair::from_secret_bytes(&seed_bytes(209));
+    let room = super::types::dm_room_code(&m_master, &b_master);
+
+    // B removes us, we ask again, B accepts.
+    b.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: m_master.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a2, &b_master).await, "A2 takes B's removal");
+    drain_events(&mut b);
+    a1.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    let mut asker = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(15), |ev| match ev {
+            NetworkEvent::FriendRequestReceived { peer_id } => { asker = Some(peer_id.clone()); true }
+            _ => false,
+        }).await,
+        "B hears the request"
+    );
+    b.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: asker.unwrap() }).await.unwrap();
+    assert!(wait_until(15, async || is_friend(&a1, &b_master) && is_friend(&a2, &b_master)).await, "the re-add reaches both our devices");
+    let since = a2.store().get_friend_row(&b_master).unwrap().map(|(_, _, at)| at).expect("A2 holds the re-add");
+    let ended: i64 = a2.store().load_setting(&format!("friend_removed:{b_master}")).unwrap()
+        .and_then(|v| v.parse().ok()).expect("A2 holds B's removal");
+    let removal = |at: i64| serde_json::to_vec(&super::types::HavenMessage::FriendRemove { at: Some(at) }).unwrap();
+
+    // Sealed now, yet naming the friendship that ended: a copy of the old removal.
+    let now = super::frame_auth::now_ms();
+    relay.inject_raw_direct(&room, &b.device_id, &a2.device_id, super::frame_auth::seal_at(&b_key, &room, &a2.device_id, now, [21; 16], &removal(ended)));
+    flush_frames(&relay, &mut a2).await;
+    assert!(is_friend(&a2, &b_master), "a removal naming the friendship before ours ended the re-add");
+
+    // Sealed before the removal we hold, by a device of B's whose clock runs behind,
+    // yet naming this friendship: it lands.
+    drain_events(&mut a2);
+    let behind = super::frame_auth::seal_at(&b_key, &room, &a2.device_id, ended - 1_000, [22; 16], &removal(since + 1));
+    relay.inject_raw_direct(&room, &b.device_id, &a2.device_id, behind);
+    assert!(drops_friend(&mut a2, &b_master).await, "a removal of this friendship from a device whose clock runs behind was ignored");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn an_accept_of_a_request_both_our_devices_hold_stands_on_both() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let [m1, m2] = [215, 216].map(|s| NativeKeypair::from_secret_bytes(&seed_bytes(s)).peer_id());
+    let (mut a1, mut a2, b) = siblings_and_friend(&relay, [210, 211, 212, 213, 214], &[&m1, &m2]).await;
+    let b_master = b.master_id.clone();
+
+    // A2 removes B; A1, online, takes it.
+    drain_events(&mut a1);
+    a2.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: b_master.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a1, &b_master).await, "A1 takes A2's removal");
+    let ended: i64 = a2.store().load_setting(&format!("friend_removed:{b_master}")).unwrap()
+        .and_then(|v| v.parse().ok()).expect("A2 records the removal");
+
+    // B, whose clock runs 3 s behind, asks again and reaches both our devices.
+    let room = super::types::dm_room_code(&a1.master_id, &b_master);
+    let request = || super::types::HavenMessage::FriendRequest {
+        requested_at: ended - 3_000,
+        carried_bundle: None,
+        device_list: None,
+        sealed_card: None,
+    };
+    send_as(&relay, &room, &b, &a1, request()).await;
+    send_as(&relay, &room, &b, &a2, request()).await;
+    let incoming = |node: &TestNode| node.store().get_friend_row(&b_master).ok().flatten().is_some_and(|(s, d, _)| s == "pending" && d == "incoming");
+    assert!(wait_until(10, async || incoming(&a1) && incoming(&a2)).await, "both our devices show B's request");
+    a1.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    assert!(wait_until(10, async || is_friend(&a1, &b_master) && is_friend(&a2, &b_master)).await, "the accept reaches A2");
+
+    // Each device's full list reaches the other; a removal planted on each, of a friend
+    // the other still holds, shows when that list was taken. Removals go newest first,
+    // so the planted one, the oldest, is taken last.
+    for (node, marker) in [(&a1, &m1), (&a2, &m2)] {
+        node.store().remove_friend(marker).unwrap();
+        node.store().save_setting(&format!("friend_removed:{marker}"), "2").unwrap();
+    }
+    drain_events(&mut a1);
+    drain_events(&mut a2);
+    carry_as(&a2, &a1, super::types::HavenMessage::FriendListRequest).await;
+    carry_as(&a1, &a2, super::types::HavenMessage::FriendListRequest).await;
+    let mut b_dropped = Vec::new();
+    for (node, marker, name) in [(&mut a2, &m1, "A2"), (&mut a1, &m2, "A1")] {
+        let took = wait_event(node, std::time::Duration::from_secs(15), |ev| match ev {
+            NetworkEvent::FriendRemoved { peer_id } if *peer_id == b_master => {
+                b_dropped.push(name);
+                false
+            }
+            NetworkEvent::FriendRemoved { peer_id } => peer_id == marker,
+            _ => false,
+        })
+        .await;
+        assert!(took, "{name} takes its sibling's list");
+    }
+    assert!(b_dropped.is_empty(), "a sibling's list ended the accept on {b_dropped:?}, even if its friends brought it back");
+}
+
+// g13w3-readd-m
+
+/// B's genuine removal of the friendship our accept made, stamped by a
+/// clock just behind our accept mark, must end it on every device of ours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_removal_of_a_friendship_our_accept_stamped_ends_it_everywhere() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let seeds = [235, 236, 237, 238, 239];
+    let (mut a1, mut a2, b) = siblings_and_friend(&relay, seeds, &[]).await;
+    let b_master = b.master_id.clone();
+    let b_key = NativeKeypair::from_secret_bytes(&seed_bytes(seeds[4]));
+
+    // A2 removes B; A1, online, takes it.
+    drain_events(&mut a1);
+    a2.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: b_master.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a1, &b_master).await, "A1 takes A2's removal");
+    let ended: i64 = a2.store().load_setting(&format!("friend_removed:{b_master}")).unwrap()
+        .and_then(|v| v.parse().ok()).expect("A2 records the removal");
+
+    // B, whose clock runs 3 s behind, asks again; A1 accepts.
+    drain_events(&mut a1);
+    let room = super::types::dm_room_code(&a1.master_id, &b_master);
+    send_as(&relay, &room, &b, &a1, super::types::HavenMessage::FriendRequest {
+        requested_at: ended - 3_000,
+        carried_bundle: None,
+        device_list: None,
+        sealed_card: None,
+    }).await;
+    assert!(
+        wait_until(10, async || a1.store().get_friend_row(&b_master).ok().flatten().is_some_and(|(s, d, _)| s == "pending" && d == "incoming")).await,
+        "A1 shows B's new request"
+    );
+    a1.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    assert!(wait_until(10, async || is_friend(&a1, &b_master) && is_friend(&a2, &b_master)).await, "the accept reaches A2");
+    let r1 = a1.store().get_friend_row(&b_master).unwrap().map(|(_, _, s)| s).unwrap();
+    let accepted: i64 = a1.store().load_setting(&format!("friend_accepted_here:{b_master}")).unwrap()
+        .and_then(|v| v.split_once(':').and_then(|(_, at)| at.parse().ok())).expect("A1 marks its accept");
+
+    // B (same clock, 3 s behind) removes the friendship a moment after our accept: its
+    // stamp is past the request it knows, before our accept mark.
+    let at = accepted - 1;
+    assert!(at > r1, "precondition: B's removal is past the friendship's request");
+    drain_events(&mut a1);
+    drain_events(&mut a2);
+    let removal = serde_json::to_vec(&super::types::HavenMessage::FriendRemove { at: Some(at) }).unwrap();
+    for (i, node) in [&a1, &a2].into_iter().enumerate() {
+        let frame = super::frame_auth::seal_at(&b_key, &room, &node.device_id, at, [40 + i as u8; 16], &removal);
+        relay.inject_raw_direct(&room, &b.device_id, &node.device_id, frame);
+    }
+    assert!(drops_friend(&mut a1, &b_master).await, "A1 takes B's removal");
+    flush_frames(&relay, &mut a2).await;
+    let a2_kept = is_friend(&a2, &b_master);
+
+    // A2's full list reaches A1.
+    carry_as(&a1, &a2, super::types::HavenMessage::FriendListRequest).await;
+    let back = wait_until(10, async || is_friend(&a1, &b_master)).await;
+    assert!(!a2_kept && !back, "B's removal was ignored on A2 ({a2_kept}) and A2's list brought B back on A1 ({back})");
+}
+
+/// The same removal reaching only A1 ends the friendship on A2 through A1's share, and
+/// neither device's list brings it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_removal_of_a_friendship_our_accept_stamped_reaches_a_sibling_through_our_share() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let seeds = [235, 236, 237, 238, 239];
+    let (mut a1, mut a2, b) = siblings_and_friend(&relay, seeds, &[]).await;
+    let b_master = b.master_id.clone();
+    let b_key = NativeKeypair::from_secret_bytes(&seed_bytes(seeds[4]));
+
+    // A2 removes B; A1, online, takes it.
+    drain_events(&mut a1);
+    a2.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: b_master.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a1, &b_master).await, "A1 takes A2's removal");
+    let ended: i64 = a2.store().load_setting(&format!("friend_removed:{b_master}")).unwrap()
+        .and_then(|v| v.parse().ok()).expect("A2 records the removal");
+
+    // B, whose clock runs 3 s behind, asks again; A1 accepts.
+    drain_events(&mut a1);
+    let room = super::types::dm_room_code(&a1.master_id, &b_master);
+    send_as(&relay, &room, &b, &a1, super::types::HavenMessage::FriendRequest {
+        requested_at: ended - 3_000,
+        carried_bundle: None,
+        device_list: None,
+        sealed_card: None,
+    }).await;
+    assert!(
+        wait_until(10, async || a1.store().get_friend_row(&b_master).ok().flatten().is_some_and(|(s, d, _)| s == "pending" && d == "incoming")).await,
+        "A1 shows B's new request"
+    );
+    a1.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    assert!(wait_until(10, async || is_friend(&a1, &b_master) && is_friend(&a2, &b_master)).await, "the accept reaches A2");
+    let r1 = a1.store().get_friend_row(&b_master).unwrap().map(|(_, _, s)| s).unwrap();
+    let accepted: i64 = a1.store().load_setting(&format!("friend_accepted_here:{b_master}")).unwrap()
+        .and_then(|v| v.split_once(':').and_then(|(_, at)| at.parse().ok())).expect("A1 marks its accept");
+
+    // B (same clock, 3 s behind) removes the friendship a moment after our accept: its
+    // stamp is past the request it knows, before our accept mark.
+    let at = accepted - 1;
+    assert!(at > r1, "precondition: B's removal is past the friendship's request");
+    drain_events(&mut a1);
+    drain_events(&mut a2);
+    let removal = serde_json::to_vec(&super::types::HavenMessage::FriendRemove { at: Some(at) }).unwrap();
+    let frame = super::frame_auth::seal_at(&b_key, &room, &a1.device_id, at, [40; 16], &removal);
+    relay.inject_raw_direct(&room, &b.device_id, &a1.device_id, frame);
+    assert!(drops_friend(&mut a1, &b_master).await, "A1 takes B's removal");
+    let a2_took = drops_friend(&mut a2, &b_master).await;
+
+    // Each device's full list reaches the other.
+    carry_as(&a1, &a2, super::types::HavenMessage::FriendListRequest).await;
+    carry_as(&a2, &a1, super::types::HavenMessage::FriendListRequest).await;
+    let back = wait_until(10, async || is_friend(&a1, &b_master) || is_friend(&a2, &b_master)).await;
+    assert!(a2_took && !back, "A2 kept the friendship B ended ({a2_took}) or a list brought B back ({back})");
 }
