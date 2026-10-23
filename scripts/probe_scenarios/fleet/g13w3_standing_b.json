@@ -1,0 +1,289 @@
+{
+ "_": [
+  "g13w3-f-authority part two, on b and c, with the owner a STOPPED: c joins through b's",
+  "invite and is seated by b (the stand-in, by standing; the walk sends c's KeyPackage to b),",
+  "b and c read each other in #general, and both sit in the voice room. Run after",
+  "g13w3_standing_a and `-Stop -Peers a`; part three deletes the server."
+ ],
+ "peers": [
+  "b",
+  "c"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "c",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_C"
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "g13w3-standing"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "right_click",
+   "target": "server:g13w3-standing"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "b",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "dialog > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "server:g13w3-standing",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "c",
+   "op": "open_server",
+   "name": "g13w3-standing"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "key:member:${PEER_C}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "c",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "while the owner is away ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:while the owner is away ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "seated without the owner ${RUN}"
+  },
+  {
+   "peer": "c",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:seated without the owner ${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "g13w3-b-01-joined-owner-away"
+  },
+  {
+   "peer": "b",
+   "op": "log",
+   "message": "both join the voice room and mute at once (shared mic): the room's key comes from the group c was seated in"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "vc-standing"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Mute",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Unmute",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "vc-standing"
+  },
+  {
+   "peer": "c",
+   "op": "open_channel",
+   "name": "vc-standing"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Mute",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "semantics:Unmute",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "c",
+   "op": "open_channel",
+   "name": "vc-standing"
+  },
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "target": "type:_VoiceParticipantRow",
+   "count": 2,
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 5000,
+   "why": "Media settles before the evidence shot and dump."
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "g13w3-b-02-voice-owner-away"
+  },
+  {
+   "peer": "all",
+   "op": "dump",
+   "name": "g13w3-b-02-voice-owner-away"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "gone": "semantics:Leave the room",
+   "timeout_ms": 30000
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "all",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0,
+   "soft": true
+  }
+ ]
+}

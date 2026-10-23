@@ -1,0 +1,210 @@
+{
+ "_": [
+  "g13w3-f-authority (standing stand-in), part one of three, on throwaway peers a and b:",
+  "a (owner) makes the server with a voice room, b joins and they talk. Then the runner stops a",
+  "(-Stop -Peers a) and runs part two (g13w3_standing_b) with b and c while the owner is away;",
+  "part three (g13w3_standing_c) brings a back and deletes the server. No cleanup here: the",
+  "server must survive into part two."
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "b",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_B"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "g13w3-standing"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:g13w3-standing",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "g13w3-standing"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create channel",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "dialog > text:Create channel",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Voice",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "value": "vc-standing"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:vc-standing",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:g13w3-standing"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "server:g13w3-standing",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "g13w3-standing"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "key:member:${PEER_B}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "owner here ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:owner here ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "g13w3-a-01-owner-and-member"
+  }
+ ]
+}

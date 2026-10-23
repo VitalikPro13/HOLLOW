@@ -1867,11 +1867,21 @@ pub(crate) async fn handle_join_server(
     // refreshes the nonce and keeps the package, because the ring may already hold
     // a copy naming it. `mint_key_package` persists the private half immediately,
     // which is what keeps it usable days and one restart later.
+    // A self-certifying id pins its own owner; a pin on one would only be noise.
+    let owner_pin = owner_pin
+        .filter(|_| !crate::crdt::anchor::is_genesis_id(&server_id))
+        .or_else(|| pending_server_joins.get(&server_id).and_then(|p| p.owner_pin.clone()));
+    // Only a Legacy server seats a joiner from its ring copy, and every door holder reads
+    // that copy: a self-certifying id or an owner pin (a checkpoint anchor) carries none.
+    let legacy_possible = !crate::crdt::anchor::is_genesis_id(&server_id) && owner_pin.is_none();
     let key_package = stored_key_package.or_else(|| {
         pending_server_joins
             .get(&server_id)
             .and_then(|p| p.key_package.clone())
-    }).or_else(|| {
+    }).filter(|_| legacy_possible).or_else(|| {
+        if !legacy_possible {
+            return None;
+        }
         let mls = mls.as_ref()?;
         match super::crypto_handler::mint_group_key_package(mls, crypto_store, &server_id, true) {
             Ok(kp) => Some(base64::engine::general_purpose::STANDARD.encode(kp)),
@@ -1881,10 +1891,6 @@ pub(crate) async fn handle_join_server(
             }
         }
     });
-    // A self-certifying id pins its own owner; a pin on one would only be noise.
-    let owner_pin = owner_pin
-        .filter(|_| !crate::crdt::anchor::is_genesis_id(&server_id))
-        .or_else(|| pending_server_joins.get(&server_id).and_then(|p| p.owner_pin.clone()));
     let reply_secret = stored_reply_secret
         .as_deref()
         .and_then(super::join_lane::ReplySecret::from_stored)

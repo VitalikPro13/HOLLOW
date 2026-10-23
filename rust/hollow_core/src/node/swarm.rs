@@ -554,7 +554,7 @@ use super::crypto_handler::{
     KeyExchangeAuth, REQUIRE_SIGNED_KEY_EXCHANGE,
     check_backfill_signature, BackfillSig, PkCache,
     persist_mls_state, persist_crypto_state, persist_olm_read,
-    peer_is_reachable, is_mls_coordinator, is_vault_coordinator, elect_coordinator, ws_room_for_peer,
+    peer_is_reachable, is_mls_coordinator, is_vault_coordinator, ws_room_for_peer,
     send_mls_broadcast, send_encrypted_message,
     send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer, send_raw_to_identity,
 };
@@ -1034,6 +1034,9 @@ async fn run_event_loop(
                                     if let Ok(ops) = store.load_ops_for_server(&server_id, legacy.then_some(1000)) {
                                         state.restore_op_log(ops);
                                     }
+                                }
+                                if state.refold_for_standing() {
+                                    crdt_store.save_state_snapshot(server_id.clone(), &state);
                                 }
                                 // Fold any legacy device-keyed member entries into
                                 // their master identity (the resolver was warmed just
@@ -1791,7 +1794,7 @@ async fn run_event_loop(
                             // remove its MLS leaf from shared servers: the same enforcement
                             // a friend runs when it ingests the removal.
                             enforce_device_revocations(
-                                &[revoked], &mut olm, &crypto_store, mls.as_ref(),
+                                &[revoked], &mut olm, &crypto_store, mls.as_ref(), &server_states,
                                 &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
                             );
                         }
@@ -1836,7 +1839,7 @@ async fn run_event_loop(
 
                     NodeCommand::RosterChanged { newly_revoked } => {
                         enforce_device_revocations(
-                            &newly_revoked, &mut olm, &crypto_store, mls.as_ref(),
+                            &newly_revoked, &mut olm, &crypto_store, mls.as_ref(), &server_states,
                             &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
                         );
                         sync_handler::announce_roster_change(
@@ -1886,7 +1889,7 @@ async fn run_event_loop(
                             // remove their MLS leaves from shared servers — same path a
                             // friend runs ingesting the tombstones.
                             enforce_device_revocations(
-                                &revoked, &mut olm, &crypto_store, mls.as_ref(),
+                                &revoked, &mut olm, &crypto_store, mls.as_ref(), &server_states,
                                 &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
                             );
                         }
@@ -3318,7 +3321,7 @@ async fn run_event_loop(
                     NodeCommand::ReleaseHeldDms { master } => {
                         let (held_dms, reconciled) = super::roster_reach::release(&device_peer_id, &master);
                         follow_reconciled(
-                            &reconciled, &event_tx, &mut olm, &crypto_store, mls.as_ref(),
+                            &reconciled, &event_tx, &mut olm, &crypto_store, mls.as_ref(), &server_states,
                             &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
                         ).await;
                         for held in held_dms {
@@ -3748,7 +3751,7 @@ async fn run_event_loop(
                             &|to| social::profile_audience(&server_states, &local_peer_str, to, &db_path, &db_passphrase),
                         );
                         follow_reconciled(
-                            &removed, &event_tx, &mut olm, &crypto_store, mls.as_ref(),
+                            &removed, &event_tx, &mut olm, &crypto_store, mls.as_ref(), &server_states,
                             &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
                         ).await;
                         // ASYNC FRIENDING: re-deposit every still-pending outgoing request into the
@@ -3885,7 +3888,7 @@ async fn run_event_loop(
                             &|to| social::profile_audience(&server_states, &local_peer_str, to, &db_path, &db_passphrase),
                         );
                         follow_reconciled(
-                            &removed, &event_tx, &mut olm, &crypto_store, mls.as_ref(),
+                            &removed, &event_tx, &mut olm, &crypto_store, mls.as_ref(), &server_states,
                             &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
                         ).await;
                         if gap {
@@ -4313,7 +4316,7 @@ async fn run_event_loop(
                                                 if mls_mgr.has_group(sid) {
                                                     let mls_members = mls_mgr.group_members(sid);
                                                     if !mls_members.contains(&peer_id) {
-                                                        if is_mls_coordinator(mls_mgr, sid, &local_peer_str, &ws_room_peers) {
+                                                        if is_mls_coordinator(mls_mgr, sid, server_states.get(sid), &local_peer_str, &ws_room_peers) {
                                                             super::frame_budget::pace_plain(
                                                                 &mut frame_budget, &ws_cmd_tx, &ws_room_peers, &device_peer_id,
                                                                 &peer_id, &HavenMessage::MlsKeyPackageRequest {
@@ -4322,6 +4325,18 @@ async fn run_event_loop(
                                                                 },
                                                             );
                                                         }
+                                                    }
+                                                } else if !mls_bootstrap_requested.get(sid).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT)
+                                                    && let Some(state) = server_states.get(sid)
+                                                    && state.anchor() != crate::crdt::server_state::Anchor::Legacy
+                                                {
+                                                    // Outside a Legacy server our KeyPackage goes only to
+                                                    // the walk's next member, never to whoever joined.
+                                                    if crate::node::crypto_handler::request_server_leaf(
+                                                        mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers, state, sid,
+                                                        &local_peer_str, &device_peer_id,
+                                                    ) {
+                                                        mls_bootstrap_requested.insert(sid.clone(), std::time::Instant::now());
                                                     }
                                                 } else if !mls_bootstrap_requested.get(sid).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                                                     // We're a member but lost our MLS group — send
@@ -4880,6 +4895,17 @@ async fn run_event_loop(
                                             if !srv_state.members.keys().any(|k| super::resolver::same_identity(pid_str, k)) { continue; }
                                             if mls_mgr.has_group(sid) { continue; }
                                             if mls_bootstrap_requested.get(sid.as_str()).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) { continue; }
+                                            // Outside a Legacy server our KeyPackage goes only to the walk's
+                                            // next member, never to whoever is in the room.
+                                            if srv_state.anchor() != crate::crdt::server_state::Anchor::Legacy {
+                                                if crate::node::crypto_handler::request_server_leaf(
+                                                    mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers, srv_state, sid,
+                                                    &local_peer_str, &device_peer_id,
+                                                ) {
+                                                    mls_bootstrap_requested.insert(sid.clone(), std::time::Instant::now());
+                                                }
+                                                continue;
+                                            }
                                             hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {pid_str} for bootstrap (RoomMembers)");
                                             if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, &crypto_store, sid, false) {
                                                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
@@ -5474,9 +5500,9 @@ async fn run_event_loop(
                                         super::door_room::note_heard(&from, &room);
                                     }
                                     match &msg {
-                                        HavenMessage::DoorAsk { server_id } => {
+                                        HavenMessage::DoorAsk { server_id, nonce } => {
                                             door_rooms.answer_ask(
-                                                &room, server_id, &from, &olm, &server_states,
+                                                &room, server_id, nonce, &from, &olm, &server_states,
                                                 &ws_room_peers, &local_peer_str, &device_peer_id, &ws_cmd_tx,
                                             );
                                             continue;
@@ -5731,6 +5757,10 @@ async fn run_event_loop(
                                             continue;
                                         }
                                         let (msg, from) = if matches!(*msg, HavenMessage::MlsKeyPackageForward { .. }) {
+                                            // A 0.12.2-shaped test node drops the frame type, as 0.12.2 does.
+                                            if super::standing::knobs::on(super::standing::knobs::Knob::OldLeaf, &device_peer_id) {
+                                                continue;
+                                            }
                                             match super::mls_turns::unwrap_forwarded_key_package(&msg, &from, &device_peer_id, &server_states) {
                                                 Some((kp, device)) => (Box::new(kp), device),
                                                 None => continue,
@@ -5887,7 +5917,8 @@ async fn run_event_loop(
                                 && mls_mgr.seat(sid) == crate::crypto::Seat::Missing
                                 && !pending_server_joins.contains_key(*sid)
                                 && !mls_welcome_grace.contains_key(*sid)
-                                && mls_bootstrap_requested.get(*sid).is_none_or(|t| t.elapsed() >= MLS_BOOTSTRAP_TIMEOUT)
+                                && (mls_bootstrap_requested.get(*sid).is_none_or(|t| t.elapsed() >= MLS_BOOTSTRAP_TIMEOUT)
+                                    || mls_mgr.lead.walk_step_due(sid))
                         })
                         .map(|(sid, _)| sid.clone())
                         .collect();
@@ -5988,11 +6019,15 @@ async fn run_event_loop(
                         let rules = super::mls_authority::GroupRules::Server {
                             state, channel: channel_id.as_deref(),
                         };
+                        let declares = |kp: &[u8]| mls_mgr.key_package_declares(kp);
                         let (removals, adds) = super::mls_authority::plan_membership(
                             &mls_mgr.group_leaves(&group_key), &mls_mgr.leaf_minted(&group_key),
                             &queued_removals, queued_adds,
                             |kp| mls_mgr.key_package_minted_for(kp, &group_key),
                             &ourselves, &rules,
+                            (super::standing::tree_declares(&mls_mgr.leaf_records(&group_key))
+                                && !super::standing::knobs::on(super::standing::knobs::Knob::NoRatchet, &device_peer_id))
+                                .then_some(&declares as &dyn Fn(&[u8]) -> bool),
                         );
                         // What the receiver cap would refuse now waits for its window (AR-27).
                         let waiting = mls_mgr.over_cap_devices(&group_key, &removals, &adds, |m| {
@@ -6188,6 +6223,8 @@ async fn run_event_loop(
                             awaiting_parked_join: &awaiting_mls_after_parked_join,
                             join_pending: pending_server_joins.contains_key(&server_id),
                             answered: mls_mgr.key_request_answered(&group_key),
+                            delegate: mls_mgr.key_request_answered(&group_key).and_then(|(r, _)| mls_mgr.lead.repair_delegate(&group_key, &r)),
+                            anchored: server_states.get(&server_id).is_some_and(|s| s.anchor() != crate::crdt::server_state::Anchor::Legacy),
                         };
                         let mut sender: Option<crate::crypto::LeafIdentity> = None;
                         let retried = mls_mgr.retry_held_welcome(&group_key, |facts| {
@@ -6663,7 +6700,7 @@ async fn run_event_loop(
                         // Only the vault coordinator runs repair to avoid duplicate requests.
                         if let Some(ref mls_mgr) = mls {
                             if mls_mgr.has_group(server_id) {
-                                if !is_vault_coordinator(mls_mgr, server_id, &local_peer_str, &ws_room_peers) {
+                                if !is_vault_coordinator(mls_mgr, server_id, state, &local_peer_str, &ws_room_peers) {
                                     continue;
                                 }
                             }
@@ -6788,7 +6825,7 @@ async fn run_event_loop(
                             // Only the vault coordinator runs rebalance.
                             if let Some(ref mls_mgr) = mls {
                                 if mls_mgr.has_group(server_id) {
-                                    if !is_vault_coordinator(mls_mgr, server_id, &local_peer_str, &ws_room_peers) {
+                                    if !is_vault_coordinator(mls_mgr, server_id, state, &local_peer_str, &ws_room_peers) {
                                         continue;
                                     }
                                 }
@@ -7256,11 +7293,12 @@ async fn follow_reconciled(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     mls: Option<&MlsManager>,
+    server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     pending_mls_removals: &mut HashMap<String, Vec<String>>,
 ) {
-    enforce_device_revocations(&reconciled.removed, olm, crypto_store, mls, local_peer_str, ws_room_peers, pending_mls_removals);
+    enforce_device_revocations(&reconciled.removed, olm, crypto_store, mls, server_states, local_peer_str, ws_room_peers, pending_mls_removals);
     for master in &reconciled.masters {
         let _ = event_tx.send(NetworkEvent::DeviceListUpdated { master_peer_id: master.clone() }).await;
     }
@@ -7278,6 +7316,7 @@ fn enforce_device_revocations(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     mls: Option<&MlsManager>,
+    server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     pending_mls_removals: &mut HashMap<String, Vec<String>>,
@@ -7304,7 +7343,7 @@ fn enforce_device_revocations(
                     continue;
                 }
                 if !super::crypto_handler::is_mls_coordinator(
-                    mls_mgr, &server_id, local_peer_str, ws_room_peers,
+                    mls_mgr, &server_id, server_states.get(&server_id), local_peer_str, ws_room_peers,
                 ) {
                     continue;
                 }
@@ -8813,7 +8852,7 @@ async fn handle_incoming_request_inner(
                                 db_path, db_passphrase,
                             ).await;
                             enforce_device_revocations(
-                                &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                                &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
                                 local_peer_str, ws_room_peers, pending_mls_removals,
                             );
                         }
@@ -10452,6 +10491,7 @@ async fn handle_incoming_request_inner(
                     mls_epoch_hint_cooldown,
                     &server_id, None, their_epoch, None, peer_str, local_peer_str,
                     false, // incidental hint on a sync — elect one responder
+                    false,
                 );
             }
         }
@@ -10796,14 +10836,9 @@ async fn handle_incoming_request_inner(
                                 // private init and leaf-encryption keys into persisted
                                 // MLS storage that only a Welcome consumes, and the
                                 // frame is byte-identical either way.
-                                let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
-                                    server_id: server_id.clone(),
-                                    key_package: kp_b64,
-                                    channel_id: None,
-                                }).unwrap_or_default();
                                 if crate::node::crypto_handler::send_join_leaf_ask(
-                                    ws_cmd_tx, ws_room_peers, state, &server_id, local_peer_str, device_peer_id, peer_str, data,
+                                    mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, state, &server_id, local_peer_str,
+                                    device_peer_id, peer_str, kp_bytes,
                                 ) {
                                     mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
                                 }
@@ -10946,7 +10981,7 @@ async fn handle_incoming_request_inner(
                         peer_str, device_list.clone(), db_path, db_passphrase,
                     ).await;
                     enforce_device_revocations(
-                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
                         local_peer_str, ws_room_peers, pending_mls_removals,
                     );
                     let Some(master) = super::roster_book::carried_master(list, peer_str) else {
@@ -11068,8 +11103,9 @@ async fn handle_incoming_request_inner(
                             .filter(|m| !super::resolver::same_identity(&member_master, m))
                             .cloned()
                             .collect();
+                        let rule = mls.as_ref().map(|m| super::standing::rule(m, state, &server_id)).unwrap_or_default();
                         let coordinator = crate::node::crypto_handler::elect_server_coordinator(
-                            state, &candidates, local_peer_str, &ws_room_peers,
+                            state, &candidates, local_peer_str, ws_room_peers, &rule,
                         );
                         if coordinator.as_deref()
                             .is_some_and(|c| !super::resolver::same_identity(c, local_peer_str))
@@ -11296,7 +11332,12 @@ async fn handle_incoming_request_inner(
                 // And only when the package's leaf is bound to the device attribution
                 // named and to the joiner's master: that device's key signs it, so
                 // not even the relay can hand us a leaf in someone else's name.
-                if parked && let Some(kp_b64) = key_package.as_ref() {
+                // Outside a Legacy server every member reads the ring copy, so its
+                // package seats nobody: the joiner seats itself by the walk once online.
+                if parked
+                    && state.anchor() == crate::crdt::server_state::Anchor::Legacy
+                    && let Some(kp_b64) = key_package.as_ref()
+                {
                     match base64::engine::general_purpose::STANDARD.decode(kp_b64) {
                         Err(e) => hollow_log!("[HOLLOW-MLS] Carried KeyPackage from {peer_str} for {server_id} is not valid base64: {e}"),
                         Ok(kp_bytes) => match crate::crypto::MlsManager::key_package_identity(&kp_bytes) {
@@ -11812,14 +11853,17 @@ async fn handle_incoming_request_inner(
                             let coordinator = match &msg_channel_id {
                                 Some(cid) => crate::node::crypto_handler::elect_subgroup_coordinator(
                                     state, cid, &local_peer_str, ws_room_peers,
+                                    &super::standing::rule(mls_mgr, state, &group_key),
                                 ).filter(|c| c != &local_peer_str),
+                                // Server group: the walk (the owner first when online).
                                 None => {
-                                    // Server group: target the OWNER (always holds the
-                                    // group) when online — single authoritative re-adder.
-                                    // Fall back to lowest-master only if owner is offline.
-                                    crate::node::crypto_handler::server_bootstrap_target(
-                                        state, &local_peer_str, ws_room_peers,
-                                    )
+                                    if crate::node::crypto_handler::request_server_leaf(
+                                        mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, state, &server_id,
+                                        local_peer_str, device_peer_id,
+                                    ) {
+                                        mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+                                    }
+                                    None
                                 }
                             };
                             if may_bootstrap {
@@ -12119,7 +12163,7 @@ async fn handle_incoming_request_inner(
                                 // server-member profile path too (Olm drop + single
                                 // leaf removal where we coordinate).
                                 enforce_device_revocations(
-                                    &envelope_revoked, olm, crypto_store, Some(&*mls_mgr),
+                                    &envelope_revoked, olm, crypto_store, Some(&*mls_mgr), server_states,
                                     local_peer_str, ws_room_peers, pending_mls_removals,
                                 );
                             }
@@ -12446,8 +12490,22 @@ async fn handle_incoming_request_inner(
                 return;
             };
             let rules = super::mls_authority::GroupRules::Server { state, channel: kp_channel_id.as_deref() };
+            let old_shaped = super::standing::knobs::on(super::standing::knobs::Knob::OldLeaf, device_peer_id);
+            let ack = |outcome| {
+                if !old_shaped {
+                    super::standing::ack_key_package(ws_cmd_tx, ws_room_peers, peer_str, &server_id, kp_channel_id.clone(), &kp_bytes, outcome, None);
+                }
+            };
             if let crate::crypto::Verdict::Hold(why) = rules.membership(&sender_leaf.master, "sender") {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackage from {peer_str} for {group_key}: {why}");
+                ack(super::standing::KpOutcome::Cannot);
+                return;
+            }
+            // The exact package already seated its device: a slow committer and a later
+            // forward of the same bytes must not cost a remove and re-add.
+            if mls.as_ref().is_some_and(|m| m.key_package_seated(&group_key, &kp_bytes)) {
+                hollow_log!("[HOLLOW-MLS] KeyPackage from {peer_str} for {group_key} already seats it, dropping");
+                ack(super::standing::KpOutcome::Commit);
                 return;
             }
 
@@ -12490,21 +12548,32 @@ async fn handle_incoming_request_inner(
                     // Server group: prefer the OWNER as the single authoritative
                     // committer, which keeps epochs linear and avoids the
                     // non-owner-committer divergence. A subgroup elects the lowest master.
+                    let rule = super::standing::rule(mls_mgr, state, &group_key);
                     let coordinator = if kp_channel_id.is_none() {
-                        server_states.get(&server_id).map_or_else(
-                            || elect_coordinator(&members, local_peer_str, &ws_room_peers),
-                            |s| crate::node::crypto_handler::elect_server_coordinator(
-                                s, &members, local_peer_str, &ws_room_peers,
-                            ),
-                        )
+                        crate::node::crypto_handler::elect_server_coordinator(state, &members, local_peer_str, ws_room_peers, &rule)
                     } else {
-                        elect_coordinator(&members, local_peer_str, &ws_room_peers)
+                        crate::node::crypto_handler::elect_by_rule(state, &rule, &members, local_peer_str, ws_room_peers)
                     };
-                    let coordinator = crate::node::crypto_handler::fit_coordinator(coordinator, &members, local_peer_str, ws_room_peers, &unfit);
-                    if coordinator.as_deref() != Some(local_peer_str) {
+                    let coordinator = crate::node::crypto_handler::fit_coordinator(coordinator, &members, local_peer_str, ws_room_peers, &unfit, state, &rule)
+                        .filter(|c| rule.may_lead() || c != local_peer_str);
+                    if coordinator.as_deref() != Some(local_peer_str)
+                        && !super::standing::knobs::on(super::standing::knobs::Knob::WelcomeOnReceipt, device_peer_id)
+                    {
                         hollow_log!("[HOLLOW-MLS] Not MLS coordinator for {group_key} (excluding sender identity), skipping KeyPackage");
-                        if let Some(c) = coordinator.as_deref() {
-                            super::mls_turns::forward_key_package(ws_cmd_tx, ws_room_peers, device_peer_id, c, &server_id, kp_channel_id.clone(), &key_package);
+                        // A coordinator on a 0.12.2 leaf drops forwards: the asker steps on instead.
+                        let takes_forwards = |c: &str| mls_mgr.leaf_records(&group_key).iter().any(|r| r.master() == Some(c) && r.declares);
+                        let forwarded = !old_shaped && coordinator.as_deref().is_some_and(|c| {
+                            takes_forwards(c)
+                                && super::mls_turns::forward_key_package(ws_cmd_tx, ws_room_peers, device_peer_id, c, &server_id, kp_channel_id.clone(), &key_package)
+                        });
+                        if forwarded {
+                            // Names the committer, so a repair's asker takes its Welcome.
+                            super::standing::ack_key_package(
+                                ws_cmd_tx, ws_room_peers, peer_str, &server_id, kp_channel_id.clone(), &kp_bytes,
+                                super::standing::KpOutcome::Forwarded, coordinator.as_deref(),
+                            );
+                        } else {
+                            ack(super::standing::KpOutcome::Cannot);
                         }
                         return;
                     }
@@ -12512,6 +12581,7 @@ async fn handle_incoming_request_inner(
                     mls_mgr, state, &group_key, kp_channel_id.as_deref(), &sender_leaf, from_sibling,
                     local_peer_str, ws_room_peers,
                 ) {
+                    ack(super::standing::KpOutcome::Cannot);
                     return;
                 }
             } } // close `if let Some(mls_mgr)` + `if !sibling_readd`
@@ -12520,10 +12590,11 @@ async fn handle_incoming_request_inner(
                 // Create MLS group lazily if it doesn't exist (server group: migration
                 // for pre-MLS servers; subgroup: first restricted-channel join). Not while
                 // the app is away: nobody else would see the group, and the sender asks again.
-                if !mls_mgr.has_group(&group_key) {
-                    if super::ws_client::backgrounded() || !super::mls_authority::found_group(mls_mgr, &group_key) {
-                        return;
-                    }
+                if !mls_mgr.has_group(&group_key)
+                    && (super::ws_client::backgrounded() || !super::mls_authority::found_group(mls_mgr, &group_key))
+                {
+                    ack(super::standing::KpOutcome::Cannot);
+                    return;
                 }
 
                 // Step 1: queue stale leaves for removal in the same commit as the add,
@@ -12544,6 +12615,7 @@ async fn handle_incoming_request_inner(
                 }
 
                 // Queue KeyPackage for batch processing (single epoch advance per batch).
+                ack(super::standing::KpOutcome::Commit);
                 pending_mls_key_packages
                     .entry(group_key.clone())
                     .or_default()
@@ -12579,6 +12651,8 @@ async fn handle_incoming_request_inner(
                     awaiting_parked_join: awaiting_mls_after_parked_join,
                     join_pending: pending_server_joins.contains_key(&server_id),
                     answered: mls_mgr.key_request_answered(&group_key),
+                    delegate: mls_mgr.key_request_answered(&group_key).and_then(|(r, _)| mls_mgr.lead.repair_delegate(&group_key, &r)),
+                    anchored: server_states.get(&server_id).is_some_and(|s| s.anchor() != crate::crdt::server_state::Anchor::Legacy),
                 };
                 let mut welcome_leaf: Option<crate::crypto::LeafIdentity> = None;
                 let judged = mls_mgr.join_from_welcome_judged(&group_key, &welcome_bytes, |facts| {
@@ -12616,6 +12690,7 @@ async fn handle_incoming_request_inner(
 
                 match judged {
                     Ok(()) => {
+                        mls_mgr.lead.end_walk(&group_key);
                         let sync_peer = crate::node::crypto_handler::mls_sync_partner(
                             server_states.get(&server_id), welcome_leaf.as_ref(), Some(peer_str),
                         );
@@ -12662,7 +12737,30 @@ async fn handle_incoming_request_inner(
             }
         }
 
-        HavenMessage::MlsEpochProbe { server_id, channel_id: pr_channel_id, epoch, epoch_auth } => {
+        HavenMessage::MlsKeyPackageAck { server_id, channel_id: ack_channel_id, package, outcome, via } => {
+            let group_key = match &ack_channel_id {
+                Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
+                None => server_id.clone(),
+            };
+            let Some(mls_mgr) = mls.as_ref() else { return };
+            if mls_mgr.lead.note_ack(&group_key, peer_str, &package, outcome) {
+                hollow_log!("[HOLLOW-MLS] {peer_str} answered our KeyPackage for {group_key}: {outcome:?}");
+            }
+            // The member we answered a repair request passed our package on: the Welcome
+            // comes from the committer it names, if that one may seat us at all.
+            if outcome == super::standing::KpOutcome::Forwarded
+                && let Some(via) = via
+                && let Some(state) = server_states.get(&server_id)
+                && mls_mgr.lead.note_repair_delegate(
+                    &group_key, peer_str, &package, &via, state,
+                    &mls_mgr.group_leaves(&group_key).iter().filter_map(|l| l.bound().map(|b| b.master.clone())).collect::<Vec<_>>(),
+                )
+            {
+                hollow_log!("[HOLLOW-MLS] {peer_str} passed our repair KeyPackage for {group_key} to {via}");
+            }
+        }
+
+        HavenMessage::MlsEpochProbe { server_id, channel_id: pr_channel_id, epoch, epoch_auth, answer, standing } => {
             // A peer asks whether its group is behind or forked. Membership gate,
             // authority election and cooldowns live in the handler; a spoofed hint
             // can never drop a group.
@@ -12673,8 +12771,17 @@ async fn handle_incoming_request_inner(
                     mls_epoch_hint_cooldown,
                     &server_id, pr_channel_id.as_deref(), epoch, epoch_auth.as_deref(),
                     peer_str, local_peer_str,
-                    true, // addressed to us — answer it, do not re-elect
+                    // Addressed to us: answer it, do not re-elect. An echo is read as a hint.
+                    !answer,
+                    standing,
                 );
+                if answer {
+                    let group_key = match &pr_channel_id {
+                        Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
+                        None => server_id.clone(),
+                    };
+                    mls_mgr.lead.heard(&group_key, &super::resolver::resolve(peer_str));
+                }
             }
         }
 
@@ -12698,6 +12805,8 @@ async fn handle_incoming_request_inner(
                     hollow_log!("[HOLLOW-MLS] Ignoring MlsCommitCatchup for group we don't hold: {group_key}");
                     return;
                 }
+                // A catch-up is the useful answer to a probe, and the server sends no echo with it.
+                mls_mgr.lead.heard(&group_key, &super::resolver::resolve(peer_str));
                 let mut entries = commits;
                 entries.sort_by_key(|(e, _)| *e);
                 entries.truncate(16); // flood guard
@@ -12778,11 +12887,23 @@ async fn handle_incoming_request_inner(
                 return;
             }
             let holds_leaf = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
-            let unfit = mls.as_ref().map(|m| crate::node::crypto_handler::unfit_responders(m, state, &server_id, kpr_channel_id.as_deref())).unwrap_or_default();
+            if let Some(m) = mls.as_ref() {
+                m.lead.heard(&group_key, &requester_master);
+            }
+            let lead = mls.as_ref().map(|m| crate::node::crypto_handler::responder_view(m, state, &server_id, kpr_channel_id.as_deref())).unwrap_or_default();
             if holds_leaf && !crate::node::crypto_handler::may_repair_our_leaf(
-                state, kpr_channel_id.as_deref(), local_peer_str, ws_room_peers, &requester_master, &unfit,
+                state, kpr_channel_id.as_deref(), local_peer_str, ws_room_peers, &requester_master, &lead,
             ) {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackageRequest from {peer_str} for {group_key}: {requester_master} may not repair our leaf");
+                return;
+            }
+            if !holds_leaf
+                && let Some(m) = mls.as_ref()
+                && !crate::node::crypto_handler::leafless_may_answer_request(
+                    m, state, &server_id, kpr_channel_id.as_deref(), local_peer_str, ws_room_peers, &requester_master,
+                )
+            {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackageRequest from {peer_str} for {group_key}: {requester_master} is not who we seek a leaf from");
                 return;
             }
             if let Some(mls_mgr) = mls {
@@ -12806,6 +12927,7 @@ async fn handle_incoming_request_inner(
                         );
                         // The repair's Welcome from this requester's identity may replace our group.
                         mls_mgr.note_key_request_answered(&group_key, &requester_master);
+                        mls_mgr.lead.note_repair_answer(&group_key, &requester_master, &kp_bytes);
                     }
                     Err(e) => hollow_log!("[HOLLOW-MLS] Failed to generate KeyPackage: {e}"),
                 }
@@ -12857,7 +12979,7 @@ async fn handle_incoming_request_inner(
                     peer_str, device_list.clone(), db_path, db_passphrase,
                 ).await;
                 enforce_device_revocations(
-                    &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                    &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
                     local_peer_str, ws_room_peers, pending_mls_removals,
                 );
                 // The carried bundle and profile below are keyed by the roster's master.
@@ -13095,7 +13217,7 @@ async fn handle_incoming_request_inner(
                         peer_str, device_list.clone(), db_path, db_passphrase,
                     ).await;
                     enforce_device_revocations(
-                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
                         local_peer_str, ws_room_peers, pending_mls_removals,
                     );
                     let Some(master) = super::roster_book::carried_master(list, peer_str) else {
@@ -13209,7 +13331,7 @@ async fn handle_incoming_request_inner(
                         peer_str, device_list.clone(), db_path, db_passphrase,
                     ).await;
                     enforce_device_revocations(
-                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
                         local_peer_str, ws_room_peers, pending_mls_removals,
                     );
                     let Some(master) = super::roster_book::carried_master(list, peer_str) else {
@@ -13446,7 +13568,7 @@ async fn handle_incoming_request_inner(
                     event_tx, ws_cmd_tx, local_peer_str, device_peer_id, peer_str, roster, db_path, db_passphrase,
                 ).await;
                 enforce_device_revocations(
-                    &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                    &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
                     local_peer_str, ws_room_peers, pending_mls_removals,
                 );
             }
@@ -14254,7 +14376,7 @@ async fn handle_incoming_request_inner(
             // Step 7: enforce any device revocations learned from this list — drop
             // Olm sessions + (coordinator) remove the revoked leaf from shared servers.
             enforce_device_revocations(
-                &ingest_outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                &ingest_outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
                 local_peer_str, ws_room_peers, pending_mls_removals,
             );
             // Our own roster changed: re-announce it to every peer we share a room
@@ -14921,7 +15043,7 @@ async fn handle_incoming_request_inner(
                 device_list, db_path, db_passphrase,
             ).await;
             enforce_device_revocations(
-                &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
                 local_peer_str, ws_room_peers, pending_mls_removals,
             );
             // A card speaks only for its sender's own identity.
@@ -14964,7 +15086,7 @@ async fn handle_incoming_request_inner(
                 local_peer_str, server_states, is_invisible, db_path, db_passphrase, call_book.own(),
             );
             enforce_device_revocations(
-                &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
                 local_peer_str, ws_room_peers, pending_mls_removals,
             );
             if let Some(subject) = roster_heard {

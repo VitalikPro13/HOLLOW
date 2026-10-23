@@ -16,7 +16,7 @@ pub(crate) use mls_manager::{
 };
 pub(crate) use mls_manager::{subgroup_id, KEY_PACKAGE_MAX_AGE};
 #[cfg(test)]
-pub(crate) use mls_manager::certificate_for_test;
+pub(crate) use mls_manager::{certificate_for_test, throwaway_key_package_for_test};
 #[cfg(test)]
 pub(crate) use mls_manager::test_keys as mls_manager_test_keys;
 pub(crate) use mls_manager::split_group_key;

@@ -151,6 +151,11 @@ pub(crate) fn with_tally(extensions: &Extensions<LeafNode>, tally: &Tally) -> Ex
     Extensions::from_vec(out).unwrap_or_else(|_| extensions.clone())
 }
 
+/// Whether a leaf node lists the tally capability (what the standing gate and ratchet read).
+pub(crate) fn declares(leaf: &LeafNode) -> bool {
+    leaf.capabilities().extensions().contains(&tally_extension_type())
+}
+
 /// The tally a leaf node carries, if it declares the capability and the bytes parse.
 pub(crate) fn leaf_tally(leaf: &LeafNode) -> Option<Tally> {
     if !leaf.capabilities().extensions().contains(&tally_extension_type()) {

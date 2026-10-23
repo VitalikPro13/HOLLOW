@@ -1824,6 +1824,7 @@ pub(crate) fn elect_server_coordinator(
     mls_members: &[String],
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    rule: &Rule,
 ) -> Option<String> {
     let owner = server.members.keys().find(|m| {
         server.roles.get(*m)
@@ -1834,19 +1835,55 @@ pub(crate) fn elect_server_coordinator(
         let owner_online = owner.as_str() == local_peer || peer_is_reachable(ws_room_peers, owner);
         // The owner must be a candidate of THIS election: it holds a leaf and is not
         // the excluded sender.
-        let owner_is_candidate = mls_members.iter().any(|p| super::resolver::same_identity(p, owner));
+        let owner_is_candidate = mls_members.iter().any(|p| super::resolver::same_identity(p, owner)) && rule.admits(owner, local_peer, ws_room_peers);
         if owner_online && owner_is_candidate {
             return Some(owner.clone());
         }
     }
-    elect_coordinator(mls_members, local_peer, ws_room_peers)
+    elect_by_rule(server, rule, mls_members, local_peer, ws_room_peers)
+}
+
+/// [`elect_coordinator`] under the old rule; under standing the first online candidate
+/// holding a leaf in our tree, by standing.
+pub(crate) fn elect_by_rule(
+    server: &crate::crdt::server_state::ServerState,
+    rule: &Rule,
+    mls_members: &[String],
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Option<String> {
+    if !rule.on() {
+        return elect_coordinator(mls_members, local_peer, ws_room_peers);
+    }
+    let masters = online_master_identities(mls_members, local_peer, ws_room_peers);
+    super::standing::first_by_standing(server, masters.into_iter().filter(|m| rule.admits(m, local_peer, ws_room_peers)))
+}
+
+/// The first of `candidates` (masters) that is online, `local_peer` counting only when
+/// it is one of them: by standing under `rule`, else the lowest id.
+fn first_online_candidate(
+    state: &crate::crdt::server_state::ServerState,
+    rule: &Rule,
+    candidates: impl IntoIterator<Item = String>,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Option<String> {
+    let online: Vec<String> = candidates
+        .into_iter()
+        .filter(|m| rule.admits(m, local_peer, ws_room_peers) && (m.as_str() == local_peer || peer_is_reachable(ws_room_peers, m)))
+        .collect();
+    if rule.on() {
+        super::standing::first_by_standing(state, online)
+    } else {
+        online.into_iter().min()
+    }
 }
 
 /// Where a member sends its server-group bootstrap/recovery KeyPackage: the
 /// OWNER when online (it always holds the group), else the lowest online master
 /// among CRDT members. Pairs with [`elect_server_coordinator`] so the owner is
 /// both committer and recovery target, closing the 3+-member recovery deadlock.
-pub(crate) fn server_bootstrap_target(
+pub(crate) fn old_bootstrap_target(
     server: &crate::crdt::server_state::ServerState,
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -1900,9 +1937,12 @@ pub(crate) fn we_commit_for_our_identity(
     })
 }
 
+/// Whether we commit a newcomer's add or a revoked device's removal in a server group:
+/// under the old rule the raw lowest online master, under standing the server coordinator.
 pub(crate) fn is_mls_coordinator(
     mls: &MlsManager,
     server_id: &str,
+    state: Option<&crate::crdt::server_state::ServerState>,
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) -> bool {
@@ -1910,7 +1950,11 @@ pub(crate) fn is_mls_coordinator(
         return false;
     }
     let members = mls.group_members(server_id);
-    elect_coordinator(&members, local_peer, ws_room_peers).as_deref() == Some(local_peer)
+    let rule = state.map(|s| super::standing::rule(mls, s, server_id)).unwrap_or_default();
+    match (state, rule.on()) {
+        (Some(state), true) => elect_server_coordinator(state, &members, local_peer, ws_room_peers, &rule).as_deref() == Some(local_peer),
+        _ => rule.may_lead() && elect_coordinator(&members, local_peer, ws_room_peers).as_deref() == Some(local_peer),
+    }
 }
 
 /// Vault coordinator: 2nd-lowest online MASTER identity (distributes work away
@@ -1940,6 +1984,7 @@ pub(crate) fn elect_vault_coordinator(
 pub(crate) fn is_vault_coordinator(
     mls: &MlsManager,
     server_id: &str,
+    state: &crate::crdt::server_state::ServerState,
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) -> bool {
@@ -1947,7 +1992,14 @@ pub(crate) fn is_vault_coordinator(
         return false;
     }
     let members = mls.group_members(server_id);
-    elect_vault_coordinator(&members, local_peer, ws_room_peers).as_deref() == Some(local_peer)
+    let rule = super::standing::rule(mls, state, server_id);
+    if !rule.on() {
+        return rule.may_lead() && elect_vault_coordinator(&members, local_peer, ws_room_peers).as_deref() == Some(local_peer);
+    }
+    // Under standing: the second online leaf holder by standing, the first when alone.
+    let online = online_master_identities(&members, local_peer, ws_room_peers).into_iter().filter(|m| rule.admits(m, local_peer, ws_room_peers));
+    let ranked = super::standing::rank_masters(state, online);
+    ranked.get(1).or(ranked.first()).is_some_and(|m| m == local_peer)
 }
 
 /// How long a session that came back is read before this device commits again: the
@@ -2005,6 +2057,7 @@ pub(crate) fn elect_subgroup_coordinator(
     channel_id: &str,
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    rule: &Rule,
 ) -> Option<String> {
     // Prefer the OWNER when online: it always qualifies and is a globally agreed
     // choice from the CRDT, so two nodes cannot each elect themselves and fork the
@@ -2015,9 +2068,13 @@ pub(crate) fn elect_subgroup_coordinator(
             .unwrap_or(false)
     });
     if let Some(owner) = owner {
-        if owner.as_str() == local_peer || peer_is_reachable(ws_room_peers, owner) {
+        if (owner.as_str() == local_peer || peer_is_reachable(ws_room_peers, owner)) && rule.admits(owner, local_peer, ws_room_peers) {
             return Some(owner.clone());
         }
+    }
+    if rule.on() {
+        let qualifying = server.members.keys().filter(|m| server.can_see_channel(m, channel_id)).cloned();
+        return first_online_candidate(server, rule, qualifying, local_peer, ws_room_peers);
     }
     let mut masters: Vec<String> = server.members.keys()
         .filter(|m| server.can_see_channel(m, channel_id))
@@ -2046,7 +2103,8 @@ pub(crate) fn request_subgroup_bootstrap(
     channel_id: &str,
     local_peer: &str,
 ) -> bool {
-    let Some(coordinator) = elect_subgroup_coordinator(server, channel_id, local_peer, ws_room_peers) else {
+    let rule = super::standing::rule(mls, server, &crate::crypto::subgroup_id(server_id, channel_id));
+    let Some(coordinator) = elect_subgroup_coordinator(server, channel_id, local_peer, ws_room_peers, &rule) else {
         return false;
     };
     let ours = coordinator == local_peer;
@@ -2131,7 +2189,7 @@ pub(crate) fn tend_own_subgroups(
                 || asked_lately
                 || welcome_grace.contains_key(&group_key)
                 || !state.can_see_channel(local_peer, &cid)
-                || elect_subgroup_coordinator(state, &cid, local_peer, ws_room_peers).as_deref() != Some(local_peer)
+                || elect_subgroup_coordinator(state, &cid, local_peer, ws_room_peers, &super::standing::rule(mls, state, &group_key)).as_deref() != Some(local_peer)
             {
                 continue;
             }
@@ -2180,12 +2238,85 @@ pub(crate) fn request_server_group_bootstrap(
     sent > 0
 }
 
-/// Ask for a leaf in a server group we hold no copy of: the owner when online, our
-/// own siblings when the owner is our identity (they re-add a sibling), else the
-/// lowest online member. True when a KeyPackage reached a device.
+/// The member a leafless ask of ours goes to next, and whether it starts a new pass. A
+/// Legacy server keeps the old single target (the owner, else the lowest online
+/// member); any other walks the members by standing, the old-rule target last, one
+/// target per ask (design g13w2-f §4.3).
+pub(crate) fn leaf_ask_target(
+    mls: &MlsManager,
+    server: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    local_master: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Option<(String, bool)> {
+    let old = old_bootstrap_target(server, local_master, ws_room_peers).filter(|t| !super::resolver::same_identity(t, local_master));
+    if server.anchor() == crate::crdt::server_state::Anchor::Legacy {
+        return old.map(|t| (t, true));
+    }
+    let order = super::standing::walk_order(server, local_master, ws_room_peers, old.as_deref());
+    super::standing::next_walk_target(&order, &mls.lead.walk_asked(server_id))
+}
+
+/// Send our server-group KeyPackage to the next member of the walk. Outside a Legacy
+/// server every target of one pass gets the same package, so two of them can never seat
+/// us twice; a new pass mints a fresh one. True when a KeyPackage reached a device.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_leaf_ask(
+    mls: &MlsManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    local_master: &str,
+    minted: Option<Vec<u8>>,
+) -> bool {
+    let Some((target, restart)) = leaf_ask_target(mls, server, server_id, local_master, ws_room_peers) else { return false };
+    let devices = online_devices_for(ws_room_peers, &target);
+    if devices.is_empty() {
+        return false;
+    }
+    let legacy = server.anchor() == crate::crdt::server_state::Anchor::Legacy;
+    let kept = if legacy || restart { None } else { mls.lead.walk_package(server_id) };
+    let kp_bytes = match kept.or(minted) {
+        Some(kp) => kp,
+        None => match mint_group_key_package(mls, crypto_store, server_id, false) {
+            Ok(kp) => kp,
+            Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
+        },
+    };
+    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+        server_id: server_id.to_string(),
+        key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
+        channel_id: None,
+    }).unwrap_or_default();
+    let mut reached = Vec::new();
+    for dev in &devices {
+        if let Some(room) = ws_room_for_peer(ws_room_peers, dev) {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                room_code: room,
+                target_peer: dev.clone(),
+                data: data.clone(),
+            });
+            reached.push(dev.clone());
+        }
+    }
+    if reached.is_empty() {
+        return false;
+    }
+    if !legacy {
+        mls.lead.note_walk_ask(server_id, &target, reached, kp_bytes, restart);
+    }
+    hollow_log!("[HOLLOW-MLS] Asked {target} for a leaf in {server_id}");
+    true
+}
+
+/// Ask for a leaf in a server group we hold no copy of: our own siblings when the owner
+/// is our identity (they re-add a sibling), else the next member of the walk
+/// ([`walk_leaf_ask`]). True when a KeyPackage reached a device.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn request_server_leaf(
-    mls: &mut MlsManager,
+    mls: &MlsManager,
     crypto_store: &CryptoStore,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -2198,15 +2329,17 @@ pub(crate) fn request_server_leaf(
         super::resolver::same_identity(m, local_master)
             && server.roles.get(m).is_some_and(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
     });
-    let targets: Vec<String> = if owner_is_us {
-        online_devices_for(ws_room_peers, local_master).into_iter().filter(|d| d != local_device).collect()
-    } else {
-        server_bootstrap_target(server, local_master, ws_room_peers)
-            .filter(|t| !super::resolver::same_identity(t, local_master))
-            .map(|t| online_devices_for(ws_room_peers, &t))
-            .unwrap_or_default()
-    };
+    if !owner_is_us {
+        return walk_leaf_ask(mls, crypto_store, ws_cmd_tx, ws_room_peers, server, server_id, local_master, None);
+    }
+    let targets: Vec<String> = online_devices_for(ws_room_peers, local_master).into_iter().filter(|d| d != local_device).collect();
     if targets.is_empty() {
+        // An owner device with no sibling online walks the members like anyone else: the
+        // room-join paths no longer hand its package to whoever joined. A Legacy server
+        // keeps that room-join send instead.
+        if server.anchor() != crate::crdt::server_state::Anchor::Legacy {
+            return walk_leaf_ask(mls, crypto_store, ws_cmd_tx, ws_room_peers, server, server_id, local_master, None);
+        }
         return false;
     }
     let kp_bytes = match mint_group_key_package(mls, crypto_store, server_id, false) {
@@ -2243,6 +2376,8 @@ pub(crate) fn request_server_leaf(
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn send_join_leaf_ask(
+    mls: &MlsManager,
+    crypto_store: &CryptoStore,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     server: &crate::crdt::server_state::ServerState,
@@ -2250,8 +2385,13 @@ pub(crate) fn send_join_leaf_ask(
     local_master: &str,
     local_device: &str,
     responder: &str,
-    data: Vec<u8>,
+    kp_bytes: Vec<u8>,
 ) -> bool {
+    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+        server_id: server_id.to_string(),
+        key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
+        channel_id: None,
+    }).unwrap_or_default();
     let owner_is_us = server.members.keys().any(|m| {
         super::resolver::same_identity(m, local_master)
             && server.roles.get(m).is_some_and(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
@@ -2268,18 +2408,13 @@ pub(crate) fn send_join_leaf_ask(
         hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to our own devices {siblings:?} for {server_id}");
         return true;
     }
-    let target = server_bootstrap_target(server, local_master, ws_room_peers)
-        .filter(|t| !super::resolver::same_identity(t, local_master));
-    let sent = match &target {
-        Some(t) => send_raw_to_identity(ws_cmd_tx, ws_room_peers, t, data.clone()),
-        None => 0,
-    };
-    if sent > 0 {
-        hollow_log!(
-            "[HOLLOW-MLS] Sent bootstrap KeyPackage to {} ({sent} device(s)) for {server_id}",
-            target.as_deref().unwrap_or_default(),
-        );
+    if walk_leaf_ask(mls, crypto_store, ws_cmd_tx, ws_room_peers, server, server_id, local_master, Some(kp_bytes)) {
         return true;
+    }
+    // Outside a Legacy server only the walk hands out our package (a member answering our
+    // join is not thereby who seats us); the batch tick walks once the room shows members.
+    if server.anchor() != crate::crdt::server_state::Anchor::Legacy && !super::resolver::same_identity(responder, local_master) {
+        return false;
     }
     let reached = send_raw_to_identity(ws_cmd_tx, ws_room_peers, responder, data);
     hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to join responder {responder} for {server_id} (no bootstrap target yet)");
@@ -2385,6 +2520,10 @@ fn subgroup_committer(
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) -> Option<String> {
+    let rule = super::standing::rule(mls, server, &crate::crypto::subgroup_id(&server.server_id, cid));
+    if rule.on() {
+        return elect_subgroup_coordinator(server, cid, local_peer, ws_room_peers, &rule);
+    }
     let owner = server.members.keys().find(|m| {
         server.roles.get(*m)
             .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
@@ -2403,7 +2542,7 @@ fn subgroup_committer(
         .collect();
     holders.sort();
     holders.into_iter().next()
-        .or_else(|| elect_subgroup_coordinator(server, cid, local_peer, ws_room_peers))
+        .or_else(|| elect_subgroup_coordinator(server, cid, local_peer, ws_room_peers, &rule))
 }
 
 /// Every group we hold that still seats someone our view removed, which no send
@@ -2433,7 +2572,8 @@ pub(crate) fn sweep_unseated_leaves(
             Some(cid) => subgroup_committer(mls, state, cid, local_peer, ws_room_peers),
             None => {
                 let seated: Vec<String> = mls.group_members(&group_key).into_iter().filter(|l| !unseated.contains(l)).collect();
-                elect_server_coordinator(state, &seated, local_peer, ws_room_peers)
+                let rule = super::standing::rule(mls, state, &group_key);
+                elect_server_coordinator(state, &seated, local_peer, ws_room_peers, &rule).filter(|_| rule.may_lead())
             }
         };
         if committer.as_deref() != Some(local_peer) {
@@ -3241,7 +3381,8 @@ pub(crate) async fn rebind_unbound_leaves(
         }
         let (server_id, channel_id) = crate::crypto::split_group_key(&group_key);
         let Some(state) = server_states.get(&server_id) else { continue };
-        let authority = group_authority(state, channel_id.as_deref(), local_peer_str, ws_room_peers, &Default::default());
+        let lead = responder_view(mls_mgr, state, &server_id, channel_id.as_deref());
+        let authority = group_authority(state, channel_id.as_deref(), local_peer_str, ws_room_peers, &lead);
         let we_are_authority =
             authority.as_deref().is_some_and(|a| super::resolver::same_identity(a, local_peer_str));
         // Two devices of the authority that upgrade together would each rebind and fork
@@ -3281,10 +3422,7 @@ pub(crate) async fn rebind_unbound_leaves(
         let target = if we_are_authority && !we_act {
             Some(local_peer_str.to_string())
         } else if we_are_authority {
-            epoch_catchup_responder(
-                state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str,
-                &unfit_responders(mls_mgr, state, &server_id, channel_id.as_deref()),
-            )
+            epoch_catchup_responder(state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str, &lead)
         } else {
             authority
         };
@@ -3330,8 +3468,8 @@ pub(crate) fn ask_leaf_repair(
     if !entitled || mls_mgr.welcome_waits(group_key) {
         return false;
     }
-    let unfit = unfit_responders(mls_mgr, state, &server_id, channel_id.as_deref());
-    let Some(target) = epoch_catchup_responder(state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str, &unfit) else {
+    let lead = responder_view(mls_mgr, state, &server_id, channel_id.as_deref());
+    let Some(target) = epoch_catchup_responder(state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str, &lead) else {
         return false;
     };
     if preferred_online_device(ws_room_peers, &target).is_none() {
@@ -3380,8 +3518,8 @@ pub(crate) fn repair_after_spent_catchup(
     if mls_mgr.holds_commit(&group_key) {
         return false;
     }
-    let unfit = unfit_responders(mls_mgr, state, server_id, channel_id);
-    let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str, &unfit);
+    let lead = responder_view(mls_mgr, state, server_id, channel_id);
+    let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str, &lead);
     if !responder.is_some_and(|r| super::resolver::same_identity(&r, frame_sender)) {
         hollow_log!("[HOLLOW-MLS] A spent commit for {group_key} came from {frame_sender}, not our catch-up responder; no repair");
         return false;
@@ -3406,39 +3544,66 @@ pub(crate) fn is_anchor_owner(state: &crate::crdt::server_state::ServerState, ma
     state.anchor_owner().as_deref() == Some(master)
 }
 
-/// Masters our copy of the group shows unfit to answer for it (catch-up, repairs):
-/// at their cap, or keeping a pre-0.13 leaf where every other master's carries a tally.
-pub(crate) fn unfit_responders(
+pub(crate) use super::standing::Rule;
+
+/// What a replica's elections of a group's responder read besides presence: the rule,
+/// the masters the tree shows unfit, and the silent responders we skip.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Lead {
+    pub unfit: std::collections::HashSet<String>,
+    pub rule: Rule,
+    pub skipped: std::collections::HashSet<String>,
+}
+
+impl Lead {
+    fn excludes(&self, master: &str) -> bool {
+        self.unfit.contains(master) || self.skipped.contains(master)
+    }
+}
+
+/// The [`Lead`] for answering a group: masters our copy shows unfit to answer for it
+/// (catch-up, repairs) at their cap or keeping a pre-0.13 leaf where every other
+/// master's carries a tally, and under standing the responder we found silent.
+pub(crate) fn responder_view(
     mls: &MlsManager,
     state: &crate::crdt::server_state::ServerState,
     server_id: &str,
     channel_id: Option<&str>,
-) -> std::collections::HashSet<String> {
+) -> Lead {
     let group_key = match channel_id {
         Some(cid) => crate::crypto::subgroup_id(server_id, cid),
         None => server_id.to_string(),
     };
-    mls.unfit_masters(&group_key, false, |m| is_anchor_owner(state, m))
+    let rule = super::standing::rule(mls, state, &group_key);
+    let skipped = if rule.on() { mls.lead.skipped(&group_key) } else { Default::default() };
+    Lead { unfit: mls.unfit_masters(&group_key, false, |m| is_anchor_owner(state, m)), rule, skipped }
 }
 
-/// `elected` unless the tree shows it unfit to commit, then the lowest fit online
-/// master (we always count as online, so our own election never names us unfit);
-/// with nobody fit, `elected` stands.
+/// `elected` unless the tree shows it unfit to commit, then the first fit online
+/// master (the lowest, or by standing under it; we always count as online, so our own
+/// election never names us unfit); with nobody fit, `elected` stands.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fit_coordinator(
     elected: Option<String>,
     members: &[String],
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     unfit: &std::collections::HashSet<String>,
+    state: &crate::crdt::server_state::ServerState,
+    rule: &Rule,
 ) -> Option<String> {
     let elected = elected?;
     if !unfit.iter().any(|m| super::resolver::same_identity(m, &elected)) {
         return Some(elected);
     }
-    online_master_identities(members, local_peer, ws_room_peers)
+    let fit = online_master_identities(members, local_peer, ws_room_peers)
         .into_iter()
-        .find(|m| !unfit.iter().any(|u| super::resolver::same_identity(u, m)))
-        .or(Some(elected))
+        .filter(|m| !unfit.iter().any(|u| super::resolver::same_identity(u, m)));
+    if rule.on() {
+        super::standing::first_by_standing(state, fit.filter(|m| rule.admits(m, local_peer, ws_room_peers))).or(Some(elected))
+    } else {
+        fit.into_iter().next().or(Some(elected))
+    }
 }
 
 /// Masters our copy of the group shows unfit to commit for it: at their cap.
@@ -3459,10 +3624,10 @@ fn group_authority(
     channel_id: Option<&str>,
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    unfit: &std::collections::HashSet<String>,
+    lead: &Lead,
 ) -> Option<String> {
     match channel_id {
-        Some(cid) => elect_subgroup_coordinator(state, cid, local_peer, ws_room_peers).filter(|c| !unfit.contains(c)),
+        Some(cid) => elect_subgroup_coordinator(state, cid, local_peer, ws_room_peers, &lead.rule).filter(|c| !lead.excludes(c)),
         None => {
             let owner = state.members.keys().find(|m| {
                 state.roles.get(*m)
@@ -3471,11 +3636,48 @@ fn group_authority(
             });
             if let Some(owner) = owner
                 && (owner.as_str() == local_peer || peer_is_reachable(ws_room_peers, owner))
+                && lead.rule.admits(owner, local_peer, ws_room_peers)
             {
                 return Some(owner.clone());
             }
-            let members: Vec<String> = state.members.keys().filter(|m| !unfit.contains(*m)).cloned().collect();
-            elect_coordinator(&members, local_peer, ws_room_peers).filter(|c| !unfit.contains(c))
+            if lead.rule.on() {
+                let candidates = state.members.keys().filter(|m| !lead.excludes(m)).cloned();
+                return first_online_candidate(state, &lead.rule, candidates, local_peer, ws_room_peers);
+            }
+            let members: Vec<String> = state.members.keys().filter(|m| !lead.unfit.contains(*m)).cloned().collect();
+            elect_coordinator(&members, local_peer, ws_room_peers).filter(|c| !lead.unfit.contains(c))
+        }
+    }
+}
+
+/// H1b: whether a device holding no copy of the group answers `requester`'s KeyPackage
+/// request (a KeyPackage is what a Welcome into the requester's own group needs). A
+/// Legacy server keeps the old rule, anyone; otherwise the server group only from the
+/// owner or a master at or above our walk target by standing, a subgroup only from those
+/// its election names (the owner, its coordinator, our responder there).
+pub(crate) fn leafless_may_answer_request(
+    mls: &MlsManager,
+    state: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    channel_id: Option<&str>,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    requester: &str,
+) -> bool {
+    if state.anchor() == crate::crdt::server_state::Anchor::Legacy {
+        return true;
+    }
+    match channel_id {
+        None => {
+            let target = mls
+                .lead
+                .walk_target(server_id)
+                .or_else(|| leaf_ask_target(mls, state, server_id, local_peer, ws_room_peers).map(|(t, _)| t));
+            super::standing::leafless_may_answer(state, requester, target.as_deref())
+        }
+        Some(cid) => {
+            let lead = responder_view(mls, state, server_id, Some(cid));
+            may_repair_our_leaf(state, Some(cid), local_peer, ws_room_peers, requester, &lead)
         }
     }
 }
@@ -3489,15 +3691,20 @@ pub(crate) fn may_repair_our_leaf(
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     requester: &str,
-    unfit: &std::collections::HashSet<String>,
+    lead: &Lead,
 ) -> bool {
     let is_owner = state.roles.get(requester)
         .is_some_and(|r| *r.read() == crate::crdt::operations::MemberRole::Owner);
+    // A Legacy view of a tree that would be on cannot rank leaders until the owner's
+    // checkpoint rebases it, so only the owner repairs it meanwhile.
+    if !lead.rule.may_lead() {
+        return is_owner;
+    }
     let named = |elected: Option<String>| elected.is_some_and(|e| super::resolver::same_identity(&e, requester));
     is_owner
-        || named(epoch_catchup_responder(state, channel_id, local_peer, ws_room_peers, local_peer, unfit))
+        || named(epoch_catchup_responder(state, channel_id, local_peer, ws_room_peers, local_peer, lead))
         || channel_id.is_some_and(|cid| {
-            named(elect_subgroup_coordinator(state, cid, local_peer, ws_room_peers).filter(|c| !unfit.contains(c)))
+            named(elect_subgroup_coordinator(state, cid, local_peer, ws_room_peers, &lead.rule).filter(|c| !lead.excludes(c)))
         })
 }
 
@@ -3518,26 +3725,31 @@ fn epoch_catchup_responder(
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     behind: &str,
-    unfit: &std::collections::HashSet<String>,
+    lead: &Lead,
 ) -> Option<String> {
-    let authority = group_authority(state, channel_id, local_peer, ws_room_peers, unfit);
+    let authority = group_authority(state, channel_id, local_peer, ws_room_peers, lead);
     if let Some(a) = &authority
         && !super::resolver::same_identity(a, behind)
     {
         return authority;
     }
     // The authority IS the peer that is behind. Deterministic fallback: the lowest
-    // online master among the rest (subgroup: among those who qualify).
+    // online master among the rest (subgroup: among those who qualify), or the first by
+    // standing among the rest holding a leaf.
     let candidates: Vec<String> = state
         .members
         .keys()
-        .filter(|m| !super::resolver::same_identity(m, behind) && !unfit.contains(*m))
+        .filter(|m| !super::resolver::same_identity(m, behind) && !lead.unfit.contains(*m))
         .filter(|m| match channel_id {
             Some(cid) => state.can_see_channel(m, cid),
             None => true,
         })
         .cloned()
         .collect();
+    if lead.rule.on() {
+        let candidates = candidates.into_iter().filter(|m| !lead.skipped.contains(m));
+        return first_online_candidate(state, &lead.rule, candidates, local_peer, ws_room_peers);
+    }
     // We always count as online, so when WE are the one behind the answer is the
     // lowest of the rest, never nobody because we sort first.
     online_master_identities(&candidates, local_peer, ws_room_peers)
@@ -3580,6 +3792,8 @@ pub(crate) fn handle_epoch_hint(
     // ourselves. Re-electing on a direct probe re-opens the deadlock from the other
     // side: the asker picks from ITS view, and a returning owner's CRDT is behind.
     direct_probe: bool,
+    // The probe's `standing` bit: the prober's gate is on.
+    their_standing: bool,
 ) {
     // Conferences re-emit only (heal rule): admission is Welcome-based, and a
     // conf group must never be dragged through hint-driven repair.
@@ -3595,6 +3809,31 @@ pub(crate) fn handle_epoch_hint(
         return; // group-less recovery is owned by the existing bootstrap paths
     }
     let Ok(own_epoch) = mls_mgr.epoch(&group_key) else { return };
+    let from_master = super::resolver::resolve(from_peer);
+    let lead = responder_view(mls_mgr, state, server_id, channel_id);
+    // A direct probe always gets one reply, even when we have nothing to serve or our
+    // cooldown holds the costly answers back: only a missing reply counts as silence.
+    let echo = |mls_mgr: &MlsManager, epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>| {
+        if !direct_probe {
+            return;
+        }
+        let key = format!("{group_key}|{from_master}|echo");
+        if epoch_hint_cooldown.get(&key).is_some_and(|t| t.elapsed() < EPOCH_ECHO_GAP) {
+            return;
+        }
+        epoch_hint_cooldown.insert(key, std::time::Instant::now());
+        send_message_to_peer(
+            ws_cmd_tx, ws_room_peers, from_peer,
+            HavenMessage::MlsEpochProbe {
+                server_id: server_id.to_string(),
+                channel_id: channel_id.map(|c| c.to_string()),
+                epoch: own_epoch,
+                epoch_auth: mls_mgr.epoch_auth_digest(&group_key),
+                answer: true,
+                standing: lead.rule.on(),
+            },
+        );
+    };
 
     // Membership gate: only members of this server get epoch SERVICE.
     if !state.members.keys().any(|m| super::resolver::same_identity(m, from_peer)) {
@@ -3615,17 +3854,23 @@ pub(crate) fn handle_epoch_hint(
     // it, and a catch-up from our cache could never apply there.
     let ours_then = if their_epoch <= own_epoch { mls_mgr.epoch_auth_digest_at(&group_key, their_epoch) } else { None };
     let forked = their_epoch_auth.is_some_and(|theirs| ours_then.as_deref().is_some_and(|ours| ours != theirs));
+    if direct_probe {
+        mls_mgr.lead.heard(&group_key, &from_master);
+    }
     if their_epoch < own_epoch || forked {
         // ONE responder, no room-wide echo, elected with the peer that is behind
         // excluded so a stale AUTHORITY still gets an answer. A direct probe skips it.
-        let unfit = unfit_responders(mls_mgr, state, server_id, channel_id);
-        let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, from_peer, &unfit);
+        let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, from_peer, &lead);
         if !direct_probe
             && !responder.as_deref().is_some_and(|r| super::resolver::same_identity(r, local_peer_str))
         {
             return;
         }
-        let from_master = super::resolver::resolve(from_peer);
+        // A Legacy view of a tree that would be on serves nothing.
+        if !lead.rule.may_lead() {
+            echo(mls_mgr, epoch_hint_cooldown);
+            return;
+        }
         // A hint without a digest cannot show a fork, so it must never hold back the
         // probe that can.
         let cd_key = match their_epoch_auth {
@@ -3633,6 +3878,7 @@ pub(crate) fn handle_epoch_hint(
             None => format!("{group_key}|{from_master}|hint"),
         };
         if epoch_hint_cooldown.get(&cd_key).is_some_and(|t| t.elapsed() < EPOCH_HINT_COOLDOWN) {
+            echo(mls_mgr, epoch_hint_cooldown);
             return;
         }
         epoch_hint_cooldown.insert(cd_key, std::time::Instant::now());
@@ -3657,9 +3903,19 @@ pub(crate) fn handle_epoch_hint(
                 }
             }
             None => {
+                // Across the gate flip only OFF yields to ON: we cannot check an ON claim,
+                // so an OFF replica never yields to one, and an ON replica repairs an OFF
+                // prober onto its own fork.
+                if forked && !lead.rule.on() && their_standing {
+                    echo(mls_mgr, epoch_hint_cooldown);
+                    return;
+                }
                 // Of two forks the one the authority's acting device holds stays, or
                 // two sides would keep repairing each other onto their own.
-                if forked && is_authoritys_acting_device(state, channel_id, local_peer_str, ws_room_peers, from_peer) {
+                if forked
+                    && lead.rule.on() == their_standing
+                    && is_authoritys_acting_device(state, channel_id, local_peer_str, ws_room_peers, from_peer, &lead.rule)
+                {
                     hollow_log!(
                         "[HOLLOW-MLS] {from_peer} holds the fork of {group_key} that stays (epoch {their_epoch}); asking it to repair ours"
                     );
@@ -3672,6 +3928,8 @@ pub(crate) fn handle_epoch_hint(
                             channel_id: channel_id.map(|c| c.to_string()),
                             epoch: their_epoch,
                             epoch_auth: ours_then,
+                            answer: false,
+                            standing: lead.rule.on(),
                         },
                     );
                     return;
@@ -3696,8 +3954,15 @@ pub(crate) fn handle_epoch_hint(
             mls_mgr, ws_cmd_tx, ws_room_peers, state,
             server_id, channel_id, local_peer_str, epoch_hint_cooldown,
         );
+        echo(mls_mgr, epoch_hint_cooldown);
+    } else {
+        echo(mls_mgr, epoch_hint_cooldown);
     }
 }
+
+/// The least spacing of our echoes to one prober in one group; an honest prober's own
+/// throttle is [`EPOCH_HINT_COOLDOWN`].
+const EPOCH_ECHO_GAP: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Whether `device` is the [`acting_device`] of the group's authority, an identity
 /// other than ours.
@@ -3707,8 +3972,9 @@ fn is_authoritys_acting_device(
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     device: &str,
+    rule: &Rule,
 ) -> bool {
-    group_authority(state, channel_id, local_peer, ws_room_peers, &Default::default())
+    group_authority(state, channel_id, local_peer, ws_room_peers, &Lead { rule: rule.clone(), ..Default::default() })
         .filter(|a| !super::resolver::same_identity(a, local_peer))
         .and_then(|a| acting_device(&super::resolver::resolve(&a), ws_room_peers))
         .is_some_and(|d| d == device)
@@ -3740,11 +4006,9 @@ pub(crate) fn send_epoch_probe(
     // WE would be the peer that is behind, so we are excluded from the election:
     // "we are the authority" says who COMMITS, never who holds the newest epoch,
     // and treating it as the latter left a returning owner with nobody to ask.
+    let lead = responder_view(mls_mgr, state, server_id, channel_id);
     let Some(authority) =
-        epoch_catchup_responder(
-            state, channel_id, local_peer_str, ws_room_peers, local_peer_str,
-            &unfit_responders(mls_mgr, state, server_id, channel_id),
-        )
+        epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str, &lead)
     else {
         return false; // no other online member — nobody to ask
     };
@@ -3758,9 +4022,13 @@ pub(crate) fn send_epoch_probe(
         channel_id: channel_id.map(|c| c.to_string()),
         epoch: own_epoch,
         epoch_auth: mls_mgr.epoch_auth_digest(&group_key),
+        answer: false,
+        standing: lead.rule.on(),
     }).unwrap_or_default();
     let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &authority, data);
     if sent > 0 {
+        // Under standing every leaf holder echoes a probe, so only there does silence count.
+        mls_mgr.lead.note_probe(&group_key, &super::resolver::resolve(&authority), lead.rule.on());
         hollow_log!("[HOLLOW-MLS] Sent epoch probe (epoch {own_epoch}) to authority {authority} for {group_key}");
     }
     sent > 0
@@ -3846,8 +4114,8 @@ mod tests {
         }
         let channel = state.channels.keys().next().unwrap().clone();
         let rooms = make_room_peers(&[("ur_srv", &["ua_flooder"])]);
-        assert!(may_repair_our_leaf(&state, Some(&channel), "uz_local", &rooms, "ua_flooder", &HashSet::new()));
-        let unfit: HashSet<String> = ["ua_flooder".to_string()].into();
+        assert!(may_repair_our_leaf(&state, Some(&channel), "uz_local", &rooms, "ua_flooder", &Lead::default()));
+        let unfit = Lead { unfit: ["ua_flooder".to_string()].into(), ..Default::default() };
         assert!(!may_repair_our_leaf(&state, Some(&channel), "uz_local", &rooms, "ua_flooder", &unfit));
     }
 
@@ -3938,9 +4206,15 @@ mod tests {
         let mut mls = MlsManager::new(&kp, &kp).unwrap();
         mls.create_group("vc_srv").unwrap();
         let sibling = make_room_peers(&[("vc_srv", &["vc_my_sibling"])]);
-        assert!(as_node(false, || is_vault_coordinator(&mls, "vc_srv", &me, &sibling)).await);
+        let anchored = crate::crdt::server_state::ServerState::skeleton("0123456789abcdef0123456789abcdef01234567".into());
+        assert!(as_node(false, || is_vault_coordinator(&mls, "vc_srv", &anchored, &me, &sibling)).await);
+        let legacy = crate::crdt::server_state::ServerState::skeleton("vc_srv".into());
         assert!(
-            !as_node(true, || is_vault_coordinator(&mls, "vc_srv", &me, &sibling)).await,
+            !as_node(false, || is_vault_coordinator(&mls, "vc_srv", &legacy, &me, &sibling)).await,
+            "a Legacy view of an all-0.13 tree leads nothing",
+        );
+        assert!(
+            !as_node(true, || is_vault_coordinator(&mls, "vc_srv", &anchored, &me, &sibling)).await,
             "our identity is the coordinator, and the sibling the others see acts for it",
         );
         super::super::resolver::clear_all();
@@ -5926,7 +6200,11 @@ mod tests {
         // D8: the committer's planner applies the same rule, so only this scan sees the
         // arm stop asking it.
         assert!(live.contains("rules.membership(&sender_leaf.master"), "live KeyPackage arm queues a non-member's or a banned identity's leaf");
-        let parked = arm("if parked && let Some(kp_b64) = key_package.as_ref() {", "pending_mls_key_packages");
+        let parked = arm("&& let Some(kp_b64) = key_package.as_ref()", "pending_mls_key_packages");
+        assert!(
+            swarm.contains("if parked\n                    && state.anchor() == crate::crdt::server_state::Anchor::Legacy\n                    && let Some(kp_b64)"),
+            "a parked join's package seats only in a Legacy server",
+        );
         assert!(parked.contains("key_package_identity(") && parked.contains("id.device != peer_str"), "parked-join KeyPackage");
         let conf = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/conference.rs"))
             .expect("read conference.rs");
@@ -6221,5 +6499,217 @@ mod g13_mls_saves {
         mls.encrypt("srv", b"x").unwrap();
         assert_eq!(persist_mls_state_awaited(&mls, &store).settled(soon).await, crate::crypto::Saved::Stored);
         assert_eq!(stored(), all, "the save after a failure wrote only what changed");
+    }
+}
+
+/// Unit 3 (design g13w2-f): with the gate off every election is byte for byte the 0.12.2
+/// one. The `old_*` functions are frozen copies of the 0.12.2 bodies.
+#[cfg(test)]
+mod standing_golden_tests {
+    use super::*;
+    use crate::crdt::server_state::{MemberInfo, ServerState};
+    use std::collections::HashSet;
+
+    type Peers = HashMap<String, HashSet<String>>;
+
+    fn old_elect_server_coordinator(server: &ServerState, mls_members: &[String], local_peer: &str, peers: &Peers) -> Option<String> {
+        let owner = server.members.keys().find(|m| {
+            server.roles.get(*m).map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner).unwrap_or(false)
+        });
+        if let Some(owner) = owner {
+            let owner_online = owner.as_str() == local_peer || peer_is_reachable(peers, owner);
+            let owner_is_candidate = mls_members.iter().any(|p| super::super::resolver::same_identity(p, owner));
+            if owner_online && owner_is_candidate {
+                return Some(owner.clone());
+            }
+        }
+        elect_coordinator(mls_members, local_peer, peers)
+    }
+
+    fn old_elect_subgroup_coordinator(server: &ServerState, channel_id: &str, local_peer: &str, peers: &Peers) -> Option<String> {
+        let owner = server.members.keys().find(|m| {
+            server.roles.get(*m).map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner).unwrap_or(false)
+        });
+        if let Some(owner) = owner
+            && (owner.as_str() == local_peer || peer_is_reachable(peers, owner))
+        {
+            return Some(owner.clone());
+        }
+        let mut masters: Vec<String> = server
+            .members
+            .keys()
+            .filter(|m| server.can_see_channel(m, channel_id))
+            .filter(|m| m.as_str() == local_peer || peer_is_reachable(peers, m))
+            .cloned()
+            .collect();
+        masters.sort();
+        masters.dedup();
+        masters.into_iter().next()
+    }
+
+    fn old_fit_coordinator(elected: Option<String>, members: &[String], local_peer: &str, peers: &Peers, unfit: &HashSet<String>) -> Option<String> {
+        let elected = elected?;
+        if !unfit.iter().any(|m| super::super::resolver::same_identity(m, &elected)) {
+            return Some(elected);
+        }
+        online_master_identities(members, local_peer, peers)
+            .into_iter()
+            .find(|m| !unfit.iter().any(|u| super::super::resolver::same_identity(u, m)))
+            .or(Some(elected))
+    }
+
+    fn old_group_authority(state: &ServerState, channel_id: Option<&str>, local_peer: &str, peers: &Peers, unfit: &HashSet<String>) -> Option<String> {
+        match channel_id {
+            Some(cid) => old_elect_subgroup_coordinator(state, cid, local_peer, peers).filter(|c| !unfit.contains(c)),
+            None => {
+                let owner = state.members.keys().find(|m| {
+                    state.roles.get(*m).map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner).unwrap_or(false)
+                });
+                if let Some(owner) = owner
+                    && (owner.as_str() == local_peer || peer_is_reachable(peers, owner))
+                {
+                    return Some(owner.clone());
+                }
+                let members: Vec<String> = state.members.keys().filter(|m| !unfit.contains(*m)).cloned().collect();
+                elect_coordinator(&members, local_peer, peers).filter(|c| !unfit.contains(c))
+            }
+        }
+    }
+
+    fn old_epoch_catchup_responder(
+        state: &ServerState,
+        channel_id: Option<&str>,
+        local_peer: &str,
+        peers: &Peers,
+        behind: &str,
+        unfit: &HashSet<String>,
+    ) -> Option<String> {
+        let authority = old_group_authority(state, channel_id, local_peer, peers, unfit);
+        if let Some(a) = &authority
+            && !super::super::resolver::same_identity(a, behind)
+        {
+            return authority;
+        }
+        let candidates: Vec<String> = state
+            .members
+            .keys()
+            .filter(|m| !super::super::resolver::same_identity(m, behind) && !unfit.contains(*m))
+            .filter(|m| match channel_id {
+                Some(cid) => state.can_see_channel(m, cid),
+                None => true,
+            })
+            .cloned()
+            .collect();
+        online_master_identities(&candidates, local_peer, peers).into_iter().find(|c| !super::super::resolver::same_identity(c, behind))
+    }
+
+    fn old_may_repair_our_leaf(state: &ServerState, channel_id: Option<&str>, local_peer: &str, peers: &Peers, requester: &str, unfit: &HashSet<String>) -> bool {
+        let is_owner = state.roles.get(requester).is_some_and(|r| *r.read() == crate::crdt::operations::MemberRole::Owner);
+        let named = |elected: Option<String>| elected.is_some_and(|e| super::super::resolver::same_identity(&e, requester));
+        is_owner
+            || named(old_epoch_catchup_responder(state, channel_id, local_peer, peers, local_peer, unfit))
+            || channel_id.is_some_and(|cid| named(old_elect_subgroup_coordinator(state, cid, local_peer, peers).filter(|c| !unfit.contains(c))))
+    }
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn pick<'a>(&mut self, of: &'a [String]) -> &'a String {
+            &of[(self.next() as usize) % of.len()]
+        }
+        fn subset(&mut self, of: &[String]) -> Vec<String> {
+            of.iter().filter(|_| self.next().is_multiple_of(2)).cloned().collect()
+        }
+    }
+
+    /// Under standing the fallback past an unfit coordinator and the server election
+    /// pick the first by standing among online leaf holders, never the lowest id.
+    #[test]
+    fn standing_sites_pick_the_highest_standing_leaf_holder() {
+        use crate::crdt::admin_lww::AdminLwwReg;
+        use crate::crdt::operations::MemberRole;
+        let mut state = ServerState::new("0123456789abcdef0123456789abcdef01234567".into(), "s".into(), "own".into());
+        for m in ["own", "p0", "p1", "unfit"] {
+            state.members.insert(m.into(), MemberInfo { peer_id: m.into(), display_name: m.into() });
+        }
+        state.roles.insert("p1".into(), AdminLwwReg::new(MemberRole::Admin, crate::crdt::hlc::HlcTimestamp::zero("a"), 3));
+        let leaves: HashMap<String, String> = ["own", "p0", "p1", "unfit"].iter().map(|m| (m.to_string(), m.to_string())).collect();
+        let on = Rule::Standing(Some(leaves));
+        let members: Vec<String> = ["p0", "p1", "unfit"].iter().map(|m| m.to_string()).collect();
+        let peers: Peers = [("room".to_string(), members.iter().cloned().collect())].into();
+        let unfit: HashSet<String> = ["unfit".to_string()].into();
+        assert_eq!(fit_coordinator(Some("unfit".into()), &members, "zz", &peers, &unfit, &state, &on).as_deref(), Some("p1"));
+        assert_eq!(fit_coordinator(Some("unfit".into()), &members, "zz", &peers, &unfit, &state, &Rule::Old).as_deref(), Some("p0"));
+        assert_eq!(elect_server_coordinator(&state, &members, "zz", &peers, &on).as_deref(), Some("p1"));
+        assert_eq!(elect_server_coordinator(&state, &members, "zz", &peers, &Rule::Old).as_deref(), Some("p0"));
+    }
+
+    #[test]
+    fn every_off_site_equals_the_0122_election() {
+        let mut rng = Lcg(0x9e3779b97f4a7c15);
+        let off = Rule::Old;
+        for round in 0..3000 {
+            let n = 2 + (rng.next() % 6) as usize;
+            let mut masters: Vec<String> = (0..n).map(|_| format!("p{:03}", rng.next() % 1000)).collect::<HashSet<_>>().into_iter().collect();
+            masters.sort();
+            let owner = rng.pick(&masters).clone();
+            let mut state = ServerState::new("0123456789abcdef0123456789abcdef01234567".into(), "s".into(), owner.clone());
+            for m in &masters {
+                state.members.insert(m.clone(), MemberInfo { peer_id: m.clone(), display_name: m.clone() });
+            }
+            if rng.next().is_multiple_of(4) {
+                state.members.remove(&owner);
+            }
+            let cid = state.channels.keys().next().cloned().unwrap();
+            let peers: Peers = [("room".to_string(), rng.subset(&masters).into_iter().collect())].into();
+            let local = rng.pick(&masters).clone();
+            let mls = rng.subset(&masters);
+            let unfit: HashSet<String> = rng.subset(&masters).into_iter().collect();
+            let lead = Lead { unfit: unfit.clone(), rule: Rule::Old, skipped: HashSet::new() };
+            let behind = rng.pick(&masters).clone();
+            let requester = rng.pick(&masters).clone();
+            let ctx = format!("round {round}: masters {masters:?} owner {owner} local {local} peers {peers:?} mls {mls:?} unfit {unfit:?}");
+
+            let elected = elect_server_coordinator(&state, &mls, &local, &peers, &off);
+            assert_eq!(elected, old_elect_server_coordinator(&state, &mls, &local, &peers), "{ctx}");
+            assert_eq!(
+                fit_coordinator(elected.clone(), &mls, &local, &peers, &unfit, &state, &off),
+                old_fit_coordinator(elected, &mls, &local, &peers, &unfit),
+                "{ctx}",
+            );
+            assert_eq!(elect_by_rule(&state, &off, &mls, &local, &peers), elect_coordinator(&mls, &local, &peers), "{ctx}");
+            assert_eq!(elect_subgroup_coordinator(&state, &cid, &local, &peers, &off), old_elect_subgroup_coordinator(&state, &cid, &local, &peers), "{ctx}");
+            for ch in [None, Some(cid.as_str())] {
+                assert_eq!(group_authority(&state, ch, &local, &peers, &lead), old_group_authority(&state, ch, &local, &peers, &unfit), "{ctx} {ch:?}");
+                assert_eq!(
+                    epoch_catchup_responder(&state, ch, &local, &peers, &behind, &lead),
+                    old_epoch_catchup_responder(&state, ch, &local, &peers, &behind, &unfit),
+                    "{ctx} {ch:?} behind {behind}",
+                );
+                assert_eq!(
+                    may_repair_our_leaf(&state, ch, &local, &peers, &requester, &lead),
+                    old_may_repair_our_leaf(&state, ch, &local, &peers, &requester, &unfit),
+                    "{ctx} {ch:?} requester {requester}",
+                );
+            }
+        }
+    }
+
+    /// A Legacy view of an on tree takes repairs from the owner alone.
+    #[test]
+    fn an_abstaining_view_takes_repairs_from_the_owner_alone() {
+        let mut state = ServerState::new("0123456789abcdef0123456789abcdef".into(), "s".into(), "own".into());
+        for m in ["own", "a", "b"] {
+            state.members.insert(m.into(), MemberInfo { peer_id: m.into(), display_name: m.into() });
+        }
+        // The owner is away, so the old rule's responder is the lowest online id.
+        let peers: Peers = [("room".to_string(), ["a", "b"].iter().map(|m| m.to_string()).collect())].into();
+        let abstain = Lead { rule: Rule::Abstain, ..Default::default() };
+        assert!(may_repair_our_leaf(&state, None, "b", &peers, "a", &Lead::default()), "control: the old rule names the lowest id");
+        assert!(!may_repair_our_leaf(&state, None, "b", &peers, "a", &abstain));
+        assert!(may_repair_our_leaf(&state, None, "b", &peers, "own", &abstain));
     }
 }

@@ -1932,6 +1932,9 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "door_ask")]
     DoorAsk {
         server_id: String,
+        /// Fresh per ask: salts the answerers' order so no member can grind ids into it.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        nonce: String,
     },
 
     /// The newest door of a server, sealed to the asking device's own key: what it
@@ -2100,6 +2103,13 @@ pub(crate) enum HavenMessage {
         epoch: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch_auth: Option<String>,
+        /// The echo a 0.13 receiver sends to a probe that needed an answer; never answered.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        answer: bool,
+        /// The prober's gate is on (design g13w2-f §3): of two forks across the flip the
+        /// OFF side's yields. 0.12.2 never sets it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        standing: bool,
     },
 
     /// A member device that is not the group's committer passes on a KeyPackage it was
@@ -2111,6 +2121,24 @@ pub(crate) enum HavenMessage {
         key_package: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
+    },
+
+    /// What a KeyPackage's receiver did with it, so a leafless asker steps on to the
+    /// next member at once instead of after the re-ask timer. `package` is
+    /// [`super::standing::package_tag`]. Routing metadata, like the package itself.
+    #[serde(rename = "mls_kp_ack")]
+    MlsKeyPackageAck {
+        server_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
+        #[serde(default)]
+        package: String,
+        #[serde(default)]
+        outcome: super::standing::KpOutcome,
+        /// With `Forwarded`, the master it went to: a repair we answered then takes that
+        /// master's Welcome (`LeadBook::repair_delegate`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<String>,
     },
 
     /// The group's committer hands one device a turn to refresh its own leaf at
@@ -4343,6 +4371,7 @@ impl HavenMessage {
             | Self::MlsKeyPackageRequest { .. }
             | Self::MlsEpochProbe { .. }
             | Self::MlsKeyPackageForward { .. }
+            | Self::MlsKeyPackageAck { .. }
             | Self::MlsUpdateTurn { .. }
             | Self::MlsUpdateTurnCommit { .. }
             | Self::MlsUpdateTurnDeclined { .. }
@@ -4549,6 +4578,7 @@ impl HavenMessage {
             | Self::MlsKeyPackageRequest { .. }
             | Self::MlsEpochProbe { .. }
             | Self::MlsKeyPackageForward { .. }
+            | Self::MlsKeyPackageAck { .. }
             | Self::MlsUpdateTurn { .. }
             | Self::MlsUpdateTurnCommit { .. }
             | Self::MlsUpdateTurnDeclined { .. }
@@ -5524,11 +5554,13 @@ mod epoch_catchup_wire_tests {
             channel_id: None,
             epoch: 4,
             epoch_auth: Some("ab12".into()),
+            answer: false,
+            standing: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"mls_epoch_probe","server_id":"srv1","epoch":4,"epoch_auth":"ab12"}"#);
         match serde_json::from_str::<HavenMessage>(&json).unwrap() {
-            HavenMessage::MlsEpochProbe { server_id, channel_id, epoch, epoch_auth } => {
+            HavenMessage::MlsEpochProbe { server_id, channel_id, epoch, epoch_auth, .. } => {
                 assert_eq!(server_id, "srv1");
                 assert!(channel_id.is_none());
                 assert_eq!(epoch, 4);
@@ -5947,6 +5979,71 @@ mod fwd_envelope_tests {
         ];
         for env in envs {
             assert!(env.target().is_none(), "fwd envelope unexpectedly targetable");
+        }
+    }
+}
+
+#[cfg(test)]
+mod standing_wire_tests {
+    use super::*;
+    use crate::node::standing::KpOutcome;
+
+    /// What a 0.12.2 decoder of the probe reads: no new fields, unknown ones ignored.
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "type")]
+    enum OldProbe {
+        #[serde(rename = "mls_epoch_probe")]
+        Probe { server_id: String, epoch: u64 },
+    }
+
+    /// Units 5 and 11: a probe without the new fields is a required probe with the gate
+    /// off; both fields pin; a 0.12.2-shaped decoder still reads the frame.
+    #[test]
+    fn the_epoch_probe_fields_default_off_and_old_decoders_read_them() {
+        let bare = r#"{"type":"mls_epoch_probe","server_id":"s","epoch":3}"#;
+        match serde_json::from_str::<HavenMessage>(bare).unwrap() {
+            HavenMessage::MlsEpochProbe { answer, standing, .. } => assert!(!answer && !standing),
+            other => panic!("{other:?}"),
+        }
+        let echo = HavenMessage::MlsEpochProbe {
+            server_id: "s".into(),
+            channel_id: None,
+            epoch: 3,
+            epoch_auth: None,
+            answer: true,
+            standing: true,
+        };
+        let json = serde_json::to_string(&echo).unwrap();
+        assert_eq!(json, r#"{"type":"mls_epoch_probe","server_id":"s","epoch":3,"answer":true,"standing":true}"#);
+        let OldProbe::Probe { server_id, epoch } = serde_json::from_str::<OldProbe>(&json).unwrap();
+        assert_eq!((server_id.as_str(), epoch), ("s", 3));
+        assert_eq!(echo.lane(), Lane::Relay, "the bit rides the relay lane (documented, L5)");
+    }
+
+    /// Unit 12: the ack's wire pin, its lane and that it is never buffered.
+    #[test]
+    fn the_key_package_ack_pins_its_wire_lane_and_liveness() {
+        let ack = HavenMessage::MlsKeyPackageAck {
+            server_id: "s".into(),
+            channel_id: Some("c".into()),
+            package: "00ff".into(),
+            outcome: KpOutcome::Forwarded,
+            via: Some("m".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&ack).unwrap(),
+            r#"{"type":"mls_kp_ack","server_id":"s","channel_id":"c","package":"00ff","outcome":"forwarded","via":"m"}"#,
+        );
+        assert_eq!(ack.lane(), Lane::Relay);
+        assert!(ack.live_only());
+        match serde_json::from_str::<HavenMessage>(r#"{"type":"mls_kp_ack","server_id":"s"}"#).unwrap() {
+            HavenMessage::MlsKeyPackageAck { package, outcome, channel_id, via, .. } => {
+                assert!(package.is_empty() && outcome == KpOutcome::Cannot && channel_id.is_none() && via.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        for (o, s) in [(KpOutcome::Commit, "commit"), (KpOutcome::Cannot, "cannot")] {
+            assert_eq!(serde_json::to_string(&o).unwrap(), format!("\"{s}\""));
         }
     }
 }

@@ -1,0 +1,149 @@
+{
+ "_": [
+  "g13w3-f-authority part three, on a, b and c: the owner a is back (relaunched with its data",
+  "kept: `-Live -Peers a` without -Fresh), reads what was said while it was away, says something",
+  "everyone reads, then deletes the server and b and c lose it."
+ ],
+ "peers": [
+  "a",
+  "b",
+  "c"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "g13w3-standing"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "contains:seated without the owner",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "g13w3-standing"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "c",
+   "op": "open_server",
+   "name": "g13w3-standing"
+  },
+  {
+   "peer": "c",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "hint:Message #general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Message #general",
+   "value": "the owner is back ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:the owner is back ${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "text:the owner is back ${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "g13w3-c-01-owner-back"
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:g13w3-standing"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Server settings"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "server:g13w3-standing",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "server:g13w3-standing",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "gone": "server:g13w3-standing",
+   "timeout_ms": 90000
+  }
+ ]
+}

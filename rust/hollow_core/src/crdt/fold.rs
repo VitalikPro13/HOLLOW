@@ -120,7 +120,7 @@ impl ServerState {
             for (who, until_ms) in current.into_iter().chain(past) {
                 let spans = base.member_record.entry(who).or_default();
                 if spans.first().is_none_or(|s| s.from_ms > 0) {
-                    spans.insert(0, MemberSpan { from_ms: 0, until_ms, asked_at: 0 });
+                    spans.insert(0, MemberSpan { from_ms: 0, until_ms, ..MemberSpan::default() });
                 }
             }
         }
@@ -241,6 +241,18 @@ impl ServerState {
             return self.fold_in(Vec::new(), out);
         }
         out
+    }
+
+    /// Refold an anchored log once on a state persisted before 0.13, whose spans lack the
+    /// admitters `node::standing` reads; true when the caller must persist the state. A
+    /// log that did not load leaves the mark unset, so the next start refolds.
+    pub fn refold_for_standing(&mut self) -> bool {
+        if self.standing_folded || self.anchor() == Anchor::Legacy || self.op_log.is_empty() {
+            return false;
+        }
+        let _ = self.fold_in(Vec::new(), Ingested::default());
+        self.standing_folded = true;
+        true
     }
 
     /// Server id, author signature and clock bound: everything that does not depend on
@@ -699,6 +711,40 @@ mod tests {
         assert!(base.was_member_at(&o, 1), "a current member from the start");
         assert!(base.was_member_at(&id(4), 4_000), "an author the owner holds posts by");
         assert!(!base.was_member_at(&id(4), 5_000 + 2 * hour), "only up to the checkpoint");
+    }
+
+    /// R4 (design g13w2-f): a state 0.12.2 persisted has spans without the admitters
+    /// standing reads; the first 0.13 load refolds it once into exactly what a replica
+    /// that folded under 0.13 holds.
+    #[test]
+    fn a_state_persisted_before_0_13_refolds_once_into_its_admitters() {
+        let t = crate::crdt::hlc::wall_clock_ms() - 3_600_000;
+        let sid = crate::crdt::anchor::derive_server_id(&id(1), "n");
+        let history = vec![
+            op_at(1, &sid, t, P::ServerCreated { name: "S".into(), owner_peer_id: id(1), nonce: "n".into() }),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, add(&sid, 3)),
+        ];
+        let mut live = joiner(&sid, 4);
+        live.ingest_remote(&history);
+        let want = live.member_record.clone();
+        assert!(want[&id(3)].last().is_some_and(|s| s.admitted.len() == 1 && s.from_hlc.is_some()), "control: a 0.13 fold records them");
+
+        let mut old = live.clone();
+        for spans in old.member_record.values_mut() {
+            for span in spans {
+                span.from_hlc = None;
+                span.admitted.clear();
+            }
+        }
+        let log = std::mem::take(&mut old.op_log);
+        assert!(!old.refold_for_standing() && !old.standing_folded, "a log that did not load leaves the mark unset");
+        old.op_log = log;
+        assert!(old.refold_for_standing(), "a state never refolded is refolded and saved");
+        assert_eq!(old.member_record, want);
+        assert!(!old.refold_for_standing(), "only once");
+        let restored: ServerState = serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        assert!(restored.standing_folded, "the mark persists");
     }
 
     /// M1: after a restart the store hands the log in clock order, where a checkpoint

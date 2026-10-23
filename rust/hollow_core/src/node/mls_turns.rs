@@ -205,12 +205,14 @@ fn committer_identity(state: &crate::crdt::server_state::ServerState, mls: &MlsM
     let (_, channel) = crate::crypto::split_group_key(group_key);
     let unfit = super::crypto_handler::unfit_committers(mls, state, group_key);
     let members = mls.group_members(group_key);
+    let rule = super::standing::rule(mls, state, group_key);
     let elected = match channel {
-        Some(cid) => super::crypto_handler::elect_subgroup_coordinator(state, &cid, local_master, peers),
-        None => super::crypto_handler::elect_server_coordinator(state, &members, local_master, peers),
+        Some(cid) => super::crypto_handler::elect_subgroup_coordinator(state, &cid, local_master, peers, &rule),
+        None => super::crypto_handler::elect_server_coordinator(state, &members, local_master, peers, &rule),
     };
     // A subgroup we hold falls back among its own leaves.
-    super::crypto_handler::fit_coordinator(elected, &members, local_master, peers, &unfit)
+    super::crypto_handler::fit_coordinator(elected, &members, local_master, peers, &unfit, state, &rule)
+        .filter(|c| rule.may_lead() || c != local_master)
 }
 
 /// The device of `identity` that commits for it in the group: its lowest online,
@@ -514,7 +516,8 @@ fn first_forward(local_device: &str, key_package_b64: &str) -> bool {
     true
 }
 
-/// Pass a KeyPackage we will not commit on to `coordinator`'s devices, once.
+/// Pass a KeyPackage we will not commit on to `coordinator`'s devices, once. True when
+/// it is on its way (now or by an earlier forward).
 pub(crate) fn forward_key_package(
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     peers: &Peers,
@@ -523,9 +526,9 @@ pub(crate) fn forward_key_package(
     server_id: &str,
     channel_id: Option<String>,
     key_package_b64: &str,
-) {
+) -> bool {
     if !first_forward(local_device, key_package_b64) {
-        return;
+        return true;
     }
     super::crypto_handler::send_key_package_to_identity_of(
         ws_cmd_tx,
@@ -534,6 +537,7 @@ pub(crate) fn forward_key_package(
         &HavenMessage::MlsKeyPackageForward { server_id: server_id.to_string(), key_package: key_package_b64.to_string(), channel_id },
     );
     hollow_log!("[HOLLOW-MLS] Passed a KeyPackage for {server_id} on to the committer {coordinator}");
+    true
 }
 
 /// A forwarded KeyPackage as the KeyPackage its own device would have sent: the

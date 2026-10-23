@@ -1181,7 +1181,7 @@ pub(crate) async fn handle_voice_sframe_heal(
     // Who is the authority for this group?
     let authority: Option<String> = if restricted {
         super::crypto_handler::elect_subgroup_coordinator(
-            state, &channel_id, local_peer_str, ws_room_peers)
+            state, &channel_id, local_peer_str, ws_room_peers, &super::standing::rule(mls_mgr, state, &group_key))
     } else {
         state.members.keys().find(|m| {
             state.roles.get(*m)

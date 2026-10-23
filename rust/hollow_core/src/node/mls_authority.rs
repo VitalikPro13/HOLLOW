@@ -126,6 +126,17 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
             return Verdict::Refuse(format!("epoch rate: {why}"));
         }
     }
+    // The standing ratchet (design g13w2-f §3): an all-0.13 tree admits no leaf without
+    // the tally capability but the anchored owner's, or one stale leaf turns the gate off.
+    if let GroupRules::Server { state, .. } = rules
+        && super::standing::tree_declares(&facts.tree)
+        && let Some(leaf) = facts
+            .undeclared
+            .iter()
+            .find(|l| !l.bound().is_some_and(|b| super::crypto_handler::is_anchor_owner(state, &b.master)))
+    {
+        return Verdict::Refuse(format!("writes leaf {} without the tally capability into an all-0.13 group", leaf.id()));
+    }
     if refused(committer) {
         return Verdict::Refuse(format!("committed by revoked or disowned device {}", committer.device));
     }
@@ -225,10 +236,14 @@ pub(crate) fn welcome_sender_refusal(
     refused(&device).then(|| "a revoked or disowned device".to_string())
 }
 
+/// Whether a serialised KeyPackage declares the tally capability.
+pub(crate) type KeyPackageDeclares<'a> = dyn Fn(&[u8]) -> bool + 'a;
+
 /// The committer's side: which queued removals and adds go into one commit. An add
 /// needs a bound KeyPackage for the device it was queued under, from a current
 /// member; a current member's leaf is removed only alongside a re-add of its device
 /// with a KeyPackage `minted_for_group` dates after `leaf_minted`'s.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_membership(
     leaves: &[LeafView],
     leaf_minted: &std::collections::HashMap<String, u64>,
@@ -237,6 +252,9 @@ pub(crate) fn plan_membership(
     minted_for_group: impl Fn(&[u8]) -> Option<u64>,
     ourselves: &LeafIdentity,
     rules: &GroupRules,
+    // The tree is all-0.13 (`standing::tree_declares`) and whether a package declares the
+    // tally capability: the committer's half of the standing ratchet.
+    ratchet: Option<&KeyPackageDeclares>,
 ) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
     let mut adds = Vec::new();
     let mut planned = CommitFacts { remove_minted: leaf_minted.clone(), ..Default::default() };
@@ -247,6 +265,11 @@ pub(crate) fn plan_membership(
             || refused(identity)
             || rules.membership(&identity.master, "") != Verdict::Accept
         {
+            continue;
+        }
+        let owner = matches!(rules, GroupRules::Server { state, .. } if super::crypto_handler::is_anchor_owner(state, &identity.master));
+        if !owner && ratchet.is_some_and(|declares| !declares(&kp)) {
+            crate::hollow_log!("[HOLLOW-MLS] Not adding {device}: its leaf lacks the tally capability and every leaf here has it");
             continue;
         }
         if let Some(minted) = minted_for_group(&kp) {
@@ -279,12 +302,20 @@ pub(crate) struct LeafRequests<'a> {
     pub join_pending: bool,
     /// The master whose KeyPackage request we last answered for this group.
     pub answered: Option<(String, std::time::Instant)>,
+    /// The committer that master named when it forwarded our package
+    /// (`LeadBook::repair_delegate`).
+    pub delegate: Option<String>,
+    /// The server is not Legacy (design g13w2-f §10.3): its parked joins carry no
+    /// KeyPackage, so a parked join asked for no Welcome.
+    pub anchored: bool,
 }
 
 /// Whether a Welcome for `group_key` from `sender_master` answers a request of ours:
 /// a KeyPackage we pushed, an eviction whose re-add we are waiting for, our own join
-/// in flight, or a KeyPackage request we answered FOR THAT SENDER. Anyone can ask us
-/// for a KeyPackage, so an answer vouches for its requester and nobody else.
+/// in flight, or a KeyPackage request we answered FOR THAT SENDER. The relay reads the
+/// package we answer with, so an answer vouches for its requester and nobody else, plus
+/// the committer the requester names when it forwards that package
+/// (`LeadBook::note_repair_delegate`).
 pub(crate) fn asked_for_leaf(
     group_key: &str,
     server_id: &str,
@@ -296,13 +327,15 @@ pub(crate) fn asked_for_leaf(
     }
     let recent = |t: &std::time::Instant| t.elapsed() < ASKED_WINDOW;
     requests.join_pending
-        || requests.awaiting_parked_join.contains(server_id)
+        || (!requests.anchored && requests.awaiting_parked_join.contains(server_id))
         || requests.bootstrap_requested.get(group_key).is_some_and(recent)
         || requests.welcome_grace.get(group_key).is_some_and(recent)
         || requests
             .answered
             .as_ref()
-            .is_some_and(|(requester, t)| recent(t) && sender_master == Some(requester.as_str()))
+            .is_some_and(|(requester, t)| {
+                recent(t) && sender_master.is_some_and(|s| s == requester || requests.delegate.as_deref() == Some(s))
+            })
 }
 
 /// [`welcome_verdict`] for a group key, with the rules its server or meeting follows.
@@ -366,6 +399,7 @@ pub(crate) fn frame_names_a_group(msg: &super::types::HavenMessage, from: &str) 
         | H::MlsKeyPackageRequest { server_id, channel_id }
         | H::MlsEpochProbe { server_id, channel_id, .. }
         | H::MlsKeyPackageForward { server_id, channel_id, .. }
+        | H::MlsKeyPackageAck { server_id, channel_id, .. }
         | H::MlsUpdateTurn { server_id, channel_id, .. }
         | H::MlsUpdateTurnCommit { server_id, channel_id, .. }
         | H::MlsUpdateTurnDeclined { server_id, channel_id, .. }
@@ -481,8 +515,16 @@ pub(crate) fn founds_on_key_package(
 ) -> bool {
     match channel {
         Some(cid) => {
+            let rule = super::standing::rule(mls, state, group_key);
             let coordinator = if from_sibling {
-                super::crypto_handler::elect_subgroup_coordinator(state, cid, local_master, ws_room_peers)
+                super::crypto_handler::elect_subgroup_coordinator(state, cid, local_master, ws_room_peers, &rule)
+            } else if rule.on() {
+                let qualifying = state.members.keys()
+                    .filter(|m| state.can_see_channel(m, cid))
+                    .filter(|m| !super::resolver::same_identity(&sender.device, m) && **m != sender.master)
+                    .filter(|m| m.as_str() == local_master || super::crypto_handler::peer_is_reachable(ws_room_peers, m))
+                    .cloned();
+                super::standing::first_by_standing(state, qualifying)
             } else {
                 state.members.keys()
                     .filter(|m| state.can_see_channel(m, cid))
@@ -940,10 +982,114 @@ mod tests {
             |_| None,
             &ourselves,
             &rules,
+            None,
         );
         assert!(adds.is_empty(), "an unparseable KeyPackage is never added");
         assert_eq!(removals, vec!["gone-d".to_string(), "legacy".to_string()]);
         assert_eq!(stale_leaves(&leaves, "owner-d", &rules), vec!["gone-d".to_string(), "legacy".to_string()]);
+    }
+
+    /// An answered KeyPackage request vouches for its requester alone (the relay reads
+    /// the package), and outside a Legacy server a parked join vouches for nothing (its
+    /// ring copy carried no package).
+    #[test]
+    fn an_answered_request_vouches_for_its_requester_and_a_parked_join_only_in_legacy() {
+        let none = std::collections::HashMap::new();
+        let no_parked = std::collections::HashSet::new();
+        let parked: std::collections::HashSet<String> = ["s1".to_string()].into();
+        let req = |anchored: bool, parked_set, answered: bool| LeafRequests {
+            bootstrap_requested: &none,
+            welcome_grace: &none,
+            awaiting_parked_join: parked_set,
+            join_pending: false,
+            answered: answered.then(|| ("resp".to_string(), std::time::Instant::now())),
+            delegate: None,
+            anchored,
+        };
+        assert!(asked_for_leaf("s1", "s1", Some("resp"), &req(false, &no_parked, true)));
+        assert!(!asked_for_leaf("s1", "s1", Some("coord"), &req(false, &no_parked, true)), "Legacy: the requester alone");
+        assert!(!asked_for_leaf("s1", "s1", Some("coord"), &req(true, &no_parked, true)), "anchored: still the requester alone");
+        assert!(asked_for_leaf("s1", "s1", Some("x"), &req(false, &parked, false)), "Legacy: a parked join seats");
+        assert!(!asked_for_leaf("s1", "s1", Some("x"), &req(true, &parked, false)), "anchored: a parked join asked nothing");
+        let named = |answered: bool| LeafRequests { delegate: Some("coord".into()), ..req(true, &no_parked, answered) };
+        assert!(asked_for_leaf("s1", "s1", Some("coord"), &named(true)), "the committer the requester named");
+        assert!(!asked_for_leaf("s1", "s1", Some("coord"), &named(false)), "a name outlives no answer");
+        assert!(!asked_for_leaf("s1", "s1", Some("other"), &named(true)), "nobody else");
+        assert!(!asked_for_leaf("s1", "s1", None, &named(true)), "an unbound sender");
+    }
+
+    /// Unit 4: the receiver half of the standing ratchet. In an all-0.13 tree a commit
+    /// writing a leaf without the tally capability (an add or the committer's path leaf)
+    /// is refused, unless the leaf is the anchored owner's; an older tree and meetings
+    /// take it.
+    #[test]
+    fn the_ratchet_matrix() {
+        let state = server(&["owner", "alice", "bob"]);
+        let rules = GroupRules::Server { state: &state, channel: None };
+        let rec = |dev: &str, master: &str, declares: bool| crate::crypto::mls_tally::LeafRecord {
+            index: 0,
+            identity: Some(LeafIdentity { device: dev.into(), master: master.into() }),
+            declares,
+            tally: None,
+            commit_written: false,
+            fresh_day: 0,
+        };
+        let on = vec![rec("owner-d", "owner", true), rec("alice-d", "alice", true)];
+        let off = vec![rec("owner-d", "owner", true), rec("alice-d", "alice", false)];
+        let ratchet = |v: &Verdict| matches!(v, Verdict::Refuse(why) if why.contains("tally capability"));
+        let add = |tree: &Vec<crate::crypto::mls_tally::LeafRecord>, who: LeafView, declares: bool| CommitFacts {
+            adds: vec![who.clone()],
+            undeclared: if declares { vec![] } else { vec![who] },
+            tree: tree.clone(),
+            ..facts(leaf("owner-d", "owner"))
+        };
+        assert!(ratchet(&commit_verdict(&add(&on, leaf("bob-d", "bob"), false), &rules)), "on, a member's stale add");
+        assert!(!ratchet(&commit_verdict(&add(&on, leaf("bob-d", "bob"), true), &rules)), "on, a declaring add");
+        assert!(!ratchet(&commit_verdict(&add(&off, leaf("bob-d", "bob"), false), &rules)), "off: the old rule");
+        assert!(!ratchet(&commit_verdict(&add(&on, leaf("owner-d2", "owner"), false), &rules)), "on, the owner's own old device");
+        let path = |committer: LeafView, tree: &Vec<crate::crypto::mls_tally::LeafRecord>| CommitFacts {
+            path_leaf: Some(committer.clone()),
+            undeclared: vec![committer.clone()],
+            tree: tree.clone(),
+            ..facts(committer)
+        };
+        assert!(ratchet(&commit_verdict(&path(leaf("alice-d", "alice"), &on), &rules)), "on, a member's stale path leaf");
+        assert!(!ratchet(&commit_verdict(&path(leaf("owner-d", "owner"), &on), &rules)), "on, the owner's stale path leaf");
+        assert!(!ratchet(&commit_verdict(&path(leaf("alice-d", "alice"), &off), &rules)), "off, a stale path leaf");
+        let meeting = GroupRules::Meeting { host: Some("owner") };
+        assert!(!ratchet(&commit_verdict(&add(&on, leaf("bob-d", "bob"), false), &meeting)), "meetings are exempt");
+    }
+
+    /// The committer half: in an all-0.13 tree the planner drops a stale KeyPackage of
+    /// anyone but the anchored owner.
+    #[test]
+    fn the_planner_ratchet_spares_only_the_owner() {
+        use crate::identity::native_identity::NativeKeypair;
+        let kp_of = |tag: u8| {
+            let mut secret = [0u8; 32];
+            secret[0] = tag;
+            secret[31] = 0x5a;
+            NativeKeypair::from_secret_bytes(&secret)
+        };
+        let (owner, owner_d2, bob, bob_d) = (kp_of(1), kp_of(2), kp_of(3), kp_of(4));
+        let state = server(&[&owner.peer_id(), &bob.peer_id()]);
+        let rules = GroupRules::Server { state: &state, channel: None };
+        let ourselves = LeafIdentity { device: "owner-d".into(), master: owner.peer_id() };
+        let queued = vec![
+            (owner_d2.peer_id(), crate::crypto::mls_tally::stray_key_package(&owner_d2, &owner, "s1")),
+            (bob_d.peer_id(), crate::crypto::mls_tally::stray_key_package(&bob_d, &bob, "s1")),
+        ];
+        let leaves = vec![leaf("owner-d", &owner.peer_id())];
+        let none = std::collections::HashMap::new();
+        let stale = |_: &[u8]| false;
+        let plan = |ratchet: Option<&KeyPackageDeclares>| {
+            plan_membership(&leaves, &none, &[], queued.clone(), |_| None, &ourselves, &rules, ratchet).1
+                .into_iter()
+                .map(|(d, _)| d)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(plan(None), vec![owner_d2.peer_id(), bob_d.peer_id()], "off: both");
+        assert_eq!(plan(Some(&stale)), vec![owner_d2.peer_id()], "on: only the owner's old device");
     }
 
     /// Every inbound MLS frame names its group by a server's or a meeting's id and a
@@ -960,7 +1106,7 @@ mod tests {
                 H::MlsWelcome { server_id: server_id.clone(), welcome: s.clone(), channel_id: channel_id.clone(), conf_host: None },
                 H::MlsCommit { server_id: server_id.clone(), commit: s, channel_id: channel_id.clone(), epoch: None },
                 H::MlsKeyPackageRequest { server_id: server_id.clone(), channel_id: channel_id.clone() },
-                H::MlsEpochProbe { server_id: server_id.clone(), channel_id: channel_id.clone(), epoch: 1, epoch_auth: None },
+                H::MlsEpochProbe { server_id: server_id.clone(), channel_id: channel_id.clone(), epoch: 1, epoch_auth: None, answer: false, standing: false },
                 H::MlsCommitCatchup { server_id, channel_id, commits: Vec::new() },
             ]
         };

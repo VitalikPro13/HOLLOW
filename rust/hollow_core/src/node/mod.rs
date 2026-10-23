@@ -60,6 +60,7 @@ pub(crate) mod room_bounds;
 pub(crate) mod roster_book;
 pub(crate) mod roster_reach;
 pub(crate) mod sealed_box;
+pub(crate) mod standing;
 pub(crate) mod security_alerts;
 pub(crate) mod share_handler;
 pub(crate) mod social;

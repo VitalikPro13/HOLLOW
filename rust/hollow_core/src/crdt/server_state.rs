@@ -243,13 +243,30 @@ pub struct MemberInfo {
 
 /// One stretch of time an identity was a member, in epoch ms from its admitting op's
 /// clock to its removal's (`u64::MAX` while still a member).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MemberSpan {
     pub from_ms: u64,
     pub until_ms: u64,
     /// The `at` of the ask that opened it; 0 for the founder and spans a checkpoint seeded.
     #[serde(default)]
     pub asked_at: i64,
+    /// The full clock of the op that opened it; `None` for spans written before 0.13.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_hlc: Option<HlcTimestamp>,
+    /// Every distinct author of a `MemberAdded` naming this member while the span was
+    /// open, with that author's earliest such clock: the inputs of its standing
+    /// (`node::standing`). Empty for the founder and seeded or pre-0.13 spans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admitted: Vec<(String, HlcTimestamp)>,
+}
+
+/// Keep `by`'s earliest admission clock in `span`, one entry per distinct author.
+fn note_admitter(span: &mut MemberSpan, by: &str, at: &HlcTimestamp) {
+    match span.admitted.iter_mut().find(|(author, _)| author == by) {
+        Some((_, hlc)) if at < hlc => *hlc = at.clone(),
+        Some(_) => {}
+        None => span.admitted.push((by.to_string(), at.clone())),
+    }
 }
 
 /// Slack either side of a membership span when judging a post's time: post clocks
@@ -338,6 +355,10 @@ pub struct ServerState {
     /// Clock of the checkpoint this state was last rebased on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_hlc: Option<HlcTimestamp>,
+    /// This replica refolded its log once under 0.13, so every span carries the admitters
+    /// `node::standing` reads (`refold_for_standing`). Remove in 0.14.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standing_folded: bool,
     /// Admitted ops since the anchor, HLC-sorted. Persisted in `crdt_ops`, never in
     /// the state JSON. Capped at `LEGACY_OP_LOG_CAP` only while `Anchor::Legacy`.
     #[serde(default, skip_serializing)]
@@ -374,7 +395,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, join_secret, join_lock, owner_pin, checkpoint_hlc,
+            member_record, join_secret, join_lock, owner_pin, checkpoint_hlc, standing_folded,
             op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, signer: _,
         } = self;
         ServerState {
@@ -403,6 +424,7 @@ impl ServerState {
             join_lock: join_lock.clone(),
             owner_pin: owner_pin.clone(),
             checkpoint_hlc: checkpoint_hlc.clone(),
+            standing_folded: *standing_folded,
             op_log: Vec::new(),
             hlc: None,
             op_log_dedup: HashSet::new(),
@@ -441,6 +463,7 @@ impl ServerState {
             join_lock: Default::default(),
             owner_pin: None,
             checkpoint_hlc: None,
+            standing_folded: false,
             op_log: Vec::new(),
             hlc: None,
             op_log_dedup: HashSet::new(),
@@ -495,7 +518,7 @@ impl ServerState {
             owner.to_string(),
             AdminLwwReg::new(MemberRole::Owner, at.clone(), MemberRole::Owner.priority()),
         );
-        self.open_span(owner, at.physical_ms, 0);
+        self.open_span(owner, at, 0, None);
         let general_id = format!("{}-general", &self.server_id[..8.min(self.server_id.len())]);
         self.channels.entry(general_id.clone()).or_insert_with(|| ChannelInfo {
             channel_id: general_id,
@@ -532,10 +555,19 @@ impl ServerState {
         self.owner_pin.clone().or_else(|| self.current_owner())
     }
 
-    fn open_span(&mut self, master: &str, at_ms: u64, asked_at: i64) {
+    fn open_span(&mut self, master: &str, at: &HlcTimestamp, asked_at: i64, by: Option<&str>) {
         let spans = self.member_record.entry(master.to_string()).or_default();
         if spans.last().is_none_or(|s| s.until_ms != u64::MAX) {
-            spans.push(MemberSpan { from_ms: at_ms, until_ms: u64::MAX, asked_at });
+            spans.push(MemberSpan {
+                from_ms: at.physical_ms,
+                until_ms: u64::MAX,
+                asked_at,
+                from_hlc: Some(at.clone()),
+                admitted: Vec::new(),
+            });
+        }
+        if let (Some(by), Some(open)) = (by, spans.last_mut()) {
+            note_admitter(open, by, at);
         }
     }
 
@@ -807,7 +839,7 @@ impl ServerState {
             server_id: _, channels: _, members: _, pinned_messages: _,
             channel_layout: _, labels: _, label_assignments: _, emotes: _,
             stickers: _, deleted: _, member_record: _, owner_pin: _,
-            checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _, held: _,
+            checkpoint_hlc: _, standing_folded: _, op_log: _, hlc: _, op_log_dedup: _, held: _,
             id_memo: _, signer: _,
         } = self;
 
@@ -1006,7 +1038,11 @@ impl ServerState {
                 ask, ..
             } => {
                 if !self.members.contains_key(peer_id) {
-                    self.open_span(peer_id, op.hlc.physical_ms, ask.as_ref().map_or(0, |a| a.at));
+                    self.open_span(peer_id, &op.hlc, ask.as_ref().map_or(0, |a| a.at), Some(&op.author));
+                } else if let Some(open) = self.member_record.get_mut(peer_id).and_then(|s| s.last_mut()).filter(|s| s.until_ms == u64::MAX) {
+                    // A duplicate admission adds its author to an open span and never opens
+                    // one: a span opened here would widen `was_member_at` for older rows.
+                    note_admitter(open, &op.author, &op.hlc);
                 }
                 self.members.entry(peer_id.clone()).or_insert_with(|| {
                     MemberInfo {
@@ -1366,7 +1402,7 @@ impl ServerState {
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
             member_record, join_secret, join_lock,
-            owner_pin: _, checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _,
+            owner_pin: _, checkpoint_hlc: _, standing_folded: _, op_log: _, hlc: _, op_log_dedup: _,
             held: _, id_memo: _, signer: _,
         } = base;
         self.name = name;
@@ -1415,7 +1451,7 @@ impl ServerState {
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
             member_record, join_secret, join_lock, checkpoint_hlc,
-            owner_pin: _, op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, signer: _,
+            owner_pin: _, standing_folded: _, op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, signer: _,
         } = fresh;
         self.name = name;
         self.channels = channels;
@@ -2282,6 +2318,58 @@ mod tests {
         let mut op = state.create_op(payload);
         op.author = author.to_string();
         op
+    }
+
+    /// Unit 8 (design g13w2-f): a span keeps every distinct author of a `MemberAdded`
+    /// naming its member, each at its earliest clock; the opening op's clock is kept whole.
+    #[test]
+    fn a_span_records_every_admitter_once_at_its_earliest_clock() {
+        let mut s = test_state("s1".into(), "S".into(), "owner".into());
+        let add = |s: &mut ServerState, by: &str| {
+            let op = op_by(s, by, CrdtPayload::MemberAdded { peer_id: "m".into(), display_name: "m".into(), follow: None, ask: None });
+            let _ = s.apply_op(&op);
+            op.hlc
+        };
+        let first = add(&mut s, "owner");
+        let by_alice = add(&mut s, "alice");
+        let _later = add(&mut s, "alice");
+        let span = s.member_record["m"].last().unwrap().clone();
+        assert_eq!(span.from_hlc, Some(first.clone()));
+        assert_eq!(span.from_ms, first.physical_ms);
+        assert_eq!(span.admitted, vec![("owner".to_string(), first), ("alice".to_string(), by_alice)]);
+    }
+
+    /// A duplicate `MemberAdded` for a member whose row has no open span (written before
+    /// spans existed) opens none, so `was_member_at` answers as 0.12.2 did.
+    #[test]
+    fn a_duplicate_admission_opens_no_span_for_an_old_row() {
+        let mut s = test_state("s1".into(), "S".into(), "owner".into());
+        let add = |s: &mut ServerState| {
+            let op = op_by(s, "owner", CrdtPayload::MemberAdded { peer_id: "m".into(), display_name: "m".into(), follow: None, ask: None });
+            let _ = s.apply_op(&op);
+            op.hlc
+        };
+        let first = add(&mut s);
+        s.member_record.remove("m");
+        let dup = add(&mut s);
+        assert!(s.member_record.get("m").is_none_or(|spans| spans.is_empty()), "a duplicate opened a span");
+        assert!(!s.was_member_at("m", dup.physical_ms) && !s.was_member_at("m", first.physical_ms));
+    }
+
+    /// Spans written before 0.13 (DB rows, checkpoints) load with empty new fields, and a
+    /// span without them serializes exactly as 0.12.2 wrote it.
+    #[test]
+    fn member_spans_written_before_0_13_still_load() {
+        let old = r#"{"from_ms":5,"until_ms":18446744073709551615,"asked_at":3}"#;
+        let span: MemberSpan = serde_json::from_str(old).unwrap();
+        assert!(span.from_hlc.is_none() && span.admitted.is_empty());
+        assert_eq!(serde_json::to_string(&span).unwrap(), old);
+        let oldest: MemberSpan = serde_json::from_str(r#"{"from_ms":5,"until_ms":9}"#).unwrap();
+        assert_eq!((oldest.asked_at, oldest.from_hlc, oldest.admitted.len()), (0, None, 0));
+        let mut state = test_state("s1".into(), "S".into(), "owner".into());
+        state.member_record.insert("m".into(), vec![span]);
+        let back: ServerState = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(back.member_record["m"][0].asked_at, 3);
     }
 
     /// The shared ingest permission matrix (`op_allowed`), one allowed and one denied

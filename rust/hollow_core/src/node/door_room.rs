@@ -166,7 +166,9 @@ impl DoorRooms {
         }
         self.asked.insert(room.to_string(), Instant::now());
         hollow_log!("[HOLLOW-WS] The relay hides us in {room}: asking its members for the newest door");
-        if let Ok(data) = serde_json::to_vec(&HavenMessage::DoorAsk { server_id: room.to_string() }) {
+        let mut salt = [0u8; 16];
+        let nonce = if getrandom::fill(&mut salt).is_ok() { hex::encode(salt) } else { String::new() };
+        if let Ok(data) = serde_json::to_vec(&HavenMessage::DoorAsk { server_id: room.to_string(), nonce }) {
             let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: room.to_string(), data });
         }
         true
@@ -182,6 +184,7 @@ impl DoorRooms {
         &mut self,
         room: &str,
         server_id: &str,
+        nonce: &str,
         asker: &str,
         olm: &crate::crypto::OlmManager,
         server_states: &ServerStates,
@@ -198,10 +201,12 @@ impl DoorRooms {
             return false;
         };
         if !state.is_member(&master) {
-            return olm.has_session(asker) && self.tell_removal(room, asker, &master, state, ws_room_peers, our_device, ws_cmd_tx);
+            return olm.has_session(asker)
+                && self.first_to_answer(room, asker, nonce, ws_room_peers, our_device, local_master)
+                && self.tell_removal(room, asker, &master, state, ws_cmd_tx);
         }
         let Some((n, _, secret)) = state.join_lock.newest_door() else { return false };
-        if !self.first_to_answer(room, asker, ws_room_peers, our_device) {
+        if !self.first_to_answer(room, asker, nonce, ws_room_peers, our_device, local_master) {
             return false;
         }
         let key = (room.to_string(), asker.to_string());
@@ -222,17 +227,29 @@ impl DoorRooms {
         true
     }
 
-    fn first_to_answer(&self, room: &str, asker: &str, ws_room_peers: &WsRoomPeers, our_device: &str) -> bool {
+    /// Whether we are among the first [`ANSWERERS`] identities in the room by an order
+    /// the asker's fresh `nonce` salts: one slot per master (its lowest device answers),
+    /// so no identity fills the slots with many devices or ids ground in advance.
+    fn first_to_answer(&self, room: &str, asker: &str, nonce: &str, ws_room_peers: &WsRoomPeers, our_device: &str, local_master: &str) -> bool {
         use sha2::{Digest, Sha256};
-        let rank = |device: &str| Sha256::digest(format!("{asker}\n{device}").as_bytes());
-        let ours = rank(our_device);
-        let ahead = ws_room_peers
+        let rank = |master: &str| Sha256::digest(format!("{asker}\n{nonce}\n{master}").as_bytes());
+        let devices: Vec<&String> = ws_room_peers
             .get(room)
             .into_iter()
             .flatten()
-            .filter(|d| d.as_str() != our_device && d.as_str() != asker && rank(d) < ours)
-            .count();
-        ahead < ANSWERERS
+            .filter(|d| d.as_str() != asker && !super::resolver::is_bare_master(d))
+            .collect();
+        if devices.iter().any(|d| d.as_str() < our_device && super::resolver::same_identity(d, local_master)) {
+            return false;
+        }
+        let asker_master = super::resolver::resolve(asker);
+        let masters: std::collections::HashSet<String> = devices
+            .iter()
+            .map(|d| super::resolver::resolve(d))
+            .filter(|m| m != local_master && *m != asker_master)
+            .collect();
+        let ours = rank(local_master);
+        masters.iter().filter(|m| rank(m) < ours).count() < ANSWERERS
     }
 
     /// A former member's device asked: hand it the op that removed it, with what its
@@ -245,8 +262,6 @@ impl DoorRooms {
         asker: &str,
         master: &str,
         state: &crate::crdt::server_state::ServerState,
-        ws_room_peers: &WsRoomPeers,
-        our_device: &str,
         ws_cmd_tx: &WsCmdTx,
     ) -> bool {
         // A door ask carries no state vector, so the notice reaches back to the anchor.
@@ -256,7 +271,7 @@ impl DoorRooms {
             return false;
         };
         let key = (room.to_string(), asker.to_string());
-        if self.told.get(&key) == Some(&removal) || !self.first_to_answer(room, asker, ws_room_peers, our_device) {
+        if self.told.get(&key) == Some(&removal) {
             return false;
         }
         let Ok(ops_json) = serde_json::to_string(&notice) else { return false };
@@ -328,7 +343,8 @@ impl DoorRooms {
 mod tests {
     use super::super::resolver;
     use super::super::ws_client::WsCommand;
-    use super::{speaks_for, DoorRooms, HavenMessage};
+    use super::{speaks_for, DoorRooms, HavenMessage, WsRoomPeers, ANSWERERS};
+    use std::collections::HashSet;
     use crate::crdt::hlc::HlcTimestamp;
     use crate::crdt::operations::{CrdtOp, CrdtPayload, JoinAsk};
     use crate::crdt::server_state::ServerState;
@@ -345,6 +361,44 @@ mod tests {
         };
         op.sign(&kp, &pk);
         op
+    }
+
+    /// Design g13w2-f §4.7: one identity with many (ground) devices fills at most one
+    /// answerer slot, answered by its lowest device, and which identities answer
+    /// changes with the asker's fresh nonce, so nothing can be ground in advance.
+    #[test]
+    fn g13w2f_door_answerers_are_three_identities_whatever_their_device_ids() {
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        let mut links: Vec<(String, String)> = (1..=6).map(|i| (format!("x{i}"), "X".to_string())).collect();
+        links.extend([("a1", "A"), ("b1", "B"), ("c1", "C")].map(|(d, m)| (d.to_string(), m.to_string())));
+        resolver::warm_from_links(&links);
+        let mut room: HashSet<String> = links.iter().map(|(d, _)| d.clone()).collect();
+        room.insert("asker".into());
+        let peers: WsRoomPeers = [("r".to_string(), room)].into();
+        let doors = DoorRooms::default();
+        let answering = |nonce: &str| -> Vec<String> {
+            let mut v: Vec<String> = links
+                .iter()
+                .filter(|(d, m)| doors.first_to_answer("r", "asker", nonce, &peers, d, m))
+                .map(|(d, _)| d.clone())
+                .collect();
+            v.sort();
+            v
+        };
+        let mut x_left_out = false;
+        let mut x_in = false;
+        for n in 0..32 {
+            let who = answering(&format!("nonce-{n}"));
+            assert_eq!(who.len(), ANSWERERS, "three answerers for nonce {n}: {who:?}");
+            let xs: Vec<&String> = who.iter().filter(|d| d.starts_with('x')).collect();
+            assert!(xs.len() <= 1, "one identity took two slots: {who:?}");
+            assert!(xs.iter().all(|d| d.as_str() == "x1"), "only the identity's lowest device answers: {who:?}");
+            x_left_out |= xs.is_empty();
+            x_in |= !xs.is_empty();
+        }
+        assert!(x_left_out && x_in, "the nonce reorders the identities");
+        resolver::clear_for_test();
     }
 
     /// HOL-SEC-114: a kicked member's device that asks for the door is handed its
@@ -379,7 +433,7 @@ mod tests {
         let peers = std::collections::HashMap::new();
         let mut olm = crate::crypto::OlmManager::new();
         let ask = |doors: &mut DoorRooms, states: &std::collections::HashMap<String, ServerState>, olm: &crate::crypto::OlmManager, asker: &str| {
-            doors.answer_ask(&sid, &sid, asker, olm, states, &peers, &owner, "our-device", &tx)
+            doors.answer_ask(&sid, &sid, "", asker, olm, states, &peers, &owner, "our-device", &tx)
         };
 
         assert!(!ask(&mut doors, &states, &olm, "kicked-device") && rx.try_recv().is_err(), "told with no session to carry it");

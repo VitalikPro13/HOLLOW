@@ -150,6 +150,12 @@ pub(crate) fn certificate_for_test(device: &NativeKeypair, master: &NativeKeypai
     bound_credential_text(device, master)
 }
 
+/// A KeyPackage from a hostile test copy, whose private half no test reads back.
+#[cfg(test)]
+pub(crate) fn throwaway_key_package_for_test(mls: &MlsManager, group_key: &str) -> Vec<u8> {
+    mls.generate_key_package_for(group_key, false).expect("kp")
+}
+
 /// Who a device certificate (a bound credential's text) says it is, when its
 /// master's signature holds. It proves the binding, never who sent it: pair it with
 /// a frame sealed by that device.
@@ -351,6 +357,9 @@ pub(crate) struct CommitFacts {
     pub path_tally: Option<Option<super::mls_tally::Tally>>,
     /// The commit carries no proposal at all.
     pub no_proposals: bool,
+    /// Leaves the commit writes (adds, the committer's path leaf) that do not declare
+    /// the tally capability: the standing ratchet's input.
+    pub undeclared: Vec<LeafView>,
 }
 
 /// What a received Welcome would install, read before it replaces anything.
@@ -549,6 +558,8 @@ pub(crate) struct MlsManager {
     own_staged: HashMap<String, (u64, Vec<u8>)>,
     seat_cache: SeatCache,
     leaf_cache: LeafCache,
+    /// Leafless walks and silent responders (RAM-only).
+    pub(crate) lead: crate::node::standing::LeadBook,
 }
 
 /// Commits kept per group for catch-up replay. A desktop, the device that answers
@@ -614,6 +625,7 @@ impl MlsManager {
             own_staged: HashMap::new(),
             seat_cache: Mutex::new(HashMap::new()),
             leaf_cache: Mutex::new(HashMap::new()),
+            lead: Default::default(),
         }
     }
 
@@ -851,8 +863,8 @@ impl MlsManager {
     /// older ones for the group are dropped once superseded for a while.
     pub fn generate_key_package_for(&self, group_key: &str, parked: bool) -> Result<Vec<u8>, String> {
         let bundle = KeyPackage::builder()
-            .leaf_node_capabilities(super::mls_tally::tally_capabilities())
-            .leaf_node_extensions(stamped_leaf_extensions(group_key))
+            .leaf_node_capabilities(self.leaf_capabilities())
+            .leaf_node_extensions(self.new_leaf_extensions(group_key))
             .build(CIPHERSUITE, &self.provider, &self.signer, self.credential_with_key.clone())
             .map_err(|e| format!("Failed to build KeyPackage: {e:?}"))?;
         let kp = bundle.key_package();
@@ -865,6 +877,28 @@ impl MlsManager {
             }
         }
         TlsSerialize::tls_serialize_detached(kp).map_err(|e| format!("Failed to serialize KeyPackage: {e:?}"))
+    }
+
+    /// The capabilities our new leaves list: the tally, unless a test made this device
+    /// mint 0.12.2-shaped leaves.
+    fn leaf_capabilities(&self) -> Capabilities {
+        if self.old_shaped() { Capabilities::default() } else { super::mls_tally::tally_capabilities() }
+    }
+
+    fn new_leaf_extensions(&self, group_key: &str) -> Extensions<LeafNode> {
+        if self.old_shaped() { mint_stamp(group_key) } else { stamped_leaf_extensions(group_key) }
+    }
+
+    /// Whether a test made this device mint leaves without the tally (a 0.12.2 leaf).
+    fn old_shaped(&self) -> bool {
+        #[cfg(test)]
+        {
+            crate::node::standing::knobs::on(crate::node::standing::knobs::Knob::OldLeaf, &self.credential_identity())
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
     }
 
     /// Delete the private half of a KeyPackage we minted; whether it is gone.
@@ -895,6 +929,29 @@ impl MlsManager {
         let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(kp_bytes).ok()?;
         let kp = kp_in.validate(self.provider.crypto(), ProtocolVersion::Mls10).ok()?;
         minted_for(kp.leaf_node(), group_key)
+    }
+
+    /// Whether this exact KeyPackage already seated its leaf in `group_key` (a leaf with
+    /// its encryption key sits in the tree), so committing it again would only cost a
+    /// remove and re-add.
+    pub fn key_package_seated(&self, group_key: &str, kp_bytes: &[u8]) -> bool {
+        let Some(group) = self.groups.get(group_key) else { return false };
+        let Some(kp) = TlsDeserialize::tls_deserialize_exact(kp_bytes)
+            .ok()
+            .and_then(|kp_in: KeyPackageIn| kp_in.validate(self.provider.crypto(), ProtocolVersion::Mls10).ok())
+        else {
+            return false;
+        };
+        let key = kp.leaf_node().encryption_key();
+        group.members().any(|m| group.public_group().leaf(m.index).is_some_and(|l| l.encryption_key() == key))
+    }
+
+    /// Whether a serialised KeyPackage's leaf declares the tally capability.
+    pub fn key_package_declares(&self, kp_bytes: &[u8]) -> bool {
+        TlsDeserialize::tls_deserialize_exact(kp_bytes)
+            .ok()
+            .and_then(|kp_in: KeyPackageIn| kp_in.validate(self.provider.crypto(), ProtocolVersion::Mls10).ok())
+            .is_some_and(|kp| super::mls_tally::declares(kp.leaf_node()))
     }
 
     /// By device, when each bound leaf's KeyPackage was minted, where its leaf says.
@@ -958,8 +1015,8 @@ impl MlsManager {
                 SENDER_RATCHET_TOLERANCE,
                 SENDER_RATCHET_MAX_FORWARD,
             ))
-            .capabilities(super::mls_tally::tally_capabilities())
-            .with_leaf_node_extensions(stamped_leaf_extensions(server_id))
+            .capabilities(self.leaf_capabilities())
+            .with_leaf_node_extensions(self.new_leaf_extensions(server_id))
             .map_err(|e| format!("Failed to stamp our leaf: {e:?}"))?
             .build();
 
@@ -1006,6 +1063,7 @@ impl MlsManager {
         rate_exempt: bool,
     ) -> Result<MembershipCommit, String> {
         let tree = self.leaf_records(group_key);
+        let old_shaped = self.old_shaped();
         let group = self.groups.get_mut(group_key)
             .ok_or_else(|| format!("No MLS group for server {group_key}"))?;
         if !own_leaf_bound(group, self.signer.public(), &self.leaf_cache) {
@@ -1080,7 +1138,9 @@ impl MlsManager {
             .collect();
         let epoch = group.epoch().as_u64();
         let mut params = None;
-        if let Some(me) = tree.iter().find(|r| r.index == own_index.u32()).and_then(|r| r.identity.clone()) {
+        if !old_shaped
+            && let Some(me) = tree.iter().find(|r| r.index == own_index.u32()).and_then(|r| r.identity.clone())
+        {
             let input = super::mls_rate::RateInput {
                 epoch, leaves: &tree, committer: &me, adds: &added_ids, removes: &removed_views, no_proposals: false,
             };
@@ -1287,6 +1347,9 @@ impl MlsManager {
     /// we hand it to decides whether it takes the epoch, and its broadcast of these
     /// bytes is what merges it here (`OwnPendingCommit`).
     pub(crate) fn stage_self_update(&mut self, group_key: &str, tally: &super::mls_tally::Tally) -> Result<Vec<u8>, String> {
+        if self.old_shaped() {
+            return Err("a 0.12.2-shaped leaf takes no turns".to_string());
+        }
         let group = self.groups.get_mut(group_key).ok_or_else(|| format!("No MLS group for {group_key}"))?;
         if !own_leaf_bound(group, self.signer.public(), &self.leaf_cache) {
             return Err(format!("our leaf in {group_key} is not bound"));
@@ -1460,6 +1523,10 @@ impl MlsManager {
             super::mls_tally::MasterTally::Unreadable => Vec::new(),
         };
         let tally = super::mls_tally::Tally { refreshed_day: super::mls_tally::today(), epochs, carried: Vec::new() }.checked()?;
+        let params = LeafNodeParameters::builder()
+            .with_capabilities(self.leaf_capabilities())
+            .with_extensions(if self.old_shaped() { mint_stamp(group_key) } else { super::mls_tally::with_tally(&mint_stamp(group_key), &tally) })
+            .build();
         let (legacy_signer, _) = self.legacy.as_ref().ok_or("no legacy signer to rebind with")?;
         let group = self.groups.get_mut(group_key)
             .ok_or_else(|| format!("No MLS group for server {group_key}"))?;
@@ -1475,10 +1542,7 @@ impl MlsManager {
                     signer: &self.signer,
                     credential_with_key: self.credential_with_key.clone(),
                 },
-                LeafNodeParameters::builder()
-                    .with_capabilities(super::mls_tally::tally_capabilities())
-                    .with_extensions(super::mls_tally::with_tally(&mint_stamp(group_key), &tally))
-                    .build(),
+                params,
             )
             .map_err(|e| format!("Failed to rebind our leaf: {e:?}"))?;
         TlsSerialize::tls_serialize_detached(bundle.commit())
@@ -1833,7 +1897,13 @@ impl MlsManager {
                 let held = kp.hash_ref(self.provider.crypto()).is_ok_and(|r| key_package_held(&self.provider, &r));
                 facts.readds_us_with_held_key = Some(held || facts.readds_us_with_held_key == Some(true));
             }
+            if !super::mls_tally::declares(kp.leaf_node()) {
+                facts.undeclared.push(view.clone());
+            }
             facts.adds.push(view);
+        }
+        if let Some(path) = staged.update_path_leaf_node().filter(|l| !super::mls_tally::declares(l)) {
+            facts.undeclared.push(leaf_node_view(&self.leaf_cache, path));
         }
         for proposal in staged.remove_proposals() {
             let index = proposal.remove_proposal().removed();
@@ -4404,5 +4474,40 @@ mod g13_s3_admissions {
             guest.join_from_welcome(group, &welcome).unwrap();
             assert_eq!(guest.epoch_auth_digest(group), host.epoch_auth_digest(group));
         }
+    }
+}
+
+#[cfg(test)]
+mod standing_tests {
+    use super::test_keys::bound;
+
+    /// Unit 13: the exact package that seated a device reads as seated (the KeyPackage
+    /// arm drops it); a fresh one of the same device is a repair.
+    #[test]
+    fn a_key_package_that_already_seats_its_device_reads_seated() {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group("s").unwrap();
+        let (joiner, jdev) = bound(3, 4);
+        let kp = joiner.generate_key_package_for("s", false).unwrap();
+        assert!(!owner.key_package_seated("s", &kp));
+        owner.commit_membership("s", &[], &[(jdev, kp.clone())]).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        assert!(owner.key_package_seated("s", &kp));
+        let fresh = joiner.generate_key_package_for("s", false).unwrap();
+        assert!(!owner.key_package_seated("s", &fresh), "a fresh package of the same device is a repair");
+        assert!(!owner.key_package_seated("other", &kp), "no group, nothing seated");
+    }
+
+    /// The test knob makes a device mint 0.12.2-shaped leaves; normally every leaf declares.
+    #[test]
+    fn key_packages_declare_the_tally_unless_the_old_leaf_knob_is_set() {
+        use crate::node::standing::knobs::{set, Knob};
+        let (owner, _) = bound(5, 6);
+        let (old, old_dev) = bound(7, 8);
+        assert!(owner.key_package_declares(&old.generate_key_package_for("s", false).unwrap()));
+        set(Knob::OldLeaf, &old_dev, true);
+        let kp = old.generate_key_package_for("s", false);
+        set(Knob::OldLeaf, &old_dev, false);
+        assert!(!owner.key_package_declares(&kp.unwrap()));
     }
 }
