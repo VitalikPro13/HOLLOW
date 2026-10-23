@@ -410,8 +410,10 @@ fn destroy_with(root: &Path, outside: &Outside) -> Result<(), String> {
     // The log goes with the identity, before anything else can add a line to it.
     crate::log::erase();
 
-    // 3. The per-file keys. Only the singleton closes; the marker covers the rest.
+    // 3. The per-file keys. Only the singleton and the node's pooled connections
+    // close; the marker covers the rest.
     close_store_singleton();
+    crate::storage::store_pool::close_all();
     for name in ["messages.db", "messages.db-wal", "messages.db-shm"] {
         let _ = std::fs::remove_file(root.join(name));
     }

@@ -292,7 +292,7 @@ fn send_personal_emotes_to_sibling(
     db_path: &str,
     db_passphrase: &str,
 ) -> usize {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return 0;
     };
     let Ok(rows) = store.list_personal_emote_entries() else {
@@ -390,7 +390,7 @@ pub(super) fn on_verified_sibling(
     // A freshly-imported device holds the master KEY but none of the master's
     // profile CONTENT, so pull the profile from the sibling when ours is empty.
     // Without this the substitute device shows the identity online but nameless.
-    let need_profile = crate::storage::MessageStore::open(db_path, db_passphrase)
+    let need_profile = crate::storage::MessageStore::lease(db_path, db_passphrase)
         .ok()
         .and_then(|s| s.load_profile(local_peer_str).ok().flatten())
         .map(|p| p.display_name.trim().is_empty())
@@ -687,11 +687,12 @@ pub(crate) async fn spawn_node_mock(
 
     // This node's own `relay_set_background` flag, which the test sets.
     let away = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::ws_client::with_relay_domain(super::ws_client::HARNESS_RELAY_DOMAIN.to_string(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(Box::pin(run_event_loop(
+    let metered = db_path.clone();
+    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::ws_client::with_relay_domain(super::ws_client::HARNESS_RELAY_DOMAIN.to_string(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(crate::storage::store_pool::meter::OnLoop::new(Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    )))))));
+    )), &metered))))));
 
     Ok((master_peer_id, handle, ws_cmd_rx, ws_event_tx, away))
 }
@@ -719,6 +720,8 @@ async fn run_event_loop(
     db_path: String,
     db_passphrase: String,
 ) {
+    // Warm store connections for this loop's whole life (dropped with it, abort included).
+    let _store_pool = crate::storage::store_pool::enable(&db_path, &db_passphrase);
     let pub_key_proto = bundle_keypair.public_key_protobuf();
     let pub_key_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key_proto);
 
@@ -958,7 +961,7 @@ async fn run_event_loop(
     // siblings once connected or none of them counts the others.
     let mut announce_first_roster = false;
     {
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
             super::resolver::warm_from_store(&store);
             let own_master = master_keypair.peer_id();
             announce_first_roster = super::roster_book::load(&store, &own_master).is_none()
@@ -987,7 +990,7 @@ async fn run_event_loop(
     // device-keyed row into its master. Idempotent, and it heals an existing broken
     // DB on the next launch with no re-add.
     {
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
             if let Ok(rows) = store.load_friends(None) {
                 let mut folded = 0u32;
                 for (peer_id, _status, _dir, _req, _upd) in rows {
@@ -1015,7 +1018,7 @@ async fn run_event_loop(
     let mut server_rows_read = false;
     let mut unreadable_servers: Vec<String> = Vec::new();
     {
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
             match store.load_all_servers() {
                 Ok(rows) => {
                     server_rows_read = true;
@@ -1065,7 +1068,7 @@ async fn run_event_loop(
     // Ops an older build skipped: read again from what we kept, or fetched again whole.
     // It writes on its own connection, so the canonicalize saves above land first.
     crdt_store.committed().await;
-    let mut crdt_resync = match crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+    let mut crdt_resync = match crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
         Ok(store) => super::crdt_resync::CrdtResync::load(
             &store, &mut server_states, crdt_store.clone(), crate::api::updater::APP_VERSION,
         ),
@@ -1075,7 +1078,7 @@ async fn run_event_loop(
 
     // -- MLS state --
     let mut mls: Option<MlsManager> = {
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
             match store.load_mls_identity() {
                 Ok(Some(_)) => {
                     // Every MLS group key to reload: each server's bare id (the server-wide group)
@@ -1120,7 +1123,7 @@ async fn run_event_loop(
                                 || stale_keystone;
                             if foreign {
                                 hollow_log!("[HOLLOW-MLS] MLS credential {cred_id} not ours / stale keystone (device={device_peer_id}, has_sibling={has_sibling}, stale_keystone={stale_keystone}); discarding inherited identity + groups, will mint fresh");
-                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                                     let _ = store.clear_mls_identity();
                                 }
                                 None
@@ -1165,7 +1168,7 @@ async fn run_event_loop(
             Ok(mgr) => {
                 hollow_log!("[HOLLOW-MLS] Created new MLS identity");
                 if let (Ok(save), Ok(store)) =
-                    (mgr.take_whole_save(), crate::storage::MessageStore::open(&db_path, &db_passphrase))
+                    (mgr.take_whole_save(), crate::storage::MessageStore::lease(&db_path, &db_passphrase))
                     && store.begin_transaction().is_ok()
                 {
                     if store.save_mls_state(&save).and_then(|()| store.commit_transaction()).is_err() {
@@ -1229,7 +1232,7 @@ async fn run_event_loop(
     // Pending friend removals: peer_ids whose FriendRemove wasn't delivered (peer offline).
     let mut pending_friend_removals: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
             if let Ok(friends) = store.load_friends(Some("pending")) {
                 for (peer_id, _status, direction, requested_at, _updated_at) in friends {
                     if direction == "outgoing" {
@@ -1264,7 +1267,7 @@ async fn run_event_loop(
     // point. The room join happens in the `WsEvent::Connected` handler with every
     // other room join. A refused row is restored too: a refusal never ends a join.
     {
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
             let rows = store.load_pending_joins().unwrap_or_default();
             if !rows.is_empty() {
                 // ONE build for all of them: this opens the DB.
@@ -1321,7 +1324,7 @@ async fn run_event_loop(
     // drained on the peer's appearance, at most one extra message per friend.
     let mut pending_friend_accepts: HashMap<String, i64> = HashMap::new();
     {
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
             if let Ok(friends) = store.load_friends(Some("accepted")) {
                 for (peer_id, _status, _direction, requested_at, _updated_at) in friends {
                     pending_friend_accepts.insert(peer_id, requested_at);
@@ -2296,7 +2299,7 @@ async fn run_event_loop(
                     NodeCommand::RequestPublicChannelSync { server_id, channel_id, before_timestamp } => {
                         if server_states.contains_key(&server_id) {
                             // Already a member — serve from our own DB.
-                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                            if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                                 let limit = 50i32;
                                 let messages_result = if let Some(before_ts) = before_timestamp {
                                     store.get_visible_channel_messages_before(&server_id, &channel_id, before_ts, limit)
@@ -3563,7 +3566,7 @@ async fn run_event_loop(
                     #[cfg(test)]
                     NodeCommand::TestCarry { device, msg } => {
                         // Built by hand: a modified client puts any type in its envelope.
-                        let envelope = MessageEnvelope::Carried { msg, at_ms: super::frame_auth::now_ms() };
+                        let envelope = MessageEnvelope::Carried { msg, at_ms: super::frame_auth::seal_stamp_ms() };
                         if let Ok(json) = serde_json::to_string(&envelope) {
                             super::olm_lane::carry_json(&ws_cmd_tx, &device, None, json, super::olm_lane::NoSession::Queue);
                         }
@@ -3785,7 +3788,7 @@ async fn run_event_loop(
                         {
                             let (path, pass) = (db_path.clone(), db_passphrase.clone());
                             let friends = tokio::task::spawn_blocking(move || {
-                                crate::storage::MessageStore::open(&path, &pass)
+                                crate::storage::MessageStore::lease(&path, &pass)
                                     .map(|store| social::dm_room_masters(&store))
                                     .unwrap_or_default()
                             })
@@ -4183,7 +4186,7 @@ async fn run_event_loop(
                                             &ws_cmd_tx, &ws_room_peers,
                                             &peer_id, HavenMessage::FriendRemove,
                                         );
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                                             let _ = store.remove_friend(&key);
                                         }
                                     }
@@ -4281,7 +4284,7 @@ async fn run_event_loop(
                                             super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &peer_id, &ask);
 
                                             {
-                                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                                if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                                                     let channels_ts: Vec<(String, i64)> = state.channels.keys()
                                                         .map(|cid| {
                                                             let ts = store
@@ -4337,7 +4340,7 @@ async fn run_event_loop(
                                     // not the raw device id the relay reported, or a multi-device friend's
                                     // timestamp lookup misses and we mis-page the sync.
                                     {
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                                             let convo = super::resolver::resolve(&peer_id);
                                             // Multi-device peer-fallback: if WE have a sibling, ask for BOTH
                                             // directions, so a friend re-serves the messages we sent from another,
@@ -4792,7 +4795,7 @@ async fn run_event_loop(
                                     }
 
                                     {
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                                             if let Ok(None) = store.load_profile(pid_str)
                                                 && social::profile_audience(&server_states, &local_peer_str, pid_str, &db_path, &db_passphrase) != social::Audience::None
                                             {
@@ -4804,7 +4807,7 @@ async fn run_event_loop(
 
                                     // Ask this peer for profiles of offline server members we don't have.
                                     {
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                                             let mut proxy_count = 0u32;
                                             for (_sid, state) in server_states.iter() {
                                                 if !state.is_member(pid_str) { continue; }
@@ -4844,7 +4847,7 @@ async fn run_event_loop(
                                             // Without this, the joining peer never probes for missed
                                             // channel messages and never gets MessageSyncCompleted.
                                             {
-                                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                                if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                                                     let channels_ts: Vec<(String, i64)> = state.channels.keys()
                                                         .map(|cid| {
                                                             let ts = store
@@ -4909,7 +4912,7 @@ async fn run_event_loop(
                                     // High-water keyed by the peer's MASTER (conversation
                                     // key), not the raw device id (multi-device).
                                     {
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                                             let convo = super::resolver::resolve(pid_str);
                                             // Multi-device peer-fallback (see PeerJoined
                                             // site): both directions from our both-way
@@ -4982,7 +4985,7 @@ async fn run_event_loop(
                                             &ws_cmd_tx, &ws_room_peers,
                                             pid_str, HavenMessage::FriendRemove,
                                         );
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                                             let _ = store.remove_friend(&key);
                                         }
                                     }
@@ -6070,7 +6073,7 @@ async fn run_event_loop(
                         // During the stale epoch the coordinator may have dropped messages
                         // that peer sent, so syncing from them fills the gap on this side.
                         if !done.added.is_empty()
-                            && let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase)
+                            && let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase)
                         {
                             let sync_cids: Vec<String> = match &channel_id {
                                 Some(cid) => vec![cid.clone()],
@@ -6285,7 +6288,7 @@ async fn run_event_loop(
                     // so a wedged friend with no queued DM would otherwise never be swept.
                     // Master-keyed, so a sibling resolves to our own master and is excluded.
                     let accepted_friends: std::collections::HashSet<String> =
-                        crate::storage::MessageStore::open(&db_path, &db_passphrase)
+                        crate::storage::MessageStore::lease(&db_path, &db_passphrase)
                             .ok()
                             .and_then(|s| s.load_friends(Some("accepted")).ok())
                             .map(|v| v.into_iter().map(|(pid, ..)| pid).collect())
@@ -6377,7 +6380,7 @@ async fn run_event_loop(
                         "[HOLLOW-SYNC] Fan-out dispatch for server {server_id}: {total_channels} channel probes across {total_peers} peers"
                     );
 
-                    let sync_store = crate::storage::MessageStore::open(&db_path, &db_passphrase).ok();
+                    let sync_store = crate::storage::MessageStore::lease(&db_path, &db_passphrase).ok();
 
                     for (peer, channels) in assignments {
                         let peer_str = peer.to_string();
@@ -6582,7 +6585,7 @@ async fn run_event_loop(
 
                     // 2c. Message retention: prune old messages per server setting.
                     // Forward-only: only prune messages sent after the policy was set.
-                    if let Ok(msg_store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                    if let Ok(msg_store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                         for (server_id, state) in &server_states {
                             let msg_policy = state.settings
                                 .get("retention_messages")
@@ -6959,7 +6962,7 @@ async fn run_event_loop(
                 arm_started = Some(("timer", "peer_liveness", std::time::Instant::now()));
                 let mut check_peers: Vec<String> = Vec::new();
 
-                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                     // Its answer rejoins the DM room, so it asks only about rooms we keep.
                     for friend_pid in &social::dm_room_masters(&store) {
                         if *friend_pid == local_peer_str { continue; }
@@ -7051,7 +7054,7 @@ fn dm_event_convo(
     db_passphrase: &str,
 ) -> String {
     if super::resolver::same_identity(sender_peer, local_master) {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             if let Some(peer) = store.get_dm_message_peer(mid) {
                 return peer;
             }
@@ -7079,7 +7082,7 @@ fn request_dm_resync_after_rekey(
     if peer_is_forwarder_only(ws_room_peers, peer_str) {
         return;
     }
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         let convo = super::resolver::resolve(peer_str);
         // Multi-device: if WE have a sibling, request both directions from our
         // cross-direction high-water mark (mirrors the PeerJoined DM-sync) so a
@@ -7822,7 +7825,7 @@ fn ask_sender_for_channels(
     if sync_cids.is_empty() {
         return;
     }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     for cid in &sync_cids {
         super::olm_lane::carry(
             ws_cmd_tx, peer_str, None,
@@ -7884,7 +7887,7 @@ async fn after_welcome_joined(
         let (tx, me) = (ws_cmd_tx.clone(), local_peer_str.to_string());
         let (path, pass) = (db_path.to_string(), db_passphrase.to_string());
         tokio::task::spawn_blocking(move || {
-            let placed: std::collections::HashSet<String> = crate::storage::MessageStore::open(&path, &pass)
+            let placed: std::collections::HashSet<String> = crate::storage::MessageStore::lease(&path, &pass)
                 .and_then(|s| s.get_all_device_links())
                 .map(|links| links.into_iter().map(|(device, _)| device).collect())
                 .unwrap_or_default();
@@ -7958,7 +7961,7 @@ async fn after_welcome_joined(
     // (not just empty ones; the DB has gaps from the stale epoch).
     // Subgroup: just the one restricted channel it serves.
     if let Some(state) = server_states.get(server_id) {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             let sync_cids: Vec<String> = match channel_id {
                 Some(cid) => vec![cid.clone()],
                 None => state.channels.keys().cloned().collect(),
@@ -8586,7 +8589,7 @@ async fn handle_incoming_request_inner(
                     let mut new_count = 0u32;
                     let received_count = messages.len() as u32;
 
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                         let _ = store.begin_transaction();
                         let mut pk_cache = PkCache::new();
                         let mut events = Vec::new();
@@ -8712,7 +8715,7 @@ async fn handle_incoming_request_inner(
                     {
                         // Held across the carried-removal fold below, so its digests are
                         // judged after it.
-                        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
+                        let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok();
                         let mut roster_news = false;
                         if let Some(store) = store.as_ref() {
                             roster_news = super::roster_reach::first_signed_copy(store, mid.as_deref());
@@ -8814,7 +8817,7 @@ async fn handle_incoming_request_inner(
                     }
                     let mut new_count = 0u32;
 
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                         let mut events: Vec<NetworkEvent> = Vec::new();
                         let _ = store.begin_transaction();
                         let mut pk_cache = PkCache::new();
@@ -9062,7 +9065,7 @@ async fn handle_incoming_request_inner(
                     let convo_peer = convo.clone();
                     let mut new_count = 0u32;
 
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                         let mut events: Vec<NetworkEvent> = Vec::new();
                         let _ = store.begin_transaction();
                         let mut pk_cache = PkCache::new();
@@ -9342,7 +9345,7 @@ async fn handle_incoming_request_inner(
                     } else if !message_ops::reaction_sig_rejected(
                         &reactor, "reaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref(),
                     ) {
-                        let stored = crate::storage::MessageStore::open(db_path, db_passphrase)
+                        let stored = crate::storage::MessageStore::lease(db_path, db_passphrase)
                             .is_ok_and(|store| {
                                 message_ops::dm_reaction_target_ok(&store, &mid, peer_str, master_peer_str)
                                     && store.add_reaction(
@@ -9378,7 +9381,7 @@ async fn handle_incoming_request_inner(
                         &reactor, "unreaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref(),
                     ) {
                         // Only the reactor's own reaction goes, so no row check is needed.
-                        let removed = crate::storage::MessageStore::open(db_path, db_passphrase)
+                        let removed = crate::storage::MessageStore::lease(db_path, db_passphrase)
                             .is_ok_and(|store| store.remove_reaction(&mid, &emoji, &reactor, ts, sig.as_deref(), pk.as_deref()) == Ok(true));
                         if removed {
                             let _ = event_tx.send(NetworkEvent::DmReactionRemoved {
@@ -9400,7 +9403,7 @@ async fn handle_incoming_request_inner(
                     use crate::node::file_transfer;
                     hollow_log!("[HOLLOW-FILE] FileHeader received: {fid} ({size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
-                    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+                    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
                     // A holder answering for someone else's file: the device an explicit
                     // pull asked on this connection, or the decrypt-fail retry's target.
                     let asked = pending_file_asks.get(&fid).is_some_and(|a| a.asked.contains(peer_str))
@@ -9510,7 +9513,7 @@ async fn handle_incoming_request_inner(
                     // is Olm-authenticated, but that only proves WHO sent it —
                     // not that the `file_id` inside is theirs to relabel.
                     let mut meta_written = false;
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                         meta_written = file_handler::file_meta_write_allowed(&store, &fid, &peer_str);
                         if meta_written {
                             let _ = store.insert_file_metadata(
@@ -9592,7 +9595,7 @@ async fn handle_incoming_request_inner(
                                     crate::vault::pipeline::aes_decrypt(&ct, &k, &n).ok()
                                 });
                             if let Some(plaintext) = decoded {
-                                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                                     // Captionless offline image: the "[file:...]" companion
                                     // DM is never sent to offline peers, so the message row
                                     // is inserted here (deduped by mid; a captioned image's
@@ -9653,7 +9656,7 @@ async fn handle_incoming_request_inner(
                                     // directory, so a peer that chooses the name
                                     // chooses the directory.
                                     hollow_log!("[HOLLOW-SECURITY] REJECTED inline FileHeader from {peer_str}: bad file id or extension");
-                                } else if let Some(reason) = match crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                } else if let Some(reason) = match crate::storage::MessageStore::lease(db_path, db_passphrase) {
                                     Ok(store) => super::file_commit::completion_refused(&store, &fid, &plaintext),
                                     Err(_) => Some("the store could not be opened"),
                                 } {
@@ -9664,7 +9667,7 @@ async fn handle_incoming_request_inner(
                                     let disk_path = file_transfer::final_file_path(&fid, &ext);
                                     if crate::node::at_rest::write_all(&disk_path, &plaintext).is_ok() {
                                         let disk_str = disk_path.to_string_lossy().to_string();
-                                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                                             let _ = store.mark_file_complete(&fid, &disk_str);
                                         }
                                         hollow_log!("[HOLLOW-FILE] Wrote inline image {fid} ({} bytes) from buffered header", plaintext.len());
@@ -10604,7 +10607,7 @@ async fn handle_incoming_request_inner(
                             // per-peer ProfileRequest on sync, but during a pending
                             // join this server was not in server_states yet.
                             {
-                                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                                     let mut proxy_count = 0u32;
                                     for member_id in state.members.keys() {
                                         if proxy_count >= 10 { break; }
@@ -11499,7 +11502,7 @@ async fn handle_incoming_request_inner(
 
             hollow_log!("[HOLLOW-SYNC] ChannelSyncRequest from {peer_str} for {channel_id} in {server_id} since {since_timestamp} (per-sender: {} entries, gap={})", sender_timestamps.len(), gap.is_some());
 
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                 // Per-sender sync when watermarks were sent, legacy single-timestamp
                 // fallback otherwise — shared with the MLS/Olm responders.
                 if let Ok((envelope, count)) = super::sync_handler::build_channel_sync_batch(
@@ -11537,7 +11540,7 @@ async fn handle_incoming_request_inner(
             // lookup; the transport send still targets the raw device.
             let convo_peer = super::resolver::resolve(peer_str);
 
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                 // A device its own roster removed serves no history: what it holds is for
                 // its person until the wipe, and a contact that missed the removal asks it.
                 if super::roster_book::own_removal(&store).is_some() {
@@ -11612,7 +11615,7 @@ async fn handle_incoming_request_inner(
             let since_map: std::collections::HashMap<String, i64> =
                 per_convo_since.into_iter().collect();
 
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                 let convos = store.get_dm_peer_ids();
                 hollow_log!(
                     "[HOLLOW-SYNC] DmSiblingSyncRequest from sibling {peer_str} — serving {} conversation(s)",
@@ -12832,7 +12835,7 @@ async fn handle_incoming_request_inner(
                     // authenticated statement of who this device speaks for.
                     let key = social::in_bundle_key(&list.master);
                     if let (Ok(store), Ok(json)) = (
-                        crate::storage::MessageStore::open(db_path, db_passphrase),
+                        crate::storage::MessageStore::lease(db_path, db_passphrase),
                         serde_json::to_string(&record),
                     ) {
                         let _ = store.save_setting(&key, &json);
@@ -12852,7 +12855,7 @@ async fn handle_incoming_request_inner(
             // AFTER the carried-bundle store, since a half-formed friendship may want
             // its bundle refreshed, and BEFORE `is_mutual`, which must still fire.
             {
-                let existing = crate::storage::MessageStore::open(db_path, db_passphrase)
+                let existing = crate::storage::MessageStore::lease(db_path, db_passphrase)
                     .ok()
                     .and_then(|s| s.get_friend_row(&req_master_early).ok().flatten());
                 match existing.as_ref().map(|(s, d, r)| (s.as_str(), d.as_str(), *r)) {
@@ -12935,7 +12938,7 @@ async fn handle_incoming_request_inner(
             let is_mutual = {
                 let queued = pending_friend_requests.contains_key(&req_master_early)
                     || pending_friend_requests.contains_key(peer_str);
-                let persisted = crate::storage::MessageStore::open(db_path, db_passphrase)
+                let persisted = crate::storage::MessageStore::lease(db_path, db_passphrase)
                     .ok()
                     .and_then(|s| {
                         s.get_friend_status_direction(&req_master_early)
@@ -12963,7 +12966,7 @@ async fn handle_incoming_request_inner(
                 // for one friendship, and a later decline measured against the other
                 // side's reads as a stale replay half the time. save_friend advances a
                 // PENDING row by MAX, and MAX is symmetric, so both sides freeze together.
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                     let _ = store.save_friend(
                         &req_master_early, "pending", "outgoing", requested_at,
                     );
@@ -12985,7 +12988,7 @@ async fn handle_incoming_request_inner(
             // itself, which the device-list ingest re-key later migrates.
             let mut thumb_kept = false;
             {
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                     let master = super::resolver::resolve(&peer_str);
                     if master != peer_str {
                         let _ = store.migrate_friend_to_master(&peer_str, &master);
@@ -13050,7 +13053,7 @@ async fn handle_incoming_request_inner(
             }
             let was_pending;
             {
-                let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+                let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
                     return;
                 };
                 if master != peer_str {
@@ -13162,7 +13165,7 @@ async fn handle_incoming_request_inner(
                 None => super::resolver::resolve(&peer_str),
             };
 
-            let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+            let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
                 hollow_log!("[HOLLOW-FRIENDS] FriendReject from {peer_str}: store unavailable, ignoring");
                 return;
             };
@@ -13225,7 +13228,7 @@ async fn handle_incoming_request_inner(
             // MASTER on our side, so resolve or the DELETE misses and the removal is
             // asymmetric. Delete both keys for any legacy device-stranded row.
             let master = super::resolver::resolve(&peer_str);
-            let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+            let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
             // A removal sealed before this friendship began belongs to an earlier one,
             // held back or replayed by the relay.
             if let Ok(Some((status, direction, since))) = store.get_friend_row(&master) {
@@ -13334,7 +13337,7 @@ async fn handle_incoming_request_inner(
 
             let mut inserted: u32 = 0;
             let mut backfilled: Vec<(String, String)> = Vec::new();
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                 // Existing friends (any status), so a relationship we already track is
                 // never clobbered; a removed one is kept out by its tombstone below.
                 let existing: HashMap<String, String> = store
@@ -13445,7 +13448,7 @@ async fn handle_incoming_request_inner(
             // A row is its own LWW version: one stamped past the frame would win every
             // later write, and a clamped one would order differently on each device.
             let ceiling = super::frame_auth::stamp_ceiling(frame_ts_ms);
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                 for e in &rows {
                     if !crate::crdt::valid_emote_name(&e.name)
                         || !(e.hash.is_empty() || crate::crdt::valid_emote_hash(&e.hash))
@@ -13552,7 +13555,7 @@ async fn handle_incoming_request_inner(
             if kind.is_empty() { return; }
             let (db, pass, device, tx) = (db_path.to_string(), db_passphrase.to_string(), peer_str.to_string(), event_tx.clone());
             tokio::task::spawn_blocking(move || {
-                let stored = crate::storage::MessageStore::open(&db, &pass).and_then(|s| s.set_device_kind(&device, kind));
+                let stored = crate::storage::MessageStore::lease(&db, &pass).and_then(|s| s.set_device_kind(&device, kind));
                 if let Ok(true) = stored {
                     let _ = tx.blocking_send(NetworkEvent::DeviceKindsChanged);
                 }
@@ -13844,7 +13847,7 @@ async fn handle_incoming_request_inner(
                 }
                 channel_sync_sent.insert(dedup_key, std::time::Instant::now());
 
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                     let limit = 50i32;
                     let messages_result = if let Some(before_ts) = before_timestamp {
                         store.get_visible_channel_messages_before(&server_id, &channel_id, before_ts, limit)
@@ -14377,7 +14380,7 @@ async fn handle_incoming_request_inner(
             use crate::node::file_transfer;
             hollow_log!("[HOLLOW-FILE] FileRequest from {peer_str} for {file_id}");
 
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                 if let Ok(Some(file_meta)) = store.get_file_metadata(&file_id) {
                         // SECURITY: serving used to be UNGATED, so any peer that
                         // learned a file_id (guests see them in plaintext public
@@ -14820,7 +14823,7 @@ async fn handle_incoming_request_inner(
 
         // -- Profile request --
         HavenMessage::ProfileRequest => {
-            if crate::storage::MessageStore::open(db_path, db_passphrase)
+            if crate::storage::MessageStore::lease(db_path, db_passphrase)
                 .is_ok_and(|store| super::roster_book::own_removal(&store).is_some())
             {
                 hollow_log!("[HOLLOW-SECURITY] Left a ProfileRequest from {peer_str} unanswered: this device was removed");

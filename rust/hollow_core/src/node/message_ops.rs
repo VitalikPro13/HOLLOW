@@ -341,7 +341,7 @@ pub(crate) async fn handle_send_message(
 
     // Same Rust-generated timestamp as sent, so DM sync timestamps agree.
     {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             let _ = store.insert(
                 &peer_id_str, &text, true, dm_timestamp,
                 sig.as_deref(), pk.as_deref(), Some(&message_id),
@@ -635,9 +635,8 @@ async fn send_dm_to_device(
             device_peer, envelope_json, dm_room,
         ).await;
     } else if is_sibling && device_online {
-        // Our OWN sibling, online: siblings meet in inbox:{our_master}, NOT
-        // dm_room_code(M,M), so route via the flexible `ws_room_for_peer` lookup.
-        // A sibling shares only the inbox room with us, so it is unambiguous.
+        // Our OWN sibling, online: never the DM room, which it may have left;
+        // `ws_room_for_peer` picks our own room or inbox for our devices.
         send_encrypted_message(
             olm, crypto_store, device_peer, envelope_json,
             event_tx, ws_cmd_tx, ws_room_peers,
@@ -929,7 +928,7 @@ pub(crate) async fn handle_send_channel_message(
     // the room hint and the offline push fan-out so mentions-only receivers can
     // gate on "reply to ME", not "reply to anyone" (#42). One store open.
     let reply_author: Option<String> = reply_to_mid.as_deref().and_then(|mid| {
-        crate::storage::MessageStore::open(db_path, db_passphrase)
+        crate::storage::MessageStore::lease(db_path, db_passphrase)
             .ok()
             .and_then(|s| s.get_channel_message_sender(mid))
     });
@@ -1097,7 +1096,7 @@ pub(crate) async fn latest_own_channel_ts_blocking(
     let path = db_path.to_string();
     let pass = db_passphrase.to_string();
     tokio::task::spawn_blocking(move || {
-        let store = crate::storage::MessageStore::open(&path, &pass).ok()?;
+        let store = crate::storage::MessageStore::lease(&path, &pass).ok()?;
         store.latest_own_channel_ts(&sid, &cid)
     })
     .await
@@ -1372,7 +1371,7 @@ fn persist_sent_channel_message(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return;
     };
     let _ = store.insert_channel_message(
@@ -1439,7 +1438,7 @@ pub(crate) async fn handle_edit_channel_message(
     let mut sig = None;
     let mut pk = None;
     {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             let row = RowExtras::load_channel(&store, &message_id);
             (sig, pk) = sign_message_versioned(
                 bundle_keypair, pub_key_b64, "ch",
@@ -1528,7 +1527,7 @@ pub(crate) async fn handle_edit_dm_message(
     let mut sig = None;
     let mut pk = None;
     {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             let row = RowExtras::load_dm(&store, &message_id);
             (sig, pk) = sign_message_versioned(
                 bundle_keypair, pub_key_b64, "dm", &peer_id_str,
@@ -1688,6 +1687,13 @@ fn sign_attached_preview(
         bundle_keypair, pub_key_b64, msg_type, context, signer, ts, &extras, &row.text,
     );
     AttachSig { ts, sig, pk }
+}
+
+/// The stamp our own card lands under: strictly after the row's last card or edit, so
+/// the author's newest card always replaces the one before it on its own row, even
+/// within one millisecond or over a sibling's card stamped ahead of our clock.
+fn local_card_stamp(floor: Option<i64>) -> i64 {
+    super::frame_auth::now_ms().max(floor.unwrap_or(0).saturating_add(1))
 }
 
 /// Serialize a preview for the `link_preview_json` column. `None` clears it.
@@ -1904,7 +1910,7 @@ pub(crate) async fn handle_attach_channel_link_preview(
     let ctx = format!("{server_id}:{channel_id}");
 
     let mut attached: Option<AttachSig> = None;
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         // Local-author op: we may only re-sign our OWN row. Remote ingest has its
         // own check; this stops a UI bug minting a signature over somebody else's.
         let sender = store.get_channel_message_sender(&message_id);
@@ -1924,8 +1930,8 @@ pub(crate) async fn handle_attach_channel_link_preview(
             &super::resolver::resolve(local_peer_str), &message_id,
         );
         let _ = store.update_channel_link_preview_and_sig(
-            &message_id, lp_json.as_deref(),
-            signed.sig.as_deref(), signed.pk.as_deref(), Some(super::frame_auth::now_ms()),
+            &message_id, lp_json.as_deref(), signed.sig.as_deref(), signed.pk.as_deref(),
+            Some(local_card_stamp(store.channel_card_floor(&message_id))),
         );
         attached = Some(signed);
     }
@@ -1996,7 +2002,7 @@ pub(crate) async fn handle_attach_dm_link_preview(
     let lp_json = preview_column(lp);
 
     let mut attached: Option<AttachSig> = None;
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         // Local-author op — the row has to be one WE sent.
         if store.get_dm_message_is_mine(&message_id) != Some(true) {
             hollow_log!("[HOLLOW-LP] Refusing to attach preview to DM {message_id} — not ours");
@@ -2010,8 +2016,8 @@ pub(crate) async fn handle_attach_dm_link_preview(
             &super::resolver::resolve(local_peer_str), &message_id,
         );
         let _ = store.update_link_preview_and_sig(
-            &message_id, lp_json.as_deref(),
-            signed.sig.as_deref(), signed.pk.as_deref(), Some(super::frame_auth::now_ms()),
+            &message_id, lp_json.as_deref(), signed.sig.as_deref(), signed.pk.as_deref(),
+            Some(local_card_stamp(store.dm_card_floor(&message_id))),
         );
         attached = Some(signed);
     }
@@ -2132,7 +2138,7 @@ pub(crate) async fn handle_delete_channel_message(
     let mut sig = None;
     let mut pk = None;
     {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             let row = RowExtras::load_channel(&store, &message_id);
             let current_text = row.text.clone().unwrap_or_default();
             (sig, pk) = sign_message_versioned(
@@ -2215,7 +2221,7 @@ pub(crate) async fn handle_delete_dm_message(
     let mut sig = None;
     let mut pk = None;
     {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             let row = RowExtras::load_dm(&store, &message_id);
             let current_text = row.text.clone().unwrap_or_default();
             (sig, pk) = sign_message_versioned(
@@ -2299,8 +2305,8 @@ pub(crate) async fn handle_add_channel_reaction(
 
     let local_peer = local_peer_str.to_string();
     let (reaction_ts, sig, pk) = {
-        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
-        let reaction_ts = reaction_stamp(store.as_ref(), &message_id, &emoji, &local_peer);
+        let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok();
+        let reaction_ts = reaction_stamp(store.as_deref(), &message_id, &emoji, &local_peer);
         let signing_payload = format!("reaction:{}:{}:{}", message_id, emoji, reaction_ts);
         let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
         if let Some(store) = store {
@@ -2379,8 +2385,8 @@ pub(crate) async fn handle_add_dm_reaction(
     let reactor_master = super::resolver::resolve(&local_peer);
 
     let (reaction_ts, sig, pk) = {
-        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
-        let reaction_ts = reaction_stamp(store.as_ref(), &message_id, &emoji, &reactor_master);
+        let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok();
+        let reaction_ts = reaction_stamp(store.as_deref(), &message_id, &emoji, &reactor_master);
         let signing_payload = format!("reaction:{}:{}:{}", message_id, emoji, reaction_ts);
         let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
         if let Some(store) = store {
@@ -2462,8 +2468,8 @@ pub(crate) async fn handle_remove_channel_reaction(
 
     let local_peer = local_peer_str.to_string();
     let (remove_ts, sig, pk) = {
-        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
-        let remove_ts = reaction_stamp(store.as_ref(), &message_id, &emoji, &local_peer);
+        let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok();
+        let remove_ts = reaction_stamp(store.as_deref(), &message_id, &emoji, &local_peer);
         let signing_payload = format!("unreaction:{}:{}:{}", message_id, emoji, remove_ts);
         let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
         if let Some(store) = store {
@@ -2541,8 +2547,8 @@ pub(crate) async fn handle_remove_dm_reaction(
     let reactor_master = super::resolver::resolve(&local_peer);
 
     let (remove_ts, sig, pk) = {
-        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
-        let remove_ts = reaction_stamp(store.as_ref(), &message_id, &emoji, &reactor_master);
+        let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok();
+        let remove_ts = reaction_stamp(store.as_deref(), &message_id, &emoji, &reactor_master);
         let signing_payload = format!("unreaction:{}:{}:{}", message_id, emoji, remove_ts);
         let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
         if let Some(store) = store {
@@ -2821,7 +2827,7 @@ async fn live_channel_moderation_drop(
         let sender = sender_peer_id.to_string();
         let (path, pass) = (db_path.to_string(), db_passphrase.to_string());
         let violation = tokio::task::spawn_blocking(move || {
-            crate::storage::MessageStore::open(&path, &pass)
+            crate::storage::MessageStore::lease(&path, &pass)
                 .map(|store| store.channel_sender_has_msg_in_range(&sid_o, &cid_o, &sender, ts - window_ms, ts))
                 .unwrap_or(false)
         }).await.unwrap_or(false);
@@ -2924,7 +2930,7 @@ fn persist_incoming_channel_message(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<(bool, Option<String>)> {
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok()?;
     // Replied-to message's author (MASTER id), so the event's `reply_to_own` lets
     // mentions-only gate on "reply to ME" (#42). Same store open; absent = None.
     let reply_author = reply_to.and_then(|m| store.get_channel_message_sender(m));
@@ -2976,7 +2982,7 @@ pub(crate) async fn handle_envelope_edit_message(
         return;
     }
     let mut edit_applied = false;
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         let sender = store.get_channel_message_sender(&mid);
         let scope = RowScope::Channel { sid: s, cid: c, signer: peer_str };
         if sender.is_some() && change_may_touch_row(&store, &scope, Some(&mid)) {
@@ -3047,7 +3053,7 @@ pub(crate) async fn handle_envelope_link_preview_set(
         return;
     }
 
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return;
     };
     let is_channel = sid.is_some();
@@ -3144,7 +3150,7 @@ pub(crate) async fn handle_envelope_delete_message(
 ) {
     let (Some(s), Some(c)) = (sid.as_deref(), cid.as_deref()) else { return };
     // Dart hears of a delete only once every check below passed: no store, no event.
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     let scope = RowScope::Channel { sid: s, cid: c, signer: sender_peer_id };
     if !store.channel_message_exists(&mid) || !change_may_touch_row(&store, &scope, Some(&mid)) {
         return;
@@ -3192,7 +3198,7 @@ pub(crate) async fn handle_envelope_dm_edit(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     let Some(change) = live_dm_change(&store, &mid, sender, local_master) else {
         hollow_log!("[HOLLOW-EDIT] Rejected: {sender} may not edit DM {mid}");
         return;
@@ -3232,7 +3238,7 @@ pub(crate) async fn handle_envelope_dm_delete(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     let Some(change) = live_dm_change(&store, &mid, sender, local_master) else {
         hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage (DM) from {sender}: may not delete {mid}");
         return;
@@ -3292,7 +3298,7 @@ pub(crate) async fn handle_envelope_add_reaction(
     if reaction_sig_rejected(peer_str, "reaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref()) {
         return;
     }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     if !channel_reaction_target_ok(&store, &mid, &s_id, &c_id) {
         return;
     }
@@ -3393,7 +3399,7 @@ pub(crate) async fn handle_envelope_remove_reaction(
     if reaction_sig_rejected(peer_str, "unreaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref()) {
         return;
     }
-    let removed = crate::storage::MessageStore::open(db_path, db_passphrase)
+    let removed = crate::storage::MessageStore::lease(db_path, db_passphrase)
         .is_ok_and(|store| store.remove_reaction(&mid, &emoji, peer_str, ts, sig.as_deref(), pk.as_deref()) == Ok(true));
     if !removed {
         return;

@@ -503,7 +503,7 @@ pub(crate) async fn handle_vault_upload_prepared(
 
             // Link vault content_id to the file record via message_id.
             if !message_id.is_empty() {
-                if let Ok(ms) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                if let Ok(ms) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
                     let _ = ms.set_file_content_id(&message_id, &content_id);
                 }
             }
@@ -1273,7 +1273,7 @@ pub(crate) async fn handle_shard_delete(
 
 /// `Err` when a reconstructed vault file is not the one its cards commit to.
 fn vault_bytes_checked(content_id: &str, plaintext: &[u8], db_path: &str, db_passphrase: &str) -> Result<(), String> {
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase)?;
+    let store = crate::storage::MessageStore::lease(db_path, db_passphrase)?;
     match super::file_commit::vault_plaintext_refused(&store, content_id, plaintext) {
         Some(reason) => {
             hollow_log!("[HOLLOW-SECURITY] REFUSED vault content {content_id}: {reason}");
@@ -1326,7 +1326,7 @@ pub(crate) fn ingest_vault_manifest(
     if manifest.message_id.is_empty() {
         return;
     }
-    if let Ok(ms) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(ms) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         let cards = ms.file_senders_for_message(&manifest.message_id).unwrap_or_default();
         if cards.iter().all(|sender| super::resolver::resolve(sender) == creator) {
             let _ = ms.set_file_content_id(&manifest.message_id, &manifest.content_id);

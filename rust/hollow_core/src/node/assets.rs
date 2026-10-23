@@ -105,7 +105,7 @@ pub(crate) fn public_banner_thumb(
     if !crate::crdt::valid_emote_hash(&hash) {
         return None;
     }
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok()?;
     let bytes = store.load_emote_blob(&hash).ok().flatten()?;
     super::image_convert::process_server_banner_thumb(&bytes).ok()
 }

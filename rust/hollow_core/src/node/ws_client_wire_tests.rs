@@ -439,16 +439,10 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
             std::future::pending::<()>().await;
             return;
         }
+        // Biased to the outbox: a kill queued by the frame just read lands before the
+        // next frame is read, so a reset after N frames counts exactly N.
         tokio::select! {
-            m = r.next() => match m {
-                Some(Ok(msg)) => {
-                    if zombie.load(Ordering::SeqCst) {
-                        continue;
-                    }
-                    on_client_frame(&state, id, msg);
-                }
-                _ => break,
-            },
+            biased;
             out = rx.recv() => match out {
                 Some(Out::Frame(m)) => {
                     if zombie.load(Ordering::SeqCst) {
@@ -465,6 +459,15 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
                     break;
                 }
                 Some(Out::Kill) | None => break,
+            },
+            m = r.next() => match m {
+                Some(Ok(msg)) => {
+                    if zombie.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    on_client_frame(&state, id, msg);
+                }
+                _ => break,
             },
             _ = wake.notified() => {}
         }
@@ -747,8 +750,19 @@ async fn a_zombie_window_loses_nothing_in_either_direction() {
 /// the old flush dropped the batch tail).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_write_mid_flush_keeps_the_rest_of_the_queue() {
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let url = format!("ws://127.0.0.1:{port}/ws");
+    // One listener throughout: a port given back between the two phases can be taken
+    // by another test's socket under load. Until the relay starts it drops every dial.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let (stop, mut stopped) = oneshot::channel::<()>();
+    let refuser = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut stopped => return listener,
+                dial = listener.accept() => drop(dial),
+            }
+        }
+    });
     const N: u8 = 8;
     let big = |k: u8| {
         let mut d = vec![k; 4 * 1024 * 1024];
@@ -759,7 +773,8 @@ async fn a_failed_write_mid_flush_keeps_the_rest_of_the_queue() {
     let queued = (1..=N).map(|k| WsCommand::SendToRoom { room_code: ROOM.into(), data: big(k) }).collect();
     let mut c = spawn_client_with(&url, quick(), queued);
     c.wait_kind("SessionLost", Duration::from_secs(10)).await;
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    stop.send(()).unwrap();
+    let listener = refuser.await.unwrap();
     let relay = FakeRelay::start_on(listener, false, |r| r.reset_first_after = Some(1));
     relay
         .wait("the last queued frame", Duration::from_secs(25), |r| r.binaries().iter().any(|p| p[1] == N))

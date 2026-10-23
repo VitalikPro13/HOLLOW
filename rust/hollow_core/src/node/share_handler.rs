@@ -184,12 +184,12 @@ pub(crate) fn open_control(
 /// Open a fresh MessageStore for this handler call. Returns None on failure.
 /// Held only inside the call (never across `.await`) so the swarm event loop
 /// future stays Send.
-fn open_message_store(bundle_keypair: &NativeKeypair) -> Option<MessageStore> {
+fn open_message_store(bundle_keypair: &NativeKeypair) -> Option<crate::storage::store_pool::StoreLease> {
     let data_dir = crate::identity::data_dir().ok()?;
     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
     let proto = bundle_keypair.to_protobuf_encoding().ok()?;
     let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    MessageStore::open(&db_path, &passphrase).ok()
+    MessageStore::lease(&db_path, &passphrase).ok()
 }
 
 fn now_unix_secs() -> u64 {

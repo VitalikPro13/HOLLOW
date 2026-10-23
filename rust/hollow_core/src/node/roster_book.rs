@@ -371,7 +371,7 @@ pub(crate) fn rooted_by(
     db_path: &str,
     db_passphrase: &str,
 ) -> Result<bool, String> {
-    let store = MessageStore::open(db_path, db_passphrase)?;
+    let store = MessageStore::lease(db_path, db_passphrase)?;
     let roster = match load_strict(&store, &master.peer_id())? {
         Some(r) => r,
         None => ensure_own(&store, master, device, db_path).0,
@@ -395,7 +395,7 @@ fn heard_for_own(store: &MessageStore, master: &str, incoming: &Roster) -> Roste
 
 /// Our own roster and its fold, as stored.
 pub(crate) fn own(master: &str, db_path: &str, db_passphrase: &str) -> Option<(Roster, RosterState)> {
-    let store = MessageStore::open(db_path, db_passphrase).ok()?;
+    let store = MessageStore::lease(db_path, db_passphrase).ok()?;
     let roster = load(&store, master)?;
     let state = fold(&store, &roster);
     Some((roster, state))
@@ -423,7 +423,7 @@ fn change_own(
     db_passphrase: &str,
     change: impl FnOnce(&mut Roster, &RosterState) -> Result<(), String>,
 ) -> Result<(Roster, RosterState), String> {
-    let store = MessageStore::open(db_path, db_passphrase)?;
+    let store = MessageStore::lease(db_path, db_passphrase)?;
     let own = master.peer_id();
     let mut roster = load(&store, &own).unwrap_or_else(|| Roster::new(&own));
     let before = fold(&store, &roster);
@@ -510,7 +510,7 @@ pub(crate) fn remove_self(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<Roster> {
-    let store = MessageStore::open(db_path, db_passphrase).ok()?;
+    let store = MessageStore::lease(db_path, db_passphrase).ok()?;
     let own = master.peer_id();
     let mut roster = load(&store, &own)?;
     let state = fold(&store, &roster);
@@ -624,7 +624,7 @@ async fn announce_own_state_inner(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
     match state.removed.get(local_device) {
         Some(by) => {
             note_own_removal(&store, Some(by));
@@ -685,7 +685,7 @@ pub(crate) async fn ask_again<'a>(
         Ok(())
     });
     let Ok((roster, _)) = asked else { return };
-    if let Ok(store) = MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = MessageStore::lease(db_path, db_passphrase) {
         stamp_pending(&store, &roster);
     }
     hollow_log!("[HOLLOW-ROSTER] A new base left this device out: asking to join again");
@@ -724,7 +724,7 @@ fn fan_out<'a>(
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom { room_code: own_room(local_master), data: data.clone() });
     // Each friend's whole DM room: we may know none of its devices yet, and a
     // single-device friend's device is its master id, which no link names.
-    let friends = MessageStore::open(db_path, db_passphrase)
+    let friends = MessageStore::lease(db_path, db_passphrase)
         .and_then(|s| s.load_friends(Some("accepted")))
         .unwrap_or_default();
     // A blocked friend's room stays left (`social::holds_dm_room`).
@@ -1015,7 +1015,7 @@ fn stored_ingest(
     else {
         return false;
     };
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return true };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return true };
     // The running app holds the resolver this process just moved: it re-reads.
     if changed {
         let _ = store.mark_roster_dirty(&master, now_ms());
@@ -1087,7 +1087,7 @@ fn fold_in(
     local_device: &str,
     source: Source,
 ) -> Option<Folded> {
-    let store = MessageStore::open(db_path, db_passphrase).ok()?;
+    let store = MessageStore::lease(db_path, db_passphrase).ok()?;
     // One writer from load to save: two processes (the app, the push fetch) folding at
     // once would each save over the other, and a lost removal comes back unrevoked.
     if let Err(e) = store.begin_transaction() {
@@ -1223,7 +1223,7 @@ async fn own_changes(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
     if let Some(by) = now.removed.get(local_device) {
         if !prev.removed.contains_key(local_device) {
             note_own_removal(&store, Some(by));
@@ -1331,7 +1331,7 @@ pub(crate) fn carried_member(
     db_passphrase: &str,
 ) -> bool {
     let carried = carried.verified(now_ms());
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return false };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return false };
     let view = match load(&store, &carried.master) {
         Some(stored) => merged_here(&store, Some(&stored), &carried),
         None => carried,

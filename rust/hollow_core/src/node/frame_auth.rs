@@ -68,13 +68,44 @@ pub(crate) enum Refusal {
 }
 
 pub(crate) fn now_ms() -> i64 {
-    let wall = std::time::SystemTime::now()
+    with_test_clock(wall_ms())
+}
+
+fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+fn with_test_clock(wall: i64) -> i64 {
     #[cfg(test)]
     let wall = wall.saturating_add(test_clock_ahead_ms());
     wall
+}
+
+/// How far ahead of the wall clock [`seal_stamp_ms`] may run to keep a burst of seals apart.
+pub(crate) const SEAL_LEAD_MS: i64 = 500;
+
+/// The stamp for the next frame this process seals: strictly after the last one, unless a
+/// burst already ran it [`SEAL_LEAD_MS`] ahead of the wall clock, then equal. Receivers
+/// order changes to one row by seal time ("sealed after the card it replaces"), so two
+/// changes sealed in one millisecond would make the newer look like a replay of the older.
+/// The last stamp lives in memory only, so a restart right after a burst can seal up to
+/// [`SEAL_LEAD_MS`] earlier than the frame before it, which an Olm read mark (AR-19) or a
+/// removal stamp then counts as that much older: kept small rather than a write per seal.
+pub(crate) fn seal_stamp_ms() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    let wall = wall_ms();
+    let last = LAST
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| Some(stamp_after(last, wall)))
+        .unwrap_or(wall);
+    with_test_clock(stamp_after(last, wall))
+}
+
+fn stamp_after(last: i64, wall: i64) -> i64 {
+    last.saturating_add(1).clamp(wall, wall.saturating_add(SEAL_LEAD_MS))
 }
 
 /// How far tests have moved the frame clock, per tokio runtime: seals, carried stamps
@@ -142,7 +173,7 @@ pub(crate) fn seal(keypair: &NativeKeypair, room: &str, route: &str, body: &[u8]
         nonce[..8].copy_from_slice(&FALLBACK.fetch_add(1, Ordering::Relaxed).to_be_bytes());
         nonce[8..].copy_from_slice(&now_ms().to_be_bytes());
     }
-    seal_at(keypair, room, route, now_ms(), nonce, body)
+    seal_at(keypair, room, route, seal_stamp_ms(), nonce, body)
 }
 
 pub(crate) fn seal_at(
@@ -522,6 +553,23 @@ mod tests {
         };
         let WsCommand::SendChannelDirect { data, .. } = seal_command(&alice, trigger) else { panic!() };
         assert!(data.is_empty());
+    }
+
+    #[test]
+    fn frames_sealed_within_one_millisecond_carry_increasing_stamps() {
+        let alice = keypair(1);
+        let stamps: Vec<i64> = (0..200)
+            .map(|_| open(&seal(&alice, ROOM, ROUTE_ROOM, b"x"), &alice.peer_id(), ROOM, Delivery::Room, now_ms()).unwrap().ts_ms)
+            .collect();
+        assert!(stamps.windows(2).all(|w| w[1] > w[0]), "two frames shared a seal stamp: {stamps:?}");
+    }
+
+    #[test]
+    fn a_seal_stamp_runs_at_most_the_lead_ahead_and_never_back() {
+        assert_eq!(stamp_after(NOW - 10, NOW), NOW, "an idle clock seals at the wall time");
+        assert_eq!(stamp_after(NOW + 3, NOW), NOW + 4);
+        assert_eq!(stamp_after(NOW + SEAL_LEAD_MS, NOW), NOW + SEAL_LEAD_MS, "a burst stops at the lead");
+        assert_eq!(stamp_after(i64::MAX, i64::MAX), i64::MAX);
     }
 
     #[test]

@@ -548,6 +548,15 @@ impl MessageStore {
     pub fn open(path: &str, passphrase: &str) -> Result<Self, String> {
         #[cfg(test)]
         OPENS_ON_THIS_THREAD.with(|n| n.set(n.get() + 1));
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let opened = Self::open_inner(path, passphrase);
+        #[cfg(test)]
+        super::store_pool::meter::note_open(started.elapsed().as_nanos() as u64);
+        opened
+    }
+
+    fn open_inner(path: &str, passphrase: &str) -> Result<Self, String> {
         let conn =
             Connection::open(path).map_err(|e| format!("Failed to open database: {e}"))?;
 
@@ -1578,6 +1587,57 @@ impl MessageStore {
             .map_err(|e| format!("WAL checkpoint failed: {e}"))
     }
 
+    /// True while a transaction this connection began is still open, or a statement
+    /// still holds a read open (a snapshot later reads would keep seeing).
+    pub(crate) fn in_transaction(&self) -> bool {
+        if !self.conn.is_autocommit() {
+            return true;
+        }
+        // SAFETY: walks this connection's own statements without touching them.
+        unsafe {
+            let db = self.conn.handle();
+            let mut stmt = rusqlite::ffi::sqlite3_next_stmt(db, std::ptr::null_mut());
+            while !stmt.is_null() {
+                if rusqlite::ffi::sqlite3_stmt_busy(stmt) != 0 {
+                    return true;
+                }
+                stmt = rusqlite::ffi::sqlite3_next_stmt(db, stmt);
+            }
+        }
+        false
+    }
+
+    /// Test-only: a statement stepped once and never reset, as a leaked row cursor leaves it.
+    #[cfg(test)]
+    pub(crate) fn hold_a_read_open_for_test(&self) {
+        let mut stmt = self.conn.prepare("SELECT 1 UNION ALL SELECT 2").unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let _ = rows.next().unwrap();
+        std::mem::forget(rows);
+        std::mem::forget(stmt);
+    }
+
+    /// Gives back this connection's unused page cache.
+    pub(crate) fn release_cache(&self) {
+        let _ = self.conn.release_memory();
+    }
+
+    /// The bytes this connection's page cache holds.
+    pub(crate) fn cache_used(&self) -> i64 {
+        let (mut cur, mut high) = (0, 0);
+        // SAFETY: reads a counter of this connection's own handle.
+        unsafe {
+            rusqlite::ffi::sqlite3_db_status(self.conn.handle(), rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED, &mut cur, &mut high, 0);
+        }
+        i64::from(cur)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw_handle(&self) -> *const rusqlite::ffi::sqlite3 {
+        // SAFETY: the pointer is only compared, never dereferenced.
+        unsafe { self.conn.handle() }
+    }
+
     pub fn begin_transaction(&self) -> Result<(), String> {
         self.conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| format!("BEGIN failed: {e}"))
@@ -1807,6 +1867,31 @@ impl MessageStore {
         self.update_link_preview_and_sig_in(
             "channel_messages", message_id, link_preview_json, signature, public_key, sealed_at,
         )
+    }
+
+    /// The stamp a new card on channel row `message_id` must pass: its last card's or
+    /// edit's, whichever is later. `None` = no such row.
+    pub fn channel_card_floor(&self, message_id: &str) -> Option<i64> {
+        self.card_floor_in("channel_messages", message_id)
+    }
+
+    /// DM twin of [`Self::channel_card_floor`].
+    pub fn dm_card_floor(&self, message_id: &str) -> Option<i64> {
+        self.card_floor_in("messages", message_id)
+    }
+
+    /// `table` is a fixed table name, never user input.
+    fn card_floor_in(&self, table: &str, message_id: &str) -> Option<i64> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT MAX(COALESCE(lp_at, 0), COALESCE(edited_at, 0)) FROM {table} \
+                     WHERE message_id = ?1"
+                ),
+                params![message_id],
+                |row| row.get(0),
+            )
+            .ok()
     }
 
     /// Attach (or clear) a card and swap in the re-signature that covers it, in ONE

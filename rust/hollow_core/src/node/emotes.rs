@@ -258,7 +258,7 @@ pub(crate) fn retry_stale_asks(
     }
     let stale = sweep_order(pending, stale);
     let mut ready: Vec<String> = Vec::new();
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         for h in stale {
             // The bytes may have landed by another route (a pack import, a
             // second conversation) — retire the ask instead of re-asking.
@@ -397,7 +397,7 @@ pub(crate) fn handle_request_emotes(
 ) {
     let mut fresh: Vec<String> = Vec::new();
     let mut re_aimed: Vec<String> = Vec::new();
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         for h in hashes.into_iter().take(kind.max_request_hashes()) {
             if !crate::crdt::valid_emote_hash(&h) {
                 continue;
@@ -465,7 +465,7 @@ pub(crate) fn handle_emote_request(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return;
     };
     let mut assets: Vec<(String, Vec<u8>)> = Vec::new();
@@ -593,7 +593,7 @@ pub(crate) async fn handle_emote_assets(
     let (db, pass, events) = (db_path.to_string(), db_passphrase.to_string(), event_tx.clone());
     tokio::spawn(async move {
         let settled = tokio::task::spawn_blocking(move || {
-            let Ok(store) = crate::storage::MessageStore::open(&db, &pass) else {
+            let Ok(store) = crate::storage::MessageStore::lease(&db, &pass) else {
                 return Vec::new();
             };
             let mut settled = Vec::new();

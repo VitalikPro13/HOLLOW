@@ -373,7 +373,7 @@ pub(crate) async fn accept(
         return;
     }
     if !kind.is_empty()
-        && let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase)
+        && let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase)
     {
         let _ = store.set_device_kind(&device, kind);
     }

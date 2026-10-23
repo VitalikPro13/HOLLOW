@@ -795,7 +795,7 @@ fn spawn_image_conversion(
     db_passphrase: &str,
 ) {
     let webp_quality = {
-        crate::storage::MessageStore::open(db_path, db_passphrase)
+        crate::storage::MessageStore::lease(db_path, db_passphrase)
             .ok()
             .and_then(|s| s.load_setting("image_quality").ok().flatten())
             .map(|s| image_convert::WebpQuality::from_setting(&s))
@@ -1116,7 +1116,7 @@ fn persist_sent_file_row(
     store_full_file: bool,
     final_path: &std::path::Path,
 ) {
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         let _ = store.insert_file_metadata(
             file_id, original_name, final_ext, final_mime,
             file_size, total_chunks, is_image,
@@ -1149,7 +1149,7 @@ fn persist_sent_dm_row(
     order_us: i64,
     album: Option<&str>,
 ) {
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         let _ = store.insert(
             peer_str, text, true, timestamp,
             sig, pk, Some(message_id),
@@ -1802,7 +1802,7 @@ fn persist_sent_channel_row(
     order_us: i64,
     album: Option<&str>,
 ) {
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         let _ = store.insert_channel_message(
             sid, cid, local_peer, text, true, timestamp,
             sig, pk, Some(message_id),
@@ -2255,7 +2255,7 @@ pub(crate) async fn handle_request_file(
     // Where may this file be pulled from? Read off OUR row, ONE store open on
     // this path (the same inline-open pattern the FileRequest responder uses),
     // and cached in the ask entry from here on.
-    let row = crate::storage::MessageStore::open(db_path, db_passphrase)
+    let row = crate::storage::MessageStore::lease(db_path, db_passphrase)
         .ok()
         .and_then(|store| store.get_file_metadata(&file_id).ok().flatten())
         .and_then(|meta| {
@@ -2937,7 +2937,7 @@ async fn try_decrypt_file_stream(
     } else {
         (plaintext, String::new())
     };
-    let refusal = match crate::storage::MessageStore::open(db_path, db_passphrase) {
+    let refusal = match crate::storage::MessageStore::lease(db_path, db_passphrase) {
         Ok(store) => super::file_commit::completion_refused_hashed(
             &store, file_id, plaintext.len() as u64, &sha256,
         ),
@@ -2956,7 +2956,7 @@ async fn try_decrypt_file_stream(
         return StreamOutcome::WrongKey("failed to write decrypted file".to_string());
     }
     let disk_path = final_path.to_string_lossy().to_string();
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         let _ = store.mark_file_complete(file_id, &disk_path);
     }
     hollow_log!("[HOLLOW-STREAM] File {file_id} complete: {}", crate::log::redact_file(&disk_path));
@@ -3205,7 +3205,7 @@ async fn attempt_vault_reconstruction(
         return Some(repull(dl_server_id));
     }
     let reconstructed = rebuilt.and_then(|plaintext| {
-        match crate::storage::MessageStore::open(db_path, db_passphrase) {
+        match crate::storage::MessageStore::lease(db_path, db_passphrase) {
             Ok(store) => match super::file_commit::vault_plaintext_refused(&store, content_id, &plaintext) {
                 Some(reason) => Err(format!("{FORGED_FILE_ERROR} ({reason})")),
                 None => Ok(plaintext),
@@ -3415,7 +3415,7 @@ pub(crate) async fn handle_envelope_file_header(
     // The stream this header's bytes ride from its sender to us.
     let stream_id = file_stream_id(&fid, &sender_peer_id, local_device);
 
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     let judged_sid = if from_guest_pull { None } else { sid.as_deref() };
     if let Some(reason) = file_header_refused(
         &store, server_states, &fid, judged_sid, cid.as_deref(), &sender_peer_id, from_guest_pull,

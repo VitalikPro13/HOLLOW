@@ -113,7 +113,7 @@ async fn record(
     kind: &str,
     detail: &str,
 ) -> bool {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return false;
     };
     let created_at = now_ms();
@@ -230,7 +230,7 @@ pub(crate) async fn note_olm_identity_key(
     device_peer_id: &str,
     identity_key: &str,
 ) {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return;
     };
     let Some(created_at) = pin_olm_identity_key(

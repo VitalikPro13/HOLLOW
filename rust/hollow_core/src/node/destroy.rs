@@ -83,7 +83,7 @@ pub(crate) const REPAIR_LINK_HINT: &str = "repair_link_time";
 /// device has a NEW id and no row in the imported database, so it stamps fresh; a
 /// repair a crash cut short stamps the earlier time it left beside the database.
 pub(crate) fn stamp_device_link(db_path: &str, db_passphrase: &str, device_peer_id: &str) {
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
     let hint = std::path::Path::new(db_path).with_file_name(REPAIR_LINK_HINT);
     let key = link_key(device_peer_id);
     if store.load_setting(&key).ok().flatten().is_some() {
@@ -161,7 +161,7 @@ pub(crate) fn judge_own_order(
     if from_the_future(order) {
         return Verdict::RejectPermanent("dated in the future");
     }
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else {
         return Verdict::RejectTransient("database unavailable");
     };
     match authorised(&store, order, true) {
@@ -221,7 +221,7 @@ async fn apply_friend_order(
         hollow_log!("[HOLLOW-DESTROY] Refused a friend destruction order: dated in the future");
         return;
     }
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
     if authorised(&store, order, false) != Some(true) {
         hollow_log!("[HOLLOW-DESTROY] Refused a friend destruction order: not signed with the recovery phrase");
         return;
@@ -256,7 +256,7 @@ pub(crate) async fn note_identity_reappeared(
     db_passphrase: &str,
     master: &str,
 ) {
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
     if identity_destroyed_at(&store, master).is_none() {
         return;
     }
@@ -456,7 +456,7 @@ async fn announce_to_friends(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
     let Ok(friends) = store.load_friends(Some("accepted")) else { return };
     let Some(carried) = super::olm_lane::carried_json(&HavenMessage::IdentityDestroyed {
         destroy: Box::new(order.clone()),

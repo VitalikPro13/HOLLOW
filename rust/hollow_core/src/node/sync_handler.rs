@@ -1198,7 +1198,7 @@ async fn ask_peers_to_fill(
     let convos: Vec<String> = dm_peers.iter().map(|d| super::resolver::resolve(d)).collect();
     let (path, pass) = (db_path.to_string(), db_passphrase.to_string());
     let (channel_ts, anchors) = tokio::task::spawn_blocking(move || {
-        let Ok(store) = crate::storage::MessageStore::open(&path, &pass) else {
+        let Ok(store) = crate::storage::MessageStore::lease(&path, &pass) else {
             return (HashMap::new(), Vec::new());
         };
         let channel_ts: HashMap<String, Vec<(String, i64)>> = channels
@@ -3581,7 +3581,7 @@ pub(crate) async fn handle_request_channel_sync(
     }
     channel_sync_sent.insert(dedup_key, std::time::Instant::now());
     if let Some(state) = server_states.get(&server_id) {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             carry_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str,
                 &channel_sync_request(&store, &server_id, &channel_id, true),
@@ -3848,7 +3848,7 @@ pub(crate) async fn flush_pending_sync_requests(
 
     hollow_log!("[HOLLOW-SYNC] Flushing {} pending sync requests for {peer_str}", entries.len());
 
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
 
     for (server_id, channel_id, since_timestamp) in entries {
         let _ = event_tx.send(NetworkEvent::MessageSyncStarted {
@@ -4041,7 +4041,7 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     // One transaction for the whole batch (up to 200 items) — the per-item
     // auto-commit made this handler fsync hundreds of times per sync page.
     // Same pattern as its plaintext twin in swarm.rs (ChannelSyncBatch).

@@ -151,7 +151,7 @@ pub(crate) fn for_dm(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<RosterDigests> {
-    let store = MessageStore::open(db_path, db_passphrase).ok()?;
+    let store = MessageStore::lease(db_path, db_passphrase).ok()?;
     let own_roster = store.load_roster(local_master).ok().flatten().filter(|r| r.master == local_master);
     let own = own_roster.as_ref().map(Roster::digest);
     let peer = (recipient_master != local_master).then(|| held_digest(&store, recipient_master)).flatten();
@@ -430,7 +430,7 @@ pub(crate) fn answer(
     if !pass_gate(format!("{local_device}|{kind}|{asker}|{subject}"), ROSTER_ANSWER_GAP_MS, now) {
         return;
     }
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
     let Some(roster) = super::roster_book::load(&store, subject) else { return };
     let msg = HavenMessage::RosterSync { roster, reply: false, waiting: false };
     if waiting {
@@ -515,7 +515,7 @@ pub(crate) fn fetch_roster(
     let own = subject == local_master;
     super::roster_book::ingest_stored(db_path, db_passphrase, local_master, local_device, sender, roster);
     if (own || reply)
-        && let Ok(store) = MessageStore::open(db_path, db_passphrase)
+        && let Ok(store) = MessageStore::lease(db_path, db_passphrase)
     {
         let _ = store.add_roster_ask_due(&subject, sender, super::roster_book::now_ms(), ASKS_DUE_CAP);
     }
@@ -533,7 +533,7 @@ pub(crate) fn send_due_asks(
     db_passphrase: &str,
     audience: &dyn Fn(&str) -> Audience,
 ) -> Reconciled {
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return Reconciled::default() };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return Reconciled::default() };
     let revoked = super::roster_book::reconcile_dirty(&store, None, local_master, local_device);
     let now = super::roster_book::now_ms();
     for (subject, device) in store.take_roster_asks_due() {
@@ -634,7 +634,7 @@ pub(crate) fn hold_for_stale_roster(
         hold.queue.push(dm());
         return Gate::Held;
     }
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return Gate::Go };
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return Gate::Go };
     let own_master = super::resolver::resolve(local_device);
     // Another process (the push fetch, the iOS NSE) stored a roster change this
     // process's resolver has not seen: follow it, and the release sends the DM again on
@@ -802,7 +802,7 @@ fn arm_backstop(
         let Some(unplaced) = taken else { return };
         let master = key[local_device.len() + 1..].to_string();
         hollow_log!("[HOLLOW-ROSTER] DM room for {master} never listed this session: the held DM goes out");
-        if let Ok(store) = MessageStore::open(&db_path, &db_passphrase) {
+        if let Ok(store) = MessageStore::lease(&db_path, &db_passphrase) {
             send_asks(&ws_cmd_tx, &store, &master, &unplaced.asks, &unplaced.dm_room, super::roster_book::now_ms());
         }
         let _ = cmd_tx.send(NodeCommand::ReleaseHeldDms { master }).await;
@@ -878,7 +878,7 @@ pub(crate) fn on_room_listed(
     if placed.is_empty() {
         return;
     }
-    let store = MessageStore::open(db_path, db_passphrase).ok();
+    let store = MessageStore::lease(db_path, db_passphrase).ok();
     let now = super::roster_book::now_ms();
     for (key, asks) in placed {
         let master = key[prefix.len()..].to_string();

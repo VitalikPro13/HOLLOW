@@ -18,7 +18,7 @@ const GUEST_AVATAR_MAX_BYTES: usize = 256 * 1024;
 /// Our own card, signed now from the stored profile. `None` with no name to show.
 pub(crate) fn own_card(master_keypair: &NativeKeypair, db_path: &str, db_passphrase: &str) -> Option<SignedCard> {
     let master = master_keypair.peer_id();
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok()?;
     let profile = store.load_profile(&master).ok().flatten()?;
     if profile.display_name.trim().is_empty() {
         return None;
@@ -35,7 +35,7 @@ pub(crate) fn own_card(master_keypair: &NativeKeypair, db_path: &str, db_passphr
 
 /// Our own avatar bytes, for a card pulled by someone who lacks them.
 pub(crate) fn own_avatar(master: &str, db_path: &str, db_passphrase: &str) -> Option<Vec<u8>> {
-    crate::storage::MessageStore::open(db_path, db_passphrase)
+    crate::storage::MessageStore::lease(db_path, db_passphrase)
         .ok()?
         .load_profile(master)
         .ok()
@@ -168,7 +168,7 @@ pub(crate) fn keep_card(card: &SignedCard, master: &str, ceiling: i64, db_path: 
     {
         return false;
     }
-    let Ok(st) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return false };
+    let Ok(st) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return false };
     super::overlay::ingest_field(&st, &card.master, card.stream_overlay.as_deref(), ceiling, None);
     st.save_signed_card(&stored(card)).unwrap_or(false)
 }
@@ -238,7 +238,7 @@ pub(crate) fn store_card(card: &SignedCard, avatar: Option<&[u8]>, ceiling: i64,
                 &card.master, "card avatar", super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES, Some(b),
             )
         });
-    crate::storage::MessageStore::open(db_path, db_passphrase)
+    crate::storage::MessageStore::lease(db_path, db_passphrase)
         .ok()
         .and_then(|st| {
             // Two devices of one identity can sign different cards at one stamp; the

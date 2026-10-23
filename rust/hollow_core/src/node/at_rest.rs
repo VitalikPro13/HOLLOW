@@ -65,7 +65,7 @@ pub fn init(db_path: &str, passphrase: &str) -> Result<(), String> {
             return Ok(());
         }
     }
-    let store = MessageStore::open(db_path, passphrase)?;
+    let store = MessageStore::lease(db_path, passphrase)?;
     let rows = store.load_file_keys()?;
     drop(store);
 
@@ -141,7 +141,7 @@ fn write_target() -> Result<StoreRef, String> {
 /// an orphan row, never an unreadable file.
 fn persist_key(uid: &[u8; 16], fk: &FileKey) -> Result<(), String> {
     let target = write_target()?;
-    let store = MessageStore::open(&target.db_path, &target.passphrase)?;
+    let store = MessageStore::lease(&target.db_path, &target.passphrase)?;
     store.insert_file_key(uid, &fk.key, &fk.nonce)?;
     let mut guard = ring().write().map_err(|e| format!("Key ring lock poisoned: {e}"))?;
     guard.keys.insert(*uid, fk.clone());
@@ -151,7 +151,7 @@ fn persist_key(uid: &[u8; 16], fk: &FileKey) -> Result<(), String> {
 fn forget_key(uid: &[u8; 16]) {
     let stores = ring().read().ok().map(|g| g.stores.clone()).unwrap_or_default();
     for s in &stores {
-        if let Ok(store) = MessageStore::open(&s.db_path, &s.passphrase) {
+        if let Ok(store) = MessageStore::lease(&s.db_path, &s.passphrase) {
             let _ = store.delete_file_key(uid);
         }
     }

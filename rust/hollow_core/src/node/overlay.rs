@@ -368,7 +368,7 @@ pub(crate) enum OwnChange {
 async fn save_own_inner(master_keypair: &NativeKeypair, change: OwnChange, db_path: &str, db_passphrase: &str) -> Result<String, String> {
     let (db, pass, kp, now) = (db_path.to_string(), db_passphrase.to_string(), master_keypair.clone(), super::frame_auth::now_ms());
     tokio::task::spawn_blocking(move || {
-        let store = MessageStore::open(&db, &pass)?;
+        let store = MessageStore::lease(&db, &pass)?;
         match change {
             OwnChange::Flags { allow, share } => set_flags(&store, &kp, allow, share, now).map(|()| String::new()),
             OwnChange::Look(look_json) => set_own_look(&store, &kp, &look_json, now),
@@ -670,7 +670,7 @@ async fn handle_envelope_overlay_look_ask_inner(
         .collect();
     let (db, pass, master) = (db_path.to_string(), db_passphrase.to_string(), local_master.to_string());
     let answer = tokio::task::spawn_blocking(move || {
-        MessageStore::open(&db, &pass).ok().map(|store| build_answer(&store, &master, sibling, &held))
+        MessageStore::lease(&db, &pass).ok().map(|store| build_answer(&store, &master, sibling, &held))
     })
     .await
     .ok()
@@ -878,7 +878,7 @@ async fn react_to_notices_inner(
     // our look from that sibling first, else from any.
     if let Some(hint) = own_pull {
         let (db, pass) = (db_path.to_string(), db_passphrase.to_string());
-        let held = tokio::task::spawn_blocking(move || MessageStore::open(&db, &pass).map(|s| own_held(&s)).unwrap_or_default())
+        let held = tokio::task::spawn_blocking(move || MessageStore::lease(&db, &pass).map(|s| own_held(&s)).unwrap_or_default())
             .await
             .unwrap_or_default();
         // A pull already under way keeps whom it asked: their answers still count.
@@ -907,7 +907,7 @@ async fn tick_inner(
     if book.dirty {
         book.dirty = false;
         let (db, pass) = (db_path.to_string(), db_passphrase.to_string());
-        let wanted = tokio::task::spawn_blocking(move || MessageStore::open(&db, &pass).map(|s| wanted_from_store(&s)).unwrap_or_default())
+        let wanted = tokio::task::spawn_blocking(move || MessageStore::lease(&db, &pass).map(|s| wanted_from_store(&s)).unwrap_or_default())
             .await
             .unwrap_or_default();
         let listed: HashSet<String> = wanted.iter().map(|(m, ..)| m.clone()).collect();
@@ -1149,7 +1149,7 @@ async fn handle_envelope_overlay_look_answer_inner(
     });
     let (db, pass, me, who) = (db_path.to_string(), db_passphrase.to_string(), local_master.to_string(), master.clone());
     let applied = tokio::task::spawn_blocking(move || {
-        MessageStore::open(&db, &pass).ok().and_then(|store| apply_answer(&store, &me, &who, &status, &look_json, &bundle_json))
+        MessageStore::lease(&db, &pass).ok().and_then(|store| apply_answer(&store, &me, &who, &status, &look_json, &bundle_json))
     })
     .await
     .ok()
@@ -1233,7 +1233,7 @@ fn build_announce(
         Some((roster, state)) => (Some(roster), state.removed.into_keys().collect()),
         None => (None, HashSet::new()),
     };
-    let friend_status = MessageStore::open(db_path, db_passphrase)
+    let friend_status = MessageStore::lease(db_path, db_passphrase)
         .map(|st| unplaced.iter().map(|m| (m.clone(), st.get_friend_status(m).ok().flatten())).collect())
         .unwrap_or_default();
     BuiltAnnounce {

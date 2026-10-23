@@ -118,7 +118,7 @@ pub(crate) fn request_predates_removal(
     db_path: &str,
     db_passphrase: &str,
 ) -> bool {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return false };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return false };
     let stale = older_than_removal(&store, master, requested_at);
     if stale {
         hollow_log!("[HOLLOW-SECURITY] Ignoring a FriendRequest from {sender} made before the last removal");
@@ -182,7 +182,7 @@ pub(crate) fn take_sibling_removals(
     if removed.is_empty() {
         return dropped;
     }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return dropped };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return dropped };
     for removal in removed.iter().take(MAX_SHARED_REMOVALS) {
         if removal.at <= 1 {
             continue;
@@ -225,7 +225,7 @@ pub(crate) fn build_friend_request(
 ) -> HavenMessage {
     let device_list = super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase);
     let key = out_bundle_key(target_master);
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
+    let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok();
 
     // Reuse a cached bundle while it is still inside the carried freshness rule.
     let cached: Option<CarriedBundle> = store
@@ -280,7 +280,7 @@ pub(crate) fn build_friend_request(
 
 /// How many pending-OUTGOING friend requests are on the books right now.
 fn outstanding_outgoing_requests(db_path: &str, db_passphrase: &str) -> usize {
-    crate::storage::MessageStore::open(db_path, db_passphrase)
+    crate::storage::MessageStore::lease(db_path, db_passphrase)
         .ok()
         .and_then(|st| st.load_friends(Some("pending")).ok())
         .map(|rows| {
@@ -346,7 +346,7 @@ pub(crate) async fn take_friend_card(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     let rows = store.load_friends(Some("pending")).unwrap_or_default();
     let Some(opened) = rows
         .iter()
@@ -454,7 +454,7 @@ pub(crate) fn share_friend_with_siblings(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     let Some((status, direction, requested_at)) = store.get_friend_row(master).ok().flatten() else { return };
     let roster = super::roster_book::load(&store, master);
     drop(store);
@@ -523,7 +523,7 @@ pub(crate) async fn handle_block_changed(
     }
     let (m, db, pass) = (master.clone(), db_path.to_string(), db_passphrase.to_string());
     let holds = tokio::task::spawn_blocking(move || {
-        crate::storage::MessageStore::open(&db, &pass)
+        crate::storage::MessageStore::lease(&db, &pass)
             .ok()
             .and_then(|st| st.get_friend_row(&m).ok().flatten())
             .is_some_and(|(status, direction, _)| holds_dm_room(&m, &status, &direction))
@@ -550,7 +550,7 @@ pub(crate) fn block_entries(store: &crate::storage::MessageStore) -> Vec<BlockEn
 /// The newest word we hold on `master`, its block or its lifting. Opens the store, so
 /// the event loop calls it through `spawn_blocking`.
 pub(crate) fn own_block_entry(master: &str, db_path: &str, db_passphrase: &str) -> Option<BlockEntry> {
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok()?;
     block_entries(&store).into_iter().find(|e| e.peer_id == master)
 }
 
@@ -583,7 +583,7 @@ pub(crate) fn take_sibling_blocks(
     if blocks.is_empty() {
         return changed;
     }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return changed };
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return changed };
     let held: HashMap<String, i64> = store.blocked_rows().unwrap_or_default().into_iter().collect();
     // A list names a block and its lifting both when the person was blocked again.
     let mut newest: HashMap<String, (bool, i64)> = HashMap::new();
@@ -618,7 +618,7 @@ pub(crate) fn take_sibling_blocks(
 /// True when `master` is an accepted friend on disk. A queued accept for anyone else
 /// outlived a removal (a sibling removed them, or the queue was seeded before it).
 pub(crate) fn holds_accepted_friend(db_path: &str, db_passphrase: &str, master: &str) -> bool {
-    crate::storage::MessageStore::open(db_path, db_passphrase)
+    crate::storage::MessageStore::lease(db_path, db_passphrase)
         .ok()
         .and_then(|st| st.get_friend_status(master).ok().flatten())
         .as_deref()
@@ -693,7 +693,7 @@ pub(crate) async fn handle_send_friend_request(
     // from under bundles already sitting in a relay mailbox. An already-pending
     // target is exempt: re-requesting reuses its cached bundle and mints nothing.
     {
-        let already_pending = crate::storage::MessageStore::open(db_path, db_passphrase)
+        let already_pending = crate::storage::MessageStore::lease(db_path, db_passphrase)
             .ok()
             .and_then(|st| {
                 st.get_friend_status_direction(&super::resolver::resolve(&peer_id_str))
@@ -738,7 +738,7 @@ pub(crate) async fn handle_send_friend_request(
     // the master; resolving here is idempotent and covers any remaining device id).
     let master = super::resolver::resolve(&peer_id_str);
     {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             // Fold any pre-existing row stranded under the device id (parity with
             // the accept path) so re-adding never leaves a stale device-keyed dup.
             if master != peer_id_str {
@@ -844,7 +844,7 @@ pub(crate) async fn handle_accept_friend_request(
     // the row, so it is read back after the write.
     let mut answered_at = 0i64;
     {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             if master != peer_id_str {
                 let _ = store.migrate_friend_to_master(&peer_id_str, &master);
             }
@@ -882,7 +882,7 @@ pub(crate) async fn handle_accept_friend_request(
     // inbound session. Failure is never fatal: it falls back to lazy co-presence.
     {
         let stored: Option<CarriedRequestRecord> =
-            crate::storage::MessageStore::open(db_path, db_passphrase)
+            crate::storage::MessageStore::lease(db_path, db_passphrase)
                 .ok()
                 .and_then(|st| st.load_setting(&in_bundle_key(&master)).ok().flatten())
                 .and_then(|json| serde_json::from_str::<CarriedRequestRecord>(&json).ok());
@@ -1038,7 +1038,7 @@ pub(crate) async fn handle_reject_friend_request(
     // NEWER request is strictly greater and still shows, and a re-add overwrites.
     let mut original_requested_at: i64 = 0;
     {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             // Fold any device-stranded row up to the master first (parity with the
             // accept/removal paths) so the tombstone lands on the one master key.
             if master != peer_id_str {
@@ -1104,7 +1104,7 @@ pub(crate) async fn handle_remove_friend(
     // action and must take effect whether or not the peer is online to hear about
     // it. Also clean up any legacy device-stranded row so no duplicate survives.
     let mut ended_at = super::frame_auth::now_ms();
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         // Past the friendship it ends, even one stamped by a clock ahead of ours, so
         // every device of ours counts that friendship as ended.
         if let Ok(Some((_, _, since))) = store.get_friend_row(&master) {
@@ -1126,7 +1126,7 @@ pub(crate) async fn handle_remove_friend(
     let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
     if targets.is_empty() {
         pending_friend_removals.insert(master.clone());
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             let _ = store.save_friend(&master, "removed", "outgoing", 0);
         }
         // A removed row never rejoins the DM room where the queue would meet them,
@@ -1316,7 +1316,7 @@ pub(crate) async fn handle_update_profile(
     // An edit outranks every copy this device holds, even one a sibling with a clock
     // ahead of ours stamped: a stored row never yields to an older stamp. A planted
     // stamp past any honest one is replaced instead of outranked.
-    let now = crate::storage::MessageStore::open(db_path, db_passphrase)
+    let now = crate::storage::MessageStore::lease(db_path, db_passphrase)
         .ok()
         .and_then(|db| db.load_profile_light(local_peer_str).ok().flatten())
         .map(|p| p.updated_at)
@@ -1352,7 +1352,7 @@ pub(crate) async fn handle_update_profile(
             String::new(), String::new(), String::new(), String::new(), String::new(),
             String::new(), String::new(), String::new(),
         );
-        if let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(db) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             if let Err(e) = db.save_profile(
                 &local_peer_str, &display_name, &status, &about_me, now,
                 avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
@@ -1410,7 +1410,7 @@ pub(crate) async fn handle_update_profile(
 
     // Our card rides along, so a co-member can show a guest who wrote our public posts.
     let card = super::profile_card::own_card(master_keypair, db_path, db_passphrase);
-    let stream_overlay = crate::storage::MessageStore::open(db_path, db_passphrase)
+    let stream_overlay = crate::storage::MessageStore::lease(db_path, db_passphrase)
         .ok()
         .and_then(|st| super::overlay::own_field(&st, local_peer_str));
     // Over MLS to each server we share, then over Olm to everyone MLS did not reach.
@@ -1628,7 +1628,7 @@ pub(crate) fn save_incoming_profile(
     if profile_from_the_future(&master, updated_at, ceiling) {
         return (master, false);
     }
-    let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(db) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return (master, false);
     };
     // Before the empty-profile guard: the field stands on its own signature, and a
@@ -1889,7 +1889,7 @@ pub(crate) fn profile_audience(
     db_passphrase: &str,
 ) -> Audience {
     profile_audience_known(server_states, local_master, peer).unwrap_or_else(|| {
-        let status = crate::storage::MessageStore::open(db_path, db_passphrase)
+        let status = crate::storage::MessageStore::lease(db_path, db_passphrase)
             .ok()
             .and_then(|st| st.get_friend_status(&super::resolver::resolve(peer)).ok().flatten());
         audience_by_friend_status(status.as_deref())
@@ -2118,7 +2118,7 @@ pub(crate) fn co_members_to_introduce(
     db_path: &str,
     db_passphrase: &str,
 ) -> Vec<String> {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return Vec::new();
     };
     candidates
@@ -2185,7 +2185,7 @@ pub(crate) fn own_profile_update(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<HavenMessage> {
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok()?;
     let p = store.load_profile(local_master).ok().flatten().unwrap_or_else(|| crate::storage::messages::StoredProfile {
         peer_id: local_master.to_string(),
         ..Default::default()
@@ -2291,7 +2291,7 @@ pub(crate) fn maybe_request_full_profile(
     if avatar_hash.is_empty() && banner_hash.is_empty() && showcase_assets_hash.is_empty() {
         return;
     }
-    let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(db) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return;
     };
     let cached = db.load_profile(profile_master).ok().flatten();
@@ -2491,7 +2491,7 @@ pub(crate) fn handle_profile_request_for(
 ) {
     if target_peer_id.is_empty() { return; }
 
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         if let Ok(Some(profile)) = store.load_profile(target_peer_id) {
             // Only a profile its owner signed whole can be relayed: the receiver
             // refuses anything less, so sending it would only mask the reason.
@@ -2630,7 +2630,7 @@ pub(crate) async fn handle_profile_relay(
             })
     };
 
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return;
     };
     let limit = crate::storage::messages::stored_profile_stamp_limit();

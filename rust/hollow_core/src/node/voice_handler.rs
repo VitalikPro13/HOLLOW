@@ -563,7 +563,7 @@ fn call_invite_allowed(local_master: &str, peer: &str, db_path: &str, db_passphr
         return false;
     }
     let master = super::resolver::resolve(peer);
-    crate::storage::MessageStore::open(db_path, db_passphrase)
+    crate::storage::MessageStore::lease(db_path, db_passphrase)
         .ok()
         .and_then(|st| st.get_friend_status(&master).ok().flatten())
         .as_deref()

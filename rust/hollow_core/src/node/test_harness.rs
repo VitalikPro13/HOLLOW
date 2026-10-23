@@ -46861,7 +46861,7 @@ async fn authz_only_our_own_device_blocks_for_us() {
     carry_and_settle(&d1, &mut d2, md_blocks(&[(&target, true, far)])).await;
     let since = d2.store().blocked_rows().unwrap().into_iter().find(|(p, _)| *p == target).map(|(_, at)| at);
     assert!(
-        since.is_some_and(|at| at <= super::frame_auth::now_ms() + super::frame_auth::LIVE_SKEW_MS),
+        since.is_some_and(|at| at <= super::frame_auth::now_ms() + super::frame_auth::LIVE_SKEW_MS + super::frame_auth::SEAL_LEAD_MS),
         "our own device's block must land, held to its frame: {since:?}",
     );
 
@@ -55121,4 +55121,302 @@ async fn g13_sync_asks_until_still(nodes: &mut [TestNode], still_ms: u64, max_se
             return (bytes, deliveries);
         }
     }
+}
+
+// g13w3-actor
+
+/// The opens each node's event loop made itself, outside the store pool.
+fn g13w3_direct_opens(nodes: &[&TestNode]) -> Vec<(String, String)> {
+    nodes
+        .iter()
+        .map(|n| (n.device_id.clone(), crate::storage::store_pool::meter::for_path(&n.db_path)))
+        .filter(|(_, m)| m.direct_opens.load(std::sync::atomic::Ordering::Relaxed) > 0)
+        .map(|(d, m)| (d, m.summary()))
+        .collect()
+}
+
+async fn g13w3_dm(from: &TestNode, to_master: &str, mid: &str, text: &str) {
+    from.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: to_master.to_string(),
+            text: text.to_string(),
+            message_id: mid.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+}
+
+async fn g13w3_post(from: &TestNode, server_id: &str, channel_id: &str, mid: &str, text: &str) {
+    from.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.to_string(),
+            channel_id: channel_id.to_string(),
+            text: text.to_string(),
+            message_id: mid.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+}
+
+async fn g13w3_got_dm(node: &mut TestNode, text: &str) -> bool {
+    wait_event(node, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text: t, .. } if t == text)
+    })
+    .await
+}
+
+async fn g13w3_got_post(node: &mut TestNode, text: &str) -> bool {
+    wait_event(node, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text: t, .. } if t == text)
+    })
+    .await
+}
+
+/// No event loop opens the message store itself: friend DMs with an edit and a reaction,
+/// a server join, channel posts with an edit and a reaction, presence, a profile change
+/// and a restart all run on the loop's pooled connections.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_no_event_loop_opens_the_store_itself() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O_TAG: u8 = 201;
+    const J_TAG: u8 = 202;
+    let o_master = tag_kp(O_TAG).peer_id();
+    let j_master = tag_kp(J_TAG).peer_id();
+    let mut o = spawn_node_with_friends(&relay, O_TAG, O_TAG, &[&j_master]).await;
+    let mut j = spawn_node_with_friends(&relay, J_TAG, J_TAG, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 20).await;
+
+    g13w3_dm(&o, &j_master, "g13w3-dm-1", "hello J").await;
+    assert!(g13w3_got_dm(&mut j, "hello J").await, "J gets O's DM");
+    g13w3_dm(&j, &o_master, "g13w3-dm-2", "hello O").await;
+    assert!(g13w3_got_dm(&mut o, "hello O").await, "O gets J's DM");
+    o.cmd_tx
+        .send(NodeCommand::EditDmMessage { peer_id: j_master.clone(), message_id: "g13w3-dm-1".into(), new_text: "hello J, edited".into() })
+        .await
+        .unwrap();
+    j.cmd_tx
+        .send(NodeCommand::AddDmReaction { peer_id: o_master.clone(), message_id: "g13w3-dm-1".into(), emoji: "👍".into() })
+        .await
+        .unwrap();
+    o.cmd_tx
+        .send(NodeCommand::UpdateProfile {
+            display_name: "Owner".into(),
+            status: String::new(),
+            about_me: String::new(),
+            avatar_bytes: None,
+            banner_bytes: None,
+            twitch_username: String::new(),
+            showcase_board: None,
+            showcase_assets: None,
+            avatar_frame: None,
+            avatar_anim: None,
+            banner_anim: None,
+            support_creds: None,
+        })
+        .await
+        .unwrap();
+
+    let server_id = create_server_and_wait(&mut o, "Pool Server").await;
+    let general = general_channel_of(&server_id);
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(30, async || j.mls_members(&server_id).await.len() == 2).await,
+        "J joins the server's MLS group",
+    );
+    g13w3_post(&o, &server_id, &general, "g13w3-ch-1", "hello channel").await;
+    assert!(g13w3_got_post(&mut j, "hello channel").await, "J gets O's post");
+    g13w3_post(&j, &server_id, &general, "g13w3-ch-2", "hello back").await;
+    assert!(g13w3_got_post(&mut o, "hello back").await, "O gets J's post");
+    o.cmd_tx
+        .send(NodeCommand::EditChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), message_id: "g13w3-ch-1".into(), new_text: "hello channel, edited".into() })
+        .await
+        .unwrap();
+    j.cmd_tx
+        .send(NodeCommand::AddChannelReaction { server_id: server_id.clone(), channel_id: general.clone(), message_id: "g13w3-ch-1".into(), emoji: "👍".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || j.channel_messages(&server_id, &general).iter().any(|m| m.text == "hello channel, edited")).await,
+        "J stores O's edit",
+    );
+
+    let mut j = restart_node(&relay, j, J_TAG, J_TAG).await;
+    expect_dm_pair_ready(&relay, &o, &j, 20).await;
+    g13w3_dm(&o, &j_master, "g13w3-dm-3", "after the restart").await;
+    assert!(g13w3_got_dm(&mut j, "after the restart").await, "J gets a DM after its restart");
+    g13w3_post(&o, &server_id, &general, "g13w3-ch-3", "channel after the restart").await;
+    assert!(g13w3_got_post(&mut j, "channel after the restart").await, "J gets a post after its restart");
+    drain_events(&mut o);
+
+    let opened = g13w3_direct_opens(&[&o, &j]);
+    assert!(opened.is_empty(), "an event loop opened the message store itself: {opened:?}");
+    for n in [&o, &j] {
+        let m = crate::storage::store_pool::meter::for_path(&n.db_path);
+        let warm = m.warm_leases.load(std::sync::atomic::Ordering::Relaxed);
+        let opens = m.pool_opens.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(warm > 10 * opens.max(1), "{} ran its loop off warm connections only {warm} times: {}", n.device_id, m.summary());
+    }
+}
+
+/// Event-loop stall on a busy server: grow to `HOLLOW_ACTOR_MEMBERS` (default 20), post
+/// `HOLLOW_ACTOR_POSTS` (default 100) for the joiners to backfill, then the G1 checkpoint
+/// (idle, join, posts, reconnect, leave, join, kick). Writes every loop's meter, summed,
+/// to `HOLLOW_ACTOR_OUT`; run once with `HOLLOW_STORE_POOL_OFF=1` (the 0.13 base) and once
+/// without.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_measure_loop_stall() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let members = g1_env_u64("HOLLOW_ACTOR_MEMBERS", 20) as usize;
+    let posts = g1_env_u64("HOLLOW_ACTOR_POSTS", 100);
+    let relay = MockRelay::new();
+    g1_probe::start();
+    let mut owner = spawn_node_with_friends(&relay, 1, 1, &[]).await;
+    let server_id = create_server_and_wait(&mut owner, "Stall Probe").await;
+    let general = general_channel_of(&server_id);
+    let mut run = G1Run {
+        relay: relay.clone(),
+        nodes: vec![owner],
+        server_id: server_id.clone(),
+        general: general.clone(),
+        next_tag: 2,
+        owner_friend: None,
+        quiet_ms: 3000,
+        max_secs: 240,
+        allowed: 0,
+        phases: Vec::new(),
+    };
+    run.grow(members - 1, 4).await;
+    for k in 0..posts {
+        run.nodes[(k as usize) % 2].cmd_tx.send(g1_send_cmd(&server_id, &general, format!("stall-{k}"))).await.unwrap();
+    }
+    crate::storage::store_pool::meter::reset_all();
+    let started = std::time::Instant::now();
+    run.checkpoint(members).await;
+    let secs = started.elapsed().as_secs_f64();
+    g1_probe::stop();
+    let total = crate::storage::store_pool::meter::LoopMeter::default();
+    for n in &run.nodes {
+        total.add(&crate::storage::store_pool::meter::for_path(&n.db_path));
+    }
+    let line = format!(
+        "pool_off={} members={members} posts={posts} nodes={} secs={secs:.1} {}\n",
+        crate::storage::store_pool::meter::pool_off(),
+        run.nodes.len(),
+        total.summary(),
+    );
+    if let Ok(out) = std::env::var("HOLLOW_ACTOR_OUT") {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(out).expect("meter out");
+        f.write_all(line.as_bytes()).expect("write meter");
+    }
+    crate::hollow_log!("[g13w3] {line}");
+}
+
+/// The author's newest card always lands on its own row, channel and DM: a card stamped
+/// at or after our clock (a second attach in the same millisecond, or a sibling's card
+/// stamped ahead) used to make our own row refuse the card we were showing and sending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_our_newest_card_lands_on_our_row_over_a_card_stamped_ahead() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let friend = NativeKeypair::from_secret_bytes(&seed_bytes(42)).peer_id();
+    let mut o = spawn_node_with_friends(&relay, 41, 41, &[&friend]).await;
+    let server_id = create_server_and_wait(&mut o, "Card Stamp Server").await;
+    let general = general_channel_of(&server_id);
+    const CH_MID: &str = "g13w3-card-ch";
+    const DM_MID: &str = "g13w3-card-dm";
+    g13w3_post(&o, &server_id, &general, CH_MID, "see https://example.com/stamp").await;
+    g13w3_dm(&o, &friend, DM_MID, "see https://example.com/stamp").await;
+    assert!(
+        wait_until(10, async || o.store().channel_message_exists(CH_MID) && o.store().dm_message_exists(DM_MID)).await,
+        "both messages are stored"
+    );
+
+    let card = |title: &str| crate::node::LinkPreviewRef {
+        url: "https://example.com/stamp".to_string(),
+        title: title.to_string(),
+        description: String::new(),
+        domain: "example.com".to_string(),
+        site_name: String::new(),
+        thumb_webp_b64: None,
+        thumb_w: None,
+        thumb_h: None,
+        rich: None,
+    };
+    let ahead_json = serde_json::to_string(&card("card-ahead")).unwrap();
+    let ahead_at = Some(super::frame_auth::now_ms() + 60_000);
+    let store = o.store();
+    assert_eq!(store.update_channel_link_preview_and_sig(CH_MID, Some(&ahead_json), None, None, ahead_at), Ok(true));
+    assert_eq!(store.update_link_preview_and_sig(DM_MID, Some(&ahead_json), None, None, ahead_at), Ok(true));
+    drop(store);
+
+    drain_events(&mut o);
+    let newest = || Some(Box::new(card("card-newest")));
+    o.cmd_tx
+        .send(NodeCommand::AttachChannelLinkPreview {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            message_id: CH_MID.to_string(),
+            preview: newest(),
+        })
+        .await
+        .unwrap();
+    o.cmd_tx
+        .send(NodeCommand::AttachDmLinkPreview { peer_id: friend.clone(), message_id: DM_MID.to_string(), preview: newest() })
+        .await
+        .unwrap();
+    let held = |o: &TestNode| {
+        let store = o.store();
+        let title = |row: Option<crate::storage::messages::MessageSigRow>| row.and_then(|r| r.link_preview).map(|c| c.title);
+        (title(store.get_channel_message_sig_row(CH_MID)), title(store.get_dm_message_sig_row(DM_MID)))
+    };
+    let landed = wait_until(10, async || {
+        held(&o) == (Some("card-newest".to_string()), Some("card-newest".to_string()))
+    })
+    .await;
+    assert!(landed, "our own rows kept an older card than the one we sent: {:?}", held(&o));
+}
+
+/// A frame for our own sibling goes through a room every device of ours holds: the first
+/// room that shows it can be one it just left (a friend's DM room after a removal), where
+/// the relay buffers the frame for a rejoin that never comes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_a_carry_to_a_sibling_never_rides_a_room_it_left() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut d1, d2, x) = siblings_and_friend(&relay, [241, 242, 243, 244, 245], &[]).await;
+    // Device 2's stale view: device 1 still listed in rooms it is no longer in.
+    for i in 0..40 {
+        relay.inject_presence(&d2.device_id, &format!("g13w3-left-{i:02}"), &d1.device_id);
+    }
+    sleep_ms(500).await;
+    drain_events(&mut d1);
+    carry_as(&d2, &d1, super::types::HavenMessage::StatusUpdate { status: "g13w3-own-room".into() }).await;
+    let arrived = wait_event(&mut d1, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::PeerStatusChanged { status, .. } if status == "g13w3-own-room")
+    })
+    .await;
+    assert!(arrived, "a carry to our sibling went to a room it is not in");
+    drop(x);
 }

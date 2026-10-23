@@ -1,30 +1,16 @@
-//! A floor against new `MessageStore::open` calls in `node/`: every one opens a SQLCipher
-//! connection, and on the event loop that stalls every peer. The message-store actor
-//! (0.13) moves the kept sites off the loop; until then the count may only go down.
+//! A floor against `MessageStore::open` in `node/`: a fresh SQLCipher connection
+//! re-parses the whole schema under a shared lock, and on the event loop that stalls
+//! every peer. Node code leases (`MessageStore::lease`, warm connections while a loop
+//! runs); the harness test `g13w3_no_event_loop_opens_the_store_itself` catches an open
+//! reached through a helper in any module, which this scan cannot see.
 
 use std::collections::BTreeMap;
 
-/// Every `MessageStore::open` in `node/` outside tests at 0.12.2, by (file, enclosing
-/// fn): on the event loop today, the message-store actor in 0.13 moves them.
+/// The only `MessageStore::open` left in `node/` outside tests, by (file, enclosing fn).
 const KEPT: &[(&str, &str, usize)] = &[
-    ("assets.rs", "public_banner_thumb", 1),
-    ("at_rest.rs", "forget_key", 1),
-    ("at_rest.rs", "init", 1),
-    ("at_rest.rs", "persist_key", 1),
+    // The CrdtStore actor's own long-lived connection.
     ("crdt_store.rs", "open", 1),
-    ("crypto_handler.rs", "accepted_friend_entries", 1),
-    ("crypto_handler.rs", "request_sibling_dm_backfill", 1),
-    ("crypto_handler.rs", "send_friend_list_to_sibling", 1),
-    ("crypto_handler.rs", "send_read_markers_to_sibling", 1),
-    ("destroy.rs", "announce_to_friends", 1),
-    ("destroy.rs", "apply_friend_order", 1),
-    ("destroy.rs", "judge_own_order", 1),
-    ("destroy.rs", "note_identity_reappeared", 1),
-    ("destroy.rs", "stamp_device_link", 1),
-    ("emotes.rs", "handle_emote_assets", 1),
-    ("emotes.rs", "handle_emote_request", 1),
-    ("emotes.rs", "handle_request_emotes", 1),
-    ("emotes.rs", "retry_stale_asks", 1),
+    // The push fetch node: one short pass in its own process, with no event loop.
     ("fetch.rs", "fetch_post_refused", 1),
     ("fetch.rs", "fetched_post_mentions", 1),
     ("fetch.rs", "filter_by_notification_level", 1),
@@ -39,110 +25,8 @@ const KEPT: &[(&str, &str, usize)] = &[
     ("fetch.rs", "run_fetch", 1),
     ("fetch.rs", "stored_server_state", 1),
     ("fetch.rs", "try_decrypt_dm", 1),
-    ("file_asks.rs", "retention_expired_locally", 1),
-    ("file_asks.rs", "retry_stale_asks", 1),
-    ("file_handler.rs", "attempt_vault_reconstruction", 1),
-    ("file_handler.rs", "handle_envelope_file_header", 1),
-    ("file_handler.rs", "handle_request_file", 1),
-    ("file_handler.rs", "persist_sent_channel_row", 1),
-    ("file_handler.rs", "persist_sent_dm_row", 1),
-    ("file_handler.rs", "persist_sent_file_row", 1),
-    ("file_handler.rs", "spawn_image_conversion", 1),
-    ("file_handler.rs", "try_decrypt_file_stream", 2),
+    // A guest's in-memory store lives exactly as long as this one connection.
     ("guest_view.rs", "enter", 1),
-    ("link_handler.rs", "accept", 1),
-    ("message_ops.rs", "handle_add_channel_reaction", 1),
-    ("message_ops.rs", "handle_add_dm_reaction", 1),
-    ("message_ops.rs", "handle_attach_channel_link_preview", 1),
-    ("message_ops.rs", "handle_attach_dm_link_preview", 1),
-    ("message_ops.rs", "handle_delete_channel_message", 1),
-    ("message_ops.rs", "handle_delete_dm_message", 1),
-    ("message_ops.rs", "handle_edit_channel_message", 1),
-    ("message_ops.rs", "handle_edit_dm_message", 1),
-    ("message_ops.rs", "handle_envelope_add_reaction", 1),
-    ("message_ops.rs", "handle_envelope_delete_message", 1),
-    ("message_ops.rs", "handle_envelope_dm_delete", 1),
-    ("message_ops.rs", "handle_envelope_dm_edit", 1),
-    ("message_ops.rs", "handle_envelope_edit_message", 1),
-    ("message_ops.rs", "handle_envelope_link_preview_set", 1),
-    ("message_ops.rs", "handle_envelope_remove_reaction", 1),
-    ("message_ops.rs", "handle_remove_channel_reaction", 1),
-    ("message_ops.rs", "handle_remove_dm_reaction", 1),
-    ("message_ops.rs", "handle_send_channel_message", 1),
-    ("message_ops.rs", "handle_send_message", 1),
-    ("message_ops.rs", "latest_own_channel_ts_blocking", 1),
-    ("message_ops.rs", "live_channel_moderation_drop", 1),
-    ("message_ops.rs", "persist_incoming_channel_message", 1),
-    ("message_ops.rs", "persist_sent_channel_message", 1),
-    ("overlay.rs", "build_announce", 1),
-    ("overlay.rs", "handle_envelope_overlay_look_answer_inner", 1),
-    ("overlay.rs", "handle_envelope_overlay_look_ask_inner", 1),
-    ("overlay.rs", "react_to_notices_inner", 1),
-    ("overlay.rs", "save_own_inner", 1),
-    ("overlay.rs", "tick_inner", 1),
-    ("profile_card.rs", "keep_card", 1),
-    ("profile_card.rs", "own_avatar", 1),
-    ("profile_card.rs", "own_card", 1),
-    ("profile_card.rs", "store_card", 1),
-    ("roster_book.rs", "announce_own_state_inner", 1),
-    ("roster_book.rs", "ask_again", 1),
-    ("roster_book.rs", "carried_member", 1),
-    ("roster_book.rs", "change_own", 1),
-    ("roster_book.rs", "fan_out", 1),
-    ("roster_book.rs", "fold_in", 1),
-    ("roster_book.rs", "own", 1),
-    ("roster_book.rs", "own_changes", 1),
-    ("roster_book.rs", "remove_self", 1),
-    ("roster_book.rs", "rooted_by", 1),
-    ("roster_book.rs", "stored_ingest", 1),
-    ("roster_reach.rs", "answer", 1),
-    ("roster_reach.rs", "arm_backstop", 1),
-    ("roster_reach.rs", "fetch_roster", 1),
-    ("roster_reach.rs", "for_dm", 1),
-    ("roster_reach.rs", "hold_for_stale_roster", 1),
-    ("roster_reach.rs", "on_room_listed", 1),
-    ("roster_reach.rs", "send_due_asks", 1),
-    ("security_alerts.rs", "note_olm_identity_key", 1),
-    ("security_alerts.rs", "record", 1),
-    ("share_handler.rs", "open_message_store", 1),
-    ("social.rs", "build_friend_request", 1),
-    ("social.rs", "co_members_to_introduce", 1),
-    ("social.rs", "handle_accept_friend_request", 2),
-    ("social.rs", "handle_block_changed", 1),
-    ("social.rs", "handle_profile_relay", 1),
-    ("social.rs", "handle_profile_request_for", 1),
-    ("social.rs", "handle_reject_friend_request", 1),
-    ("social.rs", "handle_remove_friend", 2),
-    ("social.rs", "handle_send_friend_request", 2),
-    ("social.rs", "handle_update_profile", 3),
-    ("social.rs", "holds_accepted_friend", 1),
-    ("social.rs", "maybe_request_full_profile", 1),
-    ("social.rs", "outstanding_outgoing_requests", 1),
-    ("social.rs", "own_block_entry", 1),
-    ("social.rs", "own_profile_update", 1),
-    ("social.rs", "profile_audience", 1),
-    ("social.rs", "request_predates_removal", 1),
-    ("social.rs", "save_incoming_profile", 1),
-    ("social.rs", "share_friend_with_siblings", 1),
-    ("social.rs", "take_friend_card", 1),
-    ("social.rs", "take_sibling_blocks", 1),
-    ("social.rs", "take_sibling_removals", 1),
-    ("swarm.rs", "after_welcome_joined", 2),
-    ("swarm.rs", "ask_sender_for_channels", 1),
-    ("swarm.rs", "dm_event_convo", 1),
-    ("swarm.rs", "handle_incoming_request_inner", 29),
-    ("swarm.rs", "on_verified_sibling", 1),
-    ("swarm.rs", "request_dm_resync_after_rekey", 1),
-    ("swarm.rs", "run_event_loop", 25),
-    ("swarm.rs", "send_personal_emotes_to_sibling", 1),
-    ("sync_handler.rs", "ask_peers_to_fill", 1),
-    ("sync_handler.rs", "flush_pending_sync_requests", 1),
-    ("sync_handler.rs", "handle_envelope_channel_sync_batch", 1),
-    ("sync_handler.rs", "handle_request_channel_sync", 1),
-    ("vault_ops.rs", "handle_vault_upload_prepared", 1),
-    ("vault_ops.rs", "ingest_vault_manifest", 1),
-    ("vault_ops.rs", "vault_bytes_checked", 1),
-    ("voice_handler.rs", "call_invite_allowed", 1),
 ];
 
 /// `src` with every top-level `#[cfg(test)]` item, comment and literal blanked,
@@ -313,8 +197,7 @@ fn the_scanner_skips_tests_comments_and_literals() {
     assert_eq!(got, want);
 }
 
-/// A floor, not a proof: it sees a direct open in `node/`, never one reached through a
-/// helper called from the loop (`social::holds_accepted_friend` and the like).
+/// A floor, not a proof: it sees a direct open in `node/` only.
 #[test]
 fn every_node_store_open_is_a_kept_site() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node");
@@ -346,6 +229,7 @@ fn every_node_store_open_is_a_kept_site() {
         .collect();
     assert!(
         new.is_empty() && gone.is_empty(),
-        "MessageStore::open outside the kept sites (a new open on the loop waits for the message-store actor): {new:?}; kept sites with no open left (drop them): {gone:?}"
+        "MessageStore::open outside the kept sites (node code uses MessageStore::lease): {new:?}; kept sites with no open left (drop them): {gone:?}"
     );
 }
+

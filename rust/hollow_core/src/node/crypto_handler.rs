@@ -45,7 +45,7 @@ pub(crate) fn request_sibling_dm_backfill(
 
     let mut per_convo_since: Vec<(String, i64)> = Vec::new();
     let mut gaps: HashMap<String, GapDigest> = HashMap::new();
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         for convo in store.get_dm_peer_ids() {
             let (since, gap) = store.dm_sync_anchor(&convo, true);
             if let Some(gap) = gap {
@@ -76,7 +76,7 @@ pub(crate) fn send_read_markers_to_sibling(
     db_path: &str,
     db_passphrase: &str,
 ) -> usize {
-    let markers: Vec<ReadMarker> = crate::storage::MessageStore::open(db_path, db_passphrase)
+    let markers: Vec<ReadMarker> = crate::storage::MessageStore::lease(db_path, db_passphrase)
         .map(|s| s.read_markers_snapshot())
         .unwrap_or_default()
         .into_iter()
@@ -95,7 +95,7 @@ pub(crate) fn send_read_markers_to_sibling(
 
 /// Our accepted friends as the sibling lane carries them.
 pub(crate) fn accepted_friend_entries(db_path: &str, db_passphrase: &str) -> Vec<FriendListEntry> {
-    crate::storage::MessageStore::open(db_path, db_passphrase)
+    crate::storage::MessageStore::lease(db_path, db_passphrase)
         .ok()
         .and_then(|s| s.load_friends(Some("accepted")).ok())
         .unwrap_or_default()
@@ -115,7 +115,7 @@ pub(crate) fn send_friend_list_to_sibling(
     db_passphrase: &str,
 ) -> usize {
     let mut friends = accepted_friend_entries(db_path, db_passphrase);
-    let (removed, blocks) = crate::storage::MessageStore::open(db_path, db_passphrase)
+    let (removed, blocks) = crate::storage::MessageStore::lease(db_path, db_passphrase)
         .map(|store| {
             for f in &mut friends {
                 f.roster = super::roster_book::load(&store, &f.peer_id);
@@ -2512,17 +2512,23 @@ pub(crate) async fn remove_identity_from_subgroups(
     }
 }
 
-/// Find a WS room containing the given peer.
+/// Find a WS room containing the given peer. One of our own devices is found in the
+/// rooms every device of ours holds, our own room then our inbox: any other room it
+/// shares with us is a first match that may be one it just left, where the relay
+/// buffers the frame for a rejoin that never comes.
 pub(crate) fn ws_room_for_peer(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     peer_str: &str,
 ) -> Option<String> {
-    for (room, peers) in ws_room_peers {
-        if peers.contains(peer_str) {
-            return Some(room.clone());
+    let shows = |room: &str| ws_room_peers.get(room).is_some_and(|peers| peers.contains(peer_str));
+    let master = super::resolver::resolve(peer_str);
+    if master != peer_str && super::dm_room::is_local(&master) {
+        let own = [super::roster_book::own_room(&master), format!("inbox:{master}")];
+        if let Some(room) = own.into_iter().find(|room| shows(room)) {
+            return Some(room);
         }
     }
-    None
+    ws_room_peers.iter().find(|(_, peers)| peers.contains(peer_str)).map(|(room, _)| room.clone())
 }
 
 /// Where a frame for `peer_str` goes: a room that shows it to us, else the room a peer
@@ -3801,6 +3807,30 @@ mod tests {
         rooms.iter().map(|(room, peers)| {
             (room.to_string(), peers.iter().map(|p| p.to_string()).collect())
         }).collect()
+    }
+
+    #[test]
+    fn our_own_device_is_reached_through_our_own_room_then_our_inbox() {
+        use crate::identity::native_identity::NativeKeypair;
+        let _g = super::super::resolver::test_lock();
+        let master = NativeKeypair::from_secret_bytes(&[0xA7; 32]);
+        let (m, sibling) = (master.peer_id(), NativeKeypair::from_secret_bytes(&[0xA8; 32]).peer_id());
+        let stranger = NativeKeypair::from_secret_bytes(&[0xA9; 32]).peer_id();
+        super::super::dm_room::register(&master);
+        super::super::resolver::seed_self(&m, std::slice::from_ref(&sibling));
+        let (own, inbox) = (super::super::roster_book::own_room(&m), format!("inbox:{m}"));
+        let rooms = |extra: &[&str]| {
+            let mut rooms: HashMap<String, HashSet<String>> =
+                (0..40).map(|i| (format!("left-{i}"), HashSet::from([sibling.clone(), stranger.clone()]))).collect();
+            for room in extra {
+                rooms.insert(room.to_string(), HashSet::from([sibling.clone()]));
+            }
+            rooms
+        };
+        assert_eq!(ws_room_for_peer(&rooms(&[&inbox]), &sibling), Some(inbox.clone()));
+        assert_eq!(ws_room_for_peer(&rooms(&[&inbox, &own]), &sibling), Some(own.clone()));
+        assert!(ws_room_for_peer(&rooms(&[&inbox, &own]), &stranger).is_some_and(|r| r.starts_with("left-")));
+        assert!(ws_room_for_peer(&rooms(&[]), &sibling).is_some_and(|r| r.starts_with("left-")), "no own room = any room");
     }
 
     /// Review M3: a master the tree shows unfit never repairs our leaf, even as the

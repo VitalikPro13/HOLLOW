@@ -247,7 +247,7 @@ pub(crate) fn carried_json(msg: &HavenMessage) -> Option<String> {
     debug_assert_eq!(msg.lane(), Lane::Carried, "only a Carried-lane message rides the Olm lane");
     serde_json::to_string(&MessageEnvelope::Carried {
         msg: Box::new(msg.clone()),
-        at_ms: super::frame_auth::now_ms(),
+        at_ms: super::frame_auth::seal_stamp_ms(),
     })
     .ok()
 }
@@ -443,6 +443,19 @@ mod tests {
         let (kind, reply) = bob.encrypt("alice", b"reply").unwrap();
         alice.decrypt("bob", kind, &reply).unwrap();
         (alice, bob)
+    }
+
+    /// A carried change is judged by min(its stamp, its frame's seal): both must rise.
+    #[test]
+    fn carried_stamps_strictly_increase_within_a_millisecond() {
+        let msg = HavenMessage::StatusUpdate { status: "x".into() };
+        let stamps: Vec<i64> = (0..200)
+            .map(|_| match serde_json::from_str(&carried_json(&msg).unwrap()).unwrap() {
+                MessageEnvelope::Carried { at_ms, .. } => at_ms,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert!(stamps.windows(2).all(|w| w[1] > w[0]), "two carried envelopes shared a stamp: {stamps:?}");
     }
 
     #[tokio::test]

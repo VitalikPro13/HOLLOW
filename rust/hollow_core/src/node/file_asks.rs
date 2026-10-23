@@ -414,7 +414,7 @@ fn retention_expired_locally(
     db_path: &str,
     db_passphrase: &str,
 ) -> bool {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return false;
     };
     let Ok(Some(meta)) = store.get_file_metadata(file_id) else {
@@ -676,7 +676,7 @@ pub(crate) async fn retry_stale_asks(
         return;
     }
     let stale = sweep_order(pending, stale);
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return;
     };
     let mut ready: Vec<String> = Vec::new();

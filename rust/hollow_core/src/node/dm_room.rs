@@ -34,6 +34,11 @@ pub(crate) fn register(master: &NativeKeypair) {
         .insert(master.peer_id(), master.x25519_scalar_bytes());
 }
 
+/// Whether this process speaks for `master` ([`register`]ed).
+pub(crate) fn is_local(master: &str) -> bool {
+    LOCAL_MASTERS.read().unwrap_or_else(|p| p.into_inner()).contains_key(master)
+}
+
 /// The relay room for the DM between two MASTER ids. The same on both sides and on
 /// every device of either, and it needs the key of one of them.
 ///
