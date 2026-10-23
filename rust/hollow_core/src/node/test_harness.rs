@@ -55420,3 +55420,91 @@ async fn g13w3_a_carry_to_a_sibling_never_rides_a_room_it_left() {
     assert!(arrived, "a carry to our sibling went to a room it is not in");
     drop(x);
 }
+
+// g13w3-ar35
+
+/// The KeyBundles `q` put on the wire for `to`.
+fn ar35_bundles_to(relay: &MockRelay, q: &TestNode, to: &str) -> usize {
+    review_bundles_to(relay, &q.device_id, to).len()
+}
+
+/// A relay that kept a live-only frame cannot deliver it again after the receiver
+/// restarts: the replay guard outlives the process (AR-35, C-OLM-05).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn ar35_a_live_frame_replayed_after_a_restart_is_refused() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut q = spawn_node_with_friends(&relay, 247, 247, &[]).await;
+    let p_key = NativeKeypair::from_secret_bytes(&seed_bytes(248));
+    let p_id = p_key.peer_id();
+    let inbox = format!("inbox:{}", q.master_id);
+    let sealed_ask = |q: &TestNode| {
+        let ask = super::crypto_handler::signed_key_request(&p_key, &p_id, &q.device_id);
+        super::frame_auth::seal(&p_key, &inbox, &q.device_id, &serde_json::to_vec(&ask).unwrap())
+    };
+    // Q must see P somewhere for its answer to reach the wire.
+    relay.set_recording(&q.device_id, true);
+    let settle = async |relay: &MockRelay, q: &mut TestNode| {
+        assert!(wait_until(10, async || relay.room_devices(&inbox).contains(&q.device_id)).await, "Q holds its inbox");
+        relay.inject_presence(&q.device_id, "ar35-room", &p_id);
+        flush_frames(relay, q).await;
+        sleep_ms(500).await;
+        flush_frames(relay, q).await;
+    };
+    settle(&relay, &mut q).await;
+
+    let before = ar35_bundles_to(&relay, &q, &p_id);
+    let frame = sealed_ask(&q);
+    relay.inject_raw_direct(&inbox, &p_id, &q.device_id, frame.clone());
+    assert!(wait_until(10, async || ar35_bundles_to(&relay, &q, &p_id) == before + 1).await, "Q answers the KeyRequest");
+
+    let mut q = restart_node(&relay, q, 247, 247).await;
+    settle(&relay, &mut q).await;
+    let after_restart = ar35_bundles_to(&relay, &q, &p_id);
+    relay.inject_raw_direct(&inbox, &p_id, &q.device_id, frame);
+    flush_frames(&relay, &mut q).await;
+    sleep_ms(500).await; // ABSENCE: the replay must draw no bundle
+    assert_eq!(ar35_bundles_to(&relay, &q, &p_id), after_restart, "Q answered a replayed live frame after its restart");
+
+    // Not deaf: a fresh frame from the same sender still lands.
+    relay.inject_raw_direct(&inbox, &p_id, &q.device_id, sealed_ask(&q));
+    assert!(
+        wait_until(10, async || ar35_bundles_to(&relay, &q, &p_id) == after_restart + 1).await,
+        "Q must still answer a fresh KeyRequest after its restart",
+    );
+}
+
+/// The swarm hands the stored guard each sender's placement (AR-35 review MED 1): a
+/// friend's device fills the pool no stranger can, a stranger only the strangers' pool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn ar35_a_friends_live_frame_is_kept_where_strangers_cannot_evict_it() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let friend = NativeKeypair::from_secret_bytes(&seed_bytes(251));
+    let friend_dev = NativeKeypair::from_secret_bytes(&seed_bytes(252));
+    let stranger = NativeKeypair::from_secret_bytes(&seed_bytes(253));
+    let mut q = spawn_node_with_friends(&relay, 247, 247, &[&friend.peer_id()]).await;
+    super::resolver::update_many(&friend.peer_id(), [friend_dev.peer_id().as_str()]);
+    let inbox = format!("inbox:{}", q.master_id);
+    assert!(wait_until(10, async || relay.room_devices(&inbox).contains(&q.device_id)).await, "Q holds its inbox");
+
+    for key in [&friend_dev, &stranger] {
+        let ask = super::crypto_handler::signed_key_request(key, &key.peer_id(), &q.device_id);
+        let frame = super::frame_auth::seal(key, &inbox, &q.device_id, &serde_json::to_vec(&ask).unwrap());
+        relay.inject_raw_direct(&inbox, &key.peer_id(), &q.device_id, frame);
+    }
+    flush_frames(&relay, &mut q).await;
+    let expected = vec![(false, stranger.peer_id(), 1), (true, friend.peer_id(), 1)];
+    let shares = || {
+        let mut shares = q.store().live_frame_nonce_shares().unwrap();
+        shares.sort();
+        shares
+    };
+    assert!(wait_until(10, async || shares() == expected).await, "stored shares {:?}, want {expected:?}", shares());
+}

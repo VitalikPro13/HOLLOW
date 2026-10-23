@@ -262,7 +262,7 @@ impl Sealing {
         };
         if msg.live_only()
             && (is_stale(opened.ts_ms, now_ms)
-                || !self.replays.first_sight(sender, opened.nonce, opened.ts_ms, now_ms))
+                || !self.replays.first_sight(sender, opened.nonce, opened.ts_ms, now_ms, None))
         {
             hollow_log!("[HOLLOW-SECURITY] Dropped a stale or repeated live frame at the forwarder");
             return None;

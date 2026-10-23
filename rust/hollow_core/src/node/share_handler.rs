@@ -28,6 +28,36 @@ const MANIFEST_VERSION: u16 = 1;
 /// Share link envelope version. Layout: [version:1][root_hash:32][key:32].
 const LINK_VERSION: u8 = 1;
 
+/// Most chunks a share may have (256 GiB): above any manifest the 64 MB relay frame
+/// can carry, so no share that could ever travel is refused (C-FILES-06).
+const MAX_SHARE_CHUNKS: u32 = 1 << 20;
+
+impl ShareManifest {
+    /// Whether the fields that size the bitmap and the partial file agree with each
+    /// other: a manifest is its publisher's word, and the link pins only its hash.
+    pub(crate) fn well_formed(&self) -> Result<(), &'static str> {
+        if self.version != MANIFEST_VERSION {
+            return Err("unknown manifest version");
+        }
+        if self.chunk_size != CHUNK_SIZE {
+            return Err("chunk size is not the version's");
+        }
+        if self.total_size == 0 {
+            return Err("empty share");
+        }
+        if self.total_size.div_ceil(CHUNK_SIZE as u64) != self.chunk_count as u64 {
+            return Err("chunk count does not cover the size");
+        }
+        if self.chunk_count > MAX_SHARE_CHUNKS {
+            return Err("more chunks than a share may have");
+        }
+        if self.chunk_hashes.len() != self.chunk_count as usize {
+            return Err("chunk count vs hash list mismatch");
+        }
+        Ok(())
+    }
+}
+
 /// Prefix for share swarm room IDs on the relay.
 const SHARE_ROOM_PREFIX: &str = "share:";
 
@@ -521,8 +551,8 @@ pub fn build_manifest_from_file(
         return Err("Cannot share an empty file".to_string());
     }
     let chunk_count_u64 = total_size.div_ceil(CHUNK_SIZE as u64);
-    if chunk_count_u64 > u32::MAX as u64 {
-        return Err(format!("File too large: {chunk_count_u64} chunks > u32::MAX"));
+    if chunk_count_u64 > MAX_SHARE_CHUNKS as u64 {
+        return Err("This file is too large to share".to_string());
     }
     let chunk_count = chunk_count_u64 as u32;
 
@@ -1172,9 +1202,9 @@ fn rebuild_seed_state(
     store: &MessageStore,
 ) -> Option<(String, ShareSwarmState)> {
     if stored.state != "completed" || !stored.seeding { return None; }
-    let manifest: ShareManifest = match serde_json::from_str(&stored.manifest_json) {
-        Ok(m) => m,
-        Err(_) => return None,
+    let manifest: ShareManifest = match serde_json::from_str::<ShareManifest>(&stored.manifest_json) {
+        Ok(m) if m.well_formed().is_ok() => m,
+        _ => return None,
     };
     let Some(disk_path) = stored.disk_path.as_ref() else { return None; };
     if !Path::new(disk_path).exists() {
@@ -1630,8 +1660,8 @@ pub async fn handle_envelope_share_manifest_response(
         Ok(m) => m,
         Err(e) => { hollow_log!("[SHARE] manifest parse: {e}"); return; }
     };
-    if manifest.chunk_hashes.len() as u32 != manifest.chunk_count {
-        hollow_log!("[SHARE] manifest chunk_count vs hash list mismatch");
+    if let Err(why) = manifest.well_formed() {
+        hollow_log!("[HOLLOW-SECURITY] Refused a share manifest for {root_hash}: {why}");
         return;
     }
 
@@ -2239,6 +2269,71 @@ mod tests {
         assert!(registry[&root].peer_have.is_empty(), "a Have before the manifest was taken");
         handle_envelope_share_manifest_response(&mut registry, &kp, &tx, root.clone(), b64).await;
         assert!(registry[&root].manifest.is_some(), "the first manifest lands");
+    }
+
+    /// C-FILES-06: a publisher's manifest sizes our bitmap and partial file, so one
+    /// whose fields do not add up is refused before anything is allocated or emitted.
+    #[tokio::test]
+    async fn a_share_manifest_that_does_not_add_up_is_refused() {
+        let good = ShareManifest {
+            version: MANIFEST_VERSION, file_name: "a.bin".into(), mime: "application/octet-stream".into(),
+            total_size: 2 * CHUNK_SIZE as u64 + 1, chunk_size: CHUNK_SIZE, chunk_count: 3,
+            chunk_hashes: vec![[1; 32], [2; 32], [3; 32]], created_at: 1, note: None,
+        };
+        assert_eq!(good.well_formed(), Ok(()));
+        let huge = MAX_SHARE_CHUNKS + 1;
+        let bad: Vec<(&str, ShareManifest)> = vec![
+            ("version", ShareManifest { version: MANIFEST_VERSION + 1, ..good.clone() }),
+            ("chunk size", ShareManifest { chunk_size: CHUNK_SIZE / 2, ..good.clone() }),
+            ("empty", ShareManifest { total_size: 0, chunk_count: 0, chunk_hashes: vec![], ..good.clone() }),
+            ("size past its chunks", ShareManifest { total_size: u64::MAX / 2, ..good.clone() }),
+            ("chunks past its size", ShareManifest { total_size: CHUNK_SIZE as u64, ..good.clone() }),
+            ("ceiling", ShareManifest {
+                total_size: huge as u64 * CHUNK_SIZE as u64, chunk_count: huge,
+                chunk_hashes: vec![[0; 32]; huge as usize], ..good.clone()
+            }),
+            ("hash list", ShareManifest { chunk_hashes: vec![[1; 32], [2; 32]], ..good.clone() }),
+        ];
+        let kp = NativeKeypair::from_secret_bytes(&[5; 32]);
+        for (what, manifest) in bad {
+            assert!(manifest.well_formed().is_err(), "a manifest with a bad {what} passed");
+            if what == "ceiling" {
+                continue; // too big for the wire anyway; the rule alone is the point
+            }
+            let bytes = serde_json::to_vec(&manifest).unwrap();
+            let root = hex::encode(manifest_root_hash(&bytes));
+            let mut registry = new_registry();
+            registry.insert(root.clone(), seeding_share(None));
+            let (tx, mut rx) = mpsc::channel(8);
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            handle_envelope_share_manifest_response(&mut registry, &kp, &tx, root.clone(), b64).await;
+            assert!(registry[&root].manifest.is_none(), "a manifest with a bad {what} was taken");
+            assert!(rx.try_recv().is_err(), "a manifest with a bad {what} was announced");
+        }
+    }
+
+    /// A seed rebuilt at start trusts no stored manifest more than a fresh one.
+    #[test]
+    fn a_stored_seed_whose_manifest_does_not_add_up_is_skipped() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = MessageStore::open(&tmp.path().join("s.db").to_string_lossy(), &"5e".repeat(32)).unwrap();
+        let file = tmp.path().join("seed.bin");
+        std::fs::write(&file, b"x").unwrap();
+        let manifest = ShareManifest {
+            version: MANIFEST_VERSION, file_name: "a.bin".into(), mime: "application/octet-stream".into(),
+            total_size: 1, chunk_size: CHUNK_SIZE, chunk_count: 1,
+            chunk_hashes: vec![[1; 32]], created_at: 1, note: None,
+        };
+        let row = |m: &ShareManifest| StoredShare {
+            root_hash: hex::encode([3u8; 32]), file_name: "a.bin".into(), file_ext: "bin".into(),
+            mime: m.mime.clone(), total_size: m.total_size, chunk_size: m.chunk_size, chunk_count: m.chunk_count,
+            manifest_json: serde_json::to_string(m).unwrap(), encryption_key: vec![4; 32], share_link: String::new(),
+            state: "completed".into(), seeding: true, disk_path: Some(file.to_string_lossy().into_owned()),
+            bytes_uploaded: 0, created_at: 0, completed_at: None, save_dir: None, server_id: None, context_type: None,
+        };
+        assert!(rebuild_seed_state(row(&manifest), &db).is_some(), "control: a sound seed is rebuilt");
+        let bad = ShareManifest { total_size: u64::MAX / 2, ..manifest };
+        assert!(rebuild_seed_state(row(&bad), &db).is_none(), "a stored manifest that does not add up was seeded");
     }
 
     fn sent_haves(rx: &mut mpsc::UnboundedReceiver<WsCommand>) -> Vec<(String, String, Vec<u8>)> {

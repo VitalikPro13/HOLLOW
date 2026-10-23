@@ -30,11 +30,8 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
 
     let manifest = parse_manifest(entries.manifest_bytes.as_deref())?;
 
-    if manifest.format_version != ARCHIVE_FORMAT_VERSION {
-        return Err(format!(
-            "Unsupported archive format version {} (expected {})",
-            manifest.format_version, ARCHIVE_FORMAT_VERSION
-        ));
+    if archive_signed_bytes(manifest.format_version, &[0; 32]).is_none() {
+        return Err(format!("Unsupported archive format version {}", manifest.format_version));
     }
 
     let pubkeys = parse_pubkeys(entries.pubkeys_bytes.as_deref())?;
@@ -69,7 +66,7 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
         ));
     }
 
-    let archive_signature_valid = verify_archive_level_signature(&entries, &file_metadata);
+    let archive_signature_valid = verify_archive_level_signature(&entries, &file_metadata, manifest.format_version);
 
     // The viewer opens `{files_dir}/{file_id}.{file_ext}`: only a file that landed there
     // under exactly that name is included.
@@ -350,6 +347,7 @@ fn message_signing_context(
 fn verify_archive_level_signature(
     entries: &ArchiveEntries,
     file_metadata: &[ArchiveFileMetadata],
+    format_version: u32,
 ) -> bool {
     let Some(sig_bytes) = &entries.archive_sig_bytes else {
         crate::hollow_log!("[archive] Archive has no archive_signature.json");
@@ -396,13 +394,9 @@ fn verify_archive_level_signature(
         return false;
     }
 
-    // Verify the Ed25519 signature on the hash.
-    verify_archive_signature(
-        &arch_sig.exporter_peer_id,
-        &arch_sig.signature_b64,
-        &arch_sig.public_key_b64,
-        &recomputed,
-    )
+    // The manifest is inside the hash, so its format picks the signed form.
+    let Some(signed) = archive_signed_bytes(format_version, &recomputed) else { return false };
+    verify_archive_signature(&arch_sig.exporter_peer_id, &arch_sig.signature_b64, &arch_sig.public_key_b64, &signed)
 }
 
 /// Quick-verify an archive: parse, check signatures, return summary.
@@ -487,12 +481,12 @@ fn compute_archive_hash(
     hasher.finalize().into()
 }
 
-/// Verify an Ed25519 signature on the archive content hash.
+/// Verify the exporter's Ed25519 signature over `signed`.
 fn verify_archive_signature(
     exporter_peer_id: &str,
     sig_b64: &str,
     pk_b64: &str,
-    content_hash: &[u8; 32],
+    signed: &[u8],
 ) -> bool {
     use crate::identity::native_identity::NativeKeypair;
 
@@ -506,7 +500,7 @@ fn verify_archive_signature(
     if NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes).as_deref() != Some(exporter_peer_id) {
         return false;
     }
-    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, content_hash).unwrap_or(false)
+    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, signed).unwrap_or(false)
 }
 
 /// Generate a short timestamp slug for temp directory naming.
@@ -524,18 +518,26 @@ mod tests {
     use std::io::Write;
 
     fn archive_of(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
-        let manifest = serde_json::json!({
-            "format_version": ARCHIVE_FORMAT_VERSION,
+        archive_in_format(ARCHIVE_WRITE_FORMAT, entries)
+    }
+
+    fn manifest_in_format(format_version: u32) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "format_version": format_version,
             "archive_type": "dm",
             "exporter_peer_id": "",
             "export_timestamp": 0,
             "message_count": 0,
             "file_mode": "full",
             "participants": [],
-        });
+        }))
+        .unwrap()
+    }
+
+    fn archive_in_format(format_version: u32, entries: &[(String, Vec<u8>)]) -> Vec<u8> {
         let mut out = std::io::Cursor::new(Vec::new());
         let mut z = zip::ZipWriter::new(&mut out);
-        let manifest = ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap());
+        let manifest = ("manifest.json".to_string(), manifest_in_format(format_version));
         for (name, bytes) in std::iter::once(&manifest).chain(entries) {
             z.start_file(name.as_str(), zip::write::SimpleFileOptions::default()).unwrap();
             z.write_all(bytes).unwrap();
@@ -627,6 +629,44 @@ mod tests {
         let bomb = bomb.into_inner();
         assert!(bomb.len() < 1 << 20, "the test bomb is {} bytes", bomb.len());
         assert!(load_archive(&bomb).is_err(), "320 MiB unpacked from a small archive");
+    }
+
+    /// An empty archive in `format`, its signature made over what `signed_as` signs.
+    fn signed_archive(format: u32, signed_as: u32) -> Vec<u8> {
+        let kp = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[6u8; 32]);
+        let bare = archive_in_format(format, &[]);
+        let manifest = manifest_in_format(format);
+        let empty = BTreeMap::new();
+        let hash = compute_archive_hash(&manifest, &empty, &empty, &empty, &empty, &BTreeMap::new());
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let sig = ArchiveSignature {
+            exporter_peer_id: kp.peer_id(),
+            signature_b64: b64(&kp.sign(&archive_signed_bytes(signed_as, &hash).unwrap())),
+            public_key_b64: b64(&kp.public_key_protobuf()),
+            content_hash_hex: hex::encode(hash),
+        };
+        let mut out = std::io::Cursor::new(bare);
+        {
+            let mut z = zip::ZipWriter::new_append(&mut out).unwrap();
+            z.start_file("archive_signature.json", zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(&serde_json::to_vec(&sig).unwrap()).unwrap();
+            z.finish().unwrap();
+        }
+        out.into_inner()
+    }
+
+    /// C-OLM-07: a format 2 archive signs its hash under the `hollow-archive1` tag and
+    /// format 1 keeps the bare hash, so old archives still verify; neither signature
+    /// passes for the other format, and an unknown format does not open.
+    #[test]
+    fn an_archive_signature_verifies_only_in_its_own_format() {
+        let valid = |format, signed_as| load_archive(&signed_archive(format, signed_as)).unwrap().archive_signature_valid;
+        assert!(valid(1, 1), "an old bare-hash archive no longer verifies");
+        assert!(valid(2, 2), "a tagged archive does not verify");
+        assert!(!valid(2, 1), "a bare-hash signature passed as format 2");
+        assert!(!valid(1, 2), "a tagged signature passed as format 1");
+        assert!(load_archive(&archive_in_format(3, &[])).is_err(), "an unknown format opened");
+        assert_eq!(archive_signed_bytes(3, &[0; 32]), None);
     }
 
     /// C-OLM-06: an exporter key with bytes after the key names an alias id the

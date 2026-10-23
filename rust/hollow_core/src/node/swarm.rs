@@ -733,7 +733,7 @@ async fn run_event_loop(
     let master_peer_str = local_peer_str.clone();
     crypto_handler::bind_olm_identity(&mut olm, &device_keypair);
     let (ws_cmd_tx, mut carry_rx) = super::frame_auth::spawn_sealer(device_keypair.clone(), ws_cmd_tx);
-    let mut frame_replays = super::frame_auth::ReplayGuard::default();
+    let mut frame_replays = super::frame_auth::ReplayGuard::load(&crypto_store, Duration::from_secs(5)).await;
 
     // Decrypt-failure cooldown per peer: prevents session thrashing when many
     // in-flight chunks fail decrypt at once (a 340 MB file is 1360 chunks).
@@ -1332,6 +1332,7 @@ async fn run_event_loop(
             }
         }
     }
+    frame_replays.know_friends(pending_friend_accepts.keys().cloned().collect());
 
     // Track failed sync requests per peer — retried after session re-establishment.
     // Maps peer_id_str → Vec<(server_id, channel_id, since_timestamp)>
@@ -5164,7 +5165,10 @@ async fn run_event_loop(
                             let now_ms = super::frame_auth::now_ms();
                             if msg.live_only()
                                 && (super::frame_auth::is_stale(frame_ts, now_ms)
-                                    || !frame_replays.first_sight(&from, frame_nonce, frame_ts, now_ms))
+                                    || !frame_replays.first_sight(
+                                        &from, frame_nonce, frame_ts, now_ms,
+                                        frame_replays.placement(&from, &master_peer_str, &server_states).as_deref(),
+                                    ))
                             {
                                 hollow_log!("[HOLLOW-SECURITY] Dropped a stale or repeated held join answer from {from} in {server}");
                                 continue;
@@ -5435,7 +5439,10 @@ async fn run_event_loop(
                                     }
                                     if msg.live_only()
                                         && (super::frame_auth::is_stale(frame_ts, now_ms)
-                                            || !frame_replays.first_sight(&from, frame_nonce, frame_ts, now_ms))
+                                            || !frame_replays.first_sight(
+                                                &from, frame_nonce, frame_ts, now_ms,
+                                                frame_replays.placement(&from, &master_peer_str, &server_states).as_deref(),
+                                            ))
                                     {
                                         hollow_log!("[HOLLOW-SECURITY] Dropped a stale or repeated live frame from {from} in {room}");
                                         continue;
@@ -5664,7 +5671,10 @@ async fn run_event_loop(
                                         };
                                         if inner.live_only()
                                             && (super::frame_auth::is_stale(frame_ts, now_ms)
-                                                || !frame_replays.first_sight(&from, frame_nonce, frame_ts, now_ms))
+                                                || !frame_replays.first_sight(
+                                                    &from, frame_nonce, frame_ts, now_ms,
+                                                    frame_replays.placement(&from, &master_peer_str, &server_states).as_deref(),
+                                                ))
                                         {
                                             hollow_log!("[HOLLOW-SECURITY] Dropped a stale or repeated live join frame from {from} in {room}");
                                             continue;
@@ -6293,6 +6303,7 @@ async fn run_event_loop(
                             .and_then(|s| s.load_friends(Some("accepted")).ok())
                             .map(|v| v.into_iter().map(|(pid, ..)| pid).collect())
                             .unwrap_or_default();
+                    frame_replays.know_friends(accepted_friends.clone());
                     // Co-present devices of the audited rooms (a server room of ours or the
                     // active room), placed or not: the peers the 30 s full-list ask used to re-key.
                     let co_present_peers: std::collections::HashSet<&String> = audited_rooms(&server_states, active_room.as_deref())

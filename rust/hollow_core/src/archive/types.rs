@@ -1,7 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-/// Current archive format version.
-pub(crate) const ARCHIVE_FORMAT_VERSION: u32 = 1;
+/// The format new archives are written in. 0.14 flips it to 2, the domain-tagged
+/// signature; until then a 0.12 viewer must still open what we export.
+pub(crate) const ARCHIVE_WRITE_FORMAT: u32 = 1;
+
+/// What the archive signature signs for `format_version`: format 1 signed the bare
+/// content hash (C-OLM-07), format 2 tags it. None for a format this build cannot read.
+pub(crate) fn archive_signed_bytes(format_version: u32, content_hash: &[u8; 32]) -> Option<Vec<u8>> {
+    match format_version {
+        1 => Some(content_hash.to_vec()),
+        2 => Some([&b"hollow-archive1\0"[..], content_hash].concat()),
+        _ => None,
+    }
+}
 
 /// What to export.
 pub(crate) enum ArchiveTarget {

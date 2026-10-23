@@ -75,7 +75,7 @@ pub(crate) fn export_archive(
     let participants = collect_participants(&messages);
 
     let manifest = ArchiveManifest {
-        format_version: ARCHIVE_FORMAT_VERSION,
+        format_version: ARCHIVE_WRITE_FORMAT,
         archive_type: archive_type.clone(),
         exporter_peer_id: exporter_peer_id.clone(),
         export_timestamp,
@@ -126,7 +126,8 @@ pub(crate) fn export_archive(
     );
     let content_hash_hex = hex::encode(content_hash);
 
-    let sig = keypair.sign(&content_hash);
+    let signed = archive_signed_bytes(ARCHIVE_WRITE_FORMAT, &content_hash).ok_or("No signature form for the archive format")?;
+    let sig = keypair.sign(&signed);
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig);
     let pk_b64 = base64::engine::general_purpose::STANDARD.encode(keypair.public_key_protobuf());
 

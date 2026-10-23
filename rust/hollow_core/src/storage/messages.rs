@@ -669,6 +669,23 @@ impl MessageStore {
                 sealed_ms INTEGER NOT NULL
             )")?;
 
+        // The live-frame replay guard's nonces, kept until their frames turn stale so
+        // the guard outlives a restart (AR-35). `share` is whom the row is charged to (a
+        // placed sender's master, else the sender) and `placed` the pool it fills.
+        ddl(conn, "live_frame_nonces table",
+            "CREATE TABLE IF NOT EXISTS live_frame_nonces (
+                sender     TEXT    NOT NULL,
+                nonce      BLOB    NOT NULL,
+                expires_ms INTEGER NOT NULL,
+                share      TEXT    NOT NULL DEFAULT '',
+                placed     INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (sender, nonce)
+            )")?;
+        migrate(conn, "ALTER TABLE live_frame_nonces ADD COLUMN share TEXT NOT NULL DEFAULT ''");
+        migrate(conn, "ALTER TABLE live_frame_nonces ADD COLUMN placed INTEGER NOT NULL DEFAULT 0");
+        ddl(conn, "live_frame_nonces share index",
+            "CREATE INDEX IF NOT EXISTS live_frame_nonces_share ON live_frame_nonces (placed, share, expires_ms)")?;
+
         ddl(conn, "channel_messages table",
             "CREATE TABLE IF NOT EXISTS channel_messages (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2127,6 +2144,78 @@ impl MessageStore {
         collect_rows(rows, "olm_read_marks")
     }
 
+    /// Keep a live frame's nonce until `expires_ms`, charged to `share` in the `placed`
+    /// pool; false when the row was already held.
+    pub fn insert_live_frame_nonce(
+        &self,
+        sender: &str,
+        nonce: &[u8],
+        expires_ms: i64,
+        share: &str,
+        placed: bool,
+    ) -> Result<bool, String> {
+        self.conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO live_frame_nonces (sender, nonce, expires_ms, share, placed)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .and_then(|mut stmt| stmt.execute(params![sender, nonce, expires_ms, share, placed]))
+            .map(|changed| changed == 1)
+            .map_err(|e| format!("Failed to note a live frame nonce: {e}"))
+    }
+
+    /// Drop the row of `share` in the `placed` pool that turns stale first; false when
+    /// the share holds none.
+    pub fn evict_live_frame_nonce(&self, share: &str, placed: bool) -> Result<bool, String> {
+        self.conn
+            .prepare_cached(
+                "DELETE FROM live_frame_nonces WHERE rowid = (
+                    SELECT rowid FROM live_frame_nonces WHERE placed = ?1 AND share = ?2
+                    ORDER BY expires_ms LIMIT 1)",
+            )
+            .and_then(|mut stmt| stmt.execute(params![placed, share]))
+            .map(|changed| changed == 1)
+            .map_err(|e| format!("Failed to evict a live frame nonce: {e}"))
+    }
+
+    /// How many rows each (placed, share) holds.
+    pub fn live_frame_nonce_shares(&self) -> Result<Vec<(bool, String, usize)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT placed, share, COUNT(*) FROM live_frame_nonces GROUP BY placed, share")
+            .map_err(|e| format!("Failed to prepare live_frame_nonces shares: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as usize)))
+            .map_err(|e| format!("Failed to query live_frame_nonces shares: {e}"))?;
+        collect_rows(rows, "live_frame_nonces shares")
+    }
+
+    /// Forget every nonce outside `oldest_ms..=latest_ms`: stale ones, and ones stamped
+    /// while our clock ran far ahead.
+    pub fn prune_live_frame_nonces(&self, oldest_ms: i64, latest_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM live_frame_nonces WHERE expires_ms < ?1 OR expires_ms > ?2",
+                params![oldest_ms, latest_ms],
+            )
+            .map_err(|e| format!("Failed to prune live frame nonces: {e}"))?;
+        Ok(())
+    }
+
+    /// The nonces expiring in `oldest_ms..=latest_ms`, (sender, nonce, expires_ms).
+    pub fn load_live_frame_nonces(&self, oldest_ms: i64, latest_ms: i64) -> Result<Vec<(String, Vec<u8>, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT sender, nonce, expires_ms FROM live_frame_nonces WHERE expires_ms >= ?1 AND expires_ms <= ?2",
+            )
+            .map_err(|e| format!("Failed to prepare live_frame_nonces query: {e}"))?;
+        let rows = stmt
+            .query_map(params![oldest_ms, latest_ms], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| format!("Failed to query live_frame_nonces: {e}"))?;
+        collect_rows(rows, "live_frame_nonces")
+    }
+
     /// Leave `account_pickle` as the only Olm state in this database, erased pages
     /// zeroed and the file rebuilt: for a host that keeps no record of its peers.
     pub fn keep_only_olm_account(&self, account_pickle: &str) -> Result<(), String> {
@@ -2135,7 +2224,8 @@ impl MessageStore {
                 "PRAGMA secure_delete = ON;
                  DELETE FROM olm_sessions;
                  DELETE FROM olm_session_floors;
-                 DELETE FROM olm_read_marks;",
+                 DELETE FROM olm_read_marks;
+                 DELETE FROM live_frame_nonces;",
             )
             .map_err(|e| format!("Failed to erase Olm peers: {e}"))?;
         self.save_olm_account(account_pickle)?;
@@ -3386,8 +3476,9 @@ impl MessageStore {
     }
 
     /// Remove everything that belongs to one device or to nobody's disk from a copy of
-    /// the database leaving this device (a backup, a link snapshot): the Olm account and
-    /// sessions, the MLS identity and groups, a 0.11 stored recovery phrase, and the image
+    /// the database leaving this device (a backup, a link snapshot): the Olm account,
+    /// sessions and read marks, the replay guard's nonces, the MLS identity and groups, a
+    /// 0.11 stored recovery phrase, and the image
     /// verdicts (only this install's own decodes may vouch for bytes, AR-28). Deleted
     /// pages are zeroed and the file rebuilt, so no free page still holds them.
     pub fn scrub_device_secrets(&self) -> Result<(), String> {
@@ -3397,6 +3488,8 @@ impl MessageStore {
                  DELETE FROM olm_account;
                  DELETE FROM olm_sessions;
                  DELETE FROM olm_session_floors;
+                 DELETE FROM olm_read_marks;
+                 DELETE FROM live_frame_nonces;
                  DELETE FROM mls_identity;
                  DELETE FROM mls_storage;
                  DELETE FROM app_settings WHERE key = 'recovery_mnemonic';
@@ -8226,6 +8319,19 @@ mod tests {
         assert!(store.image_verdict("h", 1).is_some());
         store.scrub_device_secrets().unwrap();
         assert_eq!(store.image_verdict("h", 1), None);
+    }
+
+    /// Read marks and replay-guard nonces describe this device's own Olm sessions and
+    /// frames: a device landing a copy holds neither, so a copied mark would turn the
+    /// re-key it needs into a quiet drop (AR-35 review LOW 5).
+    #[test]
+    fn a_staged_database_loses_its_olm_read_marks_and_live_frame_nonces() {
+        let store = mem_store();
+        store.save_olm_read_mark("peer", 5).unwrap();
+        assert!(store.insert_live_frame_nonce("peer", &[1; 16], i64::MAX, "peer", false).unwrap());
+        store.scrub_device_secrets().unwrap();
+        assert!(store.load_olm_read_marks().unwrap().is_empty(), "a copy carried this device's read marks");
+        assert!(store.load_live_frame_nonces(0, i64::MAX).unwrap().is_empty(), "a copy carried this device's live frame nonces");
     }
 
     /// Overlay images and rail blobs never share a row: the same bytes held as both

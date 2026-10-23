@@ -6,7 +6,7 @@
 //! against the key inlined in `from` before anything reads the frame. A seal proves
 //! which device sent a frame, never what that device may do: handlers still judge that.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -352,31 +352,168 @@ pub(crate) fn unchecked_body(frame: &[u8]) -> &[u8] {
     rest.get(skip + 1 + route_len as usize + SIG_LEN..).unwrap_or(frame)
 }
 
+/// Stored first sights: (sender, nonce, expires_ms).
+pub(crate) type StoredNonces = Vec<(String, Vec<u8>, i64)>;
+
 /// Refuses a repeated live-only frame inside the window its clock stamp is still
 /// accepted in, so a relay cannot replay one.
 #[derive(Default)]
 pub(crate) struct ReplayGuard {
     seen: HashMap<String, HashMap<[u8; NONCE_LEN], i64>>,
+    /// Where first sights are kept, so a frame seen before a restart stays seen
+    /// after it (AR-35). The forwarder keeps none: it may write nothing to disk.
+    sink: Option<crate::crypto::LiveNonceSink>,
+    /// Set while the stored sights have not arrived.
+    loading: Option<Loading>,
+    /// Accepted friends' masters, whose devices' sights go to the stored pool no
+    /// stranger can fill.
+    friends: HashSet<String>,
+}
+
+/// Rows the store has not answered with yet. Until it does, any frame stamped before
+/// this process started may be one acted on before the restart, so it is refused.
+struct Loading {
+    boot_ms: i64,
+    rows: Option<tokio::sync::oneshot::Receiver<StoredNonces>>,
 }
 
 impl ReplayGuard {
+    /// The node's guard, started from what `store` kept. When the rows do not come
+    /// `within`, it starts anyway and refuses frames stamped before now until they do.
+    pub(crate) async fn load(store: &crate::crypto::CryptoStore, within: std::time::Duration) -> Self {
+        let now = now_ms();
+        let mut answer = store.ask_live_nonces(now);
+        match tokio::time::timeout(within, &mut answer).await {
+            Ok(Ok(rows)) => Self::persisted(store.live_nonce_sink(), rows, now),
+            Ok(Err(_)) => {
+                hollow_log!("[HOLLOW-SECURITY] The stored replay guard could not be read: refusing live frames stamped before this start");
+                Self::loading(store.live_nonce_sink(), None, now)
+            }
+            Err(_) => {
+                hollow_log!("[HOLLOW-SECURITY] The stored replay guard did not load in {within:?}: refusing live frames stamped before this start until it does");
+                Self::loading(store.live_nonce_sink(), Some(answer), now)
+            }
+        }
+    }
+
+    /// A guard that starts from the stored `rows` (sender, nonce, expires_ms) and
+    /// writes every first sight to `sink`.
+    pub(crate) fn persisted(
+        sink: crate::crypto::LiveNonceSink,
+        rows: StoredNonces,
+        now_ms: i64,
+    ) -> Self {
+        let mut guard = Self { sink: Some(sink), ..Self::default() };
+        guard.merge(rows, now_ms);
+        guard
+    }
+
+    /// A guard whose stored rows are still to come on `rows` (never, when `None`).
+    pub(crate) fn loading(
+        sink: crate::crypto::LiveNonceSink,
+        rows: Option<tokio::sync::oneshot::Receiver<StoredNonces>>,
+        boot_ms: i64,
+    ) -> Self {
+        Self { sink: Some(sink), loading: Some(Loading { boot_ms, rows }), ..Self::default() }
+    }
+
+    fn merge(&mut self, rows: StoredNonces, now_ms: i64) {
+        let latest = now_ms.saturating_add(2 * LIVE_SKEW_MS);
+        for (sender, nonce, expires) in rows {
+            let Ok(nonce) = <[u8; NONCE_LEN]>::try_from(nonce.as_slice()) else { continue };
+            if expires < now_ms || expires > latest {
+                continue;
+            }
+            let seen = self.seen.entry(sender).or_default();
+            if seen.len() < MAX_SEEN_PER_SENDER {
+                seen.entry(nonce).or_insert(expires);
+            }
+        }
+    }
+
+    /// Take the stored rows if they arrived meanwhile.
+    fn settle(&mut self, now_ms: i64) {
+        let Some(Loading { rows: Some(rx), .. }) = &mut self.loading else { return };
+        match rx.try_recv() {
+            Ok(rows) => {
+                hollow_log!("[HOLLOW-SWARM] The stored replay guard arrived late ({} rows)", rows.len());
+                self.loading = None;
+                self.merge(rows, now_ms);
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                hollow_log!("[HOLLOW-SECURITY] The stored replay guard could not be read: refusing live frames stamped before this start");
+                if let Some(loading) = &mut self.loading {
+                    loading.rows = None;
+                }
+            }
+        }
+    }
+
+    /// The accepted friends whose devices count as known senders.
+    pub(crate) fn know_friends(&mut self, masters: HashSet<String>) {
+        self.friends = masters;
+    }
+
+    /// The master of `sender` when the roster we hold counts it as a device of our own
+    /// identity, of an accepted friend or of a co-member. Anyone else, a stranger with
+    /// a roster it delivered itself included, is placed nowhere.
+    pub(crate) fn placement(
+        &self,
+        sender: &str,
+        local_master: &str,
+        server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
+    ) -> Option<String> {
+        let master = super::resolver::resolve(sender);
+        if !super::resolver::is_device_of(sender, &master)
+            || super::resolver::is_revoked(sender)
+            || super::blocklist::is_blocked(&master)
+        {
+            return None;
+        }
+        let known = master == local_master
+            || self.friends.contains(&master)
+            || server_states.values().any(|s| !s.is_deleted() && s.is_member(&master) && s.is_member(local_master));
+        known.then_some(master)
+    }
+
     /// Whether this is the first time `sender` shows us `nonce`. A frame this old or
-    /// older must already have been refused as stale.
-    pub(crate) fn first_sight(&mut self, sender: &str, nonce: [u8; NONCE_LEN], ts_ms: i64, now_ms: i64) -> bool {
+    /// older must already have been refused as stale. `placed` as [`Self::placement`].
+    pub(crate) fn first_sight(
+        &mut self,
+        sender: &str,
+        nonce: [u8; NONCE_LEN],
+        ts_ms: i64,
+        now_ms: i64,
+        placed: Option<&str>,
+    ) -> bool {
+        self.settle(now_ms);
+        if self.loading.as_ref().is_some_and(|l| ts_ms < l.boot_ms) {
+            return false;
+        }
         let seen = self.seen.entry(sender.to_string()).or_default();
         if seen.len() >= MAX_SEEN_PER_SENDER {
-            seen.retain(|_, expires| *expires > now_ms);
+            seen.retain(|_, expires| *expires >= now_ms);
             if seen.len() >= MAX_SEEN_PER_SENDER {
                 return false;
             }
         }
-        seen.insert(nonce, ts_ms.saturating_add(LIVE_SKEW_MS)).is_none()
+        let expires = ts_ms.saturating_add(LIVE_SKEW_MS);
+        let first = seen.insert(nonce, expires).is_none();
+        if first && let Some(sink) = &self.sink {
+            sink.note(sender, nonce, expires, placed);
+        }
+        first
     }
 
     /// Forget nonces whose frames would now be refused as stale anyway.
     pub(crate) fn prune(&mut self, now_ms: i64) {
+        self.settle(now_ms);
+        if let Some(sink) = &self.sink {
+            sink.prune(now_ms);
+        }
         self.seen.retain(|_, seen| {
-            seen.retain(|_, expires| *expires > now_ms);
+            seen.retain(|_, expires| *expires >= now_ms);
             !seen.is_empty()
         });
     }
@@ -489,13 +626,81 @@ mod tests {
         }
     }
 
+    /// AR-35 review LOW 3: until the stored rows arrive, a frame stamped before the start
+    /// may be one acted on before the restart; rows that come late are merged.
+    #[test]
+    fn a_guard_whose_stored_rows_come_late_refuses_frames_from_before_its_start() {
+        let (sink, _queue) = crate::crypto::LiveNonceSink::detached_for_test();
+        let (rows, answer) = tokio::sync::oneshot::channel();
+        let mut guard = ReplayGuard::loading(sink, Some(answer), NOW);
+        assert!(!guard.first_sight("alice", [1; NONCE_LEN], NOW - 1, NOW, None), "took a frame from before the start without its rows");
+        assert!(guard.first_sight("alice", [2; NONCE_LEN], NOW, NOW, None), "refused a frame stamped after the start");
+        rows.send(vec![("alice".to_string(), vec![1; NONCE_LEN], NOW - 1 + LIVE_SKEW_MS)]).unwrap();
+        assert!(!guard.first_sight("alice", [1; NONCE_LEN], NOW - 1, NOW + 5, None), "a stored row that came late was not merged");
+        assert!(guard.first_sight("alice", [3; NONCE_LEN], NOW - 1, NOW + 5, None), "still refusing once the rows came");
+        assert!(!guard.first_sight("alice", [2; NONCE_LEN], NOW, NOW + 5, None), "the merge lost a sight made while loading");
+    }
+
+    /// AR-35 review LOW 6: a frame is fresh through the millisecond its nonce expires,
+    /// so the guard keeps the nonce through it.
+    #[test]
+    fn a_nonce_is_kept_through_the_last_millisecond_its_frame_is_fresh() {
+        let mut guard = ReplayGuard::default();
+        let ts = NOW - LIVE_SKEW_MS;
+        assert!(!is_stale(ts, NOW));
+        assert!(guard.first_sight("alice", [1; NONCE_LEN], ts, NOW - 1, None));
+        guard.prune(NOW);
+        assert!(!guard.first_sight("alice", [1; NONCE_LEN], ts, NOW, None), "a fresh frame replayed at its last millisecond");
+    }
+
+    /// AR-35 review MED 1: only a device the held roster places under our own identity,
+    /// a friend's or a co-member's earns the stored pool no stranger can fill; a stranger
+    /// whose roster it delivered itself does not.
+    #[test]
+    fn only_our_friends_and_co_members_devices_are_placed() {
+        use super::super::resolver;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        let me = "ar35-me";
+        resolver::seed_self(me, &["ar35-me-dev".to_string()]);
+        resolver::update_many("ar35-friend", ["ar35-friend-dev"]);
+        resolver::update_many("ar35-member", ["ar35-member-dev"]);
+        resolver::update_many("ar35-stranger", ["ar35-stranger-dev"]);
+        // Revoked, then linked again by a roster that still lists it: the revocation holds.
+        resolver::mark_revoked(&["ar35-friend-gone".to_string()]);
+        resolver::update_many("ar35-friend", ["ar35-friend-gone"]);
+        resolver::update_many("ar35-blocked", ["ar35-blocked-dev"]);
+        super::super::blocklist::block("ar35-blocked");
+        resolver::note_roster(me);
+
+        let mut state = crate::crdt::server_state::ServerState::new("srv".into(), "s".into(), me.into());
+        for id in ["ar35-member", "ar35-blocked"] {
+            state.members.insert(id.into(), crate::crdt::server_state::MemberInfo { peer_id: id.into(), display_name: id.into() });
+        }
+        let states = HashMap::from([("srv".to_string(), state)]);
+        let mut guard = ReplayGuard::default();
+        guard.know_friends(HashSet::from(["ar35-friend".to_string()]));
+        let placed = |p: &str| guard.placement(p, me, &states);
+
+        assert_eq!(placed("ar35-me-dev").as_deref(), Some(me), "our own device");
+        assert_eq!(placed("ar35-friend-dev").as_deref(), Some("ar35-friend"), "a friend's device");
+        assert_eq!(placed("ar35-member-dev").as_deref(), Some("ar35-member"), "a co-member's device");
+        assert_eq!(placed("ar35-stranger-dev"), None, "a stranger with a roster of its own");
+        assert_eq!(placed("ar35-unknown"), None, "an id no roster places");
+        assert_eq!(placed("ar35-friend-gone"), None, "a removed device of a friend");
+        assert_eq!(placed("ar35-blocked-dev"), None, "a blocked co-member");
+        assert_eq!(placed(me), None, "our bare master id, which our roster does not count");
+        super::super::blocklist::unblock("ar35-blocked");
+        resolver::clear_for_test();
+    }
+
     #[test]
     fn a_live_frame_is_taken_once_per_nonce_while_fresh() {
         let mut guard = ReplayGuard::default();
-        assert!(guard.first_sight("alice", [1; NONCE_LEN], NOW, NOW));
-        assert!(!guard.first_sight("alice", [1; NONCE_LEN], NOW, NOW + 1_000));
-        assert!(guard.first_sight("bob", [1; NONCE_LEN], NOW, NOW));
-        assert!(guard.first_sight("alice", [2; NONCE_LEN], NOW, NOW));
+        assert!(guard.first_sight("alice", [1; NONCE_LEN], NOW, NOW, None));
+        assert!(!guard.first_sight("alice", [1; NONCE_LEN], NOW, NOW + 1_000, None));
+        assert!(guard.first_sight("bob", [1; NONCE_LEN], NOW, NOW, None));
+        assert!(guard.first_sight("alice", [2; NONCE_LEN], NOW, NOW, None));
 
         assert!(!is_stale(NOW, NOW + LIVE_SKEW_MS));
         assert!(is_stale(NOW, NOW + LIVE_SKEW_MS + 1));
@@ -511,8 +716,8 @@ mod tests {
         assert!(is_stale(i64::MIN + 1, NOW));
         assert!(!is_stale(i64::MAX, NOW));
         let mut guard = ReplayGuard::default();
-        assert!(guard.first_sight("alice", [3; NONCE_LEN], i64::MAX, NOW));
-        assert!(!guard.first_sight("alice", [3; NONCE_LEN], i64::MAX, NOW));
+        assert!(guard.first_sight("alice", [3; NONCE_LEN], i64::MAX, NOW, None));
+        assert!(!guard.first_sight("alice", [3; NONCE_LEN], i64::MAX, NOW, None));
     }
 
     #[test]
