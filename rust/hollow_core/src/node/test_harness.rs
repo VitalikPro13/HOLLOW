@@ -846,6 +846,15 @@ impl MockRelay {
         }
     }
 
+    /// Tell `target` the members the relay holds in `room`, as its answer to a re-join.
+    pub(crate) fn inject_room_members(&self, target: &str, room: &str) {
+        let inner = self.inner.lock().unwrap();
+        let peers: Vec<String> = inner.rooms.get(room).map(|s| s.iter().cloned().collect()).unwrap_or_default();
+        if let Some(conn) = inner.conns.get(target) {
+            conn.deliver(target, WsEvent::RoomMembers { room: room.to_string(), peers });
+        }
+    }
+
     /// [`Self::inject_raw_direct`] delivered as a room broadcast.
     #[allow(dead_code)]
     pub(crate) fn inject_raw(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
@@ -57547,4 +57556,146 @@ async fn g13w3m_a_forwarded_repair_seats_the_prober_through_the_named_committer(
     relay.release_held(&a.device_id, &m.device_id);
     relay.release_broadcasts(&a.device_id, &m.device_id);
     drop(nodes);
+}
+
+// g13w3-rmlive
+
+/// O1 removes its sibling T before it heard T join any room, then hears of T first in
+/// O's inbox, which the relay no longer shows T: what O1 tells it there is lost, as when
+/// T's join outran the removal on the relay but not in O1's loop.
+async fn g13w3_rmlive_removed_before_it_joined(relay: &MockRelay) -> (TestNode, TestNode, TestNode, String) {
+    const F: u8 = 171;
+    const O: u8 = 172;
+    const O1: u8 = 173;
+    const T: u8 = 174;
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (f_master, o_master, t_dev) = (id(F), id(O), id(T));
+    let f = spawn_node_with_friends(relay, F, F, &[&o_master]).await;
+    let o = spawn_node_full(relay, O, O1, &[&f_master], Some(&[O1, T])).await;
+    assert!(wait_until(10, async || o.sees_peer(&f.device_id).await).await, "precondition: O1 shares a room with F");
+    let (own, inbox) = (super::roster_book::own_room(&o_master), format!("inbox:{o_master}"));
+    for room in [&own, &inbox, &super::dm_room::dm_room_code(&o_master, &f_master)] {
+        relay.lose_peer_joined(&o.device_id, room, 1);
+    }
+    let t = spawn_node_full(relay, O, T, &[&f_master], Some(&[O1, T])).await;
+    assert!(
+        wait_until(10, async || t.sees_peer(&o.device_id).await && relay.room_devices(&own).contains(&t_dev)).await,
+        "precondition: T joined its rooms",
+    );
+    assert!(!o.sees_peer(&t_dev).await, "precondition: O1 has not seen T");
+    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t_dev.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || o.revoked_devices(&o_master).contains(&t_dev) && !relay.inbox_owners(&o_master).contains(&t_dev)).await,
+        "precondition: O1 removed T and the relay took T's inbox",
+    );
+    relay.inject_presence(&o.device_id, &inbox, &t_dev);
+    assert!(wait_until(10, async || o.sees_peer(&t_dev).await).await, "precondition: O1 heard of T in the inbox");
+    (f, o, t, t_dev)
+}
+
+/// A device removed while it was still connecting learns it when it next appears in a
+/// room it shares with the remover, not on its next connect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_a_device_removed_while_connecting_learns_it_when_it_appears() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (_f, o, mut t, t_dev) = g13w3_rmlive_removed_before_it_joined(&relay).await;
+    let own = super::roster_book::own_room(&o.master_id);
+    relay.inject_presence(&o.device_id, &own, &t_dev);
+    assert!(
+        wait_event(&mut t, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::DeviceRemoved { .. })).await,
+        "the removed device never learned it: in own room {}",
+        relay.room_devices(&own).contains(&t_dev),
+    );
+}
+
+/// The same arrival seen in a membership refresh rather than a join.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_a_removed_device_listed_in_a_room_refresh_learns_it() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (_f, o, mut t, _) = g13w3_rmlive_removed_before_it_joined(&relay).await;
+    let own = super::roster_book::own_room(&o.master_id);
+    relay.inject_room_members(&o.device_id, &own);
+    assert!(
+        wait_event(&mut t, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::DeviceRemoved { .. })).await,
+        "the removed device never learned it from the refresh",
+    );
+}
+
+/// Only our own removed device hears the roster on arrival, once per arrival: a contact,
+/// a device another identity removed, and a removed device re-listed where we already
+/// see it get nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_only_our_removed_device_hears_the_roster_when_it_appears() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let (f, o, _t, t_dev) = g13w3_rmlive_removed_before_it_joined(&relay).await;
+    let stranger = NativeKeypair::from_secret_bytes(&seed_bytes(175)).peer_id();
+    super::resolver::mark_revoked(std::slice::from_ref(&stranger));
+    let own = super::roster_book::own_room(&o.master_id);
+    let dm = super::dm_room::dm_room_code(&o.master_id, &f.master_id);
+    let rosters = |to: &str, room: &str| {
+        relay.wiretap().frames.iter().filter(|fr| {
+            fr.from == o.device_id && fr.to.as_deref() == Some(to) && fr.room == room && fr.kind() == "roster_notice"
+        }).count()
+    };
+    relay.inject_presence(&o.device_id, &own, &f.device_id);
+    relay.inject_presence(&o.device_id, &own, &stranger);
+    relay.inject_presence(&o.device_id, &own, &t_dev);
+    relay.inject_presence(&o.device_id, &own, &t_dev);
+    // Ordered behind the four above on O1's one event queue: its roster marks them handled.
+    relay.inject_presence(&o.device_id, &dm, &t_dev);
+    assert!(wait_until(10, async || rosters(&t_dev, &dm) == 1).await, "T's arrival in a DM room told it nothing");
+    assert_eq!(rosters(&t_dev, &own), 1, "T heard the roster once per arrival in its own room");
+    assert_eq!(rosters(&f.device_id, &own), 0, "a contact's device heard our roster on arrival");
+    assert_eq!(rosters(&stranger, &own), 0, "a device another identity removed heard our roster");
+    super::resolver::unmark_revoked(std::slice::from_ref(&stranger));
+}
+
+/// G1, the arrival notice's own gate judged alone: a master id our roster removed is a
+/// bare master, never a device, and hears nothing even when the caller let it through.
+#[test]
+fn g13w3_the_arrival_notice_alone_skips_a_bare_master() {
+    let _g = test_guard();
+    let tmp = crate::test_tmp::tempdir().expect("tmp");
+    let db = tmp.path().join("messages.db").to_string_lossy().into_owned();
+    let pass = "ab".repeat(32);
+    let (m_tag, d_tag, r_tag) = (176, 177, 178);
+    let master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(m_tag));
+    let device_kp = NativeKeypair::from_secret_bytes(&seed_bytes(d_tag));
+    let (master, device) = (master_kp.peer_id(), device_kp.peer_id());
+    let removed = NativeKeypair::from_secret_bytes(&seed_bytes(r_tag)).peer_id();
+    seed_device_list_into_db(&db, &pass, m_tag, &[m_tag, d_tag, r_tag]);
+    for target in [&master, &removed] {
+        super::roster_book::remove(&master_kp, &device_kp, target, &db, &pass).expect("remove");
+    }
+    super::resolver::seed_self(&master, std::slice::from_ref(&device));
+    super::resolver::note_roster(&master);
+    super::resolver::mark_revoked_by(&master, &[master.clone(), removed.clone()]);
+    assert!(super::resolver::is_bare_master(&master), "precondition: our roster does not count the master id");
+    let notices_to = |peer: &str| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        super::roster_book::tell_removed_device_in_room(&tx, &master, peer, "room", &db, &pass);
+        let mut sent = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, WsCommand::SendDirect { ref target_peer, .. } if target_peer == peer) {
+                sent += 1;
+            }
+        }
+        sent
+    };
+    assert_eq!(notices_to(&removed), 1, "control: a removed device hears the roster");
+    assert_eq!(notices_to(&master), 0, "the bare master id heard our roster");
+    super::resolver::unmark_revoked(&[master, removed]);
 }

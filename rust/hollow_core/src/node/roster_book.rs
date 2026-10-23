@@ -414,6 +414,30 @@ pub(crate) fn own_room(local_master: &str) -> String {
     super::dm_room::dm_room_code(local_master, local_master)
 }
 
+/// `peer` just appeared to us in `room`: if our own roster removed it, hand it that roster
+/// there. The notice of the removal or of its first sighting is lost when it left before
+/// we saw the device in a room, or went into our inbox just as the relay took it away.
+pub(crate) fn tell_removed_device_in_room(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_master: &str,
+    peer: &str,
+    room: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if !super::resolver::is_revoked(peer) || super::resolver::is_bare_master(peer) {
+        return;
+    }
+    let Some((roster, state)) = own(local_master, db_path, db_passphrase) else { return };
+    if !state.removed.contains_key(peer) {
+        return;
+    }
+    hollow_log!("[HOLLOW-ROSTER] Removed device {peer} appeared in {room}: handing it our roster");
+    super::crypto_handler::send_message_to_peer_in_room(
+        ws_cmd_tx, room, peer, super::types::HavenMessage::RosterNotice { roster },
+    );
+}
+
 /// Apply a change to our own roster, persist it, and return the result. `None` when
 /// the database is unavailable or `change` refuses.
 fn change_own(

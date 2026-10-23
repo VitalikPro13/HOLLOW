@@ -4012,6 +4012,11 @@ async fn run_event_loop(
                         // per-room, so inserting here burns the `is_new` flag and a LATER join of a
                         // genuinely shared room skips profile and sync forever.
                         let is_fwd_room = is_forwarder_room(&room);
+                        if arrived_here && !is_fwd_room && peer_id != device_peer_id {
+                            super::roster_book::tell_removed_device_in_room(
+                                &ws_cmd_tx, &local_peer_str, &peer_id, &room, &db_path, &db_passphrase,
+                            );
+                        }
                         if is_fwd_room && peer_id != local_peer_str && peer_id != device_peer_id {
                             ensure_olm_session_and_drain(
                                 &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
@@ -4618,6 +4623,11 @@ async fn run_event_loop(
                             // "host already there" without waiting for a PeerJoined.
                             if !room_set.is_empty() {
                                 super::conference::reknock_if_pending(&mut mls, &crypto_store, &ws_cmd_tx, &room);
+                            }
+                            for peer in &arrived {
+                                super::roster_book::tell_removed_device_in_room(
+                                    &ws_cmd_tx, &local_peer_str, peer, &room, &db_path, &db_passphrase,
+                                );
                             }
                         }
                         ws_room_peers.insert(room.clone(), room_set);
