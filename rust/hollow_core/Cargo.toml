@@ -63,6 +63,10 @@ libwebp-sys2 = { version = "0.1", features = ["0_5", "0_6", "1_2", "demux", "mux
 scraper = "0.26"
 reed-solomon-erasure = "6.0"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+# Debug builds only: the fleet's extra relay trust anchor (`relay_ca.pem`, ws_client.rs).
+# Both already transitive through tokio-tungstenite at these versions.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki-roots = "0.26"
 futures-util = "0.3"
 aes-gcm = "0.10"
 ed25519-dalek = { version = "2", features = ["pkcs8"] }

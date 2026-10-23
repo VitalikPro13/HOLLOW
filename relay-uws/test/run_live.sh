@@ -94,12 +94,15 @@ for v in $variants; do
     if [ "$v" = on ]; then bit=1; else bit=0; fi
     compile "ws_handler_$v" ../src/ws_handler.cpp "$obj/ws_handler_$v.o" $relay_cxx $(switches $bit)
 done
+# The circuit breaker enforced (breaker.h); every other build runs it in shadow mode.
+compile ws_handler_enforce ../src/ws_handler.cpp "$obj/ws_handler_enforce.o" $relay_cxx $(switches 1) \
+    -DHOLLOW_BREAKER_ENFORCE=1
 g++ -std=c++17 $flags -I../src test_relay_live.cpp ../src/crypto.cpp \
     -o "$dir/client" -lssl -lcrypto -lsodium > "$dir/client.build" 2>&1 &
 pids+=($!)
 names+=(client)
 wait_all
-for v in $variants; do
+for v in $variants enforce; do
     g++ $flags "${objects[@]}" "$obj/ws_handler_$v.o" -o "$dir/relay_$v" -lssl -lcrypto -lsodium -lz -pthread \
         > "$dir/link_$v.build" 2>&1 || build_fail "link $v" "$dir/link_$v.build"
 done
@@ -108,17 +111,41 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=relay.live.test \
 
 domain=relay.live.test
 fail=0
+# The measuring hooks (measure.h) leave no trace in a relay built without HOLLOW_RELAY_MEASURE:
+# no line of any translation unit names them once preprocessed.
+for f in main crypto license reports http_handlers snapshot ws_handler; do
+    traces=$($relay_cxx -E "../src/$f.cpp" 2> "$dir/pp_$f.err" | grep -v '^#' | grep -cE 'measure::|namespace measure|g2-measure|MeasureClose|measure_[a-z]' || true)
+    if [ ! -s "$dir/pp_$f.err" ] && [ "$traces" = 0 ]; then
+        echo "  ok   a plain build of $f.cpp carries no measuring code"
+    else
+        echo "  FAIL a plain build of $f.cpp carries measuring code ($traces lines)"
+        fail=1
+    fi
+done
 # A third argument is HOLLOW_CONN_RATE_EXEMPT for that run, which runs only the rate cases;
-# a fourth the relay's send buffer in bytes, which runs only the dropped-write case.
+# a fourth the relay's send buffer in bytes, which runs only the dropped-write case; a fifth
+# (shadow or enforce) scales the breaker down and runs only its cases; a sixth is the
+# relay's send-buffer memory budget in bytes, which runs only the OOM-budget case.
 run_variant() {
-    local v=$1 name=${2:-$1} exempt=${3-} backpressure=${4-} port tries=0 log=$dir/relay_${2:-$1}.log
-    local extra=() only=${RELAY_LIVE_ONLY-}
-    if [ -n "$exempt" ]; then
+    local v=$1 name=${2:-$1} exempt=${3-} backpressure=${4-} breaker=${5-} budget=${6-} port tries=0 log=$dir/relay_${2:-$1}.log
+    local extra=() args=() only=${RELAY_LIVE_ONLY-} client_v=$1 stall=
+    [ "$v" = enforce ] && client_v=on
+    if [ -n "$breaker" ]; then
+        # Budgets / 100 and times / 60: the numbers test_relay_live.cpp's BRK_W and BRK_T name.
+        extra=(HOLLOW_RELAY_TEST_BREAKER_W=100 HOLLOW_RELAY_TEST_BREAKER_T=60)
+        args=(--forwarder-peer-id 12D3KooWC4T1AXU2s2YBgGJ2FeaYVtsKoHZWJeubnWe9SnuSE7Zb)
+        only=breaker_$breaker
+    elif [ -n "$exempt" ]; then
         extra=(HOLLOW_CONN_RATE_EXEMPT="$exempt")
         only=rate_exempt
     elif [ -n "$backpressure" ]; then
         extra=(HOLLOW_RELAY_TEST_BACKPRESSURE="$backpressure")
         only=dropped_write
+    elif [ -n "$budget" ]; then
+        # A short stall window so the test watches a non-reading receiver get closed.
+        stall=5000
+        extra=(HOLLOW_RELAY_TEST_SEND_BUDGET="$budget" HOLLOW_RELAY_TEST_STALL_MS=$stall)
+        only=oom
     fi
     while :; do
         if [ -n "$RELAY_LIVE_PORTS" ]; then
@@ -128,7 +155,9 @@ run_variant() {
         fi
         # Never under a systemd fd store, never near the real push sidecar's token.
         env -u NOTIFY_SOCKET -u LISTEN_PID -u LISTEN_FDS -u LISTEN_FDNAMES -u HOLLOW_PUSH_TOKEN \
-            -u HOLLOW_CONN_RATE_EXEMPT -u HOLLOW_RELAY_TEST_BACKPRESSURE "${extra[@]}" TURN_SECRET=live-test "$dir/relay_$v" --port "$port" --domain "$domain" \
+            -u HOLLOW_CONN_RATE_EXEMPT -u HOLLOW_RELAY_TEST_BACKPRESSURE -u HOLLOW_RELAY_TEST_BREAKER_W \
+            -u HOLLOW_RELAY_TEST_BREAKER_T -u HOLLOW_RELAY_TEST_SEND_BUDGET -u HOLLOW_RELAY_TEST_STALL_MS \
+            "${extra[@]}" TURN_SECRET=live-test "$dir/relay_$v" "${args[@]}" --port "$port" --domain "$domain" \
             --cert-file "$dir/cert.pem" --key-file "$dir/key.pem" \
             --keys-file "$dir/no-keys.json" --reports-file "$dir/reports_$name.json" > "$log" 2>&1 &
         relay_pid=$!
@@ -152,7 +181,7 @@ run_variant() {
 
     # The client's last case sends the relay SIGTERM itself (the drain hint); its pid
     # also lets a probe read the relay's memory. Under ASan the run takes about 96 s.
-    RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" "$v" \
+    RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_SEND_BUDGET=$budget RELAY_LIVE_STALL_MS=$stall RELAY_LIVE_SANITIZED=${SANITIZE:-0} RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" "$client_v" \
         > "$dir/client_$name.log" 2>&1
     local rc=$?
     # A relay that does not exit on SIGTERM is down until systemd kills it.
@@ -207,4 +236,9 @@ done
 run_variant "${variants%% *}" exempt "::ffff:127.0.241.3, not-an-address,127.0.241, 0.0.0.0"
 # A 1 MiB send buffer: a test drains it and writes again inside one session tick.
 run_variant "${variants%% *}" backpressure "" 1048576
+# The circuit breaker scaled down: shadow mode (every build's default), then enforced.
+run_variant "${variants%% *}" breaker_shadow "" "" shadow
+run_variant enforce breaker_enforce "" "" enforce
+# A 32 MiB send-buffer memory budget and a 5 s stall window: honest traffic passes, effects stay bounded.
+run_variant "${variants%% *}" oom "" "" "" 33554432
 exit $fail

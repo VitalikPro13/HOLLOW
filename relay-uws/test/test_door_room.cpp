@@ -120,10 +120,109 @@ static void test_doors() {
     check("a leave forgets the prover and its proof", !f.sees("a", 0) && f.proofs.empty());
 }
 
+// Every proof kept as opening nothing is a stored proof: the relay prices a lock move's
+// DHs as proofs less pending, which must never wrap.
+static bool pending_within_proofs(const door_room::Doors& d) {
+    for (const auto& [peer, group] : d.pending) {
+        (void)group;
+        if (!d.proofs.count(peer)) return false;
+    }
+    return d.pending.size() <= d.proofs.size();
+}
+
+// Junk proofs (N3.5): every lock move checks each stored proof with a DH, so proofs that
+// open nothing are kept only from a socket that saw the room, or up to PENDING_PER_GROUP
+// per address group once the room holds PENDING_FREE of them.
+static void test_junk_proofs() {
+    door_room::Doors d;
+    const std::string junk(door_room::PROOF_TEXT_LEN, 'j');
+    for (size_t g = 0; g < door_room::PENDING_FREE; g++) d.join("crowd" + std::to_string(g), junk, false, false, 0, 100 + g);
+    for (int i = 0; i < 40; i++) d.join("stranger" + std::to_string(i), junk, false, false, 0, 7);
+    check("in a crowded room one group keeps at most 8 proofs that open nothing",
+          d.proofs.size() == door_room::PENDING_FREE + door_room::PENDING_PER_GROUP);
+    d.join("other-group", junk, false, false, 0, 8);
+    check("another group keeps its own", d.proofs.count("other-group") == 1);
+    d.join("member", "opening", true, false, 0, 9);
+    check("a proof that opens is always kept", d.proofs.count("member") == 1 && d.sees("member", 0));
+    d.join("member", junk, false, true, 0, 9);
+    check("so is a new one from a socket that sees (a member ahead of the relay)", d.proofs.at("member") == junk);
+    d.leave("stranger0");
+    d.join("late", junk, false, false, 0, 7);
+    check("a leave frees its group's place", d.proofs.count("late") == 1);
+    auto newly = d.relock({"late"}, true, [](const std::string&, const std::string&) { return true; }, 0);
+    check("a kept proof that opens the moved door proves", newly.size() == 1 && d.sees("late", 0));
+    d.join("later", junk, false, false, 0, 7);
+    check("and no longer holds its group's place", d.proofs.count("later") == 1);
+    check("every pending proof is a stored proof", pending_within_proofs(d));
+    d.join("later", "opening", true, true, 0, 7);
+    d.leave("crowd0");
+    d.relock({"crowd1", "member"}, true, [](const std::string&, const std::string&) { return false; }, 0);
+    check("through joins, leaves and relocks", pending_within_proofs(d));
+}
+
+// A member ahead of the relay's chain, on a new socket, behind an address whose group
+// already holds its 8 proofs that open nothing, in a room crowded with stale proofs: its
+// proof is not kept, so the relock to its door does not prove it at once. It recovers by
+// a DoorAsk or a rejoin (AR-36 residual, accepted). The same member re-proving on the
+// socket that saw the room keeps its proof.
+static void test_member_ahead_behind_a_full_group_in_a_crowded_room() {
+    door_room::Doors d;
+    const std::string stale(door_room::PROOF_TEXT_LEN, 's');
+    const std::string ahead(door_room::PROOF_TEXT_LEN, 'a');
+    for (size_t g = 0; g < door_room::PENDING_FREE; g++) d.join("stale" + std::to_string(g), stale, false, false, 0, 500 + g);
+    for (int i = 0; i < 8; i++) d.join("nat" + std::to_string(i), ahead, false, false, 0, 42);
+    d.join("ninth", ahead, false, false, 0, 42);
+    check("the ninth proof behind the full group is not kept", d.proofs.count("ninth") == 0);
+    check("pending stays within proofs", pending_within_proofs(d));
+    const auto opens_ahead = [&](const std::string&, const std::string& proof) { return proof == ahead; };
+    auto newly = d.relock({"ninth", "nat0"}, true, opens_ahead, 0);
+    check("AR-36 residual: the ninth member does not prove on the relock",
+          !d.sees("ninth", 0) && newly.size() == 1 && newly[0] == "nat0");
+
+    door_room::Doors seen;
+    for (size_t g = 0; g < door_room::PENDING_FREE; g++) {
+        seen.join("stale" + std::to_string(g), stale, false, false, 0, 500 + g);
+    }
+    for (int i = 0; i < 8; i++) seen.join("nat" + std::to_string(i), ahead, false, false, 0, 42);
+    seen.join("ninth", "old-door", true, false, 0, 42);
+    seen.join("ninth", ahead, false, true, 0, 42);
+    check("a member that saw the room on its socket keeps its proof", seen.proofs.at("ninth") == ahead);
+    auto proved = seen.relock({"ninth"}, true, opens_ahead, 0);
+    check("and proves on the relock", seen.sees("ninth", 0) && seen.open.at("ninth") == door_room::PROVED);
+    check("pending stays within proofs there too", pending_within_proofs(seen) && proved.empty());
+}
+
+// LOW 9: members behind one address (a NAT) who prove a door the relay does not hold yet
+// keep every proof in a room no junk crowds, so each still proves on the relock.
+static void test_honest_nat_keeps_its_proofs() {
+    door_room::Doors d;
+    const std::string ahead(door_room::PROOF_TEXT_LEN, 'a');
+    std::vector<std::string> members;
+    for (int i = 0; i < 20; i++) {
+        members.push_back("nat-member" + std::to_string(i));
+        d.join(members.back(), ahead, false, false, 0, 42);
+    }
+    check("twenty proofs from one address are all kept", d.proofs.size() == 20);
+    auto newly = d.relock(members, true, [](const std::string&, const std::string&) { return true; }, 0);
+    check("and all twenty prove when the lock moves", newly.size() == 20);
+
+    door_room::Doors crowded;
+    const std::string junk(door_room::PROOF_TEXT_LEN, 'j');
+    for (size_t g = 0; g < door_room::PENDING_FREE; g++) {
+        crowded.join("junk" + std::to_string(g), junk, false, false, 0, 1000 + g);
+    }
+    for (int i = 0; i < 20; i++) crowded.join("nat" + std::to_string(i), ahead, false, false, 0, 42);
+    check("under a junk crowd one address keeps at most 8",
+          crowded.proofs.size() == door_room::PENDING_FREE + door_room::PENDING_PER_GROUP);
+}
+
 int main() {
     if (sodium_init() < 0) return 1;
     test_pinned_proof();
     test_doors();
+    test_junk_proofs();
+    test_honest_nat_keeps_its_proofs();
+    test_member_ahead_behind_a_full_group_in_a_crowded_room();
     printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;
 }

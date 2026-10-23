@@ -136,6 +136,14 @@ struct Relay {
     text_types: Vec<(u64, String)>,
     /// Send `now` on challenges and heartbeat answers, this many seconds off real time.
     clock_off_secs: Option<i64>,
+    /// The circuit breaker's start credit a fresh session's `auth_ok` names.
+    credit: Option<i64>,
+    /// Its breaker enforces: `auth_ok` and `resumed` say `enforced`.
+    enforced: bool,
+    /// Answer the next auth frame with the breaker's `cooldown` refusal for this long.
+    cooldown_next: Option<u64>,
+    /// When each counted client frame arrived, beside `got`.
+    got_at: Vec<Instant>,
     /// Every auth frame's timestamp.
     auth_stamps: Vec<u64>,
 }
@@ -344,6 +352,15 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
     if let Some(d) = delay {
         tokio::time::sleep(d).await;
     }
+    let cooldown = state.lock().unwrap().cooldown_next.take();
+    if let Some(ms) = cooldown {
+        // As the relay does: the refusal before anything binds, closed 1013.
+        let _ = w.send(Message::Text(json!({ "type": "auth_failed", "error": "cooldown", "after_ms": ms }).to_string().into())).await;
+        let close = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 1013.into(), reason: "cooldown".into() };
+        let _ = w.send(Message::Close(Some(close))).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        return;
+    }
     let refuse = state.lock().unwrap().refuse_auth;
     if !verify_auth(&auth, &nonce) || refuse {
         let _ = w.send(Message::Text(r#"{"type":"auth_failed","error":"Authentication failed"}"#.into())).await;
@@ -394,9 +411,13 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
                     }
                 }
                 let h = forced_h.unwrap_or(sess.in_h);
-                first.push(text(json!({
+                let mut resumed = json!({
                     "type": "resumed", "h": h, "gap": gap.is_some(), "reprove": reprove, "grace_secs": 120, "hb_secs": 15,
-                })));
+                });
+                if s.enforced {
+                    resumed["enforced"] = json!(true);
+                }
+                first.push(text(resumed));
                 first.extend(replay);
                 if let Some(c) = old.and_then(|o| s.conns.get(&o)) {
                     let _ = c.tx.send(Out::Close(1000, "moved"));
@@ -416,6 +437,12 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
                     Sess { in_h: 0, sent: 0, acked: 0, ring: VecDeque::new(), conn: Some(id), inactive: false },
                 );
                 let mut ok = json!({ "type": "auth_ok", "sid": sid, "grace_secs": 120, "hb_secs": 15 });
+                if let Some(credit) = s.credit {
+                    ok["credit"] = json!(credit);
+                }
+                if s.enforced {
+                    ok["enforced"] = json!(true);
+                }
                 if failed {
                     ok["resume_failed"] = json!(reason);
                 }
@@ -559,6 +586,7 @@ fn on_client_frame(state: &Arc<Mutex<Relay>>, id: u64, msg: Message) {
         sess.in_h
     });
     s.got.push((id, msg));
+    s.got_at.push(Instant::now());
     if let Some(h) = in_h
         && !withhold
     {
@@ -2161,4 +2189,250 @@ async fn after_a_refusal_one_network_change_retries_at_once() {
     }
     let later = relay.with(|r| r.tcp_accepts) - after_first;
     assert!(later <= 4, "{later} dials for 20 later network changes: they must wait for the ladder");
+}
+
+// -- The circuit breaker's pacing (relay_pace, G2) --
+
+fn server_room(n: u8) -> String {
+    format!("{:040x}", u128::from(n) + 1)
+}
+
+/// A relay with a breaker names the start credit; joins of rooms the node gave no bound for
+/// are priced as the biggest server and go only while the mirror keeps the reserve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_breaker_relay_paces_a_burst_of_joins() {
+    let relay = FakeRelay::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), true, |r| {
+        r.credit = Some(20_000);
+        r.enforced = true;
+    });
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    for n in 0..4 {
+        c.send(WsCommand::JoinRoom { room_code: server_room(n) });
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(relay.with(|r| r.joins().len()), 2, "20,000 W pays two big joins above the reserve");
+    relay.wait("every join, as the mirror refills", Duration::from_secs(6), |r| r.joins().len() == 4).await;
+}
+
+/// Control frames never wait, but the relay charges them, so they come off the mirror and
+/// hold back the next priced frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_frames_come_off_the_mirror() {
+    let relay = FakeRelay::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), true, |r| {
+        r.credit = Some(20_000);
+        r.enforced = true;
+    });
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    for n in 0..30 {
+        c.send(WsCommand::RoomBound { room_code: server_room(n), devices: 1 });
+        c.send(WsCommand::JoinRoom { room_code: server_room(n) });
+    }
+    relay.wait("thirty small joins", T, |r| r.joins().len() == 30).await;
+    // Each flag write costs one W per joined room plus itself: about 12,400 W in all.
+    for i in 0..400 {
+        c.background(i % 2 == 0);
+    }
+    relay.wait("the flag writes", T, |r| r.controls.len() >= 400).await;
+    c.send(WsCommand::JoinRoom { room_code: server_room(200) });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(relay.with(|r| r.joins().len()), 30, "the flags spent what a big join needs above the reserve");
+    relay.wait("the big join once the mirror refilled", Duration::from_secs(20), |r| r.joins().len() == 31).await;
+}
+
+/// A room bound from the node prices a join by what the room holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_room_bound_lowers_the_price() {
+    let relay = FakeRelay::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), true, |r| {
+        r.credit = Some(20_000);
+        r.enforced = true;
+    });
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    for n in 0..20 {
+        c.send(WsCommand::RoomBound { room_code: server_room(n), devices: 10 });
+        c.send(WsCommand::JoinRoom { room_code: server_room(n) });
+    }
+    relay.wait("twenty joins of small servers at once", Duration::from_millis(800), |r| r.joins().len() == 20).await;
+}
+
+/// While a big join waits, a small frame for a room nothing ahead of it touches goes
+/// first; one for the waiting join's room keeps its place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_small_frame_passes_a_paced_join_but_never_its_own_room() {
+    let relay = FakeRelay::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), true, |r| {
+        r.credit = Some(20_000);
+        r.enforced = true;
+    });
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    c.send(WsCommand::JoinRoom { room_code: ROOM.into() });
+    for n in 0..3 {
+        c.send(WsCommand::JoinRoom { room_code: server_room(n) });
+    }
+    c.send(WsCommand::SendDirect { room_code: server_room(2), target_peer: "12D3KooWPeer".into(), data: b"after".to_vec() });
+    c.send(WsCommand::SendDirect { room_code: ROOM.into(), target_peer: "12D3KooWOther".into(), data: b"call".to_vec() });
+    relay.wait("the call signal", T, |r| r.got.iter().any(|(_, m)| matches!(m, Message::Binary(b) if b.ends_with(b"call")))).await;
+    let order: Vec<String> = relay.with(|r| {
+        r.got
+            .iter()
+            .map(|(_, m)| match m {
+                Message::Binary(b) if b.ends_with(b"call") => "call".to_string(),
+                Message::Binary(b) if b.ends_with(b"after") => "after".to_string(),
+                Message::Text(t) => serde_json::from_str::<Value>(t).ok().and_then(|v| v["room"].as_str().map(str::to_string)).unwrap_or_default(),
+                _ => String::new(),
+            })
+            .collect()
+    });
+    assert_eq!(order.iter().filter(|o| o.len() == 40).count(), 2, "the third big join still waits: {order:?}");
+    relay.wait("the waiting join, then its room's direct", Duration::from_secs(6), |r| r.got.len() >= 6).await;
+    let last: Vec<String> = relay.with(|r| {
+        r.got
+            .iter()
+            .rev()
+            .take(2)
+            .map(|(_, m)| match m {
+                Message::Binary(b) if b.ends_with(b"after") => "after".to_string(),
+                Message::Text(t) => serde_json::from_str::<Value>(t).ok().and_then(|v| v["room"].as_str().map(str::to_string)).unwrap_or_default(),
+                _ => String::new(),
+            })
+            .collect()
+    });
+    assert_eq!(last, vec!["after".to_string(), server_room(2)], "a room's frames keep their order");
+}
+
+/// The breaker's hint: no socket before the pause ends, a nudge included; the resume is
+/// free, but the mirror assumes nothing, so even the frames to send again wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_breaker_pause_holds_every_dial_and_paces_the_resend() {
+    let relay = FakeRelay::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), true, |r| {
+        r.credit = Some(400_000);
+        r.enforced = true;
+        r.withhold_acks = true;
+    });
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    c.send(WsCommand::JoinRoom { room_code: ROOM.into() });
+    c.post(1);
+    relay.wait("the post", T, |r| r.binaries() == posts(1..=1)).await;
+    relay.with(|r| r.resume_h = Some(1));
+    let hinted = Instant::now();
+    relay.tell(json!({ "type": "reconnect", "after_ms": 1500, "breaker": true }));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    relay.with(|r| {
+        for conn in r.conns.values() {
+            let _ = conn.tx.send(Out::Close(1013, "breaker"));
+        }
+    });
+    c.wait_kind("Suspended", T).await;
+    c.nudge();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    c.nudge();
+    c.wait_kind("Resumed", T).await;
+    assert!(hinted.elapsed() >= Duration::from_millis(1500), "no dial before the pause ended: {:?}", hinted.elapsed());
+    assert_eq!(relay.conn_count(), 2, "one dial, after the pause");
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(relay.with(|r| r.binaries()), posts(1..=1), "the post to send again waits for the mirror to refill");
+}
+
+/// A login the breaker refuses (`cooldown`) is no refusal: the client waits it out, then
+/// resumes the session the relay held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cooldown_refusal_waits_and_resumes_the_held_session() {
+    let relay = FakeRelay::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), true, |r| {
+        r.credit = Some(400_000);
+        r.enforced = true;
+    });
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    relay.with(|r| r.cooldown_next = Some(1200));
+    relay.kill();
+    c.wait_kind("Suspended", T).await;
+    relay.wait("the refused login", T, |r| r.auths_seen >= 2).await;
+    let refused = Instant::now();
+    c.nudge();
+    c.wait_kind("Resumed", T).await;
+    assert!(refused.elapsed() >= Duration::from_millis(1000), "waited out the pause: {:?}", refused.elapsed());
+    c.drain();
+    assert!(!c.log.contains(&"SessionLost".to_string()), "the held session came back: {:?}", c.log);
+}
+
+/// A relay without a breaker names no credit: nothing is paced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_without_a_breaker_is_never_paced() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    for n in 0..30 {
+        c.send(WsCommand::JoinRoom { room_code: server_room(n) });
+    }
+    relay.wait("thirty big joins at once", Duration::from_millis(800), |r| r.joins().len() == 30).await;
+}
+
+/// The relay's numbers in the order its frames arrived: "<payload tail>" for the given
+/// payloads, the room for a text frame.
+fn arrivals(relay: &FakeRelay, tails: &[&str]) -> Vec<String> {
+    relay.with(|r| {
+        r.got
+            .iter()
+            .filter_map(|(_, m)| match m {
+                Message::Binary(b) => tails.iter().find(|t| b.ends_with(t.as_bytes())).map(|t| t.to_string()),
+                Message::Text(t) => serde_json::from_str::<Value>(t).ok().and_then(|v| v["room"].as_str().map(str::to_string)),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// MED 3 of the G2 review: a small frame never passes an earlier frame to the same
+/// device, whatever room either rides (an Olm pre-key frame must arrive before the frame
+/// that needs its session); one to another device still goes first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn priority_lane_never_passes_an_earlier_frame_to_the_same_device() {
+    let relay = FakeRelay::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), true, |r| {
+        r.credit = Some(20_000);
+        r.enforced = true;
+    });
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    c.send(WsCommand::JoinRoom { room_code: ROOM.into() });
+    for n in 0..3 {
+        c.send(WsCommand::JoinRoom { room_code: server_room(n) });
+    }
+    let x = "12D3KooWDeviceX";
+    c.send(WsCommand::SendDirect { room_code: server_room(2), target_peer: x.into(), data: b"prekey".to_vec() });
+    c.send(WsCommand::SendDirect { room_code: ROOM.into(), target_peer: x.into(), data: b"after-prekey".to_vec() });
+    c.send(WsCommand::SendDirect { room_code: ROOM.into(), target_peer: "12D3KooWDeviceY".into(), data: b"other".to_vec() });
+    relay.wait("the frame to another device", T, |r| r.got.iter().any(|(_, m)| matches!(m, Message::Binary(b) if b.ends_with(b"other")))).await;
+    let early = arrivals(&relay, &["prekey", "after-prekey", "other"]);
+    assert!(!early.iter().any(|a| a == "after-prekey"), "the second frame to X passed its first: {early:?}");
+    relay
+        .wait("both frames to X", Duration::from_secs(6), |r| r.got.iter().any(|(_, m)| matches!(m, Message::Binary(b) if b.ends_with(b"after-prekey"))))
+        .await;
+    let order: Vec<String> =
+        arrivals(&relay, &["after-prekey", "prekey", "other"]).into_iter().filter(|a| a.ends_with("prekey")).collect();
+    assert_eq!(order, vec!["prekey".to_string(), "after-prekey".to_string()], "X hears its frames in order");
+}
+
+/// MED 4 (lead decision): a shadow relay names a credit but closes nothing, so the client
+/// mirrors it and never waits; the same relay enforcing after a restart says so on the
+/// resume, and from then the client waits for its mirror.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shadow_relays_credit_never_makes_the_client_wait() {
+    let relay = FakeRelay::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), true, |r| r.credit = Some(20_000));
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    for n in 0..30 {
+        c.send(WsCommand::JoinRoom { room_code: server_room(n) });
+    }
+    relay.wait("thirty big joins at once, 50,000 W past the credit", Duration::from_millis(800), |r| r.joins().len() == 30).await;
+    relay.with(|r| r.enforced = true);
+    relay.kill();
+    c.wait_kind("Resumed", T).await;
+    for n in 30..34 {
+        c.send(WsCommand::JoinRoom { room_code: server_room(n) });
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(relay.with(|r| r.joins().len()), 30, "an enforcing relay's resume makes the client wait for its mirror");
 }

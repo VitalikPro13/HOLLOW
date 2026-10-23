@@ -220,6 +220,7 @@ fn cmd_kind(cmd: &WsCommand) -> &'static str {
         WsCommand::JoinRoom { .. } => "join",
         WsCommand::JoinInbox { .. } => "join_inbox",
         WsCommand::SetDoor { .. } => "set_door",
+        WsCommand::RoomBound { .. } => "room_bound",
         WsCommand::LeaveRoom { .. } => "leave",
         WsCommand::SendToRoom { .. } => "send_room",
         WsCommand::SendPublic { .. } => "send_public",
@@ -269,6 +270,8 @@ struct RelayInner {
     relay_idle: std::time::Duration,
     /// Every command the relay handled: (device, kind, room, source).
     cmd_log: Vec<(String, &'static str, Option<String>, CmdSource)>,
+    /// The latest device bound each node told its ws_client per room (`WsCommand::RoomBound`).
+    room_bounds: HashMap<(String, String), u32>,
     /// device -> joins a slow relay has not answered yet ([`MockRelay::hold_joins`]).
     held_joins: HashMap<String, Vec<WsCommand>>,
     /// room_code -> set of device_peer_ids currently in the room.
@@ -2272,6 +2275,11 @@ impl MockRelay {
         self.inner.lock().unwrap().sessions.get(dev).map_or(0, |s| s.ring.len())
     }
 
+    /// The device bound `dev`'s node last told its ws_client for `room`.
+    pub(crate) fn room_bound(&self, dev: &str, room: &str) -> Option<u32> {
+        self.inner.lock().unwrap().room_bounds.get(&(dev.to_string(), room.to_string())).copied()
+    }
+
     /// A point in the relay's command log.
     pub(crate) fn log_mark(&self) -> usize {
         self.inner.lock().unwrap().cmd_log.len()
@@ -2457,6 +2465,11 @@ impl RelayInner {
         conn.client.track(&cmd);
         if matches!(cmd, WsCommand::SetDoor { .. }) {
             self.handle(from, cmd);
+            return;
+        }
+        // ws_client keeps it for its pacer; it never reaches the relay.
+        if let WsCommand::RoomBound { room_code, devices } = &cmd {
+            self.room_bounds.insert((from.to_string(), room_code.clone()), *devices);
             return;
         }
         let client = &mut conn.client;
@@ -49630,8 +49643,37 @@ pub(crate) mod g1_probe {
         pub senders: BTreeMap<String, u64>,
     }
 
+    /// One frame a device handed the relay (G2: per-connection peaks).
+    #[derive(Clone, Debug)]
+    pub(crate) struct Ev {
+        /// Seconds since the probe started.
+        pub at: f64,
+        pub join: bool,
+        /// Hash of the device a direct names, 0 for anything else.
+        pub target: u64,
+        pub bytes: u32,
+    }
+
+    /// One device's busiest windows in a phase: what a per-connection breaker would see.
+    #[derive(Default, Clone, Debug)]
+    pub(crate) struct DevPeaks {
+        pub frames: u64,
+        pub joins: u64,
+        pub directs: u64,
+        pub targets: u64,
+        pub bytes: u64,
+        pub frames_1s: u64,
+        pub frames_10s: u64,
+        pub frames_60s: u64,
+        pub joins_60s: u64,
+        pub targets_60s: u64,
+        pub bytes_60s: u64,
+    }
+
     #[derive(Default, Clone, Debug)]
     pub(crate) struct Book {
+        /// Every frame each device handed the relay, in order.
+        pub series: HashMap<String, Vec<Ev>>,
         /// `bcast:<kind>` (0x03, topic, public), `direct:<kind>`, `presence:<event>`,
         /// `binary`, `ctl:<command>`. An encrypted kind reads `outer>inner`.
         pub kinds: BTreeMap<String, Tally>,
@@ -49642,7 +49684,76 @@ pub(crate) mod g1_probe {
         pub bytes_out: u64,
     }
 
+    static EPOCH: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+    /// The busiest window of `w` seconds over sorted times, weighted.
+    fn window_max(evs: &[(f64, u64)], w: f64) -> u64 {
+        let (mut lo, mut sum, mut best) = (0usize, 0u64, 0u64);
+        for (hi, &(t, v)) in evs.iter().enumerate() {
+            sum += v;
+            while evs[lo].0 <= t - w {
+                sum -= evs[lo].1;
+                lo += 1;
+            }
+            let _ = hi;
+            best = best.max(sum);
+        }
+        best
+    }
+
+    fn distinct_max(evs: &[(f64, u64)], w: f64) -> u64 {
+        let mut count: HashMap<u64, u32> = HashMap::new();
+        let (mut lo, mut best) = (0usize, 0u64);
+        for &(t, k) in evs {
+            *count.entry(k).or_default() += 1;
+            while evs[lo].0 <= t - w {
+                let key = evs[lo].1;
+                if let Some(c) = count.get_mut(&key) {
+                    *c -= 1;
+                    if *c == 0 {
+                        count.remove(&key);
+                    }
+                }
+                lo += 1;
+            }
+            best = best.max(count.len() as u64);
+        }
+        best
+    }
+
+    /// Every device's peaks in `book`, busiest (most frames) first.
+    pub(crate) fn device_peaks(book: &Book) -> Vec<(String, DevPeaks)> {
+        let mut out: Vec<(String, DevPeaks)> = book
+            .series
+            .iter()
+            .map(|(dev, evs)| {
+                let all: Vec<(f64, u64)> = evs.iter().map(|e| (e.at, 1)).collect();
+                let bytes: Vec<(f64, u64)> = evs.iter().map(|e| (e.at, e.bytes as u64)).collect();
+                let joins: Vec<(f64, u64)> = evs.iter().filter(|e| e.join).map(|e| (e.at, 1)).collect();
+                let targets: Vec<(f64, u64)> = evs.iter().filter(|e| e.target != 0).map(|e| (e.at, e.target)).collect();
+                let distinct: std::collections::HashSet<u64> = targets.iter().map(|t| t.1).collect();
+                let p = DevPeaks {
+                    frames: all.len() as u64,
+                    joins: joins.len() as u64,
+                    directs: targets.len() as u64,
+                    targets: distinct.len() as u64,
+                    bytes: bytes.iter().map(|b| b.1).sum(),
+                    frames_1s: window_max(&all, 1.0),
+                    frames_10s: window_max(&all, 10.0),
+                    frames_60s: window_max(&all, 60.0),
+                    joins_60s: window_max(&joins, 60.0),
+                    targets_60s: distinct_max(&targets, 60.0),
+                    bytes_60s: window_max(&bytes, 60.0),
+                };
+                (dev.clone(), p)
+            })
+            .collect();
+        out.sort_by_key(|(_, p)| std::cmp::Reverse(p.frames));
+        out
+    }
+
     pub(crate) fn start() {
+        *EPOCH.lock().unwrap() = Some(std::time::Instant::now());
         *BOOK.lock().unwrap() = Some(Book::default());
         *INNER.lock().unwrap() = Some(HashMap::new());
         ON.store(true, Ordering::SeqCst);
@@ -49758,7 +49869,21 @@ pub(crate) mod g1_probe {
             other => format!("ctl:{}", super::cmd_kind(other)),
         };
         let route = super::cmd_kind(cmd);
+        let (join, target, bytes) = match cmd {
+            WsCommand::JoinRoom { room_code } => (true, 0, room_code.len() + 32),
+            WsCommand::JoinInbox { room_code, .. } => (true, 0, room_code.len() + 512),
+            WsCommand::SendDirect { target_peer, data, .. }
+            | WsCommand::SendDirectImage { target_peer, data, .. }
+            | WsCommand::SendBinaryDirect { target_peer, data, .. }
+            | WsCommand::SendChannelDirect { target_peer, data, .. } => (false, hash(target_peer.as_bytes()).max(1), data.len()),
+            WsCommand::SendToRoom { data, .. } | WsCommand::SendPublic { data, .. } | WsCommand::SendToRoomTopic { data, .. } => {
+                (false, 0, data.len())
+            }
+            _ => (false, 0, 64),
+        };
+        let at = EPOCH.lock().unwrap().map(|e| e.elapsed().as_secs_f64()).unwrap_or(0.0);
         with_book(|book| {
+            book.series.entry(from.to_string()).or_default().push(Ev { at, join, target, bytes: bytes as u32 });
             book.cmds += 1;
             *book.routes.entry(route).or_default() += 1;
             let t = book.kinds.entry(key).or_default();
@@ -49967,6 +50092,14 @@ impl G1Run {
             book.bytes_out,
             if settled { "" } else { " (did not settle)" },
         );
+        if let Some((_, d)) = g1_probe::device_peaks(&book).first() {
+            println!(
+                "[g2] {phase:<10} members={members:>4} busiest device: frames={} joins={} directs={} targets={} bytes={} \
+                 peak frames 1s/10s/60s={}/{}/{} joins_60s={} targets_60s={} bytes_60s={}",
+                d.frames, d.joins, d.directs, d.targets, d.bytes, d.frames_1s, d.frames_10s, d.frames_60s, d.joins_60s,
+                d.targets_60s, d.bytes_60s,
+            );
+        }
         self.phases.push(G1Phase { phase, members, book, secs, settled });
     }
 
@@ -50103,6 +50236,25 @@ fn g1_write_csv(phases: &[G1Phase], path: &str) {
         }
         for (r, n) in &p.book.routes {
             csv.push_str(&format!("{},{},{:.2},{},route:{},{},0,0,,\n", p.phase, p.members, p.secs, p.settled, r, n));
+        }
+        // G2: the largest per-device value of each breaker counter in this phase.
+        let peaks = g1_probe::device_peaks(&p.book);
+        let max = |f: fn(&g1_probe::DevPeaks) -> u64| peaks.iter().map(|(_, d)| f(d)).max().unwrap_or(0);
+        let rows: [(&str, u64); 11] = [
+            ("frames", max(|d| d.frames)),
+            ("joins", max(|d| d.joins)),
+            ("directs", max(|d| d.directs)),
+            ("targets", max(|d| d.targets)),
+            ("bytes", max(|d| d.bytes)),
+            ("frames_1s", max(|d| d.frames_1s)),
+            ("frames_10s", max(|d| d.frames_10s)),
+            ("frames_60s", max(|d| d.frames_60s)),
+            ("joins_60s", max(|d| d.joins_60s)),
+            ("targets_60s", max(|d| d.targets_60s)),
+            ("bytes_60s", max(|d| d.bytes_60s)),
+        ];
+        for (name, v) in rows {
+            csv.push_str(&format!("{},{},{:.2},{},peak:{},{},0,0,{},\n", p.phase, p.members, p.secs, p.settled, name, v, peaks.len()));
         }
     }
     std::fs::write(path, csv).expect("write the probe csv");
@@ -56058,4 +56210,64 @@ async fn g13w3_a_page_nobody_asked_for_is_never_followed() {
         .await;
         assert!(!seen, "L asked K for the next page of a page it never asked for ({lane})");
     }
+}
+
+// g13w3-g2
+
+/// The pacer's bound for a server room follows its members and their devices
+/// (room_bounds): every member's devices and ours, told to ws_client within a tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_g2_room_bounds_follow_members_and_devices() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, sid) = three_member_server(&relay, 251, 252, 253).await;
+    // Three single-device members, ours counted again: never below the room.
+    for node in [&o, &m, &x] {
+        assert!(
+            wait_until(40, async || relay.room_bound(&node.device_id, &sid).is_some_and(|b| b >= 4)).await,
+            "{} never told its pacer the room's devices: {:?}",
+            node.device_id,
+            relay.room_bound(&node.device_id, &sid),
+        );
+    }
+    assert_eq!(relay.room_bound(&o.device_id, &sid), Some(4), "three members and our own device");
+    assert!(relay.commands_since(&o.device_id, 0).iter().all(|(kind, _, _)| *kind != "room_bound"), "a bound never reaches the relay");
+}
+
+/// What a co-member's fresh reconnect makes the others send it (design section 10): a
+/// bounded handful of answers per churn, so a churning member costs an honest one far less
+/// than the refill.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_g2_a_churning_member_costs_others_a_handful_of_frames() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, _m, x, sid) = three_member_server(&relay, 254, 255, 250).await;
+    sleep_ms(3_000).await;
+    let mut worst = 0;
+    for _ in 0..3 {
+        go_offline(&relay, &x, &sid).await;
+        let mark = relay.log_mark();
+        relay.set_online(&x.device_id, true);
+        assert!(
+            wait_until(15, async || relay.room_devices(&sid).contains(&x.device_id)).await,
+            "X came back into the server room"
+        );
+        sleep_ms(5_000).await;
+        let sent: usize = relay
+            .commands_since(&o.device_id, mark)
+            .iter()
+            .filter(|(kind, _, _)| matches!(*kind, "send_direct" | "send_direct_image" | "send_binary" | "send_room" | "send_topic"))
+            .count();
+        worst = worst.max(sent);
+    }
+    hollow_log!("[g13w3-g2] the most frames one member sent for a co-member's churn: {worst}");
+    // 20 frames is about 40 W: 60 churning addresses would take 4,800 W a minute of the
+    // honest member's 60,000 W refill.
+    assert!(worst <= 20, "one churn made a co-member send {worst} frames");
 }

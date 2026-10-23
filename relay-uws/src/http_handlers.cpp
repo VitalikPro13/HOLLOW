@@ -1,4 +1,6 @@
 #include "http_handlers.h"
+#include "ws_handler.h"
+#include "measure.h"
 #include "json.hpp"
 #include "server_stats.h"
 #include "version.h"
@@ -131,7 +133,19 @@ static void handle_server_stats(HttpResponse* res, RelayState& state, const Conf
         {"send_dropped", state.diag.send_dropped},
         {"fwd_delivered", state.diag.fwd_delivered},
         {"fwd_buffered", state.diag.fwd_buffered},
-        {"ghost_left_suppressed", state.diag.ghost_left_suppressed}
+        {"ghost_left_suppressed", state.diag.ghost_left_suppressed},
+        // The circuit breaker's trips by kind (ws_handler.cpp); shadow mode counts the
+        // trips enforcement would make.
+        {"breaker", breaker_stats()},
+        // Send-buffer pressure against the memory budget (send_budget.h): a healthy relay
+        // sits at 0; sustained near 100 means slow or hostile readers.
+        {"send_budget_used_pct", send_budget::used_pct(state.send_ledger.total(), state.send_ledger.limits.limit)},
+        {"send_budget_bytes", state.send_ledger.limits.limit},
+        {"fanout_tripped", state.diag.fanout_tripped},
+        {"fanout_refused", state.diag.fanout_refused},
+        {"fanout_evicted", state.diag.fanout_evicted},
+        {"budget_refused", state.diag.budget_refused},
+        {"budget_closed", state.diag.budget_closed}
     };
 
     server_stats::keep_public(resp, config.public_stats);
@@ -168,6 +182,24 @@ void setup_http_handlers(uWS::SSLApp& app, RelayState& state,
         res->end();
     });
 
+#ifdef HOLLOW_RELAY_MEASURE
+    // The measuring build's anonymous counters (measure.h), for a test relay on loopback.
+    app.get("/g2-measure", [](HttpResponse* res, HttpRequest* /*req*/) {
+        cors_headers(res);
+        res->end(measure_report());
+    });
+    app.get("/g2-measure-reset", [](HttpResponse* res, HttpRequest* /*req*/) {
+        measure::reset();
+        cors_headers(res);
+        res->end(R"({"ok":true})");
+    });
+#endif
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+    // One payer's breaker buckets, for the live tests; never in a relay that serves anyone.
+    app.get("/breaker-test", [](HttpResponse* res, HttpRequest* req) {
+        res->end(breaker_test_report(std::string(req->getQuery("peer"))));
+    });
+#endif
     app.get("/health", [](HttpResponse* res, HttpRequest* /*req*/) {
         handle_health(res);
     });

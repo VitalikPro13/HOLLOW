@@ -5,6 +5,7 @@
 #include <string>
 #include <strings.h>
 
+#include "breaker.h"
 #include "json.hpp"
 
 // /server-stats with the public activity turned off (PUBLIC_STATS=off, AR-32): the online
@@ -34,6 +35,15 @@ inline void keep_public(nlohmann::json& body, bool public_stats) {
         }
     }
     body = std::move(kept);
+}
+
+// The circuit breaker's block while the public stats are on; keep_public drops it when off.
+inline nlohmann::json breaker_block(const breaker::Stats& st, bool enforced, size_t cooling_devices) {
+    return {{"enforced", enforced},
+            {"trips", st.trips},
+            {"ladder_steps", st.ladder_steps},
+            {"refused", st.refused},
+            {"cooling_devices", cooling_devices}};
 }
 
 // PUBLIC_STATS from the relay's environment, trimmed and in any case: unset, empty, on,

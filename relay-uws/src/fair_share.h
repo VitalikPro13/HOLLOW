@@ -83,6 +83,18 @@ public:
         return *s.by_use.begin()->second;
     }
 
+    // victim(), passing over `spare` (the entry just written): when it is the heaviest
+    // share's only entry the next heaviest share gives way, so a newcomer whose share
+    // tops the table cannot stop every eviction and grow it without bound.
+    std::optional<Key> victim_except(const Key& spare) const {
+        for (auto h = by_held_.rbegin(); h != by_held_.rend(); ++h) {
+            for (const auto& [tick, key] : shares_.at(h->second).by_use) {
+                if (!(*key == spare)) return *key;
+            }
+        }
+        return std::nullopt;
+    }
+
     size_t total() const { return total_; }
     size_t size() const { return entries_.size(); }
 

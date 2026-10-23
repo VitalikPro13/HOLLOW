@@ -2,7 +2,9 @@
 // whose depth rule is what keeps the recursive walks after it (dump, copies,
 // comparisons) off the end of the relay's stack (C-RP-01). The rule must be exact:
 // it refuses every text the parser would build deeper than MAX_DEPTH, and nothing
-// the parser would build within it, so no real frame is lost to it.
+// the parser would build within it, so no real frame is lost to it. The send budget's
+// read of a text msg (src/msg_plan.h) runs outside any try, so on any accepted value it
+// must never throw, and the copy it predicts must be the size the relay writes.
 
 #include <string>
 #include <utility>
@@ -10,6 +12,7 @@
 
 #include "client_json.h"
 #include "fuzz_support.h"
+#include "msg_plan.h"
 
 namespace {
 
@@ -47,6 +50,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     const size_t depth = depth_of(unbounded);
     FUZZ_CHECK(j.is_discarded() == (depth > client_json::MAX_DEPTH));
     if (j.is_discarded()) return 0;
+
+    if (const auto f = msg_plan::fields(j)) {
+        const nlohmann::json out = {
+            {"type", "msg"}, {"room", *f->room}, {"from", "12D3KooWfuzz"}, {"data", std::string(f->data)}};
+        FUZZ_CHECK(msg_plan::out_size(*f->room, "12D3KooWfuzz", f->data) == out.dump().size());
+    }
 
     // What a handler may do with an accepted value: write it out and read it again.
     const std::string dumped = j.dump();

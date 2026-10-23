@@ -4,6 +4,7 @@
 #include <deque>
 #include <functional>
 #include <queue>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <chrono>
@@ -22,6 +23,9 @@
 #include "offline_index.h"
 #include "reports.h"
 #include "roster_book.h"
+#include "measure.h"
+#include "breaker.h"
+#include "send_budget.h"
 
 // No soft backpressure — let uWebSockets buffer handle delivery.
 // Hard limit (.maxBackpressure = 64MB) catches truly dead connections.
@@ -223,10 +227,26 @@ struct PerSocketData {
     bool write_dead = false;
     // Any write to this socket uWS dropped (a socket without a session keeps writing).
     bool write_dropped = false;
+    // The address share this socket's held bytes are charged to in RelayState::send_ledger,
+    // under a key that lives as long as the process (a share never splits mid-socket).
+    uint64_t budget_share = 0;
+    // Messages this socket has finished: an inbound frame spanning reads makes progress
+    // when one finishes (send_budget stall sweep).
+    uint64_t inbound_messages = 0;
     // The newest mailbox entry (its OfflineIndex seq) this socket was replayed: a later
     // owning join replays only past it (AR-36). Never raised by a live deposit, so a
     // socket that proves late still reads what arrived before.
     uint64_t mailbox_mark = 0;
+    // Set by the first close of this socket (close_once, the close handler): the breaker
+    // never judges a socket on its way out, and no second close is attempted.
+    bool closing = false;
+    // The address group (ip_limit_key, keyed) this socket's received writes tally under.
+    uint64_t group = 0;
+    // The buckets of a socket without a session: fetch, guest, a session-less full login.
+    breaker::Account acct;
+#ifdef HOLLOW_RELAY_MEASURE
+    std::unique_ptr<measure::Meter> meter;
+#endif
 };
 
 struct WsRoom {
@@ -240,6 +260,8 @@ struct WsRoom {
     // presence, still reached by delivery (into their ring). Their `owners` and `doors`
     // entries stay while they hold it.
     std::unordered_set<std::string> held;
+    // What public frames reaching sockets outside its audience draw on (breaker.h).
+    breaker::Allowance allowance;
 };
 
 // An address holding a socket, or holding none with connects in the last minute
@@ -261,6 +283,14 @@ struct DeliveryDiag {
     uint64_t fwd_delivered = 0;      // 0x04/0x08 directs delivered live to the configured media forwarder
     uint64_t fwd_buffered = 0;       // ...that fell into the offline buffer instead (membership loss!)
     uint64_t ghost_left_suppressed = 0; // peer_left broadcasts withheld because a newer socket of the same peer took over
+    // The send-buffer memory breaker (send_budget.h): fan-outs tripped (sender closed 1013,
+    // re-sends on resume) and fan-outs refused (larger than the whole budget, dropped once).
+    // A healthy relay leaves both at zero; non-zero means slow or hostile readers.
+    uint64_t fanout_tripped = 0;
+    uint64_t fanout_refused = 0;
+    uint64_t fanout_evicted = 0;  // sockets of a heavier share closed so a fan-out fits
+    uint64_t budget_refused = 0;  // writes refused to a receiver (socket/share cap, ceiling)
+    uint64_t budget_closed = 0;   // sockets the sweep closed: stalled, or over budget/share cap
 };
 
 struct ServerStatsCache {
@@ -474,6 +504,16 @@ struct RelayState {
     // One entry per socket (`write_dead` is set once).
     std::vector<std::string> dropped_writes;
 
+    // The send-buffer memory budget (send_budget.h): every socket's held buffer, charged
+    // to its OWN address share, so a fan-out into non-reading sockets cannot OOM the box.
+    // A memory-safety bound, never a volume quota; sized from the box at startup.
+    send_budget::Ledger<SSLWebSocket*> send_ledger;
+    // The key budget shares hash under: RAM only, minted at start, never rotated (the
+    // ledger holds an entry only while its socket holds bytes, never persisted).
+    std::string send_share_key;
+    // Every open socket, for the sweep that charges inbound frames spanning reads.
+    std::unordered_set<SSLWebSocket*> open_sockets;
+
     // Every identity's roster, folded from the rosters shown on its inbox joins
     // (design ID-1R): who owns each inbox, removals no later roster takes back.
     RosterBook roster_book;
@@ -483,6 +523,22 @@ struct RelayState {
     // is over.
     std::string share_key;
     std::chrono::steady_clock::time_point share_key_since{};
+
+    // The circuit breaker (breaker.h): device cooldowns, the fresh-start pools of address
+    // blocks and the devices seen clean, keyed under `breaker_key`, minted at start and
+    // never rotated (a 24 h cooldown outlives the hourly share key). RAM only, never
+    // logged or snapshotted: a restart forgives.
+    breaker::Limits breaker_limits = breaker::DEFAULT;
+    std::string breaker_key;
+    breaker::CooldownBook cooldowns;
+    breaker::StartPools start_pools;
+    breaker::CleanSeen clean_seen;
+    // Every payer's stranger count, in one byte budget (HIGH 1).
+    breaker::StrangerBook strangers;
+    std::chrono::steady_clock::time_point breaker_swept{};
+    // Graces of sessions a breaker trip paused: each runs from its own pause, so not in
+    // `grace_ends` order. One entry per paused session, gone when it resumes or ends.
+    std::set<PresenceDue> long_grace_ends;
 
     size_t online_users() const { return peer_sockets.size() - guest_count; }
 };

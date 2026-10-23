@@ -387,6 +387,11 @@ function Stop-FleetProxy {
 function Set-PeerRelayConnect($peer, $dataDir) {
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $dataDir 'relay_connect'), "127.0.0.1:$(Get-FleetProxyPort $peer)`n")
+    # FLEET_RELAY_CA (a PEM file) is trusted beside the public roots by debug builds, for a
+    # test relay that answers under the relay's own name behind FLEET_RELAY_CONNECT.
+    $ca = Join-Path $dataDir 'relay_ca.pem'
+    if ($env:FLEET_RELAY_CA) { Copy-Item -LiteralPath $env:FLEET_RELAY_CA -Destination $ca -Force }
+    else { Remove-Item -LiteralPath $ca -ErrorAction SilentlyContinue }
 }
 
 function Invoke-ProxyNet($peer, $op, $step) {

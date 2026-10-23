@@ -19,6 +19,8 @@ pub(crate) const MAX_UNWRITTEN_ENTRIES: usize = 20_000;
 pub(crate) const MAX_UNWRITTEN_BYTES: usize = 32 * 1024 * 1024;
 /// The longest drain wait honoured: a relay names 2 to 10 s.
 pub(crate) const MAX_DRAIN_WAIT: Duration = Duration::from_secs(30);
+/// The breaker's longest pause, its ladder's top rung: a longer hint is never honoured.
+pub(crate) const MAX_BREAKER_WAIT: Duration = Duration::from_secs(24 * 3600);
 
 /// Every interval the client keeps (section 9.9); tests shrink them.
 #[derive(Clone, Debug)]
@@ -250,6 +252,13 @@ pub(crate) enum AuthReply {
         sid: Option<String>,
         #[serde(default)]
         resume_failed: Option<String>,
+        /// The W the relay's circuit breaker started this session at (relay_pace); absent
+        /// from a relay without one.
+        #[serde(default)]
+        credit: Option<i64>,
+        /// The relay's breaker closes sockets (else it only counts): the pacer waits only then.
+        #[serde(default)]
+        enforced: bool,
     },
     Resumed {
         h: u64,
@@ -257,10 +266,15 @@ pub(crate) enum AuthReply {
         gap: bool,
         #[serde(default)]
         reprove: bool,
+        #[serde(default)]
+        enforced: bool,
     },
     AuthFailed {
         #[serde(default)]
         error: String,
+        /// With `error: "cooldown"`: how long the breaker's pause still runs.
+        #[serde(default)]
+        after_ms: Option<u64>,
     },
 }
 
@@ -284,23 +298,40 @@ impl AuthReply {
 pub(crate) enum Established {
     /// A fresh session; `sid` none when the relay keeps no session for this socket.
     /// `lost`: the session we held is gone.
-    Fresh { sid: Option<String>, lost: bool },
-    Resumed { h: u64, gap: bool, reprove: bool },
+    Fresh { sid: Option<String>, lost: bool, credit: Option<i64>, enforced: bool },
+    Resumed { h: u64, gap: bool, reprove: bool, enforced: bool },
 }
 
 /// The relay's answer to our auth frame, read against what we asked and whether we
 /// held a session going in.
 pub(crate) fn judge(ask: &Ask, held: bool, reply: AuthReply) -> Result<Established, String> {
     match (ask, reply) {
-        (_, AuthReply::AuthFailed { error }) => Err(error),
-        (Ask::Resume { .. }, AuthReply::Resumed { h, gap, reprove }) => Ok(Established::Resumed { h, gap, reprove }),
+        (_, AuthReply::AuthFailed { error, .. }) => Err(error),
+        (Ask::Resume { .. }, AuthReply::Resumed { h, gap, reprove, enforced }) => {
+            Ok(Established::Resumed { h, gap, reprove, enforced })
+        }
         (_, AuthReply::Resumed { .. }) => Err("the relay resumed a session nobody asked for".to_string()),
-        (Ask::V2, AuthReply::AuthOk { .. }) => Ok(Established::Fresh { sid: None, lost: held }),
-        (_, AuthReply::AuthOk { sid, resume_failed }) => Ok(Established::Fresh {
+        (Ask::V2, AuthReply::AuthOk { credit, enforced, .. }) => {
+            Ok(Established::Fresh { sid: None, lost: held, credit, enforced })
+        }
+        (_, AuthReply::AuthOk { sid, resume_failed, credit, enforced }) => Ok(Established::Fresh {
             sid: sid.filter(|s| is_sid_shape(s)),
             lost: held || resume_failed.is_some(),
+            credit,
+            enforced,
         }),
         (_, AuthReply::AuthChallenge { .. }) => Err("a second challenge instead of an answer".to_string()),
+    }
+}
+
+/// The breaker's pause a refused login must wait out, from `auth_failed`'s `cooldown`;
+/// never longer than the ladder's top rung.
+pub(crate) fn cooldown(reply: &AuthReply) -> Option<Duration> {
+    match reply {
+        AuthReply::AuthFailed { error, after_ms } if error == "cooldown" => {
+            Some(Duration::from_millis(after_ms.unwrap_or(MAX_DRAIN_WAIT.as_millis() as u64)).min(MAX_BREAKER_WAIT))
+        }
+        _ => None,
     }
 }
 
@@ -518,6 +549,23 @@ impl<C: Queued> Outbound<C> {
     /// either bound, so a burst (a file stream) waits upstream instead of being pruned.
     pub(crate) fn has_room(&self) -> bool {
         self.unwritten.len() < MAX_UNWRITTEN_ENTRIES / 2 && self.unwritten_bytes < MAX_UNWRITTEN_BYTES / 2
+    }
+
+    /// The next unwritten entry, left in place.
+    pub(crate) fn front(&self) -> Option<&Entry<C>> {
+        self.unwritten.front().map(|u| &u.entry)
+    }
+
+    /// The unwritten entries in order.
+    pub(crate) fn unwritten(&self) -> impl Iterator<Item = &Entry<C>> {
+        self.unwritten.iter().map(|u| &u.entry)
+    }
+
+    /// Takes the unwritten entry at `at` out of its place (it goes on the wire next).
+    pub(crate) fn take(&mut self, at: usize) -> Option<Entry<C>> {
+        let u = self.unwritten.remove(at)?;
+        self.unwritten_bytes -= u.bytes;
+        Some(u.entry)
     }
 
     pub(crate) fn pop(&mut self) -> Option<Entry<C>> {
@@ -937,10 +985,37 @@ mod tests {
         assert!(!offers(r#"{"type":"auth_ok","sid":"00112233445566778899aabbccddeeff"}"#));
     }
 
+    /// The breaker's numbers in the answers: `enforced` only from a relay that says so
+    /// (a shadow relay's credit never makes the client wait), and a pause is honoured up
+    /// to the ladder's top rung, never longer (LOW 12).
+    #[test]
+    fn the_breakers_answers_are_read_and_bounded() {
+        let reply = |t: &str| serde_json::from_str::<AuthReply>(t).unwrap();
+        let ok = format!(r#"{{"type":"auth_ok","sid":"{SID}","grace_secs":120,"hb_secs":15,"credit":400000}}"#);
+        assert!(matches!(
+            judge(&Ask::New, false, reply(&ok)),
+            Ok(Established::Fresh { credit: Some(400_000), enforced: false, .. })
+        ));
+        let enforced = format!(r#"{{"type":"auth_ok","sid":"{SID}","credit":24000,"enforced":true}}"#);
+        assert!(matches!(judge(&Ask::New, false, reply(&enforced)), Ok(Established::Fresh { enforced: true, .. })));
+        let resume = Ask::Resume { sid: SID.into(), in_h: 3 };
+        assert!(matches!(
+            judge(&resume, true, reply(r#"{"type":"resumed","h":3,"enforced":true}"#)),
+            Ok(Established::Resumed { enforced: true, .. })
+        ));
+        let day = Duration::from_secs(24 * 3600);
+        let long = reply(r#"{"type":"auth_failed","error":"cooldown","after_ms":90000000}"#);
+        assert_eq!(cooldown(&long), Some(day), "25 h is honoured as the ladder's 24 h");
+        let short = reply(r#"{"type":"auth_failed","error":"cooldown","after_ms":1500}"#);
+        assert_eq!(cooldown(&short), Some(Duration::from_millis(1500)));
+        assert_eq!(cooldown(&reply(r#"{"type":"auth_failed","error":"Authentication failed"}"#)), None);
+    }
+
     #[test]
     fn the_relays_answers_are_judged_by_what_was_asked() {
         let reply = |t: &str| serde_json::from_str::<AuthReply>(t).unwrap();
-        let fresh = |sid: Option<&str>, lost| Ok(Established::Fresh { sid: sid.map(str::to_string), lost });
+        let fresh =
+            |sid: Option<&str>, lost| Ok(Established::Fresh { sid: sid.map(str::to_string), lost, credit: None, enforced: false });
         let resume = Ask::Resume { sid: SID.into(), in_h: 3 };
         let ok = format!(r#"{{"type":"auth_ok","sid":"{SID}","grace_secs":120,"hb_secs":15}}"#);
         assert_eq!(judge(&Ask::New, false, reply(&ok)), fresh(Some(SID), false));
@@ -955,7 +1030,7 @@ mod tests {
         );
         assert_eq!(
             judge(&resume, true, reply(r#"{"type":"resumed","h":7,"gap":true,"reprove":false,"grace_secs":120,"hb_secs":15}"#)),
-            Ok(Established::Resumed { h: 7, gap: true, reprove: false })
+            Ok(Established::Resumed { h: 7, gap: true, reprove: false, enforced: false })
         );
         let failed = format!(r#"{{"type":"auth_ok","sid":"{SID2}","grace_secs":120,"hb_secs":15,"resume_failed":"unknown"}}"#);
         assert_eq!(judge(&resume, true, reply(&failed)), fresh(Some(SID2), true));
@@ -973,19 +1048,19 @@ mod tests {
         assert_eq!(on_drop(true), vec![Note::Suspended]);
         assert_eq!(on_drop(false), vec![Note::SessionLost]);
         assert_eq!(
-            on_established(&Established::Resumed { h: 1, gap: true, reprove: false }),
+            on_established(&Established::Resumed { h: 1, gap: true, reprove: false, enforced: false }),
             vec![Note::Resumed { gap: true }]
         );
         assert_eq!(
-            on_established(&Established::Resumed { h: 1, gap: false, reprove: true }),
+            on_established(&Established::Resumed { h: 1, gap: false, reprove: true, enforced: false }),
             vec![Note::Resumed { gap: false }]
         );
         assert_eq!(
-            on_established(&Established::Fresh { sid: Some(SID.into()), lost: true }),
+            on_established(&Established::Fresh { sid: Some(SID.into()), lost: true, credit: None, enforced: false }),
             vec![Note::SessionLost, Note::Connected]
         );
-        assert_eq!(on_established(&Established::Fresh { sid: None, lost: true }), vec![Note::SessionLost, Note::Connected]);
-        assert_eq!(on_established(&Established::Fresh { sid: Some(SID.into()), lost: false }), vec![Note::Connected]);
+        assert_eq!(on_established(&Established::Fresh { sid: None, lost: true, credit: None, enforced: false }), vec![Note::SessionLost, Note::Connected]);
+        assert_eq!(on_established(&Established::Fresh { sid: Some(SID.into()), lost: false, credit: None, enforced: false }), vec![Note::Connected]);
         assert_eq!(on_resume_refused(), vec![Note::SessionLost]);
     }
 

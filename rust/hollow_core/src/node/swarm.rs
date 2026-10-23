@@ -1409,6 +1409,8 @@ async fn run_event_loop(
     let mut rebootstrap_timer = tokio::time::interval(Duration::from_secs(30));
     rebootstrap_timer.tick().await; // consume immediate first tick
     let mut audit_tick: u64 = 0;
+    // Each server room's device bound last told to ws_client (room_bounds).
+    let mut room_bounds_sent: HashMap<String, u32> = HashMap::new();
     let mut eviction_counter: u32 = 0;
 
     // Vault rebalance + retention enforcement timer (30 min safety net).
@@ -3697,6 +3699,8 @@ async fn run_event_loop(
                             super::nick_claim::send_claim(&ws_cmd_tx, &master_keypair, &device_peer_id, &nickname);
                         }
                         door_rooms.on_connected();
+                        // Before the joins below, so the pacer prices them by what each room holds.
+                        super::room_bounds::send(&ws_cmd_tx, &server_states, &local_peer_str, &mut room_bounds_sent, true);
                         // Phase 2: if we're serving as a peer forwarder, the
                         // relay forgot our fwd room on the reconnect — rejoin
                         // (media legs survive the signaling blip).
@@ -6284,6 +6288,7 @@ async fn run_event_loop(
                 // once per period, spread over the ticks; ws_client re-joins nothing
                 // unless what it was told differs (presence_audit.rs).
                 audit_tick = audit_tick.wrapping_add(1);
+                super::room_bounds::send(&ws_cmd_tx, &server_states, &local_peer_str, &mut room_bounds_sent, false);
                 for room_code in audited_rooms(&server_states, active_room.as_deref()) {
                     if super::presence_audit::due_on_tick(&room_code, &device_peer_id, audit_tick) {
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::DiscoverPeers { room_code });

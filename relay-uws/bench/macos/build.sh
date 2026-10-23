@@ -33,7 +33,7 @@ inc="-I$ssl/include -I$brew_prefix/include"
 lib="-L$ssl/lib -L$brew_prefix/lib"
 flags="-O2 -DNDEBUG -DLIBUS_USE_OPENSSL"
 conns=${BENCH_CONNS_PER_IP:-1000000}
-relay_flags="$flags -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_CONNS_PER_IP=$conns -include $here/macos_shim.h"
+relay_flags="$flags -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_CONNS_PER_IP=$conns ${RELAY_EXTRA_FLAGS:-} -include $here/macos_shim.h"
 objs=()
 pids=()
 for f in bsd context loop socket eventing/epoll_kqueue eventing/gcd eventing/libuv crypto/openssl; do

@@ -35,6 +35,7 @@ run() {
 LIBS="-lsodium -lcrypto"
 run test_auth_frame
 run test_binary_frame
+run test_breaker
 run test_client_json
 run test_conn_rate
 run test_conn_rate_exempt
@@ -53,6 +54,7 @@ run test_reports ../src/reports.cpp ../src/crypto.cpp $LIBS
 run test_ring_auth
 run test_ring_evict
 run test_roster ../src/crypto.cpp $LIBS
+run test_send_budget
 run test_server_stats
 run test_session
 # state.h includes App.h, so the session bounds need the uWebSockets headers.

@@ -232,6 +232,18 @@ class Socket {
         write_all(all);
     }
 
+    // The header and the first `sent` bytes of a binary frame of `declared` payload bytes,
+    // the rest never sent: the relay holds the frame open.
+    void send_partial(uint64_t declared, size_t sent) {
+        if (!ssl_ || closed_) return;
+        std::string f(1, static_cast<char>(0x82));
+        f.push_back(static_cast<char>(0x80 | 127));
+        for (int i = 7; i >= 0; i--) f.push_back(static_cast<char>((declared >> (8 * i)) & 0xff));
+        f.append(4, '\0');  // a zero mask
+        f.append(sent, 'p');
+        write_all(f);
+    }
+
     static std::string encode(uint8_t opcode, const std::string& payload) {
         std::string f(1, static_cast<char>(0x80 | opcode));
         if (payload.size() < 126) {
@@ -638,6 +650,15 @@ static std::string door_proof_for(const Peer& p, const std::string& nonce, const
     }
     return door_proof_make(door.sk, relay_pk,
                            door_room::proof_message(auth_domain(g_domain), nonce, p.id.peer, room, door.text, p.relay_key));
+}
+
+// A random 32 bytes as unpadded URL-safe base64: the shape of a door proof that opens nothing.
+static std::string random_b64url32() {
+    unsigned char b[32];
+    randombytes_buf(b, sizeof(b));
+    char out[64];
+    sodium_bin2base64(out, sizeof(out), b, sizeof(b), sodium_base64_VARIANT_URLSAFE_NO_PADDING);
+    return out;
 }
 
 static std::string door_proof(const Peer& p, const std::string& room, const Door& door) {
@@ -1436,6 +1457,23 @@ static void test_fetch() {
     late->send(catchup(server, topic));
     settle({late.get()});
     check("and a fetch socket's ring control opens no ring", !got(*late, bin(frame(0x08, {server, topic, m->id.peer}, "fetch-ring"))));
+}
+
+// A device's fetch socket is a push isolate, never a viewer: it hears no presence (G2 f).
+static void test_fetch_hears_no_presence() {
+    printf("fetch sockets: no presence\n");
+    const std::string room = room_name("fetch-presence");
+    Ident d;
+    auto f = login(d, "fetch");
+    f->send({{"type", "join"}, {"room", room}});
+    settle({f.get()});
+    auto a = login(Ident());
+    join(*a, room);
+    settle({f.get(), a.get()});
+    check("fetch_socket_hears_no_presence: no peer_joined", !got(*f, about("peer_joined", room, a->id.peer)));
+    a->ws.close_clean();
+    settle({f.get()});
+    check("fetch_socket_hears_no_presence: no peer_left", !got(*f, about("peer_left", room, a->id.peer)));
 }
 
 static void test_door_rooms() {
@@ -4452,6 +4490,8 @@ static void test_public_stats() {
                                              j["online_users"].get<int64_t>() >= 1);
     check("and the activity fields", j.is_object() && j.contains("rx_mbps") && j.contains("tx_mbps") &&
                                          j.contains("fwd_delivered") && j.contains("send_dropped"));
+    check("and the breaker's trip counts, in shadow mode",
+          j.is_object() && j.contains("breaker") && j["breaker"].value("enforced", true) == false);
 }
 
 // --- New-connection rate (MAX_NEW_CONNS_PER_MIN_PER_IP) and HOLLOW_CONN_RATE_EXEMPT ---
@@ -4521,6 +4561,897 @@ static void test_rate_exempt() {
     test_rate_limit();
 }
 
+// --- The circuit breaker (breaker.h, phase G2) --------------------------------------------
+//
+// run_live.sh runs these against relays whose budgets and times are scaled down
+// (HOLLOW_RELAY_TEST_BREAKER_W / _T below): its shadow build (RELAY_LIVE_ONLY=breaker_shadow)
+// and one built with HOLLOW_BREAKER_ENFORCE=1 (=breaker_enforce), which also names the
+// forwarder below. Each socket dials from an address of its own, so each is its own group
+// and its own block.
+static constexpr int64_t BRK_W = 100;
+static constexpr int64_t BRK_T = 60;
+static constexpr unsigned char BRK_FORWARDER_SEED = 0x42;
+
+// One payer's buckets, as the test relay reports them (/breaker-test).
+static json breaker_of(const std::string& peer) {
+    Socket s;
+    const auto body = s.get("/breaker-test?peer=" + peer);
+    json j = body ? json::parse(*body, nullptr, false) : json();
+    return j.is_object() ? j : json::object();
+}
+
+static int64_t spent_of(const std::string& peer) { return breaker_of(peer).value("spent", int64_t(-1)); }
+
+// /server-stats' breaker counts. The relay keeps an answer for 5 s, so a caller comparing
+// two reads waits that long in between.
+static json breaker_counts() {
+    Socket s;
+    const auto body = s.get("/server-stats");
+    const json j = body ? json::parse(*body, nullptr, false) : json();
+    return j.is_object() && j.contains("breaker") ? j["breaker"] : json::object();
+}
+
+// Broadcasts "<tag>-<i>" into `room`, in batches, until the relay closes the socket or
+// `max` went. How many were written.
+static size_t flood(Peer& p, const std::string& room, const std::string& tag, size_t max) {
+    size_t sent = 0;
+    while (sent < max && !p.ws.closed()) {
+        std::vector<std::pair<uint8_t, std::string>> frames;
+        for (size_t i = 0; i < 100 && sent < max; i++, sent++) {
+            frames.push_back({0x2, frame(0x03, {room}, tag + "-" + std::to_string(sent))});
+        }
+        p.ws.send_frames(frames);
+        p.ws.pump(5);
+    }
+    return sent;
+}
+
+// The indices of "<tag>-<i>" broadcasts from `from` that `p` read, waiting for `last`.
+static std::map<size_t, size_t> heard(Peer& p, const std::string& room, const std::string& from, const std::string& tag,
+                                      size_t last, int timeout_ms = WAIT_MS) {
+    std::map<size_t, size_t> seen;
+    const std::string head = frame(0x05, {room, from}, tag + "-");
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        for (auto it = p.ws.inbox.begin(); it != p.ws.inbox.end();) {
+            if (!it->text && it->data.compare(0, head.size(), head) == 0) {
+                seen[std::stoul(it->data.substr(head.size()))]++;
+                it = p.ws.inbox.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (seen.count(last) || left_ms(deadline) <= 0) return seen;
+        p.ws.pump(std::min(left_ms(deadline), 200));
+    }
+}
+
+static bool each_once(const std::map<size_t, size_t>& seen, size_t upto) {
+    if (seen.size() != upto + 1) return false;
+    for (size_t i = 0; i <= upto; i++) {
+        auto it = seen.find(i);
+        if (it == seen.end() || it->second != 1) return false;
+    }
+    return true;
+}
+
+static std::optional<json> breaker_hint(Peer& p) {
+    return next_json(p, json_where([](const json& j) { return j.value("type", "") == "reconnect"; }));
+}
+
+static json lock_get_of(size_t n) {
+    json locks = json::array();
+    for (size_t i = 0; i < n; i++) locks.push_back({{"server", random_hex(20)}, {"owner", ""}});
+    return {{"type", "lock_get"}, {"locks", locks}};
+}
+
+static void test_breaker_trip_resends() {
+    printf("breaker (enforced): a trip closes 1013 with the hint, and the frame comes back once\n");
+    const std::string room = room_name("brk-trip");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login3(Ident(), "new", 0);
+    check("a fresh session is told its start credit", a->answer.value("credit", int64_t(0)) == 400'000 / BRK_W);
+    check("and that the relay enforces", a->answer.value("enforced", false));
+    join(*a, room);
+    join(*b, room);
+    settle({a.get(), b.get()});
+    const int64_t joined = spent_of(ida.peer);
+    flood(*a, room, "t", 20'000);
+    auto hint = breaker_hint(*a);
+    check("the relay tells the device to come back, as the breaker",
+          hint && hint->value("breaker", false) && hint->value("after_ms", int64_t(0)) > 0);
+    check("and closes 1013, never 1008", closed_by_relay(*a) && a->ws.close_code == 1013);
+    check("with one hint for the one close", count(*a, typed("reconnect")) == 0);
+    const json paused = breaker_of(ida.peer);
+    check("a first trip inside the honest budget is a pure pause",
+          paused.value("session_paused_ms", int64_t(0)) > 0 && paused.value("cooldown_ms", int64_t(-1)) == 0);
+    const int64_t at_trip = paused.value("spent", int64_t(-1));
+    sleep_ms(static_cast<int>(hint ? hint->value("after_ms", int64_t(0)) : 0) + 100);
+    auto a2 = login3(ida, a->sid, a->ws.counted);
+    check("after the pause the session resumes", resumed(*a2));
+    check("its resume says the relay enforces", a2->answer.value("enforced", false));
+    check("and its pause left no long grace behind", !breaker_of(ida.peer).value("long_grace", true));
+    const uint64_t h = a2->answer.value("h", uint64_t(0));
+    // Counted before the flood: the join and the barrier's discover.
+    check("with the tripping frame uncounted", h >= 3);
+    const size_t k = static_cast<size_t>(h - 2);
+    check("the trip and its close charged nothing past the frames handled", at_trip == joined + 2 * static_cast<int64_t>(k));
+    check("the resume after a breaker pause is free", spent_of(ida.peer) == at_trip);
+    a2->send_bin(frame(0x03, {room}, "t-" + std::to_string(k)));
+    const auto seen = heard(*b, room, ida.peer, "t", k);
+    check("every frame up to the resent one arrived exactly once", each_once(seen, k));
+    // No barrier: the resumed session's bucket holds just what the resent frame cost.
+    check("and nothing after it", heard(*b, room, ida.peer, "t", k + 1, 500).empty());
+}
+
+static void test_breaker_waits_before_binding() {
+    printf("breaker (enforced): a paused device's logins wait, hb and ack never trip\n");
+    const std::string room = room_name("brk-wait");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login3(Ident(), "new", 0);
+    join(*a, room);
+    join(*b, room);
+    flood(*a, room, "w", 20'000);
+    auto hint = breaker_hint(*a);
+    closed_by_relay(*a);
+    sleep_ms(static_cast<int>(hint ? hint->value("after_ms", int64_t(0)) : 0) + 100);
+    auto a2 = login3(ida, a->sid, a->ws.counted);
+    check("the session is back, its bucket nearly empty", resumed(*a2) && breaker_of(ida.peer).value("w", 0) < 50);
+    for (uint64_t i = 0; i < 20; i++) a2->send({{"type", "hb"}, {"h", a2->ws.counted}});
+    a2->send({{"type", "ack"}, {"h", 0}});
+    a2->send({{"type", "inactive"}});
+    a2->send({{"type", "active"}});
+    size_t acks = 0;
+    while (next_json(*a2, typed("hb_ack"), 2000)) acks++;
+    check("twenty heartbeats on an empty bucket are each answered", acks == 20 && !a2->ws.closed());
+    a2->send(lock_get_of(30));
+    auto hint2 = breaker_hint(*a2);
+    const int64_t wait = hint2 ? hint2->value("after_ms", int64_t(0)) : 0;
+    check("a frame its bucket cannot pay for pauses it as long as the refill takes",
+          wait >= 3000 && closed_by_relay(*a2) && a2->ws.close_code == 1013);
+    auto fresh = login3(ida, "new", 0);
+    check("a fresh login during the pause is refused before it binds anything",
+          fresh->answer.value("type", "") == "auth_failed" && fresh->answer.value("error", "") == "cooldown" &&
+              fresh->answer.value("after_ms", int64_t(0)) > 0 && closed_by_relay(*fresh) && fresh->ws.close_code == 1013);
+    auto early = login3(ida, a->sid, a2->ws.counted);
+    check("so is the resume", early->answer.value("error", "") == "cooldown");
+    check("and the session is still held", breaker_of(ida.peer).value("session_paused_ms", int64_t(0)) > 0);
+    sleep_ms(static_cast<int>(breaker_of(ida.peer).value("session_paused_ms", int64_t(0))) + 200);
+    auto a3 = login3(ida, a->sid, a2->ws.counted);
+    check("once the pause is over it resumes", resumed(*a3));
+}
+
+static void test_breaker_fetch_cools_nothing() {
+    printf("breaker (enforced): a fetch socket's trip closes it and cools nothing\n");
+    const std::string room = room_name("brk-fetch");
+    Ident d;
+    auto m = login3(Ident(), "new", 0);
+    join(*m, room);
+    auto f = login(d, "fetch");
+    f->send({{"type", "join"}, {"room", room}});
+    for (int round = 0; round < 50 && !f->ws.closed(); round++) {
+        std::vector<std::pair<uint8_t, std::string>> frames;
+        for (int i = 0; i < 20; i++) frames.push_back({0x2, frame(0x04, {room, m->id.peer}, "fd")});
+        f->ws.send_frames(frames);
+        f->ws.pump(5);
+    }
+    auto hint = breaker_hint(*f);
+    check("a fetch socket trips with a fixed pause",
+          hint && hint->value("breaker", false) && hint->value("after_ms", int64_t(0)) == 30'000 / BRK_T);
+    check("and closes 1013", closed_by_relay(*f) && f->ws.close_code == 1013);
+    auto full = login3(d, "new", 0);
+    check("its device's full login is not refused", full->ok && breaker_of(d.peer).value("cooldown_ms", int64_t(-1)) == 0);
+}
+
+static void test_breaker_forwarder_exempt() {
+    printf("breaker (enforced): the configured forwarder pays nothing\n");
+    Ident fwd;
+    unsigned char seed[crypto_sign_SEEDBYTES];
+    memset(seed, BRK_FORWARDER_SEED, sizeof(seed));
+    crypto_sign_seed_keypair(fwd.pk, fwd.sk, seed);
+    unsigned char proto[36] = {0x08, 0x01, 0x12, 0x20};
+    memcpy(proto + 4, fwd.pk, 32);
+    fwd.pub_b64 = b64(proto, sizeof(proto));
+    fwd.peer = derive_peer_id(fwd.pub_b64);
+    const std::string room = "fwd:" + fwd.peer;
+    auto x = login3(fwd, "new", 0);
+    auto v = login3(Ident(), "new", 0);
+    join(*x, room);
+    join(*v, room);
+    flood(*x, room, "x", 6'000);
+    check("its flood never trips", hb(*x, x->ws.counted).value("type", "") == "hb_ack" && !x->ws.closed());
+}
+
+static void test_breaker_audience() {
+    printf("breaker (enforced): a post pays for the room's visible audience only\n");
+    Ident owner, change;
+    Door door;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    auto p = login3(Ident(), "new", 0);
+    p->send({{"type", "lock_put"}, {"server", room}, {"owner", ""},
+             {"links", base_link(room, door, change, owner, nonce, true)}});
+    next_json(*p, typed("lock_chain"));
+    join(*p, room, {{"door_proof", door_proof(*p, room, door)}});
+    auto p2 = login3(Ident(), "new", 0);
+    join(*p2, room, {{"door_proof", door_proof(*p2, room, door)}});
+    auto q = login3(Ident(), "new", 0);
+    join(*q, room);
+    auto w = login3(Ident(), "new", 0);
+    join(*w, room);
+    auto g = login(Ident(), "guest");
+    g->send({{"type", "join"}, {"room", room}});
+    settle({p.get(), p2.get(), q.get(), w.get(), g.get()});
+    const int64_t before = spent_of(p->id.peer);
+    p->send_bin(frame(0x03, {room}, "seen"));
+    check("the prover hears it", next(*p2, bin(frame(0x05, {room, p->id.peer}, "seen"))).has_value());
+    const int64_t after_bcast = spent_of(p->id.peer);
+    check("hidden sockets in a door room cost the poster nothing", after_bcast - before == 2);
+    p->send_bin(frame(0x0A, {room}, "public"));
+    check("a public frame reaches a guest", next(*g, bin(frame(0x05, {room, p->id.peer}, "public"))).has_value());
+    check("and the poster pays for the members alone, the room's allowance for the rest",
+          spent_of(p->id.peer) - after_bcast == 2);
+    // D1 lets a hidden socket's broadcast reach the provers (a door ask, a join ask, a
+    // guest's sync ask: HOL-SEC-127), so it pays for each prover it reaches.
+    const int64_t q_before = spent_of(q->id.peer);
+    q->send_bin(frame(0x03, {room}, "hidden-ask"));
+    check("a hidden socket's broadcast still reaches the provers",
+          next(*p2, bin(frame(0x05, {room, q->id.peer}, "hidden-ask"))).has_value());
+    check("and its sender pays for both of them", spent_of(q->id.peer) - q_before == 3);
+}
+
+// MED 5: proofs that open nothing (strangers' junk) are judged at every lock move, but
+// the relay pays for them, never the moderator moving the lock: the same move costs the
+// mover the same with twenty junk proofs stored as with none.
+static int64_t breaker_move_cost(size_t junk) {
+    Ident owner, change, change2;
+    Door door, door2;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    const json base = base_link(room, door, change, owner, nonce, true);
+    auto m = login3(Ident(), "new", 0);
+    m->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", base}});
+    next_json(*m, typed("lock_chain"));
+    join(*m, room, {{"door_proof", door_proof(*m, room, door)}});
+    std::vector<std::unique_ptr<Peer>> strangers;
+    for (size_t i = 0; i < junk; i++) {
+        strangers.push_back(login3(Ident(), "new", 0));
+        join(*strangers.back(), room, {{"door_proof", random_b64url32()}});
+    }
+    for (auto& p : strangers) settle({p.get()});
+    settle({m.get()});
+    const int64_t before = spent_of(m->id.peer);
+    json links = base;
+    links.push_back(successor_link(room, 2, door2, change2, change));
+    m->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", links}});
+    next_json(*m, typed("lock_chain"));
+    settle({m.get()});
+    return spent_of(m->id.peer) - before;
+}
+
+static void test_breaker_junk_proofs_do_not_cost_the_mover() {
+    printf("breaker (enforced): junk door proofs do not cost the moderator who moves the lock\n");
+    const int64_t clean = breaker_move_cost(0);
+    const int64_t crowded = breaker_move_cost(20);
+    printf("    a move costs %lld W, %lld W with twenty junk proofs stored\n", static_cast<long long>(clean),
+           static_cast<long long>(crowded));
+    check("twenty junk proofs add nothing to the mover's charge", clean > 0 && crowded == clean);
+}
+
+// MED 5: a guest in an unlocked room is paid for by the room's allowance, like one outside
+// a locked room's audience: the poster pays for the member devices it can count.
+static void test_breaker_unlocked_guest() {
+    printf("breaker (enforced): a guest in an unlocked room is the room allowance's\n");
+    const std::string room = room_name("brk-open");
+    auto p = login3(Ident(), "new", 0);
+    auto q = login3(Ident(), "new", 0);
+    auto g = login(Ident(), "guest");
+    join(*p, room);
+    join(*q, room);
+    g->send({{"type", "join"}, {"room", room}});
+    settle({p.get(), q.get(), g.get()});
+    const int64_t before = spent_of(p->id.peer);
+    p->send_bin(frame(0x03, {room}, "open"));
+    check("the member hears it", next(*q, bin(frame(0x05, {room, p->id.peer}, "open"))).has_value());
+    check("so does the guest", next(*g, bin(frame(0x05, {room, p->id.peer}, "open"))).has_value());
+    check("and the poster pays for the member alone", spent_of(p->id.peer) - before == 2);
+}
+
+// A fresh session counts its strangers from nothing, as its pacer does (the stranger book
+// outlives a session): two sessions of 300 new strangers each stay under the scaled 500.
+static void test_breaker_fresh_session_counts_strangers_afresh() {
+    printf("breaker (enforced): a fresh session counts its strangers afresh\n");
+    const std::string room = room_name("brk-strangers");
+    Ident ida;
+    auto deposit = [&](Peer& p, size_t n) {
+        std::vector<std::pair<uint8_t, std::string>> frames;
+        for (size_t i = 0; i < n; i++) frames.push_back({0x2, frame(0x04, {room, Ident().peer}, "x")});
+        p.ws.send_frames(frames);
+        p.ws.pump(50);
+    };
+    auto a = login3(ida, "new", 0);
+    deposit(*a, 300);
+    check("300 strangers pass", hb(*a, a->ws.counted).value("type", "") == "hb_ack");
+    auto a2 = login3(ida, "new", 0);
+    deposit(*a2, 300);
+    check("and 300 more in a fresh session", hb(*a2, a2->ws.counted).value("type", "") == "hb_ack" && !breaker_hint(*a2));
+}
+
+static void test_breaker_pause_holds_no_slot() {
+    printf("breaker (enforced): a paused session holds no per-IP slot\n");
+    PinnedSource pin(50101);
+    const std::string room = room_name("brk-slot");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login3(Ident(), "new", 0);
+    auto c = login(Ident());
+    join(*a, room);
+    join(*b, room);
+    flood(*a, room, "slot", 20'000);
+    auto hint = breaker_hint(*a);
+    closed_by_relay(*a);
+    sleep_ms(static_cast<int>(hint ? hint->value("after_ms", int64_t(0)) : 0) + 100);
+    auto a2 = login3(ida, a->sid, a->ws.counted);
+    check("the paused device resumes at its own address", resumed(*a2));
+    a2->send(lock_get_of(30));
+    auto hint2 = breaker_hint(*a2);
+    check("a pause long enough to look at the address",
+          hint2 && hint2->value("after_ms", int64_t(0)) >= 3000 && closed_by_relay(*a2));
+    auto d = login(Ident());
+    check("its full address takes a newcomer meanwhile: the pause holds no slot", d->ok);
+    d->ws.close_clean();
+    sleep_ms(static_cast<int>(breaker_of(ida.peer).value("session_paused_ms", int64_t(0))) + 200);
+    auto a3 = login3(ida, a->sid, a2->ws.counted);
+    check("and the device resumes once the pause is over", resumed(*a3));
+}
+
+// Sends `n` heartbeats (control frames: charged one W each, never tripped) and drains their acks.
+static void hb_flood(Peer& p, size_t n) {
+    const std::string hb_text = json{{"type", "hb"}, {"h", 0}}.dump();
+    for (size_t sent = 0; sent < n && !p.ws.closed();) {
+        std::vector<std::pair<uint8_t, std::string>> frames;
+        for (size_t i = 0; i < 100 && sent < n; i++, sent++) frames.push_back({0x1, hb_text});
+        p.ws.send_frames(frames);
+        p.ws.pump(5);
+    }
+    while (next_json(p, typed("hb_ack"), 500)) {
+    }
+}
+
+static void test_breaker_ladder_window() {
+    printf("breaker (enforced): the ladder steps only for a window that overspent the honest budget\n");
+    const std::string room = room_name("brk-ladder");
+    // Scaled: start 4,000, cap 8,000, 10 W/s, a 10 s window worth 8,100.
+    const size_t half = 6'500;
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    join(*a, room);
+    hb_flood(*a, half);
+    sleep_ms(11'000);
+    hb_flood(*a, half);
+    check("two spends a window apart pass start + cap over the session's life",
+          spent_of(ida.peer) > 3 * 400'000 / BRK_W);
+    a->send_bin(frame(0x03, {room}, "late"));
+    auto hint = breaker_hint(*a);
+    check("its trip is a pure pause, the device not cooled",
+          hint && closed_by_relay(*a) && breaker_of(ida.peer).value("cooldown_ms", int64_t(-1)) == 0);
+    Ident idb;
+    auto b = login3(idb, "new", 0);
+    join(*b, room);
+    hb_flood(*b, 2 * half);
+    b->send_bin(frame(0x03, {room}, "over"));
+    auto hint_b = breaker_hint(*b);
+    check("a session that overspent inside one window cools its device",
+          hint_b && closed_by_relay(*b) && breaker_of(idb.peer).value("cooldown_ms", int64_t(0)) > 0 &&
+              hint_b->value("after_ms", int64_t(0)) >= 60'000 / BRK_T);
+}
+
+static void test_breaker_shadow() {
+    printf("breaker (shadow): a flood is booked, counted and let through\n");
+    const json counts0 = breaker_counts();
+    check("the relay says it does not enforce", counts0.value("enforced", true) == false);
+    const std::string room = room_name("brk-shadow");
+    Ident ida;
+    auto a = login3(ida, "new", 0);
+    auto b = login3(Ident(), "new", 0);
+    check("a fresh session is told its start credit", a->answer.value("credit", int64_t(0)) == 400'000 / BRK_W);
+    check("but not that the relay enforces: a pacing client never waits", !a->answer.contains("enforced"));
+    join(*a, room);
+    join(*b, room);
+    const size_t n = 3'500;
+    flood(*a, room, "s", n);
+    check("nothing is closed", hb(*a, a->ws.counted).value("type", "") == "hb_ack" && !a->ws.closed());
+    check("nothing is held back", each_once(heard(*b, room, ida.peer, "s", n - 1, 20'000), n - 1));
+    const json acct = breaker_of(ida.peer);
+    check("the bucket went into debt, down to the floor at most",
+          acct.value("tripped", false) && acct.value("w", 0) < 0 && acct.value("w", 0) >= -100'000 / BRK_W);
+    a->ws.abort();
+    sleep_ms(300);
+    const int64_t before_resume = spent_of(ida.peer);
+    auto a2 = login3(ida, a->sid, a->ws.counted);
+    check("a resume in debt is let in", resumed(*a2));
+    check("and is not told the relay enforces", !a2->answer.contains("enforced"));
+    check("and costs its flat four W per room held", spent_of(ida.peer) == before_resume + 4);
+    sleep_ms(5'200);
+    const json counts = breaker_counts();
+    check("the trips enforcement would have made are counted",
+          counts.value("trips", 0) >= counts0.value("trips", 0) + 1);
+    check("and the resume it would have refused", counts.value("refused", 0) >= counts0.value("refused", 0) + 1);
+}
+
+// /server-stats as a whole, read fresh (the relay keeps an answer for 5 s).
+static json fresh_server_stats() {
+    sleep_ms(5'500);
+    Socket s;
+    const auto body = s.get("/server-stats");
+    const json j = body ? json::parse(*body, nullptr, false) : json();
+    return j.is_object() ? j : json::object();
+}
+
+// The seam with the send budget: the breaker's trips above are its own, never a send
+// budget trip or refusal (this relay runs the production budget).
+static void test_breaker_trips_are_no_budget_trips() {
+    printf("breaker (enforced): its trips are no send-budget trips\n");
+    const json st = fresh_server_stats();
+    check("the breaker tripped", st.value("breaker", json::object()).value("trips", 0) > 0);
+    check("and the send budget counted no trip and no refusal of its own",
+          st.value("fanout_tripped", -1) == 0 && st.value("fanout_refused", -1) == 0);
+}
+
+// The send-buffer memory budget (src/send_budget.h). uWebSockets keeps a full copy of
+// every frame a socket has not drained, so unbounded, receivers that do not read grow the
+// relay's buffers until the box is OOM-killed (no snapshot). These cases check honest
+// behaviour and bounded effects against a relay built with a tiny budget and a short
+// stall window (run_live.sh =oom); the fairness rules themselves are proven by
+// test_send_budget.cpp. RSS is checked only where /proc is available.
+static uint64_t env_u64(const char* name) {
+    const char* v = getenv(name);
+    return v ? strtoull(v, nullptr, 10) : 0;
+}
+
+static int oom_stall_ms() {
+    const uint64_t v = env_u64("RELAY_LIVE_STALL_MS");
+    return v ? static_cast<int>(v) : 5000;
+}
+
+static bool closed_within(Peer& p, int ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (!p.ws.closed() && left_ms(deadline) > 0) {
+        p.ws.pump(std::min(200, std::max(1, left_ms(deadline))));
+        p.ws.inbox.clear();
+    }
+    return p.ws.closed();
+}
+
+static void drain_inbox(Peer& p) {
+    while (p.ws.pump(2)) {}
+    p.ws.inbox.clear();
+}
+
+// Honest traffic passes: a sender broadcasting into a room of receivers that never read
+// is never tripped (their own address shares hold the bytes, so they give way), the
+// reader gets every broadcast exactly once, the relay's RSS stays bounded and every
+// non-reader is closed.
+static void oom_honest_fanout_evicts_nonreaders() {
+    printf("oom: a broadcast into non-reading receivers closes them, never the honest sender\n");
+    const uint64_t budget = env_u64("RELAY_LIVE_SEND_BUDGET");
+    if (budget == 0) {
+        check("(the relay runs with a small send budget)", false);
+        return;
+    }
+    const std::string room = room_name("oom");
+    auto reader = login(Ident());
+    join(*reader, room);
+    // Each on its own address (the test build caps an address at three sockets), with a
+    // tiny receive window so the kernel cannot drain it.
+    std::vector<std::unique_ptr<Peer>> slow;
+    for (int i = 0; i < 6; i++) {
+        g_rcvbuf = 16 << 10;
+        auto p = login(Ident());
+        g_rcvbuf = 0;
+        join(*p, room);
+        next(*reader, about("peer_joined", room, p->id.peer));
+        slow.push_back(std::move(p));
+    }
+    Ident sid;
+    auto sender = login(sid);
+    join(*sender, room);
+    next(*reader, about("peer_joined", room, sid.peer));
+    sync(*sender);
+
+    const long rss0 = relay_rss_kb();
+    const std::string chunk(2u << 20, 'x');
+    constexpr int SENT = 12;  // 24 MiB into each non-reader: past its socket cap
+    std::vector<std::string> expect;
+    std::vector<int> copies(SENT, 0);
+    // A non-reader's close is watched through the reader's presence, never by reading it.
+    std::set<std::string> left;
+    auto drain_reader = [&](int ms) {
+        while (reader->ws.pump(ms)) {}
+        for (const auto& f : reader->ws.inbox) {
+            for (size_t i = 0; i < expect.size(); i++) {
+                if (!f.text && f.data == expect[i]) copies[i]++;
+            }
+            if (auto j = as_json(f); j && j->value("type", "") == "peer_left" && j->value("room", "") == room) {
+                left.insert(j->value("peer_id", ""));
+            }
+        }
+        reader->ws.inbox.clear();
+    };
+    for (int i = 0; i < SENT; i++) {
+        const std::string payload = "b" + std::to_string(i) + ":" + chunk;
+        expect.push_back(frame(0x05, {room, sid.peer}, payload));
+        sender->send_bin(frame(0x03, {room}, payload));
+        drain_reader(20);
+    }
+    const bool sender_ok = sync(*sender) && !sender->ws.closed();
+    drain_reader(500);
+    check("the honest sender is never tripped", sender_ok);
+    bool once = true;
+    for (int c : copies) once = once && c == 1;
+    check("the reader gets every broadcast exactly once", once);
+    const long rss1 = relay_rss_kb();
+    if (rss0 > 0 && rss1 > 0) {
+        // ASan's quarantine keeps freed buffers resident (256 MiB by default): only a
+        // sanitized relay gets that much more.
+        const long asan_kb = env_u64("RELAY_LIVE_SANITIZED") == 1 ? 256 * 1024 : 0;
+        const long bound_kb = static_cast<long>(budget / 1024) * 3 + 64 * 1024 + asan_kb;
+        printf("  relay RSS %ld -> %ld KiB (+%ld; sent %d), bound %+ld\n", rss0, rss1, rss1 - rss0, SENT, bound_kb);
+        check("the relay's RSS stays bounded by the budget, not by what was sent", rss1 - rss0 < bound_kb);
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(oom_stall_ms() + 4000);
+    while (left.size() < slow.size() && left_ms(deadline) > 0) drain_reader(100);
+    bool all_left = true;
+    for (auto& p : slow) all_left = all_left && left.count(p->id.peer);
+    check("every receiver that never drains is closed", all_left);
+    check("and the sender still syncs", sync(*sender));
+}
+
+// A sender whose address share holds the most, with the bytes on ANOTHER socket of that
+// address (a co-tenant behind the same carrier address): that socket gives way, never the
+// sender, which would otherwise trip, free nothing and trip again on every resume. The
+// share is held by a partial inbound frame (charged by the once-a-second sweep).
+static void oom_cotenant_gives_way_before_sender_trips() {
+    printf("oom: a co-tenant's held bytes give way before the sender on its address trips\n");
+    const uint64_t budget = env_u64("RELAY_LIVE_SEND_BUDGET");
+    if (budget == 0) {
+        check("(the relay runs with a small send budget)", false);
+        return;
+    }
+    // With a 32 MiB budget: 6 MiB held, 3 x 9 MiB copies = 33 MiB > 32.
+    const uint64_t hold = budget * 3 / 16, size = budget * 9 / 32;
+    const std::string room = room_name("oom-cotenant");
+    std::vector<std::unique_ptr<Peer>> readers;
+    for (int i = 0; i < 3; i++) {
+        readers.push_back(login(Ident()));
+        join(*readers.back(), room);
+    }
+    g_pin_source = 60010;
+    Ident sid;
+    auto sender = login3(sid, "new", 0);
+    join(*sender, room);
+    sync(*sender);
+    auto holder = login(Ident());
+    g_pin_source = -1;
+    holder->ws.send_partial(hold, 64 << 10);
+    sleep_ms(1500);  // the sweep charges the held frame to the sender's share
+    for (auto& r : readers) drain_inbox(*r);
+
+    const std::string payload = "cotenant:" + std::string(size, 'k');
+    const std::string expect = frame(0x05, {room, sid.peer}, payload);
+    sender->send_bin(frame(0x03, {room}, payload));
+    bool arrived = true;
+    for (auto& r : readers) arrived = arrived && next(*r, bin(expect), 10000).has_value();
+    check("the sender's frame reaches every receiver", arrived);
+    check("the sender is not tripped", sync(*sender) && !sender->ws.closed());
+    check("the co-tenant holding the bytes is closed at once, before the stall sweep",
+          closed_within(*holder, 2000));
+    bool once = true;
+    for (auto& r : readers) {
+        settle({r.get()});
+        once = once && count(*r, bin(expect)) == 0;
+    }
+    check("and the frame arrives exactly once", once);
+}
+
+// A sender whose own unsent buffer holds the most trips when its fan-out does not fit: it
+// is closed 1013 uncounted (which frees what it held), resumes, and its re-sent frame
+// arrives exactly once.
+static void oom_tripped_sender_resumes_frame_once() {
+    printf("oom: a sender whose own buffer holds the most trips, resumes and its frame arrives once\n");
+    const uint64_t budget = env_u64("RELAY_LIVE_SEND_BUDGET");
+    if (budget == 0) {
+        check("(the relay runs with a small send budget)", false);
+        return;
+    }
+    // With a 32 MiB budget: a 14 MiB frame into the sender (under its 16 MiB socket cap,
+    // about 10 MiB of it past the kernel), then 3 x 9 MiB copies: over 32 (a trip, not a
+    // refusal).
+    const uint64_t feed = budget * 7 / 16, size = budget * 9 / 32;
+    const std::string room = room_name("oom-trip"), feed_room = room_name("oom-feed");
+    std::vector<std::unique_ptr<Peer>> readers;
+    for (int i = 0; i < 3; i++) {
+        readers.push_back(login(Ident()));
+        join(*readers.back(), room);
+    }
+    Ident sid;
+    g_rcvbuf = 16 << 10;
+    auto sender = login3(sid, "new", 0);
+    g_rcvbuf = 0;
+    join(*sender, room);
+    join(*sender, feed_room);
+    sync(*sender);
+    auto feeder = login(Ident());
+    join(*feeder, feed_room);
+    for (auto& r : readers) drain_inbox(*r);
+    feeder->send_bin(frame(0x03, {feed_room}, "feed:" + std::string(feed, 'f')));
+    sync(*feeder);  // the relay has written the feed into the sender's buffer
+
+    const std::string payload = "trip:" + std::string(size, 't');
+    const std::string expect = frame(0x05, {room, sid.peer}, payload);
+    sender->send_bin(frame(0x03, {room}, payload));
+    check("the sender is closed by the breaker", closed_by_relay(*sender));
+    const uint64_t read = sender->ws.counted;
+    for (auto& r : readers) settle({r.get()});
+    bool none = true;
+    for (auto& r : readers) none = none && !got(*r, bin(expect));
+    check("the tripping frame was not delivered", none);
+
+    auto s2 = login3(sid, sender->sid, read);
+    check("the tripped sender's session resumes", resumed(*s2));
+    check("the tripping frame stayed uncounted (two joins and sync only)",
+          s2->answer.value("h", static_cast<uint64_t>(0)) == 3);
+    join(*s2, room);
+    sync(*s2);
+    s2->send_bin(frame(0x03, {room}, payload));
+    bool arrived = true;
+    for (auto& r : readers) arrived = arrived && next(*r, bin(expect), 10000).has_value();
+    check("its re-sent frame reaches every receiver", arrived);
+    check("(the resumed sender is not tripped again)", sync(*s2) && !s2->ws.closed());
+    bool once = true;
+    for (auto& r : readers) {
+        settle({r.get()});
+        once = once && count(*r, bin(expect)) == 0;
+    }
+    check("and arrives exactly once", once);
+}
+
+// N7: a fan-out larger than the WHOLE budget can never be held at once, so the relay
+// refuses it ONCE (counting it, so the client drops it) and the sender does not reconnect
+// forever. The frame itself fits a share; three copies do not fit the budget.
+static void oom_unbufferable_fanout_refused_once() {
+    printf("oom: a fan-out past the whole budget is refused once, never looped\n");
+    const uint64_t budget = env_u64("RELAY_LIVE_SEND_BUDGET");
+    if (budget == 0) {
+        check("(the relay runs with a small send budget)", false);
+        return;
+    }
+    const std::string room = room_name("oom-big");
+    std::vector<std::unique_ptr<Peer>> readers;
+    for (int i = 0; i < 3; i++) {
+        readers.push_back(login(Ident()));
+        join(*readers.back(), room);
+    }
+    Ident sid;
+    auto sender = login3(sid, "new", 0);
+    join(*sender, room);
+    sync(*sender);
+    for (auto& r : readers) drain_inbox(*r);
+
+    const std::string big = "big:" + std::string(budget * 3 / 8, 'x');  // 3 copies > the budget
+    sender->send_bin(frame(0x03, {room}, big));
+    check("the sender is closed by the breaker (1013)", closed_by_relay(*sender) && sender->ws.close_code == 1013);
+    const uint64_t read = sender->ws.counted;
+    std::vector<json> hints;
+    for (const auto& f : sender->ws.inbox) {
+        if (auto j = as_json(f); j && j->value("type", "") == "reconnect") hints.push_back(*j);
+    }
+    check("with one plain reconnect hint, never the circuit breaker's pause",
+          hints.size() == 1 && !hints[0].contains("breaker") && hints[0].value("after_ms", int64_t(0)) == 2000);
+    const json books = breaker_of(sid.peer);
+    check("and the breaker's books for the sender untouched: no trip, pause, cooldown or long grace",
+          books.value("ready", false) && !books.value("tripped", true) && books.value("session_paused_ms", int64_t(-1)) == 0 &&
+              books.value("cooldown_ms", int64_t(-1)) == 0 && !books.value("long_grace", true));
+
+    auto s2 = login3(sid, sender->sid, read);
+    check("the sender resumes (the refused frame was counted, so no reconnect loop)", resumed(*s2));
+    check("the relay counted join, sync and the refused frame", s2->answer.value("h", static_cast<uint64_t>(0)) == 3);
+    join(*s2, room);
+    sync(*s2);
+    s2->send_bin(frame(0x03, {room}, "small"));
+    bool small = true;
+    for (auto& r : readers) small = small && next(*r, bin(frame(0x05, {room, sid.peer}, "small")), 8000).has_value();
+    check("a normal broadcast after the refusal is delivered", small);
+    bool never = true;
+    for (auto& r : readers) never = never && !got(*r, bin(frame(0x05, {room, sid.peer}, big)));
+    check("the unbufferable frame was never delivered", never);
+}
+
+// The walk both judges share counts at most two receivers per address block (the test
+// build's count; eight in production), so receivers piled behind one address cannot make
+// an honest frame trip: two copies fit the budget, a third is that address's to refuse.
+static void oom_piled_receivers_never_trip_the_sender() {
+    printf("oom: receivers piled behind one address never trip the sender\n");
+    const uint64_t budget = env_u64("RELAY_LIVE_SEND_BUDGET");
+    if (budget == 0) {
+        check("(the relay runs with a small send budget)", false);
+        return;
+    }
+    const std::string room = room_name("oom-pile");
+    std::vector<std::unique_ptr<Peer>> pile;
+    {
+        PinnedSource pin(60040);
+        for (int i = 0; i < 3; i++) {
+            g_rcvbuf = 16 << 10;
+            pile.push_back(login(Ident()));
+            g_rcvbuf = 0;
+            join(*pile.back(), room);
+        }
+    }
+    Ident sid;
+    auto sender = login3(sid, "new", 0);
+    join(*sender, room);
+    sync(*sender);
+    for (auto& p : pile) drain_inbox(*p);
+    // With a 32 MiB budget: two 12 MiB copies fit, three do not.
+    sender->send_bin(frame(0x03, {room}, "pile:" + std::string(budget * 3 / 8, 'p')));
+    check("three receivers behind one address count as two: the sender is not tripped",
+          sync(*sender) && !sender->ws.closed());
+    for (auto& p : pile) p->ws.abort();
+    sleep_ms(500);
+}
+
+// The seam with the circuit breaker: the send budget's trips and refusals above are no
+// breaker trips. The breaker (shadow, at full size here) counted none, stepped no ladder
+// and cools no device, while the budget counted its own.
+static void oom_trips_are_no_breaker_trips() {
+    printf("oom: the send budget's trips are no circuit-breaker trips\n");
+    const json st = fresh_server_stats();
+    const json b = st.value("breaker", json::object());
+    // The trip case can also end by the sweep closing the sender, so only the refusal is sure.
+    printf("  send budget: %d tripped, %d refused\n", st.value("fanout_tripped", 0), st.value("fanout_refused", 0));
+    check("the budget counted its refusal", st.value("fanout_refused", 0) >= 1);
+    check("the breaker counted no trip, ladder step or refusal and cools no device",
+          b.value("trips", -1) == 0 && b.value("ladder_steps", -1) == 0 && b.value("refused", -1) == 0 &&
+              b.value("cooling_devices", -1) == 0);
+}
+
+// C1: the budget reads a text msg before the handler's try. A field of the wrong type
+// there once threw into uSockets and killed the relay (no snapshot).
+static void oom_malformed_msg_relay_answers() {
+    printf("oom: a malformed msg leaves the relay answering\n");
+    const std::string room = room_name("oom-msg");
+    auto a = login(Ident());
+    join(*a, room);
+    auto b = login(Ident());
+    join(*b, room);
+    a->send({{"type", "msg"}, {"room", 1}});
+    a->send({{"type", "msg"}, {"room", room}, {"data", json::object()}});
+    a->send({{"type", "msg"}, {"room", room}, {"data", nullptr}});
+    a->send({{"type", "msg"}, {"data", "x"}});
+    auto g = login(Ident(), "guest");
+    g->send({{"type", "msg"}, {"room", 1}});
+    check("the relay still answers the sender", sync(*a));
+    a->send({{"type", "msg"}, {"room", room}, {"data", "after"}});
+    check("a well-formed msg is still delivered", next(*b, typed("msg", room)).has_value());
+    auto c = login(Ident());
+    check("and a new login is served", c->ok && sync(*c));
+}
+
+// uWS end() runs the close handler at once, which drops the socket's charge, while the
+// socket keeps its unsent buffer until it drains (a trickle keeps it for good): a stranger
+// re-logging in as its own non-reader would hold that memory outside the budget. The close
+// handler releases such a buffer instead, so the old socket gets only what the kernel had.
+static void oom_ended_socket_buffer_released() {
+    printf("oom: a superseded socket's unsent buffer is released, not kept\n");
+    const std::string room = room_name("oom-end");
+    auto reader = login(Ident());
+    join(*reader, room);
+    Ident slow_id;
+    g_rcvbuf = 16 << 10;
+    auto slow = login(slow_id);
+    g_rcvbuf = 0;
+    join(*slow, room);
+    next(*reader, about("peer_joined", room, slow_id.peer));
+    auto sender = login(Ident());
+    join(*sender, room);
+    sync(*sender);
+
+    // 14 MiB into the non-reader (under the test's 16 MiB socket cap), inside the stall
+    // window so the sweep has not closed it.
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::string chunk(2u << 20, 'e');
+    for (int i = 0; i < 7; i++) {
+        sender->send_bin(frame(0x03, {room}, chunk));
+        drain_inbox(*reader);
+    }
+    sync(*sender);
+    auto again = login(slow_id);
+    const auto setup_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    check("(the buffer was filled and superseded inside the stall window)", setup_ms < oom_stall_ms() - 1000);
+
+    uint64_t received = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!slow->ws.closed() && std::chrono::steady_clock::now() < deadline) {
+        slow->ws.pump(200);
+        for (const auto& f : slow->ws.inbox) received += f.data.size();
+        slow->ws.inbox.clear();
+    }
+    printf("  the superseded socket received %llu bytes of 14 MiB\n", static_cast<unsigned long long>(received));
+    check("the superseded socket is gone", slow->ws.closed());
+    check("its unsent buffer was released, not delivered", received < (6u << 20));
+    check("the new login is served", again->ok && sync(*again));
+}
+
+// A broadcast that meets a sessionless receiver at its socket cap refuses that one write
+// and dooms the socket for the next sweep: closing it inside the fan-out would erase it
+// from the room the loop is walking. The sender is never tripped by someone else's buffer.
+static void oom_full_receiver_closed_after_fanout() {
+    printf("oom: a receiver at its socket cap is closed after the fan-out, not inside it\n");
+    const std::string room = room_name("oom-cap");
+    auto reader = login(Ident());
+    join(*reader, room);
+    g_rcvbuf = 16 << 10;
+    auto slow = login(Ident());
+    g_rcvbuf = 0;
+    join(*slow, room);
+    next(*reader, about("peer_joined", room, slow->id.peer));
+    auto sender = login(Ident());
+    join(*sender, room);
+    sync(*sender);
+
+    // 2 MiB each, 28 MiB in all: past the test's 16 MiB socket cap plus the 4 MiB the
+    // kernel takes, while the 32 MiB budget never matters.
+    const std::string chunk(2u << 20, 'c');
+    constexpr int SENT = 14;
+    uint64_t delivered = 0;
+    // Its close is watched through the reader's presence (the kernel still holds
+    // megabytes the client has not read).
+    bool closed = false;
+    auto drain_reader = [&](int ms) {
+        while (reader->ws.pump(ms)) {}
+        for (const auto& f : reader->ws.inbox) {
+            delivered += f.text ? 0 : 1;
+            if (auto j = as_json(f); j && j->value("type", "") == "peer_left" && j->value("peer_id", "") == slow->id.peer) {
+                closed = true;
+            }
+        }
+        reader->ws.inbox.clear();
+    };
+    for (int i = 0; i < SENT; i++) {
+        sender->send_bin(frame(0x03, {room}, chunk));
+        drain_reader(20);
+    }
+    const bool sender_ok = sync(*sender) && !sender->ws.closed();
+    drain_reader(300);
+    check("the sender is not tripped by another socket's full buffer", sender_ok);
+    check("the reader got every broadcast", delivered == SENT);
+
+    // The refused write dooms it; the next sweep closes it.
+    for (int i = 0; i < 10 && !closed; i++) drain_reader(300);
+    check("the receiver a write was refused on is closed", closed);
+    check("and the room still serves the sender", sync(*sender));
+}
+
+// uWS answers every ping with a pong outside write_raw, so a client that floods pings and
+// never reads would buffer pongs the budget never saw. The ping handler charges them, so
+// such a socket is counted and the stall sweep closes it.
+static void oom_ping_flood_counted() {
+    printf("oom: pongs a non-reader provokes are charged and swept\n");
+    g_rcvbuf = 16 << 10;
+    auto p = login(Ident());
+    g_rcvbuf = 0;
+    // 125 bytes is the largest control frame: 80,000 pings ask for about 10 MiB of pongs,
+    // more than the kernel's send buffer takes.
+    const std::vector<std::pair<uint8_t, std::string>> batch(400, {0x9, std::string(125, 'p')});
+    for (int i = 0; i < 200 && !p->ws.closed(); i++) p->ws.send_frames(batch);
+    sleep_ms(oom_stall_ms() + 1500);  // past the stall window, reading nothing
+    check("a ping flooder that never reads is closed by the stall sweep", closed_by_relay(*p));
+}
+
 int main(int argc, char** argv) {
     if (argc != 4 || (std::string(argv[3]) != "on" && std::string(argv[3]) != "off")) {
         fprintf(stderr, "usage: test_relay_live <port> <auth domain> <on|off>\n");
@@ -4548,6 +5479,35 @@ int main(int argc, char** argv) {
         hs_door_moved_in_grace();
         test_hidden_door_rooms(true);
         test_presence_digest_door(true);
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =fetch_presence: a fetch socket hears no presence (the mutation pass).
+    if (only && std::string(only) == "fetch_presence") {
+        test_fetch_hears_no_presence();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =breaker_enforce / =breaker_shadow: the circuit breaker against a scaled-down relay.
+    if (only && std::string(only).rfind("breaker_", 0) == 0) {
+        signal(SIGPIPE, SIG_IGN);
+        if (std::string(only) == "breaker_enforce") {
+            test_breaker_trip_resends();
+            test_breaker_waits_before_binding();
+            test_breaker_fetch_cools_nothing();
+            test_breaker_forwarder_exempt();
+            test_breaker_audience();
+            test_breaker_junk_proofs_do_not_cost_the_mover();
+            test_breaker_unlocked_guest();
+            test_breaker_fresh_session_counts_strangers_afresh();
+            test_breaker_pause_holds_no_slot();
+            test_breaker_ladder_window();
+            test_breaker_trips_are_no_budget_trips();
+        } else {
+            test_breaker_shadow();
+        }
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
@@ -4585,6 +5545,23 @@ int main(int argc, char** argv) {
         } else {
             hs_dropped_write_resumes_cleanly();
         }
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =oom: the send-buffer memory budget (run_live.sh starts a relay with a tiny budget
+    // and a short stall window). On a box without /proc the RSS check is skipped.
+    if (only && std::string(only) == "oom") {
+        oom_malformed_msg_relay_answers();
+        oom_honest_fanout_evicts_nonreaders();
+        oom_cotenant_gives_way_before_sender_trips();
+        oom_tripped_sender_resumes_frame_once();
+        oom_unbufferable_fanout_refused_once();
+        oom_ended_socket_buffer_released();
+        oom_full_receiver_closed_after_fanout();
+        oom_ping_flood_counted();
+        oom_piled_receivers_never_trip_the_sender();
+        oom_trips_are_no_breaker_trips();
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
@@ -4636,6 +5613,7 @@ int main(int argc, char** argv) {
         test_hidden_channel_copies();
         test_guests();
         test_fetch();
+        test_fetch_hears_no_presence();
         test_door_rooms();
         test_rate_limit();
         test_rate_limit_idle_address();

@@ -15,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+#include "breaker.h"
+
 // Resumable sessions (RESUMABLE_SESSIONS_PLAN.md section 9): a device's session outlives
 // its socket, both sides count the stream frames they handled, and the relay keeps every
 // frame it sent until the device acks it, so a frame written into a dead socket is
@@ -462,6 +464,19 @@ struct Session {
     // that count is due at the latest. Live only, never snapshotted.
     uint32_t unacked_in = 0;
     std::chrono::steady_clock::time_point ack_due{};
+    // What the device's frames may still cost (breaker.h). Never snapshotted: a restored
+    // session starts at the full start credit.
+    breaker::Account acct;
+    // The address group its socket's writes tally under, kept for deliveries in grace.
+    uint64_t group = 0;
+    // Steady ms it was minted at: a session that lived a minute without a trip is clean.
+    int64_t minted_ms = 0;
+    // A breaker trip paused it until then (enforced mode): its grace runs from there, it
+    // holds no per-IP slot, and its resume is free of charge.
+    int64_t breaker_until_ms = 0;
+    bool breaker_free = false;
+    // Its grace is in RelayState::long_grace_ends (a breaker pause).
+    bool long_grace = false;
 
     // A stream frame from the device arrived at `now`. True when an ack must be queued for
     // it (RelayState::acks_due), due at `ack_due`. One is queued per session at a time: a

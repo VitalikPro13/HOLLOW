@@ -108,6 +108,16 @@ impl Audit {
         self.told.get(room)
     }
 
+    /// Whether this socket was told `peer` is in `room`.
+    pub(crate) fn told_has(&self, room: &str, peer: &str) -> bool {
+        self.told.get(room).is_some_and(|t| t.contains(peer))
+    }
+
+    /// How many peers this socket was told are in `room`.
+    pub(crate) fn told_count(&self, room: &str) -> Option<usize> {
+        self.told.get(room).map(HashSet::len)
+    }
+
     /// A `members` snapshot: the room's record is replaced, without ourselves.
     pub(crate) fn on_members(&mut self, room: &str, peers: &[String], me: &str, now: Instant) {
         self.told.insert(room.to_string(), peers.iter().filter(|p| p.as_str() != me).cloned().collect());

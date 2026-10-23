@@ -1,4 +1,6 @@
 #include "crypto.h"
+#include "measure.h"
+#include "breaker.h"
 #include <sodium.h>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
@@ -35,6 +37,8 @@ bool verify_ed25519(const std::string& pubkey_b64,
         return false;
     }
 
+    MEASURE_BUMP(VERIFIES, 1);
+    breaker::bump(breaker::SIG_W);
     return crypto_sign_verify_detached(
         sig_bytes,
         reinterpret_cast<const unsigned char*>(message.c_str()),
@@ -54,6 +58,8 @@ bool verify_ed25519_raw(const unsigned char* pubkey32,
                           sodium_base64_VARIANT_ORIGINAL) != 0 || sig_len != 64) {
         return false;
     }
+    MEASURE_BUMP(VERIFIES, 1);
+    breaker::bump(breaker::SIG_W);
     return crypto_sign_verify_detached(
         sig_bytes,
         reinterpret_cast<const unsigned char*>(message.c_str()),
@@ -271,6 +277,8 @@ bool door_proof_opens(const DoorKey& key, const std::string& door_text, const st
     unsigned char proof[32];
     unsigned char expected[crypto_auth_hmacsha256_BYTES];
     if (!b64url_32(door_text, door) || !b64url_32(proof_text, proof)) return false;
+    MEASURE_BUMP(DH, 1);
+    breaker::bump(breaker::DH_W);
     if (!door_mac(key.sk, door, message, expected)) return false;
     return crypto_verify_32(expected, proof) == 0;
 }

@@ -114,6 +114,20 @@ int main() {
         check("every entry drains through victim()", drained == 2500 && t.total() == 0);
     }
 
+    // Passing over the entry just written: the next of its share, else the next share.
+    {
+        Table t;
+        t.put("old", 1, 1);
+        t.put("new", 2, 5);
+        check("the spared entry's share is the victim's", t.victim() == std::optional<std::string>("new"));
+        check("the next share gives way instead", t.victim_except("new") == std::optional<std::string>("old"));
+        t.put("new2", 2, 1);
+        check("or the next entry of its own share", t.victim_except("new") == std::optional<std::string>("new2"));
+        Table alone;
+        alone.put("only", 1, 1);
+        check("nothing when only the spared entry is left", !alone.victim_except("only").has_value());
+    }
+
     // Two equal floods from two shares split the table between them.
     {
         Table t;

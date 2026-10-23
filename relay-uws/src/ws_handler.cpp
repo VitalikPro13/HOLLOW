@@ -1,7 +1,10 @@
 #include "ws_handler.h"
+#include "server_stats.h"
 #include "auth_frame.h"
 #include "binary_frame.h"
 #include "client_json.h"
+#include "drain.h"
+#include "msg_plan.h"
 #include "ring_evict.h"
 #include "ring_auth.h"
 #include "crypto.h"
@@ -134,6 +137,8 @@ struct Audience {
 static Audience audience(const RelayState& state, const WsRoom& room, const std::string& name) {
     return Audience{room, is_inbox_room(name), room_lock(state, name) != nullptr, steady_ms(), name};
 }
+// Audience keeps a view of the name: a temporary would dangle (stack-use-after-scope).
+static Audience audience(const RelayState& state, const WsRoom& room, std::string&& name) = delete;
 
 // "Is `x` in one of the same rooms as `caller`" is the only relationship the
 // relay can verify between two peers, so it is what gates the answers one peer
@@ -146,7 +151,7 @@ static Audience audience(const RelayState& state, const WsRoom& room, const std:
 // `budget` caps the insertions so a peer sitting in thousands of rooms cannot
 // make each query expensive; truncation can only ever WITHHOLD an answer.
 static std::unordered_set<std::string> collect_room_co_members(
-        const RelayState& state, const std::string& caller, size_t budget) {
+        const RelayState& state, const std::string& caller, size_t budget, size_t& walked) {
     std::unordered_set<std::string> members;
     auto it = state.peer_rooms.find(caller);
     if (it == state.peer_rooms.end()) return members;
@@ -158,6 +163,7 @@ static std::unordered_set<std::string> collect_room_co_members(
         if (!aud.sees(caller)) continue;
         for (const auto& [pid, sock] : rit->second.peers) {
             (void)sock;
+            walked++;
             if (!aud.shares(pid, caller)) continue;
             if (budget == 0) return members;
             budget--;
@@ -186,6 +192,57 @@ static std::string g_forwarder_peer_id;
 // The state every send consults for the receiving socket's session.
 static RelayState* g_state = nullptr;
 static int64_t g_grace_secs = session::DEFAULT_GRACE_SECS;
+// How long a receiver's buffer may sit without draining before the budget sweep closes it
+// (send_budget::STALL_MS; the live tests shorten it).
+static int64_t g_stall_ms = send_budget::STALL_MS;
+
+// uWS keeps an inbound frame that spans reads in the private WebSocketData::fragmentBuffer
+// (up to maxPayloadLength, its capacity kept after the message). Read and release it
+// without patching uWS: an explicit instantiation may name a private member, and a
+// renamed field fails to compile rather than misread.
+namespace inbound_peek {
+using Member = std::string uWS::WebSocketData::*;
+Member member();
+template <Member M>
+struct Grant {
+    friend Member member() { return M; }
+};
+template struct Grant<&uWS::WebSocketData::fragmentBuffer>;
+}  // namespace inbound_peek
+
+static std::string& inbound_buffer(SSLWebSocket* ws) {
+    auto* wd = static_cast<uWS::WebSocketData*>(us_socket_ext(1, reinterpret_cast<us_socket_t*>(ws)));
+    return wd->*inbound_peek::member();
+}
+
+// The recipients of the fan-out being delivered, counted per block and share in the same
+// walk the admission predicted; null outside a fan-out.
+static send_budget::Recipients* g_fanout = nullptr;
+
+struct FanoutScope {
+    send_budget::Recipients counted;
+    // `reserved`: the fan-out's prediction, walked again now (fanout_bytes).
+    FanoutScope(const send_budget::Limits& l, uint64_t reserved) : counted(l, reserved) { g_fanout = &counted; }
+    ~FanoutScope() { g_fanout = nullptr; }
+    FanoutScope(const FanoutScope&) = delete;
+    FanoutScope& operator=(const FanoutScope&) = delete;
+};
+
+// The connection block a recipient is counted under (the work breaker's key).
+static const std::string& recipient_block(const PerSocketData* d) {
+    return d->ip_key.empty() ? d->share_block : d->ip_key;
+}
+
+// The breaker's numbers this process runs (breaker.h).
+static const breaker::Limits& limits() { return g_state ? g_state->breaker_limits : breaker::DEFAULT; }
+
+// A breaker key: `text` hashed under the process-lifetime key, `kind` keeping devices,
+// address groups, blocks and targets apart.
+static uint64_t breaker_hash(RelayState& state, char kind, std::string_view text) {
+    std::string block(1, kind);
+    block.append(text);
+    return share_id(state.breaker_key, block);
+}
 
 static void write_raw(SSLWebSocket* ws, std::string_view data, uWS::OpCode op) {
     // uWS silently returns DROPPED past maxBackpressure — count it or a
@@ -195,6 +252,32 @@ static void write_raw(SSLWebSocket* ws, std::string_view data, uWS::OpCode op) {
     // Past a dropped write a session's socket writes nothing more, or the client would
     // count a later frame in the dropped one's place and every resume would shift.
     if (d->write_dead) return;
+    // Memory-safety budget (send_budget.h, NOT a volume quota): refuse a write that would
+    // hold more than one max frame on this socket or take the box past its ceiling (the
+    // budget itself for a recipient past its fan-out's count). Under pressure its address
+    // share keeps to its cap, its least progressed sockets doomed first. The RECEIVER
+    // pays: it writes nothing more and closes on the next tick, a session resuming from
+    // its ring (a refused frame is re-sent, never lost); a session-less socket loses the
+    // frame.
+    if (g_state) {
+        if (!g_state->send_ledger.write_ok(ws, ws->getBufferedAmount(), data.size() + send_budget::FRAME_HEADER_BYTES,
+                                           d->budget_share, g_fanout, recipient_block(d))) {
+            g_state->diag.send_dropped++;
+            g_state->diag.budget_refused++;
+            d->write_dropped = true;
+            d->write_dead = true;
+            if (!d->sid.empty()) {
+                g_state->dropped_writes.push_back(d->peer_id);
+            } else {
+                g_state->send_ledger.doom(ws);
+            }
+            return;
+        }
+    }
+    // A refused write is no write: the breaker charges only what goes out.
+    MEASURE_BUMP(WRITES, 1);
+    MEASURE_BUMP(WRITE_BYTES, data.size());
+    breaker::bump_write(d->group);
     auto status = ws->send(data, op);
     if (g_diag) {
         if (status == SSLWebSocket::SendStatus::DROPPED) g_diag->send_dropped++;
@@ -207,6 +290,7 @@ static void write_raw(SSLWebSocket* ws, std::string_view data, uWS::OpCode op) {
         d->write_dead = true;
         g_state->dropped_writes.push_back(d->peer_id);
     }
+    if (g_state) g_state->send_ledger.out(ws, ws->getBufferedAmount(), steady_ms(), d->budget_share);
 }
 
 // --- Sessions (RESUMABLE_SESSIONS_PLAN.md section 9) -------------------------
@@ -301,6 +385,9 @@ static void send_stream(SSLWebSocket* ws, std::string_view data, bool binary, co
 static bool send_held(RelayState& state, const std::string& peer, const Bytes& bytes, bool binary, const Meta& meta) {
     session::Session* s = grace_session(state, peer);
     if (!s) return false;
+    MEASURE_BUMP(WRITES, 1);
+    MEASURE_BUMP(WRITE_BYTES, bytes->size());
+    breaker::bump_write(s->group);
     ring_in(state, *s, bytes, binary, meta, nullptr);
     return true;
 }
@@ -329,6 +416,78 @@ static void send_json(SSLWebSocket* ws, const json& j) {
     } else {
         write_raw(ws, j.dump(), uWS::OpCode::TEXT);
     }
+}
+
+// Every close the circuit breaker or the send budget starts goes through here, once per
+// socket: a socket on its way out is never judged again and never closed twice (past a
+// close its user data is gone). `code` 0 closes at once, its buffers freed with it (the
+// send budget's victims); else an uncounted `hint` (none when empty), then end(code).
+// Never inside a fan-out loop: a close enters grace, which erases from the room walked.
+// False when the socket was closing already.
+static bool close_once(SSLWebSocket* ws, int code, std::string_view reason, std::string_view hint = {}) {
+    PerSocketData* d = ws->getUserData();
+    if (d->closing) return false;
+    d->closing = true;
+    if (code == 0) {
+        ws->close();
+        return true;
+    }
+    if (!hint.empty()) {
+        breaker::Uncharged uncharged;
+        write_raw(ws, hint, uWS::OpCode::TEXT);
+    }
+    ws->end(code, reason);
+    return true;
+}
+
+// How long a full login of `peer` must wait for the breaker, 0 for none: its device's
+// cooldown, the pause its held session is in, or (resuming `session`) the time that
+// session's bucket needs to climb out of debt. Counted in shadow mode too.
+static int64_t breaker_login_wait(RelayState& state, const std::string& peer, const std::string& session) {
+    const int64_t now = steady_ms();
+    const breaker::Limits& l = limits();
+    int64_t wait = state.cooldowns.remaining_ms(breaker_hash(state, 'd', peer), now, l);
+    auto it = state.sessions.find(peer);
+    if (it != state.sessions.end()) {
+        session::Session& s = it->second;
+        if (s.breaker_until_ms > now) wait = std::max(wait, s.breaker_until_ms - now);
+        const bool resumes = !session.empty() && session != "new" && session::sid_equal(s.sid, session);
+        if (resumes && s.acct.ready && !s.breaker_free) {
+            s.acct.refill(now, l);
+            const int64_t climb = s.acct.w.ms_until(0, s.acct.w_rates(l));
+            wait = std::max(wait, climb);
+        }
+    }
+    if (wait > 0) breaker::g_stats.count_refusal();
+    return wait;
+}
+
+// The W start of a fresh full session or session-less full socket (section 4).
+static int64_t fresh_credit(RelayState& state, const PerSocketData* d) {
+    const int64_t now = steady_ms();
+    const breaker::Limits& l = limits();
+    const bool clean = state.clean_seen.recent(breaker_hash(state, 'd', d->peer_id), now, l);
+    return state.start_pools.take(breaker_hash(state, 'b', d->share_block), socket_share(state, d), clean, now, l);
+}
+
+// The key of a payer's stranger tracker (breaker::StrangerBook): a device's full
+// session or socket, its fetch socket and a guest each count apart.
+static uint64_t stranger_key(RelayState& state, const std::string& peer, breaker::Kind kind) {
+    return breaker_hash(state, kind == breaker::Kind::Full ? 's' : kind == breaker::Kind::Fetch ? 'f' : 'g', peer);
+}
+
+// Starts a payer's buckets; its stranger count starts over with them, as its pacer's does.
+static void begin_payer(RelayState& state, breaker::Account& a, const std::string& peer, breaker::Kind kind,
+                        int64_t credit) {
+    a.begin(kind, credit, steady_ms(), limits());
+    state.strangers.forget(stranger_key(state, peer, kind));
+}
+
+// A session that lived a minute without a trip marks its device clean (N6).
+static void note_clean(RelayState& state, const session::Session& s) {
+    const int64_t now = steady_ms();
+    if (!s.acct.ready || s.acct.tripped || now - s.minted_ms < 60'000) return;
+    state.clean_seen.note(breaker_hash(state, 'd', s.peer_id), s.share, now);
 }
 
 // Forward declarations — offline buffer replay is used by handle_join (defined
@@ -471,6 +630,19 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
             return;
     }
 
+    // A full login of a device the breaker paused waits out the pause before it binds
+    // anything: no session is resumed, ended or minted and no slot settled, and the close
+    // (1013, never 1008) touches no session. A resume of a session in debt waits until it
+    // is back at zero (AR-36). Fetch logins pass: push keeps working.
+    if (!guest && !fetch) {
+        const int64_t wait = breaker_login_wait(state, peer_id, frame->version == 3 ? frame->session : std::string());
+        if (wait > 0 && breaker::ENFORCE) {
+            close_once(ws, 1013, "cooldown",
+                       json{{"type", "auth_failed"}, {"error", "cooldown"}, {"after_ms", wait}}.dump());
+            return;
+        }
+    }
+
     // A full address settles before anything is answered: a device back at its own address
     // takes its own slot, a newcomer a neighbour's only within settle_login's bounds.
     {
@@ -501,6 +673,7 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
 
     if (guest) {
         data->is_guest = true;
+        begin_payer(state, data->acct, peer_id, breaker::Kind::Guest, limits().w_guest.start);
         auto now = std::chrono::steady_clock::now();
         data->last_binary_activity = now;
         data->minute_window_start = now;
@@ -510,6 +683,7 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
 
     if (fetch) {
         data->is_fetch = true;
+        begin_payer(state, data->acct, peer_id, breaker::Kind::Fetch, limits().w_fetch.start);
     }
 
     if (data->auth_timer) {
@@ -580,6 +754,11 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
 
     if (wants_session) {
         mint_session(state, ws, data, challenge, resume_failed);
+    } else if (!guest && !fetch) {
+        // A full socket without a session pays from its own buckets, as a device.
+        // Its answer stays as before: only a 0.13 client (v3, a session) paces.
+        begin_payer(state, data->acct, peer_id, breaker::Kind::Full, fresh_credit(state, data));
+        send_json(ws, {{"type", "auth_ok"}});
     } else {
         send_json(ws, {{"type", "auth_ok"}});
     }
@@ -661,6 +840,8 @@ static bool is_inbox_room(const std::string& room) {
 // inbox at once; the owners left see them go. A stranger with a request pending
 // learns neither which devices a person has nor when they are online (Audience).
 static void drop_inbox_owners(RelayState& state, const std::string& room, const roster::State& st) {
+    // The fold's own consequence, not the shower's work.
+    breaker::Uncharged uncharged;
     auto rit = state.ws_rooms.find(room);
     if (rit == state.ws_rooms.end()) return;
     WsRoom& r = rit->second;
@@ -682,7 +863,8 @@ static void drop_inbox_owners(RelayState& state, const std::string& room, const 
         std::string left = json{{"type", "peer_left"}, {"room", room}, {"peer_id", peer}}.dump();
         const Audience aud = audience(state, r, room);
         for (auto& [pid, sock] : r.peers) {
-            if (pid != peer && !sock->getUserData()->is_guest && aud.sees(pid)) {
+            const PerSocketData* d = sock->getUserData();
+            if (pid != peer && !d->is_guest && !d->is_fetch && aud.sees(pid)) {
                 send_presence(sock, room, left);
             }
         }
@@ -722,11 +904,14 @@ static std::vector<std::string> roster_for(const WsRoom& room, const Audience& a
 }
 
 // `peer` is now seen in `room`, or no longer is: tell the other provers.
+// Guests and the devices' own fetch sockets learn no presence (a push isolate is no viewer).
 static void announce_door_change(const WsRoom& room, const Audience& aud, const std::string& room_name,
                                  const std::string& peer, const char* type) {
     std::string frame = json{{"type", type}, {"room", room_name}, {"peer_id", peer}}.dump();
+    breaker::Fanout fanout;
     for (const auto& [pid, sock] : room.peers) {
-        if (pid != peer && !sock->getUserData()->is_guest && aud.shares(pid, peer)) {
+        const PerSocketData* d = sock->getUserData();
+        if (pid != peer && !d->is_guest && !d->is_fetch && aud.shares(pid, peer)) {
             send_presence(sock, room_name, frame);
         }
     }
@@ -811,6 +996,8 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
         auto held = ws_room.peers.find(data->peer_id);
         bool full_holds = held != ws_room.peers.end() && held->second != ws &&
                           !held->second->getUserData()->is_fetch;
+        // What the device itself is owed is never charged to it (breaker.h).
+        breaker::Uncharged own_data;
         if (!full_holds) {
             ws_room.peers[data->peer_id] = ws;
             data->fetch_rooms.insert(room);
@@ -844,7 +1031,7 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
         const std::string proof = data->is_guest ? std::string() : door_proof;
         const bool opens =
             !proof.empty() && door_opens(state, data->door_nonce, data->peer_id, room, lock->door, proof);
-        door_ok = ws_room.doors.join(data->peer_id, proof, opens, same_socket, now_ms);
+        door_ok = ws_room.doors.join(data->peer_id, proof, opens, same_socket, now_ms, data->group);
     }
     const bool visible = (!inbox || owner) && door_ok;
     const Audience aud = audience(state, ws_room, room);
@@ -893,6 +1080,7 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     };
     if (lock) members_msg["proved"] = door_ok;
     write_raw(ws, members_msg.dump(), uWS::OpCode::TEXT);
+    breaker::bump(static_cast<int64_t>((all_peers.size() + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W));
 
     // Notify existing non-guest peers (skip if joiner is a guest, fetch-mode or hidden,
     // or if this is a redundant re-join — the peer was already in the room).
@@ -913,6 +1101,8 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     // Replay any buffered offline messages for this peer in this room.
     // Works for both fetch-mode (FCM wake) and full-node joins. Guests never
     // have offline buffers (they don't register push tokens).
+    // Its own held data: every copy was paid for by whoever deposited it.
+    breaker::Uncharged own_data;
     if (!data->is_guest) {
         replay_buffered_msgs(ws, data->peer_id, room, !data->is_fetch, state);
     }
@@ -1154,6 +1344,7 @@ static void buffer_offline_msg(const std::string& target_peer_id,
                                std::string frame, RelayState& state,
                                const std::string& sender, uint64_t share,
                                bool is_image = false, bool is_channel = false) {
+    breaker::bump(1);
     auto& q = state.offline_buffer[target_peer_id];
     uint64_t seq = state.buffer_index.stamp(target_peer_id, false, share, frame.size());
     q.push_back({room, std::move(frame), sender, std::chrono::steady_clock::now(),
@@ -1310,6 +1501,8 @@ void sweep_kill_list(RelayState& state) {
 // The door grace of `room` that ran out by `now_ms`: those who stopped seeing are told,
 // and so is everyone who saw them. Whether provers are still in their grace.
 static bool expire_door_grace(RelayState& state, const std::string& room, WsRoom& r, int64_t now_ms) {
+    // A time's consequence: whoever asks first must not pay for others' door graces.
+    breaker::Uncharged uncharged;
     const Audience aud = audience(state, r, room);
     // A lock gone from the relay leaves the room open: nobody to hide anyone from.
     for (const auto& peer : r.doors.expire(now_ms)) {
@@ -1582,6 +1775,21 @@ static void relock_room(RelayState& state, const std::string& room, bool was_loc
     for (const auto& pid : r.held) {
         if (r.peers.find(pid) == r.peers.end() || r.peers[pid]->getUserData()->is_fetch) peers.push_back(pid);
     }
+    // The mover pays a DH per member proof judged, each address group at most SHARE_CAP of
+    // them; what the move reveals to the room is the room's own convergence. Proofs that
+    // opened nothing when shown (`pending`: strangers' junk, members ahead of the chain)
+    // are the relay's own cost, bounded per group by door_room.h (MED 5, AR-36).
+    breaker::Tally judged;
+    for (const auto& peer : peers) {
+        if (!r.doors.proofs.count(peer) || r.doors.pending.count(peer)) continue;
+        auto pit = r.peers.find(peer);
+        const session::Session* s = grace_session(state, peer);
+        judged.add(pit != r.peers.end() && !pit->second->getUserData()->is_fetch ? pit->second->getUserData()->group
+                   : s                                                         ? s->group
+                                                                                : 0);
+    }
+    breaker::bump(breaker::DH_W * judged.cost());
+    breaker::Uncharged uncharged;
     const std::string door = lock->door;
     auto opens = [&](const std::string& peer, const std::string& proof) {
         auto pit = r.peers.find(peer);
@@ -1923,6 +2131,50 @@ static void try_channel_push_notify(const std::string& target, const std::string
                                 sender, server, channel, mention});
 }
 
+// The send budget (send_budget.h): a fan-out holds one copy of the frame per live recipient
+// in a uWS send buffer at once, so an absurd audience or a backed-up box must stop the
+// SENDER before any copy is made (never drop a frame, never close inside the loop). Held
+// (grace) recipients ride rings, a separate pool, so they are not counted here.
+
+static bool subscribed(const std::unordered_map<std::string, std::unordered_set<std::string>>& subs,
+                       const std::string& room, const std::string& topic);
+
+// Whether a fan-out from `sender` reaches the live room peer `pid`: the one rule the
+// delivery loops, the breaker's plan and the send budget's prediction all walk (`topic`
+// for a 0x07 send, else null).
+static bool fanout_reaches(const Audience& aud, bool public_frame, const std::string& pid, const std::string& sender,
+                           const PerSocketData* d, const std::string& room, const std::string* topic) {
+    if (pid == sender || !(public_frame || aud.shares(pid, sender))) return false;
+    return !topic || subscribed(d->subscriptions, room, *topic);
+}
+
+// What a fan-out writes to now: fanout_reaches, less a socket that writes nothing more
+// (write_raw skips it in the delivery).
+static bool fanout_writes(const Audience& aud, bool public_frame, const std::string& pid, const std::string& sender,
+                          const PerSocketData* d, const std::string& room, const std::string* topic) {
+    return !d->write_dead && fanout_reaches(aud, public_frame, pid, sender, d, room, topic);
+}
+
+// The bytes a fan-out holds at once, walking the room the way the delivery does and
+// counting at most so many recipients per block and per share, so sockets a stranger piles
+// into the room cannot inflate it. The delivery walks it again under FanoutScope (an
+// admission may have closed sockets since).
+static uint64_t fanout_bytes(const PerSocketData* data, const std::string& room, uint64_t per_copy,
+                             RelayState& state, bool to_all, const std::string* topic) {
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end()) return 0;
+    if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return 0;
+    // Audience keeps a view of the name: hand it the map's key, never a temporary.
+    const Audience aud = audience(state, rit->second, rit->first);
+    const bool public_frame = to_all && aud.locked && aud.sees(data->peer_id);
+    return send_budget::predict(rit->second.peers, per_copy, state.send_ledger.limits, [&](const auto& peer)
+        -> std::optional<std::pair<std::string, uint64_t>> {
+        const PerSocketData* d = peer.second->getUserData();
+        if (!fanout_writes(aud, public_frame, peer.first, data->peer_id, d, room, topic)) return std::nullopt;
+        return std::make_pair(recipient_block(d), d->budget_share);
+    });
+}
+
 // 0x09: targeted channel-message frame for an OFFLINE server member.
 // Layout: [0x09][room\0][target\0][channel\0][flags:1][payload]
 // flags bit0 = mention. The SENDER picked the target from its CRDT member list
@@ -2000,8 +2252,9 @@ static void handle_msg(PerSocketData* data, const std::string& room,
     const Bytes out = shared_bytes(broadcast.dump());
     const Meta meta{socket_share(state, data)};
     const Audience aud = audience(state, rit->second, room);
+    FanoutScope counted(state.send_ledger.limits, fanout_bytes(data, room, out->size(), state, false, nullptr));
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (pid != data->peer_id && aud.shares(pid, data->peer_id)) {
+        if (fanout_reaches(aud, false, pid, data->peer_id, peer_ws->getUserData(), room, nullptr)) {
             send_stream(peer_ws, out, false, meta);
         }
     }
@@ -2133,22 +2386,15 @@ static void handle_binary_msg(PerSocketData* data,
 
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
 
-    // Build: [0x05][room\0][sender\0][payload]
-    std::string forwarded;
-    forwarded.reserve(1 + room_code.size() + 1 + data->peer_id.size() + 1 + payload.size());
-    forwarded.push_back(0x05);
-    forwarded.append(room_code);
-    forwarded.push_back(0x00);
-    forwarded.append(data->peer_id);
-    forwarded.push_back(0x00);
-    forwarded.append(payload);
+    std::string forwarded = binary_frame::out_frame(0x05, {room_code, data->peer_id}, payload);
 
     const Audience aud = audience(state, rit->second, room_str);
     const bool public_frame = to_all && aud.locked && aud.sees(data->peer_id);
     const Bytes out = shared_bytes(std::move(forwarded));
     const Meta meta{socket_share(state, data)};
+    FanoutScope counted(state.send_ledger.limits, fanout_bytes(data, room_str, out->size(), state, to_all, nullptr));
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (pid != data->peer_id && (public_frame || aud.shares(pid, data->peer_id))) {
+        if (fanout_reaches(aud, public_frame, pid, data->peer_id, peer_ws->getUserData(), room_str, nullptr)) {
             send_stream(peer_ws, out, true, meta);
         }
     }
@@ -2239,6 +2485,7 @@ static void handle_binary_direct_msg(PerSocketData* data,
         if (room_str == std::string(INBOX_ROOM_PREFIX) + target_str) {
             const Bytes live = shared_bytes(build_direct_frame(room_code, data->peer_id, payload));
             const Meta meta{socket_share(state, data)};
+            breaker::Fanout fanout;
             for (const auto& owner_id : rit->second.owners) {
                 if (owner_id == data->peer_id) continue;
                 auto oit = rit->second.peers.find(owner_id);
@@ -2322,17 +2569,7 @@ static void handle_binary_topic_msg(PerSocketData* data,
 
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
 
-    // Build: [0x08][room\0][topic\0][sender\0][payload]
-    std::string forwarded;
-    forwarded.reserve(1 + room_code.size() + 1 + topic.size() + 1 + data->peer_id.size() + 1 + payload.size());
-    forwarded.push_back(0x08);
-    forwarded.append(room_code);
-    forwarded.push_back(0x00);
-    forwarded.append(topic);
-    forwarded.push_back(0x00);
-    forwarded.append(data->peer_id);
-    forwarded.push_back(0x00);
-    forwarded.append(payload);
+    std::string forwarded = binary_frame::out_frame(0x08, {room_code, topic, data->peer_id}, payload);
 
     // Tee into the channel's ring buffer when registered (server owner opted
     // into relay catch-up). Ciphertext only; per-channel caps + retention +
@@ -2369,10 +2606,9 @@ static void handle_binary_topic_msg(PerSocketData* data,
     const Audience aud = audience(state, rit->second, room_str);
     const Bytes out = shared_bytes(std::move(forwarded));
     const Meta meta{socket_share(state, data)};
+    FanoutScope counted(state.send_ledger.limits, fanout_bytes(data, room_str, out->size(), state, false, &topic_str));
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (pid == data->peer_id) continue;
-        if (!aud.shares(pid, data->peer_id)) continue;
-        if (subscribed(peer_ws->getUserData()->subscriptions, room_str, topic_str)) {
+        if (fanout_reaches(aud, false, pid, data->peer_id, peer_ws->getUserData(), room_str, &topic_str)) {
             send_stream(peer_ws, out, true, meta);
         }
     }
@@ -2745,8 +2981,11 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         // Guests are refused outright: a browser viewer has no friends to heal.
         json online_peers = json::array();
         if (!data->is_guest && j.contains("peers") && j["peers"].is_array()) {
+            size_t walked = 0;
             const auto co_members = collect_room_co_members(
-                state, data->peer_id, MAX_CHECK_PEERS_SCAN);
+                state, data->peer_id, MAX_CHECK_PEERS_SCAN, walked);
+            breaker::bump(std::min<int64_t>(static_cast<int64_t>((walked + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W),
+                                            breaker::CHECK_PEERS_SCAN_W));
             size_t asked = 0;
             for (auto& pid : j["peers"]) {
                 if (++asked > MAX_CHECK_PEERS_QUERY) break;
@@ -2804,6 +3043,7 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                     r.peers, data->peer_id, sees, [&](const std::string& pid) { return aud.shares(pid, data->peer_id); });
                 answer["digest"] = d.sum;
                 answer["count"] = d.count;
+                breaker::bump(static_cast<int64_t>((d.count + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W));
             }
         } else if (rit != state.ws_rooms.end() && rit->second.peers.count(data->peer_id)) {
             // A client before 0.13 asks every 30 s and only adds what it hears: a random
@@ -2816,6 +3056,7 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                 [&](const std::string& pid) { return aud.shares(pid, data->peer_id); },
                 r.peers.bucket_count() ? randombytes_uniform(static_cast<uint32_t>(r.peers.bucket_count())) : 0,
                 presence::LEGACY_CAP, [&](const std::string& pid) { peers.push_back(pid); });
+            breaker::bump(static_cast<int64_t>((peers.size() + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W));
         }
         send_json(ws, answer);
     } else if (type == "subscribe") {
@@ -3008,10 +3249,19 @@ static void let_go(RelayState& state, const std::string& peer, const std::string
 // The device's session is gone now (grace over, `end`, evicted, or a fresh login of
 // the device): its ring hands off, a session in grace lets go of its rooms and
 // bindings, and a live socket goes on without a session, its rooms its own again.
+// A paused session's grace leaves the long grace queue when the session resumes or ends.
+static void drop_long_grace(RelayState& state, session::Session& s, const std::string& peer) {
+    if (!s.long_grace) return;
+    state.long_grace_ends.erase({s.grace_until, peer});
+    s.long_grace = false;
+}
+
 static void end_session(RelayState& state, const std::string& peer) {
     auto it = state.sessions.find(peer);
     if (it == state.sessions.end()) return;
     session::Session& s = it->second;
+    drop_long_grace(state, s, peer);
+    if (s.state == session::State::Live) note_clean(state, s);
     hand_off(state, peer, session_bounds::ring_take_all(state, s));
     if (s.state == session::State::Grace) {
         for (const auto& [room, owner] : s.rooms) let_go(state, peer, room);
@@ -3045,10 +3295,23 @@ static void enter_grace(RelayState& state, SSLWebSocket* ws, PerSocketData* data
         state.peer_rooms.erase(peer);
         go_offline(state, peer);
     }
-    session_bounds::hold_ip_slot(state, s, data->ip_key);
+    note_clean(state, s);
     s.mailbox_mark = data->mailbox_mark;
     s.state = session::State::Grace;
     s.unacked_in = 0;
+    if (s.breaker_until_ms > steady_ms()) {
+        // A breaker pause: the grace runs from its end, and the session holds no per-IP
+        // slot meanwhile (a day's hold of one of an address's slots would starve a CGNAT).
+        session_bounds::release_ip_slot(state, s);
+        state.session_book.to_grace(peer, "");
+        drop_long_grace(state, s, peer);
+        s.grace_until = std::chrono::steady_clock::time_point(std::chrono::milliseconds(s.breaker_until_ms)) +
+                        std::chrono::seconds(g_grace_secs);
+        state.long_grace_ends.emplace(s.grace_until, peer);
+        s.long_grace = true;
+        return;
+    }
+    session_bounds::hold_ip_slot(state, s, data->ip_key);
     s.grace_until = std::chrono::steady_clock::now() + std::chrono::seconds(g_grace_secs);
     state.grace_ends.emplace_back(s.grace_until, peer);
 }
@@ -3078,8 +3341,17 @@ static void mint_session(RelayState& state, SSLWebSocket* ws, PerSocketData* dat
     s.peer_id = data->peer_id;
     s.door_nonce = challenge;
     s.share = share;
+    s.group = data->group;
+    s.minted_ms = steady_ms();
+    // The fresh-start tier of the device's address block, told so a pacing client starts
+    // its mirror there (quantized: it says only whether the block's pool ran dry).
+    const int64_t credit = fresh_credit(state, data);
+    begin_payer(state, s.acct, s.peer_id, breaker::Kind::Full, credit);
     data->sid = s.sid;
-    json ok = {{"type", "auth_ok"}, {"sid", s.sid}, {"grace_secs", g_grace_secs}, {"hb_secs", session::HB_SECS}};
+    json ok = {{"type", "auth_ok"},       {"sid", s.sid},      {"grace_secs", g_grace_secs},
+               {"hb_secs", session::HB_SECS}, {"credit", credit}};
+    // A pacing client mirrors the credit always and waits only on a relay that enforces.
+    if (breaker::ENFORCE) ok["enforced"] = true;
     if (resume_failed) ok["resume_failed"] = resume_failed;
     state.sessions[data->peer_id] = std::move(s);
     write_raw(ws, ok.dump(), uWS::OpCode::TEXT);
@@ -3091,7 +3363,7 @@ static void mint_session(RelayState& state, SSLWebSocket* ws, PerSocketData* dat
 // for its end, and one undone meanwhile tells nobody. A socket whose session ended is on its
 // way out and stays as it is.
 static void settle_presence(RelayState& state, SSLWebSocket* ws, PerSocketData* data) {
-    const session::Session* s = live_session(state, data);
+    session::Session* s = live_session(state, data);
     if (!s || s->inactive == data->hidden) return;
     const auto now = std::chrono::steady_clock::now();
     if (now < data->next_presence_pass) {
@@ -3102,6 +3374,13 @@ static void settle_presence(RelayState& state, SSLWebSocket* ws, PerSocketData* 
         return;
     }
     const bool hide = s->inactive;
+    // The device pays one W per room its pass walks, when the pass runs (a deferred pass
+    // too, never one its resume runs, which is flat); the announcements themselves are not
+    // charged per recipient (M2).
+    if (s->acct.ready && breaker::g_uncharged == 0) {
+        s->acct.spend_w(static_cast<int64_t>(s->rooms.size()), steady_ms(), limits());
+    }
+    breaker::Uncharged per_room;
     uint64_t walked = 0;
     for (const auto& [room, owner] : s->rooms) {
         walked++;
@@ -3128,6 +3407,26 @@ static void settle_presence(RelayState& state, SSLWebSocket* ws, PerSocketData* 
 static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* data, session::Session& s,
                            uint64_t in_h, const std::string& challenge) {
     const std::string peer = data->peer_id;
+#ifdef HOLLOW_RELAY_MEASURE
+    if (data->meter) data->meter->resumed = true;
+#endif
+    // A resume costs a flat RESUME_W_PER_ROOM per room held (its `members`, the came-back
+    // announcements, the grace before it); the one after a breaker pause costs nothing.
+    breaker::Uncharged flat;
+    drop_long_grace(state, s, peer);
+    {
+        const int64_t now = steady_ms();
+        if (!s.acct.ready) begin_payer(state, s.acct, peer, breaker::Kind::Full, limits().w_full.start);
+        s.acct.refill(now, limits());
+        if (s.breaker_free) {
+            s.breaker_free = false;
+            s.breaker_until_ms = 0;
+        } else {
+            const int64_t w = breaker::RESUME_W_PER_ROOM * static_cast<int64_t>(s.rooms.size());
+            s.acct.spend_w(w, now, limits());
+        }
+        s.group = data->group;
+    }
     SSLWebSocket* old = s.state == session::State::Live ? socket_of(state, s) : nullptr;
     if (s.state == session::State::Grace) session_bounds::release_ip_slot(state, s);
     s.state = session::State::Live;
@@ -3179,15 +3478,11 @@ static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* d
     }
 
     const bool gap = s.ring.gap_after(in_h);
-    write_raw(ws,
-              json{{"type", "resumed"},
-                   {"h", s.in_h},
-                   {"gap", gap},
-                   {"reprove", reprove},
-                   {"grace_secs", g_grace_secs},
-                   {"hb_secs", session::HB_SECS}}
-                  .dump(),
-              uWS::OpCode::TEXT);
+    json resumed = {{"type", "resumed"},         {"h", s.in_h},          {"gap", gap},
+                    {"reprove", reprove},        {"grace_secs", g_grace_secs}, {"hb_secs", session::HB_SECS}};
+    // Said again on a resume: a restart may have brought up a relay that enforces.
+    if (breaker::ENFORCE) resumed["enforced"] = true;
+    write_raw(ws, resumed.dump(), uWS::OpCode::TEXT);
     session_bounds::ring_ack(state, s, in_h);
     send_kill_signals(state, ws, peer);
     for (const auto& [room, owner] : s.rooms) {
@@ -3227,6 +3522,8 @@ static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* d
 
 // The relay's count of what the device sent, which lets the device drop what it kept.
 static void send_ack(SSLWebSocket* ws, session::Session& s) {
+    // The relay's own bookkeeping: never charged to the device (N3).
+    breaker::Uncharged uncharged;
     write_raw(ws, json{{"type", "ack"}, {"h", s.in_h}}.dump(), uWS::OpCode::TEXT);
     s.unacked_in = 0;
 }
@@ -3250,6 +3547,8 @@ static bool json_h(const json& j, uint64_t& h) {
 // client could ask for at will.
 static void send_withheld_members(RelayState& state, SSLWebSocket* ws, PerSocketData* data,
                                   const session::Session& s) {
+    // Paid with the pass `active` asks for (one W per room).
+    breaker::Uncharged uncharged;
     for (const auto& room : data->presence_withheld) {
         auto held = s.rooms.find(room);
         auto rit = state.ws_rooms.find(room);
@@ -3268,6 +3567,7 @@ static bool handle_session_control(SSLWebSocket* ws, PerSocketData* data, const 
         // An `h` out of range acks nothing.
         if (s && json_h(j, h)) session_bounds::ring_ack(state, *s, h);
         // `now` lets the client notice its clock moving while the socket lives.
+        breaker::Uncharged uncharged;
         write_raw(ws, json{{"type", "hb_ack"}, {"h", s ? s->in_h : 0}, {"now", now_unix_secs()}}.dump(),
                   uWS::OpCode::TEXT);
         if (s) s->unacked_in = 0;
@@ -3312,7 +3612,27 @@ static void sweep_sessions(RelayState& state) {
     dropped.swap(state.dropped_writes);
     for (const auto& peer : dropped) {
         auto it = state.peer_sockets.find(peer);
-        if (it != state.peer_sockets.end() && it->second->getUserData()->write_dead) it->second->close();
+        if (it != state.peer_sockets.end() && it->second->getUserData()->write_dead) close_once(it->second, 0, {});
+    }
+    // The send-buffer budget, once a second: charge every inbound frame spanning reads
+    // (and release a finished one's kept capacity), then close the sockets a write was
+    // refused on or doomed, the ones not REALLY draining or receiving for STALL_MS, and the
+    // heaviest share's while the budget (or, under pressure, a share) is over its line.
+    // Each close frees what the socket held; a session resumes from its ring.
+    const int64_t budget_now = steady_ms();
+    for (SSLWebSocket* ws : state.open_sockets) {
+        std::string& in = inbound_buffer(ws);
+        if (in.empty() && in.capacity() > send_budget::ENDED_KEEP_BYTES) std::string().swap(in);
+        const PerSocketData* d = ws->getUserData();
+        state.send_ledger.in(ws, in.empty() ? 0 : in.capacity(), in.size(), d->inbound_messages, budget_now,
+                             d->budget_share);
+    }
+    for (SSLWebSocket* ws : state.send_ledger.doomed()) close_once(ws, 0, {});
+    for (SSLWebSocket* ws : state.send_ledger.stalled(budget_now, g_stall_ms)) {
+        if (close_once(ws, 0, {})) state.diag.budget_closed++;
+    }
+    for (SSLWebSocket* ws : state.send_ledger.over_budget()) {
+        if (close_once(ws, 0, {})) state.diag.budget_closed++;
     }
     session_bounds::sweep_rate_windows(state, now);
     while (!state.presence_due.empty() && state.presence_due.top().first <= now) {
@@ -3325,6 +3645,9 @@ static void sweep_sessions(RelayState& state) {
         PerSocketData* d = it->second->getUserData();
         if (!d->presence_pass_queued) continue;
         d->presence_pass_queued = false;
+#ifdef HOLLOW_RELAY_MEASURE
+        measure::Scope measure_scope(d->meter.get());
+#endif
         settle_presence(state, it->second, d);
     }
     while (!state.acks_due.empty() && state.acks_due.front().first <= now) {
@@ -3346,6 +3669,24 @@ static void sweep_sessions(RelayState& state) {
             end_session(state, peer);
         }
     }
+    while (!state.long_grace_ends.empty() && state.long_grace_ends.begin()->first <= now) {
+        const auto due = state.long_grace_ends.begin()->first;
+        const std::string peer = state.long_grace_ends.begin()->second;
+        state.long_grace_ends.erase(state.long_grace_ends.begin());
+        auto it = state.sessions.find(peer);
+        if (it != state.sessions.end() && it->second.state == session::State::Grace && it->second.grace_until == due) {
+            end_session(state, peer);
+        }
+    }
+    // The breaker's tables forget what is over, every ten seconds.
+    if (now - state.breaker_swept >= std::chrono::seconds(10)) {
+        state.breaker_swept = now;
+        const int64_t ms = steady_ms();
+        state.cooldowns.sweep(ms, limits());
+        state.start_pools.sweep(ms, limits());
+        state.clean_seen.sweep(ms, limits());
+        state.strangers.sweep(ms);
+    }
 }
 
 // Sessions a snapshot brought back (relay-bounds' restore runs before this): every one
@@ -3356,6 +3697,8 @@ static void adopt_restored_sessions(RelayState& state) {
         s.peer_id = peer;
         s.state = session::State::Grace;
         s.restored = true;
+        // A restart is not the client's doing: every restored session starts in full.
+        s.acct.begin(breaker::Kind::Full, limits().w_full.start, steady_ms(), limits());
         s.unacked_in = 0;
         s.grace_until = until;
         state.grace_ends.emplace_back(until, peer);
@@ -3387,6 +3730,540 @@ static unsigned int max_backpressure([[maybe_unused]] const Config& config) {
     return MAX_BACKPRESSURE;
 }
 
+#ifdef HOLLOW_RELAY_MEASURE
+// What a client frame asks for, charged to its socket's meter (measure.h).
+static void measure_text(PerSocketData* d, const json& j, const std::string& type) {
+    measure::Meter* m = d->meter.get();
+    if (!m) return;
+    auto text = [&](const char* field) -> std::string {
+        if (!j.is_object()) return std::string();
+        auto it = j.find(field);
+        return it != j.end() && it->is_string() ? it->get<std::string>() : std::string();
+    };
+    if (type == "join") {
+        m->add(measure::JOINS, 1);
+        m->room(measure::hash_of(text("room")));
+    } else if (type == "leave") {
+        m->add(measure::LEAVES, 1);
+    } else if (type == "direct") {
+        m->add(measure::DIRECTS, 1);
+        m->target(measure::hash_of(text("target")));
+    } else if (type == "msg") {
+        m->add(measure::BCASTS, 1);
+    } else if (type == "hb" || type == "ack" || type == "inactive" || type == "active" || type == "end" ||
+               type == "auth" || type == "auth_hello") {
+    } else {
+        m->add(measure::CTRL, 1);
+        if (type == "lock_put") m->add(measure::LOCKPUTS, 1);
+    }
+}
+
+static void measure_binary(PerSocketData* d, std::string_view raw) {
+    measure::Meter* m = d->meter.get();
+    if (!m || raw.size() < 2) return;
+    std::optional<std::string_view> target;
+    switch (static_cast<uint8_t>(raw[0])) {
+        case 0x02:
+            if (auto f = binary_frame::parse_chunk(raw)) target = f->target;
+            break;
+        case 0x04:
+        case 0x08:
+            if (auto f = binary_frame::parse_direct(raw)) target = f->target;
+            break;
+        case 0x09:
+            if (auto f = binary_frame::parse_channel_direct(raw)) target = f->target;
+            break;
+        case 0x03:
+        case 0x07:
+        case 0x0A:
+            m->add(measure::BCASTS, 1);
+            return;
+        default:
+            m->add(measure::CTRL, 1);
+            return;
+    }
+    m->add(measure::DIRECTS, 1);
+    if (target) m->target(measure::hash_of(*target));
+}
+
+// Records a closing socket after the close's own work was charged to it.
+struct MeasureClose {
+    PerSocketData* d;
+    ~MeasureClose() {
+        if (!d->meter) return;
+        d->meter->fetch = d->is_fetch;
+        d->meter->guest = d->is_guest;
+        d->meter->session = !d->sid.empty();
+        d->meter->authed = d->authenticated;
+        measure::bury(std::move(d->meter));
+    }
+};
+
+std::string measure_report() {
+    return measure::report([](auto&& emit) {
+        if (!g_state) return;
+        for (auto& [peer, ws] : g_state->peer_sockets) emit(ws->getUserData()->meter.get());
+    });
+}
+#endif
+
+// --- The circuit breaker's judgement of one inbound frame (breaker.h, design section 3) ---
+
+// Who pays for `data`'s frames: its session's device, else the socket; nobody for the
+// configured forwarder.
+static breaker::Account* breaker_payer(RelayState& state, PerSocketData* data) {
+    if (!g_forwarder_peer_id.empty() && data->peer_id == g_forwarder_peer_id) return nullptr;
+    if (session::Session* s = live_session(state, data)) return s->acct.ready ? &s->acct : nullptr;
+    if (!data->acct.ready && !data->is_fetch && !data->is_guest) {
+        // A full socket whose session ended under it goes on at the low tier.
+        begin_payer(state, data->acct, data->peer_id, breaker::Kind::Full, limits().w_low);
+    }
+    return data->acct.ready ? &data->acct : nullptr;
+}
+
+// The deliveries one room broadcast makes, walked once with the delivery loops' own
+// predicate (fanout_writes) for both judges: whoever shares the room with the sender (the
+// members part), for a public frame the sockets outside its audience too, and the copies
+// the send budget counts (at most so many per block and share, as fanout_bytes does).
+struct CastWalk {
+    breaker::Tally members;
+    breaker::Tally outside;
+    size_t live = 0;
+    uint64_t budget_copies = 0;
+};
+
+static CastWalk walk_cast(RelayState& state, const PerSocketData* data, const WsRoom& r, const std::string& room,
+                          bool to_all, const std::string* topic) {
+    CastWalk w;
+    const Audience aud = audience(state, r, room);
+    const bool public_frame = to_all && aud.locked && aud.sees(data->peer_id);
+    send_budget::Recipients counted(state.send_ledger.limits);
+    for (const auto& [pid, sock] : r.peers) {
+        const PerSocketData* d = sock->getUserData();
+        if (!fanout_writes(aud, public_frame, pid, data->peer_id, d, room, topic)) continue;
+        const bool shares = aud.shares(pid, data->peer_id);
+        // A guest is no member device the poster can count (presence never lists one), so
+        // the room's allowance pays for it, in an unlocked room too (MED 5).
+        (shares && !d->is_guest ? w.members : w.outside).add(d->group);
+        w.live++;
+        if (counted.take(recipient_block(d), d->budget_share)) w.budget_copies++;
+    }
+    for (const auto& pid : r.held) {
+        if (pid == data->peer_id) continue;
+        const bool shares = aud.shares(pid, data->peer_id);
+        if (!shares && !public_frame) continue;
+        const session::Session* s = grace_session(state, pid);
+        if (!s || (topic && !subscribed(s->subscriptions, room, *topic))) continue;
+        (shares ? w.members : w.outside).add(s->group);
+    }
+    return w;
+}
+
+// One room broadcast as the breaker's plan walked it, for the send budget to judge from the
+// same walk (CastSeen::matches names the broadcast it saw).
+struct CastSeen {
+    bool looked = false;
+    std::string room;
+    bool to_all = false;
+    bool has_topic = false;
+    std::string topic;
+    // The sender is in the room and its walk counted these copies.
+    bool walked = false;
+    uint64_t budget_copies = 0;
+
+    bool matches(const std::string& r, bool all, const std::string* t) const {
+        return looked && room == r && to_all == all && has_topic == (t != nullptr) && (!t || topic == *t);
+    }
+};
+
+// A broadcast's exact charge: the frame and its members part, the outside part from the
+// room's allowance (each group capped there too); what the allowance cannot cover is free.
+static void plan_cast(RelayState& state, const PerSocketData* data, const std::string& room, bool to_all,
+                      const std::string* topic, size_t frame_bytes, breaker::Plan& plan, CastSeen* seen) {
+    plan.exact = true;
+    plan.w = 1;
+    if (seen) {
+        *seen = CastSeen{true, room, to_all, topic != nullptr, topic ? *topic : std::string()};
+    }
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end() || !rit->second.peers.count(data->peer_id)) return;
+    CastWalk w = walk_cast(state, data, rit->second, room, to_all, topic);
+    if (seen) {
+        seen->walked = true;
+        seen->budget_copies = w.budget_copies;
+    }
+    plan.recipients = w.live;
+    plan.frame_bytes = frame_bytes;
+    plan.w = 1 + w.members.cost();
+    plan.outside = w.outside.cost();
+    if (plan.outside > 0) plan.room = room;
+}
+
+// Whether a deposit to `target` reaches a stranger: nobody holding a socket or a session
+// for it, or one sharing no room with the sender.
+static bool is_stranger(RelayState& state, const std::string& sender, const std::string& target) {
+    const std::unordered_set<std::string>* theirs = nullptr;
+    auto pit = state.peer_rooms.find(target);
+    std::unordered_set<std::string> held;
+    if (state.peer_sockets.count(target) && pit != state.peer_rooms.end()) {
+        theirs = &pit->second;
+    } else if (const session::Session* s = grace_session(state, target)) {
+        for (const auto& [room, owner] : s->rooms) held.insert(room);
+        theirs = &held;
+    }
+    if (!theirs) return true;
+    auto mine = state.peer_rooms.find(sender);
+    if (mine == state.peer_rooms.end()) return true;
+    const auto& small = mine->second.size() < theirs->size() ? mine->second : *theirs;
+    const auto& large = mine->second.size() < theirs->size() ? *theirs : mine->second;
+    for (const auto& room : small) {
+        if (large.count(room)) return false;
+    }
+    return true;
+}
+
+// A direct the relay deposits rather than delivers, counted when its target is a stranger.
+static void plan_deposit(RelayState& state, const PerSocketData* data, const std::string& room,
+                         const std::string& target, bool empty_room_deposits, breaker::Plan& plan) {
+    if (!is_peer_id_shape(target)) return;
+    auto rit = state.ws_rooms.find(room);
+    bool deposits;
+    if (rit == state.ws_rooms.end()) {
+        deposits = empty_room_deposits && !state.peer_sockets.count(target);
+    } else {
+        deposits = rit->second.peers.count(data->peer_id) && !rit->second.peers.count(target) &&
+                   !rit->second.held.count(target);
+    }
+    if (deposits && is_stranger(state, data->peer_id, target)) plan.stranger = breaker_hash(state, 't', target);
+}
+
+// Keys named "sig" in a shown roster, a few levels deep.
+static int64_t sig_count(const json& j, int depth = 0) {
+    if (depth > 6) return 0;
+    int64_t n = 0;
+    if (j.is_object()) {
+        for (auto it = j.begin(); it != j.end(); ++it) {
+            if (it.key() == "sig") n++;
+            n += sig_count(it.value(), depth + 1);
+        }
+    } else if (j.is_array()) {
+        for (const auto& e : j) n += sig_count(e, depth + 1);
+    }
+    return n;
+}
+
+// The visible deliveries a join or leave of `peer` would announce.
+static breaker::Tally walk_announce(RelayState& state, const std::string& room, const std::string& peer) {
+    breaker::Tally t;
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end()) return t;
+    const Audience aud = audience(state, rit->second, room);
+    for (const auto& [pid, sock] : rit->second.peers) {
+        const PerSocketData* d = sock->getUserData();
+        if (pid != peer && !d->is_guest && !d->is_fetch && aud.shares(pid, peer)) t.add(d->group);
+    }
+    return t;
+}
+
+static breaker::Plan plan_text(RelayState& state, const PerSocketData* data, const json& j, const std::string& type,
+                               size_t frame_bytes, CastSeen* seen) {
+    breaker::Plan plan;
+    if (type == "hb" || type == "ack" || type == "inactive" || type == "active" || type == "end") {
+        plan.control = true;
+        plan.w = 1;
+        return plan;
+    }
+    if (!j.is_object()) return plan;
+    if (type == "msg") {
+        plan_cast(state, data, json_text(j, "room"), false, nullptr, frame_bytes, plan, seen);
+    } else if (type == "join") {
+        const std::string room = json_text(j, "room");
+        breaker::Tally t = walk_announce(state, room, data->peer_id);
+        const int64_t listed = static_cast<int64_t>(t.deliveries()) + 1;
+        plan.join = true;
+        plan.w = 2 + (json_text(j, "door_proof").empty() ? 0 : breaker::DH_W) +
+                 (listed + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W + t.cost();
+        auto roster = j.find("inbox_roster");
+        if (roster != j.end()) plan.w += breaker::SIG_W * 2 * sig_count(*roster);
+    } else if (type == "leave") {
+        // Only a member's leave is announced: a non-member's costs no walk of the room.
+        const std::string room = json_text(j, "room");
+        auto rit = state.ws_rooms.find(room);
+        plan.w = 1;
+        if (rit != state.ws_rooms.end() && rit->second.peers.count(data->peer_id)) {
+            plan.w += walk_announce(state, room, data->peer_id).cost();
+        }
+    } else if (type == "direct") {
+        plan.w = 3;
+        plan_deposit(state, data, json_text(j, "room"), json_text(j, "target"), false, plan);
+    } else if (type == "topic_catchup") {
+        plan.w = 2 + static_cast<int64_t>(MAX_TOPIC_BUFFER_MSGS);
+    } else if (type == "lock_put") {
+        auto links = j.find("links");
+        const int64_t n = links != j.end() && links->is_array() ? static_cast<int64_t>(links->size()) : 0;
+        plan.w = 2 + breaker::SIG_W * n;
+        auto rit = state.ws_rooms.find(json_text(j, "server"));
+        if (rit != state.ws_rooms.end()) {
+            const auto& doors = rit->second.doors;
+            // Saturating: pending is a subset of proofs (test_door_room), never trusted to be.
+            plan.w += breaker::DH_W *
+                      static_cast<int64_t>(doors.proofs.size() - std::min(doors.pending.size(), doors.proofs.size()));
+        }
+    } else if (type == "lock_get") {
+        auto locks = j.find("locks");
+        const size_t n = locks != j.end() && locks->is_array() ? std::min<size_t>(locks->size(), 256) : 0;
+        plan.w = 1 + 2 * static_cast<int64_t>(n);
+    } else if (type == "check_peers") {
+        plan.w = 2 + breaker::CHECK_PEERS_SCAN_W;
+    } else if (type == "discover_peers") {
+        auto rit = state.ws_rooms.find(json_text(j, "room"));
+        const int64_t n = rit == state.ws_rooms.end() ? 0 : static_cast<int64_t>(rit->second.peers.size());
+        plan.w = 2 + (n + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W;
+    } else if (type == "kill_deposit") {
+        auto targets = j.find("targets");
+        const int64_t n = targets != j.end() && targets->is_array() ? static_cast<int64_t>(targets->size()) : 0;
+        plan.w = 2 + breaker::SIG_W * 66 + std::min<int64_t>(n, static_cast<int64_t>(KillList::MAX_TARGETS_PER_DEPOSIT));
+    }
+    return plan;
+}
+
+static breaker::Plan plan_binary(RelayState& state, const PerSocketData* data, std::string_view raw, CastSeen* seen) {
+    breaker::Plan plan;
+    plan.w = 1;
+    if (raw.size() < 2) return plan;
+    switch (static_cast<uint8_t>(raw[0])) {
+        case 0x03:
+        case 0x0A:
+            if (auto f = binary_frame::parse_broadcast(raw)) {
+                plan_cast(state, data, std::string(f->room), raw[0] == 0x0A, nullptr,
+                          f->payload.size() + f->room.size() + data->peer_id.size() + 3, plan, seen);
+            }
+            break;
+        case 0x07:
+            if (auto f = binary_frame::parse_topic(raw)) {
+                const std::string topic(f->topic);
+                plan_cast(state, data, std::string(f->room), false, &topic,
+                          f->payload.size() + f->room.size() + f->topic.size() + data->peer_id.size() + 4, plan,
+                          seen);
+            }
+            break;
+        case 0x02:
+            plan.w = 3;
+            break;
+        case 0x04:
+        case 0x08:
+            plan.w = 3;
+            if (auto f = binary_frame::parse_direct(raw)) {
+                plan_deposit(state, data, std::string(f->room), std::string(f->target), true, plan);
+            }
+            break;
+        case 0x09:
+            // The copy, its deposit and its push, whoever the target: one W in all.
+            plan.exact = true;
+            if (auto f = binary_frame::parse_channel_direct(raw)) {
+                plan_deposit(state, data, std::string(f->room), std::string(f->target), false, plan);
+            }
+            break;
+        default:
+            break;
+    }
+    return plan;
+}
+
+// --- The send budget's judgement of one inbound broadcast (send_budget.h) ---
+
+// The bytes a broadcast from `data` holds at once in send buffers: from the breaker's walk
+// when it made one of this broadcast, else walked here.
+static uint64_t cast_budget_bytes(RelayState& state, const PerSocketData* data, const std::string& room, bool to_all,
+                                  const std::string* topic, uint64_t per_copy, const CastSeen& seen) {
+    if (seen.matches(room, to_all, topic)) {
+        return seen.walked ? send_budget::held_bytes(seen.budget_copies, per_copy) : 0;
+    }
+    return fanout_bytes(data, room, per_copy, state, to_all, topic);
+}
+
+// Judges a fan-out of `predicted` bytes from `ws`: over the budget, the heaviest share's
+// least progressed sockets other than the sender are closed until it fits (none of them
+// is in a loop here), else the sender trips.
+static send_budget::Admit admit_fanout(SSLWebSocket* ws, uint64_t predicted, RelayState& state) {
+    if (predicted == 0) return send_budget::Admit::Pass;
+    return state.send_ledger.admit(predicted, ws, ws->getUserData()->budget_share, [&](SSLWebSocket* const& v) {
+        if (close_once(v, 0, {})) state.diag.fanout_evicted++;
+    });
+}
+
+// How the send budget judges a binary broadcast (0x03/0x0A broadcast, 0x07 topic). Parses
+// only to size the fan-out; the handler parses again to deliver. Pass for any other frame
+// and a malformed one (the handler drops it and it still counts).
+static send_budget::Admit binary_fanout_plan(SSLWebSocket* ws, std::string_view raw, RelayState& state,
+                                             const CastSeen& seen) {
+    if (raw.size() < 2) return send_budget::Admit::Pass;
+    const uint8_t opcode = static_cast<uint8_t>(raw[0]);
+    const PerSocketData* data = ws->getUserData();
+    if (opcode == 0x07) {
+        const auto f = binary_frame::parse_topic(raw);
+        if (!f) return send_budget::Admit::Pass;
+        const std::string room(f->room), topic(f->topic);
+        const uint64_t per = binary_frame::out_frame_size({room, topic, data->peer_id}, f->payload);
+        return admit_fanout(ws, cast_budget_bytes(state, data, room, false, &topic, per, seen), state);
+    }
+    if (opcode != 0x03 && opcode != 0x0A) return send_budget::Admit::Pass;
+    const auto f = binary_frame::parse_broadcast(raw);
+    if (!f) return send_budget::Admit::Pass;
+    const std::string room(f->room);
+    const uint64_t per = binary_frame::out_frame_size({room, data->peer_id}, f->payload);
+    return admit_fanout(ws, cast_budget_bytes(state, data, room, /*to_all=*/opcode == 0x0A, nullptr, per, seen), state);
+}
+
+// How the send budget judges the text "msg" broadcast. Never throws (it runs outside the
+// handler's try): a field of the wrong type passes here and is refused by the handler.
+static send_budget::Admit text_msg_fanout_plan(SSLWebSocket* ws, const json& j, RelayState& state,
+                                               const CastSeen& seen) {
+    const auto f = msg_plan::fields(j);
+    if (!f) return send_budget::Admit::Pass;
+    const PerSocketData* data = ws->getUserData();
+    const uint64_t per = msg_plan::out_size(*f->room, data->peer_id, f->data);
+    return admit_fanout(ws, cast_budget_bytes(state, data, *f->room, false, nullptr, per, seen), state);
+}
+
+// Acts on the send budget's verdict; true when the frame stops here. A Trip closes the
+// sender UNCOUNTED, so its resume re-sends the frame once buffers drain; a Refuse is
+// COUNTED first, as it can never be held, so the client drops it instead of reconnecting
+// forever (N7). Either closes 1013 after a plain reconnect hint (never 1008, which ends
+// the session): no breaker trip, so no pause, no ladder step and no breaker count. The
+// hint's small wait keeps a client that re-sends an absurd frame from spinning while the
+// stall sweep frees room.
+static bool budget_stops(RelayState& state, SSLWebSocket* ws, session::Session* s, send_budget::Admit verdict) {
+    if (verdict == send_budget::Admit::Pass) return false;
+    if (verdict == send_budget::Admit::Refuse) {
+        if (s) count_in(state, ws, *s);
+        state.diag.fanout_refused++;
+    } else {
+        state.diag.fanout_tripped++;
+    }
+    close_once(ws, 1013, "send budget", drain::hint(session::DRAIN_MIN_MS));
+    return true;
+}
+
+// The socket whose frame is being handled, and whether its own handler closed it: past a
+// close its user data is gone and nothing may touch it.
+struct FrameGuard {
+    SSLWebSocket* ws = nullptr;
+    bool closed = false;
+};
+static FrameGuard* g_frame = nullptr;
+
+// Judges a frame before it is counted. True when the breaker tripped (enforced mode): the
+// socket is closing 1013 after a reconnect hint, and the frame is neither counted nor
+// handled, so the client's resume resends it. In shadow mode it books the trip exactly as
+// enforcement would, counts it once per would-be pause, and lets the frame through.
+static bool breaker_trips(RelayState& state, SSLWebSocket* ws, PerSocketData* data, breaker::Account& a,
+                          const breaker::Plan& plan) {
+    const int64_t now = steady_ms();
+    const breaker::Limits& l = limits();
+    const breaker::Verdict v = breaker::judge(a, plan, now, l, state.strangers, stranger_key(state, data->peer_id, a.kind));
+    if (v == breaker::Verdict::Pass) return false;
+    if (!breaker::ENFORCE && now < a.shadow_until_ms) return false;
+    const breaker::Pause pause = breaker::pause_for(a, plan, v, state.cooldowns, breaker_hash(state, 'd', data->peer_id),
+                                                    socket_share(state, data), now, l);
+    breaker::g_stats.count_trip(a.kind, v, pause.ladder);
+    a.tripped = true;
+    if (!breaker::ENFORCE) {
+        a.shadow_until_ms = now + pause.wait_ms;
+        return false;
+    }
+    if (session::Session* s = live_session(state, data)) {
+        s->breaker_until_ms = a.kind == breaker::Kind::Full ? now + pause.wait_ms : 0;
+        s->breaker_free = true;
+    }
+    close_once(ws, 1013, "breaker", json{{"type", "reconnect"}, {"after_ms", pause.wait_ms}, {"breaker", true}}.dump());
+    return true;
+}
+
+// Charges what a handled frame cost: the plan where it was exact, else the frame and the
+// work its handler did. A public frame's outside part is the room's allowance's.
+static void breaker_charge(RelayState& state, PerSocketData* data, const breaker::Plan& plan, int64_t worked) {
+    breaker::Account* a = breaker_payer(state, data);
+    if (!a) return;
+    const int64_t now = steady_ms();
+    breaker::charge(*a, plan.exact ? plan.w : 1 + worked, plan, now, limits(), state.strangers,
+                    stranger_key(state, data->peer_id, a->kind), socket_share(state, data));
+    if (plan.outside > 0) {
+        auto rit = state.ws_rooms.find(plan.room);
+        if (rit != state.ws_rooms.end()) rit->second.allowance.cover(plan.outside, now, limits());
+    }
+}
+
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+// The live tests read one payer's buckets (test builds only).
+std::string breaker_test_report(const std::string& peer) {
+    if (!g_state) return "{}";
+    RelayState& state = *g_state;
+    const breaker::Account* a = nullptr;
+    auto sit = state.sessions.find(peer);
+    if (sit != state.sessions.end()) a = &sit->second.acct;
+    auto pit = state.peer_sockets.find(peer);
+    if ((!a || !a->ready) && pit != state.peer_sockets.end()) a = &pit->second->getUserData()->acct;
+    json out = {{"ready", a && a->ready}};
+    if (a && a->ready) {
+        breaker::Account copy = *a;
+        copy.refill(steady_ms(), limits());
+        out["w"] = copy.w.level();
+        out["joins"] = copy.joins.level();
+        out["spent"] = copy.spent;
+        out["start"] = copy.start_credit;
+        out["tripped"] = copy.tripped;
+    }
+    out["cooldown_ms"] = state.cooldowns.remaining_ms(breaker_hash(state, 'd', peer), steady_ms(), limits());
+    out["session_paused_ms"] =
+        sit != state.sessions.end() ? std::max<int64_t>(0, sit->second.breaker_until_ms - steady_ms()) : 0;
+    out["long_grace"] = std::any_of(state.long_grace_ends.begin(), state.long_grace_ends.end(),
+                                    [&](const auto& e) { return e.second == peer; });
+    return out.dump();
+}
+#endif
+
+// The anonymous trip counts for /server-stats (http_handlers.cpp).
+nlohmann::json breaker_stats() {
+    return server_stats::breaker_block(breaker::g_stats, breaker::ENFORCE, g_state ? g_state->cooldowns.size() : 0);
+}
+
+// The box's total RAM in bytes, 0 when unknown (/proc/meminfo is Linux-only; the live
+// tests on other systems fall back to the floored default).
+static uint64_t mem_total_bytes() {
+    FILE* f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    char line[256];
+    uint64_t kb = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "MemTotal:", 9) == 0) {
+            kb = strtoull(line + 9, nullptr, 10);
+            break;
+        }
+    }
+    fclose(f);
+    return kb * 1024;
+}
+
+// The send-buffer budget: a quarter of the box by default, an operator override
+// (HOLLOW_SEND_BUDGET_BYTES) floored at the honest maximum, or a tiny test budget.
+static void init_send_budget(RelayState& state, [[maybe_unused]] const Config& config) {
+    state.send_share_key = random_hex(32);
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+    if (config.test_send_budget) {
+        state.send_ledger.limits = send_budget::limits_for(config.test_send_budget, /*test=*/true);
+        return;
+    }
+#endif
+    const uint64_t mem = mem_total_bytes();
+    uint64_t budget = send_budget::default_limit(mem);
+    if (const char* e = getenv("HOLLOW_SEND_BUDGET_BYTES")) {
+        const uint64_t v = strtoull(e, nullptr, 10);
+        if (v) budget = std::max(v, send_budget::floor_for(mem));
+    }
+    state.send_ledger.limits = send_budget::limits_for(budget);
+}
+
 void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config) {
     g_diag = &state.diag;
     g_state = &state;
@@ -3399,6 +4276,14 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
 #endif
     door_key_mint(state.door_key);
     state.door_domain = auth_domain(config.domain);
+    state.breaker_key = random_hex(32);
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+    state.breaker_limits = breaker::scaled(breaker::DEFAULT, config.test_breaker_w, config.test_breaker_t);
+#endif
+    init_send_budget(state, config);
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+    if (config.test_stall_ms) g_stall_ms = config.test_stall_ms;
+#endif
     adopt_restored_sessions(state);
     if (!g_session_timer) {
         auto* loop = reinterpret_cast<struct us_loop_t*>(uWS::Loop::get());
@@ -3423,6 +4308,8 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             const std::string remote(ws->getRemoteAddressAsText());
             std::string ip = ip_limit_key(remote);
             data->share_block = share_block(remote);
+            data->budget_share = share_id(state.send_share_key, data->share_block);
+            state.open_sockets.insert(ws);
 
             // A refused socket never took a slot, so its close must give none back:
             // `ip_key` is set only once the slot is taken. At the cap, a socket comes in
@@ -3442,6 +4329,10 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                     break;
             }
             data->ip_key = ip;
+            data->group = breaker_hash(state, 'i', ip);
+#ifdef HOLLOW_RELAY_MEASURE
+            data->meter = std::make_unique<measure::Meter>();
+#endif
 
             // 10-second auth timeout
             auto* loop = reinterpret_cast<struct us_loop_t*>(uWS::Loop::get());
@@ -3465,6 +4356,20 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
 
         .message = [&state, &config](SSLWebSocket* ws, std::string_view message, uWS::OpCode opCode) {
             auto* data = ws->getUserData();
+#ifdef HOLLOW_RELAY_MEASURE
+            measure::Scope measure_scope(data->meter.get());
+            if (data->meter) {
+                data->meter->add(measure::FRAMES, 1);
+                data->meter->add(measure::BYTES, message.size());
+                if (opCode == uWS::OpCode::BINARY) measure_binary(data, message);
+            }
+#endif
+            data->inbound_messages++;
+            // A finished message leaves nothing in flight: its inbound charge goes now, not
+            // at the next sweep, or a sender would trip on its own last frame.
+            if (state.send_ledger.holds(ws)) {
+                state.send_ledger.in(ws, 0, 0, data->inbound_messages, steady_ms(), data->budget_share);
+            }
 
             // Nothing a client sends may unwind into uSockets' C frames: that ends
             // the process, and an abnormal exit takes no snapshot.
@@ -3478,23 +4383,73 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             }
 
             session::Session* s = live_session(state, data);
+            FrameGuard guard{ws};
+            FrameGuard* const outer = g_frame;
+            g_frame = &guard;
+            struct Restore {
+                FrameGuard* outer;
+                ~Restore() { g_frame = outer; }
+            } restore{outer};
+            breaker::Account* payer = data->closing ? nullptr : breaker_payer(state, data);
             if (opCode == uWS::OpCode::TEXT) {
                 // Text past the cap is never parsed; it still counts, like text that
                 // does not parse.
                 const json j = message.size() <= 1024 * 1024 ? client_json::parse(message)
                                                               : json(json::value_t::discarded);
                 const std::string type = json_type(j);
-                if (s && session::client_type_counts(type)) count_in(state, ws, *s);
-                if (j.is_discarded()) return;
-                // A field of the wrong JSON type makes value() throw, and an
-                // exception unwinding into uSockets' C frames would end the
-                // process on one malformed frame from any client.
-                try {
-                    handle_text_message(ws, data, j, type, state, config);
-                } catch (const std::exception&) {
-                    return;
+#ifdef HOLLOW_RELAY_MEASURE
+                measure_text(data, j, type);
+#endif
+                // The breaker judges first (in shadow mode it counts what enforcement would
+                // trip), then the send budget from the walk the breaker's plan made.
+                breaker::Plan plan;
+                CastSeen seen;
+                if (payer) {
+                    try {
+                        plan = plan_text(state, data, j, type, message.size(), &seen);
+                    } catch (const std::exception&) {
+                        plan = breaker::Plan();
+                        seen = CastSeen();
+                    }
+                    if (breaker_trips(state, ws, data, *payer, plan)) return;
                 }
+                if (type == "msg" && budget_stops(state, ws, s, text_msg_fanout_plan(ws, j, state, seen))) return;
+                if (s && session::client_type_counts(type)) count_in(state, ws, *s);
+                breaker::Scope scope;
+                if (!j.is_discarded()) {
+                    // A field of the wrong JSON type makes value() throw, and an
+                    // exception unwinding into uSockets' C frames would end the
+                    // process on one malformed frame from any client.
+                    try {
+                        std::optional<breaker::Uncharged> exact;
+                        if (plan.exact) exact.emplace();
+                        handle_text_message(ws, data, j, type, state, config);
+                    } catch (const std::exception&) {
+                    }
+                }
+                if (payer && !guard.closed) breaker_charge(state, data, plan, scope.spent());
             } else if (opCode == uWS::OpCode::BINARY) {
+                breaker::Plan plan;
+                CastSeen seen;
+                if (payer) {
+                    plan = plan_binary(state, data, message, &seen);
+                    if (breaker_trips(state, ws, data, *payer, plan)) return;
+                }
+                if (budget_stops(state, ws, s, binary_fanout_plan(ws, message, state, seen))) return;
+                breaker::Scope scope;
+                struct Charge {
+                    RelayState& state;
+                    PerSocketData* data;
+                    const breaker::Plan& plan;
+                    const breaker::Scope& scope;
+                    const FrameGuard& guard;
+                    bool payer;
+                    ~Charge() {
+                        if (payer && !guard.closed) breaker_charge(state, data, plan, scope.spent());
+                    }
+                } charge{state, data, plan, scope, guard, payer != nullptr};
+                std::optional<breaker::Uncharged> exact;
+                if (plan.exact) exact.emplace();
                 if (s) count_in(state, ws, *s);
                 // 1-byte 0x00 = guest keepalive, don't process or count
                 if (message.size() == 1 && static_cast<uint8_t>(message[0]) == 0x00) {
@@ -3560,10 +4515,33 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             }
         },
 
-        .drain = [](SSLWebSocket* /*ws*/) {},
+        .drain = [&state](SSLWebSocket* ws) {
+            // uWS drained some of this socket's backpressure: lower its charge in the
+            // memory budget and mark it as making progress (the stall sweep spares it).
+            PerSocketData* d = ws->getUserData();
+            state.send_ledger.out(ws, ws->getBufferedAmount(), steady_ms(), d->budget_share);
+        },
+
+        .ping = [&state](SSLWebSocket* ws, std::string_view /*payload*/) {
+            // uWS has answered with a pong outside write_raw: charge what it buffered, so a
+            // ping flood into a socket that never reads is counted and swept like any other.
+            PerSocketData* d = ws->getUserData();
+            state.send_ledger.out(ws, ws->getBufferedAmount(), steady_ms(), d->budget_share);
+        },
 
         .close = [&state](SSLWebSocket* ws, int code, std::string_view /*reason*/) {
             auto* data = ws->getUserData();
+#ifdef HOLLOW_RELAY_MEASURE
+            MeasureClose measure_close{data};
+            measure::Scope measure_scope(data->meter.get());
+#endif
+            data->closing = true;
+            if (g_frame && g_frame->ws == ws) g_frame->closed = true;
+            // A close's presence is the socket's lifecycle, never a frame's work.
+            breaker::Uncharged uncharged;
+            // The socket's send buffer is freed with it: drop its charge (never negative).
+            state.send_ledger.forget(ws);
+            state.open_sockets.erase(ws);
 
             // A session socket that is gone starts its grace, holding its per-IP slot;
             // a policy close (a revoked license) ends the session instead.
@@ -3572,9 +4550,11 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                 end_session(state, data->peer_id);
                 s = nullptr;
             }
+            // A session the breaker paused holds no slot through its pause.
+            const bool paused = s && s->breaker_until_ms > steady_ms();
 
             // IP tracking cleanup (in-memory only).
-            if (!s && !data->ip_key.empty()) session_bounds::free_ip_slot(state, data->ip_key);
+            if ((!s || paused) && !data->ip_key.empty()) session_bounds::free_ip_slot(state, data->ip_key);
 
             if (data->is_guest) {
                 if (state.guest_count > 0) state.guest_count--;
@@ -3603,6 +4583,16 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                 // already superseded by a newer connection is a no-op here and
                 // must not evict the live socket from its rooms.
                 cleanup_peer(state, data->peer_id, ws);
+            }
+
+            // end() runs this at once but keeps the socket's unsent buffer until it drains (a
+            // trickle reader keeps it for good), outside the budget once its charge left
+            // above: past ENDED_KEEP_BYTES it goes now, its session replaying from the ring.
+            // WebSocket::close() does nothing once end() began; the socket stays allocated
+            // until this loop iteration ends, so end() may finish after this returns.
+            auto* raw = reinterpret_cast<us_socket_t*>(ws);
+            if (!us_socket_is_closed(1, raw) && ws->getBufferedAmount() > send_budget::ENDED_KEEP_BYTES) {
+                us_socket_close(1, raw, 0, nullptr);
             }
         }
     });

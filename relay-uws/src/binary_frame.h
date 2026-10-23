@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -125,6 +126,27 @@ inline std::string direct_frame(std::string_view room, std::string_view sender, 
     frame.push_back(0x00);
     frame.append(sender);
     frame.push_back(0x00);
+    frame.append(payload);
+    return frame;
+}
+
+// The frame a broadcast (0x05, fields room and sender) or a topic send (0x08, fields
+// room, topic and sender) reaches each receiver as: the opcode, each field NUL-ended,
+// then the payload.
+inline uint64_t out_frame_size(std::initializer_list<std::string_view> fields, std::string_view payload) {
+    uint64_t n = 1 + payload.size();
+    for (std::string_view f : fields) n += f.size() + 1;
+    return n;
+}
+
+inline std::string out_frame(uint8_t op, std::initializer_list<std::string_view> fields, std::string_view payload) {
+    std::string frame;
+    frame.reserve(out_frame_size(fields, payload));
+    frame.push_back(static_cast<char>(op));
+    for (std::string_view f : fields) {
+        frame.append(f);
+        frame.push_back(0x00);
+    }
     frame.append(payload);
     return frame;
 }

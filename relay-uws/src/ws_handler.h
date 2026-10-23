@@ -2,6 +2,7 @@
 #include <App.h>
 #include "state.h"
 #include "config.h"
+#include "json.hpp"
 
 void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config);
 
@@ -31,3 +32,12 @@ void sweep_link_codes(RelayState& state);
 // Drop per-IP link-code guess records that have gone quiet for
 // LINK_GUESS_EXPIRE_SECS. Called from main's timer loop.
 void sweep_link_guesses(RelayState& state);
+
+// The breaker's anonymous trip counts (breaker.h): by kind, never ids. In shadow mode,
+// the trips enforcement would have made.
+nlohmann::json breaker_stats();
+
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+// One payer's buckets, for the live tests (test builds only).
+std::string breaker_test_report(const std::string& peer);
+#endif

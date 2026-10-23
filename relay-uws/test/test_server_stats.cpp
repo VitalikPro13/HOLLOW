@@ -19,7 +19,8 @@ static nlohmann::json full_body() {
     return {{"mem_total_kb", 8000000}, {"mem_used_kb", 1000000}, {"rx_mbps", 1.5},
             {"tx_mbps", 2.5},           {"bandwidth_cap_mbps", 950}, {"online_users", 3},
             {"send_backpressure", 1},   {"send_dropped", 0},        {"fwd_delivered", 7},
-            {"fwd_buffered", 0},        {"ghost_left_suppressed", 2}, {"some_new_counter", 9}};
+            {"fwd_buffered", 0},        {"ghost_left_suppressed", 2}, {"some_new_counter", 9},
+            {"breaker", {{"enforced", false}, {"trips", 1}}}};
 }
 
 static std::set<std::string> keys(const nlohmann::json& j) {
@@ -38,6 +39,7 @@ int main() {
     server_stats::keep_public(off, false);
     check("with the public stats off only memory and the cap are left",
           keys(off) == std::set<std::string>{"mem_total_kb", "mem_used_kb", "bandwidth_cap_mbps"});
+    check("the breaker's counts are left out too", !off.contains("breaker"));
     check("and the total and the cap are unchanged", off["mem_total_kb"] == 8000000 && off["bandwidth_cap_mbps"] == 950);
     check("memory in use is whole percent of the total", off["mem_used_kb"] == 960000);
     nlohmann::json before = full_body(), after = full_body();
@@ -58,6 +60,18 @@ int main() {
     nlohmann::json on_exact = full_body();
     server_stats::keep_public(on_exact, true);
     check("with the stats on, memory in use is exact", on_exact["mem_used_kb"] == 1000000);
+
+    breaker::Stats st;
+    st.count_trip(breaker::Kind::Full, breaker::Verdict::Work, false);
+    st.count_trip(breaker::Kind::Fetch, breaker::Verdict::Joins, false);
+    st.count_trip(breaker::Kind::Full, breaker::Verdict::Distinct, true);
+    st.count_refusal();
+    const nlohmann::json block = server_stats::breaker_block(st, true, 4);
+    check("with the stats on the breaker shows coarse totals only",
+          keys(block) == std::set<std::string>{"enforced", "trips", "ladder_steps", "refused", "cooling_devices"});
+    check("summed over every kind of socket and trip", block["trips"] == 3 && block["ladder_steps"] == 1 &&
+                                                            block["refused"] == 1 && block["cooling_devices"] == 4 &&
+                                                            block["enforced"] == true);
 
     check("unset means on", server_stats::parse_public_stats(nullptr));
     check("empty means on", server_stats::parse_public_stats(""));

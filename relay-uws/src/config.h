@@ -36,6 +36,16 @@ struct Config {
     // HOLLOW_RELAY_TEST_BACKPRESSURE: a send buffer the live tests drain inside one
     // session tick (run_live.sh). Never compiled into a relay that serves anyone.
     unsigned int test_max_backpressure = 0;
+    // HOLLOW_RELAY_TEST_BREAKER_W / _T: the breaker's budgets and its times divided by
+    // these, so the live tests trip it and watch pauses end in seconds.
+    int64_t test_breaker_w = 1;
+    int64_t test_breaker_t = 1;
+    // HOLLOW_RELAY_TEST_SEND_BUDGET: a tiny send-buffer budget so the live tests trip the
+    // fan-out breaker without allocating gigabytes. Never in a relay that serves anyone.
+    uint64_t test_send_budget = 0;
+    // HOLLOW_RELAY_TEST_STALL_MS: a short not-draining window so the live tests watch a
+    // non-reading receiver get closed in seconds. Never in a relay that serves anyone.
+    int64_t test_stall_ms = 0;
 #endif
 };
 
@@ -94,6 +104,14 @@ inline Config parse_args(int argc, char** argv) {
 #ifdef HOLLOW_RELAY_TEST_LOOPBACK
     if (const char* bp = getenv("HOLLOW_RELAY_TEST_BACKPRESSURE")) {
         config.test_max_backpressure = static_cast<unsigned int>(strtoul(bp, nullptr, 10));
+    }
+    if (const char* w = getenv("HOLLOW_RELAY_TEST_BREAKER_W")) config.test_breaker_w = strtoll(w, nullptr, 10);
+    if (const char* t = getenv("HOLLOW_RELAY_TEST_BREAKER_T")) config.test_breaker_t = strtoll(t, nullptr, 10);
+    if (const char* sb = getenv("HOLLOW_RELAY_TEST_SEND_BUDGET")) {
+        config.test_send_budget = strtoull(sb, nullptr, 10);
+    }
+    if (const char* sm = getenv("HOLLOW_RELAY_TEST_STALL_MS")) {
+        config.test_stall_ms = strtoll(sm, nullptr, 10);
     }
 #endif
 

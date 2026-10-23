@@ -5,7 +5,7 @@
 //! `relay_session`): both sides count and ack stream frames, a dropped socket resumes
 //! without a single rejoin, and a heartbeat with a deadline finds a dead path in seconds.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -24,6 +24,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use base64::Engine;
 
+use super::relay_pace;
 use super::relay_session::{
     self, Ask, AuthReply, Backoff, Class, Clocks, Entry, Established, Flag, Frame, Inbound, Liveness, Note, Outbound,
     Queued, Timing,
@@ -111,6 +112,10 @@ pub enum WsCommand {
     /// The newest door we hold for a server's room (`None` = none any more). Joins of
     /// that room prove it to the relay from now on; a joined room proves it at once.
     SetDoor { room_code: String, door: Option<DoorSecret> },
+    /// The node's upper bound on a room's devices, which presence alone undercounts (hidden,
+    /// held and fetch receivers are never listed): what the pacer prices a frame into it
+    /// for (relay_pace). Never reaches the relay.
+    RoomBound { room_code: String, devices: u32 },
     LeaveRoom { room_code: String },
     /// Broadcast an encrypted message to all peers in a room.
     SendToRoom { room_code: String, data: Vec<u8> },
@@ -466,8 +471,9 @@ enum ServerMsg {
     /// The relay's count of our stream frames, answering a heartbeat, and its clock.
     HbAck { h: u64, #[serde(default)] now: Option<serde_json::Value> },
     Ack { h: u64 },
-    /// The relay is about to restart: resume after this long.
-    Reconnect { #[serde(default)] after_ms: u64 },
+    /// The relay is about to restart: resume after this long. With `breaker`, its circuit
+    /// breaker paused this session: no socket before then, however long.
+    Reconnect { #[serde(default)] after_ms: u64, #[serde(default)] breaker: bool },
 }
 
 /// A server's door secret on its way to the socket that proves it; never printed.
@@ -717,6 +723,23 @@ pub(crate) fn route_source(relay: SocketAddr) -> Option<IpAddr> {
 
 // -- The client --
 
+/// Entries the priority lane looks past the waiting head.
+const PRIORITY_SCAN: usize = 256;
+
+/// What an unwritten entry costs at the relay ([`relay_pace`]), and what orders it.
+#[derive(Default)]
+struct Price {
+    cost: relay_pace::Cost,
+    target: Option<String>,
+    room: Option<String>,
+    /// The one device it is written to (a direct, a file chunk).
+    to: Option<String>,
+    /// Signatures a join's shown roster carries.
+    sigs: i64,
+    /// Joins, leaves and subscriptions never jump the queue.
+    room_state: bool,
+}
+
 /// What every connect attempt needs.
 #[derive(Clone)]
 struct Dial {
@@ -746,6 +769,28 @@ struct Rooms {
     last_join_attempt: Option<String>,
     /// What this socket was told of each room, and the presence audits in flight.
     audit: super::presence_audit::Audit,
+    /// The node's device bound per room ([`WsCommand::RoomBound`]).
+    bounds: HashMap<String, u32>,
+    /// The largest list the relay sent per room lately, and when.
+    listed: HashMap<String, (u32, Instant)>,
+}
+
+/// How long a room's largest list keeps lifting its price.
+const LISTED_FOR: Duration = Duration::from_secs(600);
+
+impl relay_pace::RoomSizes for Rooms {
+    fn told(&self, room: &str) -> Option<u32> {
+        self.audit.told_count(room).map(|n| n as u32)
+    }
+    fn bound(&self, room: &str) -> Option<u32> {
+        self.bounds.get(room).copied()
+    }
+    fn floor(&self, room: &str) -> Option<u32> {
+        self.listed.get(room).filter(|(_, at)| at.elapsed() < LISTED_FOR).map(|(n, _)| *n)
+    }
+    fn joined(&self) -> usize {
+        self.joined.len()
+    }
 }
 
 type WsSink = SplitSink<WsStream, Message>;
@@ -858,6 +903,20 @@ struct Client {
     stopped: bool,
     /// The relay clock offset last sent to the node ([`WsEvent::ClockOffset`]).
     clock_told: Option<i64>,
+    /// The mirror of our breaker buckets at the relay, while it has a breaker.
+    pace: Option<relay_pace::Pacer>,
+    /// The head of the queue waits for the mirror to refill until then.
+    pace_at: Option<Instant>,
+    /// Something was queued while the head waited: a small frame may go first.
+    priority_check: bool,
+    /// A resume's frames to write again, already numbered, before anything new.
+    resend: VecDeque<Frame>,
+    /// The breaker paused us: no socket before then.
+    cooldown_until: Option<Instant>,
+    /// The next resume follows a breaker pause.
+    breaker_paused: bool,
+    /// What each written join was priced at, until its answer says what it cost.
+    join_spend: HashMap<String, (relay_pace::Cost, i64)>,
 }
 
 /// The socket's next frame; never while `held` (a move is under way).
@@ -912,6 +971,13 @@ impl Client {
             attempts: 0,
             license_busy_notified: false,
             stopped: false,
+            pace: None,
+            pace_at: None,
+            priority_check: false,
+            resend: VecDeque::new(),
+            cooldown_until: None,
+            breaker_paused: false,
+            join_spend: HashMap::new(),
         }
     }
 
@@ -978,6 +1044,7 @@ impl Client {
             }
         };
         if let Some(s) = &self.socket {
+            consider(self.pace_at);
             if !moving {
                 consider(s.live.dead_at(&self.timing));
                 consider(s.live.probe_missed_at());
@@ -1019,6 +1086,10 @@ impl Client {
                 if changed && door.is_some() && self.rooms.joined.contains(room_code) {
                     self.push(WsCommand::JoinRoom { room_code: room_code.clone() });
                 }
+                return;
+            }
+            WsCommand::RoomBound { room_code, devices } => {
+                self.rooms.bounds.insert(room_code.clone(), *devices);
                 return;
             }
             WsCommand::JoinRoom { room_code } => {
@@ -1065,6 +1136,7 @@ impl Client {
     }
 
     fn push(&mut self, cmd: WsCommand) {
+        self.priority_check |= self.pace_at.is_some();
         let pruned = self.out.push(cmd, super::frame_auth::now_ms());
         if pruned > 0 {
             hollow_log!("[HOLLOW-WS] Outbound queue full: {pruned} unwritten frame(s) dropped");
@@ -1073,9 +1145,10 @@ impl Client {
 
     fn can_pump(&self) -> bool {
         let Some(s) = &self.socket else { return false };
+        let paced = self.pace_at.is_some_and(|at| at > Instant::now());
         !self.attempt.as_ref().is_some_and(|a| a.purpose == Purpose::Race || a.signing)
-            && self.out.has_unwritten()
-            && (!s.session || self.out.can_write())
+            && (!self.resend.is_empty() || (self.out.has_unwritten() && (!s.session || self.out.can_write())))
+            && (!paced || self.priority_check)
     }
 
     /// Write queued entries, a batch per loop turn. A frame gets its number before the
@@ -1083,9 +1156,41 @@ impl Client {
     /// written again as new; on a session-less socket a failed entry goes back in
     /// front, and nothing behind it moves.
     async fn pump(&mut self) {
+        if self.pace_at.is_some_and(|at| at > Instant::now()) {
+            // The head waits: only small frames for rooms nothing ahead of them touches.
+            self.priority_check = false;
+            while self.pump_priority().await {}
+            return;
+        }
         for _ in 0..PUMP_BATCH {
             if !self.can_pump() {
                 return;
+            }
+            let now = Instant::now();
+            // A resume's frames go first, in order, numbered already.
+            if let Some(frame) = self.resend.front().cloned() {
+                if !self.paced(&frame, now) {
+                    return;
+                }
+                self.resend.pop_front();
+                if !self.write_control(frame.to_message()).await {
+                    return;
+                }
+                continue;
+            }
+            let Some(price) = self.out.front().map(|entry| self.price(entry)) else { return };
+            if let Some(pace) = self.pace.as_mut() {
+                if let Some(at) = pace.wait(price.cost, price.target.as_deref(), now, false) {
+                    self.pace_at = Some(at);
+                    while self.pump_priority().await {}
+                    return;
+                }
+                pace.spend(price.cost, price.target.as_deref(), now);
+                if price.cost.joins > 0
+                    && let Some(room) = &price.room
+                {
+                    self.join_spend.insert(room.clone(), (price.cost, price.sigs));
+                }
             }
             let Some(entry) = self.out.pop() else { return };
             let Some((frame, room_state)) = self.render(&entry) else { continue };
@@ -1106,6 +1211,133 @@ impl Client {
                 return;
             }
         }
+    }
+
+    /// Whether a frame written again may go now, spending its price; else the queue waits.
+    fn paced(&mut self, frame: &Frame, now: Instant) -> bool {
+        let Some(pace) = self.pace.as_mut() else { return true };
+        let cost = relay_pace::cost(frame, &self.rooms);
+        let target = relay_pace::target(frame);
+        if let Some(at) = pace.wait(cost, target.as_deref(), now, false) {
+            self.pace_at = Some(at);
+            return false;
+        }
+        pace.spend(cost, target.as_deref(), now);
+        true
+    }
+
+    /// What an unwritten entry costs at the relay, priced from the command where it can
+    /// be (a file chunk is never copied to be priced).
+    fn price(&self, entry: &Entry<WsCommand>) -> Price {
+        let rooms = &self.rooms;
+        let of_frame = |f: &Frame| Price {
+            cost: relay_pace::cost(f, rooms),
+            target: relay_pace::target(f),
+            room: relay_pace::room_of(f),
+            to: relay_pace::device_of(f),
+            sigs: 0,
+            room_state: false,
+        };
+        let cmd = match entry {
+            Entry::Frame(f) => return of_frame(f),
+            Entry::Command(c) | Entry::Replay(c) => c,
+        };
+        let at = |room: &String, cost, target: Option<&String>| Price {
+            cost,
+            target: target.cloned(),
+            room: Some(room.clone()),
+            to: None,
+            sigs: 0,
+            room_state: false,
+        };
+        match cmd {
+            WsCommand::JoinRoom { room_code } => {
+                Price { room_state: true, ..at(room_code, relay_pace::join_cost(rooms, room_code, 0), None) }
+            }
+            WsCommand::JoinInbox { room_code, roster } => {
+                let sigs = serde_json::to_string(roster).map_or(0, |t| t.matches("\"sig\"").count() as i64);
+                Price { sigs, room_state: true, ..at(room_code, relay_pace::join_cost(rooms, room_code, sigs), None) }
+            }
+            WsCommand::LeaveRoom { room_code } => {
+                Price { room_state: true, ..at(room_code, relay_pace::broadcast_cost(rooms, room_code), None) }
+            }
+            WsCommand::SendToRoom { room_code, .. }
+            | WsCommand::SendPublic { room_code, .. }
+            | WsCommand::SendToRoomTopic { room_code, .. } => at(room_code, relay_pace::broadcast_cost(rooms, room_code), None),
+            WsCommand::SendDirect { room_code, target_peer, .. } | WsCommand::SendDirectImage { room_code, target_peer, .. } => {
+                Price { to: Some(target_peer.clone()), ..at(room_code, relay_pace::direct_cost(rooms, room_code), Some(target_peer)) }
+            }
+            WsCommand::SendBinaryDirect { room_code, target_peer, .. } => {
+                Price { to: Some(target_peer.clone()), ..at(room_code, relay_pace::direct_cost(rooms, room_code), None) }
+            }
+            WsCommand::SendChannelDirect { room_code, target_peer, .. } => {
+                Price { to: Some(target_peer.clone()), ..at(room_code, relay_pace::Cost { w: 1, joins: 0 }, Some(target_peer)) }
+            }
+            WsCommand::Subscribe { .. } | WsCommand::SetOfflineBuffer { .. } => {
+                Price { room_state: true, ..command_frame(cmd).map(|f| of_frame(&f)).unwrap_or_default() }
+            }
+            _ => command_frame(cmd).map(|f| of_frame(&f)).unwrap_or_default(),
+        }
+    }
+
+    /// While the head waits: the first small frame that passes no earlier entry for its
+    /// room or for any device it reaches goes, if the mirror holds it above the priority
+    /// reserve (call signals, a reply in a DM). Wire order stays program order per room and
+    /// per device (an Olm pre-key frame stays ahead of what follows it, MED 3), and the relay
+    /// counts in write order, so this changes nothing it judges. True when one was written.
+    async fn pump_priority(&mut self) -> bool {
+        let Some(s) = &self.socket else { return false };
+        if !self.resend.is_empty() || (s.session && !self.out.can_write()) || self.pace.is_none() {
+            return false;
+        }
+        let mut rooms: HashSet<String> = HashSet::new();
+        let mut devices: HashSet<String> = HashSet::new();
+        let mut pick = None;
+        for (i, entry) in self.out.unwritten().enumerate().take(PRIORITY_SCAN) {
+            let price = self.price(entry);
+            let Some(room) = price.room.clone() else { continue };
+            let small = i > 0 && !price.room_state && price.cost.joins == 0 && price.cost.w <= relay_pace::PRIORITY_MAX_W;
+            // A direct reaches its device; a room frame every device listed in its room.
+            let audit = &self.rooms.audit;
+            let passes_a_device = match &price.to {
+                Some(d) => devices.contains(d) || rooms.iter().any(|r| audit.told_has(r, d)),
+                None => devices.iter().any(|d| audit.told_has(&room, d)),
+            };
+            if small && !rooms.contains(&room) && !passes_a_device && self.rooms.joined.contains(&room) {
+                pick = Some((i, price));
+                break;
+            }
+            rooms.insert(room);
+            if let Some(d) = price.to {
+                devices.insert(d);
+            }
+        }
+        let Some((i, price)) = pick else { return false };
+        let now = Instant::now();
+        let Some(pace) = self.pace.as_mut() else { return false };
+        if pace.wait(price.cost, price.target.as_deref(), now, true).is_some() {
+            return false;
+        }
+        pace.spend(price.cost, price.target.as_deref(), now);
+        let Some(entry) = self.out.take(i) else { return false };
+        let Some((frame, room_state)) = self.render(&entry) else { return true };
+        let session = self.socket.as_ref().is_some_and(|s| s.session);
+        if session && relay_session::client_frame_counts(&frame) > 0 {
+            self.out.record(frame.clone(), room_state);
+        }
+        let sent = match self.socket.as_mut() {
+            Some(s) => bounded_send(&mut s.write, frame.to_message()).await,
+            None => Err("no socket".to_string()),
+        };
+        if let Err(e) = sent {
+            hollow_log!("[HOLLOW-WS] Send failed: {e}");
+            if !session {
+                self.out.unpop(entry);
+            }
+            self.drop_socket(Why::SendFailed).await;
+            return false;
+        }
+        true
     }
 
     /// The frame an entry becomes on this socket, and whether it is room state a
@@ -1279,6 +1511,17 @@ impl Client {
     fn on_text(&mut self, text: &str) {
         let Ok(msg) = serde_json::from_str::<ServerMsg>(text) else { return };
         let session = self.socket.as_ref().is_some_and(|s| s.session);
+        if let ServerMsg::Members { room, peers, .. } = &msg {
+            // Itself last; a list lifts the room's price for a while, and a join's answer
+            // says what the join cost.
+            let listed = peers.len().saturating_sub(1) as u32;
+            let now = Instant::now();
+            let kept = self.rooms.listed.get(room).filter(|(_, at)| at.elapsed() < LISTED_FOR).map_or(0, |(n, _)| *n);
+            self.rooms.listed.insert(room.clone(), (listed.max(kept), now));
+            if let (Some(pace), Some((spent, sigs))) = (self.pace.as_mut(), self.join_spend.remove(room)) {
+                pace.refund(relay_pace::join_refund(&self.rooms, room, listed, spent, sigs));
+            }
+        }
         match msg {
             ServerMsg::HbAck { h, now } => {
                 if let Some(secs) = now.as_ref().and_then(serde_json::Value::as_u64) {
@@ -1295,7 +1538,16 @@ impl Client {
                     self.out.ack(h);
                 }
             }
-            ServerMsg::Reconnect { after_ms } => {
+            ServerMsg::Reconnect { after_ms, breaker: true } => {
+                let wait = Duration::from_millis(after_ms).min(relay_session::MAX_BREAKER_WAIT);
+                hollow_log!("[HOLLOW-WS] The relay paused this connection for {} s", wait.as_secs().max(1));
+                let until = Instant::now() + wait;
+                self.cooldown_until = Some(until);
+                // The relay holds the session through the pause and its grace after it.
+                self.suspended_at = Some(until);
+                self.breaker_paused = true;
+            }
+            ServerMsg::Reconnect { after_ms, .. } => {
                 let wait = relay_session::drain_wait(after_ms);
                 hollow_log!("[HOLLOW-WS] The relay is restarting: resuming in {}ms", wait.as_millis());
                 self.drain_at = Some(Instant::now() + wait);
@@ -1328,6 +1580,7 @@ impl Client {
     }
 
     async fn send_ack(&mut self) -> bool {
+        self.spend_control(1);
         let h = self.inbound.acked();
         self.write_control(relay_session::ack_frame(h).to_message()).await
     }
@@ -1338,6 +1591,9 @@ impl Client {
         let Some(socket) = self.socket.as_mut() else { return false };
         let msg = if socket.session {
             self.flag.beat_sent();
+            if let Some(pace) = self.pace.as_mut() {
+                pace.spend(relay_pace::Cost { w: 1, joins: 0 }, None, Instant::now());
+            }
             relay_session::hb_frame(self.inbound.acked()).to_message()
         } else {
             Message::Ping(vec![0x01].into())
@@ -1354,14 +1610,26 @@ impl Client {
             return true;
         }
         self.flag.wrote(self.background);
+        self.spend_control(1 + self.rooms.joined.len() as i64);
         let frame = if self.background { relay_session::INACTIVE } else { relay_session::ACTIVE };
         self.write_control(Message::Text(frame.into())).await
+    }
+
+    /// A frame the relay charges and never refuses (an ack, a heartbeat, the flag): spent,
+    /// never waited for.
+    fn spend_control(&mut self, w: i64) {
+        if let Some(pace) = self.pace.as_mut() {
+            pace.spend(relay_pace::Cost { w, joins: 0 }, None, Instant::now());
+        }
     }
 
     // -- Timers --
 
     async fn on_timers(&mut self) {
         let now = Instant::now();
+        if self.pace_at.is_some_and(|at| now >= at) {
+            self.pace_at = None;
+        }
         if self.suspending.as_ref().is_some_and(|s| now >= s.until) {
             self.finish_suspend().await;
         }
@@ -1504,13 +1772,16 @@ impl Client {
         if !skips_backoff {
             return;
         }
+        // Nothing, focus, push or a network change included, dials before a breaker pause ends.
+        let paused = self.cooldown_until.is_some_and(|c| c > now);
         match &self.attempt {
-            Some(a) if now.saturating_duration_since(a.started) >= self.timing.nudge_quiet => {
+            Some(a) if !paused && now.saturating_duration_since(a.started) >= self.timing.nudge_quiet => {
                 hollow_log!("[HOLLOW-WS] Nudge ({reason}): starting the connect over");
                 self.attempt = None;
                 self.start_attempt(Purpose::Connect);
             }
             Some(_) => {}
+            None if paused => {}
             None => {
                 hollow_log!("[HOLLOW-WS] Nudge ({reason}): connecting now");
                 self.drain_at = None;
@@ -1556,7 +1827,7 @@ impl Client {
     async fn check_suspend(&mut self) {
         let Some(session) = self.socket.as_ref().map(|s| s.session) else { return };
         let Some(asked) = self.suspending.as_ref().map(|s| s.asked) else { return };
-        if self.out.has_unwritten() {
+        if self.out.has_unwritten() || !self.resend.is_empty() {
             return;
         }
         if !session || self.out.all_acked() {
@@ -1671,6 +1942,12 @@ impl Client {
                 if matches!(e, ConnectError::Refused(_) | ConnectError::License(_)) {
                     self.refused = true;
                 }
+                if let ConnectError::Cooldown(wait) = &e {
+                    // Not a refusal: the relay holds the session for the pause and its grace.
+                    let until = Instant::now() + *wait;
+                    self.cooldown_until = Some(until);
+                    self.suspended_at = Some(until);
+                }
                 match attempt.purpose {
                     // The old socket is still being judged; the dead rule decides it.
                     Purpose::Race => return,
@@ -1699,7 +1976,7 @@ impl Client {
                         self.stopped = true;
                         return;
                     }
-                    ConnectError::Refused(_) | ConnectError::Other(_) => {}
+                    ConnectError::Refused(_) | ConnectError::Other(_) | ConnectError::Cooldown(_) => {}
                 }
                 if !held {
                     let _ = self.event_tx.send(WsEvent::SessionLost);
@@ -1746,11 +2023,18 @@ impl Client {
         let now = Instant::now();
         let (write, read) = stream.split();
         match established {
-            Established::Fresh { sid, lost } => {
+            Established::Fresh { sid, lost, credit, enforced } => {
                 if lost {
                     self.lose_session();
                 }
-                self.notify(relay_session::on_established(&Established::Fresh { sid: sid.clone(), lost }));
+                self.notify(relay_session::on_established(&Established::Fresh { sid: sid.clone(), lost, credit, enforced }));
+                // A relay with a breaker says where it started this session; mirror from
+                // there, and wait only if it enforces.
+                self.pace = credit.map(|c| relay_pace::Pacer::fresh(c, enforced, now));
+                self.pace_at = None;
+                self.resend.clear();
+                self.join_spend.clear();
+                self.breaker_paused = false;
                 let session = sid.is_some();
                 self.session_door = sid.as_ref().map(|_| door.clone());
                 self.sid = sid;
@@ -1763,7 +2047,7 @@ impl Client {
                 self.replay_rooms();
                 self.sync_flag().await;
             }
-            Established::Resumed { h, gap, reprove } => {
+            Established::Resumed { h, gap, reprove, enforced } => {
                 let Some(resend) = self.out.resume(h) else {
                     hollow_log!("[HOLLOW-WS] The relay resumed numbers that are not ours: starting a fresh session");
                     self.notify(relay_session::on_resume_refused());
@@ -1772,7 +2056,7 @@ impl Client {
                     self.reconnect_at = Some(now);
                     return;
                 };
-                self.notify(relay_session::on_established(&Established::Resumed { h, gap, reprove }));
+                self.notify(relay_session::on_established(&Established::Resumed { h, gap, reprove, enforced }));
                 if reprove {
                     self.session_door = Some(door.clone());
                 }
@@ -1784,22 +2068,32 @@ impl Client {
                     resend.len(),
                     if gap { ", the relay's ring had a gap" } else { "" }
                 );
-                if !self.sync_flag().await {
-                    return;
-                }
-                for frame in resend {
-                    if !self.write_control(frame.to_message()).await {
-                        return;
+                if let Some(pace) = self.pace.as_mut() {
+                    pace.enforce(enforced);
+                    if self.breaker_paused {
+                        pace.after_breaker(now);
+                    } else {
+                        if reprove {
+                            pace.restored(now);
+                        }
+                        pace.resumed(self.rooms.joined.len(), now);
                     }
                 }
+                self.breaker_paused = false;
+                self.pace_at = None;
+                // Written by the pump, through the pacer, ahead of the reprove joins.
+                self.resend = resend.into();
                 if reprove {
                     self.reprove_doors();
                 }
+                // A failed write already took the socket down; nothing follows here.
+                let _ = self.sync_flag().await;
             }
         }
     }
 
     fn up(&mut self, now: Instant) {
+        self.cooldown_until = None;
         self.backoff.reset();
         self.license_busy_notified = false;
         self.reconnect_at = None;
@@ -1812,6 +2106,10 @@ impl Client {
     /// The session is gone: its unacked data waits for the next one, its numbers and
     /// joins start over.
     fn lose_session(&mut self) {
+        self.pace = None;
+        self.pace_at = None;
+        self.resend.clear();
+        self.join_spend.clear();
         self.rooms.audit.clear();
         self.out.lose_session();
         self.inbound = Inbound::default();
@@ -1870,7 +2168,7 @@ impl Client {
                 None => now + self.retry_wait(),
             },
         };
-        self.reconnect_at = Some(at);
+        self.reconnect_at = Some(self.cooldown_until.map_or(at, |c| at.max(c)));
     }
 
     fn retry_wait(&mut self) -> Duration {
@@ -2131,6 +2429,7 @@ fn command_frame(cmd: &WsCommand) -> Option<Frame> {
         | WsCommand::JoinInbox { .. }
         | WsCommand::LeaveRoom { .. }
         | WsCommand::SetDoor { .. }
+        | WsCommand::RoomBound { .. }
         | WsCommand::Carry { .. }
         | WsCommand::AfterSave { .. }
         | WsCommand::AfterMlsSave { .. }
@@ -2160,6 +2459,9 @@ pub(crate) enum ConnectError {
     /// The relay turned the socket away (a 1008 close, `auth_failed`): each such socket
     /// spends its per-address budget, so the next try waits the full backoff.
     Refused(String),
+    /// The relay's circuit breaker paused our session: try again after this long. The
+    /// session is held meanwhile, so this is no refusal.
+    Cooldown(Duration),
     Other(String),
 }
 
@@ -2195,6 +2497,7 @@ impl std::fmt::Display for ConnectError {
         match self {
             Self::License(r) => write!(f, "{}", r.code()),
             Self::Refused(why) => write!(f, "refused by the relay ({why})"),
+            Self::Cooldown(wait) => write!(f, "the relay paused this connection for {} s", wait.as_secs().max(1)),
             Self::Other(e) => write!(f, "{e}"),
         }
     }
@@ -2332,7 +2635,7 @@ async fn dial_websocket(url: &str) -> Result<(WsStream, Option<(SocketAddr, Sock
         .map_err(|e| format!("WebSocket connect failed: {e}"))?;
     limit_unacked_send_time(&tcp);
     let path = tcp.local_addr().ok().zip(tcp.peer_addr().ok());
-    let (stream, _response) = tokio_tungstenite::client_async_tls_with_config(request, tcp, None, None)
+    let (stream, _response) = tokio_tungstenite::client_async_tls_with_config(request, tcp, None, extra_trust())
         .await
         .map_err(|e| format!("WebSocket connect failed: {e}"))?;
     Ok((stream, path))
@@ -2349,6 +2652,42 @@ fn dial_override() -> Option<String> {
 #[cfg(not(debug_assertions))]
 fn dial_override() -> Option<String> {
     None
+}
+
+/// Debug builds only: a `relay_ca.pem` in the data dir is trusted beside the public
+/// roots, so the fleet can put a test relay behind the relay's own name.
+#[cfg(debug_assertions)]
+fn extra_trust() -> Option<tokio_tungstenite::Connector> {
+    extra_trust_in(&crate::identity::data_dir().ok()?)
+}
+
+/// A release build looks for no data dir on a dial (identity::data_dir creates it).
+#[cfg(not(debug_assertions))]
+fn extra_trust() -> Option<tokio_tungstenite::Connector> {
+    None
+}
+
+/// A release build never opens the file, whatever lies in the data dir.
+#[cfg(all(test, not(debug_assertions)))]
+fn extra_trust_in(_dir: &std::path::Path) -> Option<tokio_tungstenite::Connector> {
+    None
+}
+
+#[cfg(debug_assertions)]
+fn extra_trust_in(dir: &std::path::Path) -> Option<tokio_tungstenite::Connector> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+    let pem = std::fs::read(dir.join("relay_ca.pem")).ok()?;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    for cert in CertificateDer::pem_slice_iter(&pem) {
+        roots.add(cert.ok()?).ok()?;
+    }
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .ok()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Some(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
 }
 
 #[cfg(debug_assertions)]
@@ -2478,7 +2817,10 @@ async fn sign_in(
         .map_err(|e| format!("Failed to send auth: {e}"))?;
 
     match read_auth_reply(&mut read, timing.auth_reply).await? {
-        (AuthReply::AuthFailed { error }, _) => Err(match LicenseRefusal::from_code(&error) {
+        (reply @ AuthReply::AuthFailed { .. }, _) if relay_session::cooldown(&reply).is_some() => {
+            Err(ConnectError::Cooldown(relay_session::cooldown(&reply).unwrap_or_default()))
+        }
+        (AuthReply::AuthFailed { error, .. }, _) => Err(match LicenseRefusal::from_code(&error) {
             Some(refusal) => ConnectError::License(refusal),
             None => ConnectError::Refused(log_word(&error)),
         }),
@@ -2929,6 +3271,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     fn the_fleet_dial_override_takes_only_one_address() {
         let dir = crate::test_tmp::tempdir().unwrap();
         assert_eq!(dial_override_in(dir.path()), None, "no file, the relay's own address");
@@ -2939,6 +3282,29 @@ mod tests {
             assert_eq!(dial_override_in(dir.path()), None, "{junk:?} is not one address");
         }
     }
+
+    /// The fleet's extra trust anchor: only a PEM certificate file adds one.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn the_fleet_trust_anchor_takes_only_a_certificate() {
+        let dir = crate::test_tmp::tempdir().unwrap();
+        assert!(extra_trust_in(dir.path()).is_none(), "no file, the public roots alone");
+        std::fs::write(dir.path().join("relay_ca.pem"), "-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----\n").unwrap();
+        assert!(extra_trust_in(dir.path()).is_none(), "a broken certificate adds nothing");
+        std::fs::write(dir.path().join("relay_ca.pem"), TEST_CA).unwrap();
+        assert!(extra_trust_in(dir.path()).is_some());
+    }
+
+    /// Runs in both profiles: a release build trusts nothing beyond the public roots,
+    /// even with a valid `relay_ca.pem` in the data dir.
+    #[test]
+    fn only_a_debug_build_reads_the_fleet_trust_anchor() {
+        let dir = crate::test_tmp::tempdir().unwrap();
+        std::fs::write(dir.path().join("relay_ca.pem"), TEST_CA).unwrap();
+        assert_eq!(extra_trust_in(dir.path()).is_some(), cfg!(debug_assertions));
+    }
+
+    const TEST_CA: &str = "-----BEGIN CERTIFICATE-----\nMIIC3jCCAcagAwIBAgIJAKri/RG2wNyJMA0GCSqGSIb3DQEBCwUAMBwxGjAYBgNV\nBAMMEUhvbGxvdyBHMiB0ZXN0IENBMB4XDTI2MTAyMzA2MTQzMFoXDTI2MTEyMjA2\nMTQzMFowHDEaMBgGA1UEAwwRSG9sbG93IEcyIHRlc3QgQ0EwggEiMA0GCSqGSIb3\nDQEBAQUAA4IBDwAwggEKAoIBAQC9z7ytH8jJ9f9HxP3rPkK/dyXXAY823wDLM+jA\nQ1VmpoAmmIeTm2fhMf2zeHFWHIS3AUus5vMOGa+vrs2RcXtioPic7p1aiV5cDmik\nvvwtUT10mo0TQ9se2+duyME1NLoh5HhASx9XasgKsZacM3mlHSKQPilml6cn7o9h\nSyur447AYyZfjwi//QBWDADY9lNGioUdIXvFK/gVc+G7GqBJE53Jk0ONxW4sQQXO\nR8wuXIKGtlLwNG0LcIQWio3GoeQ3Y+x2c8+KEDylov4Y5yOiNV8MWxV+ENGchdFK\n/fl86hmoxkjT66Q4WDw3ybyLQNFuD6dhGp87Ve7SftYDTHSHAgMBAAGjIzAhMA8G\nA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3DQEBCwUAA4IB\nAQC5jKbLWzcHy91ybTEixul+rGHCT8W39PRnSaHjGgk+6GcCN9OaHIeaNdh9znHB\nFn5+8WqERu/mAwfZOq11jXQIXyRAkgR38PMJHM6gzWq5m+EmmpQzjmgSJQJublV7\n2qRoK6hxKkKV7w/bj8uYyeTGD55TxjAJUg4eIhnX9mibMyMSXAY2H8QlNX47SmDc\nrHkNQy81QTTE5lZf8AMDXySAPP1VczSaQZeE4DAQ1R/pNqa9i2mVWNkszgheBJz2\nOMPIaH9deFohKlgto8ks2yqg57y378hrGiUvusgU6wrnprF1WIkXzFByeW8chc4g\nmHIYC0j8hO4nKC48GjfuclrR\n-----END CERTIFICATE-----\n";
 
     #[test]
     fn test_auth_message_format() {
