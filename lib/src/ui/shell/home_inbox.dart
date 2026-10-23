@@ -294,8 +294,8 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
                     "${_addedLabel(a.createdAt.toInt())}. If you didn't add it, "
                     'remove it.'
                 : '${name(added.device)} joined your identity '
-                    '${_addedLabel(a.createdAt.toInt())} and has been removed '
-                    'since.',
+                    '${_addedLabel(a.createdAt.toInt())} and has since been '
+                    'removed.',
             secondaryLabel: 'Dismiss',
             onSecondary: () => ref
                 .read(securityAlertsProvider.notifier)

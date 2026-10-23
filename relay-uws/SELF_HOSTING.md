@@ -339,15 +339,15 @@ and no new ports open.
 `harden-host.sh` opens exactly these. If your provider has its own firewall in
 front of the VPS, open them there too.
 
-TURN may relay only to this machine's own address, and coturn's settings cannot
-limit which ports there it reaches. `deploy/turn-port-lock.sh` adds a firewall
+TURN may relay only to this machine's own address, but coturn has no setting
+that limits which ports on it TURN can reach. `deploy/turn-port-lock.sh` adds a firewall
 rule that keeps TURN to coturn's relay ports and the forwarder's, and reserves
 those ports so no other program's connections land in them. The steps to install
 it are at the top of `deploy/hollow-turn-port-lock.service`, and
 `deploy/check-host.sh` checks it. Under Docker the lock starts before Docker
 does, and a timer loads it again every minute in case anything clears the
-firewall. Keep other services out of 49152 to 65535. Two things follow from the lock.
-A Hollow app running on the relay machine itself cannot use TURN, because coturn's
+firewall. Keep other services out of ports 49152 to 65535. With the lock in
+place, a Hollow app running on the relay machine itself cannot use TURN, because coturn's
 replies to it are dropped, though its direct connections still work. And a service
 that runs under the same account as coturn is held to the same ports.
 
@@ -438,9 +438,9 @@ one person's report counting twice it also keeps a one-way fingerprint of each
 report, made with a random key that exists only in the relay's memory and is
 never written to disk, so the reports file can't confirm who reported whom. The
 key is carried across a restart the same way the offline buffers are. Under
-Docker, and after a reboot, the relay starts with a new key, drops the old
-fingerprints and keeps the counts, so a repeat of an old report counts once
-more. Relays before 0.13 kept the key in `reports.json.key`; the
+Docker every restart gives the relay a new key, and so does a reboot without
+Docker. It then drops the old fingerprints and keeps the counts, so a repeat of
+an old report counts once more. Relays before 0.13 kept the key in `reports.json.key`; the
 first start of a newer relay overwrites that file with zeros and deletes it.
 
 ## Starting on boot

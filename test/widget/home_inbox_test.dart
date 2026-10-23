@@ -153,7 +153,7 @@ void main() {
       deviceKindProvider.overrideWith(_Kinds.new),
     ]);
     expect(find.text('Desktop added a device'), findsOneWidget);
-    expect(find.textContaining('has been removed since'), findsOneWidget);
+    expect(find.textContaining('has since been removed'), findsOneWidget);
     expect(find.textContaining('added a device and removed it again'), findsOneWidget);
     expect(find.textContaining('added a new device'), findsNothing,
         reason: 'a device removed since is not a new device');
