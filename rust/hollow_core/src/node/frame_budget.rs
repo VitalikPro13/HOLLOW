@@ -1,6 +1,6 @@
-//! Per-peer frame budgets. Every node takes a sender device's frames through one
-//! bucket; what the bucket drops is asked for again from that sender once the bucket
-//! has refilled. Our own catch-up bulk to one device goes paced against the same
+//! Per-peer frame budgets. Every node takes a sender device's frames through a bucket
+//! per [`Route`]; what a bucket drops is asked for again from that sender once its
+//! buckets have refilled. Our own catch-up bulk to one device goes paced against the same
 //! numbers, so a well-behaved sender stays inside the receiver's bucket.
 
 use std::collections::{HashMap, VecDeque};
@@ -23,6 +23,15 @@ const HOLD: Duration = Duration::from_secs(6);
 /// leaves room for its live traffic and the answers to its asks.
 const PACE_BURST: f64 = (BURST / 5) as f64;
 const PACE_PER_SEC: f64 = (REFILL_PER_SEC / 2) as f64;
+
+/// Which of a sender's two buckets a frame takes from. A room or topic broadcast (a
+/// ring replay of a busy channel among them) never empties the bucket that frames
+/// addressed to us ride, where a sender's roster, profile answer and Welcome come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Route {
+    Direct,
+    Broadcast,
+}
 
 /// What the bucket did with one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,10 +90,11 @@ impl Bucket {
     }
 }
 
-/// The inbound token bucket per sender device, and the senders it dropped frames from.
+/// The inbound token buckets per sender device and route, and the senders they dropped
+/// frames from.
 #[derive(Default)]
 pub(crate) struct Limiter {
-    buckets: HashMap<String, Bucket>,
+    buckets: HashMap<(String, Route), Bucket>,
     /// Sender -> (first drop, frames dropped) since its last repair.
     dropped: HashMap<String, (Instant, u32)>,
     repaired_at: HashMap<String, Instant>,
@@ -93,9 +103,9 @@ pub(crate) struct Limiter {
 }
 
 impl Limiter {
-    /// Take one frame from `from`, or drop it and remember that it was dropped.
-    pub(crate) fn admit(&mut self, from: &str, now: Instant) -> Admission {
-        let bucket = self.buckets.entry(from.to_string()).or_insert(Bucket { tokens: BURST, last: now });
+    /// Take one frame from `from` on `route`, or drop it and remember that it was dropped.
+    pub(crate) fn admit(&mut self, from: &str, route: Route, now: Instant) -> Admission {
+        let bucket = self.buckets.entry((from.to_string(), route)).or_insert(Bucket { tokens: BURST, last: now });
         bucket.refill(from, now);
         if bucket.tokens > 0 {
             bucket.tokens -= 1;
@@ -119,15 +129,18 @@ impl Limiter {
     }
 
     /// Senders to ask again now, with how many frames each lost: one entry per sender
-    /// however much it sent, only once its bucket is full again (it stopped flooding),
-    /// and never within [`REPAIR_COOLDOWN`] of its last repair.
+    /// however much it sent, only once both its buckets are full again (it stopped
+    /// flooding), and never within [`REPAIR_COOLDOWN`] of its last repair.
     pub(crate) fn due_repairs(&mut self, now: Instant) -> Vec<(String, u32)> {
         let due: Vec<String> = self
             .dropped
             .keys()
             .filter(|peer| {
-                let refilled =
-                    self.buckets.get(*peer).is_none_or(|b| b.tokens.saturating_add(b.whole_refill(peer, now)) >= BURST);
+                let refilled = [Route::Direct, Route::Broadcast].iter().all(|route| {
+                    self.buckets
+                        .get(&((*peer).clone(), *route))
+                        .is_none_or(|b| b.tokens.saturating_add(b.whole_refill(peer, now)) >= BURST)
+                });
                 let cooled = self
                     .repaired_at
                     .get(*peer)
@@ -145,6 +158,11 @@ impl Limiter {
             .collect()
     }
 
+    /// Whether `peer` has sent us a frame within the idle window [`Self::forget_idle`] keeps.
+    pub(crate) fn knows(&self, peer: &str) -> bool {
+        [Route::Direct, Route::Broadcast].iter().any(|r| self.buckets.contains_key(&(peer.to_string(), *r)))
+    }
+
     /// TEST-ONLY: every frame dropped so far, per sender.
     #[cfg(test)]
     pub(crate) fn dropped_totals(&self) -> HashMap<String, u64> {
@@ -155,7 +173,8 @@ impl Limiter {
     pub(crate) fn forget_idle(&mut self, idle: Duration, now: Instant) {
         self.buckets.retain(|_, b| now.saturating_duration_since(b.last) < idle);
         let buckets = &self.buckets;
-        self.dropped.retain(|peer, _| buckets.contains_key(peer));
+        self.dropped
+            .retain(|peer, _| [Route::Direct, Route::Broadcast].iter().any(|r| buckets.contains_key(&(peer.clone(), *r))));
         self.repaired_at.retain(|_, at| now.saturating_duration_since(*at) < idle.max(REPAIR_COOLDOWN));
     }
 }
@@ -172,6 +191,24 @@ fn is_dm_copy(json: &str) -> bool {
             | MessageEnvelope::RemoveReaction { .. }
             | MessageEnvelope::LinkPreviewSet { .. })
     )
+}
+
+/// Drop our parked profile asks to each device `stale` names (one we still cannot place,
+/// with no Olm session, silent past the limiter's idle window): the drop repair parks
+/// one per unplaced flooder, and nothing else would ever empty those queues.
+pub(crate) fn forget_stale_profile_asks(pending: &mut HashMap<String, Vec<String>>, stale: impl Fn(&str) -> bool) {
+    let is_profile_ask = |json: &String| {
+        matches!(
+            serde_json::from_str::<MessageEnvelope>(json),
+            Ok(MessageEnvelope::Carried { msg, .. }) if matches!(*msg, HavenMessage::ProfileRequest)
+        )
+    };
+    pending.retain(|device, queue| {
+        if stale(device) {
+            queue.retain(|json| !is_profile_ask(json));
+        }
+        !queue.is_empty()
+    });
 }
 
 /// One frame of our bulk to a device, in the order it was paced.
@@ -558,11 +595,58 @@ mod tests {
     fn the_bucket_admits_its_burst_then_its_refill() {
         let t0 = Instant::now();
         let mut l = Limiter::default();
-        let admitted = (0..300).filter(|_| l.admit("p", t0) == Admission::Admitted).count();
+        let admitted = (0..300).filter(|_| l.admit("p", Route::Broadcast, t0) == Admission::Admitted).count();
         assert_eq!(admitted, BURST as usize, "a burst at one instant gets the bucket");
-        let later = (0..300).filter(|_| l.admit("p", at(t0, 1000)) == Admission::Admitted).count();
+        let later = (0..300).filter(|_| l.admit("p", Route::Broadcast, at(t0, 1000)) == Admission::Admitted).count();
         assert_eq!(later, REFILL_PER_SEC as usize, "a second later, one second of refill");
-        assert_eq!(l.admit("q", t0), Admission::Admitted, "each sender has its own bucket");
+        assert_eq!(l.admit("q", Route::Broadcast, t0), Admission::Admitted, "each sender has its own bucket");
+    }
+
+    #[test]
+    fn a_broadcast_flood_leaves_the_direct_bucket_whole_and_one_repair_waits_for_both() {
+        let t0 = Instant::now();
+        let mut l = Limiter::default();
+        let broadcast = (0..300).filter(|_| l.admit("p", Route::Broadcast, t0) == Admission::Admitted).count();
+        assert_eq!(broadcast, BURST as usize, "the broadcast bucket takes its burst");
+        let direct = (0..300).filter(|_| l.admit("p", Route::Direct, t0) == Admission::Admitted).count();
+        assert_eq!(direct, BURST as usize, "the direct bucket is untouched by the broadcast flood");
+        assert_eq!(l.due_repairs(at(t0, 5_100)).len(), 1, "both refilled: one repair for the sender");
+        for _ in 0..150 {
+            l.admit("q", Route::Broadcast, t0);
+        }
+        for _ in 0..150 {
+            l.admit("q", Route::Direct, at(t0, 4_000));
+        }
+        assert!(l.due_repairs(at(t0, 5_100)).iter().all(|(p, _)| p != "q"), "a direct bucket still refilling holds the repair");
+        assert!(l.due_repairs(at(t0, 9_100)).iter().any(|(p, _)| p == "q"), "both full: repaired");
+    }
+
+    #[test]
+    fn a_sender_still_heard_on_one_route_keeps_its_repair() {
+        let t0 = Instant::now();
+        let mut l = Limiter::default();
+        for _ in 0..150 {
+            l.admit("p", Route::Broadcast, t0);
+        }
+        l.admit("p", Route::Direct, at(t0, 200_000));
+        l.forget_idle(Duration::from_secs(300), at(t0, 301_000));
+        assert!(l.knows("p"), "the direct bucket is not idle");
+        assert!(l.due_repairs(at(t0, 302_000)).iter().any(|(p, _)| p == "p"), "the idle broadcast bucket took the repair with it");
+    }
+
+    #[test]
+    fn stale_profile_asks_are_dropped_and_everything_else_stays() {
+        let ask = super::super::olm_lane::carried_json(&HavenMessage::ProfileRequest).expect("a carried ask");
+        let other = super::super::olm_lane::carried_json(&HavenMessage::FriendListRequest).expect("a carried request");
+        let mut pending: HashMap<String, Vec<String>> = HashMap::from([
+            ("stale".to_string(), vec![ask.clone(), other.clone()]),
+            ("only-ask".to_string(), vec![ask.clone()]),
+            ("live".to_string(), vec![ask.clone()]),
+        ]);
+        forget_stale_profile_asks(&mut pending, |d| d != "live");
+        assert_eq!(pending.get("stale"), Some(&vec![other]), "only the profile ask goes");
+        assert!(!pending.contains_key("only-ask"), "a queue left empty is forgotten");
+        assert_eq!(pending.get("live"), Some(&vec![ask]), "a device that is not stale keeps its ask");
     }
 
     #[test]
@@ -572,7 +656,7 @@ mod tests {
         let mut firsts = 0;
         // 40 frames a second for ten seconds: twice the refill.
         for ms in (0..10_000).step_by(25) {
-            if l.admit("p", at(t0, ms)) == (Admission::Dropped { first: true }) {
+            if l.admit("p", Route::Broadcast, at(t0, ms)) == (Admission::Dropped { first: true }) {
                 firsts += 1;
             }
             assert!(l.due_repairs(at(t0, ms)).is_empty(), "a repair while the flood goes on, at {ms} ms");
@@ -591,11 +675,11 @@ mod tests {
         let t0 = Instant::now();
         let mut l = Limiter::default();
         for _ in 0..150 {
-            l.admit("p", t0);
+            l.admit("p", Route::Broadcast, t0);
         }
         assert_eq!(l.due_repairs(at(t0, 6_000)).len(), 1, "the first episode is repaired");
         for _ in 0..150 {
-            l.admit("p", at(t0, 7_000));
+            l.admit("p", Route::Broadcast, at(t0, 7_000));
         }
         assert!(l.due_repairs(at(t0, 13_000)).is_empty(), "a refilled bucket inside the cooldown waits");
         assert_eq!(l.due_repairs(at(t0, 36_000)).len(), 1, "after the cooldown the second episode is repaired");
@@ -606,7 +690,7 @@ mod tests {
         let t0 = Instant::now();
         let mut l = Limiter::default();
         for _ in 0..150 {
-            l.admit("p", t0);
+            l.admit("p", Route::Broadcast, t0);
         }
         l.forget_idle(Duration::from_secs(300), at(t0, 301_000));
         assert!(l.due_repairs(at(t0, 302_000)).is_empty());

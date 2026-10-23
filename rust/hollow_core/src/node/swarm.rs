@@ -5395,7 +5395,11 @@ async fn run_event_loop(
                         // Our bare master id is no device (G1), so it pays like anyone.
                         let rate_ok = (!super::resolver::is_bare_master(&from)
                             && super::resolver::same_identity(&from, &local_peer_str))
-                            || match frame_budget.limiter.admit(&from, std::time::Instant::now()) {
+                            || match frame_budget.limiter.admit(
+                                &from,
+                                if direct { super::frame_budget::Route::Direct } else { super::frame_budget::Route::Broadcast },
+                                std::time::Instant::now(),
+                            ) {
                                 super::frame_budget::Admission::Admitted => true,
                                 super::frame_budget::Admission::Dropped { first } => {
                                     if first {
@@ -6341,6 +6345,12 @@ async fn run_event_loop(
                 if eviction_counter % 10 == 0 {
                     let stale = Duration::from_secs(300);
                     frame_budget.limiter.forget_idle(stale, std::time::Instant::now());
+                    super::frame_budget::forget_stale_profile_asks(&mut pending_messages, |device| {
+                        super::resolver::resolve(device) == device
+                            && !super::resolver::is_known_master(device)
+                            && !olm.has_session(device)
+                            && !frame_budget.limiter.knows(device)
+                    });
                     vc_signal_rate_tokens.retain(|_, (_, last)| last.elapsed() < stale);
                     decrypt_fail_cooldown.retain(|_, instant| instant.elapsed() < REKEY_COOLDOWN);
                     channel_sync_sent.retain(|_, instant| instant.elapsed() < Duration::from_secs(30));

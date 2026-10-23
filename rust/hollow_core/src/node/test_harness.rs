@@ -27271,7 +27271,12 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // turn for a hidden device, a late or forged turn commit never relayed, no repair onto
     // a flooder's fork), post spacing that gives each frame a chance to show a fork, and the
     // KeyPackage loop's one-a-second pacing (11.9 s on top of the 858.7 s above, total 870.6 s).
-    const BUDGET_MS: u64 = 870_600;
+    // 2026-10-23: g13w3-ringbucket added two spawn staggers between an owner and a
+    // stranger joiner (+2.4 s).
+    // 2026-10-23 merge: wave g13w3 followups (0.2 s poll step), actor (0.5 s injected
+    // presence settle) and ar35 (two 0.5 s absence proofs) together use the old slack
+    // (+1.7 s, slack kept at 1.0 s).
+    const BUDGET_MS: u64 = 874_700;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -55507,4 +55512,208 @@ async fn ar35_a_friends_live_frame_is_kept_where_strangers_cannot_evict_it() {
         shares
     };
     assert!(wait_until(10, async || shares() == expected).await, "stored shares {:?}, want {expected:?}", shares());
+}
+
+
+// g13w3-ringbucket
+/// A stranger joins a server whose channel ring holds more of the owner's posts than
+/// its bucket for the owner takes, and opens that channel: the replay empties the
+/// bucket just before the owner's direct frames (the Welcome among them) arrive. Those
+/// still land, the joiner takes its seat, and the history follows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_a_joiner_past_a_full_ring_still_gets_its_welcome() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 120, 121, &[]).await;
+    sleep_ms(1200).await; // spawn stagger
+    let mut j = spawn_node_with_friends(&relay, 122, 123, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Busy").await;
+    let general = general_channel_of(&server_id);
+    const POSTS: usize = 150;
+    for i in 0..POSTS {
+        drain_events(&mut o);
+        o.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(),
+                channel_id: general.clone(),
+                text: format!("ring post {i}"),
+                message_id: format!("ring-post-{i}"),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    }
+    drain_and_settle(&relay, &mut o, "ring-posts").await;
+    let topic = super::ring_auth::topic(&o.live_server_state(&server_id).await.expect("O holds its server"), &general);
+    assert!(relay.topic_frames(&server_id, &topic).len() >= POSTS, "the ring holds every post");
+
+    // The joiner's directs to O (its KeyPackage among them) wait until the replay is in,
+    // so O's answers cross it on the wire; J takes exactly what its bucket for O holds.
+    relay.hold_direct(&j.device_id, &o.device_id);
+    super::frame_budget::pause_refill(&o.device_id, true);
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut j, &server_id, 20).await, "the stranger joins");
+    j.cmd_tx
+        .send(NodeCommand::SubscribeChannels { server_id: server_id.clone(), channel_ids: vec![general.clone()] })
+        .await
+        .unwrap();
+    let o_dev = o.device_id.clone();
+    assert!(
+        wait_until(20, async || {
+            drain_events(&mut j);
+            j.rate_dropped_from(&o_dev).await.unwrap_or(0) > 0
+        })
+        .await,
+        "the ring replay never emptied J's bucket for O",
+    );
+    relay.release_held(&j.device_id, &o.device_id);
+    let seated = wait_until(30, async || {
+        drain_events(&mut j);
+        drain_events(&mut o);
+        j.mls_epoch(&server_id).await.is_some()
+    })
+    .await;
+    let dropped = j.rate_dropped_from(&o_dev).await;
+    super::frame_budget::pause_refill(&o.device_id, false);
+    assert!(seated, "the joiner never took its MLS seat ({dropped:?} frames of O's dropped by J's rate limit)");
+
+    let missing = |j: &TestNode| {
+        let held: HashSet<String> = j.channel_messages(&server_id, &general).into_iter().map(|m| m.text).collect();
+        (0..POSTS).filter(|i| !held.contains(&format!("ring post {i}"))).count()
+    };
+    let mut left = POSTS;
+    wait_until(60, async || {
+        drain_events(&mut j);
+        drain_events(&mut o);
+        left = missing(&j);
+        left == 0
+    })
+    .await;
+    assert!(left == 0, "{left} of {POSTS} posts never reached the joiner");
+}
+
+/// A member device we cannot place (its roster was among the drops) floods past the
+/// bucket: no server counts it, so the repair asks it for its profile, whose roster
+/// places it, instead of asking nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn g13w3_a_repair_asks_an_unplaced_member_device_for_its_profile() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 124, 125, &[]).await;
+    sleep_ms(1200).await; // spawn stagger
+    let mut j = spawn_node_with_friends(&relay, 126, 127, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Unplaced").await;
+    let general = general_channel_of(&server_id);
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut j, &server_id, 20).await, "the stranger joins");
+    expect_mls_group(&[&o, &j], &server_id, 30).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    let profile_asks = async |j: &TestNode, to: &str| {
+        j.carried_to(to).await.iter().filter(|m| matches!(m, super::types::HavenMessage::ProfileRequest)).count()
+    };
+    let flood = async |relay: &MockRelay, o: &mut TestNode, j: &mut TestNode, round: &str| {
+        super::frame_budget::pause_refill(&o.device_id, true);
+        let before = j.rate_dropped_from(&o.device_id).await.expect("J answers");
+        for i in 0..150 {
+            drain_events(o);
+            o.cmd_tx
+                .send(NodeCommand::SendChannelMessage {
+                    server_id: server_id.clone(),
+                    channel_id: general.clone(),
+                    text: format!("{round} {i}"),
+                    message_id: format!("{round}-{i}"),
+                    reply_to_mid: None,
+                    link_preview: None,
+                })
+                .await
+                .unwrap();
+        }
+        drain_and_settle(relay, o, round).await;
+        flush_frames(relay, j).await;
+        let dropped = j.rate_dropped_from(&o.device_id).await.expect("J answers") - before;
+        super::frame_budget::pause_refill(&o.device_id, false);
+        assert!(dropped > 0, "the {round} flood fit J's bucket");
+    };
+    let (o_dev, o_master) = (o.device_id.clone(), o.master_id.clone());
+
+    // A device we place gets the member repair and no profile ask.
+    let (profiles, syncs) = (profile_asks(&j, &o_dev).await, sync_asks_to(&j, &o_dev).await.1);
+    flood(&relay, &mut o, &mut j, "placed").await;
+    assert!(
+        wait_until(30, async || {
+            drain_events(&mut j);
+            drain_events(&mut o);
+            sync_asks_to(&j, &o_dev).await.1 > syncs
+        })
+        .await,
+        "the repair never asked the member it places",
+    );
+    assert_eq!(profile_asks(&j, &o_dev).await, profiles, "the repair asked a device it places for its profile");
+
+    // HARNESS HONESTY: the resolver is process-global, so J places O's device through
+    // O's own seat. In the field J holds only what O's roster told it, and that roster
+    // was among the frames the bucket dropped.
+    super::resolver::forget_for_test(&o.device_id);
+    let before = profile_asks(&j, &o_dev).await;
+    // With it, a device that only stamps frames into the server's room without sitting
+    // in it: a stranger, asked nothing. Its repair falls due long before O's, whose
+    // cooldown from the first repair still runs.
+    // So are a removed device still in the room, and a master id a device link names,
+    // which no profile ask may treat as an unplaced device.
+    let x = tag_kp(128).peer_id();
+    let removed = tag_kp(129).peer_id();
+    super::resolver::mark_revoked(std::slice::from_ref(&removed));
+    let (master, its_device) = (tag_kp(130).peer_id(), tag_kp(131).peer_id());
+    super::resolver::seed_self(&master, std::slice::from_ref(&its_device));
+    let junk_senders = [x.clone(), removed.clone(), master.clone()];
+    for sender in &junk_senders[1..] {
+        relay.inject_presence(&j.device_id, &server_id, sender);
+    }
+    // O also shows up in rooms J holds no seat in, so only an ask addressed to the
+    // server's room reaches it.
+    for i in 0..30 {
+        relay.inject_presence(&j.device_id, &format!("g13w3-elsewhere-{i}"), &o_dev);
+    }
+    let mark = relay.log_mark();
+    for sender in &junk_senders {
+        super::frame_budget::pause_refill(sender, true);
+        for i in 0..150u32 {
+            relay.inject_raw_direct(&server_id, sender, &j.device_id, format!("junk {i}").into_bytes());
+        }
+    }
+    flood(&relay, &mut o, &mut j, "unplaced").await;
+    for sender in &junk_senders {
+        let junk_dropped = j.rate_dropped_from(sender).await.unwrap_or(0);
+        super::frame_budget::pause_refill(sender, false);
+        assert!(junk_dropped > 0, "{sender}'s junk fit J's bucket");
+    }
+    let asked = wait_until(40, async || {
+        drain_events(&mut j);
+        drain_events(&mut o);
+        profile_asks(&j, &o_dev).await > before
+    })
+    .await;
+    assert!(asked, "the repair asked the device it cannot place nothing");
+    assert!(
+        wait_until(20, async || {
+            drain_events(&mut j);
+            drain_events(&mut o);
+            super::resolver::resolve(&o_dev) == o_master
+        })
+        .await,
+        "the profile answer never placed O's device",
+    );
+    assert!(directs_since(&relay, &j.device_id, &server_id, mark) > 0, "J's ask did not go to the server's room");
+    assert_eq!(profile_asks(&j, &x).await, 0, "J asked a stranger outside the server's room for its profile");
+    assert_eq!(profile_asks(&j, &removed).await, 0, "J asked a removed device for its profile");
+    assert_eq!(profile_asks(&j, &master).await, 0, "J asked a master id for its profile");
 }

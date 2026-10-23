@@ -1161,6 +1161,20 @@ pub(crate) async fn repair_after_drops(
         .then(|| peer.to_string())
         .into_iter()
         .collect();
+    // No server counts a device whose roster we never got, and that roster may be what
+    // the bucket dropped: a device sitting in a room of a server we hold is asked for
+    // its profile, which carries it. Once placed, the asks below reach it next time.
+    let unplaced = super::resolver::resolve(peer) == peer
+        && !super::resolver::is_known_master(peer)
+        && !super::resolver::is_revoked(peer);
+    let held_room = server_states
+        .iter()
+        .find(|(sid, state)| !state.is_deleted() && state.is_member(local_peer) && in_room(sid))
+        .map(|(sid, _)| sid.clone());
+    if unplaced && let Some(room) = held_room {
+        hollow_log!("[HOLLOW-SECURITY] {peer} sits in a server room we hold and we cannot place it: asked its profile");
+        super::olm_lane::carry(ws_cmd_tx, peer, Some(&room), &HavenMessage::ProfileRequest, super::olm_lane::NoSession::Queue);
+    }
     ask_peers_to_fill(
         ws_cmd_tx, server_states, crdt_resync, &server_peers, &dm_peers, join_hold.ask(), sync_coordinator, budget, mls,
         local_peer, db_path, db_passphrase,

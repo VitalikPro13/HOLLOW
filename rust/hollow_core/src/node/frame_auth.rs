@@ -32,8 +32,9 @@ pub(crate) const LIVE_SKEW_MS: i64 = 300_000;
 pub(crate) const NONCE_LEN: usize = 16;
 const SIG_LEN: usize = 64;
 
-/// More live frames than the per-sender rate limit admits in a replay window: an
-/// honest sender never reaches it.
+/// Room for a replay window of live frames at the rate limit's ceiling (two routes,
+/// 40 a second): an honest sender whose clock runs at most about 110 s fast never
+/// reaches it.
 const MAX_SEEN_PER_SENDER: usize = 16_384;
 
 /// How a frame reached us.
