@@ -1,0 +1,60 @@
+# coturn for a relay set up by install.sh: its own account, the settings of the
+# Docker setup (deploy/coturn/coturn-start.sh), and the TURN secret handed over
+# in a file only this process reads, never on its command line.
+#   /etc/hollow-turn/turn.env    TURN_SECRET, PUBLIC_IP, PUBLIC_IPV6, root 0600
+#   /etc/hollow-turn/*.pem       its own copy of the certificate, root:hollow-turn 0640
+[Unit]
+Description=coturn for the Hollow relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hollow-turn
+Group=hollow-turn
+EnvironmentFile=/etc/hollow-turn/turn.env
+Environment=CERT_DIR=/etc/hollow-turn
+RuntimeDirectory=hollow-coturn
+RuntimeDirectoryMode=0700
+# As root, before the sandbox: puts the setup's copy back if an update of it
+# was cut short, so the script below is there.
+ExecStartPre=-+/usr/local/sbin/hollow-relay-setup --repair
+ExecStart=/bin/sh /usr/local/lib/hollow-relay/installer/deploy/coturn/coturn-start.sh
+SyslogIdentifier=hollow-coturn
+Restart=always
+RestartSec=3
+LimitCORE=0
+MemorySwapMax=0
+
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateUsers=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+# AF_NETLINK: coturn lists the interfaces to open one listener per address.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+UMask=0077
+InaccessiblePaths=-/etc/letsencrypt -/etc/hollow-relay -/etc/hollow-push -/etc/hollow-forwarder -/etc/hollow-duckdns -/etc/turnserver.conf
+
+[Install]
+WantedBy=multi-user.target

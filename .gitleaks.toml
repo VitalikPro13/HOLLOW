@@ -78,9 +78,9 @@ regex = '''(?i)(?:"keys"[ \t]*:[ \t]*\[[^\]]{0,1000}?|license[_-]?key["']?[ \t]*
 secretGroup = 1
 keywords = ["\"keys\"", "license"]
 [[rules.allowlists]]
-description = "The made-up examples in relay-uws/README.md and SELF_HOSTING.md"
+description = "The made-up examples in relay-uws/README.md, SELF_HOSTING.md and the setup's tests"
 regexTarget = "secret"
-regexes = ['''^(?:AB12-CD32-BA30-LJ50|QQ44-RT19-ZZ08-MN71)$''']
+regexes = ['''^(?:AB12-CD32-BA30-LJ50|QQ44-RT19-ZZ08-MN71|ABCD-EFGH-JKLM-NPQR|WXYZ-WXYZ-WXYZ-WXYZ)$''']
 
 [[rules]]
 id = "hollow-relay-keys-file"
@@ -95,6 +95,10 @@ regex = '''(?i)(?:static[-_]auth[-_]secret|turn[-_]?(?:static[-_]?|shared[-_]?)?
 secretGroup = 1
 entropy = 3.0
 keywords = ["static-auth-secret", "static_auth_secret", "turn_secret", "turn-secret", "turnsecret", "turn_static", "turn_shared"]
+[[rules.allowlists]]
+description = "The next variable NAME in a list of setting names (TURN_SECRET HOLLOW_PUSH_TOKEN ...), never a value"
+regexTarget = "secret"
+regexes = ['''^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$''']
 
 # The push sidecar's Firebase service account can push to every Hollow phone.
 [[rules]]
@@ -199,6 +203,15 @@ description = "Placeholders in examples and docs (change-me, your-turn-secret-he
 targetRules = ["hollow-turn-static-secret", "hollow-webhook-secret", "hollow-backup-passphrase", "hollow-signing-password", "generic-api-key"]
 regexTarget = "secret"
 regexes = ['''(?i)^[a-z0-9_.\-]*(?:change[-_]?me|your[-_]|paste[-_]|example|placeholder|replace[-_]?(?:me|with)|[-_]here$|xxxx)[a-z0-9_.\-]*$''']
+
+[[allowlists]]
+description = "Made-up values in the relay setup's tests (an example access key, a fake SSH fingerprint, the relay feed's known-answer PUBLIC key RELAY_KAT_PUBKEY), and the next shell assignment after an empty KEY=\"\" (CFG_TURN=yes)"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = [
+  '''^(?:AB12-CD34-EF56-GH78|AbCdEf0123456789AbCdEf0123456789AbCdEf01234|fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618)$''',
+  '''^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+=[a-z]{2,8}$''',
+]
 
 [[allowlists]]
 description = "Widget keys (peer, server and message ids) in the UI navigation map, not credentials"

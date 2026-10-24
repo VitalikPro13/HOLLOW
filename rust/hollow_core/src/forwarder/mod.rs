@@ -141,6 +141,16 @@ fn load_or_mint_identity(data_dir: &std::path::Path) -> Result<NativeKeypair, St
     Ok(keypair)
 }
 
+/// The peer_id of the identity a previous start minted in `data_dir`, for the relay's
+/// `--forwarder-peer-id`. Never mints: only the service account may own the key file.
+pub fn stored_peer_id(data_dir: &str) -> Result<String, String> {
+    let path = std::path::Path::new(data_dir).join("forwarder.key");
+    let bytes = std::fs::read(&path).map_err(|e| {
+        format!("no forwarder identity at {} yet ({e}); start the forwarder once first", path.display())
+    })?;
+    Ok(NativeKeypair::from_protobuf_encoding(&bytes)?.peer_id())
+}
+
 /// Run the forwarder. Returns only on a fatal error (bad config, license refused,
 /// storage failure); the signaling loop reconnects forever otherwise.
 pub async fn run(cfg: ForwarderConfig) -> Result<(), String> {
@@ -198,6 +208,17 @@ mod tests {
         let body = src.split("pub async fn run(").nth(1).expect("run() exists");
         let body = &body[..body.find("\n}\n").expect("end of run()")];
         assert!(!body.contains(concat!("log::", "init")), "forwarder::run opens hollow_debug.log");
+    }
+
+    /// The installer reads the id the service minted, and reading never creates a key.
+    #[test]
+    fn stored_peer_id_reads_the_minted_identity_and_never_mints() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let dir = tmp.path().to_string_lossy().into_owned();
+        assert!(super::stored_peer_id(&dir).is_err(), "an empty data dir gave an id");
+        assert!(!tmp.path().join("forwarder.key").exists(), "reading minted a key");
+        let minted = super::load_or_mint_identity(tmp.path()).unwrap();
+        assert_eq!(super::stored_peer_id(&dir).unwrap(), minted.peer_id());
     }
 
     /// C-RP-07: what an older forwarder kept beside its account (every client's session,

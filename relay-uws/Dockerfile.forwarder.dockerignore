@@ -1,0 +1,6 @@
+# The forwarder's build context is the whole repository. Send only its sources.
+*
+!rust/hollow_core
+!rust/hollow_dfn
+!relay-uws/deploy/forwarder
+rust/*/target

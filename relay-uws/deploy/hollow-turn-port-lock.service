@@ -7,8 +7,8 @@
 #   (edit it: coturn's account, its allowed-peer-ip addresses, both port ranges)
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now hollow-turn-port-lock hollow-turn-port-lock-refresh.timer
-# then, for a coturn unit of its own (the package's coturn.service, or hollow-coturn.service
-# "Without Docker"), coturn-port-lock.conf beside it, so coturn never runs without the lock.
+# then, for a coturn unit of its own (the package's coturn.service, or the setup's
+# hollow-coturn.service), coturn-port-lock.conf beside it, so coturn never runs without the lock.
 # Under Docker, coturn comes back with dockerd, so this unit starts before docker.service
 # instead, and the refresh timer puts the lock back within a minute if anything drops it.
 # After a change to an address or a range, edit the file and

@@ -1,0 +1,42 @@
+#!/bin/sh
+# /usr/local/sbin/hollow-relay-setup, installed by the setup from its copy in
+# /usr/local/lib/hollow-relay/installer. It lives outside that copy, so it
+# still runs when an update of the copy was cut short between its two
+# renames: the checked new copy goes live, else the one it replaced
+# (setup_copy_repair in deploy/lib/native.sh), then the copy runs.
+#   hollow-relay-setup [options]   the setup's status screen and menu
+#   hollow-relay-setup --repair    only that repair; the units that run
+#                                  scripts from the copy call it on start
+set -eu
+
+lib=/usr/local/lib/hollow-relay
+copy=$lib/installer
+
+repair() {
+    for p in "$lib" "$copy" "$copy.new" "$lib/previous" "$lib/previous/installer"; do
+        if [ -L "$p" ]; then
+            echo "hollow-relay-setup: $p is a link, so I leave the setup's copy as it is." >&2
+            return 1
+        fi
+    done
+    [ -e "$copy" ] && return 0
+    if [ -f "$copy.new/install.sh" ]; then
+        mv -T -- "$copy.new" "$copy"
+    elif [ -f "$lib/previous/installer/install.sh" ]; then
+        mv -T -- "$lib/previous/installer" "$copy"
+    else
+        return 0
+    fi
+    echo "hollow-relay-setup: put the setup's copy back in place after a run that was cut short." >&2
+}
+
+if [ "${1:-}" = --repair ]; then
+    repair
+    exit $?
+fi
+[ "$(id -u)" = 0 ] && repair
+if [ ! -f "$copy/install.sh" ]; then
+    echo "hollow-relay-setup: the setup's copy in $copy is missing. Run install.sh from your copy of the repository." >&2
+    exit 1
+fi
+exec /bin/bash "$copy/install.sh" "$@"

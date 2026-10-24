@@ -3,8 +3,10 @@
 # already succeeded, so it only reports.
 set -u
 
-. /hooks/lib.sh
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 
+load_duckdns_token
 name=${CERTBOT_DOMAIN%.duckdns.org}
 resp=$(http_get "https://www.duckdns.org/update?domains=$name&token=$DUCKDNS_TOKEN&txt=&clear=true" || echo FAILED)
 case "$resp" in

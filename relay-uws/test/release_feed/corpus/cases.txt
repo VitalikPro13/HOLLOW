@@ -1,0 +1,23 @@
+# <case> <accept|refuse> <what it is>; <case>.tar.gz is the tarball.
+control accept the three programs and a setup copy with every file its install.sh sources
+pax_size_over_cap refuse a setup file whose pax size (2 MiB) is over the setup cap while its header says 16
+pax_size_honoured accept a setup file whose header size is 0 and whose pax size is its real size
+trailing_bytes refuse bytes that are not gzip after the gzip stream
+trailing_zeros refuse zero bytes after the gzip stream
+second_member_link refuse a second gzip member carrying a symlink
+second_member_file refuse a second gzip member carrying a plain setup file the first never names
+empty_last_member refuse an empty gzip member after the tarball
+empty_first_member accept an empty gzip member before the tarball, read as one stream
+mtime_unlistable refuse an mtime of 2^62, which tar -tv cannot write as a date
+mtime_last_ok accept an mtime of 2^33 - 1, the last second installers list
+mtime_first_over refuse an mtime of 2^33
+mtime_base256 accept an mtime in the base-256 form, within the bound
+pax_mtime_over refuse a pax mtime of 2^33 on a setup file
+pax_mtime_fraction accept a pax mtime with a fraction
+pax_mtime_bad_fraction refuse a pax mtime whose fraction is not digits
+pax_mtime_negative refuse a negative pax mtime
+missing_sourced_lib refuse install.sh sources deploy/lib/ui.sh, which the copy lacks
+unsourced_lib_missing_ok accept a library install.sh does not source may be left out
+missing_lockfile refuse the push sender's package-lock.json is missing
+missing_package_json refuse the push sender's package.json is missing
+missing_port_lock refuse the TURN port lock's deploy/turn-port-lock.sh is missing

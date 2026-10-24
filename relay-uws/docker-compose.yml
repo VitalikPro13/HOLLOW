@@ -16,6 +16,12 @@ services:
       # directory that always exists. The scripts read it only when
       # OWN_CERT_DIR is set.
       - ${OWN_CERT_DIR:-./deploy/certbot}:/own-certs:ro
+    logging:
+      driver: journald
+      options:
+        tag: hollow-certbot
+    mem_limit: ${HOLLOW_MEM_LIMIT:-64g}
+    memswap_limit: ${HOLLOW_MEM_LIMIT:-64g}
 
   certbot-renew:
     image: certbot/certbot:v5.8.0
@@ -30,6 +36,12 @@ services:
       - certs:/etc/letsencrypt
       - ./deploy/certbot:/hooks:ro
       - ${OWN_CERT_DIR:-./deploy/certbot}:/own-certs:ro
+    logging:
+      driver: journald
+      options:
+        tag: hollow-certbot
+    mem_limit: ${HOLLOW_MEM_LIMIT:-64g}
+    memswap_limit: ${HOLLOW_MEM_LIMIT:-64g}
 
   # Keeps a DuckDNS name pointing at this machine. Exits straight away for any
   # other kind of address.
@@ -40,6 +52,12 @@ services:
     env_file: .env
     volumes:
       - ./deploy/certbot:/hooks:ro
+    logging:
+      driver: journald
+      options:
+        tag: hollow-duckdns
+    mem_limit: ${HOLLOW_MEM_LIMIT:-64g}
+    memswap_limit: ${HOLLOW_MEM_LIMIT:-64g}
 
   relay:
     build: .
@@ -52,6 +70,7 @@ services:
       - TURN_SECRET=${TURN_SECRET:-}
       - HOLLOW_CONN_RATE_EXEMPT=${HOLLOW_CONN_RATE_EXEMPT:-}
       - PUBLIC_STATS=${PUBLIC_STATS:-on}
+      - HOLLOW_SEND_BUDGET_BYTES=${HOLLOW_SEND_BUDGET_BYTES:-}
     command:
       - --port
       - "443"
@@ -67,6 +86,9 @@ services:
       - /certs/privkey.pem
       - --session-grace-secs
       - ${SESSION_GRACE_SECS:-120}
+      # Empty unless the forwarder profile runs: install.sh fills in its id.
+      - --forwarder-peer-id
+      - ${FORWARDER_PEER_ID:-}
     volumes:
       - certs:/certs:ro
       - ./keys:/keys:ro
@@ -81,10 +103,17 @@ services:
       - net.ipv4.ip_unprivileged_port_start=443
     ulimits:
       core: 0
-    # Container logs otherwise accumulate on disk under /var/lib/docker; the
-    # host script keeps the journal in RAM.
+    # The json-file default would keep container logs on the disk under
+    # /var/lib/docker. The journal lives in RAM, and the hollow- tag is what
+    # harden-host.sh's rsyslog rule keeps out of /var/log.
     logging:
       driver: journald
+      options:
+        tag: hollow-relay
+    # A swap limit equal to the memory limit means no swap at all, and the
+    # memory limit is only that: HOLLOW_MEM_LIMIT is this machine's memory.
+    mem_limit: ${HOLLOW_MEM_LIMIT:-64g}
+    memswap_limit: ${HOLLOW_MEM_LIMIT:-64g}
     healthcheck:
       test: ["CMD", "curl", "-fsk", "https://127.0.0.1/health"]
       interval: 30s
@@ -107,6 +136,10 @@ services:
     security_opt: [no-new-privileges:true]
     logging:
       driver: journald
+      options:
+        tag: hollow-push
+    mem_limit: ${HOLLOW_MEM_LIMIT:-64g}
+    memswap_limit: ${HOLLOW_MEM_LIMIT:-64g}
     restart: unless-stopped
 
   coturn:
@@ -120,8 +153,15 @@ services:
         condition: service_completed_successfully
     entrypoint: /hooks/coturn-start.sh
     env_file: .env
-    # Same uid as the relay, which is the uid the certificate is copied to.
-    user: "999:999"
+    # TURN_UID in deploy/certbot/lib.sh: a uid no account on the host has, since
+    # the TURN port lock holds every process running as it. certbot copies the
+    # certificate into turn/ for this uid alone.
+    user: "65999:65999"
+    # Nothing here may restart coturn on a renewal, so its start script looks
+    # at its pair this often and has it reload a new one.
+    environment:
+      - CERT_DIR=/certs/turn
+      - CERT_WATCH_SECS=30
     # /tmp holds the file the start script puts the TURN secret in.
     read_only: true
     tmpfs: [/tmp]
@@ -135,7 +175,47 @@ services:
     volumes:
       - certs:/certs:ro
       - ./deploy/coturn:/hooks:ro
+    logging:
+      driver: journald
+      options:
+        tag: hollow-coturn
+    mem_limit: ${HOLLOW_MEM_LIMIT:-64g}
+    memswap_limit: ${HOLLOW_MEM_LIMIT:-64g}
+
+  # Carries screen shares to many viewers at once (COMPOSE_PROFILES=forwarder).
+  # It sees only encrypted media and holds no keys. Its id goes into
+  # FORWARDER_PEER_ID, which install.sh reads with --print-peer-id.
+  forwarder:
+    build:
+      context: ..
+      dockerfile: relay-uws/Dockerfile.forwarder
+    profiles: [forwarder]
+    # Host networking: viewers reach it on this machine's address, one UDP
+    # port per viewer from 40000 to 40199.
+    network_mode: host
+    restart: unless-stopped
+    # Only what it needs, so the TURN secret and the DuckDNS token in .env
+    # never enter this container.
+    environment:
+      - RELAY_HOST=${RELAY_HOST}
+      - PUBLIC_IP=${PUBLIC_IP:-}
+      - HOLLOW_FWD_LICENSE_KEY=${FWD_LICENSE_KEY:-}
+    volumes:
+      - fwd-data:/data
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      core: 0
+    logging:
+      driver: journald
+      options:
+        tag: hollow-forwarder
+    mem_limit: ${HOLLOW_MEM_LIMIT:-64g}
+    memswap_limit: ${HOLLOW_MEM_LIMIT:-64g}
 
 volumes:
   certs:
   data:
+  fwd-data:

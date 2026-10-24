@@ -17,7 +17,7 @@ The relay is a lightweight message router. It keeps nothing on disk, cannot decr
 - **Binary protocol**: `0x01` for room broadcasts, `0x02` for targeted peer-to-peer delivery, `0x03`/`0x04` for bandwidth-optimized message broadcast/direct (25-42% savings vs JSON), `0x07`/`0x08` for topic-routed channel messages (per-channel pub/sub). The relay rewrites target fields to sender fields on forwarding.
 - **Offline delivery buffers**: ciphertext for peers who are away, in RAM only, deleted on delivery or expiry.
 - **TURN credential generation**: time-limited HMAC-SHA1 credentials for NAT traversal via coturn (`/turn-credentials`).
-- **License key gating**: optional closed-beta access control via a `keys.json` file, with 30-second hot-reload and active connection revocation.
+- **Members-only access keys**: an optional gate for self-hosted relays via a `keys.json` file, with 30-second hot-reload and active connection revocation. The official relay keeps it off.
 - **Server stats**: live memory, bandwidth, and online user count via `/server-stats` (reads `/proc` on Linux).
 - **Capability advertisement**: `/relay-status` answers `license_required` (an access key is needed to connect), `version` (the relay's version), `turn` (this relay can issue TURN credentials, i.e. `TURN_SECRET` is set) and `forwarder` (a media forwarder is configured). The app reads it before connecting, so it knows what to ask for and what to tell the user is missing.
 
@@ -94,11 +94,19 @@ make -j$(nproc)
 
 The output is a single binary: `build/hollow-relay` (~636 KB).
 
-## Docker (self-hosting)
+## Run your own relay
 
-`docker compose up -d` builds the relay, gets a Let's Encrypt certificate, keeps it renewed, and runs coturn alongside it. Configuration is one `.env` file, and the address can be a free DuckDNS name, your VPS IP, or your own domain.
+A guided setup installs a relay on an Ubuntu 22.04+ or Debian 12+ server, gets its certificate, hardens the host and, if you want them, adds coturn, the Android push sender and the media forwarder:
 
-**[SELF_HOSTING.md](SELF_HOSTING.md) is the guide.** It covers picking an address, hardening the host, the `.env` fields, pointing the app at your relay, what a self-hosted relay does not have (phone push, the media forwarder, restart persistence), and troubleshooting.
+```bash
+git clone --recurse-submodules https://github.com/VitalikPro13/HOLLOW.git
+cd HOLLOW
+sudo bash relay-uws/install.sh
+```
+
+Run `sudo hollow-relay-setup` later for the status screen, updates and settings. The setup can also run the stack from `docker-compose.yml` instead, or take over a relay you set up by hand.
+
+**[SELF_HOSTING.md](SELF_HOSTING.md) is the guide.** It covers picking an address, preparing a server, every screen of the setup, Docker and systemd by hand, pointing the app at your relay, and troubleshooting.
 
 ## Running (manual)
 
@@ -152,13 +160,7 @@ The relay terminates TLS natively, so no Nginx or reverse proxy is needed:
 Client (WSS :443) --> hollow-relay (TLS via OpenSSL)
 ```
 
-Grant the binary permission to bind port 443 without root:
-
-```bash
-sudo setcap cap_net_bind_service=+ep ./build/hollow-relay
-```
-
-A sample systemd service file is provided in `deploy/hollow-relay.service`. Keep its `NotifyAccess`, `FileDescriptorStoreMax` and `LimitCORE` lines (see [Restart persistence](#restart-persistence)).
+The systemd unit in `deploy/hollow-relay.service` lets the relay bind port 443 without root (`AmbientCapabilities=CAP_NET_BIND_SERVICE`), so the binary needs no `setcap`. Keep its `NotifyAccess`, `FileDescriptorStoreMax` and `LimitCORE` lines (see [Restart persistence](#restart-persistence)).
 
 ### Certificate reload
 

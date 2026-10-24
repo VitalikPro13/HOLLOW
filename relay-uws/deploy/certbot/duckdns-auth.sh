@@ -2,8 +2,10 @@
 # certbot's DNS-01 auth hook: publish the challenge as the DuckDNS TXT record.
 set -eu
 
-. /hooks/lib.sh
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 
+load_duckdns_token
 name=${CERTBOT_DOMAIN%.duckdns.org}
 resp=$(http_get "https://www.duckdns.org/update?domains=$name&token=$DUCKDNS_TOKEN&txt=$CERTBOT_VALIDATION" || echo FAILED)
 case "$resp" in

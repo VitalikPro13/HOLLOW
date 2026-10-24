@@ -376,6 +376,15 @@ jobs:
           cmake -S relay-uws -B relay-uws/build -DCMAKE_BUILD_TYPE=Release
           cmake --build relay-uws/build -j"$(nproc)"
 
+      - name: Relay feed library
+        run: bash relay-uws/test/release_feed/run_tests.sh
+
+      - name: Relay tarball packing
+        run: bash relay-uws/test/release_feed/build_tree_tests.sh
+
+      - name: Relay installer
+        run: bash relay-uws/test/installer/run_tests.sh
+
   dart:
     name: Dart Analyze & Test
     runs-on: ubuntu-latest

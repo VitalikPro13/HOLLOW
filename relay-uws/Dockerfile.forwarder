@@ -1,0 +1,37 @@
+# The media forwarder, built from source. Its build context is the repository
+# root (see the forwarder service in docker-compose.yml), because it is part of
+# the Hollow core library in rust/hollow_core. That makes it a long build: up
+# to an hour or two on a small machine.
+FROM rust:1-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY rust/hollow_core rust/hollow_core
+COPY rust/hollow_dfn rust/hollow_dfn
+
+# No debug info: it would double the link step's memory for nothing.
+ENV CARGO_PROFILE_RELEASE_DEBUG=false
+RUN cargo build --release --locked --features forwarder --bin hollow-forwarder \
+    --manifest-path rust/hollow_core/Cargo.toml
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3 ca-certificates iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/rust/hollow_core/target/release/hollow-forwarder /usr/local/bin/hollow-forwarder
+COPY relay-uws/deploy/forwarder/forwarder-start.sh /usr/local/bin/forwarder-start.sh
+
+# Unprivileged, with no capability. Docker copies /data's ownership onto the
+# empty volume mounted there, where the forwarder keeps its identity key.
+RUN groupadd --system --gid 999 hollow \
+    && useradd --system --uid 999 --gid 999 --no-create-home --shell /usr/sbin/nologin hollow \
+    && mkdir -p /data && chown 999:999 /data
+
+USER hollow
+
+ENTRYPOINT ["/bin/sh", "/usr/local/bin/forwarder-start.sh"]

@@ -1,0 +1,9 @@
+[Unit]
+Description=DuckDNS update for the Hollow relay, every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

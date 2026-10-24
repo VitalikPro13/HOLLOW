@@ -25,6 +25,7 @@ EnvironmentFile=/etc/hollow-push/push.env
 Restart=always
 RestartSec=3
 LimitCORE=0
+MemorySwapMax=0
 
 CapabilityBoundingSet=
 NoNewPrivileges=yes
@@ -44,7 +45,7 @@ ProtectProc=invisible
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 # A second wall under unifiedpush.js's address guard: no push endpoint is private.
 # Loopback stays open for the relay's calls and the 127.0.0.53 resolver; a host whose
-# resolver has a private address adds it to IPAddressAllow.
+# resolver has a private address adds it to IPAddressAllow (install.sh does).
 IPAddressAllow=localhost
 IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24
 IPAddressDeny=192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4

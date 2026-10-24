@@ -10,7 +10,7 @@
 //! them an unresolved import here fails the whole mobile build.
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use hollow_core::forwarder::{run, ForwarderConfig};
+use hollow_core::forwarder::{run, stored_peer_id, ForwarderConfig};
 
 /// Mobile builds inherit `--features forwarder` with no forwarder module to drive,
 /// so the bin stubs out. Never shipped or run.
@@ -21,6 +21,7 @@ fn main() {}
 #[tokio::main]
 async fn main() {
     let mut config_path = "/etc/hollow-forwarder.toml".to_string();
+    let mut print_peer_id = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -31,8 +32,13 @@ async fn main() {
                     std::process::exit(2);
                 }
             },
+            // The relay installer reads the id for --forwarder-peer-id here instead of
+            // scraping the journal.
+            "--print-peer-id" => print_peer_id = true,
             "--help" | "-h" => {
                 println!("hollow-forwarder --config <path>   (default /etc/hollow-forwarder.toml)");
+                println!("hollow-forwarder --config <path> --print-peer-id");
+                println!("    print the peer_id a previous start minted, then exit");
                 return;
             }
             other => {
@@ -49,6 +55,17 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    if print_peer_id {
+        match stored_peer_id(&cfg.data_dir) {
+            Ok(id) => println!("{id}"),
+            Err(e) => {
+                eprintln!("hollow-forwarder: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     if let Err(e) = run(cfg).await {
         eprintln!("hollow-forwarder: fatal: {e}");

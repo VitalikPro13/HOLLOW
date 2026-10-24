@@ -36,8 +36,10 @@ LimitNOFILE=1048576
 NotifyAccess=main
 FileDescriptorStoreMax=1
 # No core dumps: a crash would otherwise write every buffered frame, peer id
-# and push token to disk. The box also runs without swap for the same reason.
+# and push token to disk. The box also runs without swap for the same reason,
+# and MemorySwapMax keeps the relay's pages off any swap added later.
 LimitCORE=0
+MemorySwapMax=0
 
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE

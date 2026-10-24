@@ -67,18 +67,19 @@ If you find a vulnerability, please report it privately as described in [SECURIT
 
 What changed in each version is on the [releases page](https://github.com/VitalikPro13/HOLLOW/releases).
 
-## Self-hosting
+## Run your own relay
 
-Hollow supports self-hosted relays for fully isolated networks. Only the people connected to your relay can reach each other, and the official network is not involved. You need a VPS with a public IP and about twenty minutes. The address can be a free DuckDNS name, so there is nothing to buy, and the certificate is obtained and renewed for you.
+Hollow works with a relay you host yourself, for a network of your own. Only the people connected to your relay can reach each other, and the official network is not involved. You need a small Ubuntu or Debian server with a public IP address. The address can be a free DuckDNS name, so there is nothing to buy beyond the server.
+
+A guided setup does the work. It checks the machine, asks a few questions, shows you its plan, then installs the relay, gets the certificate and hardens the server:
 
 ```bash
 git clone --recurse-submodules https://github.com/VitalikPro13/HOLLOW.git
-cd HOLLOW/relay-uws
-cp .env.example .env              # set your address, TURN secret and email
-docker compose up -d
+cd HOLLOW
+sudo bash relay-uws/install.sh
 ```
 
-Then point the app at it in Settings, under Network. [relay-uws/SELF_HOSTING.md](relay-uws/SELF_HOSTING.md) is the full guide, including what a self-hosted relay does not have. Update your relay to 0.12.2, as [Moving to 0.12.2](relay-uws/SELF_HOSTING.md#moving-to-0122) explains.
+When it finishes, point the app at your relay in Settings, under Network. Later, `sudo hollow-relay-setup` shows the relay's status and offers updates and settings. [relay-uws/SELF_HOSTING.md](relay-uws/SELF_HOSTING.md) is the full guide, including Docker, setting it up by hand and taking over a relay you already run. If you run one already, its [operator changelog](relay-uws/SELF_HOSTING.md#operator-changelog) lists what changed.
 
 The relay is written in C++ on uWebSockets. It handles TLS 1.3 itself, with no reverse proxy, and fits about 572,000 concurrent connections on an $8/month VPS ([BENCHMARK.md](relay-uws/BENCHMARK.md)).
 

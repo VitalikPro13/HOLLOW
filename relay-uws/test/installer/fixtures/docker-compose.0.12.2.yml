@@ -1,0 +1,142 @@
+# The compose file of 0.12.2 (commit faf97c4b), as people ran it with a plain
+# docker compose up. adopt_box_test.sh builds a relay from it, then takes it over.
+services:
+  # Gets the certificate once and exits. The relay waits for it to succeed, so
+  # a failed issuance stops the stack where you can see it.
+  certbot-init:
+    image: certbot/certbot:v5.8.0
+    # Host networking, so port 80 is bound only for the seconds an http-01
+    # challenge takes and is free the rest of the time.
+    network_mode: host
+    restart: "no"
+    entrypoint: /hooks/issue.sh
+    env_file: .env
+    volumes:
+      - certs:/etc/letsencrypt
+      - ./deploy/certbot:/hooks:ro
+      # Compose cannot mount a path conditionally, so this falls back to a
+      # directory that always exists. The scripts read it only when
+      # OWN_CERT_DIR is set.
+      - ${OWN_CERT_DIR:-./deploy/certbot}:/own-certs:ro
+
+  certbot-renew:
+    image: certbot/certbot:v5.8.0
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: /hooks/renew-loop.sh
+    env_file: .env
+    depends_on:
+      certbot-init:
+        condition: service_completed_successfully
+    volumes:
+      - certs:/etc/letsencrypt
+      - ./deploy/certbot:/hooks:ro
+      - ${OWN_CERT_DIR:-./deploy/certbot}:/own-certs:ro
+
+  # Keeps a DuckDNS name pointing at this machine. Exits straight away for any
+  # other kind of address.
+  duckdns:
+    image: certbot/certbot:v5.8.0
+    restart: on-failure
+    entrypoint: /hooks/duckdns-updater.sh
+    env_file: .env
+    volumes:
+      - ./deploy/certbot:/hooks:ro
+
+  relay:
+    build: .
+    depends_on:
+      certbot-init:
+        condition: service_completed_successfully
+    ports:
+      - "443:443"
+    environment:
+      - TURN_SECRET=${TURN_SECRET:-}
+      - HOLLOW_CONN_RATE_EXEMPT=${HOLLOW_CONN_RATE_EXEMPT:-}
+    command:
+      - --port
+      - "443"
+      - --domain
+      - ${RELAY_HOST}
+      - --keys-file
+      - /keys/keys.json
+      - --reports-file
+      - /data/reports.json
+      - --cert-file
+      - /certs/fullchain.pem
+      - --key-file
+      - /certs/privkey.pem
+      - --session-grace-secs
+      - ${SESSION_GRACE_SECS:-120}
+    volumes:
+      - certs:/certs:ro
+      - ./keys:/keys:ro
+      - data:/data
+    # The relay writes only its report count, in the data volume. It needs no
+    # capability: 443 is opened to unprivileged accounts inside this container's
+    # own network namespace, and nowhere else.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    sysctls:
+      - net.ipv4.ip_unprivileged_port_start=443
+    ulimits:
+      core: 0
+    # Container logs otherwise accumulate on disk under /var/lib/docker; the
+    # host script keeps the journal in RAM.
+    logging:
+      driver: journald
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "https://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # Sends UnifiedPush wake-ups for phones that chose a distributor such as
+  # ntfy. It shares the relay's network namespace because the relay reaches it
+  # on 127.0.0.1, and it needs no Firebase or Apple credentials.
+  push:
+    build: ../push-sidecar
+    network_mode: service:relay
+    depends_on:
+      - relay
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: journald
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:4.18
+    profiles: [turn]
+    network_mode: host
+    restart: unless-stopped
+    # Without the certificate it cannot serve turns: on 5349.
+    depends_on:
+      certbot-init:
+        condition: service_completed_successfully
+    entrypoint: /hooks/coturn-start.sh
+    env_file: .env
+    # Same uid as the relay, which is the uid the certificate is copied to.
+    user: "999:999"
+    # /tmp holds the file the start script puts the TURN secret in.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    # The image marks turnserver with this file capability, and the kernel
+    # refuses to start a program whose marked capability is missing from the
+    # bounding set. no-new-privileges still keeps it from being granted: every
+    # port coturn opens is above 1024.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - certs:/certs:ro
+      - ./deploy/coturn:/hooks:ro
+
+volumes:
+  certs:
+  data:

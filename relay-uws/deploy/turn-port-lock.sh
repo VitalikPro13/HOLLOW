@@ -13,7 +13,7 @@
 # Settings, from the environment (hollow-turn-port-lock.service reads
 # /etc/hollow-relay/turn-port-lock.env; none of them is a secret):
 #   TURN_USER        the account coturn runs as: turnserver for the distribution's
-#                    package, hollow for "Without Docker", 999 under Docker
+#                    package, hollow-turn for the setup's hollow-coturn.service, 65999 under Docker
 #   TURN_PEERS       the addresses coturn allows back (its allowed-peer-ip values),
 #                    space separated: this machine's public IPv4 and IPv6
 #   TURN_PORTS       coturn's relay ports, its --min-port to --max-port (default 49152-65535)
@@ -25,8 +25,7 @@
 # listen there), and one per family for the addresses coturn allows back, which behind
 # a NAT that hairpins are not local at all. The chain runs at raw priority, before any
 # nat output rule (Docker's DNAT of published ports) can rewrite where a datagram goes.
-# Where coturn shares an account with the relay (Docker, "Without Docker"), the relay is
-# matched too, harmlessly: it never sends UDP to its own address.
+# Every process of coturn's account is held, so that account is coturn's alone.
 # Both port ranges are also reserved (net.ipv4.ip_local_reserved_ports, which covers
 # both families), so no other program's ephemeral UDP socket lands where TURN reaches.
 set -euo pipefail

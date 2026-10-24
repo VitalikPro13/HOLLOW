@@ -1,0 +1,50 @@
+# Keeps a DuckDNS name pointing at this machine, for a relay set up by
+# install.sh. Run every five minutes by hollow-duckdns.timer.
+#   /etc/hollow-duckdns/duckdns.env   DUCKDNS_TOKEN, RELAY_HOST, DUCKDNS_IP, root 0600
+[Unit]
+Description=DuckDNS update for the Hollow relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hollow-ddns
+Group=hollow-ddns
+EnvironmentFile=/etc/hollow-duckdns/duckdns.env
+Environment=DUCKDNS_ONCE=1
+# As root, before the sandbox: puts the setup's copy back if an update of it
+# was cut short, so the script below is there.
+ExecStartPre=-+/usr/local/sbin/hollow-relay-setup --repair
+ExecStart=/bin/sh /usr/local/lib/hollow-relay/installer/deploy/certbot/duckdns-updater.sh
+SyslogIdentifier=hollow-duckdns
+LimitCORE=0
+MemorySwapMax=0
+
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateUsers=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+UMask=0077
+InaccessiblePaths=-/etc/letsencrypt -/etc/hollow-relay -/etc/hollow-push -/etc/hollow-forwarder -/etc/hollow-turn -/etc/turnserver.conf

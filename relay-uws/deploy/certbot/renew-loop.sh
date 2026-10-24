@@ -1,11 +1,13 @@
 #!/bin/sh
 # Renewal, forever. certbot stores the challenge method with the lineage, so a
 # DuckDNS or IP certificate renews the way it was issued and needs no flags
-# here. The relay picks the new files up on its own within a minute, so nothing
-# in this stack restarts on a renewal.
+# here. The relay picks the new files up on its own within a minute and coturn
+# within CERT_WATCH_SECS twice over, so nothing in this stack restarts on a
+# renewal.
 set -eu
 
-. /hooks/lib.sh
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 
 while :; do
     sleep 43200  # 12 hours, in seconds, because busybox sleep may not take suffixes

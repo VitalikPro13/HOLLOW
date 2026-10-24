@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sign, upload and verify the release feeds (status.json, news.json).
+# Sign, upload and verify the release feeds (status.json, news.json, relay.json).
 #
 # Apps from 0.12.2 on show a feed only when its `.sig` sidecar verifies against
 # the key baked into rust/hollow_core/src/api/updater.rs, for THAT feed's name;
@@ -8,10 +8,21 @@
 #
 #   scripts/sign_feeds.sh --news legal/news.json
 #   scripts/sign_feeds.sh --status ~/hollow-feeds/status.json [--skip-upload]
+#   scripts/sign_feeds.sh --relay build/relay-binaries/relay.json [--allow-downgrade]
 #
-# status.json gets `issued` rewritten before signing (--stamp): the highest of
-# now, the file's issued + 1 and the LIVE copy's issued + 1, since apps drop any
-# copy stamped earlier than one they already accepted. A stamp over an hour past
+# relay.json (from scripts/build_relay_binaries.sh) is what self-hosters'
+# installers read (relay-uws/deploy/lib/release_feed.sh): they refuse it unless
+# its signature verifies for the relay name and its `issued` is not older than
+# the copy they last accepted. Its tarballs must sit next to it (feed-sign opens
+# each one) and already be live with the hashes it names (checked before the
+# upload); a version and build below the live feed's needs --allow-downgrade.
+# Once the live pair verifies, the pair is copied to legal/relay.json(.sig) and
+# the floors in release_feed.sh are raised to it: commit all three.
+#
+# status.json and relay.json get `issued` rewritten before signing (--stamp):
+# the highest of now, the file's issued + 1 and the LIVE copy's issued + 1,
+# since apps and installers drop any copy stamped earlier than one they
+# already accepted. A stamp over an hour past
 # this clock is refused. Every feed is shape and size checked first
 # (hollow-manifest feed-sign), so a notice the app would skip is refused here
 # instead of shipping unseen.
@@ -23,17 +34,21 @@ set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 status_file=""
 news_file=""
+relay_file=""
 skip_upload=0
+allow_downgrade=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --status) status_file="$2"; shift 2 ;;
     --news) news_file="$2"; shift 2 ;;
+    --relay) relay_file="$2"; shift 2 ;;
     --skip-upload) skip_upload=1; shift ;;
-    *) echo "usage: $0 [--status <status.json>] [--news <news.json>] [--skip-upload]" >&2; exit 2 ;;
+    --allow-downgrade) allow_downgrade=(--allow-downgrade); shift ;;
+    *) echo "usage: $0 [--status <status.json>] [--news <news.json>] [--relay <relay.json> [--allow-downgrade]] [--skip-upload]" >&2; exit 2 ;;
   esac
 done
-if [ -z "$status_file" ] && [ -z "$news_file" ]; then
-  echo "nothing to sign: pass --status and/or --news" >&2
+if [ -z "$status_file" ] && [ -z "$news_file" ] && [ -z "$relay_file" ]; then
+  echo "nothing to sign: pass --status, --news and/or --relay" >&2
   exit 2
 fi
 
@@ -66,10 +81,21 @@ verify_any() { # <args...>: true when ANY baked-in key verifies
   return 1
 }
 
+record_relay() { # <relay.json that is now live>
+  if [ "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" != "$repo/legal/relay.json" ]; then
+    cp "$1" "$repo/legal/relay.json"
+    cp "$1.sig" "$repo/legal/relay.json.sig"
+  fi
+  "$tool" relay-floor "$repo/legal/relay.json" "$repo/relay-uws/deploy/lib/release_feed.sh"
+}
+
 sign_one() { # <feed> <file>
   local feed="$1" file="$2" stamp=()
   [ -f "$file" ] || { echo "$file not found" >&2; exit 1; }
-  [ "$feed" = status ] && stamp=(--stamp --live "$base_url/status.json")
+  case "$feed" in
+    status) stamp=(--stamp --live "$base_url/$feed.json") ;;
+    relay) stamp=(--stamp --live "$base_url/$feed.json" ${allow_downgrade[@]+"${allow_downgrade[@]}"}) ;;
+  esac
   echo "[$feed] signing $file"
   "$tool" feed-sign "$file" --feed "$feed" --key "$key_path" --out "$file.sig" ${stamp[@]+"${stamp[@]}"}
   verify_any "$file" "$file.sig" --feed "$feed" \
@@ -78,12 +104,17 @@ sign_one() { # <feed> <file>
     echo "[$feed] local pair verifies; upload skipped"
     return
   fi
+  if [ "$feed" = relay ]; then
+    "$tool" relay-check-live "$file" \
+      || { echo "[relay] upload the tarballs relay.json names before the feed" >&2; exit 1; }
+  fi
   # Signature first: a reader between the two copies sees a pair that fails
   # and shows nothing until its next poll, never a forged notice.
   scp -q "$file.sig" "$ssh_target:$remote_dir/$feed.json.sig"
   scp -q "$file" "$ssh_target:$remote_dir/$feed.json"
   for pk in $pubkeys; do
     if "$tool" feed-verify --url "$base_url/$feed.json" --feed "$feed" --pubkey "$pk"; then
+      [ "$feed" = relay ] && record_relay "$file"
       return
     fi
   done
@@ -93,4 +124,5 @@ sign_one() { # <feed> <file>
 
 [ -n "$news_file" ] && sign_one news "$news_file"
 [ -n "$status_file" ] && sign_one status "$status_file"
-echo "Done. Commit legal/news.json + legal/news.json.sig when news changed."
+[ -n "$relay_file" ] && sign_one relay "$relay_file"
+echo "Done. Commit legal/news.json + legal/news.json.sig when news changed; legal/relay.json, legal/relay.json.sig and relay-uws/deploy/lib/release_feed.sh when the relay changed."

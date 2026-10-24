@@ -1,0 +1,11 @@
+# Renews the relay's certificate on a machine where install.sh put certbot in
+# its own Python environment (IP address certificates on Debian). It runs the
+# hooks the certificate was issued with, the deploy hook included.
+[Unit]
+Description=Renew the Hollow relay's certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hollow-certbot/bin/certbot renew --quiet

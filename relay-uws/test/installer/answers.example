@@ -1,0 +1,50 @@
+# Answers for `sudo bash install.sh --answers <this file>`: the same questions
+# as the screens, with no one at the keyboard. key=value, one per line; # starts
+# a comment. A key left out takes the recommended choice, and an unknown key
+# stops the run, so a typo never passes silently.
+
+# First install.
+mode=native              # native (recommended) | docker
+binaries=prebuilt        # prebuilt (recommended) | source   (native only)
+address=duckdns          # duckdns (recommended) | ip | domain
+duckdns_name=myrelay     # for address=duckdns: myrelay or myrelay.duckdns.org
+# The token itself, or a file that holds it (a TOKEN= line, or the token alone
+# on its first line), so it need not sit in this file.
+duckdns_token_file=/root/duckdns.token
+#duckdns_token=a1b2c3d4-0000-1111-2222-333344445555
+#ip=203.0.113.7          # for address=ip; default: the address the internet sees
+#domain=relay.example.com  # for address=domain
+# The address people reach this machine at, when it is not the one the internet
+# sees (a test box on a LAN). DuckDNS is then pinned to it, and TURN and the
+# forwarder advertise it.
+#public_ip=192.168.1.20
+#public_ipv6=
+staging=no               # yes = Let's Encrypt staging: untrusted, no rate limits
+turn=yes
+push=yes                 # native only; the Docker setup always runs it
+forwarder=yes
+members_only=no
+member_keys=5            # with members_only=yes
+public_stats=on          # on (recommended) | off: the online count and traffic on the public stats page
+grace_secs=120           # 30 to 600
+ssh_keys=yes             # guide the switch to key-only SSH logins
+# The key that counts for the SSH switch, as ssh-keygen -lf ~/.ssh/id_ed25519.pub
+# prints it on your computer. A login with any other key never turns passwords off.
+#ssh_key_fingerprint=SHA256:AbCdEf0123456789AbCdEf0123456789AbCdEf01234
+ssh_wait_secs=300        # how long to wait for each key login
+continue_anyway=yes      # go on when the machine check needs steps from you
+confirm=yes              # the plan screen
+
+# A re-run (the machine is already set up).
+#action=status           # status | update | downgrade | rebuild | change | keys | ssh | sshkey | check | uninstall | exit
+#change=turn             # with action=change: turn | push | forwarder | members | addkey | removekey | public_stats | grace | address
+#turn=no                 # ...then the new value, under the option's own key
+#remove_key=AB12-CD34-EF56-GH78   # with change=removekey
+# With action=sshkey while password logins are off: the new computer's public
+# key, the one line from its .pub file. With passwords on, ssh_key_fingerprint
+# names the new key instead.
+#ssh_public_key=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... me@laptop
+#keep_data=yes           # with action=uninstall: keep the forwarder identity and report counts
+#interrupted=rollback    # a take over that stopped part of the way: rollback (recommended) | leave
+#replace_setup=no        # a run from a clone older than the setup a release installed: no (recommended) | yes
+#confirm=yes             # update and uninstall ask for it too

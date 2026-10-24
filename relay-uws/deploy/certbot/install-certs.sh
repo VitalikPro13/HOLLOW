@@ -3,7 +3,8 @@
 # the relay reads. Also certbot's deploy hook, so a renewal lands the same way.
 set -eu
 
-. /hooks/lib.sh
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 
 LIVE=/etc/letsencrypt/live/relay
 install_pair "$LIVE/fullchain.pem" "$LIVE/privkey.pem"
