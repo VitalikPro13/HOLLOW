@@ -5,9 +5,9 @@ requirement, matrix row and finding in this audit traces back to a claim. A
 finding that traces to no claim means a claim is missing: add it here.
 
 Written 2026-09-26 (audit phase A), from WHITEPAPER.md sections 2-23,
-CLAUDE.md's rules and the product's own copy. **Vitalik approves this list**:
+CLAUDE.md's rules and the product's own copy. **Vitalii approves this list**:
 these are the promises, so they are his to make or withdraw.
-**Approved by Vitalik 2026-09-26**, with every claim still to be verified by
+**Approved by Vitalii 2026-09-26**, with every claim still to be verified by
 the audit; C-23 withdrawn (AR-03).
 
 Columns:
@@ -17,7 +17,7 @@ Columns:
 - **Source**: where we already promise it.
 - **Status**: `Believed` (no known break, not yet verified by this audit),
   `Broken` (a finding exists), `Overclaimed` (the public wording promises
-  more than the design gives), `Undecided` (Vitalik decides whether we
+  more than the design gives), `Undecided` (Vitalii decides whether we
   promise it).
 
 ## Identity and devices
@@ -67,9 +67,9 @@ Columns:
 
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
-| C-24 | A fully malicious relay sees routing metadata only: device peer ids, which rooms they are in, and the timing and size of traffic. From that it can tell which devices belong together and who talks to whom. It never reads content, profiles, names, server or channel details, friend lists, read state or any other data. | P-01 | WP 3.1, 23.1 | Reworded 2026-09-28 (Vitalik); held for 0.12 with HOL-SEC-062 (design A-D1) and HOL-SEC-072 (meetings), see note 2 |
+| C-24 | A fully malicious relay sees routing metadata only: device peer ids, which rooms they are in, and the timing and size of traffic. From that it can tell which devices belong together and who talks to whom. It never reads content, profiles, names, server or channel details, friend lists, read state or any other data. | P-01 | WP 3.1, 23.1 | Reworded 2026-09-28 (Vitalii); held for 0.12 with HOL-SEC-062 (design A-D1) and HOL-SEC-072 (meetings), see note 2 |
 | C-25 | A malicious relay can delay or drop traffic, but cannot forge a message, a server change, a device list, a friend accept or a destroy order. | P-01 | WP 23.1 | Believed |
-| C-26 | Apple, Google and UnifiedPush distributors never receive message content. A wake's sender device id and, for a channel, server and channel ids and mention flag reach them only encrypted to the device (RFC 8291 on every path). | P-11 | WP 13 | Reworded 2026-10-04 (Vitalik, AR-26): the old wording left out the channel fields (C-RP-05). FCM/APNs wakes sealed 2026-10-18 (0.12.2, track B6, AR-26 closed), with no APNs collapse id and a seal time the phone checks (24 h + 10 min either side of its clock, once per reader); 0.12.1 phones keep the plain block until they update. Test: `push-sidecar/test/fcm_message.test.js`, `push_seal_*` |
+| C-26 | Apple, Google and UnifiedPush distributors never receive message content. A wake's sender device id and, for a channel, server and channel ids and mention flag reach them only encrypted to the device (RFC 8291 on every path). | P-11 | WP 13 | Reworded 2026-10-04 (Vitalii, AR-26): the old wording left out the channel fields (C-RP-05). FCM/APNs wakes sealed 2026-10-18 (0.12.2, track B6, AR-26 closed), with no APNs collapse id and a seal time the phone checks (24 h + 10 min either side of its clock, once per reader); 0.12.1 phones keep the plain block until they update. Test: `push-sidecar/test/fcm_message.test.js`, `push_seal_*` |
 | C-27 | Reading a message with a link preview makes no request from my device to the linked site. | P-12 | WP 23.1 | Believed |
 | C-28 | An invite link never reveals the server id to the website that serves it. | P-12 | deep linking | Believed |
 
@@ -94,7 +94,7 @@ Columns:
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
 | C-35 | With App Lock on, no message content, name or notification is visible until unlock, and nothing appears above the lock screen. | P-09 | app lock | Fixed on local main (HOL-SEC-155: notifications showed content and a reply box, a link could open above the lock), retest at release |
-| C-36 | Someone who copies my locked phone's app data pays an Argon2id derivation for every App Lock PIN guess, and a new PIN has at least six digits; a passphrase puts guessing out of reach. | P-09 | WP 2.6 | Decided 2026-10-04 (Vitalik): six-digit minimum (HOL-SEC-159), offline guessing without hardware limits accepted as AR-24 |
+| C-36 | Someone who copies my locked phone's app data pays an Argon2id derivation for every App Lock PIN guess, and a new PIN has at least six digits; a passphrase puts guessing out of reach. | P-09 | WP 2.6 | Decided 2026-10-04 (Vitalii): six-digit minimum (HOL-SEC-159), offline guessing without hardware limits accepted as AR-24 |
 | C-37 | Logs never contain message content, keys, codes or passphrases. | P-09, support channels | logging rules | Fixed on local main (HOL-SEC-142: call keys reached the debug log; HOL-SEC-160: log lines and the support export held names and the link code), the C++ log filter checked in the regression pass |
 
 ## What we do not promise
@@ -110,8 +110,9 @@ adds):
 - Trust on first use: identities are verified by comparing safety numbers.
 - Sender authenticity of media frames inside a group call (see C-23).
 - The relay sees which device ids share which rooms, and that is how it routes.
-- Recovery after a copied MLS state: a member's leaf keys are not refreshed on a
-  schedule yet, so a one-time copy keeps reading until that leaf changes (AR-25).
+- Quick recovery after a copied MLS state: since 0.13 leaves refresh in turns, at
+  most daily and less often in large servers, and a device that is rarely online or
+  runs 0.12.x keeps its leaf longer, so a one-time copy reads until then (AR-25).
 - Apple and Google see when a phone is woken and how often (AR-26 residual).
 
 ## Notes

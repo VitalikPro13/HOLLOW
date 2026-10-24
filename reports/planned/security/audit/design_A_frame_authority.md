@@ -23,11 +23,11 @@ rides in plaintext and tells the relay what claim C-24 says it never learns.
 
 ## Decisions
 
-Before this session (Vitalik, 2026-09-26, `candidate_findings.md` decision 1): every
+Before this session (Vitalii, 2026-09-26, `candidate_findings.md` decision 1): every
 state-changing plaintext message is secured, as a breaking change. Where a session
 exists the message moves into Olm or MLS; what must stay plaintext is device-signed.
 
-Taken in session 10 (Vitalik, 2026-09-27), plan section 8 items 13-16: EVERYTHING in
+Taken in session 10 (Vitalii, 2026-09-27), plan section 8 items 13-16: EVERYTHING in
 this design lands in 0.12, done properly and with no compatibility shims; old clients
 update ("cleaner is better"). A-D1 = option (a), all of C-24 including the structural
 leaks; A-D2 = yes; A-D3 = pin the host; A-D4 and A-D5 are fixed too. Session 11 builds
@@ -245,7 +245,7 @@ BUILT (session 14, phase D, profiles; 73591cbe):
   full profile to our own devices, friends and co-members (`data_channel_peer_allowed`),
   a card to either side of a pending friend request, nothing to anyone else or to a
   revoked device. The receive side ignores the profile fields of a sender we would send
-  nothing to (its device list is still ingested). Decided by Vitalik (A28, 2026-09-28):
+  nothing to (its device list is still ingested). Decided by Vitalii (A28, 2026-09-28):
   before a request is accepted each side sees only the name and the avatar.
 - The card (`node/profile_card.rs`) is signed by the master under `hollow-card1` over the
   master id, `updated_at`, name and avatar hash, and must name its sender's own master (the
@@ -257,7 +257,7 @@ BUILT (session 14, phase D, profiles; 73591cbe):
   over the meeting's MLS group once admitted, answered once per new participant; a joiner
   shows its card to the members it asks (moved inside the sealed request by the join
   lock, session 16).
-- N1, decided by Vitalik (sign every field): `hollow-profile2` signs the peer,
+- N1, decided by Vitalii (sign every field): `hollow-profile2` signs the peer,
   `updated_at` and all eleven fields (name, status, about, Twitch name, avatar, banner and
   asset hashes, board, frame, avatar and banner animations), blobs by hash, and every
   ingest path requires it; support credentials keep their own signature. Our own profile
@@ -316,7 +316,7 @@ BUILT (session 15, phase C, the join lane):
   Tests that injected join traffic in the clear now seal it (`sealed_to_members`,
   `sealed_to_joiner`), and `join_ring` reads the ring as a member does. Sixteen rules put
   back one at a time, each failing its test.
-- Left open, for Vitalik: (a) the join key is never rotated, so a kicked or banned member
+- Left open, for Vitalii: (a) the join key is never rotated, so a kicked or banned member
   keeps it and can read later requests (who asks, the device list, the Twitch
   credential, the KeyPackage) and forge a refusal to a joiner; rotating it breaks every
   invite link out there, so it wants a decision (on every ban, a manual reset, or
@@ -324,7 +324,7 @@ BUILT (session 15, phase C, the join lane):
   until the owner opens the app once, and invites made meanwhile carry no key. (c) The
   card a joiner shows the members (phase D) still rides Olm, so it opens a session with a
   stranger member; it could ride inside the join box.
-  All three settled (Vitalik, 2026-09-28): (a) answered by the join lock (session 16
+  All three settled (Vitalii, 2026-09-28): (a) answered by the join lock (session 16
   block below); (b) dropped, owners update to 0.12; (c) yes, the card now rides inside the
   sealed request.
 - Fixed after the commit (54aef252; predates the join lane): while a join was pending, the
@@ -445,9 +445,9 @@ Dart keeps the first proven host. The knock proof is an HMAC over (meeting id, k
 device) keyed by Argon2id(code, meeting id); no time is needed because the knock is a
 live-only sealed frame. Found while testing: refusing a rogue Welcome spends the
 knocker's KeyPackage, so a refused or unreadable meeting Welcome re-knocks at once.
-Pre-0.12 rooms are refused (Vitalik: no migration).
+Pre-0.12 rooms are refused (Vitalii: no migration).
 
-BUILT (session 18, HOL-SEC-072, Vitalik's decision a): the meeting link carries a key
+BUILT (session 18, HOL-SEC-072, Vitalii's decision a): the meeting link carries a key
 (`key=`, 32 bytes, the shape of a server invite's). The knock, lobby info, denial, end,
 kick and the meeting Welcome (whose nonce picks the host out of every master the relay
 knows) are `Lane::Meeting` and count only inside `MeetingSealed`: AES-256-GCM under

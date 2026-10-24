@@ -1079,6 +1079,15 @@ getting the relay killed. To change the limit, set `HOLLOW_SEND_BUDGET_BYTES` to
 `/etc/hollow-relay/relay.env` (systemd). A value below the floor counts as the
 floor. Most relays never need it.
 
+### Circuit breaker
+
+The relay also counts how much work each session causes it: messages, the
+deliveries they lead to, and signature checks. In this version it only counts.
+It closes nothing, and apps do not slow down for it. Its limits are built in,
+not settings, so an operator cannot lower them. While `PUBLIC_STATS` is on,
+`/server-stats` shows anonymous totals, under `breaker`, of how often a session
+would have been paused.
+
 ### What the relay holds and never writes
 
 While it runs, the relay holds:

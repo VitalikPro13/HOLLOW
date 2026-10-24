@@ -19,7 +19,7 @@ member adds anyone past every join gate (E7), a device id stands in for its mast
 reset (E12). Nothing records who was ever a member, so backfill cannot refuse posts
 signed by a never-member (E4).
 
-## Decisions (Vitalik, 2026-09-27)
+## Decisions (Vitalii, 2026-09-27)
 
 1. The owner is fixed for the life of the server. Nobody demotes, kicks, bans, mutes or
    renames the owner, nobody is made owner, and moderation edits (nickname, Twitch name,

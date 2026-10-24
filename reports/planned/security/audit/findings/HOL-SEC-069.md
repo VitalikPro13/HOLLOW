@@ -64,3 +64,10 @@ shares (v6). All 13 relay suites pass on the VPS (359 checks).
 CPU: a `lock_put` of a 256-link chain makes the single-threaded relay verify 256
 signatures, and nothing bounds how often one connection sends them. That belongs to the
 phase G circuit breaker (measure first, `feedback_relay_rules`).
+
+Phase G2 (0.13, 2026-10-23): the breaker folds signature checks into its work units at
+6 units a check. The burst moves from 2,048 checks (about 100 ms) to the start credit
+(400k units, about 66k checks, about 3.3 s of CPU per fresh session, spread over frames
+since a `lock_put` stays capped at 256 links), bounded per address block by the 1.2M
+unit pool. The breaker runs in shadow mode in 0.13 (it counts, closes nothing), so until
+its enforce switch (0.14 at the latest) this residual stands as written above.

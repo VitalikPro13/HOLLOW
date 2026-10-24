@@ -40,7 +40,7 @@ the claim it touches, a fix idea, a test idea. No exploit walkthroughs.
 - Requirements: **40** (R-LOCAL-01..40). ~22 met (16 with a named test, 6 by inspection),
   12 not met (each traced to a finding), the rest met with no test.
 - Leads: **L-07 becomes C-LOCAL-04** (the PIN path has no hardware attempt limit; claim
-  C-36 is still Undecided, so this is Vitalik's call to promise or accept). **L-12 holds**:
+  C-36 is still Undecided, so this is Vitalii's call to promise or accept). **L-12 holds**:
   the loopback server's four gates are sound; two Info residuals.
 - Largest item is outside the leads: the "imported archives" viewer, built to open an
   archive another person sends, extracts the archive's attachment files to the names the
@@ -121,7 +121,7 @@ the claim it touches, a fix idea, a test idea. No exploit walkthroughs.
   (UI lock, node alive), and the code comment treats the OS toast as equivalent to a phone
   lock-screen banner. On a phone the OS enforces lock-screen privacy; on desktop the OS
   toast appears over a Hollow-drawn cover that the OS does not know is a lock. C-35 is a
-  per-claim decision for Vitalik: either suppress content toasts while locked (hold them,
+  per-claim decision for Vitalii: either suppress content toasts while locked (hold them,
   like the mobile tap, and replay on unlock) or narrow C-35 to the phone.
 - **Fix idea:** while `appLockedProvider` is set, suppress the content toast (or post a
   contentless "New message in Hollow" one) and drop the Windows Reply action; replay held
@@ -174,7 +174,7 @@ the claim it touches, a fix idea, a test idea. No exploit walkthroughs.
 - **Why it breaks a claim:** C-36 ("Someone holding my locked phone cannot guess my App
   Lock PIN by copying the app's data") is marked **Undecided** in claims.md pending this
   lead. The code does not currently support promising C-36 for a short numeric PIN.
-- **Fix idea:** two options for Vitalik. (a) Bind the unlock secret into a
+- **Fix idea:** two options for Vitalii. (a) Bind the unlock secret into a
   hardware-backed keystore gate with an attempt limit: iOS `AccessControlFlag.devicePasscode`
   / biometry on the secure-storage item (the `flutter_secure_storage` 10.3.1 Apple options
   expose this, `apple_options.dart` `AccessControlFlag`), Android `AndroidOptions`

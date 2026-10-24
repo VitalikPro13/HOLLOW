@@ -376,7 +376,7 @@ Seen on screen on throwaway fleet peers (session 22): link end to end, removal a
 phrase lifting it, the app lock before the roster lock, a restored backup waiting,
 joining with the phrase, refused, and erased.
 
-## 9. Decisions (Vitalik, 2026-09-30)
+## 9. Decisions (Vitalii, 2026-09-30)
 
 1. **The phrase is no longer stored.** New identities see it once and type a few words
    back. Existing users, at their first 0.12 start, see the stored phrase one last time,

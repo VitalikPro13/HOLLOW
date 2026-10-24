@@ -44,7 +44,7 @@ knock opens nothing. A refused or unreadable Welcome spends the knocker's
 KeyPackage, so the knocker knocks again at once with a fresh one.
 
 Rooms made before 0.12 cannot be started, and their links are refused with a
-message to ask for a new one (Vitalik, 2026-09-28: no migration).
+message to ask for a new one (Vitalii, 2026-09-28: no migration).
 
 ## Test
 

@@ -18,7 +18,7 @@ Component:   rust/hollow_core/src/node/conference.rs (the meeting lane: seal_mee
 Boundary:    TB-1 (client <-> relay)
 Traces to:   C-24 (note 2), HOL-SEC-061
 Attacker:    P-01 the relay
-Found:       2026-09-28 (A-D1 left-open list), decided 2026-09-29 (Vitalik: a `key=` in meeting links)
+Found:       2026-09-28 (A-D1 left-open list), decided 2026-09-29 (Vitalii: a `key=` in meeting links)
 ```
 
 ## Description

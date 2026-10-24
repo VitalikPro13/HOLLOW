@@ -32,7 +32,7 @@ locked the real devices out of their own mailbox.
    see it leave. Every device shows its roster on every connect and after every change to
    it, the remover included (`roster_book::show_relay`).
 5. **Pending joins count seven quiet days on the relay's own clock**, from when it first
-   saw them in the current base, like every contact (Vitalik, 2026-10-02), unless the
+   saw them in the current base, like every contact (Vitalii, 2026-10-02), unless the
    phrase turned the wait off (below). A device that stops asking is forgotten, and a
    recovery starts every clock over (HOL-SEC-082: kept per device, a backup the phrase
    left out rejoined at once).
@@ -57,7 +57,7 @@ What the relay learns is no new exposure: rosters already ride in the clear as
 already grouped one person's devices by who joins their inbox. It keeps the statements in
 RAM to answer one question.
 
-## Decision: the wait can be turned off (Vitalik, 2026-10-02)
+## Decision: the wait can be turned off (Vitalii, 2026-10-02)
 
 The seven-day wait stays the default: it is how someone who lost every device and the
 phrase comes back from a backup (Signal's registration lock has the same shape). A person

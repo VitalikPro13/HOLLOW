@@ -80,7 +80,7 @@ clear) `c24_the_sibling_lane_rides_olm`, `c24_server_traffic_rides_mls_or_olm`,
   carried. `social::profile_audience` decides every announce: the full profile to
   our own devices, friends and co-members; a card (name and avatar, `hollow-card1`,
   signed by the master) to either side of a pending friend request; nothing to
-  anyone else or to a revoked device (A28, decided by Vitalik). Admitted meeting
+  anyone else or to a revoked device (A28, decided by Vitalii). Admitted meeting
   participants get each other's card over the meeting's MLS group, and a joiner
   shows its card to the members it asks. A friend request's card is sealed to its
   target under a key only the two masters derive. `hollow-profile2`
@@ -119,7 +119,7 @@ root hash; data-channel SDP (`Rtc*`, `RtcShare*`); a friend request's signed dev
 list and key bundle; KeyPackages, KeyPackage requests and epoch probes, which name
 the server and a subgroup's channel id; and the lock chain's public halves, so it
 sees when a lock moves. A relay can withhold a lock chain, and joins then wait, but
-it cannot forge one. Accepted by Vitalik (2026-09-28): a member who leaves on its
+it cannot forge one. Accepted by Vitalii (2026-09-28): a member who leaves on its
 own with a modified client that kept the door can read requests and answer them
 until an owner, admin or mod is next online (its stale "you're in" is overtaken as
 soon as a real member answers), and insiders can misbehave while they are members.

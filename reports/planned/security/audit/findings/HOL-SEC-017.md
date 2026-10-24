@@ -1,8 +1,8 @@
 # HOL-SEC-017: A server member or a meeting guest could be seated in the encryption group under someone else's name
 
 ```
-ID:          HOL-SEC-017                 Status: Member and guest halves fixed on local main (2026-09-27); the
-                                          relay half stays open with the class D design
+ID:          HOL-SEC-017                 Status: Fixed. Member and guest halves on local main (2026-09-27); the
+                                          relay half by HOL-SEC-041 (design D)
 Severity:    High                        (Impact H: a leaf credentialed as the owner or another member, so every
                                           MLS envelope it sends is attributed to that identity (meeting chat
                                           included), and a restricted-channel subgroup keeps a leaf whose name

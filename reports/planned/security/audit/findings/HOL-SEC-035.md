@@ -68,7 +68,7 @@ that we are a member.
 - iOS shows the APNs alert ("New message") for any wake before the extension
   runs; without Apple's notification filtering entitlement the extension cannot
   withhold it. A stranger who knows a device id can still cause generic banners
-  within the relay's push budget. Decision for Vitalik: request the entitlement.
+  within the relay's push budget. Decision for Vitalii: request the entitlement.
 
 ## Test
 

@@ -1,8 +1,8 @@
 # HOL-SEC-015: Anyone in a server's room could fake typing and unread or mention badges in any channel
 
 ```
-ID:          HOL-SEC-015                 Status: Partly fixed on local main (2026-09-27): forgery by non-posters
-                                          closed; the plaintext exposure of the hint is candidate J9
+ID:          HOL-SEC-015                 Status: Fixed. Forgery by non-posters closed on local main (2026-09-27);
+                                          the plaintext exposure (candidate J9) by HOL-SEC-062
 Severity:    Low                         (Impact L: "X is typing", unread counts and mention badges for any channel,
                                           including ones the victim cannot open; Exploitability H: needs only the
                                           server id, which every invite link carries)

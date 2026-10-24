@@ -1540,3 +1540,13 @@ iOS build/config: classic non-UIScene AppDelegate + firebase pinned below the iO
 - **No rate limiting:** Removed — Ed25519 auth + license keys are the DoS protection layer.
 - **Room isolation:** Peers can only send to rooms they've joined. Non-members are silently rejected.
 - **License revocation:** Active connections can be terminated within 30 seconds by removing their key from `keys.json`.
+
+## Send budget and circuit breaker (0.13)
+
+Two separate limits, neither of them a per-message rate limit (AR-01). Write gates: `security_write_gates` §52.
+
+- **Send budget** (`send_budget.h`): bounds the bytes the relay holds for slow readers, so a few addresses sending large broadcasts can no longer exhaust the box's memory (uWS used to buffer whole frames past `maxBackpressure`). At most 64 MB per socket, a global budget of a quarter of RAM (floor 512 MiB, `HOLLOW_SEND_BUDGET_BYTES` overrides), charged per address share. Under pressure the least progressed reader of the heaviest share is closed. Memory safety, not a volume quota. `/server-stats` shows `send_budget_bytes`.
+- **Circuit breaker** (`breaker.h`, `msg_plan.h`): charges every frame in work units W (frames + the writes they cause + 6 per signature check + 4 per door proof + members/32) against per-session buckets (`breaker::Limits`: start 400k, cap 800k, refill 1,000 W/s; joins start 2,500, cap 5,000, 2 a second; at most 50,000 distinct stranger targets per 10 minutes; fresh starts get 400k, 100k or 24k by how often their address block starts fresh sessions; a 1.2M pool per address block). A frame the bucket cannot pay for closes the socket 1013 with a reconnect hint (`close_once`, grace, resume); the frame is uncounted and resent, never dropped. The device ladder (1 m, 5 m, 30 m, 2 h, 24 h, one level forgotten per 6 h without a trip) steps only when a session overspends the whole honest budget within 10 minutes (cap plus 10 minutes of refill, 1.4M W); any other trip is a pause. A hidden sender is charged per prover it reaches.
+- **Shadow mode** is the 0.13 default: the relay counts would-be trips and closes nothing; build with `HOLLOW_BREAKER_ENFORCE` to enforce (0.14 at the latest, once the shadow counters show no honest trips). `auth_ok`/`resumed` carry the credit and `enforced`; clients mirror the buckets (`relay_pace.rs`, `breaker_vectors.json`, change both) and wait only when `enforced`.
+- `/server-stats` carries a coarse `breaker` block (anonymous trip totals) while `PUBLIC_STATS` is on; `PUBLIC_STATS=off` drops it. An operator cannot lower the compiled-in numbers.
+- Tests: `test_breaker`, `test_send_budget`, `test_door_room`, `test_fair_share`; live suites `breaker_shadow`, `breaker_enforce`, `oom` (plain and SANITIZE).

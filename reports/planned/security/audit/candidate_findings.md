@@ -15,7 +15,7 @@ decided (accepted risk or design ID-1).
 Severity is provisional (Impact x Exploitability, plan section 2.7) and is
 settled in each finding file.
 
-**Decisions taken by Vitalik (2026-09-26):**
+**Decisions taken by Vitalii (2026-09-26):**
 1. Class A: EVERY state-changing plaintext message is secured, as a breaking
    change (old clients cannot connect to new ones). Where a session exists the
    message moves into Olm/MLS; what must stay plaintext (friend requests to
@@ -63,7 +63,7 @@ one below is forgeable, which contradicts claim C-25 ("a malicious relay cannot
 forge a server change, a friend accept or a destroy order"). One architectural
 fix covers the class: state-changing plaintext messages are signed by the sender
 device (domain tag, recipient or room, timestamp) or ride Olm/MLS. Decision
-needed from Vitalik: which messages move, and the rollout rule.
+needed from Vitalii: which messages move, and the rollout rule.
 
 | ID | What P-01 can do | Evidence | Sev | Status |
 |---|---|---|---|---|

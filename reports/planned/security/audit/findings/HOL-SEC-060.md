@@ -44,7 +44,7 @@ vault reconstruction) hashes the plaintext and refuses bytes that do not match
 before `mark_file_complete`; a wiring test counts those paths.
 
 Files sent before 0.12 carry 32-character random ids and keep the old delivery
-gates (AR-13, accepted by Vitalik 2026-09-28).
+gates (AR-13, accepted by Vitalii 2026-09-28).
 
 ## Test
 

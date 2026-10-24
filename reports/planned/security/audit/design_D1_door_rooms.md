@@ -1,6 +1,6 @@
 # Design D1: door-proof server rooms
 
-Session 28 (2026-10-02). Decision D1 of the phase B re-check (`tmp4.txt` section 1, Vitalik:
+Session 28 (2026-10-02). Decision D1 of the phase B re-check (`tmp4.txt` section 1, Vitalii:
 "protect servers from plain outsiders"). Finding HOL-SEC-091.
 
 ## The problem in one paragraph
@@ -60,7 +60,7 @@ online, and a post in any public channel ties that device to its master.
 
 ## What it does not stop (AR)
 
-- Anyone who joins through an open invite is a member like any other (Vitalik).
+- Anyone who joins through an open invite is a member like any other (Vitalii).
 - Someone who already knows a device id can address it in a room and learn from a reply
   that it is there; in a server without public channels no hidden peer gets a reply.
 - A removed member keeps presence for up to the grace after its removal.

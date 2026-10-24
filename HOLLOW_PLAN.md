@@ -300,7 +300,7 @@ Client C ──WSS──► │                 │ ◄──WSS── Client D
 
 **WSS Connection:**
 - URL: `wss://relay.anonlisten.com/ws` (Nginx TLS termination on port 443)
-- Authentication: Ed25519 signature (`hollow-ws-auth:{peer_id}:{timestamp}`)
+- Authentication (auth v2, 0.12): `auth_hello` -> the relay's nonce -> an Ed25519 device signature over the relay's domain, the nonce and every flag (`relay-uws/src/auth_frame.h` = `ws_client::auth_v2_message`); the v1 timestamp signature was removed in 0.13
 - Auto-reconnect with exponential backoff (1s → 2s → 4s → ... → 30s max)
 - 30-second keepalive ping prevents idle connection drops
 - Re-joins all rooms on reconnect

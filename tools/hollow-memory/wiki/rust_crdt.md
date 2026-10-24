@@ -20,7 +20,7 @@ HlcTimestamp {
 }
 ```
 
-**Total ordering** is `physical_ms` then `counter` then `actor` (lexicographic string comparison on peer_id). This guarantees no two timestamps are ever equal — even if two peers generate timestamps at the exact same millisecond with the same counter, the actor string breaks the tie deterministically.
+**Total ordering** is `physical_ms` then `counter` then `actor` (lexicographic string comparison on the actor id). The actor is the author's MASTER, so the actor alone does not separate two devices of one identity: their counter lanes do (see Device lanes below).
 
 `hlc.rs:HlcTimestamp::zero()` creates a timestamp with `physical_ms=0, counter=0` for a given actor — used as an initial sentinel.
 
@@ -53,6 +53,10 @@ Hlc {
 **SECURITY — Drift rejection (5-minute window):** If `other.physical_ms` is more than 5 minutes ahead of the local wall clock, the witness is silently rejected. This prevents a malicious peer from advancing the local HLC to the far future, which would give their LWW values permanent precedence. Logged via `hollow_log!` with `[HOLLOW-SECURITY]` prefix.
 
 **Persistence accessors:** `hlc.rs:Hlc::physical_ms()`, `hlc.rs:Hlc::counter()`, `hlc.rs:Hlc::actor()` — read-only for serialization to SQLCipher.
+
+### Device lanes (0.13)
+
+All devices of one identity stamp ops with the MASTER as actor (`verify_signed` binds the actor to the author), so before 0.13 two siblings could mint the same (master, stamp): in the same millisecond, after both witnessed a peer running ahead, or after a restart reseeded from the wall clock. Dedup kept whichever copy arrived first and replicas, the user's own included, diverged for good. Since 0.13 a device clock (`Hlc::for_device`) mints only counters in its own lane: `counter = lane (mod 2^24)`, lane = SHA-256(`hollow-hlc-lane1:{device}`) (`lane_of`, `LANES`, never changes). The actor stays the master, so 0.12.2 replicas accept the stamps unchanged. Witnessing only records the newest point seen (minting steps past it into the lane), so a sync batch of old ops cannot stride the counter into the next millisecond. On load the clock witnesses the newest admitted op of its own log, and `create_op` re-mints any stamp already held. Remaining ties break deterministically: chat rows on equal `order_us` by message id; equal-stamp profiles, signed cards and sibling block lists by signature or block-wins. Residual: two siblings whose lanes collide (2^-24 per pair) share a lane again. Units `siblings_in_one_millisecond_mint_distinct_stamps`, `siblings_after_a_peer_ahead_mint_distinct_stamps`, `every_stamp_stays_in_the_lane_and_climbs`, `witnessing_older_stamps_does_not_move_the_clock`; harness `g13h_siblings_after_a_peer_ahead_converge_on_both_writes`.
 
 ---
 

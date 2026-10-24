@@ -24,7 +24,7 @@ into possible holes, so this file itself belongs on the security branch.
   key included). The claims pass surfaced a design question, AR-02 (every
   device holds the master key, so a stolen usable device can revoke its
   owner's real ones).
-- **Vitalik's answers (2026-09-26):** the relay's missing message rate limits
+- **Vitalii's answers (2026-09-26):** the relay's missing message rate limits
   are AR-01 (tried, broke sync; connection caps and fair share stay). OTF is
   too strict and NLnet Restack excludes AI projects, so the external audit
   waits on the pending NLnet application. The formal model waits until the
@@ -61,7 +61,7 @@ into possible holes, so this file itself belongs on the security branch.
   live transport and push through one gate) and **HOL-SEC-010** (an MLS envelope
   was never bound to the group that decrypted it). Also closed: C4, C5, C13, L5.
   Found on the way, not security: the 4,000-byte text clamp cuts composer-legal
-  non-Latin messages (C11, decision for Vitalik).
+  non-Latin messages (C11, decision for Vitalii).
 - **Session 5 (2026-09-27):** C11 built (**HOL-SEC-011**): one 64 KiB message
   limit in Rust and Dart, every receive path drops a longer body whole inside
   signature verification, nothing clips any more, and the composer and edit
@@ -117,7 +117,7 @@ into possible holes, so this file itself belongs on the security branch.
   **HOL-SEC-039** (edit and reaction replay), **HOL-SEC-040** (room presence
   alone opened a data channel, a gossip seat and our voice presence). L6 was
   built and reverted (honest same-second KeyRequests look like replays). Moved to
-  the class A design: J5, J7, the unsigned profile fields of N1. Vitalik's
+  the class A design: J5, J7, the unsigned profile fields of N1. Vitalii's
   decisions: M2, only friends and our own devices ring us (built into
   HOL-SEC-037); L6 accepted as AR-09. Open: the iOS notification filtering
   entitlement (K3 residual).
@@ -133,7 +133,7 @@ into possible holes, so this file itself belongs on the security branch.
   drops a group any more, forks are found by an epoch-authenticator digest in
   the probe and repaired: **HOL-SEC-044** (D4). **HOL-SEC-045** (voice signaling
   over MLS credited to the relay's sender, D9). A leaf repair is now one commit.
-  Existing groups rebind in place. Vitalik's decisions: a Welcome from any
+  Existing groups rebind in place. Vitalii's decisions: a Welcome from any
   member if we asked for it; re-key in place rather than re-form. D8 closed at
   the MLS layer, its `MemberAdded` half stays E7.
 - **Session 9 (2026-09-27): design E, CRDT state authority**
@@ -149,7 +149,7 @@ into possible holes, so this file itself belongs on the security branch.
   cap, owner-verify and Twitch; every member re-checks), **HOL-SEC-050** (Medium:
   strangers and device keys authored ops), **HOL-SEC-051** (Medium: device-keyed
   registers folded onto the owner), **HOL-SEC-052** (Low: moderation edges,
-  ownership). Vitalik's decisions: the owner is fixed; older servers keep joining
+  ownership). Vitalii's decisions: the owner is fixed; older servers keep joining
   on trust until their owner updates; invite links pin the owner; any member admits
   with the gates re-checked. Accepted risks AR-10..AR-12 (residuals R1..R3).
 - **Session 10 (2026-09-27): design A, every frame names its sender**
@@ -162,7 +162,7 @@ into possible holes, so this file itself belongs on the security branch.
   (op log to any holder of a server id), **HOL-SEC-056** (a sibling announce reopened
   a held server to any member's snapshot), **HOL-SEC-057** (full profiles to anyone),
   **HOL-SEC-058** (share audio from any data channel), **HOL-SEC-059** (the push node
-  cleared every parked destroy order). Vitalik's decisions 13-16: everything in class
+  cleared every parked destroy order). Vitalii's decisions 13-16: everything in class
   A lands in 0.12, C-24 in full, file content commitments, meeting host pinning.
 - **Session 11 (2026-09-28): design A items A-D2 and A-D3.** **HOL-SEC-060** (High:
   any holder of a file could answer for it with other bytes; a file is now named by
@@ -177,7 +177,7 @@ into possible holes, so this file itself belongs on the security branch.
   requests, the kick notice, typing, status, the voice twins and the post hint (MLS
   `ChannelHint`) left plaintext; `c24_*` wiretap tests on the mock relay. Also done: the
   HOL-SEC-056 harness test and the DM typing friend check. Claim C-24 reworded
-  (Vitalik): routing metadata is the relay's, data never is.
+  (Vitalii): routing metadata is the relay's, data never is.
 - **Session 13 (2026-09-28): A-D1 phases E and F** (`c54bcbe9`): DM room names from the
   X25519 agreement of the two masters; DM sync, file and emote traffic carried; share
   control sealed under the link key. Found: Olm glare crossed sessions at first contact.
@@ -186,13 +186,13 @@ into possible holes, so this file itself belongs on the security branch.
   suite went from 462 to none outside the revocation test); a mutual friend request
   whose accept lands first keeps one stamp (`4dbb504b`). Phase D (`73591cbe`): profiles
   ride Olm and MLS only, the full profile to own devices, friends and co-members, a
-  signed name and avatar card to pending friends (A28, decided by Vitalik), nothing to
+  signed name and avatar card to pending friends (A28, decided by Vitalii), nothing to
   strangers; `hollow-profile2` signs every field (N1).
 - **Session 15 (2026-09-28): A-D1 phase C, the join lane** (`daa9917f`; website
   `a553603`, not deployed): join requests and every answer sealed in boxes (invite
   `key=`, a reply key per join), the `~join` ring holds only boxes; the two missing card
   tests. A pending join takes its answer only from its reply key (`54aef252`: a removed
-  member could hand a joiner a stale state over Olm). Vitalik agreed the join lock the
+  member could hand a joiner a stale state over Olm). Vitalii agreed the join lock the
   same day.
 - **Session 16 (2026-09-28): the join lock** (`7b3cb37f`): a door key every member
   holds and a change key for the owner, admins and mods, moved on every removal, the
@@ -264,7 +264,7 @@ into possible holes, so this file itself belongs on the security branch.
   check spinning, a restored backup showed no lock until a restart, a settled join ask
   could still be refused, `HollowDialog` remounted its body when busy (scroll and focus
   lost after every failed action), and five harness tests that raced under full load (each now waits on the result, not on an event).
-- **NEXT (Vitalik, 2026-10-01): the iOS check of ID-1, repairing the stale fleet journeys,
+- **NEXT (Vitalii, 2026-10-01): the iOS check of ID-1, repairing the stale fleet journeys,
   then a regression pass over the whole app on throwaway fleet peers** (messaging, sync,
   files and media, calls, servers, multi-device, the key UI), so that the audit's fixes are
   proven to break nothing and to let every honest flow through. Plan: tmp4.txt, session 23.
@@ -284,7 +284,7 @@ into possible holes, so this file itself belongs on the security branch.
   statements now need a signer with standing and give way by its distance from the
   phrase), **HOL-SEC-080** (Medium: a removed device kept a fresh device of its own
   through that device's removal of it; kept vouchees are an intersection),
-  **HOL-SEC-081** (Low: destroying a device dropped the devices it had linked). Vitalik's
+  **HOL-SEC-081** (Low: destroying a device dropped the devices it had linked). Vitalii's
   decision: the seven-day wait stays the default and the phrase can turn it off
   (`no_wait` in the recovery statement, Settings > Security > Advanced). Relay DEPLOYED the
   same day after a canary on port 8443 (live probe 19/19 there and on production; the v6
@@ -308,7 +308,7 @@ into possible holes, so this file itself belongs on the security branch.
   friend request to an offline phone arriving by mailbox replay, a desktop and a phone of
   one identity both getting a request live, and a removal on the desktop locking the
   phone in the same second with nothing more reaching it.
-- **NEXT:** the program's remaining phases (section 4, C to G); Vitalik sets the order.
+- **NEXT:** the program's remaining phases (section 4, C to G); Vitalii sets the order.
   **On release day** add `ACCEPT_DEVICE_LIST_INBOX_PROOF` to the switches turned off.
 - **Before session 20 (2026-09-30):** **next session: ID-1 with HOL-SEC-002** (xhigh). Fuzzing and flood
   limits wait for phase G. Fuzzing and flood limits wait for phase G. **On release day:** the
@@ -647,6 +647,9 @@ Retest:          date, commit, result
 
 ### 2.9 External audit route
 
+- **Changed 2026-10-24:** the NLnet application was rejected. The route is now an
+  application to OSTIF (Open Source Technology Improvement Fund) after 0.13, with
+  the audit folder and SECURITY_AUDIT_2026_10.md as the readiness pack.
 - **Decided 2026-09-26:** OTF Security Lab is too strict for us and NLnet
   Restack excludes AI projects, so the route is the pending NLnet application
   and its ROS audit. The notes below stay for reference.
@@ -684,7 +687,7 @@ Retest:          date, commit, result
 **Principle: the policy is decided by us, the evidence is gathered with
 help.** AI agents enumerate handlers, fill evidence columns with file:line,
 hunt variants from a seed diff, and write harness tests. Deciding who SHOULD
-be allowed to do what is a design decision, made by Vitalik and me, and never
+be allowed to do what is a design decision, made by Vitalii and me, and never
 delegated.
 
 Artifacts, all under `reports/planned/security/audit/` on the security branch:
@@ -743,7 +746,7 @@ Mirrors tmp4.txt steps 2 to 5. Each phase is one to three sessions.
 
 **A. Claims and the diagram (session 2).** `claims.md`; attacker profiles;
 the context DFD and breakouts (identity and devices, DMs, servers CRDT+MLS,
-media, relay, push, updater, files and asset rail, local storage). Vitalik
+media, relay, push, updater, files and asset rail, local storage). Vitalii
 reviews the claims: they are the promises, so they are his.
 
 **B. The authorisation matrix (sessions 3-4).** An agent enumerates every
@@ -817,7 +820,7 @@ the 44k-connection baseline was measured), and only on those numbers decide a
 circuit breaker for clearly inhuman behaviour (close the connection, never drop
 single frames; short escalating IP cooldowns, never week-long bans that hit
 shared carrier addresses). It revisits AR-01 and AR-06 (AR-07 closed by HOL-SEC-070).
-Vitalik (2026-09-29): "Phase G will handle the whole benchmarking and proper limiting
+Vitalii (2026-09-29): "Phase G will handle the whole benchmarking and proper limiting
 of relay to get it better for normal users and bad for some bad actors." The goal is
 that no random account, spammer or small flood can take the relay down or slow real
 users, proven with the fleet. Queued for it so far: the CPU a `lock_put` of a 256-link
@@ -829,7 +832,7 @@ opcode parsers pulled out of `ws_handler.cpp` into testable functions, the JSON 
 field readers: `ring_auth::parse`, `join_lock::links_from_json`, the device list), then
 `snapshot_codec.h` (it reads only the relay's own memfd, so it matters less), run in CI
 through ClusterFuzzLite. Also in G, only
-after Vitalik confirms Apple approved it: the iOS push work behind the
+after Vitalii confirms Apple approved it: the iOS push work behind the
 Notification Service Extension filtering entitlement (requested 2026-09-27,
 the K3 residual). Add `com.apple.developer.usernotifications.filtering` to the
 extension's entitlements, regenerate its profile, and have the extension show

@@ -207,7 +207,7 @@ a malicious update").
 Note this is a known, documented state (memory says a real release keystore is
 a deliberate breaking migration, sequenced with Play Store). It belongs in the
 report as a finding so the audit record is honest; whether to accept it (as a
-pre-Play-Store posture) or fix it is Vitalik's call. If accepted it needs an
+pre-Play-Store posture) or fix it is Vitalii's call. If accepted it needs an
 `accepted_risks.md` row; today it is neither in `claims.md` as a caveat nor in
 `accepted_risks.md`.
 

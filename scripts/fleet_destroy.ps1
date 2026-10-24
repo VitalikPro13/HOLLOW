@@ -618,9 +618,25 @@ function Get-LinkCode($peer) {
     throw "[$peer] never rendered a 10-character link code"
 }
 
+# Welcome opens on the terms screen until they are agreed, then on "Create an
+# identity"; a wiped peer may land on either, depending on where consent lives.
+function Wait-Welcome($peer, $timeoutSeconds) {
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $answer = $null
+    while ((Get-Date) -lt $deadline) {
+        foreach ($text in @('Agree and continue', 'Create an identity')) {
+            $answer = Invoke-SoftStep $peer @{ op = 'wait_for'; target = "text:$text"; timeout_ms = 3000 }
+            if ($answer.ok) { return $answer }
+        }
+    }
+    return $answer
+}
+
 # Walks the welcome dialog to the enter-code screen on an EMPTY peer.
 function Open-EnterCode($peer) {
-    Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 90000 }
+    Step $peer @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 90000 }
+    Step $peer @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 }
+    Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 }
     Step $peer @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
     # A throwaway identity is created and the node started before the dialog
     # appears, so this is the slow one.
@@ -1060,7 +1076,7 @@ try {
     } else {
         Say "d relaunched itself: pid $dPid -> $dBackPid" 'Green'
     }
-    $dWelcome = Invoke-SoftStep d @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 120000 }
+    $dWelcome = Wait-Welcome d 120
     Invoke-SoftStep d @{ op = 'shot'; name = "destroy-$runTag-d-welcome" } | Out-Null
     $dAfter = @(Get-IdentityRemnants 'd' $true)
     Write-Inventory d 'after the second launch'
@@ -1084,7 +1100,7 @@ try {
         } else {
             Say "$peer relaunched itself: pid $($pair[1]) -> $backPid" 'Green'
         }
-        $welcome = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 120000 }
+        $welcome = Wait-Welcome $peer 120
         Invoke-SoftStep $peer @{ op = 'shot'; name = "destroy-$runTag-$peer-welcome" } | Out-Null
         $remnants = @(Get-IdentityRemnants $peer $true)
         Write-Inventory $peer 'after coming back'

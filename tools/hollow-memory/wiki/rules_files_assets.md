@@ -69,7 +69,7 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
 - A thumbnail from a peer (file-card blur, video poster, link-card thumb) reaches Dart
   ONLY via `image_convert::peer_thumb_for_display` (pure-Rust decode + our own re-encode,
   or dropped); never change the stored bytes, they sit inside the author's signature.
-  Asset-rail blobs and auto-downloaded images still reach Skia (AR-28). HOL-SEC-151.
+  Since 0.13 every peer image that renders without a tap passes `node/image_gate.rs` (a pure-Rust full decode) before Skia sees it (AR-28 closed); HEIC and AVIF are never drawn as images, they go as plain file cards (convert on send = follow-up). HOL-SEC-151.
 - Sender-side link-preview fetches go through the `PublicResolver` client: no loopback,
   private, link-local or metadata address on any hop, no proxy. HOL-SEC-148.
 - Vault shard streams ride `vault_ops::shard_stream_id(cid, si, from, to)`, never the
