@@ -84,7 +84,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Install cargo-llvm-cov & cargo-nextest
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
@@ -93,7 +93,7 @@ jobs:
         run: cargo llvm-cov nextest-archive --lib --archive-file "$RUNNER_TEMP/hollow-tests.tar.zst"
 
       - name: Publish the test archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-test-archive
           path: ${{ runner.temp }}/hollow-tests.tar.zst
@@ -123,12 +123,12 @@ jobs:
           rustup default stable
 
       - name: Install cargo-llvm-cov & cargo-nextest
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
       - name: Download the test archive
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rust-test-archive
           path: ${{ runner.temp }}
@@ -161,7 +161,7 @@ jobs:
           "$profdata" merge -sparse ./*.profraw -o "$RUNNER_TEMP/shard-$SHARD.profraw"
 
       - name: Publish this shard's coverage profile
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-profile-${{ matrix.shard }}
           path: ${{ runner.temp }}/shard-${{ matrix.shard }}.profraw
@@ -197,18 +197,18 @@ jobs:
           rustup default stable
 
       - name: Install cargo-llvm-cov & cargo-nextest
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
       - name: Download the test archive
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rust-test-archive
           path: ${{ runner.temp }}
 
       - name: Download every shard's coverage profile
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: rust-profile-*
           merge-multiple: true
@@ -227,7 +227,7 @@ jobs:
             --ignore-filename-regex "(frb_generated|/api/|/node/|/storage/|/archive/)"
 
       - name: Publish coverage for the Sonar job
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-coverage
           path: rust/hollow_core/lcov.info
@@ -269,7 +269,7 @@ jobs:
         run: cargo clippy --lib --message-format=json > ../../clippy-report.json
 
       - name: Publish the report for the Sonar job
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-clippy
           path: clippy-report.json
@@ -295,7 +295,7 @@ jobs:
           persist-credentials: false
 
       - name: Install cargo-deny, osv-scanner and zizmor
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@0.20.2,osv-scanner@2.5.1,zizmor@1.30.1
 
@@ -432,13 +432,13 @@ jobs:
 
       # Both land exactly where sonar-project.properties expects them.
       - name: Download Rust coverage
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rust-coverage
           path: rust/hollow_core
 
       - name: Download the Clippy report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rust-clippy
 
