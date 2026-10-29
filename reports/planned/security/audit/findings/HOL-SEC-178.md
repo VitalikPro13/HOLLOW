@@ -1,7 +1,7 @@
 # HOL-SEC-178: A busy channel's ring replay starved the owner's direct frames, so a joiner was never seated
 
 ```
-ID:          HOL-SEC-178                 Status: Fixed (2026-10-23, wave g13, local commit b6fbf2e8),
+ID:          HOL-SEC-178                 Status: Fixed (2026-10-23, wave g13, local commit 892f0dcc),
                                           ships with 0.13
 Severity:    Medium                      (Impact M: a new member of a busy server never takes its MLS seat
                                           and never sees history; Exploitability: none needed, any channel

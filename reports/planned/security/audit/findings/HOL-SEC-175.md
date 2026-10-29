@@ -1,7 +1,7 @@
 # HOL-SEC-175: The CRDT sync state vector could lose a server op for good
 
 ```
-ID:          HOL-SEC-175                 Status: Fixed (2026-10-22, wave g13, local commit cd87c801),
+ID:          HOL-SEC-175                 Status: Fixed (2026-10-22, wave g13, local commit 98b4d842),
                                           ships with 0.13
 Severity:    Medium                      (Impact M: an op such as a ban, a role change or a channel edit
                                           never reaches a replica that missed it, so that replica judges

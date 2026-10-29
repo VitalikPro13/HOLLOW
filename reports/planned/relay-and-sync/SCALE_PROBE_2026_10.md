@@ -525,10 +525,10 @@ taken out.
 
 ## 8. Rerun on the merged 0.13 tree (2026-10-22)
 
-**What ran.** The section 6 commands on `security/0.13` at 0c0f9956 (wave 1: per-device HLC
+**What ran.** The section 6 commands on `security/0.13` at 22824ffa (wave 1: per-device HLC
 lanes, MLS cost fix, presence digest with the 512-identity cap, CRDT range-digest sync with
 no receiver re-forward, AR-25/AR-27 turns and epoch cap). Harness and MLS probe compiled at
-17:39; the relay binary was built at 18:06:54, before 7fbfbb84 touched the relay sources
+17:39; the relay binary was built at 18:06:54, before 6265b545 touched the relay sources
 (18:33:29). Run 17:39 to 18:42 on the M4 mini while 4 to 5 builders used it. **Bytes and
 frame counts are exact; times are noisy.** The bare-OpenMLS control (`mls_scale_probe_message_cost`,
 code unchanged) ran 1.0 to 1.75 times its baseline time, so a time ratio inside that band is

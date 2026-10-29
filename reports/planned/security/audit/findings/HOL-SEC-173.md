@@ -1,7 +1,7 @@
 # HOL-SEC-173: A crafted WebP thumbnail in a stranger's friend-request card stopped the receiver's node
 
 ```
-ID:          HOL-SEC-173                 Status: Fixed (2026-10-22, wave g13, local commit 09028880),
+ID:          HOL-SEC-173                 Status: Fixed (2026-10-22, wave g13, local commit a7263f6b),
                                           ships with 0.13
 Severity:    High                        (Impact M-H: the node's event loop task ends, so the app keeps a
                                           live window with no network until it is restarted, and the

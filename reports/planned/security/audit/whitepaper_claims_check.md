@@ -4,7 +4,7 @@ Appendix to the 0.13 security report. Close-out item of the audit plan
 (`SECURITY_AUDIT_PLAN.md`, phase G close-out): `WHITEPAPER.md` security claims
 re-checked against `claims.md` and against the code.
 
-- **Scope:** local branch `security/0.13`, commit `28d188df` (tree
+- **Scope:** local branch `security/0.13`, commit `41080e0d` (tree
   relay `relay-uws/src` and client `rust/hollow_core/src`
   plus `lib/` where a claim lives in Dart.
 - **Date:** 2026-10-24.
@@ -13,7 +13,7 @@ re-checked against `claims.md` and against the code.
   with Grep, and checked by reading the lines cited below. The 0.13 changes named
   in the wiki rows of `security_write_gates.md` §47 to §50 and in the wave g13
   0.13 change list were each checked in code for text they make stale. No tests were
-  run for this check; the evidence is the code as written at `28d188df`.
+  run for this check; the evidence is the code as written at `41080e0d`.
   Accepted risks are named by their `accepted_risks.md` row.
 - **Verdicts:** *Holds* (the code does what the text says), *Holds with a
   residual* (true, with a known limit named by its AR row), *Stale* (the text
@@ -147,7 +147,7 @@ Paths below are relative to the repository root. `hc/` is
   Stale 27, Overclaims 9. All 36 Stale and Overclaims rows were edited (30
   edits, some covering several rows).
 - claims.md: 37 rows. Holds 15, Holds with a residual 21, withdrawn 1. None
-  Stale or Overclaimed at `28d188df`.
+  Stale or Overclaimed at `41080e0d`.
 
 ## 4. Edits made to WHITEPAPER.md
 

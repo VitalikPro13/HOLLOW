@@ -1,7 +1,7 @@
 # HOL-SEC-177: One identity's roster could lift another identity's removal of a device
 
 ```
-ID:          HOL-SEC-177                 Status: Fixed (2026-10-23, wave g13, local commit b495b028),
+ID:          HOL-SEC-177                 Status: Fixed (2026-10-23, wave g13, local commit 10dac6d6),
                                           ships with 0.13
 Severity:    Low                         (Impact M: a device one identity removed counts again when it
                                           consents into another identity, or a genuine device is refused,

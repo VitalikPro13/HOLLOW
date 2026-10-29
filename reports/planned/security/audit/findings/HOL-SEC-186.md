@@ -1,7 +1,7 @@
 # HOL-SEC-186: The relay read client JSON only up to a raw NUL byte
 
 ```
-ID:          HOL-SEC-186                 Status: Fixed (2026-10-22, wave g13, local commit 1ef1a727),
+ID:          HOL-SEC-186                 Status: Fixed (2026-10-22, wave g13, local commit 22116aa5),
                                           relay deployed 2026-10-23
 Severity:    Low                         (Impact L: the relay judged a different value than the one the
                                           client's own parser reads; no way to use the difference was

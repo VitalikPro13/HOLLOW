@@ -1,7 +1,7 @@
 # HOL-SEC-174: Two devices of one identity could mint the same server op id, and replicas diverged for good
 
 ```
-ID:          HOL-SEC-174                 Status: Fixed (2026-10-22, wave g13, local commit bfe60652),
+ID:          HOL-SEC-174                 Status: Fixed (2026-10-22, wave g13, local commit 6b612cb0),
                                           ships with 0.13
 Severity:    Medium                      (Impact M: one of two genuine writes by the same person's devices
                                           is silently dropped on some replicas, the person's own devices

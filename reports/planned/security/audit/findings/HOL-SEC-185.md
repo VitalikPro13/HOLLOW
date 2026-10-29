@@ -1,7 +1,7 @@
 # HOL-SEC-185: Opening a channel asked every member device for its history, and each page cost grew with the history
 
 ```
-ID:          HOL-SEC-185                 Status: Fixed (2026-10-23, wave g13, local commit 2db3c39a),
+ID:          HOL-SEC-185                 Status: Fixed (2026-10-23, wave g13, local commit e87391e0),
                                           ships with 0.13
 Severity:    Low                         (Impact M: a joiner pulled 2.3 to 3 full copies of a channel's
                                           history, and serving one page of a 100,000-message channel took a

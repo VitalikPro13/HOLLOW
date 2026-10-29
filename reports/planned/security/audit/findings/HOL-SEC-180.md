@@ -1,7 +1,7 @@
 # HOL-SEC-180: Two frames sealed in the same millisecond tied, so the second was taken as a replay
 
 ```
-ID:          HOL-SEC-180                 Status: Fixed (2026-10-23, wave g13, local commit be5f8124),
+ID:          HOL-SEC-180                 Status: Fixed (2026-10-23, wave g13, local commit 5d5d9116),
                                           ships with 0.13
 Severity:    Low                         (Impact L: a genuine frame, such as a second link card, refused as
                                           a replay of the first; Exploitability M: happens on its own when a

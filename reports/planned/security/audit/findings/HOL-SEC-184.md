@@ -1,7 +1,7 @@
 # HOL-SEC-184: Peer discovery answered every device with full member lists every 30 seconds
 
 ```
-ID:          HOL-SEC-184                 Status: Fixed (2026-10-22, wave g13, local commit 16f1852e),
+ID:          HOL-SEC-184                 Status: Fixed (2026-10-22, wave g13, local commit 70f7f10e),
                                           relay deployed 2026-10-23, client ships with 0.13
 Severity:    Medium                      (Impact H at scale: at 5,000 members one discovery round cost the
                                           relay's single thread about 30 s of CPU and 4.1 GB of egress, every

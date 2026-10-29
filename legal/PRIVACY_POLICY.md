@@ -1,6 +1,6 @@
 # Hollow: Privacy Policy
 
-**Last updated: October 19, 2026**
+**Last updated: October 29, 2026**
 
 Hollow is built on one principle: your conversations are yours. We cannot read your messages, listen to your calls, or identify you. This policy explains what data exists, where it exists, and what we can and cannot access.
 

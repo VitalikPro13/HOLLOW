@@ -2,7 +2,7 @@
 
 > Archived design of the 0.13 track (stand-in MLS authority). Built with review changes: R5 dropped, the named forward constrained. The code and wiki `security_write_gates` §51 are authoritative.
 
-Builder g13w2-f-authority, wave g13 wave 2, base 0c0f9956 (security/0.13 tip). DESIGN ONLY.
+Builder g13w2-f-authority, wave g13 wave 2, base 22824ffa (security/0.13 tip). DESIGN ONLY.
 v1 is kept as `DESIGN_v1.md`; review 1 is `REVIEW_1.md`, the narrow re-review is `REVIEW_2.md` (both
 GO WITH CHANGES; round 3 appended to `REVIEW_2.md`: GO, design CLOSED for the build). v2 overrides v1 wherever they differ; **§10 (v2.1) overrides §1-9 wherever they
 differ** (§2.2 position, §4.2 silent responders, §4.3 the walk and parked joins, §7 tests, §8 cost). Inputs: lead notes, s3 DESIGN.md v2.1 + fix round, memory project_mls_leaf_binding,

@@ -1,7 +1,7 @@
 # HOL-SEC-183: A few addresses could exhaust the relay box's memory with large broadcasts
 
 ```
-ID:          HOL-SEC-183                 Status: Fixed (2026-10-23, wave g13, local commit 776a91a3),
+ID:          HOL-SEC-183                 Status: Fixed (2026-10-23, wave g13, local commit 986a4d75),
                                           relay deployed to the official box 2026-10-23
 Severity:    High                        (Impact H: the relay is killed for memory and restarts with every
                                           offline message, ring, lock, push token and destroy order lost,

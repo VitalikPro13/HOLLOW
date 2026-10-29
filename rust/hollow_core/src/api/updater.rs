@@ -11,12 +11,12 @@ use super::network::get_runtime;
 use crate::frb_generated::StreamSink;
 use crate::identity::data_dir;
 
-pub(crate) const APP_VERSION: &str = "0.12.2";
+pub(crate) const APP_VERSION: &str = "0.13.0";
 
 /// The quick-patch number on top of [`APP_VERSION`]: 0 for the release itself, 1 for
 /// the first same-version patch, shown as `0.12.2+1`. Separate from pubspec's `+N`,
 /// which is the Android versionCode / iOS build.
-pub(crate) const APP_BUILD: u32 = 1;
+pub(crate) const APP_BUILD: u32 = 0;
 
 /// The highest `build` a manifest entry may carry; it names download and staging paths.
 const MAX_BUILD: u32 = 9999;

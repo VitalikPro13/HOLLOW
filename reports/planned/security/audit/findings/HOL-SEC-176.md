@@ -1,7 +1,7 @@
 # HOL-SEC-176: A ground master id led a server's encryption group while the owner was away
 
 ```
-ID:          HOL-SEC-176                 Status: Fixed (2026-10-23, wave g13, local commit 25723598),
+ID:          HOL-SEC-176                 Status: Fixed (2026-10-23, wave g13, local commit eb7ed684),
                                           ships with 0.13
 Severity:    Medium                      (Impact M: the attacker becomes the group's committer, join
                                           answerer, bootstrap target, catch-up responder and leaf repairer,

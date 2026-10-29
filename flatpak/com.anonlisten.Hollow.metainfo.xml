@@ -20,6 +20,11 @@
   <launchable type="desktop-id">com.anonlisten.Hollow.desktop</launchable>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.13.0" date="2026-10-29">
+      <description>
+        <p>Security audit, relay setup wizard, bigger servers and a Windows volume fix</p>
+      </description>
+    </release>
     <release version="0.12.2" date="2026-10-20">
       <description>
         <p>Blocking, message reports, a stronger App Lock and private push notifications</p>

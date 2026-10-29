@@ -1,3 +1,48 @@
+v0.13.0 - Security Audit, Relay Setup Wizard, Bigger Servers & Windows Volume Fix
+
+No breaking changes, so 0.12.2 and 0.13 work together. Self-hosters, update your relay too, so it handles big servers with far less traffic and keeps its memory use within a set limit.
+
+SECURITY
+
+- The full security audit of Hollow is finished and its report is published
+- Images from other people pass a safety check before Hollow shows them, and HEIC and AVIF images can't be shown for now
+- Each member's encryption keys in a server now renew regularly
+- Important security fixes for the relay, servers and your devices
+
+VOICE & CALLS
+
+- On Windows, joining a voice room or a call no longer turns down your music, videos and games
+
+SERVERS
+
+- Sending a message costs about the same in a full server as in a small one
+- A server holds up to 512 people, and the invite dialog says when it is full
+- Joining a server or opening a channel uses much less data, and long histories load faster
+- Keeping track of who is online uses far less data
+- Fixed a new member of a busy server sometimes never seeing its channels' history
+- Escape always closes server settings
+
+YOUR DEVICES
+
+- Removing a device now reaches your contacts through your direct messages, even after you go offline
+- A device you remove while it is online now locks at once and starts its three-day erase
+- The "added a new device" alert now stays until you read it, even if that device was removed since
+- Fixed re-adding a friend right after removing them sometimes being undone
+- Fixed a server change made on two of your devices at the same moment sometimes getting lost
+
+CHAT
+
+- On macOS and Linux, pressing Enter while typing Japanese, Chinese or Korean finishes the word instead of sending it half-typed
+- Up and Down now move the cursor when you edit a message
+
+SELF-HOSTING
+
+- A new setup wizard installs your own relay on Ubuntu or Debian with one command, `sudo bash relay-uws/install.sh` from a clone of the repository, as the [self-hosting guide](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/SELF_HOSTING.md) explains
+- Run `sudo hollow-relay-setup` later to update the relay or change its settings
+- The wizard also sets up TURN, push and the media forwarder, and secures the machine the same way as the official relay
+- A relay you set up by hand or with Docker can move to the wizard and keep its settings and keys
+- You can leave the online count and traffic figures off your relay's public stats page
+
 v0.12.2+1 - Emergency Certificate Fix
 
 SECURITY

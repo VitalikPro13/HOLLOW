@@ -1,7 +1,7 @@
 # HOL-SEC-182: A device removed while it was connecting never learned its removal live
 
 ```
-ID:          HOL-SEC-182                 Status: Fixed (2026-10-23, wave g13, local commit e34b86d4),
+ID:          HOL-SEC-182                 Status: Fixed (2026-10-23, wave g13, local commit 60438a4a),
                                           ships with 0.13
 Severity:    Low                         (Impact M: a removed device, such as a stolen phone, shows no
                                           lock and does not start its three-day erase until it reconnects;

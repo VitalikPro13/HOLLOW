@@ -59,10 +59,10 @@ If you find a vulnerability, please report it privately as described in [SECURIT
 
 | Platform | Links |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.12.2-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.12.2-win64.zip) |
-| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.12.2.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.12.2-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.12.2-linux.tar.gz) |
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.12.2-android.apk) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.13.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.13.0-win64.zip) |
+| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.13.0.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.13.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.13.0-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.13.0-android.apk) |
 | iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
 
 What changed in each version is on the [releases page](https://github.com/VitalikPro13/HOLLOW/releases).

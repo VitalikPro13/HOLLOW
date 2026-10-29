@@ -1,7 +1,7 @@
 # HOL-SEC-181: A removal stamped ahead of a later re-add ended the re-added friendship on some devices
 
 ```
-ID:          HOL-SEC-181                 Status: Fixed (2026-10-23, wave g13, local commit e87941c9),
+ID:          HOL-SEC-181                 Status: Fixed (2026-10-23, wave g13, local commit c4e2f7f5),
                                           ships with 0.13
 Severity:    Low                         (Impact M: a friendship re-added after a removal ends again, on
                                           some of our devices and not others, or on one side only;

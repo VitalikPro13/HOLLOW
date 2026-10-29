@@ -1,7 +1,7 @@
 # HOL-SEC-179: A frame carried to our own sibling device could be lost in a room the sibling had left
 
 ```
-ID:          HOL-SEC-179                 Status: Fixed (2026-10-23, wave g13, local commit be5f8124),
+ID:          HOL-SEC-179                 Status: Fixed (2026-10-23, wave g13, local commit 5d5d9116),
                                           ships with 0.13
 Severity:    Low                         (Impact M: a carried message to our own device, such as a friend
                                           list sync, a removal or a server announce, is silently lost;

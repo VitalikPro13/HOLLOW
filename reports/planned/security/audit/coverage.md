@@ -9,7 +9,7 @@ including "areas examined that yielded no findings". It is an appendix of the fi
 
 ## Scope and how to read this
 
-- **Scope commit.** Branch `security/0.13`, tip `28d188df` ("Add a setup wizard for self-hosted
+- **Scope commit.** Branch `security/0.13`, tip `41080e0d` ("Add a setup wizard for self-hosted
  relays"). Earlier phases ran on the branches that became the 0.12.0 release (2026-10-05),
  0.12.1 (2026-10-16) and 0.12.2 (2026-10-20); the 0.13 wave ran on `security/0.13` from
  `faf97c4b` (Release 0.12.2+1).
@@ -58,7 +58,7 @@ Source keys used below. Paths are relative to the repository root unless noted.
 | Mutation passes | One mutation at a time, named tests expected to fail, file restored by hash | MUT, finding files, per track |
 | Fleet and phones | Throwaway-identity journeys on Windows, macOS, Linux, iOS Simulators, Android emulators | `reports/shipped/security/REGRESSION_PASS_0.12.md` |
 | Relay suites | `relay-uws/test/run_tests.sh` plain and with `SANITIZE=1` (ASan, UBSan) on the VPS before every deploy, and in CI job "Relay C++" | CLAUDE.md, `.github/workflows/ci.yml:350-372` |
-| Fuzzing | Nine relay libFuzzer targets; one Rust cargo-fuzz target for the image check | commit `1ef1a727`, `relay-uws/fuzz/`, `rust/hollow_core/fuzz/` |
+| Fuzzing | Nine relay libFuzzer targets; one Rust cargo-fuzz target for the image check | commit `22116aa5`, `relay-uws/fuzz/`, `rust/hollow_core/fuzz/` |
 | Scale probes | G1 rerun on the merged 0.13 tree | SCALE |
 
 Attacker profiles (TM section 1) are applied with one standing rule: every peer attacker runs a
@@ -259,7 +259,7 @@ switches (see "Phase G").
  through `client_json::parse` and pre-auth frames only through `parse_auth_frame`.
 - L-09 holds as AR-01 (EF/relay_push "Leads").
 - The 0.13 fuzzing found no memory-safety or undefined-behaviour report in relay code in about
- 1.36 billion executions over nine targets (commit `1ef1a727`).
+ 1.36 billion executions over nine targets (commit `22116aa5`).
 
 **Not examined.** The harness does not run the relay C++ (CLAUDE.md "Multi-node harness"); relay
 logic is covered by its own suites. No penetration test of the deployed box: the phase E+F slice
@@ -283,7 +283,7 @@ author). Claims C-33, C-34. Source: EF/distribution (38 STRIDE cells, TUF attack
 **Found.** HOL-SEC-146 (links someone else chose opened with any scheme), 147 (news posts fetched
 remote images; a manifest version reached file names and update scripts). Accepted: AR-21 (no
 manifest expiry, no OS code-signature check), AR-22 (Android release key), AR-35 item 7 (no build
-provenance; SLSA L1 provenance script added in 0.13, commit `6d178a74`, unsigned).
+provenance; SLSA L1 provenance script added in 0.13, commit `46898ff4`, unsigned).
 
 **Examined, no finding.** The manifest is verified with `verify_strict` against a baked-in key
 before Dart sees a byte; every download is SHA-256-pinned against the signed manifest; non-https
@@ -295,7 +295,7 @@ verify under the current key, so they could serve a freeze but not a forgery (EF
 hostile signing key was minted to drive the Windows `update.bat`; the flatpak GPG enforcement and
 the Android certificate were confirmed from code and memory, not re-run (EF/distribution "Notes
 for the lead"). The self-hosted relay setup wizard and its signed `relay.json` feed (commit
-`28d188df`, inside the scope commit) have no audit or hostile-review record in the sources read;
+`41080e0d`, inside the scope commit) have no audit or hostile-review record in the sources read;
 the commit message notes the first real `relay.json` publish still waits for approval.
 
 ## WP6. Push, FCM, UnifiedPush, iOS NSE, channel push
@@ -366,7 +366,7 @@ one in 0.13; the bundled ffmpeg parsers, Skia's codec, `hollowpack::verify_pack`
 `webp_animation`, the `image` crate decoders behind `load_bounded`, `vault/erasure.rs::unpack_shard`
 and `link_preview::parse_og_metadata` were not fuzzed (EF/files "Phase-G fuzz targets"). Skia
 still decodes an image after the Rust check passes it; the check bounds what reaches Skia, it
-does not replace Skia's decoder (commit `09028880`).
+does not replace Skia's decoder (commit `a7263f6b`).
 
 ## WP8. Local, SQLCipher, keystore, app lock, logs, deep links, clipboard, notifications
 
@@ -458,37 +458,37 @@ its rules and residuals; the plan's state of play records the sessions.
 
 Each track went through a design review where needed, a hostile code review, a fix round,
 mutations, the full Rust suite on the PC and a fleet run. Merged-tree results on
-`e87941c9`: Rust nextest 2749 of 2758 (7 keystore tests that fail over ssh, 2 load flakes
+`c4e2f7f5`: Rust nextest 2749 of 2758 (7 keystore tests that fail over ssh, 2 load flakes
 passing alone), Flutter 2767 with 0 failures, analyze 0 errors, Windows fleet 28 of 28,
 every iOS phone scenario and the mixed iPhone and Android pass 10 of 10 in both roles.
-`28d188df` changes no relay C++ or relay test file. The
+`41080e0d` changes no relay C++ or relay test file. The
 whole 0.13 relay was deployed on 2026-10-23.
 
 | Track | Examined | Found | Examined, no finding or judged sound | Source |
 |---|---|---|---|---|
-| Relay fuzzing | `parse_auth_frame`, the binary opcode parsers (moved into `binary_frame.h`), client JSON, `ring_auth`, join-lock links, rosters, kill orders, the snapshot codec, crypto inputs: nine libFuzzer targets with ASan and UBSan | Low: client JSON with a raw NUL was judged as a different value than the client's serde reads; now refused, with regression inputs | About 1.36 billion executions, no memory-safety or UB report in relay code; the parser extraction is byte-identical to the old inline code (exhaustive test up to 9 bytes), no membership gate moved | commit `1ef1a727` |
-| Image check (AR-28) | Every peer image path into Flutter: rail blobs, attachments, profile stills, push avatars, server icons, guest events, overlay and showcase images, sticker import | A crafted WebP in a stranger's friend-request thumbnail panicked `image-webp` 0.2.4 during re-encoding and ended the event loop task (remote crash in 0.12.2). The new `image_check` cargo-fuzz target also hit an `image-webp` panic (`yuv.rs`), which the check now counts as a refusal | HEIC and AVIF never drawn as images (they stay file cards); 34 of 35 mutations killed, the last a double layer | commit `09028880` |
-| HLC lanes | CRDT op ids across sibling devices | Siblings could mint the same op id, so replicas diverged for good (live in 0.12.2) | 15 of 15 mutations, round 2 20 of 20 | commit `bfe60652` |
-| Range-digest sync | Op sync between members | The state vector lost an author's older ops for good (live in 0.12.2); receivers re-forwarded ops N x (N-1) times. Review: an unchecked digest range let a member freeze the event loop (fixed before merge) | 20 of 20 mutations | commit `cd87c801` |
-| Presence digest and cap | Peer discovery every 30 s, member cap | A cost, not a security bug: one discovery round at 5k members took 30.4 s of relay CPU and 4.13 GB (now 1.02 s, 1.71 MB); servers admit at most 512 identities | Rust mutations 14 of 15 (one redundant), relay 9 of 9 | commit `16f1852e` |
-| MLS cost | Past-epoch window, whole-store saves | Review: the committer's past copy kept a staged commit's secrets (fixed before merge) | 32 of 32 mutations after the fix round | commit `376334b3` |
-| AR-25 and AR-27 | Self-update turns, receiver epoch cap | Several review HIGHs in the design and the code (tally parsing, KeyPackage planting), fixed before merge | Voice fleet with SFrame key per epoch: zero heal or decrypt failures | commit `e912fed2` |
-| Switches removal | The four 0.11 relay compatibility switches | Code deleted; seven live refusal tests fail on the old relay | VPS plain and SAN green | commit `7fbfbb84` |
-| AR-32 and AR-36 | TURN reach to the relay host, the report key on disk, public stats, grace-slot takeovers, mailbox re-reads | AR-32 closed; AR-36 partly fixed | Item 7 (members only for changed rooms) judged unsafe to build: presence frames are uncounted, so the relay cannot know what reached a dying socket; kept accepted. Relay mutations 26 of 27 (one equivalent), TURN lock 18 of 18 | commit `4aa0c071` |
-| Roster leftovers | Removals carried inside DMs, push-stored removals, sibling echo hold, new-device alert | Review: a cross-identity un-revoke (a device id's revoked flag followed whichever roster saved last); fixed in `b495b028` | 39 of 41 mutations, fix round 17 of 18 | commits `8aed8e42`, `b495b028` |
-| Message-store pool | SQLCipher opens on the event loop | Same-millisecond seals made a receiver treat a second link card as a replay; a send to our own device took a room the sibling had left | 13 of 13, then 7 of 7 mutations | commit `be5f8124` |
-| AR-35 | Replay guard across restarts, share manifests, archive format 2, provenance | A share manifest's size was not tied to its chunk count (sparse file reported complete) | 27 of 27 mutations; residuals in the AR-35 row | commit `6d178a74` |
-| Ring bucket | Ring replay against per-sender receive buckets | A busy channel's ring replay starved the owner's direct frames, so a joiner never took its MLS seat (live in 0.12.2) | 6 of 6, then 8 of 8 mutations | commit `b6fbf2e8` |
-| Sync cost | Channel history asks and page queries | Opening a channel asked every member device; per-page cost grew with history; review: an unsolicited page kept every ask alive (fixed) | 21 of 21 mutations after the fix round | commit `2db3c39a` |
-| OOM send budget and G2 breaker | Bytes uWebSockets holds past backpressure; per-session work | Held frames could take several GB and an OOM kill loses the snapshot; reviews found a malformed-message crash path, a per-payer table that grew without bound and an O(members x links) stall in the new code, all fixed before merge | Honest fleet peaks small (119 frames/s, 7 joins, 36 verifies); enforced-mode fleet runs showed 0 honest trips, a flood tripped; VPS plain and SAN 46 of 46, 0 sanitizer output; relay mutations 29 of 32, survivor S7 argued sound, C6 and C9 not equivalent (tests owed) | commit `776a91a3` |
-| Stand-in authority | Who leads an MLS group while the owner is away | Leaders were the lowest master id by string sort, which anyone can grind | 12 of 12 mutations; Windows fleet a, b, c pass; a PC test failure proved to be a test race | commit `25723598` |
-| Removed device in a room | A device removed while connecting | It never learned its removal until its next connect | 5 of 5 mutations | commit `e34b86d4` |
-| Friend re-add | Re-add after a removal | A re-add made shortly after a removal could be undone (wall-clock stamp older than the removal's seal) | 21 of 21 mutations; a reviewer's frame-time rule was rejected (per-copy seals, behind clocks) | commit `e87941c9` |
-| G1 rerun | Join, message, reconnect, leave and kick, idle, MLS and relay costs on the merged tree | One regression risk: the digest ask fell back to the full vector under load (fixed in `1a16e510`); cap stays 512 identities | Leave and kick 34x fewer frames, reconnect sync requests 15x smaller, idle 15x less, MLS 100x faster at 1k; three timing results marked void or unexplained (SCALE 8.5) | SCALE 8.1-8.7 |
+| Relay fuzzing | `parse_auth_frame`, the binary opcode parsers (moved into `binary_frame.h`), client JSON, `ring_auth`, join-lock links, rosters, kill orders, the snapshot codec, crypto inputs: nine libFuzzer targets with ASan and UBSan | Low: client JSON with a raw NUL was judged as a different value than the client's serde reads; now refused, with regression inputs | About 1.36 billion executions, no memory-safety or UB report in relay code; the parser extraction is byte-identical to the old inline code (exhaustive test up to 9 bytes), no membership gate moved | commit `22116aa5` |
+| Image check (AR-28) | Every peer image path into Flutter: rail blobs, attachments, profile stills, push avatars, server icons, guest events, overlay and showcase images, sticker import | A crafted WebP in a stranger's friend-request thumbnail panicked `image-webp` 0.2.4 during re-encoding and ended the event loop task (remote crash in 0.12.2). The new `image_check` cargo-fuzz target also hit an `image-webp` panic (`yuv.rs`), which the check now counts as a refusal | HEIC and AVIF never drawn as images (they stay file cards); 34 of 35 mutations killed, the last a double layer | commit `a7263f6b` |
+| HLC lanes | CRDT op ids across sibling devices | Siblings could mint the same op id, so replicas diverged for good (live in 0.12.2) | 15 of 15 mutations, round 2 20 of 20 | commit `6b612cb0` |
+| Range-digest sync | Op sync between members | The state vector lost an author's older ops for good (live in 0.12.2); receivers re-forwarded ops N x (N-1) times. Review: an unchecked digest range let a member freeze the event loop (fixed before merge) | 20 of 20 mutations | commit `98b4d842` |
+| Presence digest and cap | Peer discovery every 30 s, member cap | A cost, not a security bug: one discovery round at 5k members took 30.4 s of relay CPU and 4.13 GB (now 1.02 s, 1.71 MB); servers admit at most 512 identities | Rust mutations 14 of 15 (one redundant), relay 9 of 9 | commit `70f7f10e` |
+| MLS cost | Past-epoch window, whole-store saves | Review: the committer's past copy kept a staged commit's secrets (fixed before merge) | 32 of 32 mutations after the fix round | commit `f6e04a02` |
+| AR-25 and AR-27 | Self-update turns, receiver epoch cap | Several review HIGHs in the design and the code (tally parsing, KeyPackage planting), fixed before merge | Voice fleet with SFrame key per epoch: zero heal or decrypt failures | commit `af7196db` |
+| Switches removal | The four 0.11 relay compatibility switches | Code deleted; seven live refusal tests fail on the old relay | VPS plain and SAN green | commit `6265b545` |
+| AR-32 and AR-36 | TURN reach to the relay host, the report key on disk, public stats, grace-slot takeovers, mailbox re-reads | AR-32 closed; AR-36 partly fixed | Item 7 (members only for changed rooms) judged unsafe to build: presence frames are uncounted, so the relay cannot know what reached a dying socket; kept accepted. Relay mutations 26 of 27 (one equivalent), TURN lock 18 of 18 | commit `5cd8e92f` |
+| Roster leftovers | Removals carried inside DMs, push-stored removals, sibling echo hold, new-device alert | Review: a cross-identity un-revoke (a device id's revoked flag followed whichever roster saved last); fixed in `10dac6d6` | 39 of 41 mutations, fix round 17 of 18 | commits `24eeed19`, `10dac6d6` |
+| Message-store pool | SQLCipher opens on the event loop | Same-millisecond seals made a receiver treat a second link card as a replay; a send to our own device took a room the sibling had left | 13 of 13, then 7 of 7 mutations | commit `5d5d9116` |
+| AR-35 | Replay guard across restarts, share manifests, archive format 2, provenance | A share manifest's size was not tied to its chunk count (sparse file reported complete) | 27 of 27 mutations; residuals in the AR-35 row | commit `46898ff4` |
+| Ring bucket | Ring replay against per-sender receive buckets | A busy channel's ring replay starved the owner's direct frames, so a joiner never took its MLS seat (live in 0.12.2) | 6 of 6, then 8 of 8 mutations | commit `892f0dcc` |
+| Sync cost | Channel history asks and page queries | Opening a channel asked every member device; per-page cost grew with history; review: an unsolicited page kept every ask alive (fixed) | 21 of 21 mutations after the fix round | commit `e87391e0` |
+| OOM send budget and G2 breaker | Bytes uWebSockets holds past backpressure; per-session work | Held frames could take several GB and an OOM kill loses the snapshot; reviews found a malformed-message crash path, a per-payer table that grew without bound and an O(members x links) stall in the new code, all fixed before merge | Honest fleet peaks small (119 frames/s, 7 joins, 36 verifies); enforced-mode fleet runs showed 0 honest trips, a flood tripped; VPS plain and SAN 46 of 46, 0 sanitizer output; relay mutations 29 of 32, survivor S7 argued sound, C6 and C9 not equivalent (tests owed) | commit `986a4d75` |
+| Stand-in authority | Who leads an MLS group while the owner is away | Leaders were the lowest master id by string sort, which anyone can grind | 12 of 12 mutations; Windows fleet a, b, c pass; a PC test failure proved to be a test race | commit `eb7ed684` |
+| Removed device in a room | A device removed while connecting | It never learned its removal until its next connect | 5 of 5 mutations | commit `60438a4a` |
+| Friend re-add | Re-add after a removal | A re-add made shortly after a removal could be undone (wall-clock stamp older than the removal's seal) | 21 of 21 mutations; a reviewer's frame-time rule was rejected (per-copy seals, behind clocks) | commit `c4e2f7f5` |
+| G1 rerun | Join, message, reconnect, leave and kick, idle, MLS and relay costs on the merged tree | One regression risk: the digest ask fell back to the full vector under load (fixed in `fbd2b957`); cap stays 512 identities | Leave and kick 34x fewer frames, reconnect sync requests 15x smaller, idle 15x less, MLS 100x faster at 1k; three timing results marked void or unexplained (SCALE 8.5) | SCALE 8.1-8.7 |
 | Storage measurement | DB size per message, first sync of a new member | Channel-open asks fanned to every member device; per-page cost was quadratic; a `UNIQUE(...,text)` index drops an identical same-millisecond message with a different id (0.14) | 1.7 KB per message, first sync takes the whole history | - |
 
 Fixed in the same commit, not a separate finding: `announce_door_change` sent presence to the device's
-own fetch sockets; since `776a91a3` it skips fetch and guest sockets
+own fetch sockets; since `986a4d75` it skips fetch and guest sockets
 (`relay-uws/src/ws_handler.cpp`, the `!d->is_fetch` check in that function).
 
 ## Exit criteria against the record
@@ -552,4 +552,4 @@ own fetch sockets; since `776a91a3` it skips fetch and guest sockets
 | 2026-10-05 | Final regression pass, 0.12.0 released | - |
 | 2026-10-06 to 10-07 | Scanner triage; resumable-sessions reviews | HOL-SEC-163, 164, 165, 170 to 172; AR-36 |
 | 2026-10-08 to 10-20 | 0.12.1 and 0.12.2 | AR-24 narrowed, AR-26 and AR-29 closed, AR-30 and AR-34 fixed, AR-33 in part |
-| 2026-10-22 to 10-24 | Phase G, the 0.13 wave | 26 commits `1ef1a727` to `28d188df`; relay deployed 10-23; merged-tree suites and fleets 10-24 |
+| 2026-10-22 to 10-24 | Phase G, the 0.13 wave | 26 commits `22116aa5` to `41080e0d`; relay deployed 10-23; merged-tree suites and fleets 10-24 |
