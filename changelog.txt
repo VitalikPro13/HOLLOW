@@ -1,10 +1,10 @@
-v0.13.0 - Security Audit, Relay Setup Wizard, Bigger Servers & Windows Volume Fix
+v0.13 - Security Review, Relay Setup Wizard, Bigger Servers & Windows Volume Fix
 
 No breaking changes, so 0.12.2 and 0.13 work together. Self-hosters, update your relay too, so it handles big servers with far less traffic and keeps its memory use within a set limit.
 
 SECURITY
 
-- The full security audit of Hollow is finished and its report is published
+- Our own security review of Hollow is finished, and its full report is published
 - Images from other people pass a safety check before Hollow shows them, and HEIC and AVIF images can't be shown for now
 - Each member's encryption keys in a server now renew regularly
 - Important security fixes for the relay, servers and your devices
@@ -19,14 +19,14 @@ SERVERS
 - A server holds up to 512 people, and the invite dialog says when it is full
 - Joining a server or opening a channel uses much less data, and long histories load faster
 - Keeping track of who is online uses far less data
-- Fixed a new member of a busy server sometimes never seeing its channels' history
+- Fixed a new member of a busy server sometimes never seeing the channel history
 - Escape always closes server settings
 
 YOUR DEVICES
 
 - Removing a device now reaches your contacts through your direct messages, even after you go offline
 - A device you remove while it is online now locks at once and starts its three-day erase
-- The "added a new device" alert now stays until you read it, even if that device was removed since
+- The "added a new device" alert now stays until you read it, even if that device has been removed since
 - Fixed re-adding a friend right after removing them sometimes being undone
 - Fixed a server change made on two of your devices at the same moment sometimes getting lost
 

@@ -4,7 +4,7 @@ Appendix to the 0.13 security report. Close-out item of the audit plan
 (`SECURITY_AUDIT_PLAN.md`, phase G close-out): `WHITEPAPER.md` security claims
 re-checked against `claims.md` and against the code.
 
-- **Scope:** local branch `security/0.13`, commit `41080e0d` (tree
+- **Scope:** commit `41080e0d` on `main` (tree
   relay `relay-uws/src` and client `rust/hollow_core/src`
   plus `lib/` where a claim lives in Dart.
 - **Date:** 2026-10-24.

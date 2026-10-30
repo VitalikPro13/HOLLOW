@@ -1,0 +1,19 @@
+{
+  "feed": "relay",
+  "version": "0.13.0",
+  "build": 0,
+  "issued": 1793396347,
+  "commit": "871515ec6edbc65777531a95b3b1c1614e3947ac",
+  "artifacts": {
+    "linux-x86_64": {
+      "url": "https://anonlisten.com/hollow/releases/hollow-relay-0.13.0-linux-x86_64.tar.gz",
+      "sha256": "74c8dac4224bb45ce131c1c4ef1d6786c1adfa17962a58d1471eadc58ff17e01",
+      "size": 8085494
+    },
+    "linux-aarch64": {
+      "url": "https://anonlisten.com/hollow/releases/hollow-relay-0.13.0-linux-aarch64.tar.gz",
+      "sha256": "de854fcf8153b7a4e2ace7aea4ba960623bd8cd97c1bc581439550c1cbeaf4c6",
+      "size": 6684350
+    }
+  }
+}

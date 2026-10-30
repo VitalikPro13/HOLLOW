@@ -9,7 +9,7 @@ including "areas examined that yielded no findings". It is an appendix of the fi
 
 ## Scope and how to read this
 
-- **Scope commit.** Branch `security/0.13`, tip `41080e0d` ("Add a setup wizard for self-hosted
+- **Scope commit.** `41080e0d` on `main` ("Add a setup wizard for self-hosted
  relays"). Earlier phases ran on the branches that became the 0.12.0 release (2026-10-05),
  0.12.1 (2026-10-16) and 0.12.2 (2026-10-20); the 0.13 wave ran on `security/0.13` from
  `faf97c4b` (Release 0.12.2+1).

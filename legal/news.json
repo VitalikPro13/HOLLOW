@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-10-30-v0130",
+    "date": "October 30, 2026",
+    "title": "v0.13 - Security Review, Relay Setup Wizard, Bigger Servers & Windows Volume Fix",
+    "body": "One month. It took one month to get my internal security review done. It basically turned the entire app upside down and rewrote a big part of it. But it was worth it, because the app is now more secure than ever. The full report is public, including the trade-offs I kept for now, and an independent audit is the next step. The release was supposed to happen sooner, but I got sick, unfortunately. I'm slowly recovering and taking time to rest, but I still want to keep working and keep the updates flowing. I'll keep a balance between work and health, so don't worry.\n\nNow, the most amazing feature of this update is a setup wizard that guides you step by step through setting up your own relay at full power without Docker, so your relay keeps its offline buffer across restarts. If you already self-host a relay, you can still run the wizard, and it will detect your existing setup and offer to take it over.\n\nThe App Store release has also progressed! It passed review, but I still need to figure a few things out before announcing it (especially the bad screenshots and how to move everyone over from TestFlight). Check out the changelog for the other details and fixes. Thanks!"
+  },
+  {
     "id": "2026-10-20-v0122",
     "date": "October 20, 2026",
     "title": "v0.12.2 - Blocking, Message Reports, Stronger App Lock & Private Push Notifications",

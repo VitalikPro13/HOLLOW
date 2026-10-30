@@ -89,6 +89,7 @@ The relay is written in C++ on uWebSockets. It handles TLS 1.3 itself, with no r
 - [Privacy Policy](legal/PRIVACY_POLICY.md): what data exists, where, and what we can access (nothing)
 - [Terms of Use](legal/TERMS_OF_USE.md): plain-language terms
 - [Relay Documentation](relay-uws/README.md): relay architecture, benchmarks, deployment
+- [Internal Security Review](reports/planned/security/SECURITY_AUDIT_2026_10.md): report from Oct 30, 2026
 - [Legality Research](legal/legality.md): age verification, illegal-content/CSAM liability, encryption regulations, legal precedents (US/UK/EU)
 - [Transparency Report](legal/transparency_report.md): legal requests received and data disclosure
 

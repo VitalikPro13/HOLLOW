@@ -1,34 +1,21 @@
 {
-  "latest": "0.12.2",
+  "latest": "0.13.0",
   "versions": [
     {
-      "version": "0.12.2",
-      "date": "October 20, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-win64.zip",
-      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-win64-setup.exe",
-      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.12.2-macos.zip",
-      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.12.2.dmg",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-linux.tar.gz",
-      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-android.apk",
-      "notes": "Blocking, Message Reports, Stronger App Lock & Private Push Notifications",
-      "sha256_windows": "6809e70a3f99eaf67a8869fa103a1c3689bd909ab9a0231ce6998e66bd829dd5",
-      "sha256_macos": "dbbf52c9902a1c9c73f0de38e26c115d4a59afffcd2568d7d9477e8fb45f702d",
-      "sha256_linux": "b6c9d6fdef57314d9204ea19da5200fe1264381e07cc4e58f6c6a14094c72f5a",
-      "sha256_linux_targz": "31279cbba97014fe6b929af61ab4f3f273a4912f221e74d5b9662d89f934b22a"
-    },
-    {
-      "version": "0.12.2",
-      "build": 1,
-      "critical": true,
-      "date": "October 21, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-win64.zip",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.12.2-b1-linux.tar.gz",
-      "notes": "Emergency Certificate Fix",
-      "sha256_windows": "6809e70a3f99eaf67a8869fa103a1c3689bd909ab9a0231ce6998e66bd829dd5",
-      "sha256_linux": "b6c9d6fdef57314d9204ea19da5200fe1264381e07cc4e58f6c6a14094c72f5a",
-      "sha256_linux_targz": "31279cbba97014fe6b929af61ab4f3f273a4912f221e74d5b9662d89f934b22a"
+      "version": "0.13.0",
+      "date": "October 30, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.13.0-win64.zip",
+      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.13.0-win64-setup.exe",
+      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.13.0-macos.zip",
+      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.13.0.dmg",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.13.0-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.13.0-linux.tar.gz",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.13.0-android.apk",
+      "notes": "Security Review, Relay Setup Wizard, Bigger Servers & Windows Volume Fix",
+      "sha256_windows": "3c36ad280b27c816a10db96aa5a32273617e1e5c05247c059b51f893dea4b778",
+      "sha256_macos": "946e696a22142804c22fff24edb94903f8d4a7b677bd51b4e0b6a8b52f331cad",
+      "sha256_linux": "02af16af3f0a6305c78face0c0e5df9d48d27c6f42c9b8b23f18d36f8193ac49",
+      "sha256_linux_targz": "ea1eaec0f897170536445c779347437e9c345ad271edee7edc571c419783fa0b"
     }
   ]
 }
