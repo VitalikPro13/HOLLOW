@@ -55,3 +55,7 @@ version = "0.26.11"
 ecosystem = "crates.io"
 vulnerability.ignore = true
 reason = "RUSTSEC-2026-0381: a shim with no certificates of its own that re-exports webpki-roots 1.x, locked at 1.0.10 (patched). Scoped to this version so a 1.x below 1.0.10 still fails. See rust/deny.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0387"
+reason = "crypto-bigint 0.5.5 timing branches via elliptic-curve 0.13 (openmls, hpke-rs): no patched 0.5 release; P-256 secrets are scalar-multiplied by p256's own arithmetic on the device. 0.7 is patched. See rust/deny.toml."

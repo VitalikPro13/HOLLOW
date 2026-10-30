@@ -32,6 +32,7 @@ ignore = [
   { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained, via hax-lib-macros under libcrux (the openmls crypto provider): build-time only, carried upstream." },
   { id = "RUSTSEC-2026-0319", reason = "anymap2 unmaintained, via liquid-core, a build-dependency of tract-linalg's build script under deep_filter: build-time only, no code ships." },
   { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 (via tokio-tungstenite and ureq 2) is a shim with no certificates of its own: it re-exports webpki-roots 1.x, locked at 1.0.10, which drops the emSign root. No 0.26 release past 0.26.11 exists and tokio-tungstenite 0.30 still requires the 0.26 shim." },
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint timing branches. 0.7 is at the patched 0.7.6+; the 0.5.5 copy comes from elliptic-curve 0.13 (p256/p384 under openmls and hpke-rs, which pin 0.13) and has no patched 0.5 release. Our only P-256 secrets are the phone's push-wake ECDH key (crypto/push_seal.rs) and the hardware-key path (identity/hw_key.rs): p256 0.13 multiplies scalars with its own field arithmetic, crypto-bigint only decodes and range-checks them, on the device, with no remote timing. Revisit when p256 0.14 reaches openmls." },
 ]
 
 [licenses]
