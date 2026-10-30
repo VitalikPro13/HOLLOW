@@ -104,6 +104,7 @@ mod tests {
             rooms += 1;
         }
         assert_eq!(rooms, 50);
-        assert!(took < Duration::from_millis(300), "one pass over 13,120 members took {took:?}");
+        // A quadratic pass takes tens of seconds here; CI's coverage build runs about 1 s.
+        assert!(took < Duration::from_secs(3), "one pass over 13,120 members took {took:?}");
     }
 }

@@ -510,10 +510,15 @@ else
     bad "nothing in the environment changes the keys, the origin or the protocols" "got: $prod"
 fi
 publish
-env HOLLOW_FEED_TEST_PUBKEYS="$PK" HOLLOW_FEED_TEST_BASE="file://$SRV" HOLLOW_FEED_TEST_ARCH=linux-x86_64 \
-    bash -c "$opts"'; source "$1"; hollow_feed_check "$2"' _ "$lib" "$root/envstate" > /dev/null 2> "$root/err"
-[ $? != 0 ] && [ ! -e "$root/envstate" ] && ok "the old test variables do not make a check pass" \
-    || bad "the old test variables do not make a check pass" "$(tr '\n' ' ' < "$root/err")"
+# The check may pass against the live production feed; it must never take the test one.
+took=$(env HOLLOW_FEED_TEST_PUBKEYS="$PK" HOLLOW_FEED_TEST_BASE="file://$SRV" HOLLOW_FEED_TEST_ARCH=linux-x86_64 \
+    bash -c "$opts"'; source "$1"; hollow_feed_check "$2" && echo "$FEED_ISSUED"' _ "$lib" "$root/envstate" 2> "$root/err")
+rc=$?
+if { [ $rc != 0 ] && [ ! -e "$root/envstate" ]; } || { [ $rc = 0 ] && [ "$took" != 1761134400 ]; }; then
+    ok "the old test variables never make a check take the test feed"
+else
+    bad "the old test variables never make a check take the test feed" "rc $rc, issued $took: $(tr '\n' ' ' < "$root/err")"
+fi
 if bash -c 'source "$1"; _hf_get "file://$2" "$3" 1000 5' _ "$lib" "$SRV/relay.json" "$root/got" 2>/dev/null; then
     bad "production fetches refuse a file URL"
 else
