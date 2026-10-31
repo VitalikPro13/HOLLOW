@@ -1605,6 +1605,25 @@ static long relay_unread_from(int client_port) {
     return unread;
 }
 
+// What the relay's kernel holds unread of `client_port` once it reaches `want` or has not
+// grown for 300 ms (at most 3 s): a stopped receiver's queue fills one congestion window
+// per delayed ACK, so an instant read sees only the first few.
+static long relay_unread_settled(int client_port, long want) {
+    const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    long best = relay_unread_from(client_port);
+    auto grew = std::chrono::steady_clock::now();
+    while (best < want && std::chrono::steady_clock::now() < give_up &&
+           std::chrono::steady_clock::now() - grew < std::chrono::milliseconds(300)) {
+        usleep(10000);
+        const long now = relay_unread_from(client_port);
+        if (now > best) {
+            best = now;
+            grew = std::chrono::steady_clock::now();
+        }
+    }
+    return best;
+}
+
 // Stops the relay process for as long as it lives, waiting until the kernel says so.
 struct StoppedRelay {
     pid_t pid;
@@ -1627,13 +1646,24 @@ struct StoppedRelay {
     StoppedRelay& operator=(const StoppedRelay&) = delete;
 };
 
+// The largest receive buffer this host's kernel grows a TCP socket to, -1 when it cannot say.
+static long tcp_rmem_max() {
+    FILE* f = fopen("/proc/sys/net/ipv4/tcp_rmem", "r");
+    if (!f) return -1;
+    long lo = 0, initial = 0, max = -1;
+    if (fscanf(f, "%ld %ld %ld", &lo, &initial, &max) != 3) max = -1;
+    fclose(f);
+    return max;
+}
+
 // uSockets reads every TLS socket of a loop through one shared input state
 // (src/usockets_ssl.c). The relay is stopped while a sender queues over a MiB, so it reads
 // two full chunks back to back: the second decrypts a whole receive buffer with records
 // still pending, and what the frames in it make the relay write (a forward, an answer)
 // happens in the middle of that read. The sender stays connected and every frame arrives
-// once, in order. Each stop lets the relay read a whole window at once, which is what
-// grows it, so a round that queued too little is followed by another.
+// once, in order. The relay's kernel widens its receive window only while the relay reads
+// a stream, and a stop round alone leaves it near two of the relay's reads, a little short
+// of what the case needs: so b streams before each round until a round queues enough.
 static void test_tls_write_inside_full_read() {
     printf("TLS: a write the relay makes mid-read leaves the sender's pending records whole\n");
     const char* pid_text = getenv("RELAY_LIVE_PID");
@@ -1649,14 +1679,17 @@ static void test_tls_write_inside_full_read() {
     join(*c, room);
     next(*b, about("peer_joined", room, c->id.peer));
     const std::string warm(1 << 20, 'w'), warm_end = warm + "end";
-    for (int i = 0; i < 15; i++) b->send_bin(frame(0x04, {room, c->id.peer}, warm));
-    b->send_bin(frame(0x04, {room, c->id.peer}, warm_end));
-    through(*c, bin(frame(0x06, {room, b->id.peer}, warm_end)));
+    const auto stream = [&] {
+        for (int i = 0; i < 15; i++) b->send_bin(frame(0x04, {room, c->id.peer}, warm));
+        b->send_bin(frame(0x04, {room, c->id.peer}, warm_end));
+        through(*c, bin(frame(0x06, {room, b->id.peer}, warm_end)));
+    };
 
     // The relay must hold two full receive buffers of b at once: one TLS record past them.
     constexpr long ENOUGH = (1l << 20) + 16406;
     long held = -1;
     for (int round = 0; round < 8 && held < ENOUGH; round++) {
+        stream();
         // Everything b sent is read, so the burst starts on a record boundary.
         sync(*b);
         // 64 KiB frames, so several end inside every chunk the relay reads; every fourth
@@ -1673,7 +1706,7 @@ static void test_tls_write_inside_full_read() {
         {
             StoppedRelay stopped(relay);
             off = b->ws.write_until_stalled(burst, 0, 300);
-            held = relay_unread_from(b->ws.local_port());
+            held = relay_unread_settled(b->ws.local_port(), ENOUGH);
         }
         off = b->ws.write_until_stalled(burst, off, WAIT_MS);
         const std::string r = "round " + std::to_string(round) + " (" + std::to_string(held) + " bytes queued): ";
@@ -1693,7 +1726,9 @@ static void test_tls_write_inside_full_read() {
         for (int i = 0; i < 48; i++) want.push_back(i);
         check(r + "every frame of the burst arrives once, in order (got" + list + ")", got == want);
     }
-    check("(a stopped relay held two receive buffers of b: " + std::to_string(held) + " bytes)", held >= ENOUGH);
+    check("(a stopped relay held two receive buffers of b: " + std::to_string(held) + " bytes, tcp_rmem max " +
+              std::to_string(tcp_rmem_max()) + ")",
+          held >= ENOUGH);
 }
 
 static std::string nested(size_t depth) { return std::string(depth, '[') + std::string(depth, ']'); }
