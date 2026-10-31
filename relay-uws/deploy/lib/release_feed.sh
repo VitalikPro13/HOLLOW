@@ -67,9 +67,9 @@ _HF_MAX_AHEAD=86400
 # (first install, reinstall, a switch from source) still never takes an older
 # one. scripts/sign_feeds.sh --relay raises these to every feed it signs, and
 # test/release_feed checks them against legal/relay.json.
-_HF_MIN_ISSUED=1793396347
+_HF_MIN_ISSUED=1793472159
 _HF_MIN_VERSION=0.13.0
-_HF_MIN_BUILD=0
+_HF_MIN_BUILD=1
 
 # MANIFEST_SIGNING_PUBKEYS in rust/hollow_core/src/api/updater.rs: the same key
 # signs the app manifest and every feed. test/release_feed guards this copy.
