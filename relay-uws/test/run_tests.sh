@@ -108,6 +108,33 @@ else
     echo "FAIL fuzz seeds (make_seeds.py or gen_snapshot_seeds)"
     fail=1
 fi
+# uSockets' TLS layer builds only through src/usockets_ssl.c, which carries its repair.
+if grep -nE 'uSockets/src/crypto/openssl\.c|eventing/libuv crypto/openssl' ../CMakeLists.txt run_live.sh \
+    ../bench/macos/build.sh ../../scripts/resume_e2e.sh | grep -v ':\s*#'; then
+    echo "FAIL a relay build compiles uSockets' crypto/openssl.c without its repair"
+    fail=1
+else
+    echo "pass every relay build takes the repaired TLS layer"
+fi
+# The repair rests on how these uSockets files read and move a socket (src/usockets_ssl.c
+# says why): an update to either re-checks that file and its test, then moves this pin.
+sha() { sha256sum "$@" 2> /dev/null || shasum -a 256 "$@"; }
+pinned="fae56e4a7ca0d85111226a7d7692a298b944fb16cec91f6e5e9876821792f90a  ../uSockets/src/crypto/openssl.c
+1fbdd2a10a0bb67778971f14eb8e16a31cd4db37a0a9391c4d0f7c559cf0f1e0  ../uSockets/src/context.c"
+if [ "$(sha ../uSockets/src/crypto/openssl.c ../uSockets/src/context.c)" = "$pinned" ]; then
+    echo "pass the uSockets the TLS repair was checked against"
+else
+    echo "FAIL uSockets changed under src/usockets_ssl.c: re-check the repair, then update the pin"
+    fail=1
+fi
+# check-host.sh looks for the mark the repaired layer builds in.
+mark=$(sed -n 's/^const char hollow_tls_read_repair\[\] = "\(.*\)";$/\1/p' ../src/usockets_ssl.c)
+if [ -n "$mark" ] && grep -qxF "    tls_mark=\"$mark\"" ../deploy/check-host.sh; then
+    echo "pass check-host.sh looks for the repaired TLS layer's mark"
+else
+    echo "FAIL check-host.sh and src/usockets_ssl.c name different TLS repair marks"
+    fail=1
+fi
 # The handlers themselves: the real relay on loopback, driven over TLS.
 bash ./run_live.sh "$out" || fail=1
 # The same relay across a restart, the snapshot handed over through a stand-in fd store.

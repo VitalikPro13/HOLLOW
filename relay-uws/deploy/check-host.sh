@@ -201,6 +201,28 @@ if [[ " ${units[*]} " == *" hollow-relay "* ]]; then
     else
         bad "the relay has no restart handoff: buffers and push tokens end with every restart"
     fi
+    # The running relay and the program its next start runs both carry the repaired TLS
+    # layer (src/usockets_ssl.c); test/run_tests.sh keeps this mark equal to the source's.
+    tls_mark="hollow-tls-read-repair 2"
+    tls_seen=0
+    tls_bad=0
+    relay_pid=$(systemctl show -p MainPID --value hollow-relay)
+    if [ "${relay_pid:-0}" -gt 0 ] 2>/dev/null; then
+        tls_seen=1
+        grep -qaF "$tls_mark" "/proc/$relay_pid/exe" ||
+            { bad "the running relay lacks the repaired TLS layer (src/usockets_ssl.c): rebuild, install and restart it"; tls_bad=1; }
+    fi
+    relay_exe=$(systemctl show -p ExecStart --value hollow-relay | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -n 1)
+    if [ -n "$relay_exe" ] && [ -f "$relay_exe" ]; then
+        tls_seen=1
+        grep -qaF "$tls_mark" "$relay_exe" ||
+            { bad "$relay_exe lacks the repaired TLS layer (src/usockets_ssl.c): rebuild and install it"; tls_bad=1; }
+    fi
+    if [ "$tls_seen" = 0 ]; then
+        bad "no running relay or relay program to check for the repaired TLS layer"
+    elif [ "$tls_bad" = 0 ]; then
+        ok "the relay reads TLS through the repaired layer"
+    fi
 fi
 
 echo "Disk"

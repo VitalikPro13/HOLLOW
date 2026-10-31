@@ -244,6 +244,36 @@ class Socket {
         write_all(f);
     }
 
+    // Writes `data` from `off` one TLS record at a time until it is all written or the
+    // kernel takes nothing for `stall_ms`: the offset reached. A later call from there
+    // finishes it.
+    size_t write_until_stalled(const std::string& data, size_t off, int stall_ms) {
+        if (!ssl_ || closed_) return off;
+        SSL_set_mode(ssl_, SSL_MODE_ENABLE_PARTIAL_WRITE);
+        while (off < data.size()) {
+            ERR_clear_error();
+            int n = SSL_write(ssl_, data.data() + off, static_cast<int>(data.size() - off));
+            if (n > 0) {
+                off += static_cast<size_t>(n);
+                continue;
+            }
+            int err = SSL_get_error(ssl_, n);
+            if (err != SSL_ERROR_WANT_WRITE && err != SSL_ERROR_WANT_READ) {
+                closed_ = true;
+                break;
+            }
+            pollfd p{fd_, static_cast<short>(err == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT), 0};
+            if (poll(&p, 1, stall_ms) <= 0) break;
+        }
+        return off;
+    }
+
+    int local_port() const {
+        sockaddr_in a{};
+        socklen_t n = sizeof(a);
+        return fd_ >= 0 && getsockname(fd_, reinterpret_cast<sockaddr*>(&a), &n) == 0 ? ntohs(a.sin_port) : -1;
+    }
+
     static std::string encode(uint8_t opcode, const std::string& payload) {
         std::string f(1, static_cast<char>(0x80 | opcode));
         if (payload.size() < 126) {
@@ -1553,6 +1583,117 @@ static void test_door_rooms() {
                                                          next(*q, about("peer_left", room, p2->id.peer)).has_value());
     settle({w.get(), p.get()});
     check("a hidden socket's leave to nobody", !got(*p, about("peer_left", room, w->id.peer)));
+}
+
+// What the relay's kernel holds unread of the connection from `client_port`
+// (/proc/net/tcp), -1 when it cannot say.
+static long relay_unread_from(int client_port) {
+    FILE* f = fopen("/proc/net/tcp", "r");
+    if (!f) return -1;
+    char line[512];
+    long unread = -1;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned local_ip = 0, local_port = 0, remote_ip = 0, remote_port = 0, state = 0;
+        unsigned long tx = 0, rx = 0;
+        if (sscanf(line, " %*u: %x:%x %x:%x %x %lx:%lx", &local_ip, &local_port, &remote_ip, &remote_port, &state, &tx,
+                   &rx) == 7 &&
+            static_cast<int>(local_port) == g_port && static_cast<int>(remote_port) == client_port) {
+            unread = static_cast<long>(rx);
+        }
+    }
+    fclose(f);
+    return unread;
+}
+
+// Stops the relay process for as long as it lives, waiting until the kernel says so.
+struct StoppedRelay {
+    pid_t pid;
+    explicit StoppedRelay(pid_t p) : pid(p) {
+        kill(pid, SIGSTOP);
+        const std::string stat = "/proc/" + std::to_string(pid) + "/stat";
+        for (int i = 0; i < 200; i++) {
+            FILE* f = fopen(stat.c_str(), "r");
+            if (!f) break;
+            char line[512] = {};
+            const bool read = fgets(line, sizeof(line), f) != nullptr;
+            fclose(f);
+            const char* paren = read ? strrchr(line, ')') : nullptr;
+            if (paren && paren[1] == ' ' && paren[2] == 'T') return;
+            usleep(5000);
+        }
+    }
+    ~StoppedRelay() { kill(pid, SIGCONT); }
+    StoppedRelay(const StoppedRelay&) = delete;
+    StoppedRelay& operator=(const StoppedRelay&) = delete;
+};
+
+// uSockets reads every TLS socket of a loop through one shared input state
+// (src/usockets_ssl.c). The relay is stopped while a sender queues over a MiB, so it reads
+// two full chunks back to back: the second decrypts a whole receive buffer with records
+// still pending, and what the frames in it make the relay write (a forward, an answer)
+// happens in the middle of that read. The sender stays connected and every frame arrives
+// once, in order. Each stop lets the relay read a whole window at once, which is what
+// grows it, so a round that queued too little is followed by another.
+static void test_tls_write_inside_full_read() {
+    printf("TLS: a write the relay makes mid-read leaves the sender's pending records whole\n");
+    const char* pid_text = getenv("RELAY_LIVE_PID");
+    const pid_t relay = pid_text ? static_cast<pid_t>(atoi(pid_text)) : 0;
+    if (relay <= 0) {
+        check("(the client knows the relay's pid)", false);
+        return;
+    }
+    const std::string room = room_name("tls-read");
+    auto b = login(Ident());
+    auto c = login(Ident());
+    join(*b, room);
+    join(*c, room);
+    next(*b, about("peer_joined", room, c->id.peer));
+    const std::string warm(1 << 20, 'w'), warm_end = warm + "end";
+    for (int i = 0; i < 15; i++) b->send_bin(frame(0x04, {room, c->id.peer}, warm));
+    b->send_bin(frame(0x04, {room, c->id.peer}, warm_end));
+    through(*c, bin(frame(0x06, {room, b->id.peer}, warm_end)));
+
+    // The relay must hold two full receive buffers of b at once: one TLS record past them.
+    constexpr long ENOUGH = (1l << 20) + 16406;
+    long held = -1;
+    for (int round = 0; round < 8 && held < ENOUGH; round++) {
+        // Everything b sent is read, so the burst starts on a record boundary.
+        sync(*b);
+        // 64 KiB frames, so several end inside every chunk the relay reads; every fourth
+        // asks for an answer too.
+        std::vector<std::string> arrived;
+        std::string burst;
+        for (int i = 0; i < 48; i++) {
+            const std::string payload = std::to_string(round) + "." + std::to_string(i) + std::string(64 << 10, 'A' + i % 26);
+            arrived.push_back(frame(0x06, {room, b->id.peer}, payload));
+            burst += Socket::encode(0x2, frame(0x04, {room, c->id.peer}, payload));
+            if (i % 4 == 3) burst += Socket::encode(0x1, json{{"type", "discover_peers"}, {"room", room}}.dump());
+        }
+        size_t off = 0;
+        {
+            StoppedRelay stopped(relay);
+            off = b->ws.write_until_stalled(burst, 0, 300);
+            held = relay_unread_from(b->ws.local_port());
+        }
+        off = b->ws.write_until_stalled(burst, off, WAIT_MS);
+        const std::string r = "round " + std::to_string(round) + " (" + std::to_string(held) + " bytes queued): ";
+        check(r + "the sender's burst is written whole", off == burst.size());
+        check(r + "the sender stays connected", sync(*b) && !b->ws.closed());
+        const auto upto = through(*c, bin(arrived.back()));
+        std::vector<int> got, want;
+        std::string list;
+        for (const auto& f : upto) {
+            for (size_t i = 0; i < arrived.size(); i++) {
+                if (!f.text && f.data == arrived[i]) {
+                    got.push_back(static_cast<int>(i));
+                    list += " " + std::to_string(i);
+                }
+            }
+        }
+        for (int i = 0; i < 48; i++) want.push_back(i);
+        check(r + "every frame of the burst arrives once, in order (got" + list + ")", got == want);
+    }
+    check("(a stopped relay held two receive buffers of b: " + std::to_string(held) + " bytes)", held >= ENOUGH);
 }
 
 static std::string nested(size_t depth) { return std::string(depth, '[') + std::string(depth, ']'); }
@@ -3960,7 +4101,8 @@ static void hs_dropped_write_resumes_cleanly() {
 // client drains everything written and a new frame comes before the session tick. A
 // socket still writing would hand it that frame, counted in the dropped one's place, so
 // its resume would repeat one frame and skip another. Rounds, because the tick may land
-// first; at least one must see the drain finish before it.
+// first; at least one must see the drain finish before it. Every frame of a round is
+// checked, across as many resumes as the small buffer takes.
 static void hs_dropped_write_writes_nothing_more() {
     printf("handshake review: past a dropped write nothing more is written, even once the buffer drains\n");
     const char* bp = getenv("RELAY_LIVE_BACKPRESSURE");
@@ -3982,7 +4124,22 @@ static void hs_dropped_write_writes_nothing_more() {
         next(*b, about("peer_joined", room, ida.peer));
         sync(*a);
         const std::string m0 = "m0-" + std::to_string(round), m1 = "m1-" + std::to_string(round);
-        const std::string f0 = frame(0x06, {room, b->id.peer}, m0), f1 = frame(0x06, {room, b->id.peer}, m1);
+        const std::string f1 = frame(0x06, {room, b->id.peer}, m1);
+        // Every frame b sends a, as a receives it, and the name it is reported by.
+        std::vector<std::pair<std::string, std::string>> sent;
+        for (int i = 0; i < 6; i++) {
+            sent.emplace_back(frame(0x06, {room, b->id.peer}, std::string(limit, char('a' + i))), std::string(1, char('a' + i)));
+        }
+        sent.emplace_back(frame(0x06, {room, b->id.peer}, m0), m0);
+        sent.emplace_back(f1, m1);
+        std::vector<std::string> want, markers;
+        for (const auto& [bytes, name] : sent) want.push_back(name);
+        const auto note = [&](const Frame& f) {
+            if (f.text) return;
+            for (const auto& [bytes, name] : sent) {
+                if (f.data == bytes) markers.push_back(name);
+            }
+        };
         // A small receive window keeps the kernel's share small: six buffers' worth while
         // a reads nothing overflow the relay's, and stay inside the session ring.
         for (int i = 0; i < 6; i++) b->send_bin(frame(0x04, {room, ida.peer}, std::string(limit, char('a' + i))));
@@ -3993,23 +4150,30 @@ static void hs_dropped_write_writes_nothing_more() {
         b->send_bin(frame(0x04, {room, ida.peer}, m1));
         while (a->ws.pump(50)) {}
         check("(the relay closes the socket)", closed_by_relay(*a) && next(*b, about("peer_left", room, ida.peer), 8000).has_value());
-        std::vector<std::string> markers;
-        for (const auto& f : a->ws.inbox) {
-            if (!f.text && (f.data == f0 || f.data == f1)) markers.push_back(f.data == f0 ? m0 : m1);
+        for (const auto& f : a->ws.inbox) note(f);
+        // The replay is several buffers too, so a resumed socket may drop a write of its own
+        // and close in turn; the next resume goes on from what that socket counted.
+        std::unique_ptr<Peer> last;
+        uint64_t h = a->ws.counted;
+        bool resumes = true;
+        for (int hop = 0; hop < 8 && resumes; hop++) {
+            auto r = login3(ida, a->sid, h);
+            resumes = resumed(*r);
+            auto upto = through(*r, bin(f1));
+            const bool done = !upto.empty();
+            if (done) sync(*r);
+            upto.insert(upto.end(), r->ws.inbox.begin(), r->ws.inbox.end());
+            for (const auto& f : upto) note(f);
+            h = r->ws.counted;
+            last = std::move(r);
+            if (done || !closed_by_relay(*last)) break;
         }
-        auto a2 = login3(ida, a->sid, a->ws.counted);
-        check("(the session resumes)", resumed(*a2));
-        auto upto = through(*a2, bin(f1));
-        sync(*a2);
-        upto.insert(upto.end(), a2->ws.inbox.begin(), a2->ws.inbox.end());
-        for (const auto& f : upto) {
-            if (!f.text && (f.data == f0 || f.data == f1)) markers.push_back(f.data == f0 ? m0 : m1);
-        }
+        check("(the session resumes)", resumes);
         std::string got;
         for (const auto& m : markers) got += " " + m;
         check("round " + std::to_string(round) + ": each frame once, in order, live and resumed together (got" + got + ")",
-              markers == std::vector<std::string>{m0, m1});
-        a2->ws.close_clean();
+              markers == want);
+        if (last) last->ws.close_clean();
         next(*b, about("peer_left", room, ida.peer));
     }
     check("at least one round drained before the session tick (" + std::to_string(raced) + " of 5)", raced > 0);
@@ -5585,6 +5749,13 @@ int main(int argc, char** argv) {
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
     }
+    // =tls_read: a write the relay makes in the middle of a full TLS read (the mutation pass).
+    if (only && std::string(only) == "tls_read") {
+        test_tls_write_inside_full_read();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
     // =rate: the new-connection rate alone; =rate_exempt against the relay that lists one.
     if (only && (std::string(only) == "rate" || std::string(only) == "rate_exempt")) {
         if (std::string(only) == "rate") {
@@ -5648,7 +5819,10 @@ int main(int argc, char** argv) {
         test_bounds_active();
         test_bounds_push_debounce();
     }
-    if (all) test_deep_json();
+    if (all) {
+        test_tls_write_inside_full_read();
+        test_deep_json();
+    }
     const char* probe = getenv("RELAY_LIVE_PROBE");
     if (probe && std::string(probe) == "acks") probe_ack_queue();
     if (probe && std::string(probe) == "active") probe_active_burst();

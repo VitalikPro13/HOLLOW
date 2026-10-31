@@ -16,6 +16,9 @@
 #include "snapshot.h"
 #include "ws_handler.h"
 
+// src/usockets_ssl.c, the repaired uSockets TLS layer.
+extern "C" const char hollow_tls_read_repair[];
+
 static std::atomic<bool> should_shutdown{false};
 
 // What the shutdown tick needs to end the process: the snapshot goes out
@@ -81,6 +84,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "========================================\n");
     fprintf(stderr, "Hollow Relay (uWebSockets C++)\n");
     fprintf(stderr, "Port: %d\n", config.port);
+    fprintf(stderr, "TLS layer: %s\n", hollow_tls_read_repair);
     fprintf(stderr, "========================================\n");
 
     RelayState state;

@@ -78,11 +78,14 @@ switches() {
 variants=${RELAY_LIVE_VARIANTS:-on off}
 
 objects=()
-for f in bsd context loop socket eventing/epoll_kqueue eventing/gcd eventing/libuv crypto/openssl; do
+for f in bsd context loop socket eventing/epoll_kqueue eventing/gcd eventing/libuv; do
     name=us_${f//\//_}
     compile "$name" "../uSockets/src/$f.c" "$obj/$name.o" $us_c
     objects+=("$obj/$name.o")
 done
+# crypto/openssl.c as the relay builds it, repaired (src/usockets_ssl.c).
+compile us_ssl ../src/usockets_ssl.c "$obj/us_ssl.o" $us_c
+objects+=("$obj/us_ssl.o")
 compile us_sni_tree ../uSockets/src/crypto/sni_tree.cpp "$obj/us_sni_tree.o" \
     g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -I../uSockets/src
 objects+=("$obj/us_sni_tree.o")
@@ -111,6 +114,22 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=relay.live.test \
 
 domain=relay.live.test
 fail=0
+# The repaired TLS layer over real TLS sessions, on the relay's own uSockets objects.
+us_objects=()
+for f in bsd context loop socket eventing_epoll_kqueue eventing_gcd eventing_libuv sni_tree; do us_objects+=("$obj/us_$f.o"); done
+if $us_c -c test_usockets_ssl.c -o "$dir/test_usockets_ssl.o" > "$dir/test_usockets_ssl.build" 2>&1 &&
+    g++ $flags "$dir/test_usockets_ssl.o" "${us_objects[@]}" -o "$dir/test_usockets_ssl" -lssl -lcrypto \
+        >> "$dir/test_usockets_ssl.build" 2>&1; then
+    if timeout 60 "$dir/test_usockets_ssl" "$dir/cert.pem" "$dir/key.pem" > "$dir/test_usockets_ssl.log" 2>&1; then
+        echo "pass test_usockets_ssl ($(grep -c '  ok' "$dir/test_usockets_ssl.log") checks)"
+    else
+        echo "FAIL test_usockets_ssl"
+        grep -v '  ok' "$dir/test_usockets_ssl.log" | head -20
+        fail=1
+    fi
+else
+    build_fail test_usockets_ssl "$dir/test_usockets_ssl.build"
+fi
 # The measuring hooks (measure.h) leave no trace in a relay built without HOLLOW_RELAY_MEASURE:
 # no line of any translation unit names them once preprocessed.
 for f in main crypto license reports http_handlers snapshot ws_handler; do

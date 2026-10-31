@@ -11,7 +11,8 @@ add_library(uSockets STATIC
     uSockets/src/eventing/epoll_kqueue.c
     uSockets/src/eventing/gcd.c
     uSockets/src/eventing/libuv.c
-    uSockets/src/crypto/openssl.c
+    # uSockets' crypto/openssl.c with the shared-read repair (the file says why)
+    src/usockets_ssl.c
     uSockets/src/crypto/sni_tree.cpp
 )
 target_compile_definitions(uSockets PRIVATE LIBUS_USE_OPENSSL)

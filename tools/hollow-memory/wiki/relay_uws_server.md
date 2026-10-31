@@ -1325,6 +1325,8 @@ The Dart client checks this endpoint on startup. If `license_required` is true a
 
 ## Build System (CMakeLists.txt)
 
+uSockets' TLS layer builds ONLY through `src/usockets_ssl.c` (the shared TLS read repair, 2026-10-31): it #includes the pristine `uSockets/src/crypto/openssl.c` and wraps write, shutdown and adopt so a write inside a full-buffer read never wipes the reader's pending input or leaves `ssl_socket` on a freed socket. `main.cpp` references the link mark `hollow_tls_read_repair` (an unrepaired build fails to link), the relay logs `TLS layer: hollow-tls-read-repair 2` at start, and `deploy/check-host.sh` fails without it. `test/run_tests.sh` pins the sha256 of uSockets' `openssl.c` and `context.c`: a submodule bump fails until someone re-checks the repair. A manual deploy copies `src/*.c` and `CMakeLists.txt` too.
+
 **C++20**, C11 for uSockets.
 
 **Dependencies (linked):**

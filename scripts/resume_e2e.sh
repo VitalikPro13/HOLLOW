@@ -109,11 +109,13 @@ build_relay() {
         running=$((running + 1))
         if [ $running -ge 3 ]; then wait -n; running=$((running - 1)); fi
     }
-    for f in bsd context loop socket eventing/epoll_kqueue eventing/gcd eventing/libuv crypto/openssl; do
+    for f in bsd context loop socket eventing/epoll_kqueue eventing/gcd eventing/libuv; do
         name=us_${f//\//_}
         compile "$obj/$name.o" "$src/uSockets/src/$f.c" $us_c
         objects+=("$obj/$name.o")
     done
+    compile "$obj/us_ssl.o" "$src/src/usockets_ssl.c" $us_c
+    objects+=("$obj/us_ssl.o")
     compile "$obj/us_sni_tree.o" "$src/uSockets/src/crypto/sni_tree.cpp" g++ -std=c++20 $flags -I"$src/uSockets/src"
     objects+=("$obj/us_sni_tree.o")
     for f in main crypto license reports http_handlers snapshot ws_handler; do

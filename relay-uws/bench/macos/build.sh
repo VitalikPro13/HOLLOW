@@ -36,11 +36,14 @@ conns=${BENCH_CONNS_PER_IP:-1000000}
 relay_flags="$flags -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_CONNS_PER_IP=$conns ${RELAY_EXTRA_FLAGS:-} -include $here/macos_shim.h"
 objs=()
 pids=()
-for f in bsd context loop socket eventing/epoll_kqueue eventing/gcd eventing/libuv crypto/openssl; do
+for f in bsd context loop socket eventing/epoll_kqueue eventing/gcd eventing/libuv; do
     o="$out/obj/us_${f//\//_}.o"
     clang -std=c11 $flags $inc -I"$us/src" -c "$us/src/$f.c" -o "$o" & pids+=($!)
     objs+=("$o")
 done
+o="$out/obj/us_ssl.o"
+clang -std=c11 $flags $inc -I"$us/src" -c "$relay/src/usockets_ssl.c" -o "$o" & pids+=($!)
+objs+=("$o")
 o="$out/obj/us_sni_tree.o"
 clang++ -std=c++20 $flags $inc -I"$us/src" -c "$us/src/crypto/sni_tree.cpp" -o "$o" & pids+=($!)
 objs+=("$o")
