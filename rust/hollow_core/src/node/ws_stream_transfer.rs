@@ -117,11 +117,424 @@ pub struct WsTransferState {
     pub last_frame_at: std::time::Instant,
 }
 
-/// Send a file or shard to a peer via chunked WS binary frames.
-/// Streams from disk in WS_CHUNK_SIZE increments — never loads the full file into memory.
+/// Relay streams one device runs for askers outside our identity, all together and per
+/// asking identity (the receiver's own bound).
+const MAX_RELAY_STREAMS: usize = 64;
+const MAX_RELAY_STREAMS_PER_ASKER: usize = MAX_RECV_STREAMS_PER_SENDER;
+/// Bytes those streams may hold staged on disk; one stream alone may hold more.
+const RELAY_STAGED_BYTES: u64 = 8 * super::file_transfer::DEFAULT_MAX_FILE_SIZE;
+/// Chunk bytes one device's relay streams may have handed its socket and not yet
+/// written: a stream goes at the socket's pace instead of queueing the file ahead of it.
+pub(crate) const RELAY_STREAM_QUEUE_BYTES: usize = 4 * 1024 * 1024;
+/// A stream waiting for credit ends once the socket has taken none of this device's
+/// relay chunks for this long; waiting behind other streams' chunks is no stall.
+const RELAY_STREAM_STALL: std::time::Duration = std::time::Duration::from_secs(120);
+const RELAY_STALL_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Who a relay stream goes to, which decides what gives way when a device's streams
+/// are full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RelayRank {
+    /// A public-channel guest's ask: identities are free, so guests give way first.
+    Guest,
+    /// A server member's or DM party's ask.
+    Member,
+    /// A send we started, or an ask from one of our own devices: outside every cap.
+    Own,
+}
+
+struct CreditHeld {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    written: Arc<AtomicU64>,
+}
+
+impl Drop for CreditHeld {
+    fn drop(&mut self) {
+        self.written.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A chunk's share of its sender's relay queue budget, given back when the chunk is
+/// written to the socket or dropped.
+#[derive(Clone, Default)]
+pub struct StreamCredit {
+    _held: Option<Arc<CreditHeld>>,
+}
+
+impl std::fmt::Debug for StreamCredit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StreamCredit")
+    }
+}
+
+impl StreamCredit {
+    fn new(permit: tokio::sync::OwnedSemaphorePermit, written: &Arc<AtomicU64>) -> Self {
+        Self { _held: Some(Arc::new(CreditHeld { _permit: permit, written: written.clone() })) }
+    }
+}
+
+struct RelayEntry {
+    seq: u64,
+    id: String,
+    /// The device it goes to, and that device's identity.
+    target: String,
+    asker: String,
+    rank: RelayRank,
+    bytes: u64,
+    /// Its device left every room we share: still delivered to while it only hides, and
+    /// replaced when that device asks for it again.
+    stale: bool,
+    /// Dropping it ends the stream.
+    _end: tokio::sync::oneshot::Sender<()>,
+}
+
+/// One device's relay streams.
+struct RelaySender {
+    credit: Arc<tokio::sync::Semaphore>,
+    /// Chunks of ours the socket has taken or dropped, all streams together.
+    written: Arc<AtomicU64>,
+    streams: Vec<RelayEntry>,
+}
+
+static RELAY_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn relay_senders() -> std::sync::MutexGuard<'static, HashMap<String, RelaySender>> {
+    static SENDERS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, RelaySender>>> = std::sync::OnceLock::new();
+    SENDERS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What a peer's ask for a relay stream gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelayAdmit {
+    Start,
+    /// The same stream to the same device is still going, and the device never left.
+    Running,
+    /// The asker holds its share already, or everyone it could displace ranks above it.
+    Busy,
+}
+
+fn relay_rank(us: &str, target: &str, rank: RelayRank) -> RelayRank {
+    if super::resolver::same_identity(us, target) { RelayRank::Own } else { rank }
+}
+
+/// The streams a new one for `asker` displaces, or why it may not start. Past a bound
+/// the lowest rank gives way, within it the asker holding the most (streams, or staged
+/// bytes), with its newest stream; on a tie the newcomer waits, so equals never churn.
+fn relay_plan(streams: &[RelayEntry], id: &str, asker: &str, rank: RelayRank, bytes: u64) -> Result<Vec<u64>, RelayAdmit> {
+    let mut displaced = Vec::new();
+    if let Some(running) = streams.iter().find(|s| s.id == id) {
+        if !running.stale {
+            return Err(RelayAdmit::Running);
+        }
+        displaced.push(running.seq);
+    }
+    if rank == RelayRank::Own {
+        return Ok(displaced);
+    }
+    let capped = || streams.iter().filter(|s| s.rank != RelayRank::Own && !displaced.contains(&s.seq));
+    if capped().filter(|s| s.asker == asker).count() >= MAX_RELAY_STREAMS_PER_ASKER {
+        return Err(RelayAdmit::Busy);
+    }
+    const NEWCOMER: u64 = u64::MAX;
+    let mut kept: Vec<(u64, &str, RelayRank, u64)> = capped().map(|s| (s.seq, s.asker.as_str(), s.rank, s.bytes)).collect();
+    kept.push((NEWCOMER, asker, rank, bytes));
+    loop {
+        let by_count = kept.len() > MAX_RELAY_STREAMS;
+        let staged: u64 = kept.iter().map(|k| k.3).sum();
+        if !by_count && (kept.len() < 2 || staged <= RELAY_STAGED_BYTES) {
+            return Ok(displaced);
+        }
+        let low = kept.iter().map(|k| k.2).min().unwrap_or(rank);
+        let mut shares: HashMap<&str, (u64, u64)> = HashMap::new();
+        for k in kept.iter().filter(|k| k.2 == low) {
+            let share = shares.entry(k.1).or_default();
+            share.0 += if by_count { 1 } else { k.3 };
+            share.1 = share.1.max(k.0);
+        }
+        let newest = shares.into_values().max().map_or(NEWCOMER, |(_, newest)| newest);
+        if newest == NEWCOMER {
+            return Err(RelayAdmit::Busy);
+        }
+        kept.retain(|k| k.0 != newest);
+        displaced.push(newest);
+    }
+}
+
+/// Whether `us` may start relay stream `id` of `bytes` to `target`, as `rank` ranks it.
+pub(crate) fn relay_stream_admits(us: &str, target: &str, id: &str, rank: RelayRank, bytes: u64) -> RelayAdmit {
+    let rank = relay_rank(us, target, rank);
+    let asker = super::resolver::resolve(target);
+    let senders = relay_senders();
+    let Some(sender) = senders.get(us) else { return RelayAdmit::Start };
+    match relay_plan(&sender.streams, id, &asker, rank, bytes) {
+        Ok(_) => RelayAdmit::Start,
+        Err(why) => why,
+    }
+}
+
+/// End every relay stream of `us` to `device`: it came back on a fresh session, so its
+/// receive state is gone and its next ask starts a stream afresh.
+pub(crate) fn end_relay_streams_to(us: &str, device: &str) -> usize {
+    let mut senders = relay_senders();
+    let Some(sender) = senders.get_mut(us) else { return 0 };
+    let before = sender.streams.len();
+    sender.streams.retain(|s| s.target != device);
+    before - sender.streams.len()
+}
+
+/// `device` left every room `us` shares with it: a hidden device still takes our frames,
+/// so its streams go on, but one whose session was lost asks again and that ask replaces
+/// the stream.
+pub(crate) fn orphan_relay_streams_to(us: &str, device: &str) -> usize {
+    let mut senders = relay_senders();
+    let Some(sender) = senders.get_mut(us) else { return 0 };
+    let mut orphaned = 0;
+    for s in sender.streams.iter_mut().filter(|s| s.target == device && !s.stale) {
+        s.stale = true;
+        orphaned += 1;
+    }
+    orphaned
+}
+
+/// Streams of `us` that send nothing, by the newest sequence each pause holds.
+#[cfg(test)]
+static PAUSED: std::sync::Mutex<Vec<(String, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// TEST-ONLY: hold or release every relay stream of `us`, so a test can ask again while
+/// one is still running, however fast the machine sends.
+#[cfg(test)]
+pub(crate) fn pause_relay_streams(us: &str, paused: bool) {
+    let mut held = PAUSED.lock().unwrap_or_else(|e| e.into_inner());
+    held.retain(|(s, _)| s != us);
+    if paused {
+        held.push((us.to_string(), u64::MAX));
+    }
+}
+
+/// TEST-ONLY: how many relay streams `us` runs.
+#[cfg(test)]
+pub(crate) fn relay_streams_running(us: &str) -> usize {
+    relay_senders().get(us).map_or(0, |s| s.streams.len())
+}
+
+/// TEST-ONLY: keep holding the relay streams `us` runs now and let later ones go.
+#[cfg(test)]
+pub(crate) fn pause_only_running_relay_streams(us: &str) {
+    let newest = relay_senders().get(us).and_then(|s| s.streams.iter().map(|e| e.seq).max()).unwrap_or(0);
+    let mut held = PAUSED.lock().unwrap_or_else(|e| e.into_inner());
+    held.retain(|(s, _)| s != us);
+    held.push((us.to_string(), newest));
+}
+
+/// Waits while a test holds stream `seq` of `us`; false once the stream was ended.
+async fn wait_while_paused(us: &str, seq: u64, ended: &mut tokio::sync::oneshot::Receiver<()>) -> bool {
+    #[cfg(test)]
+    while PAUSED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(s, newest)| s == us && seq <= *newest) {
+        if !matches!(ended.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)) {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    #[cfg(not(test))]
+    let _ = (us, seq);
+    matches!(ended.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty))
+}
+
+/// Holds a relay stream's place until it ends, and the temp it streams from.
+struct RelayStream {
+    us: String,
+    seq: u64,
+    staged: Option<PathBuf>,
+}
+
+impl Drop for RelayStream {
+    fn drop(&mut self) {
+        if let Some(path) = &self.staged {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Some(sender) = relay_senders().get_mut(&self.us) {
+            sender.streams.retain(|s| s.seq != self.seq);
+        }
+    }
+}
+
+struct RelayStart {
+    place: RelayStream,
+    credit: Arc<tokio::sync::Semaphore>,
+    written: Arc<AtomicU64>,
+    ended: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Take a place for relay stream `id` to `target`, ending the streams it displaces.
+fn start_relay_stream(us: &str, target: &str, id: &str, rank: RelayRank, bytes: u64) -> Result<RelayStart, RelayAdmit> {
+    let rank = relay_rank(us, target, rank);
+    let asker = super::resolver::resolve(target);
+    let mut senders = relay_senders();
+    let sender = senders.entry(us.to_string()).or_insert_with(|| RelaySender {
+        credit: Arc::new(tokio::sync::Semaphore::new(RELAY_STREAM_QUEUE_BYTES)),
+        written: Arc::default(),
+        streams: Vec::new(),
+    });
+    let displaced = relay_plan(&sender.streams, id, &asker, rank, bytes)?;
+    if !displaced.is_empty() {
+        hollow_log!("[HOLLOW-WS-STREAM] {id} to {target} replaces or displaces {} relay stream(s)", displaced.len());
+        sender.streams.retain(|s| !displaced.contains(&s.seq));
+    }
+    let seq = RELAY_SEQ.fetch_add(1, Ordering::Relaxed);
+    let (end, ended) = tokio::sync::oneshot::channel();
+    sender.streams.push(RelayEntry {
+        seq,
+        id: id.to_string(),
+        target: target.to_string(),
+        asker,
+        rank,
+        bytes,
+        stale: false,
+        _end: end,
+    });
+    Ok(RelayStart {
+        place: RelayStream { us: us.to_string(), seq, staged: None },
+        credit: sender.credit.clone(),
+        written: sender.written.clone(),
+        ended,
+    })
+}
+
+/// Where stream `seq` of `id` stages its bytes: its own name, so no other stream of the
+/// same id ever writes or unlinks it.
+fn relay_stage_path(id: &str, seq: u64) -> PathBuf {
+    let name: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).take(64).collect();
+    files_dir().join(format!(".stream_send_relay_{name}_{seq}.tmp"))
+}
+
+/// Send a file or shard from `us` to a peer via chunked WS binary frames, from disk in
+/// WS_CHUNK_SIZE pieces at the socket's pace. Returns once the stream has its own link
+/// (else copy) of `source_path`; a stream of `id` still running is not started again.
 /// If `start_offset > 0`, seeks past already-sent bytes (for transfer resumption).
-pub async fn ws_stream_send(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ws_stream_send(
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    us: &str,
+    room_code: &str,
+    target_peer: &str,
+    kind: &StreamKind,
+    id: &str,
+    source_path: &std::path::Path,
+    total_size: u64,
+    start_offset: u64,
+    rank: RelayRank,
+) {
+    let mut start = match start_relay_stream(us, target_peer, id, rank, total_size) {
+        Ok(start) => start,
+        Err(why) => {
+            hollow_log!("[HOLLOW-WS-STREAM] {id} to {target_peer} not started ({why:?})");
+            return;
+        }
+    };
+    let staged = relay_stage_path(id, start.place.seq);
+    if tokio::fs::hard_link(source_path, &staged).await.is_err() && tokio::fs::copy(source_path, &staged).await.is_err() {
+        hollow_log!("[HOLLOW-WS-STREAM] Could not stage the relay send of {id}");
+        let _ = tokio::fs::remove_file(&staged).await;
+        return;
+    }
+    start.place.staged = Some(staged);
+    spawn_relay_stream(ws_cmd_tx, start, room_code, target_peer, kind, id, total_size, start_offset);
+}
+
+/// Send bytes held in memory from `us` to a peer: staged to disk and streamed as
+/// `ws_stream_send` streams a file, under the same caps and credit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ws_stream_send_bytes(
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    us: &str,
+    room_code: &str,
+    target_peer: &str,
+    kind: &StreamKind,
+    id: &str,
+    data: &[u8],
+    rank: RelayRank,
+) {
+    let total_size = data.len() as u64;
+    let mut start = match start_relay_stream(us, target_peer, id, rank, total_size) {
+        Ok(start) => start,
+        Err(why) => {
+            hollow_log!("[HOLLOW-WS-STREAM] {id} to {target_peer} not started ({why:?})");
+            return;
+        }
+    };
+    let staged = relay_stage_path(id, start.place.seq);
+    start.place.staged = Some(staged.clone());
+    if let Err(e) = tokio::fs::write(&staged, data).await {
+        hollow_log!("[HOLLOW-WS-STREAM] Could not stage the relay send of {id}: {e}");
+        return;
+    }
+    spawn_relay_stream(ws_cmd_tx, start, room_code, target_peer, kind, id, total_size, 0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_relay_stream(
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    start: RelayStart,
+    room_code: &str,
+    target_peer: &str,
+    kind: &StreamKind,
+    id: &str,
+    total_size: u64,
+    start_offset: u64,
+) {
+    let (tx, room, target, kind, id) = (ws_cmd_tx.clone(), room_code.to_string(), target_peer.to_string(), kind.clone(), id.to_string());
+    tokio::spawn(async move {
+        let RelayStart { place, credit, written, mut ended } = start;
+        let Some(source) = place.staged.clone() else { return };
+        let stream = RelaySend { us: &place.us, seq: place.seq, credit: &credit, written: &written };
+        send_relay_chunks(&tx, stream, &mut ended, &room, &target, &kind, &id, &source, total_size, start_offset).await;
+        drop(place);
+    });
+}
+
+struct RelaySend<'a> {
+    us: &'a str,
+    seq: u64,
+    credit: &'a Arc<tokio::sync::Semaphore>,
+    written: &'a Arc<AtomicU64>,
+}
+
+/// Credit for `n` chunk bytes; `None` once the stream is ended or the socket took none
+/// of our chunks for `stall`, looked at every `check`.
+async fn relay_credit(
+    stream: &RelaySend<'_>,
+    n: usize,
+    ended: &mut tokio::sync::oneshot::Receiver<()>,
+    stall: std::time::Duration,
+    check: std::time::Duration,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    let acquire = stream.credit.clone().acquire_many_owned(n as u32);
+    tokio::pin!(acquire);
+    let mut seen = stream.written.load(Ordering::Relaxed);
+    let mut since = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut *ended => return None,
+            permit = &mut acquire => return permit.ok(),
+            _ = tokio::time::sleep(check) => {
+                let now = stream.written.load(Ordering::Relaxed);
+                if now != seen {
+                    seen = now;
+                    since = std::time::Instant::now();
+                } else if since.elapsed() >= stall {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_relay_chunks(
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    stream: RelaySend<'_>,
+    ended: &mut tokio::sync::oneshot::Receiver<()>,
     room_code: &str,
     target_peer: &str,
     kind: &StreamKind,
@@ -139,7 +552,6 @@ pub async fn ws_stream_send(
             return;
         }
     };
-
     if start_offset > 0 {
         if let Err(e) = file.seek(std::io::SeekFrom::Start(start_offset)).await {
             hollow_log!("[HOLLOW-WS-STREAM] Failed to seek to offset {start_offset}: {e}");
@@ -148,182 +560,75 @@ pub async fn ws_stream_send(
         hollow_log!("[HOLLOW-WS-STREAM] Resuming {id} from offset {start_offset}/{total_size}");
     }
 
-    // Build header for first chunk.
-    // Wire format: [type:1][id:64][size:8][extra...][data]
+    // First chunk: [type:1][id:64][size:8][extra...][data]
     //   File:       extra = (none)
     //   Shard:      extra = shard_index:u16 LE (2 bytes)
     //   ShareChunk: extra = chunk_index:u32 LE (4 bytes)
+    // Continuation: [0xFF][id:64][data]
     let id_padded = pad_id(id);
-    let extra_len: usize = match kind {
-        StreamKind::File | StreamKind::LinkSnapshot => 0,
-        StreamKind::Shard { .. } => 2,
-        StreamKind::ShareChunk { .. } => 4,
-    };
-    let header_len = 1 + 64 + 8 + extra_len;
-    let first_data_cap = WS_CHUNK_SIZE.saturating_sub(header_len).min(total_size as usize);
-
-    let mut first_chunk = Vec::with_capacity(header_len + first_data_cap);
-    first_chunk.push(match kind {
+    let mut header = vec![match kind {
         StreamKind::File => TYPE_FILE,
         StreamKind::Shard { .. } => TYPE_SHARD,
         StreamKind::ShareChunk { .. } => TYPE_SHARE_CHUNK,
         StreamKind::LinkSnapshot => TYPE_LINK,
-    });
-    first_chunk.extend_from_slice(&id_padded);
-    first_chunk.extend_from_slice(&total_size.to_le_bytes());
+    }];
+    header.extend_from_slice(&id_padded);
+    header.extend_from_slice(&total_size.to_le_bytes());
     match kind {
-        StreamKind::Shard { shard_index } => {
-            first_chunk.extend_from_slice(&shard_index.to_le_bytes());
-        }
-        StreamKind::ShareChunk { chunk_index } => {
-            first_chunk.extend_from_slice(&chunk_index.to_le_bytes());
-        }
+        StreamKind::Shard { shard_index } => header.extend_from_slice(&shard_index.to_le_bytes()),
+        StreamKind::ShareChunk { chunk_index } => header.extend_from_slice(&chunk_index.to_le_bytes()),
         StreamKind::File | StreamKind::LinkSnapshot => {}
     }
 
-    let mut read_buf = vec![0u8; first_data_cap];
-    let first_read = match file.read(&mut read_buf).await {
-        Ok(n) => n,
-        Err(e) => {
-            hollow_log!("[HOLLOW-WS-STREAM] Failed to read first chunk: {e}");
+    let mut bytes_sent = start_offset;
+    let mut chunk_count: u64 = 0;
+    loop {
+        let first = chunk_count == 0;
+        if !first && bytes_sent >= total_size {
+            break;
+        }
+        if !first {
+            header.clear();
+            header.push(TYPE_CONTINUATION);
+            header.extend_from_slice(&id_padded);
+        }
+        if !wait_while_paused(stream.us, stream.seq, ended).await {
+            hollow_log!("[HOLLOW-WS-STREAM] {id} to {target_peer} ended at {bytes_sent}/{total_size}");
             return;
         }
-    };
-    first_chunk.extend_from_slice(&read_buf[..first_read]);
-
-    let _ = ws_cmd_tx.send(WsCommand::SendBinaryDirect {
-        room_code: room_code.to_string(),
-        target_peer: target_peer.to_string(),
-        data: first_chunk,
-    });
-
-    let mut bytes_sent = first_read as u64;
-    let mut chunk_count: u64 = 1;
-    let cont_data_cap = WS_CHUNK_SIZE.saturating_sub(65);
-    let mut cont_buf = vec![0u8; cont_data_cap];
-
-    while bytes_sent < total_size {
-        tokio::task::yield_now().await;
-
-        let n = match file.read(&mut cont_buf).await {
-            Ok(0) => break,
+        let cap = WS_CHUNK_SIZE.saturating_sub(header.len()).min(total_size.saturating_sub(bytes_sent) as usize);
+        let Some(permit) = relay_credit(&stream, header.len() + cap, ended, RELAY_STREAM_STALL, RELAY_STALL_CHECK).await else {
+            hollow_log!("[HOLLOW-WS-STREAM] {id} to {target_peer} ended or stalled at {bytes_sent}/{total_size}; dropped");
+            return;
+        };
+        let mut chunk = Vec::with_capacity(header.len() + cap);
+        chunk.extend_from_slice(&header);
+        chunk.resize(header.len() + cap, 0);
+        let n = match file.read(&mut chunk[header.len()..]).await {
             Ok(n) => n,
             Err(e) => {
                 hollow_log!("[HOLLOW-WS-STREAM] Read error at offset {bytes_sent}: {e}");
-                break;
+                return;
             }
         };
-
-        let mut chunk = Vec::with_capacity(65 + n);
-        chunk.push(TYPE_CONTINUATION);
-        chunk.extend_from_slice(&id_padded);
-        chunk.extend_from_slice(&cont_buf[..n]);
-
-        let _ = ws_cmd_tx.send(WsCommand::SendBinaryDirect {
+        if n == 0 && !first {
+            break;
+        }
+        chunk.truncate(header.len() + n);
+        let sent = ws_cmd_tx.send(WsCommand::SendBinaryDirect {
             room_code: room_code.to_string(),
             target_peer: target_peer.to_string(),
             data: chunk,
+            credit: StreamCredit::new(permit, stream.written),
         });
-
+        if sent.is_err() {
+            return;
+        }
         bytes_sent += n as u64;
         chunk_count += 1;
     }
 
     hollow_log!("[HOLLOW-WS-STREAM] Sent {id} ({total_size} bytes) to {target_peer} in {chunk_count} chunks");
-}
-
-/// Send data to a peer via chunked WS binary frames, reading from an in-memory buffer.
-/// Same wire format as `ws_stream_send` but avoids the disk round-trip.
-pub async fn ws_stream_send_bytes(
-    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
-    room_code: &str,
-    target_peer: &str,
-    kind: &StreamKind,
-    id: &str,
-    data: &[u8],
-) {
-    use std::io::Read;
-
-    let total_size = data.len() as u64;
-    let mut cursor = std::io::Cursor::new(data);
-
-    let id_padded = pad_id(id);
-    let extra_len: usize = match kind {
-        StreamKind::File | StreamKind::LinkSnapshot => 0,
-        StreamKind::Shard { .. } => 2,
-        StreamKind::ShareChunk { .. } => 4,
-    };
-    let header_len = 1 + 64 + 8 + extra_len;
-    let first_data_cap = WS_CHUNK_SIZE.saturating_sub(header_len).min(data.len());
-
-    let mut first_chunk = Vec::with_capacity(header_len + first_data_cap);
-    first_chunk.push(match kind {
-        StreamKind::File => TYPE_FILE,
-        StreamKind::Shard { .. } => TYPE_SHARD,
-        StreamKind::ShareChunk { .. } => TYPE_SHARE_CHUNK,
-        StreamKind::LinkSnapshot => TYPE_LINK,
-    });
-    first_chunk.extend_from_slice(&id_padded);
-    first_chunk.extend_from_slice(&total_size.to_le_bytes());
-    match kind {
-        StreamKind::Shard { shard_index } => {
-            first_chunk.extend_from_slice(&shard_index.to_le_bytes());
-        }
-        StreamKind::ShareChunk { chunk_index } => {
-            first_chunk.extend_from_slice(&chunk_index.to_le_bytes());
-        }
-        StreamKind::File | StreamKind::LinkSnapshot => {}
-    }
-
-    let mut read_buf = vec![0u8; first_data_cap];
-    let first_read = match cursor.read(&mut read_buf) {
-        Ok(n) => n,
-        Err(e) => {
-            hollow_log!("[HOLLOW-WS-STREAM] Failed to read first chunk from bytes: {e}");
-            return;
-        }
-    };
-    first_chunk.extend_from_slice(&read_buf[..first_read]);
-
-    let _ = ws_cmd_tx.send(WsCommand::SendBinaryDirect {
-        room_code: room_code.to_string(),
-        target_peer: target_peer.to_string(),
-        data: first_chunk,
-    });
-
-    let mut bytes_sent = first_read as u64;
-    let mut chunk_count: u64 = 1;
-    let cont_data_cap = WS_CHUNK_SIZE.saturating_sub(65);
-    let mut cont_buf = vec![0u8; cont_data_cap];
-
-    while bytes_sent < total_size {
-        tokio::task::yield_now().await;
-
-        let n = match cursor.read(&mut cont_buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => {
-                hollow_log!("[HOLLOW-WS-STREAM] Read error from bytes at offset {bytes_sent}: {e}");
-                break;
-            }
-        };
-
-        let mut chunk = Vec::with_capacity(65 + n);
-        chunk.push(TYPE_CONTINUATION);
-        chunk.extend_from_slice(&id_padded);
-        chunk.extend_from_slice(&cont_buf[..n]);
-
-        let _ = ws_cmd_tx.send(WsCommand::SendBinaryDirect {
-            room_code: room_code.to_string(),
-            target_peer: target_peer.to_string(),
-            data: chunk,
-        });
-
-        bytes_sent += n as u64;
-        chunk_count += 1;
-    }
-
-    hollow_log!("[HOLLOW-WS-STREAM] Sent {id} ({total_size} bytes, in-memory) to {target_peer} in {chunk_count} chunks");
 }
 
 /// Append `payload` to an open stream, ending it when it reaches its declared size.
@@ -854,5 +1159,289 @@ mod tests {
         let _ = std::fs::remove_file(&done_here.temp_path);
         let _ = std::fs::remove_file(&done_there.temp_path);
         assert!(got_here == ours && got_there == theirs, "one stream's bytes were written over by the other's");
+    }
+
+    /// Everything waiting in an unread command channel, kept so its credit stays held,
+    /// as (bytes, ids of the streams that opened).
+    fn queued(rx: &mut mpsc::UnboundedReceiver<WsCommand>, held: &mut Vec<WsCommand>) -> (usize, Vec<String>) {
+        while let Ok(cmd) = rx.try_recv() {
+            held.push(cmd);
+        }
+        let mut bytes = 0;
+        let mut opened = Vec::new();
+        for cmd in held.iter() {
+            if let WsCommand::SendBinaryDirect { data, .. } = cmd {
+                bytes += data.len();
+                if data[0] != TYPE_CONTINUATION {
+                    opened.extend(parse_id(&data[1..65]));
+                }
+            }
+        }
+        (bytes, opened)
+    }
+
+    /// The most bytes ever waiting in `rx` over a second, and the streams that opened.
+    async fn watch_queue(rx: &mut mpsc::UnboundedReceiver<WsCommand>) -> (usize, Vec<String>) {
+        let mut held = Vec::new();
+        let mut most = 0;
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            most = most.max(queued(rx, &mut held).0);
+        }
+        (most, queued(rx, &mut held).1)
+    }
+
+    /// A peer that asks for a big file again and again, while no data channel exists and
+    /// the socket takes nothing, grows the sender's memory by at most a fixed budget, and
+    /// a stream already running for that asker is never started twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // HOLLOW_DATA_DIR is process-global
+    async fn repeated_relay_streams_hold_a_fixed_byte_budget() {
+        let _g = super::super::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+        const SIZE: u64 = 34 * 1024 * 1024;
+        let source = tmp.path().join("big.bin");
+        std::fs::write(&source, vec![0x5Au8; SIZE as usize]).unwrap();
+        let (ws_tx, mut ws_rx) = mpsc::unbounded_channel();
+        let us = "budget_us";
+        let asked = super::super::file_handler::file_stream_id(&"f".repeat(64), us, "asker");
+        let others: Vec<String> = (0..2).map(|i| super::super::file_handler::file_stream_id(&format!("{i}").repeat(64), us, "asker")).collect();
+
+        for _ in 0..4 {
+            ws_stream_send(&ws_tx, us, "room", "asker", &StreamKind::File, &asked, &source, SIZE, 0, RelayRank::Member).await;
+        }
+        for id in &others {
+            ws_stream_send(&ws_tx, us, "room", "asker", &StreamKind::File, id, &source, SIZE, 0, RelayRank::Member).await;
+        }
+        let (most, opened) = watch_queue(&mut ws_rx).await;
+        assert!(most <= RELAY_STREAM_QUEUE_BYTES, "{most} bytes queued for a socket that takes nothing");
+        assert_eq!(opened.iter().filter(|id| **id == asked).count(), 1, "a running stream started again");
+    }
+
+    /// Vault shards ride the same credited streams: a member asking for a big shard again
+    /// and again queues at most the budget, and its stream starts once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // HOLLOW_DATA_DIR is process-global
+    async fn vault_shard_relay_sends_hold_a_fixed_byte_budget() {
+        let _g = super::super::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+        let shard = vec![0x3Cu8; 20 * 1024 * 1024];
+        let (ws_tx, mut ws_rx) = mpsc::unbounded_channel();
+        let us = "shard_us";
+        let asked = super::super::vault_ops::shard_stream_id(&"c".repeat(64), 0, us, "member");
+        for _ in 0..4 {
+            ws_stream_send_bytes(&ws_tx, us, "room", "member", &StreamKind::Shard { shard_index: 0 }, &asked, &shard, RelayRank::Member).await;
+        }
+        for si in 1..3 {
+            let id = super::super::vault_ops::shard_stream_id(&"c".repeat(64), si, us, "member");
+            ws_stream_send_bytes(&ws_tx, us, "room", "member", &StreamKind::Shard { shard_index: si }, &id, &shard, RelayRank::Member).await;
+        }
+        let (most, opened) = watch_queue(&mut ws_rx).await;
+        assert!(most <= RELAY_STREAM_QUEUE_BYTES, "{most} shard bytes queued for a socket that takes nothing");
+        assert_eq!(opened.iter().filter(|id| **id == asked).count(), 1, "a running shard stream started again");
+        assert_eq!(relay_streams_running(us), 3, "the other shards never started");
+    }
+
+    /// Sealing a chunk keeps its credit, so the budget still holds it on the far side of
+    /// the sealing stage, until the socket writes it; the write counts as progress.
+    #[test]
+    fn a_sealed_chunk_keeps_its_credit() {
+        let budget = Arc::new(tokio::sync::Semaphore::new(10));
+        let written = Arc::new(AtomicU64::new(0));
+        let permit = budget.clone().try_acquire_many_owned(10).unwrap();
+        let chunk = WsCommand::SendBinaryDirect {
+            room_code: "room".into(),
+            target_peer: "peer".into(),
+            data: vec![TYPE_FILE; 80],
+            credit: StreamCredit::new(permit, &written),
+        };
+        let kp = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[3; 32]);
+        let sealed = super::super::frame_auth::seal_command(&kp, chunk);
+        assert_eq!(budget.available_permits(), 0, "sealing gave the chunk's credit back before the write");
+        assert_eq!(written.load(Ordering::Relaxed), 0);
+        drop(sealed);
+        assert_eq!(budget.available_permits(), 10, "a written chunk kept its credit");
+        assert_eq!(written.load(Ordering::Relaxed), 1, "a written chunk did not count as the socket's progress");
+    }
+
+    fn stream_of(us: &str, asker: &str, n: usize) -> String {
+        super::super::file_handler::file_stream_id(&format!("{n}"), us, asker)
+    }
+
+    /// One asker's relay streams are bounded, and a stream's place is free once it ends;
+    /// our own sends stand outside every cap.
+    #[test]
+    fn relay_streams_are_bounded_per_asker() {
+        let us = "caps_us";
+        let mut places = Vec::new();
+        for n in 0..MAX_RELAY_STREAMS_PER_ASKER {
+            assert_eq!(relay_stream_admits(us, "greedy", &stream_of(us, "greedy", n), RelayRank::Member, 1), RelayAdmit::Start);
+            places.push(start_relay_stream(us, "greedy", &stream_of(us, "greedy", n), RelayRank::Member, 1).expect("a free place"));
+        }
+        assert_eq!(relay_stream_admits(us, "greedy", &stream_of(us, "greedy", 0), RelayRank::Member, 1), RelayAdmit::Running);
+        assert_eq!(relay_stream_admits(us, "greedy", &stream_of(us, "greedy", 999), RelayRank::Member, 1), RelayAdmit::Busy, "one asker took more than its share");
+        assert_eq!(relay_stream_admits(us, "other", &stream_of(us, "other", 0), RelayRank::Member, 1), RelayAdmit::Start, "a full asker held up another");
+        assert_eq!(relay_stream_admits(us, "greedy", &stream_of(us, "greedy", 999), RelayRank::Own, 1), RelayAdmit::Start, "our own send was capped");
+        places.pop();
+        assert_eq!(relay_stream_admits(us, "greedy", &stream_of(us, "greedy", 999), RelayRank::Member, 1), RelayAdmit::Start, "an ended stream kept its place");
+    }
+
+    /// Whether the stream `start` holds was ended by another taking its place.
+    fn was_ended(start: &mut RelayStart) -> bool {
+        !matches!(start.ended.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty))
+    }
+
+    /// Four throwaway keys asking a big public file cannot fill a device: a newcomer takes
+    /// the newest place of the asker holding the most, and a member always finds room
+    /// among guests, while guests never displace members or one another's equal share.
+    #[test]
+    fn a_full_device_makes_room_from_the_heaviest_lowest_asker() {
+        let us = "fair_us";
+        let mut guests = Vec::new();
+        for g in 0..4 {
+            let asker = format!("guest{g}");
+            for n in 0..MAX_RELAY_STREAMS / 4 {
+                guests.push(start_relay_stream(us, &asker, &stream_of(us, &asker, n), RelayRank::Guest, 1).expect("a free place"));
+            }
+        }
+        let mut fresh = start_relay_stream(us, "guest4", &stream_of(us, "guest4", 0), RelayRank::Guest, 1).expect("a fifth asker was locked out");
+        let ended: Vec<usize> = guests.iter_mut().enumerate().filter_map(|(i, s)| was_ended(s).then_some(i)).collect();
+        assert_eq!(ended, vec![MAX_RELAY_STREAMS - 1], "not the newest stream of the asker holding the most gave way");
+        assert!(!was_ended(&mut fresh));
+        drop(guests);
+        drop(fresh);
+
+        let us = "fair_us2";
+        let mut held = Vec::new();
+        for g in 0..MAX_RELAY_STREAMS {
+            let asker = format!("one{g}");
+            held.push(start_relay_stream(us, &asker, &stream_of(us, &asker, 0), RelayRank::Guest, 1).expect("a free place"));
+        }
+        assert_eq!(relay_stream_admits(us, "late", &stream_of(us, "late", 0), RelayRank::Guest, 1), RelayAdmit::Busy, "equal guests churned");
+        assert_eq!(relay_stream_admits(us, "member", &stream_of(us, "member", 0), RelayRank::Member, 1), RelayAdmit::Start, "a member found no room among guests");
+        let mut members = Vec::new();
+        for m in 0..MAX_RELAY_STREAMS {
+            let asker = format!("member{}", m / MAX_RELAY_STREAMS_PER_ASKER);
+            members.push(start_relay_stream(us, &asker, &stream_of(us, &asker, m), RelayRank::Member, 1).expect("a member was turned away"));
+        }
+        assert!(held.iter_mut().all(was_ended), "a guest outlasted the members that needed its place");
+        assert_eq!(relay_stream_admits(us, "late", &stream_of(us, "late", 0), RelayRank::Guest, 1), RelayAdmit::Busy, "a guest displaced a member");
+        assert_eq!(relay_stream_admits(us, "us_sibling", &stream_of(us, "us_sibling", 0), RelayRank::Own, 1), RelayAdmit::Start);
+    }
+
+    /// The streams of one device hold a fixed number of staged bytes, shared the same way;
+    /// one stream alone may hold more.
+    #[test]
+    fn relay_streams_hold_a_fixed_staged_byte_budget() {
+        let us = "disk_us";
+        const BIG: u64 = super::super::file_transfer::DEFAULT_MAX_FILE_SIZE;
+        let fits = (RELAY_STAGED_BYTES / BIG) as usize;
+        let mut held = Vec::new();
+        for g in 0..fits {
+            let asker = format!("guest{g}");
+            held.push(start_relay_stream(us, &asker, &stream_of(us, &asker, 0), RelayRank::Guest, BIG).expect("a free place"));
+        }
+        assert_eq!(relay_stream_admits(us, "late", &stream_of(us, "late", 0), RelayRank::Guest, BIG), RelayAdmit::Busy, "staged bytes past the budget");
+        let _member = start_relay_stream(us, "member", &stream_of(us, "member", 0), RelayRank::Member, BIG).expect("a member found no room among guests");
+        assert_eq!(held.iter_mut().map(was_ended).filter(|e| *e).count(), 1, "a member's file displaced more than it needed");
+
+        let alone = "disk_alone";
+        let _own = start_relay_stream(alone, "us_sibling", &stream_of(alone, "us_sibling", 0), RelayRank::Own, 4 * RELAY_STAGED_BYTES).unwrap();
+        assert_eq!(relay_stream_admits(alone, "member", &stream_of(alone, "member", 0), RelayRank::Member, 4 * RELAY_STAGED_BYTES), RelayAdmit::Start, "a file bigger than the budget can never be served");
+    }
+
+    /// A stream that ended leaves its successor of the same id alone: its own staged
+    /// file and its place in the registry.
+    #[test]
+    #[allow(clippy::await_holding_lock)]
+    fn an_ended_stream_never_touches_its_successor() {
+        let _g = super::super::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+        let us = "race_us";
+        let id = stream_of(us, "asker", 1);
+        let stage = |start: &mut RelayStart| {
+            let path = relay_stage_path(&id, start.place.seq);
+            std::fs::write(&path, b"ciphertext").unwrap();
+            start.place.staged = Some(path.clone());
+            path
+        };
+        let mut first = start_relay_stream(us, "asker", &id, RelayRank::Member, 10).unwrap();
+        let first_path = stage(&mut first);
+        assert_eq!(end_relay_streams_to(us, "asker"), 1);
+        let mut next = start_relay_stream(us, "asker", &id, RelayRank::Member, 10).expect("an ended stream kept its place");
+        let next_path = stage(&mut next);
+        drop(first);
+        assert!(!first_path.exists(), "an ended stream left its staged file");
+        assert!(next_path.exists(), "an ended stream unlinked the file its successor streams from");
+        assert_eq!(relay_stream_admits(us, "asker", &id, RelayRank::Member, 10), RelayAdmit::Running, "an ended stream freed its successor's place");
+        drop(next);
+    }
+
+    /// A device that left every room we share may only be hidden, still taking our
+    /// frames, so its stream goes on; when it asks for that stream again its receive state
+    /// is gone, and the ask replaces the stream instead of waiting behind it.
+    #[test]
+    fn a_device_that_left_is_served_again_when_it_asks() {
+        let us = "left_us";
+        let id = stream_of(us, "asker", 1);
+        let mut first = start_relay_stream(us, "asker", &id, RelayRank::Member, 10).unwrap();
+        let mut other = start_relay_stream(us, "other", &stream_of(us, "other", 1), RelayRank::Member, 10).unwrap();
+        assert_eq!(relay_stream_admits(us, "asker", &id, RelayRank::Member, 10), RelayAdmit::Running);
+        assert_eq!(orphan_relay_streams_to(us, "asker"), 1);
+        assert!(!was_ended(&mut first), "a device that only hid lost its stream");
+        assert_eq!(relay_stream_admits(us, "asker", &id, RelayRank::Member, 10), RelayAdmit::Start, "the asker's retry waits behind a stream it cannot receive");
+        let _next = start_relay_stream(us, "asker", &id, RelayRank::Member, 10).expect("the retry was refused");
+        assert!(was_ended(&mut first), "the replaced stream kept sending");
+        assert!(!was_ended(&mut other), "another device's stream ended");
+        assert_eq!(relay_stream_admits(us, "asker", &id, RelayRank::Member, 10), RelayAdmit::Running, "the replacement is no less running");
+        assert_eq!(end_relay_streams_to(us, "asker"), 1);
+    }
+
+    fn stalled_stream() -> (Arc<tokio::sync::Semaphore>, Arc<AtomicU64>) {
+        (Arc::new(tokio::sync::Semaphore::new(0)), Arc::new(AtomicU64::new(0)))
+    }
+
+    const STALL: std::time::Duration = std::time::Duration::from_millis(300);
+    const CHECK: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// A stream queued behind others' chunks waits as long as the socket keeps taking
+    /// some, however long its own wait.
+    #[tokio::test]
+    async fn a_stream_waiting_behind_others_is_not_stalled() {
+        let (credit, written) = stalled_stream();
+        let (_end, mut ended) = tokio::sync::oneshot::channel::<()>();
+        let (c, w) = (credit.clone(), written.clone());
+        tokio::spawn(async move {
+            for _ in 0..6 {
+                tokio::time::sleep(STALL / 2).await;
+                w.fetch_add(1, Ordering::Relaxed);
+            }
+            c.add_permits(10);
+        });
+        let stream = RelaySend { us: "slow", seq: 1, credit: &credit, written: &written };
+        let began = std::time::Instant::now();
+        assert!(relay_credit(&stream, 10, &mut ended, STALL, CHECK).await.is_some(), "a slow honest stream was dropped");
+        assert!(began.elapsed() >= 2 * STALL);
+    }
+
+    /// A socket that takes none of our chunks ends the streams waiting on it, and an
+    /// ended stream stops waiting at once.
+    #[tokio::test]
+    async fn a_socket_that_takes_nothing_ends_its_streams() {
+        let (credit, written) = stalled_stream();
+        let (_end, mut ended) = tokio::sync::oneshot::channel::<()>();
+        let stream = RelaySend { us: "dead", seq: 1, credit: &credit, written: &written };
+        let began = std::time::Instant::now();
+        assert!(relay_credit(&stream, 10, &mut ended, STALL, CHECK).await.is_none());
+        assert!(began.elapsed() >= STALL, "the stream ended before the stall time");
+
+        let (end, mut ended) = tokio::sync::oneshot::channel::<()>();
+        drop(end);
+        let began = std::time::Instant::now();
+        assert!(relay_credit(&stream, 10, &mut ended, std::time::Duration::from_secs(60), std::time::Duration::from_secs(60)).await.is_none());
+        assert!(began.elapsed() < std::time::Duration::from_secs(5), "an ended stream kept waiting");
     }
 }

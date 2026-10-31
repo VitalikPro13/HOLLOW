@@ -23,7 +23,7 @@ use super::file_handler::LinkSnapshotState;
 use super::link_pake::{self, Direction, LinkInner, LinkKeys};
 use super::types::{HavenMessage, NetworkEvent};
 use super::ws_client::WsCommand;
-use super::ws_stream_transfer::{ws_stream_send_bytes, StreamKind};
+use super::ws_stream_transfer::{ws_stream_send_bytes, RelayRank, StreamKind};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -395,7 +395,8 @@ pub(crate) async fn accept(
     };
     send_message_to_peer_in_room(ws_cmd_tx, &room, target_peer, HavenMessage::LinkSealed { ct: B64.encode(sealed) });
     hollow_log!("[HOLLOW-LINK] Pushing snapshot {link_id} ({} bytes) to {target_peer}", blob.len());
-    ws_stream_send_bytes(ws_cmd_tx, &room, target_peer, &StreamKind::LinkSnapshot, &link_id, &blob).await;
+    // The joiner proved the code, so its snapshot is ours to send, outside every cap.
+    ws_stream_send_bytes(ws_cmd_tx, &device_keypair.peer_id(), &room, target_peer, &StreamKind::LinkSnapshot, &link_id, &blob, RelayRank::Own).await;
     // The code is spent; the room stays until the joiner's ack arrives in it.
     let _ = ws_cmd_tx.send(WsCommand::ReleaseLinkCode);
 }

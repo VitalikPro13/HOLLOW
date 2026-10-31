@@ -25,10 +25,11 @@ namespace snapshot {
 // ID-1R), 8 which parked destroy signals the target identity's phrase stands
 // behind (`proven`, D5), 9 every resumable session with the fan-out buffers its
 // ring shares (`buffers`, `sessions`), 10 the report fingerprints' key
-// (`report_key`), which stays off every disk. An older snapshot still decodes, without the
+// (`report_key`), which stays off every disk, 11 each report's address share
+// (`report_shares`, reports.h). An older snapshot still decodes, without the
 // newer fields, so a relay coming up on this build keeps the buffers the previous
 // one handed over.
-static constexpr uint32_t VERSION = 10;
+static constexpr uint32_t VERSION = 11;
 static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
@@ -194,6 +195,9 @@ struct Data {
     // v10: the key of the report fingerprints (reports.h), which never touches a disk;
     // empty when the relay had none.
     std::string report_key;
+    // v11: the address share each report fingerprint is charged to; on disk a report
+    // names none.
+    std::vector<std::pair<std::string, uint64_t>> report_shares;
     // Records decode left out because they did not parse. Each record is its own
     // length-prefixed string, so a bad one costs that session alone.
     size_t sessions_dropped = 0;
@@ -531,6 +535,11 @@ inline std::string encode(const Data& d) {
     w.count(d.sessions.size());
     for (const auto& s : d.sessions) w.str(detail::encode_session(s));
     w.str(d.report_key);
+    w.count(d.report_shares.size());
+    for (const auto& [key, share] : d.report_shares) {
+        w.str(key);
+        w.u64(share);
+    }
 
     w.out.append("HRSE", 4);
     return w.out;
@@ -721,6 +730,16 @@ inline bool decode(std::string_view bytes, Data& out) {
     if (version >= 10) {
         if (!r.str(d.report_key)) return false;
         if (!d.report_key.empty() && d.report_key.size() != REPORT_KEY_BYTES) return false;
+    }
+
+    if (version >= 11) {
+        if (!r.count(n)) return false;
+        for (uint32_t i = 0; i < n; i++) {
+            std::string key;
+            uint64_t share = NO_SHARE;
+            if (!r.str(key) || !r.u64(share)) return false;
+            d.report_shares.push_back({std::move(key), share});
+        }
     }
 
     if (!r.tag("HRSE") || r.left() != 0) return false;

@@ -11,3 +11,4 @@ relay-uws/**/*.sh text eol=lf
 # Every shell script is piped to or run by a remote bash (the mini, the VM, the relay
 # box); a CRLF checkout on Windows breaks it ("syntax error near do").
 *.sh text eol=lf
+*.pdf binary

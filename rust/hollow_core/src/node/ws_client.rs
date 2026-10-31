@@ -129,7 +129,8 @@ pub enum WsCommand {
     /// (3 per peer) to its offline buffer instead of the text cap.
     SendDirectImage { room_code: String, target_peer: String, data: Vec<u8> },
     /// Send binary data directly to a specific peer (for file/shard streaming).
-    SendBinaryDirect { room_code: String, target_peer: String, data: Vec<u8> },
+    /// `credit` holds the chunk's share of its stream's queue budget until it is written.
+    SendBinaryDirect { room_code: String, target_peer: String, data: Vec<u8>, credit: super::ws_stream_transfer::StreamCredit },
     /// Deliver `json` (a `MessageEnvelope`) to one device inside its Olm session.
     /// Never reaches the relay: the sealing stage hands it back to the node, which
     /// owns the sessions (`olm_lane`); `ticket` names it in the node loop's book of
@@ -2329,7 +2330,7 @@ fn binary_frame(op: u8, fields: &[&str], data: &[u8]) -> Frame {
 fn command_frame(cmd: &WsCommand) -> Option<Frame> {
     let json = |v: serde_json::Value| Some(Frame::text(v.to_string()));
     match cmd {
-        WsCommand::SendBinaryDirect { room_code, target_peer, data } => Some(binary_frame(0x02, &[room_code, target_peer], data)),
+        WsCommand::SendBinaryDirect { room_code, target_peer, data, .. } => Some(binary_frame(0x02, &[room_code, target_peer], data)),
         WsCommand::SendToRoom { room_code, data } => Some(binary_frame(0x03, &[room_code], data)),
         WsCommand::SendPublic { room_code, data } => Some(binary_frame(0x0A, &[room_code], data)),
         WsCommand::SendDirect { room_code, target_peer, data } => Some(binary_frame(0x04, &[room_code, target_peer], data)),
@@ -3583,7 +3584,7 @@ mod tests {
         assert_eq!(bin(WsCommand::SendPublic { room_code: "r".into(), data: vec![1] }), b"\x0ar\x00\x01");
         assert_eq!(bin(WsCommand::SendDirect { room_code: "r".into(), target_peer: "p".into(), data: vec![1] }), b"\x04r\x00p\x00\x01");
         assert_eq!(bin(WsCommand::SendDirectImage { room_code: "r".into(), target_peer: "p".into(), data: vec![1] }), b"\x08r\x00p\x00\x01");
-        assert_eq!(bin(WsCommand::SendBinaryDirect { room_code: "r".into(), target_peer: "p".into(), data: vec![1] }), b"\x02r\x00p\x00\x01");
+        assert_eq!(bin(WsCommand::SendBinaryDirect { room_code: "r".into(), target_peer: "p".into(), data: vec![1], credit: Default::default() }), b"\x02r\x00p\x00\x01");
         assert_eq!(bin(WsCommand::SendToRoomTopic { room_code: "r".into(), topic: "t".into(), data: vec![1] }), b"\x07r\x00t\x00\x01");
         assert_eq!(
             bin(WsCommand::SendChannelDirect { room_code: "r".into(), target_peer: "p".into(), channel_id: "c".into(), mention: true, data: vec![9] }),

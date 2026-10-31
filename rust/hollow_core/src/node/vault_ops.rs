@@ -456,6 +456,7 @@ pub(crate) async fn handle_vault_upload_prepared(
                                     ws_cmd_tx, ws_room_peers,
                                     webrtc_peers, pending_webrtc_sends, event_tx,
                                     device_peer_id, &dev, &content_id, placement.shard_index, shard_data,
+                                    super::ws_stream_transfer::RelayRank::Own,
                                 ).await;
                                 hollow_log!("[HOLLOW-VAULT] Streaming shard si={} ({} bytes) to {} (device {})", placement.shard_index, shard_data.len(), placement.target_peer, dev);
                             }
@@ -701,6 +702,7 @@ pub(crate) async fn handle_store_shard_on_peer(
                     ws_cmd_tx, ws_room_peers,
                     webrtc_peers, pending_webrtc_sends, event_tx,
                     device_peer_id, &dev, &content_id, shard_index, &data,
+                    super::ws_stream_transfer::RelayRank::Own,
                 ).await;
                 hollow_log!("[HOLLOW-VAULT] Streaming shard si={shard_index} ({} bytes) to {target_peer} (device {dev})", data.len());
             }
@@ -939,11 +941,14 @@ pub(crate) async fn apply_recovery_plan(
                 assignment.content_id, assignment.shard_index, shard_bytes.len(), assignment.dest_peer);
             super::ws_stream_transfer::ws_stream_send_bytes(
                 ws_cmd_tx,
+                &pool.local_device,
                 &pool.room_code(),
                 &assignment.dest_peer,
                 &super::ws_stream_transfer::StreamKind::Shard { shard_index: assignment.shard_index },
                 &shard_stream_id(&assignment.content_id, assignment.shard_index, &pool.local_device, &assignment.dest_peer),
                 &shard_bytes,
+                // A pool member's plan asks it, so it takes the caps an ask does.
+                super::ws_stream_transfer::RelayRank::Member,
             ).await;
 
             let received = HavenMessage::RecoveryShardReceived {
@@ -1197,7 +1202,8 @@ pub(crate) fn shard_stream_id(cid: &str, si: u16, from: &str, to: &str) -> Strin
     hex::encode(h.finalize())
 }
 
-/// Stream shard `si` of `cid` from our device `us` to device `to`, under its own stream id.
+/// Stream shard `si` of `cid` from our device `us` to device `to`, under its own stream
+/// id, ranked among our relay streams as `rank`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_shard(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -1210,11 +1216,12 @@ pub(crate) async fn stream_shard(
     cid: &str,
     si: u16,
     bytes: &[u8],
+    rank: super::ws_stream_transfer::RelayRank,
 ) {
     super::file_handler::stream_to_peer_bytes(
-        ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends, event_tx,
+        ws_cmd_tx, us, ws_room_peers, webrtc_peers, pending_webrtc_sends, event_tx,
         to, &super::ws_stream_transfer::StreamKind::Shard { shard_index: si },
-        &shard_stream_id(cid, si, us, to), bytes,
+        &shard_stream_id(cid, si, us, to), bytes, rank,
     ).await;
 }
 

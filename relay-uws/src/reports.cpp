@@ -7,17 +7,15 @@
 #include <cstring>
 #include <algorithm>
 #include <fstream>
+#include <optional>
 #include <sstream>
+#include <utility>
+#include <vector>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 using json = nlohmann::json;
-
-// Backstop against a report-flood inflating RAM/disk; organic use never gets
-// near this. New reports are dropped past the cap (counts stay accurate for
-// everything already recorded).
-static constexpr size_t MAX_REPORT_KEYS = 500000;
 
 static std::string keyed_hex(const unsigned char* key, const std::string& material,
                              size_t out_len) {
@@ -119,39 +117,151 @@ void ReportsState::ensure_key() {
     has_key = true;
 }
 
+bool ReportsState::is_fingerprint(const std::string& key) {
+    return key.size() == 64 &&
+           std::all_of(key.begin(), key.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+}
+
+size_t ReportsState::fingerprints() const { return held.size(); }
+
+void ReportsState::count(const Held& h, bool add) {
+    if (h.n == 0) return;
+    if (add) {
+        counts[h.target][h.category] += h.n;
+        return;
+    }
+    auto t = counts.find(h.target);
+    if (t == counts.end()) return;
+    auto c = t->second.find(h.category);
+    if (c != t->second.end()) {
+        c->second -= std::min(c->second, h.n);
+        if (c->second == 0) t->second.erase(c);
+    }
+    if (t->second.empty()) counts.erase(t);
+}
+
+void ReportsState::hold(const std::string& key, Held h, uint64_t share) {
+    auto [it, fresh] = held.try_emplace(key, std::move(h));
+    if (!fresh) return;
+    count(it->second, true);
+    ledger.put(key, share, ENTRY_BYTES);
+}
+
+void ReportsState::drop(const std::string& key) {
+    auto it = held.find(key);
+    if (it == held.end()) return;
+    count(it->second, false);
+    held.erase(it);
+    ledger.remove(key);
+}
+
+void ReportsState::trim(const std::string* spare) {
+    while (ledger.total() > budget) {
+        std::optional<std::string> v = spare ? ledger.victim_except(*spare) : ledger.victim();
+        if (!v) break;
+        drop(*v);
+        dirty = true;
+    }
+}
+
+void ReportsState::trim_carried() {
+    const size_t keep = carried_budget / ENTRY_BYTES;
+    if (carried.size() <= keep) return;
+    std::vector<std::pair<uint64_t, const std::string*>> order;
+    order.reserve(carried.size());
+    for (const auto& [key, h] : carried) order.push_back({h.n, &key});
+    std::sort(order.begin(), order.end(),
+              [](const auto& a, const auto& b) { return a.first != b.first ? a.first < b.first : *a.second < *b.second; });
+    std::vector<std::string> shed;
+    for (size_t i = 0; i < carried.size() - keep; i++) shed.push_back(*order[i].second);
+    for (const auto& key : shed) {
+        auto it = carried.find(key);
+        count(it->second, false);
+        carried.erase(it);
+    }
+    dirty = true;
+}
+
 bool ReportsState::load_from_file(const std::string& path) {
     file_path = path;  // set even when absent so the first save creates it
     ensure_key();
     erase_old_key_file(secret_path_for(path));
 
     std::ifstream f(path);
-    if (!f.is_open()) return false;
+    if (!f.is_open()) {
+        adopted_shares.clear();
+        return false;
+    }
     std::stringstream buf;
     buf << f.rdbuf();
     size_t dropped = 0;
+    // Counting down: every report weighs the same and the highest share gives way
+    // first, so a load past the budget sheds its oldest.
+    uint64_t own = ~OWN_SHARE;
+    auto share_for = [&](const std::string& key) {
+        auto it = adopted_shares.find(key);
+        return it != adopted_shares.end() ? it->second : (OWN_SHARE | own--);
+    };
+    // Counts whose fingerprints this key cannot read, one carried entry per pair.
+    carried.clear();
+    auto carry = [&](const std::string& target, const std::string& category, uint64_t n) {
+        if (n == 0 || target.empty() || !is_category(category)) return;
+        carried.try_emplace(carried_key(target, category), Held{target, category, 0}).first->second.n += n;
+    };
     try {
         json j = json::parse(buf.str());
-        const bool same_salt = j.value("version", 1) == FILE_VERSION &&
-                               j.value("salt_id", std::string()) == salt_id();
-        if (j.contains("keys") && j["keys"].is_array()) {
-            for (auto& k : j["keys"]) {
-                if (!k.is_string()) continue;
-                if (same_salt) keys.insert(k.get<std::string>());
-                else dropped++;
+        const int version = j.value("version", 1);
+        const bool same_salt = version >= 2 && j.value("salt_id", std::string()) == salt_id();
+        if (version >= 3) {
+            // Oldest first, so the restored order is the eviction order.
+            if (j.contains("reports") && j["reports"].is_array()) {
+                for (auto& e : j["reports"]) {
+                    if (!e.is_array() || e.size() != 4 || !e[0].is_string() || !e[1].is_string() ||
+                        !e[2].is_string() || !e[3].is_number_unsigned()) continue;
+                    const std::string key = e[0].get<std::string>();
+                    Held h{e[1].get<std::string>(), e[2].get<std::string>(), e[3].get<uint64_t>()};
+                    if (is_fingerprint(key)) {
+                        if (same_salt) {
+                            hold(key, std::move(h), share_for(key));
+                        } else {
+                            carry(h.target, h.category, h.n);
+                            dropped++;
+                        }
+                    } else if (key == carried_key(h.target, h.category)) {
+                        carry(h.target, h.category, h.n);
+                    }
+                }
             }
-        }
-        if (j.contains("counts") && j["counts"].is_object()) {
-            for (auto& [target, cats] : j["counts"].items()) {
-                if (!cats.is_object()) continue;
-                for (auto& [cat, n] : cats.items()) {
-                    if (n.is_number_unsigned()) counts[target][cat] = n.get<uint64_t>();
+        } else {
+            // Before 3 the fingerprints named no report, so each keeps dedup alone and
+            // the counts are carried.
+            if (j.contains("keys") && j["keys"].is_array()) {
+                for (auto& k : j["keys"]) {
+                    if (!k.is_string()) continue;
+                    const std::string key = k.get<std::string>();
+                    if (same_salt && is_fingerprint(key)) hold(key, Held{"", "", 0}, share_for(key));
+                    else dropped++;
+                }
+            }
+            if (j.contains("counts") && j["counts"].is_object()) {
+                for (auto& [target, cats] : j["counts"].items()) {
+                    if (!cats.is_object()) continue;
+                    for (auto& [cat, n] : cats.items()) {
+                        if (n.is_number_unsigned()) carry(target, cat, n.get<uint64_t>());
+                    }
                 }
             }
         }
     } catch (...) {
         fprintf(stderr, "[reports] Failed to parse %s\n", path.c_str());
+        adopted_shares.clear();
+        carried.clear();
         return false;
     }
+    for (const auto& [key, c] : carried) count(c, true);
+    adopted_shares.clear();
+    trim_carried();
+    trim(nullptr);
     if (dropped > 0) {
         // Rewritten at once, so fingerprints no key here can read leave the disk now.
         dirty = true;
@@ -160,18 +270,27 @@ bool ReportsState::load_from_file(const std::string& path) {
                         "report key; counts kept, a repeat of one of those reports counts again\n",
                 dropped);
     }
-    fprintf(stderr, "[reports] Loaded %zu report(s) across %zu reported peer(s)\n",
-            keys.size(), counts.size());
+    fprintf(stderr, "[reports] Loaded %zu report(s) and %zu carried count(s) across %zu reported peer(s)\n",
+            held.size(), carried.size(), counts.size());
     return true;
 }
 
 void ReportsState::save_if_dirty() {
     if (!dirty || file_path.empty()) return;
+    std::vector<std::pair<uint64_t, const std::string*>> order;
+    order.reserve(held.size());
+    for (const auto& [key, h] : held) order.push_back({ledger.last_use(key), &key});
+    std::sort(order.begin(), order.end());
     json j;
     j["version"] = FILE_VERSION;
     j["salt_id"] = salt_id();
-    j["keys"] = json::array();
-    for (const auto& k : keys) j["keys"].push_back(k);
+    json reports = json::array();
+    for (const auto& [key, h] : carried) reports.push_back(json::array({key, h.target, h.category, h.n}));
+    for (const auto& [use, key] : order) {
+        const Held& h = held.at(*key);
+        reports.push_back(json::array({*key, h.target, h.category, h.n}));
+    }
+    j["reports"] = std::move(reports);
     json c = json::object();
     for (const auto& [target, cats] : counts) {
         json cc = json::object();
@@ -204,13 +323,15 @@ bool ReportsState::is_category(const std::string& category) {
 }
 
 bool ReportsState::add(const std::string& reporter, const std::string& target,
-                       const std::string& category) {
+                       const std::string& category, uint64_t share) {
     ensure_key();
-    std::string key = fingerprint(reporter, target, category);
-    if (keys.count(key)) return false;
-    if (keys.size() >= MAX_REPORT_KEYS) return false;
-    keys.insert(std::move(key));
-    counts[target][category] += 1;
+    const std::string key = fingerprint(reporter, target, category);
+    if (held.count(key)) {
+        ledger.touch(key);
+        return false;
+    }
+    hold(key, Held{target, category, 1}, share);
+    trim(&key);
     dirty = true;
     return true;
 }

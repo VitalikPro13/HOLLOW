@@ -325,6 +325,8 @@ struct RelayInner {
     /// (sender, target) pairs whose stream frames (0x02) the relay holds back, in order,
     /// until the test releases or loses them.
     held_streams: HashMap<(String, String), Vec<BufferedMsg>>,
+    /// (sender, receiver, stream id) of every binary stream opened through the relay.
+    stream_opens: Vec<(String, String, String)>,
     /// (sender, target) pairs whose 0x03 room broadcasts the relay holds back, in order,
     /// until the test releases them: two devices act before either hears the other.
     held_broadcasts: HashMap<(String, String), Vec<WsEvent>>,
@@ -447,7 +449,7 @@ impl Wiretap {
             WsCommand::SendToRoomTopic { room_code, topic, data } => (room_code, None, Some(topic), data),
             WsCommand::SendDirect { room_code, target_peer, data }
             | WsCommand::SendDirectImage { room_code, target_peer, data }
-            | WsCommand::SendBinaryDirect { room_code, target_peer, data }
+            | WsCommand::SendBinaryDirect { room_code, target_peer, data, .. }
             | WsCommand::SendChannelDirect { room_code, target_peer, data, .. } => (room_code, Some(target_peer), None, data),
             _ => return,
         };
@@ -855,6 +857,15 @@ impl MockRelay {
         }
     }
 
+    /// [`Self::inject_room_members`] for every room `target` is in.
+    pub(crate) fn inject_room_members_everywhere(&self, target: &str) {
+        let inner = self.inner.lock().unwrap();
+        let Some(conn) = inner.conns.get(target) else { return };
+        for (room, peers) in inner.rooms.iter().filter(|(_, peers)| peers.contains(target)) {
+            conn.deliver(target, WsEvent::RoomMembers { room: room.clone(), peers: peers.iter().cloned().collect() });
+        }
+    }
+
     /// [`Self::inject_raw_direct`] delivered as a room broadcast.
     #[allow(dead_code)]
     pub(crate) fn inject_raw(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
@@ -1071,6 +1082,12 @@ impl MockRelay {
         } else {
             inner.recording.remove(peer_id);
         }
+    }
+
+    /// The ids of the binary streams `from` opened to `to`, oldest first.
+    pub(crate) fn stream_opens(&self, from: &str, to: &str) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        inner.stream_opens.iter().filter(|(f, t, _)| f == from && t == to).map(|(_, _, id)| id.clone()).collect()
     }
 
     /// The frames recorded from `peer_id`, oldest first.
@@ -1413,10 +1430,15 @@ impl RelayInner {
                     m.bytes_out += delivered * n;
                 }
             }
-            WsCommand::SendBinaryDirect { room_code, target_peer, data } => {
+            WsCommand::SendBinaryDirect { room_code, target_peer, data, .. } => {
                 // Delivered as BinaryDirect when present, not buffered. Both ends must be in the
                 // room: the relay drops a 0x02 whose SENDER never joined, so a sender that skips
                 // the join must fail here too rather than passing only under the mock.
+                let body = super::frame_auth::unchecked_body(&data);
+                if body.len() >= 65 && body[0] != 0xFF {
+                    let id = String::from_utf8_lossy(&body[1..65]).trim_end_matches('\0').to_string();
+                    inner.stream_opens.push((from.to_string(), target_peer.clone(), id));
+                }
                 let sender_in_room = inner.peer_in_room(&room_code, from);
                 let in_room = inner.holds_slot(&room_code, &target_peer);
                 if !sender_in_room || !RelayInner::paired(&room_code, from, &target_peer) { return; }
@@ -21090,7 +21112,7 @@ async fn authz_a_stranger_in_a_forwarder_room_meets_only_the_forwarder() {
     s_tx.send(WsCommand::SendToRoom { room_code: room.clone(), data: b"to the room".to_vec() }).unwrap();
     s_tx.send(WsCommand::SendPublic { room_code: room.clone(), data: b"to everyone".to_vec() }).unwrap();
     s_tx.send(to(&viewer, b"to the viewer")).unwrap();
-    s_tx.send(WsCommand::SendBinaryDirect { room_code: room.clone(), target_peer: viewer.clone(), data: b"stream".to_vec() }).unwrap();
+    s_tx.send(WsCommand::SendBinaryDirect { room_code: room.clone(), target_peer: viewer.clone(), data: b"stream".to_vec(), credit: Default::default() }).unwrap();
     barrier(&s_tx);
     let mut heard = raw_events_until(&mut s_rx, 10, |ev| matches!(ev, WsEvent::DiscoveredPeers { .. })).await;
 
@@ -27351,7 +27373,12 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-10-31: b14-flakes' known-bug test added one spawn stagger between sibling devices
     // and one absence once a leave lands, the sibling's announce-driven join never bringing
     // the server back (6.5 s, total 1032.6 s, slack 1.3 s).
-    const BUDGET_MS: u64 = 1_033_900;
+    // 2026-10-31: b14-bounds added two spawn staggers, two auto-download advert windows and
+    // one absence proof, repeated asks that start no second stream while one runs (6.4 s,
+    // total 1032.8 s, slack 1.0 s).
+    // 2026-10-31 merge of b14-flakes and b14-bounds: both blocks together (total 1039.0 s,
+    // slack 1.0 s).
+    const BUDGET_MS: u64 = 1_040_000;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -58281,4 +58308,194 @@ async fn leave_racing_a_sibling_announce_join_stays_left() {
         saw_leave && !member && c_dropped,
         "the leave did not stick: the owner saw it {saw_leave}, M is still a member {member}, C dropped the server {c_dropped}",
     );
+}
+
+// b14-bounds
+
+/// A peer that asks a holder again and again for a big file, with no data channel
+/// between them, is served ONE relay stream under ONE key: the asks that come while it
+/// runs start nothing, and the stream still delivers the file whole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn repeated_file_requests_stream_a_big_file_once() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 201;
+    const B_MASTER: u8 = 202;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    sleep_ms(1000).await; // auto-download advert settle, so A sends B the card alone
+    drain_events(&mut a);
+    drain_events(&mut b);
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+
+    let contents: Vec<u8> = (0..(34 * 1024 * 1024 - 64 * 1024) as u32).map(|i| (i % 251) as u8).collect();
+    let src = global_tmp.path().join("big_asked.bin");
+    std::fs::write(&src, &contents).expect("write src file");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "big-asked-file".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let mut got_fid = None;
+    let got = wait_event(&mut b, std::time::Duration::from_secs(30), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("big_asked")
+        {
+            got_fid = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the card");
+    let fid = got_fid.expect("file id from header");
+    let stream_id = super::file_handler::file_stream_id(&fid, &a.device_id, &b.device_id);
+    assert!(wait_until(20, async || super::ws_stream_transfer::relay_streams_running(&a.device_id) == 0).await, "A's push never ended");
+    let opened_before = relay.stream_opens(&a.device_id, &b.device_id).len();
+
+    super::ws_stream_transfer::pause_relay_streams(&a.device_id, true);
+    b.cmd_tx
+        .send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: a_master.clone(), chunks: Vec::new() })
+        .await
+        .unwrap();
+    let running = wait_until(20, async || {
+        super::ws_stream_transfer::relay_stream_admits(&a.device_id, &b.device_id, &stream_id, super::ws_stream_transfer::RelayRank::Member, 0)
+            == super::ws_stream_transfer::RelayAdmit::Running
+    })
+    .await;
+    assert!(running, "A starts the stream B asked for");
+    for _ in 0..4 {
+        carry_as(&b, &a, super::types::HavenMessage::FileRequest { file_id: fid.clone(), chunks: Vec::new(), offset: 0 }).await;
+    }
+    sleep_ms(2000).await; // absence: the repeats start nothing while the first runs
+    super::ws_stream_transfer::pause_relay_streams(&a.device_id, false);
+
+    let done = wait_event(&mut b, std::time::Duration::from_secs(60), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+    let opened: Vec<String> = relay.stream_opens(&a.device_id, &b.device_id).split_off(opened_before);
+    assert_eq!(opened, vec![stream_id.clone()], "five asks opened {} streams", opened.len());
+    assert!(done, "the one stream delivers the file under the key B holds");
+    wait_until(10, async || b.file_meta(&fid).is_some_and(|m| m.disk_path.is_some())).await;
+    let meta = b.file_meta(&fid).expect("B persisted the files row");
+    let disk = meta.disk_path.expect("B's completed file has a disk path");
+    assert!(super::at_rest::read_all(std::path::Path::new(&disk)).unwrap() == contents, "B holds the original bytes");
+    assert_eq!(super::ws_stream_transfer::relay_stream_admits(&a.device_id, &b.device_id, &stream_id, super::ws_stream_transfer::RelayRank::Member, 0),
+               super::ws_stream_transfer::RelayAdmit::Start, "the ended stream gave its place back");
+    drop(a);
+    drop(b);
+}
+
+// b14-bounds review
+
+/// An asker whose receive state for a running relay stream is gone asks again from the
+/// same device and is served, however its holder learns of it: it left every room we
+/// share, a RoomMembers refresh no longer lists it, or it came back on a fresh session
+/// we never saw it leave. The old stream is held running each time, as a big file on a
+/// slow uplink would be.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn review_b14_a_reasked_file_after_session_loss_is_served() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 203;
+    const B_MASTER: u8 = 204;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    sleep_ms(1000).await; // auto-download advert settle, so A sends B the card alone
+    drain_events(&mut a);
+    drain_events(&mut b);
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::from([(format!("dm:{a_master}"), false)]));
+    let dm_room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let (a_dev, b_dev) = (a.device_id.clone(), b.device_id.clone());
+    let admits = |stream_id: &str| {
+        super::ws_stream_transfer::relay_stream_admits(&a_dev, &b_dev, stream_id, super::ws_stream_transfer::RelayRank::Member, 0)
+    };
+
+    for how in ["left every room", "purged by a members refresh", "back on a fresh session"] {
+        let contents: Vec<u8> = (0..(4 * 1024 * 1024) as u32).map(|i| ((i + how.len() as u32) % 251) as u8).collect();
+        let name = format!("reasked_{}", how.len());
+        let src = global_tmp.path().join(format!("{name}.bin"));
+        std::fs::write(&src, &contents).expect("write src file");
+        a.cmd_tx.send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()), server_id: None, channel_id: None,
+            file_path: src.to_str().unwrap().to_string(), message_id: format!("{name}-file"),
+            message_text: String::new(), vthumb: None, override_width: None, override_height: None,
+            share_ref: None, voice: false, poster: None, album: None,
+        }))).await.unwrap();
+        let mut got_fid = None;
+        let got = wait_event(&mut b, std::time::Duration::from_secs(30), |ev| {
+            if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev && file_name.starts_with(&name) {
+                got_fid = Some(file_id.clone());
+                return true;
+            }
+            false
+        }).await;
+        assert!(got, "B must get the card ({how})");
+        let fid = got_fid.unwrap();
+        let stream_id = super::file_handler::file_stream_id(&fid, &a.device_id, &b.device_id);
+        assert!(wait_until(20, async || super::ws_stream_transfer::relay_streams_running(&a.device_id) == 0).await);
+
+        super::ws_stream_transfer::pause_relay_streams(&a.device_id, true);
+        b.cmd_tx.send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: a_master.clone(), chunks: Vec::new() }).await.unwrap();
+        let running = wait_until(20, async || admits(&stream_id) == super::ws_stream_transfer::RelayAdmit::Running).await;
+        assert!(running, "A starts the stream B asked for ({how})");
+        super::ws_stream_transfer::pause_only_running_relay_streams(&a.device_id);
+
+        // B's receive state goes; A learns of it only the way this round names.
+        match how {
+            "left every room" => relay.set_online(&b.device_id, false),
+            "purged by a members refresh" => {
+                relay.drop_socket_silently(&b.device_id);
+                relay.inject_room_members_everywhere(&a.device_id);
+            }
+            _ => relay.drop_socket_silently(&b.device_id),
+        }
+        // The fix's own effect is the only signal; without it this waits out its time.
+        let _ = wait_until(5, async || admits(&stream_id) == super::ws_stream_transfer::RelayAdmit::Start || how == "back on a fresh session").await;
+        relay.set_online(&b.device_id, true);
+        assert!(wait_until(15, async || relay.room_devices(&dm_room).contains(&b.device_id)).await, "B never came back ({how})");
+
+        b.cmd_tx.send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: a_master.clone(), chunks: Vec::new() }).await.unwrap();
+        let done = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+        }).await;
+        super::ws_stream_transfer::pause_relay_streams(&a.device_id, false);
+        assert!(done, "B re-asked after its receive state went ({how}) and got nothing in 20 s");
+    }
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+    drop(a);
+    drop(b);
 }

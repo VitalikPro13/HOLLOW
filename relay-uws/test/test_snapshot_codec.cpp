@@ -124,6 +124,7 @@ static snapshot::Data sample() {
     c.acked = 5;
     d.sessions.push_back(c);
     d.report_key = std::string("\x00report\x00key", 11) + std::string(21, '\x5a');
+    d.report_shares = {{std::string(64, 'a'), 77}, {std::string(64, 'b'), 0xfedcba9876543210ull}};
     return d;
 }
 
@@ -229,6 +230,7 @@ static snapshot::Data v1_sample() {
 
 static bool same(const snapshot::Data& a, const snapshot::Data& b) {
     if (a.report_key != b.report_key) return false;
+    if (a.report_shares != b.report_shares) return false;
     if (a.dm.size() != b.dm.size()) return false;
     for (size_t i = 0; i < a.dm.size(); i++) {
         if (a.dm[i].target != b.dm[i].target) return false;
@@ -345,9 +347,17 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
     return true;
 }
 
-// The bytes of the v9 `buffers` and `sessions` sections and the v10 report key after them.
+// The bytes of the v11 report shares.
+static size_t report_shares_bytes(const snapshot::Data& d) {
+    size_t n = 4;
+    for (const auto& [key, share] : d.report_shares) n += 4 + key.size() + 8;
+    return n;
+}
+
+// The bytes of the v9 `buffers` and `sessions` sections and the v10 report key and v11
+// report shares after them.
 static size_t sessions_bytes(const snapshot::Data& d) {
-    size_t n = 4 + 4 + d.report_key.size();
+    size_t n = 4 + 4 + d.report_key.size() + report_shares_bytes(d);
     for (const auto& b : d.buffers) n += 4 + b.size();
     n += 4;
     for (const auto& s : d.sessions) n += 4 + snapshot::detail::encode_session(s).size();
@@ -357,6 +367,7 @@ static size_t sessions_bytes(const snapshot::Data& d) {
 // `d` without what v9 added, as a v8 build held it.
 static snapshot::Data without_sessions(snapshot::Data d) {
     d.report_key.clear();
+    d.report_shares.clear();
     d.buffers.clear();
     d.sessions.clear();
     return d;
@@ -522,13 +533,35 @@ int main() {
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        std::string v9 = bytes.substr(0, bytes.size() - 4 - 4 - in.report_key.size()) + bytes.substr(bytes.size() - 4);
+        std::string v9 = bytes.substr(0, bytes.size() - 4 - 4 - in.report_key.size() - report_shares_bytes(in)) +
+                         bytes.substr(bytes.size() - 4);
         v9[4] = 9;
         snapshot::Data out;
         check("a v9 snapshot decodes under this reader", snapshot::decode(v9, out));
         snapshot::Data no_key = in;
         no_key.report_key.clear();
+        no_key.report_shares.clear();
         check("and carries no report key", out.report_key.empty() && same(no_key, out));
+    }
+
+    // The relay that charges reports to address shares takes back what the v10 build
+    // running before it handed over: the same bytes, less the shares, under version 10.
+    {
+        snapshot::Data in = sample();
+        std::string bytes = snapshot::encode(in);
+        check("a snapshot carries each report's share", [&] {
+            snapshot::Data out;
+            return snapshot::decode(bytes, out) && out.report_shares == in.report_shares;
+        }());
+        std::string v10 = bytes.substr(0, bytes.size() - 4 - report_shares_bytes(in)) + bytes.substr(bytes.size() - 4);
+        v10[4] = 10;
+        snapshot::Data out;
+        check("a v10 snapshot decodes under this reader", snapshot::decode(v10, out));
+        snapshot::Data no_shares = in;
+        no_shares.report_shares.clear();
+        check("and carries no report shares", out.report_shares.empty() && same(no_shares, out));
+        std::string cut = bytes.substr(0, bytes.size() - 4 - 8) + bytes.substr(bytes.size() - 4);
+        check("a report share cut short is refused", !snapshot::decode(cut, out));
     }
 
     // The report key is 32 bytes or absent; any other length is corruption.

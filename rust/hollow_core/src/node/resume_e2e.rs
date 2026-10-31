@@ -118,7 +118,7 @@ impl Kind {
             Kind::Direct => WsCommand::SendDirect { room_code, target_peer, data },
             Kind::Broadcast => WsCommand::SendToRoom { room_code, data },
             Kind::Topic => WsCommand::SendToRoomTopic { room_code, topic: TOPIC.into(), data },
-            Kind::Chunk => WsCommand::SendBinaryDirect { room_code, target_peer, data },
+            Kind::Chunk => WsCommand::SendBinaryDirect { room_code, target_peer, data, credit: Default::default() },
         }
     }
 

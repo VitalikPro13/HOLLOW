@@ -278,9 +278,9 @@ pub(crate) fn seal_command(keypair: &NativeKeypair, cmd: WsCommand) -> WsCommand
             let data = seal(keypair, &room_code, &target_peer, &data);
             WsCommand::SendDirectImage { room_code, target_peer, data }
         }
-        WsCommand::SendBinaryDirect { room_code, target_peer, data } => {
+        WsCommand::SendBinaryDirect { room_code, target_peer, data, credit } => {
             let data = seal(keypair, &room_code, &target_peer, &data);
-            WsCommand::SendBinaryDirect { room_code, target_peer, data }
+            WsCommand::SendBinaryDirect { room_code, target_peer, data, credit }
         }
         // Empty = a push trigger only, which the relay buffers nothing for.
         WsCommand::SendChannelDirect { room_code, target_peer, channel_id, mention, data } if !data.is_empty() => {

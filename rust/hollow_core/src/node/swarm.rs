@@ -437,6 +437,24 @@ pub(super) fn on_verified_sibling(
     );
 }
 
+/// Our relay streams to `device` end: it came back on a fresh session, so its receive
+/// state for them is gone.
+fn end_relay_streams_to(us: &str, device: &str) {
+    let ended = super::ws_stream_transfer::end_relay_streams_to(us, device);
+    if ended > 0 {
+        hollow_log!("[HOLLOW-WS-STREAM] Ended {ended} relay stream(s) to {device}: it came back on a fresh session");
+    }
+}
+
+/// `device` left every room we share (gone, or only hidden): its next ask for a stream
+/// still running replaces that stream.
+fn orphan_relay_streams_to(us: &str, device: &str) {
+    let orphaned = super::ws_stream_transfer::orphan_relay_streams_to(us, device);
+    if orphaned > 0 {
+        hollow_log!("[HOLLOW-WS-STREAM] {orphaned} relay stream(s) to {device} outlived its presence; its next ask replaces them");
+    }
+}
+
 /// The rooms whose presence is audited (presence_audit.rs): every server room of ours and
 /// the active room, once each.
 fn audited_rooms(server_states: &HashMap<String, ServerState>, active_room: Option<&str>) -> Vec<String> {
@@ -3988,6 +4006,11 @@ async fn run_event_loop(
                             continue;
                         }
                         let arrived_here = ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
+                        // Joining a room we already list it in = a fresh session of its,
+                        // whose receive state for our streams is gone.
+                        if !arrived_here {
+                            end_relay_streams_to(&device_peer_id, &peer_id);
+                        }
                         carry_unseen_ops(&mut crdt_resync, &server_states, &ws_cmd_tx, &ws_room_peers, &local_peer_str, &room);
 
                         // A holder we could not reach earlier just turned up:
@@ -4562,6 +4585,7 @@ async fn run_event_loop(
                             .collect();
                         if still_rooms.is_empty() {
                             synced_peers.remove(&peer_id);
+                            orphan_relay_streams_to(&device_peer_id, &peer_id);
                             sibling_left_its_call(&mut call_book, &event_tx, &peer_id).await;
                             let _ = event_tx.send(NetworkEvent::PeerDisconnected {
                                 peer_id: peer_id.clone(),
@@ -4674,6 +4698,7 @@ async fn run_event_loop(
                             if !still_ws {
                                 hollow_log!("[HOLLOW-WS] Stale peer {gone} purged via RoomMembers refresh of {room} — emitting disconnect");
                                 synced_peers.remove(&gone);
+                                orphan_relay_streams_to(&device_peer_id, &gone);
                                 sibling_left_its_call(&mut call_book, &event_tx, &gone).await;
                                 let _ = event_tx.send(NetworkEvent::PeerDisconnected {
                                     peer_id: gone,
@@ -10001,6 +10026,20 @@ async fn handle_incoming_request_inner(
                     } else {
                         None
                     };
+                    // One relay stream per asker and shard, as for files: a repeat while
+                    // it runs would queue the shard again.
+                    if let Some(bytes) = &shard {
+                        let stream_id = vault_ops::shard_stream_id(&cid, si, device_peer_id, peer_str);
+                        let admit = super::ws_stream_transfer::relay_stream_admits(
+                            device_peer_id, peer_str, &stream_id, super::ws_stream_transfer::RelayRank::Member, bytes.len() as u64,
+                        );
+                        if file_handler::rides_relay(webrtc_peers, pending_webrtc_sends, peer_str, &stream_id)
+                            && admit != super::ws_stream_transfer::RelayAdmit::Start
+                        {
+                            hollow_log!("[HOLLOW-VAULT] ShardRequest for {cid} si={si} from {peer_str} left for a later ask ({admit:?})");
+                            return;
+                        }
+                    }
                     let resp = MessageEnvelope::ShardResponse {
                         sid: sid.clone(), cid: cid.clone(), si,
                         data: String::new(), chunks: 0, found: shard.is_some(),
@@ -10016,6 +10055,7 @@ async fn handle_incoming_request_inner(
                             ws_cmd_tx, ws_room_peers,
                             webrtc_peers, pending_webrtc_sends, event_tx,
                             device_peer_id, peer_str, &cid, si, &shard_data,
+                            super::ws_stream_transfer::RelayRank::Member,
                         ).await;
                         hollow_log!("[HOLLOW-VAULT] Streaming shard response si={si} ({} bytes) to {peer_str}", shard_data.len());
                     }
@@ -14624,6 +14664,25 @@ async fn handle_incoming_request_inner(
                             hollow_log!("[HOLLOW-SECURITY] REJECTED FileRequest from {peer_str} for {file_id} — not entitled ({} file)", file_meta.context_type);
                             return;
                         }
+                        // One relay stream per asker and file at a time, and a bounded
+                        // number in all: each ask re-encrypts the file under a fresh key, so
+                        // a repeat while its stream runs would only queue the file again.
+                        // A public-channel guest's ask gives way to a member's.
+                        let stream_id = file_handler::file_stream_id(&file_id, device_peer_id, peer_str);
+                        let relay_rank = if requester_is_member {
+                            super::ws_stream_transfer::RelayRank::Member
+                        } else {
+                            super::ws_stream_transfer::RelayRank::Guest
+                        };
+                        if offset > 0 || file_handler::rides_relay(webrtc_peers, pending_webrtc_sends, peer_str, &stream_id) {
+                            let admit = super::ws_stream_transfer::relay_stream_admits(
+                                device_peer_id, peer_str, &stream_id, relay_rank, file_meta.size_bytes.saturating_add(16),
+                            );
+                            if admit != super::ws_stream_transfer::RelayAdmit::Start {
+                                hollow_log!("[HOLLOW-FILE] FileRequest from {peer_str} for {file_id} left for a later ask ({admit:?})");
+                                return;
+                            }
+                        }
                         // HONEST NEGATIVE ANSWER. The gate above has passed, so
                         // this requester is entitled to these bytes and we simply
                         // do not have them; saying nothing leaves the asker unable
@@ -14748,25 +14807,24 @@ async fn handle_incoming_request_inner(
                                     );
                                 }
 
-                                    let stream_id = file_handler::file_stream_id(&file_id, device_peer_id, peer_str);
                                     if offset > 0 {
                                         // Resumed transfer: skip FileHeader, stream from offset via WS.
                                         if let Some(room) = ws_room_for_peer(ws_room_peers, &peer_str) {
                                             super::ws_stream_transfer::ws_stream_send(
-                                                ws_cmd_tx, &room, &peer_str,
+                                                ws_cmd_tx, device_peer_id, &room, &peer_str,
                                                 &super::ws_stream_transfer::StreamKind::File,
                                                 &stream_id, &temp_path, enc.ciphertext.len() as u64,
-                                                offset,
+                                                offset, relay_rank,
                                             ).await;
                                         }
                                         hollow_log!("[HOLLOW-FILE] Resumed file {} to {peer_str} from offset {offset}", file_id);
                                     } else {
                                         // Fresh transfer: stream via WebRTC or WS relay.
                                         file_handler::stream_to_peer(
-                                            ws_cmd_tx, ws_room_peers,
+                                            ws_cmd_tx, device_peer_id, ws_room_peers,
                                             webrtc_peers, pending_webrtc_sends, event_tx,
                                             &peer_str, &super::ws_stream_transfer::StreamKind::File,
-                                            &stream_id, &temp_path, enc.ciphertext.len() as u64,
+                                            &stream_id, &temp_path, enc.ciphertext.len() as u64, relay_rank,
                                         ).await;
                                         hollow_log!("[HOLLOW-FILE] Streamed file {} to {peer_str}", file_id);
                                     }

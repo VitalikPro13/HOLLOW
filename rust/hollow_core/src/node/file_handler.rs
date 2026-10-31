@@ -1688,11 +1688,11 @@ async fn stream_dm_file_live(
             ).await;
 
             stream_to_peer(
-                ws_cmd_tx, ws_room_peers,
+                ws_cmd_tx, msg.device_peer_id, ws_room_peers,
                 webrtc_peers, pending_webrtc_sends, event_tx,
                 peer_str, &ws_stream_transfer::StreamKind::File,
                 &file_stream_id(msg.file_id, msg.device_peer_id, peer_str),
-                &temp_path, enc.ciphertext.len() as u64,
+                &temp_path, enc.ciphertext.len() as u64, ws_stream_transfer::RelayRank::Own,
             ).await;
             hollow_log!("[HOLLOW-FILE] Streaming {} ({} bytes) to DM {peer_str}", msg.file_id, enc.ciphertext.len());
             let _ = tokio::fs::remove_file(&temp_path).await;
@@ -2182,10 +2182,11 @@ async fn replicate_channel_file_full(
         if !super::crypto_handler::channel_readable_by(state, member_peer_str, cid) { continue; }
         for dev in super::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
             stream_to_peer(
-                ws_cmd_tx, ws_room_peers,
+                ws_cmd_tx, device_peer_id, ws_room_peers,
                 webrtc_peers, pending_webrtc_sends, event_tx,
                 &dev, &ws_stream_transfer::StreamKind::File,
                 &file_stream_id(file_id, device_peer_id, &dev), temp_path, ct_size,
+                ws_stream_transfer::RelayRank::Own,
             ).await;
         }
     }
@@ -2450,9 +2451,11 @@ pub(crate) async fn handle_webrtc_transfer_failed(
         hollow_log!("[HOLLOW-WEBRTC] Sender fallback: retrying {id} via WSS relay");
         webrtc_peers.remove(&target);
         stream_to_peer(
-            &ws_cmd_tx, &ws_room_peers,
-            &webrtc_peers, pending_webrtc_sends, &event_tx,
+            ws_cmd_tx, us, ws_room_peers,
+            webrtc_peers, pending_webrtc_sends, event_tx,
             &target, &kind, &id, &source_path, total_size,
+            // The send may have answered anyone's ask, so it takes the caps an ask does.
+            ws_stream_transfer::RelayRank::Member,
         ).await;
         let _ = tokio::fs::remove_file(&source_path).await;
     }
@@ -3249,12 +3252,24 @@ async fn stage_send_temp(source: &std::path::Path, id: &str) -> Option<PathBuf> 
     None
 }
 
-/// Stream file or shard data to a peer under the transfer's wire id. Prefers WebRTC
-/// data channel if available, falls back to WS binary frames via relay. `source_path`
-/// stays the caller's: a data-channel send streams from a staged copy of its own, and
-/// the relay reads `source_path` in full before this returns.
+/// Whether a send of transfer `id` to `peer` rides the relay rather than its data channel.
+pub(crate) fn rides_relay(
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    peer: &str,
+    id: &str,
+) -> bool {
+    !webrtc_peers.contains(peer) || pending_webrtc_sends.contains_key(id)
+}
+
+/// Stream file or shard data from `us` to a peer under the transfer's wire id. Prefers
+/// WebRTC data channel if available, falls back to WS binary frames via relay, where
+/// `rank` places it among this device's relay streams. `source_path` stays the caller's:
+/// either way the send streams from a staged copy of its own.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    us: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
@@ -3264,10 +3279,11 @@ pub(crate) async fn stream_to_peer(
     id: &str,
     source_path: &std::path::Path,
     total_size: u64,
+    rank: ws_stream_transfer::RelayRank,
 ) {
     // A data-channel send owns its temp until it ends, so a repeat of a transfer still
     // running there rides the relay.
-    let staged = if webrtc_peers.contains(peer_str) && !pending_webrtc_sends.contains_key(id) {
+    let staged = if !rides_relay(webrtc_peers, pending_webrtc_sends, peer_str, id) {
         stage_send_temp(source_path, id).await
     } else {
         None
@@ -3303,18 +3319,20 @@ pub(crate) async fn stream_to_peer(
     // Fallback: WSS relay binary streaming.
     if let Some(room) = super::crypto_handler::send_room_for_peer(ws_room_peers, peer_str) {
         ws_stream_transfer::ws_stream_send(
-            ws_cmd_tx, &room, peer_str, kind, id, source_path, total_size, 0,
+            ws_cmd_tx, us, &room, peer_str, kind, id, source_path, total_size, 0, rank,
         ).await;
     } else {
         hollow_log!("[HOLLOW-STREAM] Peer {peer_str} unreachable via WS — cannot stream {id}");
     }
 }
 
-/// Stream shard bytes held in memory to a peer under the transfer's stream id. Prefers
-/// WebRTC (writes a temp file for Dart), falls back to WS binary frames via relay
-/// (streams from memory, no disk).
+/// Stream shard bytes held in memory from `us` to a peer under the transfer's stream id.
+/// Prefers WebRTC (writes a temp file for Dart), falls back to WS binary frames via
+/// relay, credited and capped as `stream_to_peer`'s are.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_to_peer_bytes(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    us: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
@@ -3323,6 +3341,7 @@ pub(crate) async fn stream_to_peer_bytes(
     kind: &ws_stream_transfer::StreamKind,
     id: &str,
     data: &[u8],
+    rank: ws_stream_transfer::RelayRank,
 ) {
     // A data-channel send owns its temp until it ends, so a repeat of a transfer still
     // running there rides the relay.
@@ -3361,7 +3380,7 @@ pub(crate) async fn stream_to_peer_bytes(
     }
     if let Some(room) = super::crypto_handler::send_room_for_peer(ws_room_peers, peer_str) {
         ws_stream_transfer::ws_stream_send_bytes(
-            ws_cmd_tx, &room, peer_str, kind, id, data,
+            ws_cmd_tx, us, &room, peer_str, kind, id, data, rank,
         ).await;
     } else {
         hollow_log!("[HOLLOW-STREAM] Peer {peer_str} unreachable via WS — cannot stream {id}");
@@ -3884,7 +3903,7 @@ mod tests {
 
         let first = tmp.path().join("first.tmp");
         std::fs::write(&first, b"first ciphertext").unwrap();
-        stream_to_peer(&ws_tx, &rooms, &webrtc, &mut sends, &event_tx, "bob", &StreamKind::File, &id, &first, 16).await;
+        stream_to_peer(&ws_tx, "us", &rooms, &webrtc, &mut sends, &event_tx, "bob", &StreamKind::File, &id, &first, 16, ws_stream_transfer::RelayRank::Member).await;
         std::fs::remove_file(&first).unwrap();
         let Ok(NetworkEvent::WebRtcSendFile { transfer_id, file_path, .. }) = events.try_recv() else {
             panic!("the send never went to the data channel");
@@ -3895,10 +3914,11 @@ mod tests {
 
         let again = tmp.path().join("again.tmp");
         std::fs::write(&again, b"second ciphertext").unwrap();
-        stream_to_peer(&ws_tx, &rooms, &webrtc, &mut sends, &event_tx, "bob", &StreamKind::File, &id, &again, 17).await;
+        stream_to_peer(&ws_tx, "us", &rooms, &webrtc, &mut sends, &event_tx, "bob", &StreamKind::File, &id, &again, 17, ws_stream_transfer::RelayRank::Member).await;
         assert!(events.try_recv().is_err(), "a repeat went to the data channel while the first send runs");
         assert_eq!(std::fs::read(&file_path).ok().as_deref(), Some(&b"first ciphertext"[..]), "the running send's temp was rewritten");
-        assert!(matches!(ws_rx.try_recv(), Ok(super::super::ws_client::WsCommand::SendBinaryDirect { .. })), "the repeat never rode the relay");
+        let relayed = tokio::time::timeout(std::time::Duration::from_secs(5), ws_rx.recv()).await;
+        assert!(matches!(relayed, Ok(Some(super::super::ws_client::WsCommand::SendBinaryDirect { .. }))), "the repeat never rode the relay");
         assert_eq!(sends.get(&id).map(|s| s.3.clone()), Some(PathBuf::from(&file_path)));
 
         handle_webrtc_send_complete(id.clone(), &mut sends);

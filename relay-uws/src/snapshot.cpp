@@ -147,6 +147,11 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
     }
     session_snapshot::capture(st, d);
     d.report_key = st.reports.key_bytes();
+    for (const auto& [key, h] : st.reports.held) {
+        if (!ReportsState::is_fingerprint(key)) continue;
+        auto share = st.reports.ledger.share_of(key);
+        if (share && !ReportsState::is_own_share(*share)) d.report_shares.push_back({key, *share});
+    }
     return d;
 }
 
@@ -155,6 +160,7 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now, int
     RestoredShares share;
     if (!d.report_key.empty()) st.reports.adopt_key(d.report_key);
     sodium_memzero(d.report_key.data(), d.report_key.size());
+    for (auto& [key, s] : d.report_shares) st.reports.adopted_shares[std::move(key)] = s;
     for (auto& o : d.optin) st.offline_optin[o.peer] = o.retention_secs;
     for (auto& p : d.push_tokens) st.push_tokens[p.peer] = {std::move(p.token), std::move(p.platform)};
     for (auto& p : d.push_prefs) {
