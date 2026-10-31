@@ -66,6 +66,26 @@ release pipeline is the `release` skill.
   Network change = `GNetworkMonitor` (sees a new default route while NetworkManager still
   says connected, works without NM, goes through the portal), not NM `StateChanged`.
 
+## macOS release signing
+
+- The shipped app loads code only from its own bundle and the OS (HOL-SEC-187): the release
+  script runs `scripts/macos_load_gate.sh strip` + `check` BEFORE signing (prebuilt pods
+  such as mdk carry `/opt/homebrew/lib`, `/usr/local/lib` and CI-home rpaths beside weak
+  loads we never ship), the build stage gates a copy the same way, and `signed` runs after
+  signing (every Mach-O verifies in every slice and carries our team, no executable waives
+  library validation). Absolute loads only from `/usr/lib` and `/System/Library`; symlinks
+  and @-paths stay in the bundle, `..` only leading. A new pod that fails it gets its
+  install name fixed, never a wider gate. `scripts/macos_load_gate_test.sh`, guard
+  `test/macos_load_gate_guard_test.dart`.
+- Library validation admits ANY Mach-O our team signed, old Hollow libraries too: never sign
+  anything with this team that loads code from a data path, a download or a plug-in folder.
+- `Release.entitlements` keeps `disable-library-validation` ONLY for ad-hoc builds (a clone,
+  the CI dry run): ad-hoc + library validation refuses the app's own ad-hoc frameworks
+  ("different Team IDs"). The release signs with the file minus that key. Never sign a
+  distributed build with the waiver: it lets any file dropped into a user-owned bundle load.
+- Library validation on means no legacy DAL camera plug-ins in Hollow (macOS 12/13 only;
+  14.1+ dropped them everywhere); Camera Extensions run out of process and still work.
+
 ## Android build
 
 - SQLCipher links vendored static OpenSSL **3.5.8** per arch

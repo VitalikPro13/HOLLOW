@@ -260,6 +260,14 @@ if runs build; then
     archs="$(lipo -archs "$bin")"
     [[ " $archs " == *" x86_64 "* && " $archs " == *" arm64 "* ]] || { echo "ERROR: ${bin#"$REL"/} is not universal ($archs)" >&2; exit 1; }
   done
+
+  # HOL-SEC-187: a pod that loads from outside the bundle fails every build, not only a
+  # signed release. Gated on a copy: strip voids the ad-hoc signatures this stage hands on.
+  echo "==> load gate (strip + check on a copy)"
+  ditto "$APP" "$WORK/gate/Hollow.app"
+  bash "$SCRIPT_DIR/macos_load_gate.sh" strip "$WORK/gate/Hollow.app"
+  bash "$SCRIPT_DIR/macos_load_gate.sh" check "$WORK/gate/Hollow.app"
+  rm -rf "$WORK/gate"
 fi
 
 if [ "$STAGE" != verify-dmg ]; then
@@ -269,6 +277,18 @@ fi
 
 # --- Stage: sign (inside-out, then notarize + staple the app) ---------------
 if runs sign && [ "$SIGNED" = 1 ]; then
+  # HOL-SEC-187: prebuilt pods carry rpaths into /opt/homebrew/lib, /usr/local/lib and
+  # their CI's home beside weak loads of libraries we never ship; with those a planted
+  # dylib loads into the signed app. Stripped before signing, since the edit voids
+  # signatures. The shipped signature keeps library validation on: Release.entitlements
+  # waives it only because an ad-hoc build cannot load its own ad-hoc frameworks otherwise.
+  echo "==> strip load paths that leave the bundle, then gate"
+  bash "$SCRIPT_DIR/macos_load_gate.sh" strip "$APP"
+  bash "$SCRIPT_DIR/macos_load_gate.sh" check "$APP"
+  ENT_SHIP="$WORK/Hollow.entitlements"
+  cp "$ENT" "$ENT_SHIP"
+  /usr/libexec/PlistBuddy -c "Delete :com.apple.security.cs.disable-library-validation" "$ENT_SHIP" 2>/dev/null || true
+
   echo "==> sign nested dylibs / framework binaries"
   find "$APP/Contents/Frameworks" -type f \( -name "*.dylib" -o -perm +111 \) -print0 > "$WORK/nested"
   while IFS= read -r -d '' f; do
@@ -302,10 +322,11 @@ if runs sign && [ "$SIGNED" = 1 ]; then
   done < "$WORK/helpers"
 
   echo "==> sign the app bundle (with entitlements)"
-  sign --options runtime --entitlements "$ENT" "$APP"
+  sign --options runtime --entitlements "$ENT_SHIP" "$APP"
 
   codesign --verify --deep --strict --verbose=2 "$APP"
   verify_macho_signatures "$APP"
+  bash "$SCRIPT_DIR/macos_load_gate.sh" signed "$APP" "$MAC_TEAM_ID"
 
   # Stapled before it goes into the DMG and the zip, so the app a user drags out
   # opens offline.

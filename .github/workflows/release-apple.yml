@@ -168,6 +168,9 @@ jobs:
           echo "$v"
           [[ "$v" == "rustc $HOLLOW_RUST_TOOLCHAIN "* ]] || { echo "::error::rustc is not $HOLLOW_RUST_TOOLCHAIN"; exit 1; }
 
+      - name: Load gate tests (HOL-SEC-187)
+        run: bash scripts/macos_load_gate_test.sh
+
       - name: Build Hollow.app (ad-hoc signed)
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
