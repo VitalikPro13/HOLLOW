@@ -29,14 +29,11 @@ DEPENDENCIES:
   - hollow_core (from `Flutter/ephemeral/.symlinks/plugins/hollow_core/macos`)
   - irondash_engine_context (from `Flutter/ephemeral/.symlinks/plugins/irondash_engine_context/macos`)
   - local_notifier (from `Flutter/ephemeral/.symlinks/plugins/local_notifier/macos`)
+  - mdk (from `../third_party/apple_pods/mdk.podspec.json`)
   - screen_retriever_macos (from `Flutter/ephemeral/.symlinks/plugins/screen_retriever_macos/macos`)
   - super_native_extensions (from `Flutter/ephemeral/.symlinks/plugins/super_native_extensions/macos`)
   - tray_manager (from `Flutter/ephemeral/.symlinks/plugins/tray_manager/macos`)
-
-SPEC REPOS:
-  trunk:
-    - mdk
-    - WebRTC-SDK
+  - WebRTC-SDK (from `../third_party/apple_pods/WebRTC-SDK.podspec.json`)
 
 EXTERNAL SOURCES:
   flutter_webrtc:
@@ -51,12 +48,16 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/irondash_engine_context/macos
   local_notifier:
     :path: Flutter/ephemeral/.symlinks/plugins/local_notifier/macos
+  mdk:
+    :podspec: "../third_party/apple_pods/mdk.podspec.json"
   screen_retriever_macos:
     :path: Flutter/ephemeral/.symlinks/plugins/screen_retriever_macos/macos
   super_native_extensions:
     :path: Flutter/ephemeral/.symlinks/plugins/super_native_extensions/macos
   tray_manager:
     :path: Flutter/ephemeral/.symlinks/plugins/tray_manager/macos
+  WebRTC-SDK:
+    :podspec: "../third_party/apple_pods/WebRTC-SDK.podspec.json"
 
 SPEC CHECKSUMS:
   flutter_webrtc: fec3dc9284a1f6d21ec2caa91c90bb4c1824eb04
@@ -65,12 +66,12 @@ SPEC CHECKSUMS:
   hollow_core: e0b3856b50b8769ee432152cbb070c1076d37941
   irondash_engine_context: 893c7d96d20ce361d7e996f39d360c4c2f9869ba
   local_notifier: ebf072651e35ae5e47280ad52e2707375cb2ae4e
-  mdk: 59bbe9e2ac2a052455ab1b076c245680d66cf6c0
+  mdk: c0af7ebf8a547462b4e315cfd2e7e1c6bb3ddeaa
   screen_retriever_macos: 452e51764a9e1cdb74b3c541238795849f21557f
   super_native_extensions: c2795d6d9aedf4a79fae25cb6160b71b50549189
   tray_manager: a104b5c81b578d83f3c3d0f40a997c8b10810166
-  WebRTC-SDK: e6006119cd730d6315d875e4a421b6cc8bb88833
+  WebRTC-SDK: 2bdf437ed0754d13d78ee15696e4deb74318697d
 
-PODFILE CHECKSUM: 0ed63705df68a45b71e918fd76c8dc657fc4d42a
+PODFILE CHECKSUM: 8eed6bbb21416fc6560099d1abf3b3cfc33a7de1
 
 COCOAPODS: 1.17.0

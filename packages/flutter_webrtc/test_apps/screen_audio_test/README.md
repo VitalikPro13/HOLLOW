@@ -42,7 +42,7 @@ bash scripts/build_screen_audio.sh
 Run it **before** `flutter build macos` / `flutter build linux`. On macOS the
 Runner has a "Bundle screen audio capturer" run-script phase that copies the
 built binary into `Hollow.app/Contents/Resources/screen_audio_capturer`; the
-release pipeline (`scripts/macos_resign_and_dmg.sh`) re-signs it with Developer ID.
+release pipeline (`scripts/build_macos_release.sh`) re-signs it with Developer ID.
 
 ## What it does
 

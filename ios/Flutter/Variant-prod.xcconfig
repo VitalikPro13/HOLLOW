@@ -1,6 +1,8 @@
 // The production identity (TestFlight, App Store). The app, both extensions,
 // their entitlements and Info.plists take every id from here, so Variant-dev
 // can swap all of them at once. Set on the project-level Debug/Release/Profile.
+// FLUTTER_BUILD_NAME/NUMBER for the two extensions, whose versions follow the app.
+#include? "Generated.xcconfig"
 HOLLOW_BUNDLE_ID = com.anonlisten.hollow
 HOLLOW_APP_GROUP = group.$(HOLLOW_BUNDLE_ID)
 HOLLOW_DISPLAY_NAME = Hollow

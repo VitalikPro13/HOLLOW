@@ -26,6 +26,7 @@ include(FetchContent)
 FetchContent_Declare(
   opus
   URL https://github.com/xiph/opus/archive/refs/tags/v1.5.2.tar.gz
+  URL_HASH SHA256=9480e329e989f70d69886ded470c7f8cfe6c0667cc4196d4837ac9e668fb7404
 )
 set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
@@ -36,6 +37,7 @@ FetchContent_MakeAvailable(opus)
 FetchContent_Declare(
   ogg
   URL https://github.com/xiph/ogg/archive/refs/tags/v1.3.5.tar.gz
+  URL_HASH SHA256=f6f1b04cfa4e98b70ffe775d5e302d9c6b98541f05159af6de2d6617817ed7d6
 )
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(INSTALL_DOCS OFF CACHE BOOL "" FORCE)

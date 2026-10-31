@@ -1,0 +1,562 @@
+# The macOS and iOS release builds, run by hand (Actions > Release (Apple) >
+# Run workflow). It replaces the Mac that used to build them; the release skill
+# says when to run it and what to do with the result.
+#
+# No job that holds a key runs code we did not write. Every build (pub packages,
+# CocoaPods, cargo build scripts, Xcode script phases, CMake) runs in a job with
+# no secret and no environment; a signing job gets the build as a tar whose
+# sha256 the build job published as an output, and runs only Apple's tools and
+# this repository's scripts:
+#   macos-build    flutter build, ad-hoc signed                          no secrets
+#   macos-release  sign, notarize + staple the app; the DMG from a staged
+#                  folder (hdiutil, committed layout), checked, signed,
+#                  notarized + stapled; the updater zip     apple-developer-id
+#   macos-attest   SLSA build provenance for the dmg and the zip
+#   ios-build      xcodebuild archive with code signing OFF, crash symbols
+#                  from its dSYMs                                         no secrets
+#   ios-upload     inside-out signing with the Apple Distribution identity and
+#                  the App Store profiles, .ipa, altool upload     apple-asc-upload
+# The dry run (`sign` and `upload_ios` off) runs the same builds and, instead of
+# the two signing jobs, macos-package-dry (the unsigned DMG + zip through the same
+# checks) and ios-export-dry (the same export, signed ad-hoc). It needs no
+# secret, no environment and no Apple account.
+#
+# The environments' required reviewer and main-only deployment rule are the real
+# gate (a branch can edit this file, it cannot edit an environment); secrets live
+# only there, reach a step as env, never `${{ }}` inside a script, and no
+# third-party action ever sees one. No caches: a release build restores nothing
+# another run could have written. Every action is pinned to a commit SHA.
+
+name: Release (Apple)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version X.Y.Z (must match pubspec.yaml)"
+        required: true
+        type: string
+      platforms:
+        description: "Platforms to build"
+        required: true
+        type: choice
+        default: macos-and-ios
+        options: [macos-and-ios, macos, ios]
+      sign:
+        description: "Sign + notarize macOS (main only; false = unsigned dry run)"
+        required: true
+        type: boolean
+        default: false
+      upload_ios:
+        description: "Sign iOS and upload it to TestFlight (main only; false = dry run)"
+        required: true
+        type: boolean
+        default: false
+      ios_build:
+        description: "iOS build number (empty = the +N in pubspec.yaml)"
+        required: false
+        type: string
+
+concurrency:
+  group: release-apple-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  FLUTTER_VERSION: "3.47.0"
+  FLUTTER_COMMIT: 4cf24164269a5ebf0c16a028a00727d0e77bbb05
+  XCODE_APP: /Applications/Xcode_26.6.app
+  # cargokit compiles hollow_core with exactly this rustc (rust_builder/cargokit).
+  HOLLOW_RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  prepare:
+    name: Check the inputs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      build: ${{ steps.check.outputs.build }}
+      macos: ${{ steps.check.outputs.macos }}
+      ios: ${{ steps.check.outputs.ios }}
+      sign: ${{ steps.check.outputs.sign }}
+      upload_ios: ${{ steps.check.outputs.upload_ios }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs against pubspec.yaml and the ref
+        id: check
+        env:
+          IN_VERSION: ${{ inputs.version }}
+          IN_PLATFORMS: ${{ inputs.platforms }}
+          IN_SIGN: ${{ inputs.sign }}
+          IN_UPLOAD_IOS: ${{ inputs.upload_ios }}
+          IN_IOS_BUILD: ${{ inputs.ios_build }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          line="$(grep -m1 '^version:' pubspec.yaml)"
+          [[ "$line" =~ ^version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+)\+([0-9]+)[[:space:]]*$ ]] \
+            || { echo "::error::pubspec.yaml version line is not X.Y.Z+N"; exit 1; }
+          pub_version="${BASH_REMATCH[1]}"; pub_build="${BASH_REMATCH[2]}"
+          version="${IN_VERSION:-$pub_version}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version is not X.Y.Z"; exit 1; }
+          [ "$version" = "$pub_version" ] || { echo "::error::version $version, but pubspec.yaml says $pub_version"; exit 1; }
+          build="${IN_IOS_BUILD:-$pub_build}"
+          [[ "$build" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::iOS build number is not a positive integer"; exit 1; }
+          sign=false; [ "$IN_SIGN" = true ] && sign=true
+          upload_ios=false; [ "$IN_UPLOAD_IOS" = true ] && upload_ios=true
+          case "${IN_PLATFORMS:-macos-and-ios}" in
+            macos-and-ios) macos=true; ios=true ;;
+            macos) macos=true; ios=false ;;
+            ios) macos=false; ios=true ;;
+            *) echo "::error::unknown platforms value"; exit 1 ;;
+          esac
+          if { [ "$sign" = true ] || [ "$upload_ios" = true ]; } && [ "$REF" != refs/heads/main ]; then
+            echo "::error::signing and uploading run from main only"; exit 1
+          fi
+          {
+            echo "version=$version"; echo "build=$build"; echo "macos=$macos"; echo "ios=$ios"
+            echo "sign=$sign"; echo "upload_ios=$upload_ios"
+          } >> "$GITHUB_OUTPUT"
+          echo "Hollow $version (iOS build $build): macos=$macos ios=$ios sign=$sign upload_ios=$upload_ios"
+
+  # ---------------------------------------------------------------- macOS ----
+
+  macos-build:
+    name: macOS build (no secrets)
+    needs: prepare
+    if: needs.prepare.outputs.macos == 'true'
+    runs-on: macos-26
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
+
+      # A git clone checked against the tag's commit, not an action: nothing
+      # but the Flutter repository decides what SDK builds the release.
+      - name: Install Flutter
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          [ "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "$FLUTTER_COMMIT" ] || { echo "::error::Flutter $FLUTTER_VERSION is not commit $FLUTTER_COMMIT"; exit 1; }
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" --disable-analytics
+          "$RUNNER_TEMP/flutter/bin/flutter" --version
+
+      - name: Rust toolchain (pinned)
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$HOLLOW_RUST_TOOLCHAIN" --profile minimal --no-self-update \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin
+          v="$(rustup run "$HOLLOW_RUST_TOOLCHAIN" rustc --version)"
+          echo "$v"
+          [[ "$v" == "rustc $HOLLOW_RUST_TOOLCHAIN "* ]] || { echo "::error::rustc is not $HOLLOW_RUST_TOOLCHAIN"; exit 1; }
+
+      - name: Build Hollow.app (ad-hoc signed)
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: bash scripts/build_macos_release.sh --unsigned --stage build "$VERSION"
+
+      - name: hollow_core built by the pinned rustc
+        run: bash scripts/apple_ci_rustc_check.sh build/macos/Build/Products/Release/Hollow.app/Contents/Frameworks/hollow_core.framework/Versions/A/hollow_core
+
+      # pub get runs --enforce-lockfile, cargo --locked, the Podfile pins mdk and
+      # WebRTC-SDK by sha256: a lock that moved means the build resolved
+      # something the commit did not name.
+      - name: Locks unchanged
+        run: git diff --exit-code -- pubspec.lock rust/hollow_core/Cargo.lock macos/Podfile.lock
+
+      - name: Pack the app
+        id: pack
+        run: |
+          set -euo pipefail
+          tar -C build/macos/Build/Products/Release -cf "$RUNNER_TEMP/hollow-app.tar" Hollow.app
+          echo "sha256=$(shasum -a 256 "$RUNNER_TEMP/hollow-app.tar" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        with:
+          name: macos-app-built
+          path: ${{ runner.temp }}/hollow-app.tar
+          retention-days: 3
+          if-no-files-found: error
+
+  macos-package-dry:
+    name: macOS DMG + zip (unsigned dry run)
+    needs: [prepare, macos-build]
+    if: needs.prepare.outputs.sign != 'true'
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: sudo xcode-select -s "$XCODE_APP"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.macos-build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/handoff
+
+      - name: Unpack the app
+        env:
+          SHA256: ${{ needs.macos-build.outputs.sha256 }}
+        run: bash scripts/apple_ci_unpack.sh "$RUNNER_TEMP/handoff/hollow-app.tar" "$SHA256" build/macos/Build/Products/Release Hollow.app
+
+      - name: DMG + zip + checks (unsigned)
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: bash scripts/build_macos_release.sh --unsigned --stage package "$VERSION"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hollow-${{ needs.prepare.outputs.version }}-macos-UNSIGNED
+          path: |
+            build/macos/Build/Products/Release/hollow-*.dmg
+            build/macos/Build/Products/Release/hollow-*-macos.zip
+          retention-days: 7
+          if-no-files-found: error
+
+  macos-release:
+    name: macOS sign + notarize + package
+    needs: [prepare, macos-build]
+    if: needs.prepare.outputs.sign == 'true'
+    runs-on: macos-26
+    timeout-minutes: 90
+    environment: apple-developer-id
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      dmg_sha256: ${{ steps.hashes.outputs.dmg }}
+      zip_sha256: ${{ steps.hashes.outputs.zip }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: sudo xcode-select -s "$XCODE_APP"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.macos-build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/handoff
+
+      - name: Unpack the app
+        env:
+          SHA256: ${{ needs.macos-build.outputs.sha256 }}
+        run: bash scripts/apple_ci_unpack.sh "$RUNNER_TEMP/handoff/hollow-app.tar" "$SHA256" build/macos/Build/Products/Release Hollow.app
+
+      - name: Signing keychain
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          MAC_TEAM_ID: ${{ vars.MAC_TEAM_ID }}
+          MAC_SIGN_NAME: ${{ vars.MAC_SIGN_NAME }}
+        run: bash scripts/apple_ci_keychain.sh create developer-id
+
+      - name: Sign + notarize the app, then the DMG and the zip
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAC_TEAM_ID: ${{ vars.MAC_TEAM_ID }}
+          MAC_SIGN_NAME: ${{ vars.MAC_SIGN_NAME }}
+          MAC_SIGN_KEYCHAIN: ${{ runner.temp }}/hollow-signing.keychain-db
+          NOTARY_KEY_P8_BASE64: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          NOTARY_KEY_PATH="$RUNNER_TEMP/AuthKey_notary.p8"
+          trap 'rm -f "$NOTARY_KEY_PATH"' EXIT
+          [ -n "$NOTARY_KEY_P8_BASE64" ] || { echo "::error::secret NOTARY_KEY_P8_BASE64 is empty"; exit 1; }
+          printf '%s' "$NOTARY_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+          unset NOTARY_KEY_P8_BASE64
+          export NOTARY_KEY_PATH
+          bash scripts/build_macos_release.sh --stage sign "$VERSION"
+          bash scripts/build_macos_release.sh --stage package "$VERSION"
+
+      - name: Remove the keychain
+        if: always()
+        run: bash scripts/apple_ci_keychain.sh delete
+
+      - name: Hashes
+        id: hashes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        working-directory: build/macos/Build/Products/Release
+        run: |
+          set -euo pipefail
+          dmg="$(shasum -a 256 "hollow-$VERSION.dmg" | cut -d' ' -f1)"
+          zip="$(shasum -a 256 "hollow-$VERSION-macos.zip" | cut -d' ' -f1)"
+          { echo "dmg=$dmg"; echo "zip=$zip"; } >> "$GITHUB_OUTPUT"
+          { echo "### macOS $VERSION sha256"; echo '```'; echo "$dmg  hollow-$VERSION.dmg"; echo "$zip  hollow-$VERSION-macos.zip"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        with:
+          name: hollow-${{ needs.prepare.outputs.version }}-macos
+          path: |
+            build/macos/Build/Products/Release/hollow-${{ needs.prepare.outputs.version }}.dmg
+            build/macos/Build/Products/Release/hollow-${{ needs.prepare.outputs.version }}-macos.zip
+          retention-days: 14
+          if-no-files-found: error
+
+  # A public repository only: attestations of a private repository need GitHub
+  # Enterprise Cloud (APPLE_RELEASE_CI.md, "The embargo").
+  macos-attest:
+    name: macOS provenance
+    needs: [prepare, macos-release]
+    if: needs.prepare.outputs.sign == 'true' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # the OIDC token Sigstore certifies the attestation with
+      attestations: write # store the attestation on this repository
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.macos-release.outputs.artifact_id }}
+          path: ${{ runner.temp }}/release
+
+      - name: Files are the ones the signing job hashed
+        working-directory: ${{ runner.temp }}/release
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          DMG_SHA256: ${{ needs.macos-release.outputs.dmg_sha256 }}
+          ZIP_SHA256: ${{ needs.macos-release.outputs.zip_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$DMG_SHA256" =~ ^[0-9a-f]{64}$ && "$ZIP_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::missing hash outputs"; exit 1; }
+          [ "$(find . -type f | sort)" = "$(printf './hollow-%s-macos.zip\n./hollow-%s.dmg\n' "$VERSION" "$VERSION" | sort)" ] \
+            || { echo "::error::the artifact holds other files"; find . -type f; exit 1; }
+          printf '%s  %s\n%s  %s\n' "$DMG_SHA256" "hollow-$VERSION.dmg" "$ZIP_SHA256" "hollow-$VERSION-macos.zip" | sha256sum --check --strict
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/release/hollow-${{ needs.prepare.outputs.version }}.dmg
+            ${{ runner.temp }}/release/hollow-${{ needs.prepare.outputs.version }}-macos.zip
+
+  # ------------------------------------------------------------------ iOS ----
+
+  ios-build:
+    name: iOS archive (no secrets, unsigned)
+    needs: prepare
+    if: needs.prepare.outputs.ios == 'true'
+    runs-on: macos-26
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
+
+      - name: Install Flutter
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          [ "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "$FLUTTER_COMMIT" ] || { echo "::error::Flutter $FLUTTER_VERSION is not commit $FLUTTER_COMMIT"; exit 1; }
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" --disable-analytics
+          "$RUNNER_TEMP/flutter/bin/flutter" --version
+
+      - name: Rust toolchain (pinned)
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$HOLLOW_RUST_TOOLCHAIN" --profile minimal --no-self-update --target aarch64-apple-ios
+          v="$(rustup run "$HOLLOW_RUST_TOOLCHAIN" rustc --version)"
+          echo "$v"
+          [[ "$v" == "rustc $HOLLOW_RUST_TOOLCHAIN "* ]] || { echo "::error::rustc is not $HOLLOW_RUST_TOOLCHAIN"; exit 1; }
+
+      # The production Firebase config is a secret of the upload job, which
+      # swaps it in after signing starts; the build only ever sees this
+      # placeholder with the right bundle id.
+      - name: Firebase placeholder
+        run: |
+          set -euo pipefail
+          bundle_id="$(sed -nE 's/^HOLLOW_BUNDLE_ID = (.+)$/\1/p' ios/Flutter/Variant-prod.xcconfig)"
+          f=ios/GoogleService-Info.plist
+          plutil -create xml1 "$f"
+          plutil -insert BUNDLE_ID -string "$bundle_id" "$f"
+          plutil -insert GOOGLE_APP_ID -string "1:000000000000:ios:0000000000000000" "$f"
+          plutil -insert GCM_SENDER_ID -string "000000000000" "$f"
+          plutil -insert PROJECT_ID -string "ci-placeholder" "$f"
+          plutil -insert API_KEY -string "ci-placeholder" "$f"
+
+      - name: Archive (code signing off)
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD: ${{ needs.prepare.outputs.build }}
+        run: bash scripts/build_ios_release.sh archive "$VERSION" "$BUILD"
+
+      - name: hollow_core built by the pinned rustc
+        run: bash scripts/apple_ci_rustc_check.sh build/ios_release/Runner.xcarchive/Products/Applications/Runner.app/Frameworks/hollow_core.framework/hollow_core
+
+      - name: Locks unchanged
+        run: git diff --exit-code -- pubspec.lock rust/hollow_core/Cargo.lock ios/Podfile.lock
+
+      - name: Pack the archive
+        id: pack
+        run: |
+          set -euo pipefail
+          tar -C build/ios_release -cf "$RUNNER_TEMP/ios-archive.tar" Runner.xcarchive
+          echo "sha256=$(shasum -a 256 "$RUNNER_TEMP/ios-archive.tar" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        with:
+          name: ios-archive-unsigned
+          path: ${{ runner.temp }}/ios-archive.tar
+          retention-days: 3
+          if-no-files-found: error
+
+  ios-export-dry:
+    name: iOS export (ad-hoc dry run)
+    needs: [prepare, ios-build]
+    if: needs.prepare.outputs.upload_ios != 'true'
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: sudo xcode-select -s "$XCODE_APP"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.ios-build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/handoff
+
+      - name: Unpack the archive
+        env:
+          SHA256: ${{ needs.ios-build.outputs.sha256 }}
+        run: bash scripts/apple_ci_unpack.sh "$RUNNER_TEMP/handoff/ios-archive.tar" "$SHA256" build/ios_release Runner.xcarchive
+
+      - name: Export (ad-hoc, same entitlements, no profiles)
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD: ${{ needs.prepare.outputs.build }}
+        run: bash scripts/build_ios_release.sh export --unsigned "$VERSION" "$BUILD"
+
+  ios-upload:
+    name: iOS sign + TestFlight upload
+    needs: [prepare, ios-build]
+    if: needs.prepare.outputs.upload_ios == 'true'
+    runs-on: macos-26
+    timeout-minutes: 45
+    environment: apple-asc-upload
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: sudo xcode-select -s "$XCODE_APP"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.ios-build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/handoff
+
+      - name: Unpack the archive
+        env:
+          SHA256: ${{ needs.ios-build.outputs.sha256 }}
+        run: bash scripts/apple_ci_unpack.sh "$RUNNER_TEMP/handoff/ios-archive.tar" "$SHA256" build/ios_release Runner.xcarchive
+
+      - name: Signing keychain
+        env:
+          P12_BASE64: ${{ secrets.DISTRIBUTION_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.DISTRIBUTION_P12_PASSWORD }}
+          MAC_TEAM_ID: ${{ vars.MAC_TEAM_ID }}
+        run: bash scripts/apple_ci_keychain.sh create distribution
+
+      - name: Profiles and the Firebase config
+        env:
+          PROFILE_APP: ${{ secrets.IOS_PROFILE_APP_BASE64 }}
+          PROFILE_NSE: ${{ secrets.IOS_PROFILE_NOTIFICATION_SERVICE_BASE64 }}
+          PROFILE_BROADCAST: ${{ secrets.IOS_PROFILE_BROADCAST_EXTENSION_BASE64 }}
+          PLIST_BASE64: ${{ secrets.GOOGLE_SERVICE_INFO_PLIST_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          d="$RUNNER_TEMP/ios-signing"
+          mkdir "$d"
+          for pair in "app:$PROFILE_APP" "NotificationService:$PROFILE_NSE" "BroadcastExtension:$PROFILE_BROADCAST" "GoogleService-Info.plist:$PLIST_BASE64"; do
+            name="${pair%%:*}"; value="${pair#*:}"
+            [ -n "$value" ] || { echo "::error::the secret for $name is empty"; exit 1; }
+            case "$name" in *.plist) out="$d/$name" ;; *) out="$d/$name.mobileprovision" ;; esac
+            printf '%s' "$value" | base64 --decode > "$out"
+          done
+
+      - name: Sign the app and its extensions
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD: ${{ needs.prepare.outputs.build }}
+          MAC_TEAM_ID: ${{ vars.MAC_TEAM_ID }}
+          IOS_SIGN_KEYCHAIN: ${{ runner.temp }}/hollow-signing.keychain-db
+          IOS_PROFILE_DIR: ${{ runner.temp }}/ios-signing
+          FIREBASE_PLIST: ${{ runner.temp }}/ios-signing/GoogleService-Info.plist
+        run: bash scripts/build_ios_release.sh export "$VERSION" "$BUILD"
+
+      - name: Remove the keychain, the profiles and the Firebase config
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/ios-signing"
+          bash scripts/apple_ci_keychain.sh delete
+
+      - name: Upload to TestFlight
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD: ${{ needs.prepare.outputs.build }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_UPLOAD_KEY_P8_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_UPLOAD_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_UPLOAD_ISSUER_ID }}
+          ASC_APP_APPLE_ID: ${{ vars.ASC_APP_APPLE_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ASC_KEY_PATH="$RUNNER_TEMP/AuthKey_upload.p8"
+          trap 'rm -f "$ASC_KEY_PATH"' EXIT
+          [ -n "$ASC_KEY_P8_BASE64" ] || { echo "::error::secret ASC_UPLOAD_KEY_P8_BASE64 is empty"; exit 1; }
+          printf '%s' "$ASC_KEY_P8_BASE64" | base64 --decode > "$ASC_KEY_PATH"
+          unset ASC_KEY_P8_BASE64
+          export ASC_KEY_PATH
+          bash scripts/build_ios_release.sh upload "$VERSION" "$BUILD"

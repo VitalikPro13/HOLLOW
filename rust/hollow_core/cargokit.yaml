@@ -18,5 +18,6 @@ cargo:
     extra_flags: ["--features", "forwarder"]
   profile:
     extra_flags: ["--features", "forwarder"]
+  # --locked: a release compiles exactly Cargo.lock, never a re-resolved tree.
   release:
-    extra_flags: ["--features", "forwarder"]
+    extra_flags: ["--features", "forwarder", "--locked"]

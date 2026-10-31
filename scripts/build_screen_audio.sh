@@ -48,7 +48,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
         cp "$EXE" "$APP_RES/screen_audio_capturer"
         chmod +x "$APP_RES/screen_audio_capturer"
         echo "  -> $APP_RES/screen_audio_capturer"
-        echo "NOTE: re-run scripts/macos_resign_and_dmg.sh so the binary is signed."
+        echo "NOTE: scripts/build_macos_release.sh signs it; an ad-hoc copy only runs locally."
     else
         echo "No Release Hollow.app yet — the Xcode 'Bundle screen audio capturer'"
         echo "run-script phase will copy it on the next 'flutter build macos'."

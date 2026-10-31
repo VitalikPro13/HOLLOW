@@ -1,6 +1,8 @@
 // "Hollow Dev": a debug variant that installs beside the TestFlight app with
 // its own bundle ids, App Group, keychain group and data (`--flavor dev`).
 // Set on the project-level Debug-dev/Release-dev/Profile-dev.
+// FLUTTER_BUILD_NAME/NUMBER for the two extensions, whose versions follow the app.
+#include? "Generated.xcconfig"
 HOLLOW_BUNDLE_ID = com.anonlisten.hollow.dev
 HOLLOW_APP_GROUP = group.$(HOLLOW_BUNDLE_ID)
 HOLLOW_DISPLAY_NAME = Hollow Dev

@@ -18,6 +18,19 @@ class _Toolchain {
   final List<String> targets;
 }
 
+/// The non-custom toolchains in `rustup toolchain list` output: the channels and
+/// exact `X.Y.Z` versions (HOLLOW_RUST_TOOLCHAIN), so a pinned toolchain that is
+/// already installed is never installed again.
+List<String> toolchainNames(String listOutput) {
+  final nonCustom = RegExp(r'^(?:stable|beta|nightly|[0-9]+\.[0-9]+\.[0-9]+-)');
+  return listOutput
+      .split('\n')
+      .where((e) => e.startsWith(nonCustom))
+      // drops " (active, default)" after the name
+      .map((line) => line.split(' ')[0])
+      .toList(growable: true);
+}
+
 class Rustup {
   List<String>? installedTargets(String toolchain) {
     final targets = _installedTargets(toolchain);
@@ -56,23 +69,8 @@ class Rustup {
       ?.targets;
 
   static List<_Toolchain> _getInstalledToolchains() {
-    String extractToolchainName(String line) {
-      // ignore (default) after toolchain name
-      final parts = line.split(' ');
-      return parts[0];
-    }
-
     final res = runCommand("rustup", ['toolchain', 'list']);
-
-    // To list all non-custom toolchains, we need to filter out lines that
-    // don't start with "stable", "beta", or "nightly".
-    Pattern nonCustom = RegExp(r"^(stable|beta|nightly)");
-    final lines = res.stdout
-        .toString()
-        .split('\n')
-        .where((e) => e.isNotEmpty && e.startsWith(nonCustom))
-        .map(extractToolchainName)
-        .toList(growable: true);
+    final lines = toolchainNames(res.stdout.toString());
 
     return lines
         .map(

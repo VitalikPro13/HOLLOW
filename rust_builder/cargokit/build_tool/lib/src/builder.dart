@@ -1,6 +1,8 @@
 /// This is copied from Cargokit (which is the official way to use it currently)
 /// Details: https://fzyzcjy.github.io/flutter_rust_bridge/manual/integrate/builtin
 
+import 'dart:io';
+
 import 'package:collection/collection.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as path;
@@ -133,7 +135,19 @@ class RustBuilder {
   CargoBuildOptions? get _buildOptions =>
       environment.crateOptions.cargo[environment.configuration];
 
-  String get _toolchain => _buildOptions?.toolchain.name ?? 'stable';
+  /// HOLLOW_RUST_TOOLCHAIN (an exact `X.Y.Z`) replaces the cargokit.yaml channel,
+  /// so a release build compiles with the pinned compiler, not today's stable.
+  String get _toolchain {
+    final pinned = Platform.environment['HOLLOW_RUST_TOOLCHAIN'];
+    if (pinned != null && pinned.isNotEmpty) {
+      if (!RegExp(r'^[0-9]+\.[0-9]+\.[0-9]+$').hasMatch(pinned)) {
+        throw BuildException(
+            'HOLLOW_RUST_TOOLCHAIN must be an exact X.Y.Z version, got "$pinned"');
+      }
+      return pinned;
+    }
+    return _buildOptions?.toolchain.name ?? 'stable';
+  }
 
   String get toolchain => _toolchain;
 

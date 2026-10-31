@@ -50,6 +50,10 @@ flutter_ios_podfile_setup
 target 'Runner' do
   use_frameworks!
 
+  # The trunk specs fetch these binaries with no checksum (mdk from a moving
+  # nightly URL), so both come from tagged releases pinned by sha256.
+  pod 'mdk', :podspec => '../third_party/apple_pods/mdk.podspec.json'
+  pod 'WebRTC-SDK', :podspec => '../third_party/apple_pods/WebRTC-SDK.podspec.json'
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
   target 'RunnerTests' do
     inherit! :search_paths
