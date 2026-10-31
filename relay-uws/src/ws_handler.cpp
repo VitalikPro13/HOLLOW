@@ -3789,13 +3789,16 @@ static void measure_binary(PerSocketData* d, std::string_view raw) {
 // Records a closing socket after the close's own work was charged to it.
 struct MeasureClose {
     PerSocketData* d;
-    ~MeasureClose() {
+    ~MeasureClose() noexcept {
         if (!d->meter) return;
         d->meter->fetch = d->is_fetch;
         d->meter->guest = d->is_guest;
         d->meter->session = !d->sid.empty();
         d->meter->authed = d->authenticated;
-        measure::bury(std::move(d->meter));
+        try {
+            measure::bury(std::move(d->meter));
+        } catch (...) {
+        }
     }
 };
 

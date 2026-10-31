@@ -243,6 +243,7 @@ run_variant() {
     else
         echo "FAIL test_relay_live/$name (client $rc, relay $relay_rc)"
     fi
+    grep -E '^ *FAIL' "$dir/client_$name.log" | head -20
     grep -v '  ok' "$dir/client_$name.log" | head -30
     grep -E -A12 "AddressSanitizer|LeakSanitizer|runtime error:" "$log" | head -40
     fail=1

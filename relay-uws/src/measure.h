@@ -174,21 +174,25 @@ public:
         for (int c = WRITES; c < N; c++) g0_[c] = g[c];
         t0_ = Clock::now();
     }
-    ~Scope() {
+    // Measurement never ends the relay: an allocation failure here drops the sample.
+    ~Scope() noexcept {
         depth--;
         if (!outer_) return;
-        if (!m_) {
+        try {
+            if (!m_) {
+                settle_graveyard();
+                return;
+            }
+            const auto now = Clock::now();
+            g[CPU_US] += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - t0_).count());
+            for (int c = WRITES; c < N; c++) {
+                const uint64_t d = g[c] - g0_[c];
+                m_->add(c, d, now);
+                book.attributed[c] += d;
+            }
             settle_graveyard();
-            return;
+        } catch (...) {
         }
-        const auto now = Clock::now();
-        g[CPU_US] += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - t0_).count());
-        for (int c = WRITES; c < N; c++) {
-            const uint64_t d = g[c] - g0_[c];
-            m_->add(c, d, now);
-            book.attributed[c] += d;
-        }
-        settle_graveyard();
     }
     Scope(const Scope&) = delete;
     Scope& operator=(const Scope&) = delete;
