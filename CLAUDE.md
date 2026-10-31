@@ -16,7 +16,7 @@ Distributed, encrypted Discord alternative: no central servers, members host it.
 - `lib/`: `main.dart` entry; `src/core/` models+providers+services, `src/theme/`, `src/ui/`.
 - `rust/hollow_core/src/`: `api/` FFI (frb scans these); `node/` swarm.rs + focused modules (test_harness cfg(test)); `crypto/` Olm+MLS (store.rs = CryptoStore); `identity/`; `storage/` SQLCipher.
 - `reports/`: `planned/`|`shipped/`|`reference/` per area; index `reports/README.md`.
-- `relay-uws/` production relay (native TLS). `packages/flutter_webrtc/` FORK 1.5.2, libwebrtc m144 = OUR patched build, `screen_audio_capturer.exe` = SEPARATE target. `legal/` policy+terms.
+- `relay-uws/` production relay (native TLS). `packages/flutter_webrtc/` FORK 1.5.2, libwebrtc m144 = OUR patched build (Win/Linux; Apple = stock WebRTC-SDK pod), `screen_audio_capturer.exe` = SEPARATE target. `legal/` policy+terms.
 
 ## Build & Run Commands
 ```bash

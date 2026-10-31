@@ -185,7 +185,7 @@ section after the Windows fleet); these rules hold for every command that runs O
    running (`ssh pc "Get-Process cargo-nextest"`), wait for it.
 4. Report the summary line and every failure verbatim. Over ssh the 7 real-keystore tests
    (`keychain_tests::*`, `wipe::tests::a_wipe_*` / `erasing_another_profile_*`,
-   `platform_keystore::tests::the_real_keystore_*`) fail with `CredWriteW failed`: Credential
+   `platform_keystore::tests::the_real_keystore_*`, and `platform_keystore::tests::dpapi_round_trip` when DPAPI lacks the interactive profile) fail with `CredWriteW failed`: Credential
    Manager needs an interactive logon. List them separately as environmental. The lead deletes
    `D:\dev\wt\<name>\rust\hollow_core\target` when the track merges. A run whose Summary is far
    above normal (about 600 s) and whose short tests show about +30 s durations was STALLED (machine

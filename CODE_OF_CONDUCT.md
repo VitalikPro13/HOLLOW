@@ -2,7 +2,7 @@
 
 ## Our commitment
 
-Hollow exists to give people private, censorship-resistant communication. We extend the same respect to everyone who contributes to the project, regardless of background, experience level, or identity.
+Hollow exists so people can talk privately. Everyone who contributes gets the same respect, whatever their background, experience or identity.
 
 ## Standards
 
@@ -22,7 +22,7 @@ Hollow exists to give people private, censorship-resistant communication. We ext
 
 ## Enforcement
 
-Instances of unacceptable behavior can be reported to **privacy@anonlisten.com**. All reports will be reviewed and handled confidentially.
+Report unacceptable behavior to **privacy@anonlisten.com**. We read every report and keep it confidential.
 
 Project maintainers may remove, edit, or reject comments, commits, issues, and pull requests that violate this code of conduct. Repeat or serious violations may result in a temporary or permanent ban from the project.
 

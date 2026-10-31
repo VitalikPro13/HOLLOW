@@ -476,6 +476,8 @@ done
 # after loading it (nothing in the environment can reach them).
 feed_test_point_at() {
     feed_lib_load
+    # The baked floors rise every release; test/release_feed checks them.
+    _HF_MIN_ISSUED=1 _HF_MIN_VERSION=0.0.0 _HF_MIN_BUILD=0
     FEED_T_BASE="file://$1" FEED_T_KEY=$2
     _hf_release_keys() { printf '%s\n' "$FEED_T_KEY"; }
     _hf_base() { printf '%s' "$FEED_T_BASE"; }

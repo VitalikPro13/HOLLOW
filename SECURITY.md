@@ -1,35 +1,40 @@
 # Security Policy
 
-Hollow is an end-to-end encrypted communication platform. Security vulnerabilities directly impact user privacy. We take every report seriously.
+Hollow is an end-to-end encrypted messenger, so a security bug can expose exactly what people chose to keep private. Please report one privately.
 
 ## Reporting a vulnerability
 
-**Do not open a public GitHub issue for security vulnerabilities.**
+**Don't open a public GitHub issue for a security vulnerability.**
 
-Instead, email **privacy@anonlisten.com** with:
+Report it in one of two ways:
 
-- A description of the vulnerability
-- Steps to reproduce it (if applicable)
-- The potential impact
-- Any suggested fix (optional, but appreciated)
+- Through GitHub: the repository's **Security** tab, then **Report a vulnerability**. This opens a private advisory only the maintainers can see.
+- By email to **privacy@anonlisten.com**.
 
-You will receive an acknowledgment within 48 hours. We will work with you to understand the issue, develop a fix, and coordinate disclosure.
+Include:
+
+- what the vulnerability is
+- how to reproduce it, if you can
+- what an attacker could do with it
+- a suggested fix, if you have one (optional, but welcome)
+
+You'll get an acknowledgment within 48 hours. We'll work with you to understand the issue, fix it and agree on when to disclose it.
 
 ## Scope
 
-The following are in scope:
+In scope:
 
-- **Cryptographic issues** -- weaknesses in Olm, MLS, SFrame, or key exchange implementations
-- **Authentication/identity** -- Ed25519 signature bypass, key derivation flaws
-- **Relay security** -- unauthorized access, message interception, or relay compromise
-- **Data leakage** -- unencrypted data leaving the client, metadata exposure
-- **Local storage** -- SQLCipher bypass, plaintext key storage, insecure file handling
+- Weaknesses in the Olm, MLS or SFrame implementations, or in key exchange
+- Ways around Ed25519 signature checks, and flaws in key derivation
+- Unauthorized access to a relay, message interception, or relay compromise
+- Unencrypted data leaving the client, and metadata exposure
+- Ways around SQLCipher, keys stored in plain text, and unsafe file handling
 
 Out of scope:
 
 - Denial of service against self-hosted relays (that's the operator's responsibility)
-- Social engineering attacks
-- Issues in upstream dependencies with no Hollow-specific impact (report those upstream)
+- Social engineering
+- Bugs in upstream dependencies that don't affect Hollow specifically (please report those upstream)
 
 ## Supported versions
 
@@ -40,10 +45,8 @@ Out of scope:
 
 ## Disclosure
 
-We follow coordinated disclosure. Once a fix is ready, we will:
+We follow coordinated disclosure. Once a fix is ready, we:
 
 1. Release a patched version
-2. Credit the reporter (unless they prefer to remain anonymous)
-3. Publish a brief advisory describing the issue and the fix
-
-Thank you for helping keep Hollow and its users safe.
+2. Credit the reporter (unless they'd rather stay anonymous)
+3. Publish a short advisory describing the issue and the fix

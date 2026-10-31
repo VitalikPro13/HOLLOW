@@ -270,15 +270,17 @@ findings of the 0.13 wave. No number has two findings, and no finding was delete
 
 ### 3.11 Disclosure and the external audit
 
-Findings, fixes and the threat model stay on local branches until the release that fixes
+Findings, fixes and the threat model stayed on local branches until the release that fixed
 them; a pre-push hook kept the security branch off GitHub until each release. Hollow's
 first external report (July 2026, three rounds, credited to Folf) produced six GitHub
 security advisories; four are published (GHSA-39pq-74wg-66gv, GHSA-pw74-83g2-x56q,
 GHSA-rp8v-8rcw-gj6x, GHSA-3jhj-9w4q-rqjw) and two await CVE numbers. The eight Critical
-findings of this review are covered by seven private draft advisories (HOL-SEC-001 and 006
-share one), which also await CVE numbers and publish after 0.13 ships. The upstream report
-for the `image-webp` panic behind HOL-SEC-173 is held until 0.13 ships. An external audit
-with the support of OSTIF is planned, with this folder as the readiness pack.
+findings of this review are covered by seven draft advisories (HOL-SEC-001 and 006 share
+one). 0.13.0 shipped the fixes on 2026-10-30; the advisories publish once their CVE numbers
+are assigned. The `image-webp` panic behind HOL-SEC-173 was
+reported upstream independently (image-rs/image-webp#182) and a fix waits in an open pull
+request; Hollow keeps decoding inside its panic guard until a fixed release ships. An external audit with the support of OSTIF is planned, with
+this folder as the readiness pack.
 
 ## 4. Findings table
 

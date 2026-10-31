@@ -1,12 +1,12 @@
 # Contributing to Hollow
 
-Thanks for your interest in contributing. Hollow is built to give people private, distributed communication they can trust and verify. Every contribution helps make that real.
+Thanks for wanting to help. Hollow is meant to give people private, distributed communication they can trust and check for themselves.
 
 ## Before you start
 
-- **Open an issue first.** If you want to add a feature or make a significant change, create an issue to discuss it before writing code. This avoids wasted effort on something that might not align with the project's direction.
+- **Open an issue first.** If you want to add a feature or make a bigger change, open an issue to talk it through before you write code, so you don't spend time on something that doesn't fit where the project is going.
 - **Bug fixes and small improvements** can go straight to a pull request.
-- **Read the [Whitepaper](WHITEPAPER.md)** if you're touching cryptography, networking, or sync logic. It documents the protocol-level design decisions.
+- **Read the [Whitepaper](WHITEPAPER.md)** if you're touching cryptography, networking, or sync logic. It explains the protocol design and why it is the way it is.
 
 ## Setting up the project
 
@@ -55,6 +55,7 @@ Rust handles everything security-critical. Dart handles the user interface. They
 - Use `ConsumerWidget` or `ConsumerStatefulWidget` to access Riverpod state. Never pass `WidgetRef` as a constructor parameter.
 - Use the Hollow design system components (`HollowButton`, `HollowTextField`, `HollowDialog`, etc.) instead of raw Material widgets.
 - Use `AnimatedOpacity` for opacity animations, never the `Opacity` widget.
+- Text people see in the app uses sentence case for settings labels and never contains an em dash. The full design rules are in [HOLLOW_DESIGN_LANGUAGE.md](reports/reference/HOLLOW_DESIGN_LANGUAGE.md).
 
 ### General
 
@@ -65,7 +66,7 @@ Rust handles everything security-critical. Dart handles the user interface. They
 ## Submitting a pull request
 
 1. Fork the repository and create a branch from `main`.
-2. Make your changes. Keep the diff focused -- one concern per PR.
+2. Make your changes. Keep the diff focused, one concern per PR.
 3. Run `cargo test --lib` and `cargo clippy` for Rust changes.
 4. Run `flutter analyze` for Dart changes.
 5. Write a clear PR description: what changed, why, and how you tested it.
