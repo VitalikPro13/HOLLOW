@@ -1678,10 +1678,16 @@ const SNAPSHOT_STEP_PAUSE: std::time::Duration = std::time::Duration::from_milli
 const SNAPSHOT_RESTARTS: u32 = 20;
 const SNAPSHOT_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The copies whose snapshot has started reading.
 #[cfg(test)]
-static SNAPSHOT_READING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SNAPSHOT_READING: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
+// Per thread, so tests that run side by side never see each other's settings.
 #[cfg(test)]
-static SNAPSHOT_HOLD_LIMIT_OVERRIDE: Mutex<Option<std::time::Duration>> = Mutex::new(None);
+thread_local! {
+    static SNAPSHOT_HOLD_LIMIT_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> = const { std::cell::Cell::new(None) };
+    /// Runs between two steps of a stepped snapshot, where a writer could commit.
+    static SNAPSHOT_BETWEEN_STEPS: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
 
 /// Copies the committed state of `from` into a new database at `to` under the same key,
 /// with SQLite's online backup. A file copy after a checkpoint misses the rows a
@@ -1703,12 +1709,12 @@ fn backup_database(from: &std::path::Path, to: &std::path::Path, passphrase: &st
     #[cfg(not(test))]
     let hold_limit = SNAPSHOT_HOLD_LIMIT;
     #[cfg(test)]
-    let hold_limit = SNAPSHOT_HOLD_LIMIT_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or(SNAPSHOT_HOLD_LIMIT);
+    let hold_limit = SNAPSHOT_HOLD_LIMIT_OVERRIDE.get().unwrap_or(SNAPSHOT_HOLD_LIMIT);
     let mut target = rusqlite::Connection::open(to).map_err(failed)?;
     target.execute_batch(&key).map_err(failed)?;
     let backup = Backup::new(&source, &mut target).map_err(failed)?;
     #[cfg(test)]
-    SNAPSHOT_READING.store(true, std::sync::atomic::Ordering::Release);
+    SNAPSHOT_READING.lock().unwrap_or_else(|e| e.into_inner()).push(to.to_path_buf());
     let mut busy_until = None;
     let (mut remaining, mut restarts) = (i32::MAX, 0);
     let (mut steps, mut reading) = (0u32, std::time::Duration::ZERO);
@@ -1733,6 +1739,8 @@ fn backup_database(from: &std::path::Path, to: &std::path::Path, passphrase: &st
                     }
                     pages = -1;
                 }
+                #[cfg(test)]
+                SNAPSHOT_BETWEEN_STEPS.with_borrow_mut(|between| between.as_mut().map(|f| f()));
                 std::thread::sleep(pause);
             }
             _ => {
@@ -4818,12 +4826,11 @@ mod landing_tests {
             .unwrap();
         drop(filler);
 
-        SNAPSHOT_READING.store(false, std::sync::atomic::Ordering::Release);
         let snapshot = {
             let (db, copy, pass) = (db.clone(), copy.clone(), pass.clone());
             std::thread::spawn(move || backup_database(&db, &copy, &pass))
         };
-        while !SNAPSHOT_READING.load(std::sync::atomic::Ordering::Acquire) {
+        while !SNAPSHOT_READING.lock().unwrap().contains(&copy) {
             std::thread::yield_now();
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -4838,9 +4845,9 @@ mod landing_tests {
         assert_eq!(rows, ROWS + 1, "the snapshot misses the row committed while it ran");
     }
 
-    /// A snapshot of a rollback-journal database that a writer changes every 2 ms,
-    /// taken with `hold_limit` as the longest one read may hold writers off; returns
-    /// the result and the rows the copy holds.
+    /// A snapshot of a rollback-journal database that a writer changes every 2 ms and
+    /// between every two steps, taken with `hold_limit` as the longest one read may hold
+    /// writers off; returns the result and the rows the copy holds.
     fn snapshot_under_churn(hold_limit: std::time::Duration) -> (Result<(), String>, Option<i64>) {
         let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("busy.db");
@@ -4870,9 +4877,15 @@ mod landing_tests {
                 }
             })
         };
-        *SNAPSHOT_HOLD_LIMIT_OVERRIDE.lock().unwrap() = Some(hold_limit);
+        // A thread on a loaded machine can miss every gap between steps; this one cannot.
+        let between = open(&db);
+        SNAPSHOT_BETWEEN_STEPS.set(Some(Box::new(move || {
+            between.execute("INSERT INTO t VALUES (x'02')", []).expect("a writer failed between snapshot steps");
+        })));
+        SNAPSHOT_HOLD_LIMIT_OVERRIDE.set(Some(hold_limit));
         let copied = backup_database(&db, &copy, &pass);
-        *SNAPSHOT_HOLD_LIMIT_OVERRIDE.lock().unwrap() = None;
+        SNAPSHOT_HOLD_LIMIT_OVERRIDE.set(None);
+        SNAPSHOT_BETWEEN_STEPS.set(None);
         stop.store(true, std::sync::atomic::Ordering::Release);
         writer.join().expect("the writer");
         let rows = copied.is_ok().then(|| open(&copy).query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap());

@@ -9,7 +9,7 @@
 # Every shipped file is checked against its git hash on the mini.
 #
 #   bash scripts/mini_sync.sh <name> [worktree]    first run ships everything, later runs the changes
-#   MINI_HOST=jabun@192.168.18.36 bash scripts/mini_sync.sh <name>
+#   MINI_HOST=jabun@192.168.18.39 bash scripts/mini_sync.sh <name>    (else FLEET_MINI_SSH, else a scan)
 #
 # Run the fleet from that folder with your own peer letters, never another agent's:
 #   ssh <mini> 'cd ~/wt/<name> && FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Build -Peers c,d'
@@ -22,9 +22,9 @@ dest="wt/$name"
 ssh_opts=(-o HostKeyAlias=192.168.18.39 -o ConnectTimeout=4 -o BatchMode=yes)
 
 # The mini's DHCP lease moves (Tailscale first); its host key does not.
-host=${MINI_HOST:-}
+host=${MINI_HOST:-${FLEET_MINI_SSH:-}}
 if [ -z "$host" ]; then
-    for addr in 100.80.56.79 192.168.18.8 192.168.18.36 192.168.18.2 192.168.18.37 192.168.18.38; do
+    for addr in 100.80.56.79 192.168.18.39 192.168.18.8 192.168.18.36 192.168.18.2; do
         if ssh "${ssh_opts[@]}" "jabun@$addr" true 2> /dev/null; then
             host="jabun@$addr"
             break
@@ -48,8 +48,11 @@ base=$(mini "cat ~/$dest/.mini_sync_tree 2> /dev/null || true")
 if [ -n "$base" ] && git cat-file -e "$base^{tree}" 2> /dev/null; then
     [ "$base" = "$tree" ] && { echo "$name: up to date on $host"; exit 0; }
     git diff --no-renames --name-status "$base" "$tree" > "$idx.list"
-    mapfile -t changed < <(awk -F'\t' '$1 != "D" {print $2}' "$idx.list")
-    mapfile -t gone < <(awk -F'\t' '$1 == "D" {print $2}' "$idx.list")
+    # No mapfile: the Mac's /bin/bash is 3.2.
+    changed=() gone=()
+    while IFS=$'\t' read -r status path; do
+        if [ "$status" = D ]; then gone+=("$path"); else changed+=("$path"); fi
+    done < "$idx.list"
     # A long path list would pass Windows' command-line limit: ship the whole tree then.
     if [ ${#changed[@]} -gt 400 ]; then
         export_git archive "$tree" | mini "tar -xf - -C ~/$dest"
@@ -67,7 +70,8 @@ else
     mini "cd ~/src/HOLLOW && for f in ios/GoogleService-Info.plist ios/Flutter/LocalSigning.xcconfig \
         macos/Flutter/LocalSigning.xcconfig android/app/google-services.json; do \
         [ -e \"\$f\" ] && cp \"\$f\" ~/$dest/\"\$f\"; done; true"
-    mapfile -t changed < <(git ls-tree -r --name-only "$tree")
+    changed=()
+    while IFS= read -r path; do changed+=("$path"); done < <(git ls-tree -r --name-only "$tree")
 fi
 
 # Every shipped regular file must hash on the mini to what git holds (symlinks and the

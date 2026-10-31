@@ -1698,6 +1698,9 @@ pub(crate) struct DebugSnapshotReply {
     pub resync_asks: std::collections::HashMap<String, String>,
     /// Device -> whether its sync frames show it reads digests (`op_sync`).
     pub digest_caps: std::collections::HashMap<String, bool>,
+    /// Every (device, master) link in this node's own store, read over its pooled
+    /// connection so a poll never opens a second one.
+    pub device_links: Vec<(String, String)>,
 }
 
 // -- Wire protocol types (v2: encrypted) --

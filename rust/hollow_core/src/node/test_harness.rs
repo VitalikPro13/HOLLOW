@@ -3672,11 +3672,14 @@ async fn restart_node_with(
         "{device_id} must be off the relay before its DB is reopened",
     );
     let (db_path, tmp) = node.into_storage();
-    // The old loop is aborted, so its store actors are closing. Give the
-    // SQLCipher handles a moment to go: there is no signal to poll for "a task
-    // that was aborted has finished dropping its locals", and reopening the
-    // file under the old writer costs a 4s busy_timeout on every query.
-    sleep_ms(300).await;
+    // A process exit closes every handle at once; an aborted loop's store actors and
+    // tasks let go on their own time. Staging under one fails: Windows keeps an open
+    // database from being unlinked, and a reopen waits out the old writer's busy_timeout.
+    assert!(
+        wait_until(30, async || crate::storage::messages::open_connections::count(&db_path) == 0).await,
+        "{device_id}'s stopped node still holds {} connection(s) to its database",
+        crate::storage::messages::open_connections::count(&db_path),
+    );
     stage(&db_path, &passphrase);
     spawn_node_on_db(relay, master_tag, device_tag, &db_path, tmp).await
 }
@@ -3806,9 +3809,9 @@ async fn expect_dm_pair_ready(relay: &MockRelay, a: &TestNode, b: &TestNode, sec
     );
 }
 
-/// Two devices of ONE master are ready to sync once their Olm session is confirmed
-/// and both sit in the master's inbox room, which is the room sibling traffic rides
-/// when the master has no friends and so no DM room.
+/// Two devices of ONE master are ready to sync once their Olm session is confirmed,
+/// both sit in the master's inbox room (the room sibling traffic rides when the master
+/// has no friends and so no DM room), and each holds a roster counting both.
 async fn expect_siblings_ready(relay: &MockRelay, a: &TestNode, b: &TestNode, secs: u64) {
     expect_olm_confirmed(a, b, secs).await;
     let room = format!("inbox:{}", a.master_id);
@@ -3826,6 +3829,9 @@ async fn expect_siblings_ready(relay: &MockRelay, a: &TestNode, b: &TestNode, se
         secs,
         relay.room_devices(&room),
     );
+    // The harness shares one resolver: a third node folding a roster that leaves either
+    // device out would unlink it for every node, the identity's own included.
+    expect_siblings_counted(&[a, b], &a.master_id, &[&a.device_id, &b.device_id], secs).await;
 }
 
 /// Wait until `holder`'s MLS group for `group_id` carries `leaf`'s device, and
@@ -4724,6 +4730,8 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
     sleep_ms(1200).await;
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
+    // One resolver serves every node: M's devices count each other before anyone meets them.
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
 
     // Both siblings hold the roster {B, C}, as a roster exchange would leave it, so
     // B's removal of C is a removal by a member.
@@ -5014,6 +5022,8 @@ async fn dm_buffers_for_offline_real_sibling_device() {
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
     sleep_ms(1200).await;
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
+    // One resolver serves every node: M's devices count each other before anyone meets them.
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
 
     // Let Olm sessions confirm all around (A↔B, A↔C). A must hold a session with C
     // for C to qualify as an offline-REAL target (the has_session ghost filter).
@@ -10435,6 +10445,8 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
     sleep_ms(1500).await;
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
+    // One resolver serves every node: M's devices count each other before anyone meets them.
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
     sleep_ms(5000).await; // let Olm confirm all around (A↔B, A↔C, B↔C)
     drain_events(&mut a);
     drain_events(&mut b);
@@ -10713,6 +10725,8 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&v_master]).await;
     sleep_ms(1500).await;
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&v_master]).await;
+    // One resolver serves every node: M's devices count each other before anyone meets them.
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
     sleep_ms(1500).await;
     let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&m_master]).await;
     sleep_ms(5000).await; // let Olm confirm all around
@@ -15038,6 +15052,8 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&o_master]).await;
     sleep_ms(1500).await;
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    // One resolver serves every node: M's devices count each other before anyone meets them.
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
     sleep_ms(3000).await; // O<->B rooms + B<->C roster exchange + Olm settle
     drain_events(&mut o);
     drain_events(&mut b);
@@ -19480,6 +19496,8 @@ async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
     sleep_ms(1200).await;
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
+    // One resolver serves every node: M's devices count each other before anyone meets them.
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
     sleep_ms(5000).await;
     drain_events(&mut a);
     drain_events(&mut b);
@@ -27330,7 +27348,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // channel ask's recently-synced window). No sleep was added (+76.5 s on its base).
     // 2026-10-23 merge of g13w3-readd onto f-authority, g2 and rmlive: the same recount
     // finds 8.0 s of underscored literals in g2's tests (+84.5 s, total 1026.39 s, slack 1.0 s).
-    const BUDGET_MS: u64 = 1_027_400;
+    // 2026-10-31: b14-flakes' known-bug test added one spawn stagger between sibling devices
+    // and one absence once a leave lands, the sibling's announce-driven join never bringing
+    // the server back (6.5 s, total 1032.6 s, slack 1.3 s).
+    const BUDGET_MS: u64 = 1_033_900;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -33080,11 +33101,14 @@ async fn authz_a_guest_shows_an_author_only_by_its_own_card() {
         has_more: false,
         sender_cards: [(o.master_id.clone(), super::types::SenderCard { card: forged, avatar_b64: String::new() })].into(),
     };
-    relay.release_direct(&m.device_id, &g.device_id);
+    // M's own answer to the guest's request stays swallowed: under load it leaves after
+    // this point and would carry O's real card. Only the forged page is empty.
     send_as(&relay, &server_id, &m, &g, answer).await;
     let mut shown: Option<Vec<(String, Option<String>)>> = None;
     wait_event(&mut g, std::time::Duration::from_secs(10), |ev| {
-        if let NetworkEvent::PublicChannelSyncReceived { sender_profiles, .. } = ev {
+        if let NetworkEvent::PublicChannelSyncReceived { sender_profiles, messages, .. } = ev
+            && messages.is_empty()
+        {
             shown = Some(sender_profiles.iter().map(|p| (p.peer_id.clone(), p.name.clone())).collect());
         }
         shown.is_some()
@@ -45668,7 +45692,17 @@ fn md_break_and_repair(db_path: &str, passphrase: &str, master: &NativeKeypair, 
     let root = std::path::Path::new(db_path).parent().expect("root").to_path_buf();
     std::fs::write(root.join("identity.key"), master.to_protobuf_encoding().unwrap()).unwrap();
     for name in ["messages.db", "messages.db-wal", "messages.db-shm"] {
-        let _ = std::fs::remove_file(root.join(name));
+        // Windows refuses to unlink a file another handle (a scanner, say) holds for a moment;
+        // a database left in place would open under the stranger's key below.
+        let path = root.join(name);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{name} was never removed: {e}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
     let stranger = passphrase_for(&NativeKeypair::from_secret_bytes(&seed_bytes(0xEE)));
     crate::storage::MessageStore::open(db_path, &stranger).unwrap().save_setting("who", "a stranger").unwrap();
@@ -53389,6 +53423,10 @@ async fn g13_hidden_sibling_drops_server_after_leave() {
         );
     }
     expect_olm_confirmed(&b, &c, 20).await;
+    // A device's ServerJoined can come before the owner admits its ask; an ask the owner
+    // still holds when B leaves would admit M again afterwards.
+    expect_mls_leaf(&o, &sid, &b_dev, 20).await;
+    expect_mls_leaf(&o, &sid, &c_dev, 20).await;
     relay.set_background(&c, true);
     b.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
     assert!(
@@ -53652,7 +53690,14 @@ async fn g13_mesh_op_of_a_013_author_is_handed_on_to_nobody() {
         .await,
         "every member holds a leaf",
     );
-    g1_probe::start();
+    // M knows the author reads digests only once one of O's sync frames reached it.
+    assert!(
+        wait_until(30, async || {
+            m.debug_snapshot().await.is_some_and(|s| s.digest_caps.get(&o.device_id) == Some(&true))
+        })
+        .await,
+        "M never learned that O reads digests",
+    );
     // Distinct clocks: two ops of one author at one clock are one op.
     let op = |cid: &str, ahead: u64| forge_crdt_op(
         &sid, &o.master_id,
@@ -53678,9 +53723,21 @@ async fn g13_mesh_op_of_a_013_author_is_handed_on_to_nobody() {
     );
     // Absence proof: nothing M would hand on has a signal of its own.
     sleep_ms(1500).await;
-    let senders = g13_crdt_op_senders(&g1_probe::take());
-    g1_probe::stop();
-    assert!(!senders.contains_key(&m.device_id), "M handed on a 0.13 author's op: {senders:?}");
+    // Only these two ops: an op M itself authored while admitting X can still leave late.
+    let mut handed = Vec::new();
+    for device in [&o.device_id, &x.device_id] {
+        for msg in m.carried_to(device).await {
+            if let super::types::HavenMessage::CrdtOpBroadcast { server_id, op_json } = &msg
+                && *server_id == sid
+                && serde_json::from_str::<crate::crdt::operations::CrdtOp>(op_json).is_ok_and(|op| {
+                    matches!(&op.payload, crate::crdt::operations::CrdtPayload::ChannelAdded { channel_id, .. } if channel_id.starts_with("by-"))
+                })
+            {
+                handed.push(device.clone());
+            }
+        }
+    }
+    assert!(handed.is_empty(), "M handed on a 0.13 author's op to {handed:?}");
 }
 
 /// A digest from someone who is not a member is never compared against the log: a stranger
@@ -55378,10 +55435,13 @@ async fn g13w3_a_removed_device_joining_another_identity_stays_refused_for_its_o
 async fn expect_siblings_counted(nodes: &[&TestNode], master: &str, devices: &[&String], secs: u64) {
     assert!(
         wait_until(secs, async || {
-            nodes.iter().all(|n| {
-                let held = n.store().device_links_for(master).unwrap_or_default();
-                devices.iter().all(|d| held.contains(*d))
-            }) && devices.iter().all(|d| super::resolver::is_device_of(d, master))
+            for n in nodes {
+                let held = n.debug_snapshot().await.map(|s| s.device_links).unwrap_or_default();
+                if !devices.iter().all(|d| held.iter().any(|(dev, m)| dev == *d && m == master)) {
+                    return false;
+                }
+            }
+            devices.iter().all(|d| super::resolver::is_device_of(d, master))
         })
         .await,
         "{master}'s devices never counted each other",
@@ -58162,4 +58222,63 @@ async fn a_removal_of_a_friendship_our_accept_stamped_reaches_a_sibling_through_
     carry_as(&a2, &a1, super::types::HavenMessage::FriendListRequest).await;
     let back = wait_until(10, async || is_friend(&a1, &b_master) || is_friend(&a2, &b_master)).await;
     assert!(a2_took && !back, "A2 kept the friendship B ended ({a2_took}) or a list brought B back ({back})");
+}
+
+// b14-lost-leave
+
+/// A device that leaves the moment its join lands, before the owner holds its MLS leaf
+/// or a confirmed Olm session, still leaves for good: the owner closes the identity's
+/// span and the sibling that only heard the join announced drops the server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+#[ignore = "known bug: lost leave + sibling rejoin, 0.14 track"]
+async fn leave_racing_a_sibling_announce_join_stays_left() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 154;
+    const M: u8 = 155;
+    const B: u8 = 156;
+    const C: u8 = 157;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+    let mut o = spawn_node_with_friends(&relay, O, O, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, M, B, &[]).await;
+    sleep_ms(1500).await;
+    let c = spawn_node_with_friends(&relay, M, C, &[]).await;
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
+    expect_olm_confirmed(&b, &c, 20).await;
+    let sid = create_server_and_wait(&mut o, "Racing").await;
+    b.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+        })
+        .await,
+        "B never joined",
+    );
+    b.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    let owner_view = async || {
+        let state = o.live_server_state(&sid).await.expect("the owner holds its server");
+        let saw_leave = state.op_log.iter().any(|op| {
+            op.author == m_master
+                && matches!(&op.payload, crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id } if *peer_id == m_master)
+        });
+        (saw_leave, state.is_member(&m_master))
+    };
+    // Room for every retry and catch-up to carry the leave to the owner.
+    if wait_until(35, async || owner_view().await == (true, false)).await {
+        // Absence proof: the sibling's announce-driven join must not bring the server back.
+        sleep_ms(5_000).await;
+    }
+
+    let (saw_leave, member) = owner_view().await;
+    let c_dropped = g13_dropped(&c, &sid).await;
+    assert!(
+        saw_leave && !member && c_dropped,
+        "the leave did not stick: the owner saw it {saw_leave}, M is still a member {member}, C dropped the server {c_dropped}",
+    );
 }

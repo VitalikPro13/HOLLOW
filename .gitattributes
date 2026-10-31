@@ -7,3 +7,7 @@ flatpak/hollow-flatpak.gpg binary
 # The relay hook scripts run inside Linux containers and on the relay host. A
 # CRLF checkout on Windows makes the shebang line unusable.
 relay-uws/**/*.sh text eol=lf
+
+# Every shell script is piped to or run by a remote bash (the mini, the VM, the relay
+# box); a CRLF checkout on Windows breaks it ("syntax error near do").
+*.sh text eol=lf

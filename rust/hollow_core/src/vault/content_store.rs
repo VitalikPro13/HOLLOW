@@ -101,6 +101,8 @@ fn now_secs() -> i64 {
 pub struct ContentStore {
     conn: Connection,
     base_dir: PathBuf,
+    #[cfg(test)]
+    _counted: crate::storage::messages::open_connections::Counted,
 }
 
 impl ContentStore {
@@ -111,6 +113,8 @@ impl ContentStore {
         // Harness nodes share one data dir; each keeps its own shards, as an install does.
         #[cfg(test)]
         let base_dir: &Path = &base_dir.join(&content_id(db_path.as_bytes())[..16]);
+        #[cfg(test)]
+        let counted = crate::storage::messages::open_connections::Counted::new(db_path);
         let conn =
             Connection::open(db_path).map_err(|e| format!("Failed to open content store: {e}"))?;
 
@@ -194,6 +198,8 @@ impl ContentStore {
         Ok(ContentStore {
             conn,
             base_dir: base_dir.to_path_buf(),
+            #[cfg(test)]
+            _counted: counted,
         })
     }
 

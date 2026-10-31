@@ -53,11 +53,24 @@ class UnreadMarkerNotifier extends Notifier<Map<String, UnreadVisit>> {
 
   @override
   Map<String, UnreadVisit> build() {
-    ref.listen<String?>(selectedPeerProvider, (prev, next) {
-      if (prev != null && prev != next) _leave(dmMarkerKey(prev));
+    // Subscribed on the container, not through ref: split view overrides the
+    // selection providers in a nested scope, and a ref dependency on them
+    // makes Riverpod refuse this one root marker to the right pane.
+    final container = ref.container;
+    final selections = [
+      container.listen<String?>(selectedPeerProvider, (prev, next) {
+        if (prev != null && prev != next) _leave(dmMarkerKey(prev));
+      }),
+      container.listen<String?>(
+          selectedChannelProvider, (_, _) => _syncChannelKey()),
+      container.listen<String?>(
+          selectedServerProvider, (_, _) => _syncChannelKey()),
+    ];
+    ref.onDispose(() {
+      for (final sub in selections) {
+        sub.close();
+      }
     });
-    ref.listen<String?>(selectedChannelProvider, (_, _) => _syncChannelKey());
-    ref.listen<String?>(selectedServerProvider, (_, _) => _syncChannelKey());
     ref.listen<SplitViewState>(splitViewProvider, (prev, next) {
       final prevPeer = prev?.rightPane?.peerId;
       final nextPeer = next.rightPane?.peerId;

@@ -769,6 +769,16 @@ FLEET_BACKEND=android pwsh scripts/fleet_send.ps1 -Command "$(cat /tmp/cmd.json)
   follow; `fleet_link_matrix` roster_push does, and repeats it every 20 s while it waits.
   A system_server dead from `FinalizerWatchdogDaemon ... timed out` / `DeadSystemException`
   is the mini overloaded (load near 50), not the app: boot emulators when load is low.
+- **Checked again 2026-10-31 (track b14-flakes): the emulator DOES get FCM wakes.** API 37
+  `google_apis_playstore` image, debug APK from a worktree: HOME, `kill`, the friend's DM, then
+  `gcm_heartbeat`; the killed app's push fetch stored the DM 4 s after it was sent
+  (`[HOLLOW-FETCH] insert DM ...` in its hollow_debug.log). A worktree needs the gitignored
+  `android/app/google-services.json` (and `ios/GoogleService-Info.plist`,
+  `ios/Flutter/LocalSigning.xcconfig` for the simulator's arm64-only build) copied from
+  `~/src/HOLLOW` before its first build. Never send a probe step to an away peer: Android
+  freezes a HOME'd app about 70 s later and the step waits out 180 s (wait on the other peer).
+  The phone back control is `semantics:Back` on Android as on iOS; at the top of the stack
+  (Chats) there is none, so a soft Back there finds nothing by design.
 - **Hollow's own battery-exemption prompt** (`RequestIgnoreBatteryOptimizations`) sat on top of
   the app after launch and came back in front on every return, wedging the probe until
   `KEYCODE_BACK`. Wave 2 removed the prompt and its permission; `fleet_lifecycle.ps1` still

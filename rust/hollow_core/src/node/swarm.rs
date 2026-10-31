@@ -3670,6 +3670,9 @@ async fn run_event_loop(
                         snap.rate_dropped = frame_budget.limiter.dropped_totals();
                         (snap.resync_marks, snap.resync_asks) = crdt_resync.debug();
                         snap.digest_caps = crdt_resync.op_sync.debug_caps();
+                        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
+                            snap.device_links = store.get_all_device_links().unwrap_or_default();
+                        }
                         let _ = reply.send(snap);
                     }
                 }

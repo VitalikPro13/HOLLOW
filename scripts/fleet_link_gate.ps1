@@ -21,7 +21,7 @@ param(
     [string]$Third = 'win:d',
     [string]$MiniName = '',
     # The driver's own setting (FLEET_MINI_SSH) when set: the LAN address moves.
-    [string]$MiniHost = $(if ($env:FLEET_MINI_SSH) { $env:FLEET_MINI_SSH } else { 'jabun@192.168.18.36' })
+    [string]$MiniHost = $(if ($env:FLEET_MINI_SSH) { $env:FLEET_MINI_SSH } else { 'jabun@100.80.56.79' })
 )
 
 if ($args.Count -gt 0) { throw "unrecognised argument(s): $($args -join ' ')" }

@@ -8,7 +8,7 @@
 #
 # -Build first rebuilds the Windows peers here and, for a phone or Mac peer, ships
 # this worktree to the mini as ~/wt/<MiniName> (`scripts/mini_sync.sh`) and builds it
-# there. The mini's address is -MiniHost, else FLEET_MINI_SSH, else its LAN address.
+# there. The mini's address is -MiniHost, else FLEET_MINI_SSH, else its Tailscale address.
 
 param(
     [string]$Holder = 'win:s',
@@ -20,7 +20,7 @@ param(
     [switch]$Build,
     [string]$Log = '',
     [string]$MiniName = '',
-    [string]$MiniHost = $(if ($env:FLEET_MINI_SSH) { $env:FLEET_MINI_SSH } else { 'jabun@192.168.18.36' })
+    [string]$MiniHost = $(if ($env:FLEET_MINI_SSH) { $env:FLEET_MINI_SSH } else { 'jabun@100.80.56.79' })
 )
 
 if ($args.Count -gt 0) { throw "unrecognised argument(s): $($args -join ' ')" }

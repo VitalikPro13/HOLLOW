@@ -287,6 +287,54 @@ Tests: `mailbox_requires_a_roster_that_counts_the_device`,
   a device, delivered or not: the absence check for "we never told the stranger".
 - The mutation script for these rules is the untracked `tmp_s27_mutate.py` (repo root).
 
+## Flakes closed in track b14-flakes (2026-10-31)
+
+- **A restart waits for the old node's last connection.** `restart_node_with` used to sleep
+  300 ms after aborting the loop; under load its store actors still held `messages.db`, and on
+  Windows `md_break_and_repair`'s `remove_file` (errors ignored) then failed, so the stranger
+  key opened the OLD database: `Failed to set performance PRAGMAs: file is not a database`
+  (`md_recovery_a_sibling_converges_again_once_a_repaired_device_rekeys`). Tests now count
+  open connections per path (`storage::messages::open_connections::count`, cfg(test):
+  `MessageStore`, `ContentStore` and `migrate_auto_vacuum_once`, the only raw opens of
+  `messages.db` under node/) and the restart waits until it reads 0, as a process exit would
+  leave it. A new raw open of a node's database joins the count.
+- **`expect_siblings_ready` also waits for the roster count** (`expect_siblings_counted`):
+  two devices of one master are ready only once each holds a roster counting both, so a third
+  node folding a partial roster cannot unlink one for every node. It reads each node's links
+  from `DebugSnapshotReply.device_links` (the node's own pooled connection), never `store()`
+  inside the poll. Six legacy-roster tests whose
+  devices B and C are spawned apart (`dm_buffers_for_offline_real_sibling_device`,
+  `device_revocation_cuts_off_and_ghost_fanout_holds`, `late_link_preview_...`,
+  `leave_tears_down_...`, `moderation_action_converges_...`,
+  `sibling_recovers_own_channel_messages_...`) call it right after C spawns. Tests that seed
+  both devices with one roster (`spawn_node_full(.., Some(&[D1, D2]))`, one `spawn_node_seeded`
+  roster) or leave a device out on purpose (stolen backups, floods, new devices) need none.
+- **Name the frame the step made.** `authz_a_guest_shows_an_author_only_by_its_own_card`
+  released M's swallowed directs before injecting the forged answer, so M's own late answer
+  to the guest (with O's real card) could land first. The forged page rides `send_as`, which
+  never passes the swallow, and the wait matches its empty page.
+- **A device's `ServerJoined` is not the owner's admission.** `g13_hidden_sibling_drops_server_after_leave`
+  (1 in 3 full PC runs) had B leave before the owner held its MLS leaf or a confirmed Olm
+  session. Nothing was re-admitted: the leave never landed. The owner never got the op
+  (`Encrypted message for <O> but peer unreachable`), so M's one span stayed open, and the
+  hidden sibling, still finishing the announce-driven join, dropped the leave (`Ignoring
+  CrdtOpBroadcast for unknown server`) and then joined. The test now waits for both devices'
+  MLS leaves at the owner first. That product bug is OPEN (0.14 track):
+  `leave_racing_a_sibling_announce_join_stays_left` reproduces it and is `#[ignore]`d until
+  the fix; run it with `--ignored`, it must fail today.
+- **Wait for the precondition the test names.** `g13_mesh_op_of_a_013_author_is_handed_on_to_nobody`
+  injected the mesh op before M had heard any sync frame from O, so M did not yet know O reads
+  digests and rightly handed the op on (PC full run). It now waits for
+  `DebugSnapshotReply.digest_caps[O]`, and checks M's carried log for the two injected ops
+  only: a per-sender probe also counted M's own late op from admitting X.
+- **No wall-clock budget a loaded machine cannot keep.**
+  `a_session_save_behind_a_nonce_flood_settles_fast` judges the save's wait against the same
+  actor's time for one backlog of notes in that run (4x plus 50 ms), under a 1.5 s ceiling
+  (about 44 ms on the mini; a note 2 ms slower costs one backlog 2 s); the snapshot churn tests
+  (`api/storage.rs`) commit through `SNAPSHOT_BETWEEN_STEPS` between every two steps instead of
+  hoping a 2 ms writer thread wins the gap, and their overrides are per thread, since
+  `cargo test` runs the two side by side.
+
 ## Waits that a duplicate or an earlier frame can satisfy (session 22, 2026-10-01)
 
 Three load-only flakes in one session had one shape: the wait matched SOME event or frame,

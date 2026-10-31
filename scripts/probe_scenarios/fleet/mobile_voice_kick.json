@@ -496,10 +496,16 @@
   },
   {
    "peer": "a",
-   "op": "long_press",
-   "target": "text:vck-${RUN}",
+   "op": "tap",
+   "target": "semantics:Chats",
    "index": 0,
    "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "long_press",
+   "target": "text:vck-${RUN}",
+   "index": 0
   },
   {
    "peer": "a",
@@ -510,8 +516,7 @@
    "peer": "a",
    "op": "tap",
    "target": "text:Delete server",
-   "index": 0,
-   "soft": true
+   "index": 0
   },
   {
    "peer": "a",
@@ -522,15 +527,19 @@
    "peer": "a",
    "op": "tap",
    "target": "dialog > text:Delete server",
-   "index": 0,
-   "soft": true
+   "index": 0
   },
   {
    "peer": "a",
    "op": "wait_for",
    "gone": "text:vck-${RUN}",
-   "timeout_ms": 30000,
-   "soft": true
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "text:vck-${RUN}",
+   "timeout_ms": 90000
   }
  ]
 }

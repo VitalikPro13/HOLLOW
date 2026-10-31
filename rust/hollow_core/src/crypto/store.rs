@@ -836,10 +836,14 @@ mod tests {
     }
 
     /// AR-35 review LOW 2: every Olm frame waits on a session save (AR-30), so a flood of
-    /// stranger notes at a full table must never queue in front of one.
+    /// stranger notes at a full table must never queue in front of one: the save waits
+    /// behind at most one backlog of notes. Judged against this actor's own pace for one
+    /// backlog in this run, plus a ceiling that only a slower note, never load, reaches.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_session_save_behind_a_nonce_flood_settles_fast() {
         const NOW: i64 = 1_790_000_000_000;
+        // Far past any loaded run's wait, short of one backlog at 2 ms a note.
+        const SAVE_CEILING: Duration = Duration::from_millis(1_500);
         let (_tmp, path, pass) = temp_db();
         {
             let db = MessageStore::open(&path, &pass).unwrap();
@@ -854,15 +858,28 @@ mod tests {
         let store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
         assert!(store.flushed(SOON).await);
         let sink = store.live_nonce_sink();
-        let started = std::time::Instant::now();
+        let mut tag = 3u8;
+        let mut one_backlog = async || {
+            tag += 1;
+            let started = std::time::Instant::now();
+            let queued = (0..STRANGER_NOTE_BACKLOG as u32).filter(|&i| sink.note(&format!("pace{i}"), nonce_n(i, tag), NOW + 300_000, None)).count();
+            assert_eq!(queued, STRANGER_NOTE_BACKLOG, "precondition: the pace flood starts on an empty backlog");
+            assert!(store.flushed(Duration::from_secs(120)).await);
+            started.elapsed()
+        };
+        let before = one_backlog().await;
+
         for i in 0..50_000u32 {
             sink.note(&format!("flood{i}"), nonce_n(i, 2), NOW + 300_000, None);
         }
+        let started = std::time::Instant::now();
         let saved = store.save_session_awaited("bob".into(), "p1".into(), v(1, 0));
         assert_eq!(saved.settled(Duration::from_secs(120)).await, Saved::Stored);
         let waited = started.elapsed();
-        assert!(waited < Duration::from_millis(500), "a session save waited {waited:?} behind stranger notes");
         assert!(store.flushed(SOON).await);
+        let pace = before.max(one_backlog().await);
+        assert!(waited < 4 * pace + Duration::from_millis(50), "a session save waited {waited:?} behind stranger notes; one backlog takes {pace:?}");
+        assert!(waited < SAVE_CEILING, "a session save waited {waited:?} behind stranger notes, past any load");
         assert!(sink.note("late", nonce_n(0, 3), NOW + 300_000, None), "the backlog never counted down once the actor caught up");
     }
 

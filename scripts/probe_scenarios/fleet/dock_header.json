@@ -147,7 +147,9 @@
 
     { "peer": "a", "op": "open_server", "name": "dock-probe" },
     { "peer": "a", "op": "open_channel", "name": "lounge" },
-    { "peer": "a", "op": "wait_for", "target": "semantics:Leave the room", "timeout_ms": 30000, "soft": true },
+    { "peer": "a", "op": "wait_for", "target": "semantics:Leave the room", "timeout_ms": 30000 },
+    { "peer": "a", "op": "open_channel", "name": "lounge", "_": "a join keeps the text channel on screen; the second tap shows the room" },
+    { "peer": "a", "op": "wait_for", "target": "type:CallStage", "timeout_ms": 15000 },
     { "peer": "a", "op": "wait", "ms": 2500 },
     { "peer": "a", "op": "shot", "name": "k-11-in-voice" },
     { "peer": "a", "op": "tap", "target": "semantics:Home", "index": 0 },

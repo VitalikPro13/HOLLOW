@@ -114,6 +114,11 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 
 - Server switching batches the 4 selection providers atomically in ONE synchronous
   block; canonical `server_strip.dart:_selectServer`. Wiki `couplings_gotchas`.
+- Split view's right pane overrides `selectedServer/Channel/PeerProvider` in a nested
+  `ProviderScope`. A root-only provider read there (one shared state for both panes, like
+  `unreadMarkerProvider`) must never `ref.watch`/`ref.listen` those three: Riverpod asserts in
+  DEBUG. Subscribe on `ref.container` and close in `ref.onDispose`; `dependencies:` would
+  split it into one instance per pane. Test: `unread_marker_test.dart` split scope group.
 - Channel layout = ONE write path, ONE read shape: writes via
   `ChannelLayoutNotifier.mutate` ONLY (never `updateChannelLayout`); channel LISTS render
   `effectiveLayoutFrom`, never the stored layout. Both CI-guarded.

@@ -242,6 +242,49 @@ pub(crate) struct PersonalStickerRow {
 /// Encrypted SQLite message store.
 pub(crate) struct MessageStore {
     conn: Connection,
+    #[cfg(test)]
+    _counted: open_connections::Counted,
+}
+
+/// Test-only: the connections open per database path, so a test that replaces a stopped
+/// node's files waits for its last handle the way a process exit would drop it.
+#[cfg(test)]
+pub(crate) mod open_connections {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static OPEN: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
+
+    fn with<T>(f: impl FnOnce(&mut HashMap<String, usize>) -> T) -> T {
+        f(OPEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new))
+    }
+
+    pub(crate) struct Counted(String);
+
+    impl Counted {
+        pub(crate) fn new(path: &str) -> Self {
+            with(|open| *open.entry(path.to_string()).or_default() += 1);
+            Counted(path.to_string())
+        }
+    }
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            with(|open| {
+                if let Some(n) = open.get_mut(&self.0) {
+                    *n -= 1;
+                    if *n == 0 {
+                        open.remove(&self.0);
+                    }
+                }
+            });
+        }
+    }
+
+    /// Connections to `path` open right now, in this process.
+    pub(crate) fn count(path: &str) -> usize {
+        with(|open| open.get(path).copied().unwrap_or(0))
+    }
 }
 
 /// Settings key prefix: when a block of a master was lifted.
@@ -586,6 +629,8 @@ impl MessageStore {
     }
 
     fn open_inner(path: &str, passphrase: &str) -> Result<Self, String> {
+        #[cfg(test)]
+        let counted = open_connections::Counted::new(path);
         let conn =
             Connection::open(path).map_err(|e| format!("Failed to open database: {e}"))?;
 
@@ -647,7 +692,11 @@ impl MessageStore {
             }
         }
 
-        Ok(MessageStore { conn })
+        Ok(MessageStore {
+            conn,
+            #[cfg(test)]
+            _counted: counted,
+        })
     }
 
     /// All schema DDL and idempotent data migrations. Runs once per process per DB
@@ -1612,6 +1661,8 @@ impl MessageStore {
     /// spurious `hmac check failed for pgno=1` noise. Idempotent, and a missing or
     /// locked DB is a non-fatal skip, since this is disk hygiene, not data integrity.
     pub fn migrate_auto_vacuum_once(path: &str, passphrase: &str) -> Result<(), String> {
+        #[cfg(test)]
+        let _counted = open_connections::Counted::new(path);
         let conn = Connection::open(path)
             .map_err(|e| format!("Failed to open database for migration: {e}"))?;
         conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", passphrase))

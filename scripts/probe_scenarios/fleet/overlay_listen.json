@@ -45,6 +45,8 @@
     { "peer": "g", "op": "wait_for", "target": "channel:lounge", "timeout_ms": 30000 },
     { "peer": "g", "op": "open_channel", "name": "lounge" },
     { "peer": "g", "op": "wait_for", "target": "semantics:Leave the room", "timeout_ms": 30000 },
+    { "peer": "g", "op": "open_channel", "name": "lounge", "_": "a join keeps the text channel on screen; the second tap shows the room" },
+    { "peer": "g", "op": "wait_for", "target": "type:CallStage", "timeout_ms": 15000 },
     { "peer": "g", "op": "wait_for", "provider": "overlayMic", "equals": "paused", "timeout_ms": 15000 },
     { "peer": "g", "op": "wait", "ms": 1500 },
     { "peer": "g", "op": "hover_at", "x": 5, "y": 400 },

@@ -18,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 
 late ProviderContainer _c;
@@ -134,6 +135,38 @@ void main() {
       _c.read(selectedPeerProvider.notifier).state = 'bob';
       _openDm('alice', had: 'm8');
       expect(live('alice'), isEmpty);
+    });
+  });
+
+  // Split view's right pane runs under a scope that overrides the selection
+  // providers; its chat reads the ONE marker the root keeps for both panes.
+  group('read from the split view scope', () {
+    ProviderContainer splitScope() => ProviderContainer(
+          parent: _c,
+          overrides: [
+            selectedServerProvider.overrideWith((ref) => 's9'),
+            selectedChannelProvider.overrideWith((ref) => 'side'),
+            selectedPeerProvider.overrideWith((ref) => 'carol'),
+          ],
+        );
+
+    test('is the root marker, read without a dependency assertion', () {
+      final scope = splitScope();
+      addTearDown(scope.dispose);
+      _openDm('alice', had: 'm7');
+      expect(scope.read(unreadMarkerProvider)[dmMarkerKey('alice')]?.from, 'm7');
+      expect(identical(scope.read(unreadMarkerProvider.notifier), _markers),
+          isTrue);
+    });
+
+    test('a right pane conversation is captured and released', () {
+      final scope = splitScope();
+      addTearDown(scope.dispose);
+      _c.read(splitViewProvider.notifier).navigateRightToPeer('carol');
+      _markers.noteSeen(dmMarkerKey('carol'), 'm3');
+      expect(scope.read(unreadMarkerProvider)[dmMarkerKey('carol')]?.from, 'm3');
+      _c.read(splitViewProvider.notifier).navigateRightToPeer('dave');
+      expect(_markers.entrySeenId(dmMarkerKey('carol')), isNull);
     });
   });
 }
