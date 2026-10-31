@@ -895,6 +895,8 @@ void main() {
       for (final (status, live) in [
         (ConferenceLobbyStatus.waiting, true),
         (ConferenceLobbyStatus.admitted, true),
+        // A host who stepped out still answers the knocks.
+        (ConferenceLobbyStatus.steppedOut, true),
         (ConferenceLobbyStatus.denied, false),
         (ConferenceLobbyStatus.none, false),
       ]) {

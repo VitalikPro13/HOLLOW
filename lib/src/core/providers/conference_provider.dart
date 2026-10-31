@@ -50,6 +50,10 @@ enum ConferenceLobbyStatus {
 
   /// Seated in the call (host or admitted joiner).
   inCall,
+
+  /// Host: out of the call for a DM call while the meeting runs on, until
+  /// they rejoin. Nothing rejoins by itself.
+  steppedOut,
 }
 
 /// Dart-side room model wrapping the FFI [conference_api.ConferenceInfo].
@@ -311,17 +315,27 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     );
   }
 
-  /// (Host) start a meeting for [room] and join its call.
-  Future<void> startMeeting(ConferenceRoom room) async {
+  /// Toasts why a meeting's call cannot start now, if it cannot.
+  bool _callBlocksMeeting() {
     if (ref.read(callProvider).status != CallStatus.idle) {
       _toast('Leave your call first', HollowToastType.error);
-      return;
+      return true;
     }
     final elsewhere = ref.read(callElsewhereProvider);
     if (elsewhere != null) {
       _toast(callElsewhereReason(elsewhere), HollowToastType.info);
-      return;
+      return true;
     }
+    return false;
+  }
+
+  /// (Host) start a meeting for [room] and join its call.
+  Future<void> startMeeting(ConferenceRoom room) async {
+    if (state.activeConfId == room.confId &&
+        meetingOutOfSeat(state, ref.read(voiceChannelProvider))) {
+      return rejoin();
+    }
+    if (_callBlocksMeeting()) return;
     if (state.activeConfId == room.confId &&
         (state.lobbyStatus == ConferenceLobbyStatus.inCall ||
             state.lobbyStatus == ConferenceLobbyStatus.admitted)) {
@@ -371,10 +385,36 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
   static const _seatTimeout = Duration(seconds: 20);
   static const _seatFailed = "Couldn't join the meeting's call. Try again.";
 
+  /// (Host) leaves the meeting's call for a DM call; the meeting runs on.
+  Future<void> stepOut() async {
+    final confId = state.activeConfId;
+    if (confId == null) return;
+    state = state.copyWith(lobbyStatus: ConferenceLobbyStatus.steppedOut);
+    await _leaveVoiceIfInConference(confId);
+  }
+
+  /// Takes our seat in the active meeting's call again after stepping out.
+  Future<void> rejoin() async {
+    final confId = state.activeConfId;
+    if (confId == null ||
+        !meetingOutOfSeat(state, ref.read(voiceChannelProvider))) {
+      return;
+    }
+    if (_callBlocksMeeting() || !await ensureTurnForCallFromRef(ref)) return;
+    if (state.activeConfId != confId) return;
+    state = state.copyWith(lobbyStatus: ConferenceLobbyStatus.admitted);
+    if (await _takeSeatOrGiveUp(confId, keepMeeting: true) &&
+        state.activeConfId == confId) {
+      state = state.copyWith(lobbyStatus: ConferenceLobbyStatus.inCall);
+    }
+  }
+
   /// Joins the meeting's voice room and waits until it seats us. When it
   /// never does, the meeting is ended or left again (a toast says why), so the
-  /// screen is never stuck on "Joining the meeting".
-  Future<bool> _takeSeatOrGiveUp(String confId) async {
+  /// screen is never stuck on "Joining the meeting"; with [keepMeeting] the
+  /// meeting stays and we are stepped out again.
+  Future<bool> _takeSeatOrGiveUp(String confId,
+      {bool keepMeeting = false}) async {
     final sid = conferenceServerId(confId);
     bool seated(VoiceChannelState vc) =>
         vc.currentServerId == sid &&
@@ -409,7 +449,10 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
       sub.close();
     }
     if (state.activeConfId == confId) {
-      if (state.isHost) {
+      if (keepMeeting) {
+        await _leaveVoiceIfInConference(confId);
+        state = state.copyWith(lobbyStatus: ConferenceLobbyStatus.steppedOut);
+      } else if (state.isHost) {
         await endMeeting();
       } else {
         await leaveMeeting();
@@ -443,15 +486,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
   /// ConferenceLobbyInfo / Admitted / Denied.
   Future<void> requestJoin(String confId,
       {String? linkKey, String? accessCode}) async {
-    if (ref.read(callProvider).status != CallStatus.idle) {
-      _toast('Leave your call first', HollowToastType.error);
-      return;
-    }
-    final elsewhere = ref.read(callElsewhereProvider);
-    if (elsewhere != null) {
-      _toast(callElsewhereReason(elsewhere), HollowToastType.info);
-      return;
-    }
+    if (_callBlocksMeeting()) return;
     final key = linkKey ??
         (state.activeConfId == confId ? state.activeLinkKey : null);
     // A meeting made before 0.12 has an id that names no host, and a link made
@@ -471,7 +506,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     if (!state.roomsLoaded) await loadRooms();
     final ownRoom = state.roomById(confId);
     if (ownRoom != null) {
-      if (state.activeConfId == confId && state.isHost) return; // already in
+      if (state.activeConfId == confId && state.isHost) return rejoin();
       _toast('This is your room. Starting the meeting',
           HollowToastType.info);
       await startMeeting(ownRoom);
@@ -716,3 +751,25 @@ final _linkKeyShape = RegExp(r'^[A-Za-z0-9_-]{43}$');
 final conferenceProvider =
     NotifierProvider<ConferenceNotifier, ConferenceState>(
         ConferenceNotifier.new);
+
+/// Whether we hold the active meeting yet sit outside its call: stepped out, or
+/// put out of the voice room some other way.
+bool meetingOutOfSeat(ConferenceState conf, VoiceChannelState voice) {
+  final confId = conf.activeConfId;
+  if (confId == null) return false;
+  final seated = voice.currentServerId == conferenceServerId(confId) &&
+      voice.currentChannelId == kConferenceChannelId;
+  return switch (conf.lobbyStatus) {
+    ConferenceLobbyStatus.steppedOut => true,
+    ConferenceLobbyStatus.inCall => !seated,
+    _ => false,
+  };
+}
+
+/// Whether the voice room we sit in is the active meeting's, whose leave has to
+/// go through the meeting: a bare voice leave strands the meeting state.
+bool inActiveConferenceCallOf(ProviderRead read) {
+  final conf = read(conferenceProvider);
+  if (!conf.meetingActive || conf.activeConfId == null) return false;
+  return read(voiceChannelProvider).currentServerId == conf.activeServerId;
+}

@@ -85,6 +85,10 @@ bool conferenceLinkDown(OverallConnection link) =>
   );
 }
 
+/// The meeting screen once we stepped out of its call.
+const kSteppedOutTitle = 'You stepped out';
+const kSteppedOutNote = 'The meeting is still running without you.';
+
 /// Display name for a possibly device-level peer id, collapsed to master first.
 String conferenceDisplayName(WidgetRef ref, String peerId) {
   final master = ref.watch(deviceLinkProvider).identityOf(peerId);
@@ -146,6 +150,7 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
         case ConferenceLobbyStatus.denied:
           return 'denied-${conf.activeConfId}';
         case ConferenceLobbyStatus.inCall:
+        case ConferenceLobbyStatus.steppedOut:
           return 'call-${conf.activeConfId}';
         case ConferenceLobbyStatus.none:
           break;
@@ -165,6 +170,7 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
         case ConferenceLobbyStatus.denied:
           return _DeniedView(conf: conf);
         case ConferenceLobbyStatus.inCall:
+        case ConferenceLobbyStatus.steppedOut:
           return _CallView(conf: conf);
         case ConferenceLobbyStatus.none:
           break; // Inconsistent transient: fall through to the room list.
@@ -1128,19 +1134,30 @@ class _ConferenceCallArea extends ConsumerWidget {
             serverId: serverId, channelId: kConferenceChannelId),
       );
     }
+    // Out of the call, never a spinner: nothing seats us until we ask.
     return ColoredBox(
       color: hollow.background,
       child: Center(
         child: HollowEmptyState(
-          title: 'Joining the meeting',
-          action: Column(
+          title: kSteppedOutTitle,
+          description: kSteppedOutNote,
+          action: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const HollowSpinner.medium(delayed: true),
-              const SizedBox(height: HollowSpacing.lg),
-              HollowButton.ghost(
-                onPressed: () => endOrLeaveConferenceMeeting(context, ref),
-                child: const Text('Leave'),
+              // The host's End meeting sits in the header.
+              if (!conf.isHost) ...[
+                HollowButton.ghost(
+                  onPressed: () => leaveConferenceMeeting(context, ref),
+                  child: const Text('Leave'),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+              ],
+              HollowButton.filled(
+                onPressed: () => ref
+                    .read(conferenceProvider.notifier)
+                    .rejoin()
+                    .catchError((_) {}),
+                child: const Text('Rejoin'),
               ),
             ],
           ),

@@ -4,18 +4,20 @@ import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
-import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:hollow/src/ui/call/call_actions.dart' show dmCallLeavesNote;
 import 'package:hollow/src/ui/call/call_ringtone.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart' show dmCallPeerName;
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
+import 'package:hollow/src/ui/shell/conference_actions.dart'
+    show askMeetingHostBeforeDmCall;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The phone's incoming call: the whole screen, the caller large in their
@@ -54,10 +56,13 @@ class _MobileIncomingCallOverlayState
   String _master = '';
   String _name = '';
   bool _video = false;
-  String? _leavesRoom;
+  String? _leavesNote;
 
   /// A call answered under the lock cover, whose screen opens once it lifts.
   ProviderSubscription<bool>? _openAfterUnlock;
+
+  /// The host's meeting question is up: it lives on the navigator, below this.
+  bool _asking = false;
 
   @override
   void dispose() {
@@ -67,9 +72,23 @@ class _MobileIncomingCallOverlayState
     super.dispose();
   }
 
-  void _accept() {
+  Future<void> _accept() async {
     final master = _master;
-    ref.read(callProvider.notifier).acceptCall().catchError((Object _) {
+    var hostMeeting = HostMeetingChoice.stepOut;
+    final navContext = (widget.navigatorKey ?? hollowNavigatorKey).currentContext;
+    if (navContext != null && hostsActiveMeeting(ref.read)) {
+      setState(() => _asking = true);
+      final choice = await askMeetingHostBeforeDmCall(navContext, ref.read,
+          answering: true);
+      if (!mounted) return;
+      setState(() => _asking = false);
+      if (choice == null) return;
+      hostMeeting = choice;
+    }
+    ref
+        .read(callProvider.notifier)
+        .acceptCall(hostMeeting: hostMeeting)
+        .catchError((Object _) {
       if (mounted) {
         HollowToast.show(context, "Couldn't answer the call",
             type: HollowToastType.error);
@@ -122,9 +141,7 @@ class _MobileIncomingCallOverlayState
       _name = dmCallPeerName(ref, _master);
       _video = call.isVideoCall;
       // Answering leaves the voice room (issue #49), so it says so.
-      final vc = ref.watch(voiceChannelProvider);
-      _leavesRoom =
-          vc.isInVoiceChannel ? (vc.currentChannelName ?? 'voice') : null;
+      _leavesNote = dmCallLeavesNote(ref.watch, answering: true);
     }
 
     if (visible && !_wasVisible) {
@@ -143,7 +160,9 @@ class _MobileIncomingCallOverlayState
     final hollow = HollowTheme.of(context);
     final kind = _video ? 'Video call' : 'Voice call';
     return Positioned.fill(
-      child: FadeTransition(
+      child: Offstage(
+        offstage: _asking,
+        child: FadeTransition(
         opacity: _fade,
         child: IgnorePointer(
           ignoring: !visible,
@@ -189,10 +208,10 @@ class _MobileIncomingCallOverlayState
                                   style: HollowTypography.bodyTouch
                                       .copyWith(color: hollow.textSecondary),
                                 ),
-                                if (_leavesRoom != null) ...[
+                                if (_leavesNote != null) ...[
                                   const SizedBox(height: HollowSpacing.sm),
                                   Text(
-                                    'Answering will leave #$_leavesRoom',
+                                    _leavesNote!,
                                     maxLines: 2,
                                     overflow: TextOverflow.ellipsis,
                                     textAlign: TextAlign.center,
@@ -241,6 +260,7 @@ class _MobileIncomingCallOverlayState
             ),
           ),
         ),
+      ),
       ),
     );
   }

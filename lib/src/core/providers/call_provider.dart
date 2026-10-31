@@ -27,6 +27,8 @@ import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/voice_level_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart' show ProviderRead;
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/services/audio_route.dart';
@@ -969,18 +971,21 @@ class CallNotifier extends Notifier<CallState> {
 
   /// A DM call and a server voice channel must never run at the same time
   /// (issue #49): the session the user just chose wins, so leave the channel first.
-  Future<void> _leaveVoiceChannelIfActive() async {
+  Future<void> _leaveVoiceChannelIfActive(HostMeetingChoice hostMeeting) async {
     if (!ref.read(voiceChannelProvider).isInVoiceChannel) return;
     _callLog('[HOLLOW-CALL] Leaving voice channel before DM call');
     try {
-      await ref.read(voiceChannelProvider.notifier).leaveChannel();
+      await leaveVoiceForDmCall(ref.read, hostMeeting: hostMeeting);
     } catch (e) {
       _callLog('[HOLLOW-CALL] Failed to leave voice channel before call: $e');
     }
   }
 
-  /// Start an outgoing call to a peer.
-  Future<void> startCall(String peerId, {bool withVideo = false}) async {
+  /// Start an outgoing call to a peer. [hostMeeting] is what the person chose
+  /// for a meeting they host, asked before the call.
+  Future<void> startCall(String peerId,
+      {bool withVideo = false,
+      HostMeetingChoice hostMeeting = HostMeetingChoice.stepOut}) async {
     if (state.status != CallStatus.idle || _blockedElsewhere()) return;
     if (_isBlocked(peerId)) {
       _callLog('[HOLLOW-CALL] Refused a call to a blocked peer');
@@ -991,7 +996,7 @@ class CallNotifier extends Notifier<CallState> {
     RealtimeSessionFlag.acquire('dm-call');
     if (state.status != CallStatus.idle) return;
 
-    await _leaveVoiceChannelIfActive();
+    await _leaveVoiceChannelIfActive(hostMeeting);
     // The leave awaited real teardown; an incoming invite may have started ringing.
     if (state.status != CallStatus.idle) return;
 
@@ -1052,8 +1057,9 @@ class CallNotifier extends Notifier<CallState> {
     }
   }
 
-  /// Accept an incoming call.
-  Future<void> acceptCall() async {
+  /// Accept an incoming call; [hostMeeting] as for [startCall].
+  Future<void> acceptCall(
+      {HostMeetingChoice hostMeeting = HostMeetingChoice.stepOut}) async {
     if (_blockedElsewhere()) return;
     // Same relay back-off suppression as startCall: the accept rides that socket.
     RealtimeSessionFlag.acquire('dm-call');
@@ -1071,7 +1077,7 @@ class CallNotifier extends Notifier<CallState> {
     state = state.copyWith(status: CallStatus.connecting);
 
     // Leave any voice channel before the call media comes up (issue #49).
-    await _leaveVoiceChannelIfActive();
+    await _leaveVoiceChannelIfActive(hostMeeting);
     await _yieldOverlayMic();
     // The caller may have hung up while the channel tore down.
     if (state.status != CallStatus.connecting || state.callId != callId) {
@@ -2626,3 +2632,25 @@ final focusedDmSourceProvider =
 /// DM share view mode (issue #38): all sources as a tile grid instead of
 /// one focused source full-bleed. UI-only, session-sticky like the focus.
 final dmShareGridViewProvider = StateProvider<bool>((_) => false);
+
+/// What a DM call does to a meeting the person hosts: they step out and it runs
+/// on, or it ends for everyone.
+enum HostMeetingChoice { stepOut, endForEveryone }
+
+/// Whether we host the meeting whose voice room we sit in.
+bool hostsActiveMeeting(ProviderRead read) =>
+    inActiveConferenceCallOf(read) && read(conferenceProvider).isHost;
+
+/// The voice leave before a DM call. A meeting guest leaves the meeting itself,
+/// since a bare voice leave strands it; the host does what [hostMeeting] says.
+Future<void> leaveVoiceForDmCall(ProviderRead read,
+    {HostMeetingChoice hostMeeting = HostMeetingChoice.stepOut}) {
+  if (inActiveConferenceCallOf(read)) {
+    final conference = read(conferenceProvider.notifier);
+    if (!read(conferenceProvider).isHost) return conference.leaveMeeting();
+    return hostMeeting == HostMeetingChoice.endForEveryone
+        ? conference.endMeeting()
+        : conference.stepOut();
+  }
+  return read(voiceChannelProvider.notifier).leaveChannel();
+}

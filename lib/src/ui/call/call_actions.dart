@@ -6,13 +6,35 @@ import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart'
+    show inActiveConferenceCallOf;
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart' show ProviderRead;
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
+import 'package:hollow/src/ui/shell/conference_actions.dart'
+    show askMeetingHostBeforeDmCall;
+
+/// What a DM call takes us out of, said on the ringing card and before a call
+/// starts; null outside a voice room. A meeting's room is called "main", so the
+/// meeting is named instead.
+String? dmCallLeavesNote(ProviderRead read, {required bool answering}) {
+  final vc = read(voiceChannelProvider);
+  if (!vc.isInVoiceChannel) return null;
+  if (inActiveConferenceCallOf(read)) {
+    return answering
+        ? 'Answering takes you out of the meeting'
+        : 'Starting this call takes you out of the meeting.';
+  }
+  final room = '#${vc.currentChannelName ?? 'voice'}';
+  return answering
+      ? 'Answering will leave $room'
+      : 'Starting this call will disconnect you from $room.';
+}
 
 /// Screen capture exists on the desktops only.
 bool get callCanShareScreen =>
@@ -77,13 +99,16 @@ Future<void> startDmCallFlow(
   }
   if (!await ensureTurnForCall(context, ref)) return;
   if (!context.mounted) return;
-  final vc = ref.read(voiceChannelProvider);
-  if (vc.isInVoiceChannel) {
-    final channelName = vc.currentChannelName ?? 'voice';
+  final hosting = hostsActiveMeeting(ref.read);
+  final hostMeeting =
+      await askMeetingHostBeforeDmCall(context, ref.read, answering: false);
+  if (hostMeeting == null || !context.mounted) return;
+  final leaves = dmCallLeavesNote(ref.read, answering: false);
+  if (leaves != null && !hosting) {
     final confirmed = await showHollowConfirm(
       context: context,
       title: 'Start call?',
-      message: 'Starting this call will disconnect you from #$channelName.',
+      message: leaves,
       confirmLabel: 'Start call',
     );
     if (!confirmed || !context.mounted) return;
@@ -93,7 +118,8 @@ Future<void> startDmCallFlow(
   if (!_isPhone) openDmConversation(ref, master);
   beforeCall?.call();
   try {
-    await calls.startCall(master, withVideo: withVideo);
+    await calls.startCall(master,
+        withVideo: withVideo, hostMeeting: hostMeeting);
   } catch (_) {
     if (context.mounted) {
       HollowToast.show(context, "Couldn't start the call",

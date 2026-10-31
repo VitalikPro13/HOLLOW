@@ -10,18 +10,20 @@ import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/window_chrome_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
-import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/call/call_actions.dart' show dmCallLeavesNote;
 import 'package:hollow/src/ui/call/call_ringtone.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart' show dmCallPeerName;
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/peer_id_text.dart';
+import 'package:hollow/src/ui/shell/conference_actions.dart'
+    show askMeetingHostBeforeDmCall;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The incoming call (5.4): one card under the header, ghost Decline and one
@@ -50,7 +52,7 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
   String _cachedMaster = '';
   String _cachedDisplayName = '';
   bool _cachedIsVideoCall = false;
-  String? _cachedVcChannelName;
+  String? _cachedLeavesNote;
 
   @override
   void initState() {
@@ -94,13 +96,16 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
     _countdownTimer = null;
   }
 
-  void _accept() {
+  Future<void> _accept() async {
     final calls = ref.read(callProvider.notifier);
+    final hostMeeting =
+        await askMeetingHostBeforeDmCall(context, ref.read, answering: true);
+    if (hostMeeting == null || !mounted) return;
     if (!Platform.isAndroid && !Platform.isIOS) {
       openDmConversation(
           ref, ref.read(deviceLinkProvider).identityOf(_cachedPeerId));
     }
-    calls.acceptCall().catchError((Object _) {
+    calls.acceptCall(hostMeeting: hostMeeting).catchError((Object _) {
       if (mounted) {
         HollowToast.show(context, "Couldn't answer the call",
             type: HollowToastType.error);
@@ -125,9 +130,7 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
       _cachedIsVideoCall = call.isVideoCall;
       // Answering auto-leaves a voice channel, so it is worth a warning
       // (issue #49).
-      final vc = ref.watch(voiceChannelProvider);
-      _cachedVcChannelName =
-          vc.isInVoiceChannel ? (vc.currentChannelName ?? 'voice') : null;
+      _cachedLeavesNote = dmCallLeavesNote(ref.watch, answering: true);
     }
 
     if (isVisible && !_wasVisible) {
@@ -219,9 +222,9 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
                                   style: HollowTypography.bodySmall.copyWith(
                                       color: hollow.textSecondary),
                                 ),
-                                if (_cachedVcChannelName != null)
+                                if (_cachedLeavesNote != null)
                                   Text(
-                                    'Answering will leave #$_cachedVcChannelName',
+                                    _cachedLeavesNote!,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: HollowTypography.bodySmall

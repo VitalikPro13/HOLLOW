@@ -219,6 +219,12 @@ fullscreen; the frameless restore is checked by hand. `media_fullscreen.json` ne
 `UI_PROBE_FIXTURES` = a folder with a plaintext `probe_video.mp4` and `probe_image.png`: the probe
 data's own files are at-rest ciphertext, and `build/ui_probe` is wiped per run.
 
+Tray op (2026-10-31): **`tray`** (`value` = a menu key, e.g. `leave`) runs the tray's own
+`onTrayMenuItemClick`, since the native menu is out of input injection's reach. It attaches the
+probe's container through `TrayService.debugAttach` with a no-op window step (the probe never ran
+`main()`, see `view` above). The dump's `meeting` (`none` / `host inCall` / `host steppedOut` / `guest ...`),
+`voiceRoom` and `meetingSeats` (people per `conf:` room) read the meeting by state.
+
 Media viewer ops (2026-09-14): **`wheel`** (`target`, `dx`/`dy`, `frames`) sends a
 `PointerScrollEvent` of `kind: mouse` at the target's centre, a pointer SIGNAL, not a drag, which
 is what zooms an `InteractiveViewer` (a trackpad pan is a different event and would not exercise the

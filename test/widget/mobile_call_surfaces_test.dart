@@ -13,6 +13,7 @@ import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/call_records_provider.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/status_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -214,6 +215,95 @@ void main() {
       expect(find.byType(MobileCallScreen), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
+
+    testWidgets(
+        'a meeting host is asked with the ring stepped aside; Cancel brings '
+        'it back still ringing', (tester) async {
+      final calls = _InCall(const CallState(
+        status: CallStatus.ringing,
+        peerId: kFriendPeerId1,
+        callId: 'c1',
+        direction: CallDirection.incoming,
+      ));
+      await _pump(
+        tester,
+        const SizedBox.shrink(),
+        extra: [
+          callProvider.overrideWith(() => calls),
+          conferenceProvider.overrideWith(_Hosting.new),
+          voiceChannelProvider.overrideWith(() => _Room(VoiceChannelState(
+              currentServerId: conferenceServerId('c0ffee'),
+              currentChannelId: 'main'))),
+        ],
+        builder: (context, child) => Stack(children: [
+          child!,
+          MobileIncomingCallOverlay(navigatorKey: _nav),
+        ]),
+      );
+      await tester.tap(_semantic('Accept'));
+      await tester.pumpAndSettle();
+      expect(find.text('End the meeting too?'), findsOneWidget);
+      expect(_semantic('Decline'), findsNothing,
+          reason: 'the ring sits above the navigator and would hide the question');
+      expect(calls.accepted, isFalse);
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('End the meeting too?'), findsNothing);
+      expect(_semantic('Decline'), findsOneWidget);
+      expect(calls.accepted, isFalse);
+
+      await tester.tap(_semantic('Accept'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('End for everyone'));
+      await tester.pumpAndSettle();
+      expect(calls.accepted, isTrue);
+      expect(calls.hostChoice, HostMeetingChoice.endForEveryone);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    // A meeting's voice room is called "main"; the card names the meeting.
+    for (final desktop in [false, true]) {
+      for (final meeting in [true, false]) {
+        testWidgets(
+            '${desktop ? 'desktop' : 'phone'}: the ring says answering leaves '
+            '${meeting ? 'the meeting' : 'the voice channel'}', (tester) async {
+          final calls = _InCall(const CallState(
+            status: CallStatus.ringing,
+            peerId: kFriendPeerId1,
+            callId: 'c1',
+            direction: CallDirection.incoming,
+          ));
+          await _pump(
+            tester,
+            const SizedBox(),
+            extra: [
+              callProvider.overrideWith(() => calls),
+              conferenceProvider.overrideWith(_Guest.new),
+              voiceChannelProvider.overrideWith(() => _Room(VoiceChannelState(
+                  currentServerId:
+                      meeting ? conferenceServerId('c0ffee') : 'server-1',
+                  currentChannelId: meeting ? 'main' : 'general',
+                  currentChannelName: meeting ? 'main' : 'general'))),
+            ],
+            builder: (context, child) => Stack(children: [
+              child!,
+              if (desktop)
+                const IncomingCallOverlay()
+              else
+                MobileIncomingCallOverlay(navigatorKey: _nav),
+            ]),
+          );
+          expect(
+              find.text(meeting
+                  ? 'Answering takes you out of the meeting'
+                  : 'Answering will leave #general'),
+              findsOneWidget);
+          expect(find.textContaining('#main'), findsNothing);
+          await tester.pumpWidget(const SizedBox());
+        });
+      }
+    }
 
     // A faded card still answered taps and read "Voice call from ..." to a
     // screen reader long after the call ended, a blocked caller's too.
@@ -442,16 +532,31 @@ void main() {
 class _InCall extends CallNotifier {
   final CallState initial;
   bool accepted = false;
+  HostMeetingChoice? hostChoice;
   _InCall(this.initial);
 
   @override
   CallState build() => initial;
 
   @override
-  Future<void> acceptCall() async {
+  Future<void> acceptCall(
+      {HostMeetingChoice hostMeeting = HostMeetingChoice.stepOut}) async {
     accepted = true;
+    hostChoice = hostMeeting;
     state = state.copyWith(status: CallStatus.connecting);
   }
+}
+
+class _Guest extends ConferenceNotifier {
+  @override
+  ConferenceState build() => const ConferenceState(
+      activeConfId: 'c0ffee', lobbyStatus: ConferenceLobbyStatus.inCall);
+}
+
+class _Hosting extends ConferenceNotifier {
+  @override
+  ConferenceState build() =>
+      const ConferenceState(activeConfId: 'c0ffee', isHost: true);
 }
 
 class _Room extends VoiceChannelNotifier {

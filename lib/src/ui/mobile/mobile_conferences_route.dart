@@ -4,6 +4,7 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -22,6 +23,8 @@ import 'package:hollow/src/ui/shell/conference_dashboard.dart'
     show
         conferenceDenyMessage,
         conferenceLinkDown,
+        kSteppedOutNote,
+        kSteppedOutTitle,
         conferenceLobbyCopy,
         promptConferenceAccessCode,
         showConferenceRoomFormDialog,
@@ -155,6 +158,7 @@ class _MobileConferencesRouteState
         case ConferenceLobbyStatus.denied:
           return _buildDenied(hollow, conf);
         case ConferenceLobbyStatus.inCall:
+        case ConferenceLobbyStatus.steppedOut:
           return _buildInCall(hollow, conf);
         case ConferenceLobbyStatus.none:
           break;
@@ -292,6 +296,8 @@ class _MobileConferencesRouteState
   }
 
   Widget _buildInCall(HollowTheme hollow, ConferenceState conf) {
+    // Out of the call, the one action is Rejoin; nothing seats us by itself.
+    final out = meetingOutOfSeat(conf, ref.watch(voiceChannelProvider));
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
@@ -301,12 +307,24 @@ class _MobileConferencesRouteState
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
         ),
+        if (out) ...[
+          const SizedBox(height: HollowSpacing.xs),
+          Text(
+            '$kSteppedOutTitle. $kSteppedOutNote',
+            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+          ),
+        ],
         const SizedBox(height: HollowSpacing.md),
         HollowButton.filled(
           touch: true,
           expand: true,
-          onPressed: () => _openCall(conf),
-          child: const Text('Open call'),
+          onPressed: out
+              ? () => ref
+                  .read(conferenceProvider.notifier)
+                  .rejoin()
+                  .catchError((_) {})
+              : () => _openCall(conf),
+          child: Text(out ? 'Rejoin' : 'Open call'),
         ),
         const SizedBox(height: HollowSpacing.sm),
         if (conf.isHost)

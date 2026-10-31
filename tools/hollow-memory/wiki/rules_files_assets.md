@@ -70,6 +70,17 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   ONLY via `image_convert::peer_thumb_for_display` (pure-Rust decode + our own re-encode,
   or dropped); never change the stored bytes, they sit inside the author's signature.
   Since 0.13 every peer image that renders without a tap passes `node/image_gate.rs` (a pure-Rust full decode) before Skia sees it (AR-28 closed); HEIC and AVIF are never drawn as images, they go as plain file cards (convert on send = follow-up). HOL-SEC-151.
+- Every place lib/ hands bytes to Skia (`Image.memory`, `MemoryImage`, `Image.network`,
+  `FadeInImage.memory*`, `instantiateImageCodec*`, `decodeImageFromList`, `ImmutableBuffer.from*`,
+  `ImageDescriptor`, the byte-taking widgets `AnimatedGifImage`, `HollowAvatar(imageBytes:)`,
+  the showcase views, and the caches those widgets paint from: `setAvatar`, frame and profile
+  animation `seed`, the server icon/banner `applyLocalWrite`, the `guestServer*Provider` writes;
+  tear-offs and calls split across lines count too) is counted per file in
+  `test/image_file_decode_guard_test.dart`, each file
+  with where its bytes come from (gated, own, or a catalog our own search asked). A new site
+  fails CI until it is listed; peer bytes get there only through a gated getter
+  (`AttachmentImage`, `emoteBytesProvider`, `get_avatar`/`get_banner`, the server and showcase
+  getters). Swept 2026-10-31 (track b14-images): no peer site bypassed the gate.
 - Sender-side link-preview fetches go through the `PublicResolver` client: no loopback,
   private, link-local or metadata address on any hop, no proxy. HOL-SEC-148.
 - Vault shard streams ride `vault_ops::shard_stream_id(cid, si, from, to)`, never the

@@ -106,10 +106,12 @@ final relayRealtimeProvider = Provider<bool>((ref) {
   ref.onDispose(() => RealtimeSessionFlag.live.removeListener(changed));
   final ringing = ref.watch(callProvider.select((s) =>
       s.status == CallStatus.ringing && s.direction == CallDirection.incoming));
-  // A hidden phone drops out of the host's waiting list.
+  // A hidden phone drops out of the host's waiting list, and a host who stepped
+  // out still answers the knocks.
   final inLobby = ref.watch(conferenceProvider.select((s) =>
       s.lobbyStatus == ConferenceLobbyStatus.waiting ||
-      s.lobbyStatus == ConferenceLobbyStatus.admitted));
+      s.lobbyStatus == ConferenceLobbyStatus.admitted ||
+      s.lobbyStatus == ConferenceLobbyStatus.steppedOut));
   // A hidden presenter never hears the joiner arrive in the code's room, so it
   // refuses the handshake.
   final linking = ref.watch(linkPresentingProvider);

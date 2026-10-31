@@ -8,6 +8,7 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
@@ -15,6 +16,8 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
+import 'package:hollow/src/ui/shell/conference_actions.dart'
+    show endOrLeaveConferenceMeetingOf;
 
 /// Anything unread anywhere, driving the tray icon's red-dot variant. DM
 /// counts go through the notification-settings-filtered badge, so a muted
@@ -155,6 +158,20 @@ class TrayService with TrayListener {
     }
   }
 
+  @visibleForTesting
+  Menu debugMenu() => _buildMenu();
+
+  /// The UI probe's way in: it never runs main(), so it hands over its own
+  /// container, and its window must not be driven by window_manager.
+  @visibleForTesting
+  void debugAttach(ProviderContainer container,
+      {required Future<void> Function() showWindow}) {
+    _container = container;
+    _showWindow = showWindow;
+  }
+
+  Future<void> Function()? _showWindow;
+
   Menu _buildMenu() {
     // Voice items only render while actually in a call or VC, and never
     // before login: reading the call providers pre-identity would spin up
@@ -170,7 +187,11 @@ class TrayService with TrayListener {
         inVoice = true;
         muted = vc.isMuted;
         deafened = vc.isDeafened;
-        leaveLabel = 'Leave Voice Channel';
+        leaveLabel = !inActiveConferenceCallOf(_container.read)
+            ? 'Leave Voice Channel'
+            : _container.read(conferenceProvider).isHost
+                ? 'End Meeting…'
+                : 'Leave Meeting';
       } else if (call.status == CallStatus.active) {
         inVoice = true;
         muted = call.isMuted;
@@ -247,9 +268,13 @@ class TrayService with TrayListener {
     }
   }
 
+  /// A meeting is left through the meeting: a bare voice leave strands it.
   Future<void> _leaveVoice() async {
     try {
-      if (_container.read(voiceChannelProvider).isInVoiceChannel) {
+      if (inActiveConferenceCallOf(_container.read)) {
+        await endOrLeaveConferenceMeetingOf(_container.read,
+            showWindow: _showWindow ?? restoreWindow);
+      } else if (_container.read(voiceChannelProvider).isInVoiceChannel) {
         await _container.read(voiceChannelProvider.notifier).leaveChannel();
       } else if (_container.read(callProvider).status == CallStatus.active) {
         await _container.read(callProvider.notifier).endCall();

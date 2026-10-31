@@ -24,6 +24,7 @@ import 'package:hollow/src/core/providers/overlay_runtime_provider.dart';
 import 'package:hollow/src/core/providers/overlay_settings_provider.dart';
 import 'package:hollow/src/core/models/overlay_look.dart';
 import 'package:hollow/src/core/services/image_pick.dart';
+import 'package:hollow/src/core/services/tray_service.dart';
 import 'package:hollow/src/core/services/window_fullscreen.dart'
     show fullscreenProvider;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -42,6 +43,7 @@ import 'package:hollow/src/ui/chat/video_message_bubble.dart'
 import 'package:video_player/video_player.dart' show VideoPlayer;
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:tray_manager/tray_manager.dart' show MenuItem;
 
 import 'probe_dump.dart';
 import 'probe_env.dart';
@@ -752,6 +754,9 @@ class ProbeRunner {
 
       case 'kill_deposit':
         return _killDeposit(step);
+
+      case 'tray':
+        return _tray(step);
 
       case 'log':
         return '${step['message'] ?? ''}';
@@ -1536,6 +1541,20 @@ class ProbeRunner {
     throw _ProbeFailure('provider $key never '
         '${regex != null ? 'matched /$pattern/' : 'equalled "$equals"'} '
         'within ${ms}ms (last value "$last"). Readable: ${known.join(", ")}');
+  }
+
+  /// Clicks a tray menu item (`value` = its key, e.g. `leave`) through the
+  /// tray's own handler, which input injection cannot reach.
+  Future<String> _tray(Map<String, dynamic> step) async {
+    final key = step['value'] as String?;
+    if (key == null) throw _ProbeFailure('tray needs a "value" (a menu key)');
+    final app = container;
+    if (app == null) throw _ProbeFailure('tray needs the app, not a widget page');
+    TrayService.instance
+      ..debugAttach(app, showWindow: () async {})
+      ..onTrayMenuItemClick(MenuItem(key: key));
+    await settle(frames: 20);
+    return 'tray $key clicked';
   }
 
   /// Reads a value out of the app and remembers it as `${as}`.

@@ -17,6 +17,8 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/overlay_mic_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/voice_level_provider.dart';
@@ -441,6 +443,24 @@ class ProbeDump {
     // for its exit, so "Accept gone" cannot say a ring stopped.
     final call = read(callProvider);
     if (call != null) out['callStatus'] = call.status.name;
+    // A meeting by state: a voice room alone cannot show a stranded meeting.
+    final meeting = read(conferenceProvider);
+    if (meeting != null) {
+      out['meeting'] = meeting.activeConfId == null
+          ? 'none'
+          : '${meeting.isHost ? 'host' : 'guest'} ${meeting.lobbyStatus.name}';
+    }
+    final voice = read(voiceChannelProvider);
+    if (voice != null) {
+      final room = voice.currentServerId;
+      out['voiceRoom'] = room ?? '';
+      // Everyone this instance sees in a meeting room, ours or one it left.
+      out['meetingSeats'] = {
+        for (final e in voice.participants.entries)
+          if (e.key.startsWith('conf:'))
+            e.key: e.value.values.fold<int>(0, (n, s) => n + s.length),
+      };
+    }
     final listening = read(overlayMicProvider);
     if (listening != null) {
       out['overlayMic'] = !listening.on

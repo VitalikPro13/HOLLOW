@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/app_lock_provider.dart';
+import 'package:hollow/src/core/providers/call_provider.dart'
+    show CallStatus, HostMeetingChoice, callProvider, hostsActiveMeeting;
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
-import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart' show ProviderRead;
+import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -20,15 +25,14 @@ String conferenceRoomFacts(ConferenceRoom room) {
 
 /// Whether the voice room we sit in is the active conference, whose leave has
 /// to go through the meeting: a bare voice leave strands the meeting state.
-bool inActiveConferenceCall(WidgetRef ref) {
-  final conf = ref.read(conferenceProvider);
-  if (!conf.meetingActive || conf.activeConfId == null) return false;
-  return ref.read(voiceChannelProvider).currentServerId == conf.activeServerId;
-}
+bool inActiveConferenceCall(WidgetRef ref) => inActiveConferenceCallOf(ref.read);
 
 /// Asks first, then ends the meeting for everyone. The room and its link stay.
-Future<void> endConferenceMeeting(BuildContext context, WidgetRef ref) async {
-  final notifier = ref.read(conferenceProvider.notifier);
+Future<void> endConferenceMeeting(BuildContext context, WidgetRef ref) =>
+    _askThenEndMeeting(context, ref.read(conferenceProvider.notifier));
+
+Future<void> _askThenEndMeeting(
+    BuildContext context, ConferenceNotifier notifier) async {
   await showHollowConfirm(
     context: context,
     title: 'End the meeting?',
@@ -59,6 +63,83 @@ Future<void> endOrLeaveConferenceMeeting(
   return ref.read(conferenceProvider).isHost
       ? endConferenceMeeting(context, ref)
       : leaveConferenceMeeting(context, ref);
+}
+
+/// [endOrLeaveConferenceMeeting] for code that holds no widget (the tray). The
+/// host is still asked first, so [showWindow] brings the question into view;
+/// while App Lock covers the window nothing is asked and nothing ends.
+Future<void> endOrLeaveConferenceMeetingOf(
+  ProviderRead read, {
+  required Future<void> Function() showWindow,
+}) async {
+  final notifier = read(conferenceProvider.notifier);
+  if (!read(conferenceProvider).isHost) return notifier.leaveMeeting();
+  await showWindow();
+  final context = hollowNavigatorKey.currentContext;
+  if (context == null || !context.mounted || read(appLockedProvider)) return;
+  await _askThenEndMeeting(context, notifier);
+}
+
+/// Asks the meeting's host what a DM call does to it; null when they cancel.
+/// Anyone else goes on unasked, and so does a host under App Lock, since
+/// nothing routes above the cover and the meeting then runs on as before.
+Future<HostMeetingChoice?> askMeetingHostBeforeDmCall(
+  BuildContext context,
+  ProviderRead read, {
+  required bool answering,
+}) async {
+  if (!hostsActiveMeeting(read) || read(appLockedProvider)) {
+    return HostMeetingChoice.stepOut;
+  }
+  return showHollowDialog<HostMeetingChoice>(
+    context: context,
+    builder: (_) => HostMeetingDialog(answering: answering),
+  );
+}
+
+/// The host's choice before a DM call: end the meeting or keep it running.
+/// Answering, it leaves by itself once the call stops ringing.
+class HostMeetingDialog extends ConsumerWidget {
+  final bool answering;
+
+  const HostMeetingDialog({super.key, required this.answering});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    void choose(HostMeetingChoice? choice) => Navigator.of(context).pop(choice);
+    if (answering) {
+      ref.listen<CallStatus>(callProvider.select((c) => c.status), (_, status) {
+        if (status == CallStatus.ringing) return;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          final route = context.mounted ? ModalRoute.of(context) : null;
+          if (route != null && route.isActive) {
+            Navigator.of(context).removeRoute(route);
+          }
+        });
+      });
+    }
+    return HollowDialog(
+      title: 'End the meeting too?',
+      content: HollowDialogText(answering
+          ? "Answering takes you out of the meeting you're hosting. End it for everyone, or keep it running without you."
+          : "Calling takes you out of the meeting you're hosting. End it for everyone, or keep it running without you."),
+      actions: [
+        HollowButton.ghost(
+          onPressed: () => choose(null),
+          child: const Text('Cancel'),
+        ),
+        HollowButton.outline(
+          danger: true,
+          onPressed: () => choose(HostMeetingChoice.endForEveryone),
+          child: const Text('End for everyone'),
+        ),
+        HollowButton.filled(
+          onPressed: () => choose(HostMeetingChoice.stepOut),
+          child: const Text('Keep it running'),
+        ),
+      ],
+    );
+  }
 }
 
 void copyConferenceInviteLink(
