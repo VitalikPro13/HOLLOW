@@ -1216,6 +1216,11 @@ async fn run_event_loop(
     let mut lock_keeper = super::lock_keeper::LockKeeper::default();
     // The door each server room's join proves to the relay (`door_room`).
     let mut door_rooms = super::door_room::DoorRooms::default();
+    // Our leaves still on their way, and our identity's leaves held against a late join.
+    let mut leave_book = super::leave_book::LeaveBook::load(&db_path, &db_passphrase);
+    for (sid, n, secret) in leave_book.doors() {
+        door_rooms.keep_for_leave(&sid, n, secret);
+    }
     let mut recent_joins: HashMap<String, RecentJoin> = HashMap::new();
     // "{server_id}|{joiner_device}" -> when we last saw that join request, so the
     // coordinator gate can tell a first ask from the joiner's escalation retry.
@@ -1562,6 +1567,7 @@ async fn run_event_loop(
                     &mut server_states, &bundle_keypair,
                     &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                     &mut pending_server_joins,
+                    &mut leave_book,
                     &mut join_request_seen,
                     &mut join_resolutions,
                     &mut awaiting_mls_after_parked_join,
@@ -1945,12 +1951,19 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::LeaveServer { server_id } => {
+                        let door = door_rooms.door_to_keep(&server_id, &server_states);
+                        let kept = door.clone();
                         if sync_handler::handle_leave_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
-                            server_id,
-                            &crypto_store, &crdt_store,
+                            server_id.clone(),
+                            &crypto_store, &crdt_store, &mut leave_book, door,
                         ).await { continue; }
+                        if let Some((n, secret)) = kept.filter(|_| leave_book.holds_room(&server_id)) {
+                            door_rooms.keep_for_leave(&server_id, n, secret);
+                        }
+                        let landed = leave_book.drive(&olm, &ws_room_peers, &ws_cmd_tx);
+                        release_leave_rooms(landed, leave_book.rooms(), &mut door_rooms, &server_states, &pending_server_joins, &ws_cmd_tx);
                     }
 
                     NodeCommand::ChangeRolePermissions { server_id, role, permissions } => {
@@ -3458,6 +3471,7 @@ async fn run_event_loop(
                                 &mut server_states, &bundle_keypair,
                                 &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                 &mut pending_server_joins,
+                                                                &mut leave_book,
                                                                 &mut join_request_seen,
                                                                 &mut join_resolutions,
                                                                 &mut awaiting_mls_after_parked_join,
@@ -3803,6 +3817,10 @@ async fn run_event_loop(
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                 room_code: server_id.clone(),
                             });
+                        }
+                        // ...for every server we left whose members do not hold our leave yet...
+                        for server_id in leave_book.rooms().into_iter().filter(|s| !server_states.contains_key(s)) {
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id });
                         }
                         // ...and for every server we are still WAITING to join. A parked join is not a
                         // membership, so the loop above misses it, and being in that room is what makes
@@ -5253,6 +5271,7 @@ async fn run_event_loop(
                                 &mut server_states, &bundle_keypair,
                                 &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                 &mut pending_server_joins,
+                                &mut leave_book,
                                 &mut join_request_seen,
                                 &mut join_resolutions,
                                 &mut awaiting_mls_after_parked_join,
@@ -5811,6 +5830,7 @@ async fn run_event_loop(
                                             &mut server_states, &bundle_keypair,
                                             &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                             &mut pending_server_joins,
+                                                                                    &mut leave_book,
                                                                                     &mut join_request_seen,
                                                                                     &mut join_resolutions,
                                                                                     &mut awaiting_mls_after_parked_join,
@@ -5873,6 +5893,8 @@ async fn run_event_loop(
             // MLS batch timer — process queued removals then additions (2 epochs max for N peers).
             _ = mls_batch_timer.tick() => {
                 arm_started = Some(("timer", "mls_batch", std::time::Instant::now()));
+                let landed = leave_book.drive(&olm, &ws_room_peers, &ws_cmd_tx);
+                release_leave_rooms(landed, leave_book.rooms(), &mut door_rooms, &server_states, &pending_server_joins, &ws_cmd_tx);
                 // Owner checkpoints (design E): one comparison per server when none is due.
                 sync_handler::author_due_checkpoints(
                     &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers,
@@ -7604,6 +7626,24 @@ async fn apply_remote_crdt_op(
     }
 }
 
+/// Let go of the rooms whose leave landed, keeping any we hold again for a server or a join.
+fn release_leave_rooms(
+    landed: Vec<String>,
+    leave_book_rooms: Vec<String>,
+    door_rooms: &mut super::door_room::DoorRooms,
+    server_states: &HashMap<String, ServerState>,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+) {
+    door_rooms.keep_leaving_only(&leave_book_rooms);
+    for server_id in landed {
+        door_rooms.release_leave(&server_id);
+        if !server_states.contains_key(&server_id) && !pending_server_joins.contains_key(&server_id) {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: server_id });
+        }
+    }
+}
+
 /// Answers whether the op may have taken our own seat in one of the server's voice calls.
 #[allow(clippy::too_many_arguments)]
 async fn apply_remote_crdt_op_inner(
@@ -8122,6 +8162,7 @@ async fn handle_incoming_request(
     master_peer_str: &str,
     device_peer_id: &str,
     pending_server_joins: &mut HashMap<String, PendingJoin>,
+    leave_book: &mut super::leave_book::LeaveBook,
     join_request_seen: &mut HashMap<String, std::time::Instant>,
     join_resolutions: &mut HashMap<String, i64>,
     awaiting_mls_after_parked_join: &mut std::collections::HashSet<String>,
@@ -8186,7 +8227,7 @@ async fn handle_incoming_request(
     Box::pin(handle_incoming_request_inner(
         olm, crypto_store, crdt_store, crdt_resync, event_tx, pending_messages, frame_budget, key_request_in_flight,
         server_states, bundle_keypair, master_keypair, device_keypair, master_peer_str, device_peer_id,
-        pending_server_joins, join_request_seen, join_resolutions, awaiting_mls_after_parked_join,
+        pending_server_joins, leave_book, join_request_seen, join_resolutions, awaiting_mls_after_parked_join,
         crdt_store_actor, pending_sync_requests, mls, mls_bootstrap_requested, mls_welcome_grace,
         relay_catchup_done, pending_file_streams, pending_shard_streams, early_file_streams,
         pending_link_snapshots, vault_shard_asks, link, decrypt_fail_cooldown, pending_mls_key_packages,
@@ -8221,6 +8262,7 @@ async fn handle_incoming_request_inner(
     master_peer_str: &str,
     device_peer_id: &str,
     pending_server_joins: &mut HashMap<String, PendingJoin>,
+    leave_book: &mut super::leave_book::LeaveBook,
     join_request_seen: &mut HashMap<String, std::time::Instant>,
     join_resolutions: &mut HashMap<String, i64>,
     awaiting_mls_after_parked_join: &mut std::collections::HashSet<String>,
@@ -10631,6 +10673,10 @@ async fn handle_incoming_request_inner(
             let is_known = server_states.contains_key(&server_id);
             let is_pending_join = pending_server_joins.contains_key(&server_id);
             if !is_known && !is_pending_join {
+                if leave_book.on_answer(&server_id, &ops_json, nonce, peer_str, local_peer_str) {
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: server_id.clone() });
+                    return;
+                }
                 hollow_log!("[HOLLOW-CRDT] Ignoring SyncResponse for unknown server {server_id} (not joined)");
                 return;
             }
@@ -10668,11 +10714,32 @@ async fn handle_incoming_request_inner(
 
                 let mut admitted = Vec::new();
                 let merged = crdt_sync::merge_ops_with(state, &incoming_ops, |op| admitted.push(op.clone()));
+                // A join folds in our identity's own leave of the server: a membership from
+                // before the leave answers no join of ours.
+                let left_here = match leave_book.left_op(&server_id).filter(|_| pending_server_joins.contains_key(&server_id)) {
+                    Some(left) => {
+                        let _ = crdt_sync::merge_ops_with(state, std::slice::from_ref(&left), |op| admitted.push(op.clone()));
+                        !state.is_member(local_peer_str) && state.left_at(local_peer_str).is_some()
+                    }
+                    None => false,
+                };
                 crdt_store.persist_admitted(admitted, state.checkpoint_hlc.clone());
                 if let Ok(report) = &merged {
                     if report.rejected > 0 {
                         hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from a SyncResponse for {server_id} from {peer_str}", report.rejected);
                     }
+                }
+                if left_here {
+                    hollow_log!("[HOLLOW-CRDT] A membership from before our leave of {server_id} answered our join");
+                    if pending_server_joins.get(&server_id).is_some_and(|p| p.from_sibling) {
+                        sync_handler::end_join_we_left(
+                            pending_server_joins, server_states, mls, crypto_store, crdt_store, ws_cmd_tx,
+                            leave_book.holds_room(&server_id), &server_id,
+                        );
+                        return;
+                    }
+                } else if pending_server_joins.contains_key(&server_id) && state.is_member(local_peer_str) {
+                    leave_book.forget_left(&server_id);
                 }
                 match merged {
                     // Run even when 0 ops applied if a join is pending: the joiner
@@ -10681,6 +10748,7 @@ async fn handle_incoming_request_inner(
                     // An anchored joiner completes only once the fold admitted us: a
                     // batch that founds nothing or admits someone else is no join.
                     Ok(report) if (report.applied > 0 || pending_server_joins.contains_key(&server_id))
+                        && !left_here
                         && (!pending_server_joins.contains_key(&server_id)
                             || state.anchor() == crate::crdt::server_state::Anchor::Legacy
                             || state.is_member(local_peer_str)) => {
@@ -10697,6 +10765,8 @@ async fn handle_incoming_request_inner(
                         crdt_store.save_state_snapshot(server_id.clone(), state);
 
                         if let Some(completed) = pending_server_joins.remove(&server_id) {
+                            // A member again: a leave of ours from before must never land.
+                            leave_book.drop_pending(&server_id);
                             let server_name = state.name().to_string();
                             hollow_log!("[HOLLOW-CRDT] Server join completed: {server_id}");
                             // An op a member authored while our admission was in flight
@@ -10991,6 +11061,25 @@ async fn handle_incoming_request_inner(
 
         HavenMessage::CrdtOpBroadcast { server_id, op_json } => {
             hollow_log!("[HOLLOW-CRDT] CrdtOpBroadcast from {peer_str} for server {server_id}");
+            if !server_states.contains_key(&server_id)
+                && leave_book.owner_closed(&server_id, &op_json, local_peer_str)
+                && !pending_server_joins.contains_key(&server_id)
+            {
+                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: server_id.clone() });
+            }
+            if let Some(op) = super::leave_book::own_leave(&server_id, &op_json, peer_str, local_peer_str) {
+                leave_book.note_left(&server_id, &op, peer_str);
+                // Judged by the leave's own clock, never its carrier's: an old leave parked
+                // and sealed afresh may predate a rejoin it does not know of, and the join's
+                // own fold judges that one when it completes.
+                if pending_server_joins.get(&server_id).is_some_and(|p| p.from_sibling && op.hlc.physical_ms as i64 > p.announced_at) {
+                    sync_handler::end_join_we_left(
+                        pending_server_joins, server_states, mls, crypto_store, crdt_store, ws_cmd_tx,
+                        leave_book.holds_room(&server_id), &server_id,
+                    );
+                    return;
+                }
+            }
             apply_remote_crdt_op(
                 server_states, crdt_resync, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
                 mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
@@ -11862,6 +11951,7 @@ async fn handle_incoming_request_inner(
                 reply_secret: super::join_lane::ReplySecret::new(),
                 from_sibling: true,
                 quiet: !fresh,
+                announced_at: frame_ts_ms,
                 ..Default::default()
             };
             sync_handler::request_join_lock(ws_cmd_tx, &server_id, &mut pending);

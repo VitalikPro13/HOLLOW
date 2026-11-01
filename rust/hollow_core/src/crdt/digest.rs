@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 use super::hlc::HlcTimestamp;
 use super::operations::CrdtOp;
-use super::server_state::{fold_key, retained_under, ServerState};
+use super::server_state::{fold_key, ServerState};
 
 /// A differing range holding at most this many of the answerer's ops is sent whole.
 pub const SEND_WHOLE: usize = 32;
@@ -211,7 +211,7 @@ pub fn entries<'a>(state: &'a ServerState, kept: &[KeptRef<'a>], base: Option<&H
     }
     let mut rows: Vec<Row> = Vec::with_capacity(slots.len() + kept.len());
     for (at, (op, key)) in state.op_log.iter().zip(&slots).enumerate() {
-        if base.is_none_or(|b| retained_under(op, b, genesis)) {
+        if base.is_none_or(|b| state.retains(op, b, genesis)) {
             let id = *memo.ids.entry(*key).or_insert_with(|| id_hash(&op.author, &op.hlc));
             rows.push((fold_key(op).0.physical_ms, id, at, false));
         }

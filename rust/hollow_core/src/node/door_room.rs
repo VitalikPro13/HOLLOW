@@ -92,6 +92,8 @@ pub(crate) struct DoorRooms {
     /// (room, asker) -> the removal we told that former member's device of. Once per
     /// removal: one notice is enough to leave on, and each tells it we are online.
     told: HashMap<(String, String), crate::crdt::hlc::HlcTimestamp>,
+    /// Doors of servers we left, kept proved while our leave is on its way.
+    leaving: HashMap<String, (u64, Zeroizing<[u8; 32]>)>,
 }
 
 fn grant_aad(server_id: &str, n: u64, asker: &str, granter: &str) -> Vec<u8> {
@@ -129,12 +131,49 @@ impl DoorRooms {
             self.sent.insert(sid.clone(), (n, public));
             let _ = ws_cmd_tx.send(WsCommand::SetDoor { room_code: sid.clone(), door: Some(DoorSecret(secret)) });
         }
+        for (sid, (n, secret)) in &self.leaving {
+            if !kept.insert(sid.as_str()) {
+                continue;
+            }
+            let public = sealed_box::key_to_text(&sealed_box::public_of(secret));
+            if self.sent.get(sid.as_str()).is_some_and(|(sn, sp)| sn == n && *sp == public) {
+                continue;
+            }
+            self.sent.insert(sid.clone(), (*n, public));
+            let _ = ws_cmd_tx.send(WsCommand::SetDoor { room_code: sid.clone(), door: Some(DoorSecret(secret.clone())) });
+        }
         self.granted.retain(|sid, _| kept.contains(sid.as_str()));
         let gone: Vec<String> = self.sent.keys().filter(|sid| !kept.contains(sid.as_str())).cloned().collect();
         for sid in gone {
             self.sent.remove(&sid);
             let _ = ws_cmd_tx.send(WsCommand::SetDoor { room_code: sid, door: None });
         }
+    }
+
+    /// The door we prove for `server_id` now, for a leave to keep proving.
+    pub(crate) fn door_to_keep(&self, server_id: &str, server_states: &ServerStates) -> Option<(u64, Zeroizing<[u8; 32]>)> {
+        if !crate::crdt::anchor::is_genesis_id(server_id) {
+            return None;
+        }
+        if let Some((n, _, secret)) = self.granted.get(server_id) {
+            return Some((*n, secret.clone()));
+        }
+        server_states.get(server_id)?.join_lock.newest_door().map(|(n, _, secret)| (n, secret))
+    }
+
+    /// Keep proving `server_id`'s door while our leave of it is on its way.
+    pub(crate) fn keep_for_leave(&mut self, server_id: &str, n: u64, secret: Zeroizing<[u8; 32]>) {
+        self.leaving.insert(server_id.to_string(), (n, secret));
+    }
+
+    /// Our leave of `server_id` landed: its door goes with the next sync.
+    pub(crate) fn release_leave(&mut self, server_id: &str) {
+        self.leaving.remove(server_id);
+    }
+
+    /// Keep proving only the doors of leaves still on their way.
+    pub(crate) fn keep_leaving_only(&mut self, rooms: &[String]) {
+        self.leaving.retain(|sid, _| rooms.contains(sid));
     }
 
     /// The relay said whether it counts us as holding `room`'s newest door. Hidden in a

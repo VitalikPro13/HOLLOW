@@ -170,7 +170,18 @@ impl ServerState {
     /// alike: the stateless checks, dedup, then the fold. Only what it admits moves our
     /// clock, so a refused op cannot date our next writes.
     pub fn ingest_remote(&mut self, ops: &[CrdtOp]) -> Ingested {
-        let out = self.fold_remote(ops);
+        let mut out = self.fold_remote(ops);
+        // A late leave the new checkpoint keeps is stored again: storing the checkpoint
+        // drops every row it covers.
+        if out.admitted.iter().any(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. })) {
+            for (author, hlc) in &self.late_leaves {
+                if !out.admitted.iter().any(|o| o.author == *author && o.hlc == *hlc)
+                    && let Some(op) = self.op_log.iter().find(|o| o.author == *author && o.hlc == *hlc)
+                {
+                    out.admitted.push(op.clone());
+                }
+            }
+        }
         if let Some(hlc) = &mut self.hlc {
             for op in &out.admitted {
                 hlc.witness(&op.hlc);
@@ -316,6 +327,14 @@ impl ServerState {
         for op in candidates {
             if self.op_allowed(&op) {
                 self.apply_payload(&op);
+                // A member's own leave refused at its place (the admission it rests on is
+                // history this checkpoint overwrote) is judged against the checkpoint.
+                if let CrdtPayload::ServerCheckpoint { covers, .. } = &op.payload {
+                    for late in self.close_late_leaves(&refused, covers) {
+                        refused.retain(|r| !(r.author == late.author && r.hlc == late.hlc));
+                        self.log_admitted(late);
+                    }
+                }
                 self.log_admitted(op);
             } else {
                 refused.push(op);
@@ -952,5 +971,231 @@ mod tests {
         assert!(!r.held.is_empty(), "fixture: the op of a member not yet admitted is held");
         r.set_hlc(Hlc::for_device(id(9), "device"));
         assert!(r.create_op(P::ServerRenamed { new_name: "x".into() }).hlc.physical_ms < wall + 60_000, "a held op moved our clock");
+    }
+
+    /// A rejoin's admission, on a fresh ask of its own.
+    fn readd(sid: &str, tag: u8, at: i64) -> P {
+        let ask = crate::crdt::operations::JoinAsk::sign(sid, at, &keys(tag).0);
+        P::MemberAdded { peer_id: id(tag), display_name: "m".into(), follow: None, ask: Some(ask) }
+    }
+
+    /// Owner 1 founds S at `t`; 2 joins at t+1 and 3 at t+2; the owner renames at t+10
+    /// and checkpoints there, never having seen 2's own leave at t+5. Returns S, the ops
+    /// a replica needs (founding, checkpoint), the owner, the leave and `t`.
+    fn behind_a_checkpoint() -> (String, Vec<CrdtOp>, ServerState, CrdtOp, u64) {
+        let (sid, _, anchor, owner, leave, t) = behind_a_checkpoint_with_history();
+        (sid, anchor, owner, leave, t)
+    }
+
+    /// [`behind_a_checkpoint`], with the history the checkpoint covers.
+    fn behind_a_checkpoint_with_history() -> (String, Vec<CrdtOp>, Vec<CrdtOp>, ServerState, CrdtOp, u64) {
+        let t = crate::crdt::hlc::wall_clock_ms() - 3 * 3_600_000;
+        let sid = crate::crdt::anchor::derive_server_id(&id(1), "n");
+        let created = op_at(1, &sid, t, P::ServerCreated { name: "S".into(), owner_peer_id: id(1), nonce: "n".into() });
+        let history = vec![
+            created.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, add(&sid, 3)),
+            op_at(1, &sid, t + 10, P::ServerRenamed { new_name: "moved on".into() }),
+        ];
+        let mut owner = joiner(&sid, 1);
+        owner.ingest_remote(&history);
+        let covers = owner.horizon();
+        let json = owner.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
+        let checkpoint = owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
+        let leave = op_at(2, &sid, t + 5, P::MemberRemoved { peer_id: id(2) });
+        (sid, history, vec![created, checkpoint], owner, leave, t)
+    }
+
+    fn holds(s: &ServerState, op: &CrdtOp) -> bool {
+        s.op_log.iter().any(|o| o.author == op.author && o.hlc == op.hlc)
+    }
+
+    /// t14 item 2b: a member's own leave that reaches the owner behind the owner's
+    /// checkpoint ends its span there at the leave's own clock, stays in the log across
+    /// a restart, and a later checkpoint that already reflects it lets it go.
+    #[test]
+    fn a_members_own_leave_behind_a_checkpoint_still_ends_its_span() {
+        let (sid, history, anchor, mut owner, leave, t) = behind_a_checkpoint_with_history();
+        assert!(owner.is_member(&id(2)) && owner.checkpoint_hlc.as_ref().is_some_and(|c| *c > leave.hlc), "fixture");
+        let out = owner.ingest_remote(std::slice::from_ref(&leave));
+        assert!(!owner.is_member(&id(2)), "the owner still counts a member whose own leave came behind its checkpoint");
+        assert!(owner.is_member(&id(3)), "another member is untouched");
+        assert_eq!(owner.member_record[&id(2)].last().unwrap().until_ms, t + 5, "the span ends at the leave's own clock");
+        assert!(holds(&owner, &leave) && out.admitted.iter().any(|o| o.hlc == leave.hlc), "the leave is kept and stored");
+
+        // A replica handed the checkpoint and the leave together folds the same.
+        let mut replica = joiner(&sid, 9);
+        replica.ingest_remote(&[anchor.clone(), vec![leave.clone()]].concat());
+        assert!(!replica.is_member(&id(2)) && holds(&replica, &leave));
+        let base = replica.checkpoint_hlc.clone().unwrap();
+        let entries = crate::crdt::digest::entries(&replica, &[], Some(&base));
+        assert_eq!(entries.len(), crate::crdt::digest::entries(&owner, &[], Some(&base)).len(), "both replicas fingerprint the same ops");
+        assert!(
+            entries.iter().any(|e| matches!(e.item, crate::crdt::digest::Item::Op(o) if o.hlc == leave.hlc)),
+            "the digest leaves out the late leave, so a replica without it never asks",
+        );
+
+        // A replica that took the leave in its place, then the owner's checkpoint that
+        // never saw it, keeps 2 out.
+        let mut early = joiner(&sid, 8);
+        early.ingest_remote(&history);
+        early.ingest_remote(std::slice::from_ref(&leave));
+        assert!(!early.is_member(&id(2)), "fixture");
+        let out = early.ingest_remote(&anchor[1..]);
+        assert!(!early.is_member(&id(2)) && holds(&early, &leave), "a checkpoint that never saw the leave undid it");
+        assert!(out.admitted.iter().any(|o| o.hlc == leave.hlc), "storing the checkpoint would drop the late leave");
+
+        // A restart restores the log from the store and the state from its snapshot.
+        let mut restarted: ServerState = serde_json::from_str(&serde_json::to_string(&owner).unwrap()).unwrap();
+        restarted.restore_op_log(owner.op_log.clone());
+        assert!(holds(&restarted, &leave), "a restart drops the late leave from the log");
+        assert!(restarted.retains(&leave, &base, true));
+
+        // The owner's next checkpoint lists 2 as gone: the leave is history now.
+        owner.author_checked(P::ServerRenamed { new_name: "again".into() }).unwrap();
+        let covers = owner.horizon();
+        let json = owner.checkpoint_json(&id(1), &[], crate::crdt::hlc::wall_clock_ms()).unwrap();
+        owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
+        assert!(!holds(&owner, &leave) && owner.late_leaves.is_empty(), "a checkpoint that reflects the leave still keeps it");
+        assert!(!owner.is_member(&id(2)));
+    }
+
+    /// A rejoin admitted after the leave still wins: after the checkpoint, in the same
+    /// fold before it, or recorded in the span the checkpoint lists.
+    #[test]
+    fn a_rejoin_after_the_late_leave_still_wins() {
+        let (sid, anchor, owner, leave, t) = behind_a_checkpoint();
+        // After the checkpoint.
+        let mut after = owner.clone();
+        after.ingest_remote(&[op_at(1, &sid, t + 20, readd(&sid, 2, (t + 20) as i64))]);
+        after.ingest_remote(std::slice::from_ref(&leave));
+        assert!(after.is_member(&id(2)), "a rejoin after the checkpoint lost to an older leave");
+
+        // Before the checkpoint, in the batch that brings the leave.
+        let mut replica = joiner(&sid, 9);
+        replica.ingest_remote(&anchor);
+        replica.ingest_remote(&[leave.clone(), op_at(1, &sid, t + 7, readd(&sid, 2, (t + 7) as i64))]);
+        assert!(replica.is_member(&id(2)), "a rejoin folded with the leave lost to it");
+        assert!(!holds(&replica, &leave));
+
+        // Recorded in the span: another admitter took 2 in again after the leave.
+        let t2 = t;
+        let created = anchor[0].clone();
+        let history = vec![
+            created,
+            op_at(1, &sid, t2 + 1, add(&sid, 2)),
+            op_at(1, &sid, t2 + 2, add(&sid, 3)),
+            op_at(1, &sid, t2 + 3, P::RoleChanged { peer_id: id(3), role: MemberRole::Admin, priority: 3 }),
+            op_at(3, &sid, t2 + 7, readd(&sid, 2, (t2 + 7) as i64)),
+            op_at(1, &sid, t2 + 10, P::ServerRenamed { new_name: "moved on".into() }),
+        ];
+        let mut owner2 = joiner(&sid, 1);
+        owner2.ingest_remote(&history);
+        assert!(owner2.member_record[&id(2)].last().unwrap().admitted.iter().any(|(a, _)| *a == id(3)), "fixture");
+        let covers = owner2.horizon();
+        let json = owner2.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
+        owner2.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
+        owner2.ingest_remote(std::slice::from_ref(&leave));
+        assert!(owner2.is_member(&id(2)), "a span re-admitted after the leave was closed by it");
+
+        // The checkpoint already folded the leave and a rejoin by the same admitter: the
+        // span it lists opened after the leave.
+        let history = vec![
+            anchor[0].clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            leave.clone(),
+            op_at(1, &sid, t + 7, readd(&sid, 2, (t + 7) as i64)),
+            op_at(1, &sid, t + 10, P::ServerRenamed { new_name: "moved on".into() }),
+        ];
+        let mut owner3 = joiner(&sid, 1);
+        owner3.ingest_remote(&history);
+        assert!(owner3.is_member(&id(2)), "fixture");
+        let covers = owner3.horizon();
+        let json = owner3.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
+        let checkpoint = owner3.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
+        let mut late = joiner(&sid, 9);
+        late.ingest_remote(&[anchor[0].clone(), checkpoint]);
+        late.ingest_remote(std::slice::from_ref(&leave));
+        assert!(late.is_member(&id(2)), "a leave from before the span the checkpoint lists closed it");
+    }
+
+    /// Only a member's own leave, from a member the checkpoint lists, changes anything:
+    /// a stranger's leave and one member removing another stay as they were.
+    #[test]
+    fn only_a_listed_members_own_leave_outlives_a_checkpoint() {
+        let (sid, _, owner, _, t) = behind_a_checkpoint();
+        let mut s = owner.clone();
+        let stranger = op_at(4, &sid, t + 5, P::MemberRemoved { peer_id: id(4) });
+        let other = op_at(3, &sid, t + 5, P::MemberRemoved { peer_id: id(2) });
+        let owners = op_at(1, &sid, t + 6, P::MemberRemoved { peer_id: id(1) });
+        s.ingest_remote(&[stranger.clone(), other.clone(), owners.clone()]);
+        assert!(s.is_member(&id(2)) && s.is_member(&id(3)) && s.is_member(&id(1)), "a removal that is no listed member's own leave took effect");
+        assert!(!holds(&s, &stranger) && !holds(&s, &other) && !holds(&s, &owners) && s.late_leaves.is_empty());
+
+        // A span with no exact opening clock (seeded, or older than 0.13) proves nothing
+        // about when it opened.
+        let (_, history, _, mut seeded, leave, _) = behind_a_checkpoint_with_history();
+        seeded.ingest_remote(&history);
+        let mut base: ServerState = serde_json::from_str(&seeded.checkpoint_json(&id(1), &[], t + 11).unwrap()).unwrap();
+        let span = base.member_record.get_mut(&id(2)).unwrap().last_mut().unwrap();
+        span.from_hlc = None;
+        span.admitted.clear();
+        seeded.author_checked(P::ServerRenamed { new_name: "again".into() }).unwrap();
+        let covers = seeded.horizon();
+        let checkpoint = op_at(1, &sid, covers.physical_ms + 1, P::ServerCheckpoint { state: serde_json::to_string(&base).unwrap(), covers });
+        let mut replica = joiner(&sid, 9);
+        replica.ingest_remote(&[history[0].clone(), checkpoint]);
+        assert!(replica.is_member(&id(2)), "fixture");
+        replica.ingest_remote(std::slice::from_ref(&leave));
+        assert!(replica.is_member(&id(2)), "a leave closed a span with no exact opening clock");
+    }
+
+    /// Replicas holding the same ops agree, whatever order they arrived in.
+    #[test]
+    fn a_late_leave_folds_the_same_in_any_arrival_order() {
+        let (sid, anchor, _, leave, t) = behind_a_checkpoint();
+        let later = op_at(1, &sid, t + 30, P::ServerRenamed { new_name: "later".into() });
+        let leave3 = op_at(3, &sid, t + 6, P::MemberRemoved { peer_id: id(3) });
+        let rejoin = op_at(1, &sid, t + 40, readd(&sid, 3, (t + 40) as i64));
+        let ops = [anchor.clone(), vec![leave.clone(), later, leave3, rejoin]].concat();
+        let view = |s: &ServerState| {
+            let mut log: Vec<(String, HlcTimestamp)> = s.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+            log.sort();
+            let mut members: Vec<String> = s.members.keys().cloned().collect();
+            members.sort();
+            let spans: Vec<(u64, u64)> = [id(2), id(3)].iter().flat_map(|m| s.member_record[m].iter().map(|sp| (sp.from_ms, sp.until_ms))).collect();
+            (log, members, spans)
+        };
+        let mut together = joiner(&sid, 9);
+        together.ingest_remote(&ops);
+        let expected = view(&together);
+        assert!(!expected.1.contains(&id(2)) && expected.1.contains(&id(3)));
+        for order in [vec![0, 1, 2, 3, 4, 5], vec![0, 1, 5, 4, 3, 2], vec![0, 1, 3, 2, 5, 4], vec![2, 4, 0, 1, 5, 3]] {
+            let mut s = joiner(&sid, 9);
+            for i in &order {
+                s.ingest_remote(std::slice::from_ref(&ops[*i]));
+            }
+            assert_eq!(view(&s), expected, "arrival order {order:?} folded differently");
+        }
+    }
+
+    /// The log keeps at most one late leave per member the checkpoint lists: a second
+    /// leave of the same member, or a flood of them, keeps nothing more.
+    #[test]
+    fn late_leaves_are_bounded_by_the_members_a_checkpoint_lists() {
+        let (sid, _, owner, leave, t) = behind_a_checkpoint();
+        let mut s = owner.clone();
+        let mut flood = vec![leave.clone()];
+        for i in 0..50 {
+            flood.push(op_at(2, &sid, t + 6 + i, P::MemberRemoved { peer_id: id(2) }));
+            flood.push(op_at(3, &sid, t + 3 + (i % 5), P::MemberRemoved { peer_id: id(3) }));
+        }
+        s.ingest_remote(&flood);
+        let base = s.checkpoint_hlc.clone().unwrap();
+        let below: Vec<&CrdtOp> = s.op_log.iter().filter(|o| o.hlc < base && !matches!(o.payload, P::ServerCreated { .. })).collect();
+        assert_eq!(below.len(), 2, "one late leave per listed member, got {}", below.len());
+        assert!(s.late_leaves.len() <= s.member_record.len());
+        assert!(!s.is_member(&id(2)) && !s.is_member(&id(3)));
     }
 }

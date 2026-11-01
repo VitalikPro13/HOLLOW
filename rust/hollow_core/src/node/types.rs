@@ -925,6 +925,9 @@ pub(crate) struct PendingJoin {
     pub(crate) from_sibling: bool,
     /// It completes without a toast: the server came from a re-share, not a new join.
     pub(crate) quiet: bool,
+    /// When the sibling sealed the announce that started this join: only a leave of
+    /// ours made after it ends the join on arrival.
+    pub(crate) announced_at: i64,
 }
 
 impl PendingJoin {
