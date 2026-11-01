@@ -2712,8 +2712,8 @@ impl MessageStore {
                    AND op_json NOT LIKE '%\"ServerCreated\"%'",
                 params![first.server_id, base.physical_ms as i64, base.counter as i64],
             );
-            // A member's own leave this batch carries below the base is one the fold kept
-            // (`ServerState::close_late_leaves`).
+            // A member's own leave this batch carries below the base is one the fold kept:
+            // `ServerState::ingest_remote` reports no other with a checkpoint.
             for op in ops.iter().filter(|o| crate::crdt::server_state::is_self_leave(o) && o.hlc < *base) {
                 let _ = self.insert_crdt_op(op);
             }

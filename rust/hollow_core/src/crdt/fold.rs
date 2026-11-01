@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use super::hlc::HlcTimestamp;
 use super::operations::{CrdtOp, CrdtPayload, OpReject};
-use super::server_state::{fold_order, Anchor, MemberSpan, ServerState};
+use super::server_state::{fold_order, is_self_leave, Anchor, MemberSpan, ServerState};
 use super::sync::payload_name;
 
 /// Ops refused only for authority wait here for the admission or role grant they may
@@ -171,9 +171,13 @@ impl ServerState {
     /// clock, so a refused op cannot date our next writes.
     pub fn ingest_remote(&mut self, ops: &[CrdtOp]) -> Ingested {
         let mut out = self.fold_remote(ops);
-        // A late leave the new checkpoint keeps is stored again: storing the checkpoint
-        // drops every row it covers.
-        if out.admitted.iter().any(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. })) {
+        // Storing a checkpoint drops every row it covers and stores again the self-leaves
+        // below it the batch carries: exactly the late leaves the new checkpoint keeps.
+        if out.admitted.iter().any(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. }))
+            && let Some(base) = self.checkpoint_hlc.clone()
+        {
+            let genesis = super::anchor::is_genesis_id(&self.server_id);
+            out.admitted.retain(|o| !is_self_leave(o) || self.retains(o, &base, genesis));
             for (author, hlc) in &self.late_leaves {
                 if !out.admitted.iter().any(|o| o.author == *author && o.hlc == *hlc)
                     && let Some(op) = self.op_log.iter().find(|o| o.author == *author && o.hlc == *hlc)
@@ -261,9 +265,14 @@ impl ServerState {
         if self.standing_folded || self.anchor() == Anchor::Legacy || self.op_log.is_empty() {
             return false;
         }
-        let _ = self.fold_in(Vec::new(), Ingested::default());
+        self.refold();
         self.standing_folded = true;
         true
+    }
+
+    /// Rebuild the materialized state from the log as it stands.
+    pub(super) fn refold(&mut self) {
+        let _ = self.fold_in(Vec::new(), Ingested::default());
     }
 
     /// Server id, author signature and clock bound: everything that does not depend on
@@ -326,14 +335,19 @@ impl ServerState {
         let mut refused = Vec::new();
         for op in candidates {
             if self.op_allowed(&op) {
-                self.apply_payload(&op);
-                // A member's own leave refused at its place (the admission it rests on is
-                // history this checkpoint overwrote) is judged against the checkpoint.
-                if let CrdtPayload::ServerCheckpoint { covers, .. } = &op.payload {
-                    for late in self.close_late_leaves(&refused, covers) {
-                        refused.retain(|r| !(r.author == late.author && r.hlc == late.hlc));
-                        self.log_admitted(late);
+                if matches!(op.payload, CrdtPayload::ServerCheckpoint { .. }) {
+                    // A member's own leave refused at its place (the admission it rests on
+                    // is history this checkpoint overwrote) is judged against it too.
+                    let late = self.apply_checkpoint(&op, &refused);
+                    if !late.is_empty() {
+                        let keys: HashSet<(&str, &HlcTimestamp)> = late.iter().map(|o| (o.author.as_str(), &o.hlc)).collect();
+                        refused.retain(|r| !keys.contains(&(r.author.as_str(), &r.hlc)));
                     }
+                    for op in late {
+                        self.log_admitted(op);
+                    }
+                } else {
+                    self.apply_payload(&op);
                 }
                 self.log_admitted(op);
             } else {
@@ -1061,8 +1075,9 @@ mod tests {
         assert!(!owner.is_member(&id(2)));
     }
 
-    /// A rejoin admitted after the leave still wins: after the checkpoint, in the same
-    /// fold before it, or recorded in the span the checkpoint lists.
+    /// A rejoin admitted after the leave still wins after the checkpoint or recorded in
+    /// the span the checkpoint lists; one before the checkpoint that it never folded
+    /// loses, as everything a checkpoint's author never saw.
     #[test]
     fn a_rejoin_after_the_late_leave_still_wins() {
         let (sid, anchor, owner, leave, t) = behind_a_checkpoint();
@@ -1072,12 +1087,13 @@ mod tests {
         after.ingest_remote(std::slice::from_ref(&leave));
         assert!(after.is_member(&id(2)), "a rejoin after the checkpoint lost to an older leave");
 
-        // Before the checkpoint, in the batch that brings the leave.
+        // Before the checkpoint, in the batch that brings the leave: the checkpoint never
+        // folded it, so it is history the checkpoint overwrote.
         let mut replica = joiner(&sid, 9);
         replica.ingest_remote(&anchor);
         replica.ingest_remote(&[leave.clone(), op_at(1, &sid, t + 7, readd(&sid, 2, (t + 7) as i64))]);
-        assert!(replica.is_member(&id(2)), "a rejoin folded with the leave lost to it");
-        assert!(!holds(&replica, &leave));
+        assert!(!replica.is_member(&id(2)), "a rejoin the checkpoint never folded beat the late leave");
+        assert!(holds(&replica, &leave));
 
         // Recorded in the span: another admitter took 2 in again after the leave.
         let t2 = t;
@@ -1197,5 +1213,278 @@ mod tests {
         assert_eq!(below.len(), 2, "one late leave per listed member, got {}", below.len());
         assert!(s.late_leaves.len() <= s.member_record.len());
         assert!(!s.is_member(&id(2)) && !s.is_member(&id(3)));
+    }
+
+    /// Production saves `lean_snapshot()`, which carries no `late_leaves`: a restart
+    /// judges the stored late leave again, so the next rebuild keeps the leaver out.
+    #[test]
+    fn late_leave_survives_a_lean_snapshot_restart() {
+        let (sid, _, _, mut owner, leave, t) = behind_a_checkpoint_with_history();
+        owner.ingest_remote(&[op_at(1, &sid, t + 40, P::ServerRenamed { new_name: "tail".into() })]);
+        owner.ingest_remote(std::slice::from_ref(&leave));
+        assert!(!owner.is_member(&id(2)) && holds(&owner, &leave), "fixture");
+        // What CrdtStore writes, and the rows the DB hands back on start.
+        let json = serde_json::to_string(&owner.lean_snapshot()).unwrap();
+        let mut restarted: ServerState = serde_json::from_str(&json).unwrap();
+        restarted.restore_op_log(owner.op_log.clone());
+        let base = restarted.checkpoint_hlc.clone().unwrap();
+        let ours = crate::crdt::digest::entries(&restarted, &[], Some(&base)).len();
+        let theirs = crate::crdt::digest::entries(&owner, &[], Some(&base)).len();
+        // Any op older than the tail rebuilds from the checkpoint.
+        restarted.ingest_remote(&[op_at(1, &sid, t + 20, P::ServerRenamed { new_name: "mid".into() })]);
+        assert!(!restarted.is_member(&id(2)), "a rebuild after a restart counts the leaver again");
+        assert!(holds(&restarted, &leave), "a restart dropped the late leave from the log");
+        assert_eq!(ours, theirs, "a restarted replica fingerprints a different op set");
+    }
+
+    /// The verdict on a late leave never depends on which batch a rejoin the checkpoint
+    /// never saw rode in.
+    #[test]
+    fn late_leave_and_unseen_rejoin_fold_the_same_in_either_order() {
+        let (sid, anchor, _, leave, t) = behind_a_checkpoint();
+        let rejoin = op_at(3, &sid, t + 7, readd(&sid, 2, (t + 7) as i64));
+        let mut leave_first = joiner(&sid, 9);
+        leave_first.ingest_remote(&anchor);
+        leave_first.ingest_remote(std::slice::from_ref(&leave));
+        leave_first.ingest_remote(std::slice::from_ref(&rejoin));
+        let mut rejoin_first = joiner(&sid, 8);
+        rejoin_first.ingest_remote(&anchor);
+        rejoin_first.ingest_remote(std::slice::from_ref(&rejoin));
+        rejoin_first.ingest_remote(std::slice::from_ref(&leave));
+        assert_eq!(
+            (leave_first.is_member(&id(2)), holds(&leave_first, &leave)),
+            (rejoin_first.is_member(&id(2)), holds(&rejoin_first, &leave)),
+            "two replicas holding the same ops disagree on 2's membership",
+        );
+    }
+
+    /// A signed `MemberAdded` naming the leaver that the fold refuses (a stranger's, with
+    /// no ask) does not stop a late leave from landing.
+    #[test]
+    fn a_refused_admission_does_not_cancel_a_late_leave() {
+        let (sid, anchor, _, leave, t) = behind_a_checkpoint();
+        let junk = op_at(4, &sid, t + 6, P::MemberAdded { peer_id: id(2), display_name: "m".into(), follow: None, ask: None });
+        let mut s = joiner(&sid, 9);
+        s.ingest_remote(&anchor);
+        s.ingest_remote(&[leave.clone(), junk]);
+        assert!(!s.is_member(&id(2)), "a stranger's refused admission kept the leaver a member");
+    }
+
+    /// A batch carrying history plus the checkpoint reports as admitted only the
+    /// self-leaves below the base the log keeps, so the store re-inserts only those.
+    #[test]
+    fn store_reinserts_only_leaves_the_fold_kept() {
+        let t = crate::crdt::hlc::wall_clock_ms() - 3 * 3_600_000;
+        let sid = crate::crdt::anchor::derive_server_id(&id(1), "n");
+        let created = op_at(1, &sid, t, P::ServerCreated { name: "S".into(), owner_peer_id: id(1), nonce: "n".into() });
+        let gone = op_at(3, &sid, t + 5, P::MemberRemoved { peer_id: id(3) });
+        let history = vec![
+            created,
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, add(&sid, 3)),
+            gone.clone(),
+            op_at(1, &sid, t + 10, P::ServerRenamed { new_name: "moved on".into() }),
+        ];
+        let mut owner = joiner(&sid, 1);
+        owner.ingest_remote(&history);
+        let covers = owner.horizon();
+        let json = owner.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
+        let checkpoint = owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
+        let mut late = joiner(&sid, 9);
+        let out = late.ingest_remote(&[history, vec![checkpoint]].concat());
+        assert!(!holds(&late, &gone), "fixture: the checkpoint reflects 3's leave");
+        let store = crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+        store.persist_admitted_ops(&out.admitted, late.checkpoint_hlc.as_ref());
+        let stored = store.load_ops_for_server(&sid, None).unwrap();
+        assert!(
+            !stored.iter().any(|o| o.author == gone.author && o.hlc == gone.hlc),
+            "the store kept a leave the fold dropped",
+        );
+    }
+
+    /// A batch of junk a checkpoint covers costs about what the same junk above it does,
+    /// never quadratic time on the event loop.
+    #[test]
+    fn refused_junk_below_a_checkpoint_costs_linear_time() {
+        let (sid, anchor, _, _, t) = behind_a_checkpoint();
+        let junk = |base: u64| -> Vec<CrdtOp> {
+            (0..20_000u64).map(|i| {
+                let (kp, id, pk) = keys(4);
+                let mut op = CrdtOp {
+                    server_id: sid.clone(),
+                    hlc: HlcTimestamp { physical_ms: base, counter: i as u32, actor: id.clone() },
+                    author: id,
+                    payload: P::ServerRenamed { new_name: "x".into() },
+                    auth: None,
+                };
+                op.sign(&kp, &pk);
+                op
+            }).collect()
+        };
+        let time = |ops: &[CrdtOp]| {
+            let mut s = joiner(&sid, 9);
+            s.ingest_remote(&anchor);
+            let at = std::time::Instant::now();
+            s.ingest_remote(ops);
+            at.elapsed()
+        };
+        let below = time(&junk(t + 6));
+        let above = time(&junk(t + 60));
+        assert!(below < above * 3, "junk below a checkpoint costs {below:?}, above it {above:?}");
+    }
+
+    /// What a restart restores: the lean snapshot production saves, the rows the store
+    /// keeps of every batch persisted as the node persists it.
+    fn restart_from(s: &ServerState, store: &crate::storage::MessageStore) -> ServerState {
+        let mut r: ServerState = serde_json::from_str(&serde_json::to_string(&s.lean_snapshot()).unwrap()).unwrap();
+        r.restore_op_log(store.load_ops_for_server(&s.server_id, None).unwrap());
+        r
+    }
+
+    fn ingest_and_store(s: &mut ServerState, store: &crate::storage::MessageStore, ops: &[CrdtOp]) {
+        let out = s.ingest_remote(ops);
+        store.persist_admitted_ops(&out.admitted, s.checkpoint_hlc.as_ref());
+    }
+
+    type FoldView = (Vec<String>, Vec<(u64, u64)>, Vec<(String, HlcTimestamp)>, Vec<(String, HlcTimestamp)>);
+
+    /// Membership, spans, the log and the digest a replica's peers see.
+    fn fold_view(s: &ServerState) -> FoldView {
+        let mut members: Vec<String> = s.members.keys().cloned().collect();
+        members.sort();
+        let spans = [id(2), id(3)].iter().flat_map(|m| s.member_record[m].iter().map(|sp| (sp.from_ms, sp.until_ms))).collect();
+        let mut log: Vec<(String, HlcTimestamp)> = s.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+        log.sort();
+        let digest = crate::crdt::digest::entries(s, &[], s.checkpoint_hlc.as_ref())
+            .iter()
+            .filter_map(|e| match e.item {
+                crate::crdt::digest::Item::Op(o) => Some((o.author.clone(), o.hlc.clone())),
+                crate::crdt::digest::Item::Raw(_) => None,
+            })
+            .collect();
+        (members, spans, log, digest)
+    }
+
+    /// A late leave survives the real save path (lean snapshot + `persist_admitted_ops` +
+    /// `restore_op_log`), whether it came after the checkpoint or before it, and a
+    /// rebuild after the restart still keeps the leaver out.
+    #[test]
+    fn a_late_leave_survives_the_production_save_path() {
+        let (sid, history, anchor, _, leave, t) = behind_a_checkpoint_with_history();
+        let mid = op_at(1, &sid, t + 20, P::ServerRenamed { new_name: "mid".into() });
+        let tail = op_at(1, &sid, t + 40, P::ServerRenamed { new_name: "tail".into() });
+        // The leave after the checkpoint, and the leave first with the checkpoint after.
+        for batches in [vec![anchor.clone(), vec![tail.clone()], vec![leave.clone()]], vec![history.clone(), vec![leave.clone()], anchor[1..].to_vec(), vec![tail.clone()]]] {
+            let store = crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+            let mut live = joiner(&sid, 9);
+            for batch in &batches {
+                ingest_and_store(&mut live, &store, batch);
+            }
+            assert!(!live.is_member(&id(2)) && holds(&live, &leave), "fixture");
+            let mut restarted = restart_from(&live, &store);
+            assert_eq!(fold_view(&restarted), fold_view(&live), "a restart folds a different state or digest");
+            ingest_and_store(&mut live, &store, std::slice::from_ref(&mid));
+            ingest_and_store(&mut restarted, &store, std::slice::from_ref(&mid));
+            assert!(!restarted.is_member(&id(2)) && holds(&restarted, &leave), "a rebuild after a restart counts the leaver again");
+            assert_eq!(fold_view(&restarted), fold_view(&live));
+            assert_eq!(fold_view(&restart_from(&restarted, &store)), fold_view(&live), "a second restart drifted");
+        }
+    }
+
+    /// Late leaves count in the digest only under the checkpoint that judged them: a
+    /// replica still on an older checkpoint never offers one to a peer whose newer
+    /// checkpoint reflects it (the peer would drop it and be offered it again), and once
+    /// it takes the newer checkpoint the two stop asking.
+    #[test]
+    fn replicas_on_different_checkpoints_do_not_trade_a_late_leave() {
+        use crate::crdt::digest::{answer, entries, first_ask, new_salt, Item};
+        let (sid, anchor, mut owner, leave, _) = behind_a_checkpoint();
+        let mut behind = joiner(&sid, 9);
+        behind.ingest_remote(&[anchor.clone(), vec![leave.clone()]].concat());
+        owner.ingest_remote(std::slice::from_ref(&leave));
+        owner.author_checked(P::ServerRenamed { new_name: "again".into() }).unwrap();
+        let covers = owner.horizon();
+        let json = owner.checkpoint_json(&id(1), &[], crate::crdt::hlc::wall_clock_ms()).unwrap();
+        owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
+        assert!(holds(&behind, &leave) && !holds(&owner, &leave), "fixture");
+        let exchange = |asker: &mut ServerState, answerer: &ServerState| -> Vec<CrdtOp> {
+            let base = asker.checkpoint_hlc.clone();
+            let ask = first_ask(&entries(asker, &[], base.as_ref()), 1, new_salt(), base.clone());
+            let (items, _) = answer(&entries(answerer, &[], base.as_ref()), &ask).unwrap();
+            let ops: Vec<CrdtOp> = items.iter().filter_map(|i| match i { Item::Op(o) => Some((*o).clone()), Item::Raw(_) => None }).collect();
+            asker.ingest_remote(&ops);
+            ops
+        };
+        for _ in 0..2 {
+            let sent = exchange(&mut owner, &behind);
+            assert!(sent.iter().all(|o| holds(&owner, o)), "a replica on an older checkpoint offered an op the asker drops");
+        }
+        exchange(&mut behind, &owner);
+        assert_eq!(behind.checkpoint_hlc, owner.checkpoint_hlc, "fixture: the replica takes the newer checkpoint");
+        let salt = new_salt();
+        let base = owner.checkpoint_hlc.clone();
+        let print = |s: &ServerState| first_ask(&entries(s, &[], base.as_ref()), 1, salt.clone(), base.clone()).ranges;
+        assert_eq!(print(&behind), print(&owner), "two replicas holding the same ops keep asking");
+    }
+
+    /// Two leaves of one member that the checkpoint both covers: the earlier one ends the
+    /// span, whether the replica admitted the later one at its place (it held the history
+    /// of a kick and a rejoin the owner never saw) or started from the anchor.
+    #[test]
+    fn two_late_leaves_of_one_member_fold_the_same_from_history_or_anchor() {
+        let t = crate::crdt::hlc::wall_clock_ms() - 3 * 3_600_000;
+        let sid = crate::crdt::anchor::derive_server_id(&id(1), "n");
+        let created = op_at(1, &sid, t, P::ServerCreated { name: "S".into(), owner_peer_id: id(1), nonce: "n".into() });
+        let seen = vec![
+            created.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, add(&sid, 3)),
+            op_at(1, &sid, t + 3, P::RoleChanged { peer_id: id(3), role: MemberRole::Admin, priority: 3 }),
+            op_at(1, &sid, t + 20, P::ServerRenamed { new_name: "moved on".into() }),
+        ];
+        let mut owner = joiner(&sid, 1);
+        owner.ingest_remote(&seen);
+        let covers = owner.horizon();
+        let json = owner.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
+        let checkpoint = owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
+        let first = op_at(2, &sid, t + 6, P::MemberRemoved { peer_id: id(2) });
+        let unseen = vec![
+            op_at(3, &sid, t + 4, P::MemberRemoved { peer_id: id(2) }),
+            first.clone(),
+            op_at(3, &sid, t + 7, readd(&sid, 2, (t + 7) as i64)),
+            op_at(2, &sid, t + 8, P::MemberRemoved { peer_id: id(2) }),
+        ];
+        let late_nick = op_at(1, &sid, t + 5, P::NicknameChanged { peer_id: id(1), nickname: "o".into() });
+
+        let mut history = joiner(&sid, 9);
+        for op in seen[..4].iter().chain(&unseen) {
+            history.ingest_remote(std::slice::from_ref(op));
+        }
+        assert!(holds(&history, &unseen[3]) && !holds(&history, &first), "fixture: the later leave was admitted, the earlier refused");
+        history.ingest_remote(&[late_nick.clone(), checkpoint.clone()]);
+
+        let mut anchored = joiner(&sid, 8);
+        anchored.ingest_remote(&[created, checkpoint]);
+        anchored.ingest_remote(&[unseen.clone(), vec![late_nick]].concat());
+
+        for s in [&history, &anchored] {
+            assert!(!s.is_member(&id(2)) && holds(s, &first), "the earlier late leave does not end the span");
+            assert_eq!(s.member_record[&id(2)].last().unwrap().until_ms, t + 6);
+        }
+        assert_eq!(fold_view(&history), fold_view(&anchored), "the history a replica held decided the verdict");
+    }
+
+    /// `late_leaves` is derived by the fold alone: never written into a saved or sent
+    /// state, and a peer's JSON naming one is not believed.
+    #[test]
+    fn late_leaves_are_never_stored_or_read_from_a_peer() {
+        let (_, _, mut owner, leave, _) = behind_a_checkpoint();
+        owner.ingest_remote(std::slice::from_ref(&leave));
+        assert!(!owner.late_leaves.is_empty(), "fixture");
+        let mut json: serde_json::Value = serde_json::to_value(&owner).unwrap();
+        assert!(json.get("late_leaves").is_none(), "a saved state carries late leaves");
+        json["late_leaves"] = serde_json::to_value(vec![(id(4), leave.hlc.clone())]).unwrap();
+        let read: ServerState = serde_json::from_value(json).unwrap();
+        assert!(read.late_leaves.is_empty(), "a peer's state named a late leave and was believed");
     }
 }
