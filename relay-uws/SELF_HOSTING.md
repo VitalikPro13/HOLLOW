@@ -193,12 +193,14 @@ the programs yourself.
    Docker setup always runs it. See [Push](#push-notifications-on-phones).
 8. **Media forwarder for screen shares**, recommended yes. See
    [The media forwarder](#the-media-forwarder).
-9. **Who may connect.** Open to anyone with the address (recommended), or
-   members-only with keys. See [Members-only relay](#members-only-relay).
-10. **The public stats page**, recommended on. See [Public stats](#public-stats).
-11. **Waiting for dropped connections**, 120 seconds unless you change it. See
+9. **Sharing the upload fairly**, recommended on, and then the upload speed to
+   share it under. See [Fair share of the upload](#fair-share-of-the-upload).
+10. **Who may connect.** Open to anyone with the address (recommended), or
+    members-only with keys. See [Members-only relay](#members-only-relay).
+11. **The public stats page**, recommended on. See [Public stats](#public-stats).
+12. **Waiting for dropped connections**, 120 seconds unless you change it. See
     [Dropped connections](#dropped-connections).
-12. **Log in with a key instead of a password**, recommended yes. See
+13. **Log in with a key instead of a password**, recommended yes. See
     [SSH keys](#ssh-keys).
 
 For a domain you own, the setup checks that the name points at your server
@@ -221,6 +223,8 @@ setup changes on the machine. Say yes and it starts.
 - **The clock** stays synchronised. Logins to the relay carry a signed timestamp
   with a 60 second window, so a wrong clock fails every login.
 - **The TURN port lock**, when TURN is on. See [TURN](#turn-for-calls).
+- **CAKE on the upload**, unless you turn it off. See
+  [Fair share of the upload](#fair-share-of-the-upload).
 - **fail2ban and automatic security updates** are installed and turned on. A
   fresh Debian installs the updater but never runs it, so the setup switches it
   on there.
@@ -442,6 +446,7 @@ nano .env
 | `SESSION_GRACE_SECS` | Optional, 30 to 600. Empty means 120. See [Dropped connections](#dropped-connections). |
 | `HOLLOW_CONN_RATE_EXEMPT` | Optional, best left empty. See [Connection limit](#connection-limit). |
 | `PUBLIC_STATS` | Optional. `off` hides the online count and the traffic figures. See [Public stats](#public-stats). |
+| `HOLLOW_CAKE`, `HOLLOW_CAKE_MBIT` | `on` and the bandwidth of the host's CAKE queue, which the stats page shows. See [Fair share of the upload](#fair-share-of-the-upload). |
 | `HOLLOW_SEND_BUDGET_BYTES` | Optional, best left empty. See [Send budget](#send-budget). |
 | `CERTBOT_STAGING` | Troubleshooting. `1` uses the Let's Encrypt staging service, see [Troubleshooting](#troubleshooting). |
 
@@ -749,6 +754,38 @@ The relay tells the apps it has TURN when `TURN_SECRET` is set. A secret with no
 coturn running is the one combination to avoid, because the app would then hand
 out credentials for a server that isn't there. The setup always keeps the two
 together.
+
+### Fair share of the upload
+
+When the server's upload is full, one person pulling a large file or watching a
+busy screen share can slow everyone else down. So the setup puts CAKE, a queue
+built into the Linux kernel, on the network card the default route leaves
+through. Once the upload is full, CAKE gives every address the relay sends to an
+equal share. While the line has room, it holds nobody back.
+
+CAKE can only share when it is the slowest point on the way out, so it runs a
+little under the line's real speed. The setup suggests 90 percent of the speed
+the card reports, or 900 Mbit/s when the card reports none, which is common on
+virtual servers. If you measured your upload, or your provider sells you less,
+use 90 percent of that figure; behind a home router, the figure is your
+internet upload speed. Too high a number does no harm, but then CAKE never
+shares anything. Too low a number slows the relay down for everyone.
+
+Turn it off only when something in front of the server already shares the line
+fairly, such as your provider or a router of your own. The host checks then
+report it as off by your choice.
+
+Some cloud kernels leave CAKE out. The setup says so and carries on without it,
+and the host checks fail until it is there. On Ubuntu,
+`sudo apt install linux-modules-extra-$(uname -r)` adds it. Then run
+`sudo hollow-relay-setup` again.
+
+By hand, the settings go in `/etc/hollow-relay/cake.env`, a file only root
+reads, and the top of `deploy/hollow-cake.service` shows how to install it. The
+relay reads the same file and shows the number on its stats page as
+`bandwidth_cap_mbps`. Under Docker, CAKE still sits on the host, never in a
+container. Install the unit on the host, then put `HOLLOW_CAKE=on` and the same
+number in `HOLLOW_CAKE_MBIT` in `.env`.
 
 ### Push notifications on phones
 
@@ -1131,6 +1168,17 @@ overwrites that file with zeros and deletes it.
 ## Operator changelog
 
 Notes for people who already run a relay, newest first.
+
+### 0.14
+
+- The setup puts CAKE on the server's upload, so a full line is shared fairly
+  between the addresses the relay sends to. On a relay the setup put up before,
+  choose it under **Change a setting**. Until then the host checks fail.
+  See [Fair share of the upload](#fair-share-of-the-upload).
+- Ask the people who use your relay to update their apps to 0.14 when you update
+  the relay. A 0.14 relay passes a request to join a locked server to only three
+  members, and the 0.13 app often leaves it unanswered, so joins stay slow until
+  the members have 0.14.
 
 ### 0.13
 

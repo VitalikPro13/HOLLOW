@@ -28,6 +28,13 @@ CERT_HOOK=/etc/letsencrypt/renewal-hooks/deploy/hollow-relay.sh
 CERT_RENEWAL=/etc/letsencrypt/renewal/relay.conf
 CERT_RENEWAL_OFF=/etc/letsencrypt/renewal/relay.conf.hollow-off
 FWD_PORTS="40000:40199"
+# The fair-share shaper (hollow-cake.service); its settings sit beside the
+# relay's because the relay reads them too.
+CAKE_UNIT=hollow-cake.service
+CAKE_ENV=$RELAY_ETC/cake.env
+CAKE_MODLOAD=/etc/modules-load.d/hollow-cake.conf
+SYS_NET=/sys/class/net
+SYS_MODULE=/sys/module
 
 # What the prebuilt programs and the feed check need at run time, proven on
 # bare Ubuntu 22.04 and 24.04 and Debian 12 and 13 images.
@@ -539,7 +546,8 @@ setup_paths_plain() {
 # release_feed.sh refuse a release without them (SETUP_NEEDS, sourced_libs).
 setup_needs() {
     printf '%s\n' install.sh deploy/lib/release_feed.sh push-sidecar/package-lock.json push-sidecar/package.json \
-        deploy/coturn-port-lock.conf deploy/hollow-turn-port-lock-refresh.service deploy/hollow-turn-port-lock-refresh.timer deploy/hollow-turn-port-lock.service deploy/turn-port-lock.sh
+        deploy/coturn-port-lock.conf deploy/hollow-turn-port-lock-refresh.service deploy/hollow-turn-port-lock-refresh.timer deploy/hollow-turn-port-lock.service deploy/turn-port-lock.sh \
+        deploy/hollow-cake.service
     sed -n 's|^\. "\$DEPLOY/lib/\([A-Za-z0-9_][A-Za-z0-9_]*\)\.sh"$|deploy/lib/\1.sh|p' -- "$1/install.sh" 2>/dev/null
     return 0
 }
@@ -733,7 +741,7 @@ UPDATE_MARK=$STATE_DIR/update_pending
 UPDATE_SNAP=$STATE_DIR/update-snapshot
 # What an update's settings run may rewrite.
 UPDATE_SNAP_PATHS="$RELAY_ETC $TURN_ETC $PUSH_ETC $FWD_ETC $DDNS_ETC $PUSH_DIR $CERT_HOOK
-/usr/local/sbin/hollow-turn-port-lock $UNIT_DIR/hollow-coturn.service.d"
+/usr/local/sbin/hollow-turn-port-lock $UNIT_DIR/hollow-coturn.service.d $CAKE_MODLOAD"
 
 update_pending() { [ -f "$UPDATE_MARK" ]; }
 
@@ -1263,6 +1271,156 @@ lock_state() {
     esac
 }
 
+# ---------------------------------------------------------------- the fair-share shaper
+
+# CAKE on the uplink gives every host this machine sends to an equal share of
+# the upload once it is full (AR-01). Only a shaper that is the bottleneck
+# shares anything, so it runs under the line's real speed. A setup from before
+# the question (CFG_CAKE empty) leaves the machine as it is.
+
+# The device the default route leaves through, IPv4 first.
+default_route_dev() {
+    local fam dev
+    for fam in -4 -6; do
+        dev=$(ip -o "$fam" route show default 2>/dev/null |
+            awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+        if [ -n "$dev" ]; then printf '%s' "$dev"; return 0; fi
+    done
+    return 0
+}
+
+# A device name the kernel allows, of a device this machine has. It lands in
+# tc's arguments.
+is_cake_dev() { [[ "$1" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] && [ "$1" != . ] && [ "$1" != .. ] && [ -e "$SYS_NET/$1" ]; }
+is_cake_mbit() { [[ "$1" =~ ^[1-9][0-9]{0,5}$ ]] && [ "$1" -le 100000 ]; }
+
+# The operator's device while it exists, else the default route's.
+cake_dev() {
+    if [ -n "${CFG_CAKE_DEV:-}" ] && is_cake_dev "$CFG_CAKE_DEV"; then printf '%s' "$CFG_CAKE_DEV"
+    else default_route_dev; fi
+}
+
+# The speed the kernel reports for <dev> in Mbit/s, when it is a real one:
+# virtual cards often report none.
+line_speed_mbit() {
+    local s
+    s=$(cat "$SYS_NET/$1/speed" 2>/dev/null) || return 0
+    if [[ "$s" =~ ^[0-9]{2,6}$ ]] && [ "$s" -le 800000 ]; then printf '%s' "$s"; fi
+    return 0
+}
+
+# 90 percent of the line, else 90 percent of the 1 Gbit/s port most servers have.
+cake_default_mbit() {
+    local s
+    s=$(line_speed_mbit "$1")
+    if [ -n "$s" ]; then echo $((s * 9 / 10)); else echo 900; fi
+}
+
+# render_cake_env <device>
+render_cake_env() {
+    echo "# Written by install.sh: what hollow-cake.service shapes, which the relay reads too. Not secret."
+    if [ "${CFG_CAKE:-}" = on ]; then
+        printf 'HOLLOW_CAKE=on\nHOLLOW_CAKE_DEV=%s\nHOLLOW_CAKE_MBIT=%s\n' "$1" "$CFG_CAKE_MBIT"
+    else
+        echo "HOLLOW_CAKE=off"
+    fi
+}
+
+cake_text() {
+    case "${CFG_CAKE:-}" in
+    on) echo "on, ${CFG_CAKE_MBIT:-?} Mbit/s" ;;
+    off) echo "off" ;;
+    *) echo "not chosen yet. Change a setting to choose" ;;
+    esac
+}
+
+# Whether this kernel has CAKE: loaded already (a container sees its host's),
+# or a module modprobe can load.
+cake_kernel_ready() { [ -d "$SYS_MODULE/sch_cake" ] || modprobe -n -q sch_cake 2>/dev/null; }
+
+cake_settings_put() {
+    [ -d "$RELAY_ETC" ] || ensure_dir "$RELAY_ETC" 0700 root root
+    render_cake_env "$1" | put_file "$CAKE_ENV" 0600 root root
+    if [ "$PUT_CHANGED" = 1 ]; then mark_restart hollow-relay; fi
+    return 0
+}
+
+# A kernel without CAKE or a shaper that does not start never stops the
+# setup: everything else still runs, and check-host fails until it is fixed.
+cake_apply() {
+    case "${CFG_CAKE:-}" in
+    on) ;;
+    off) cake_remove; cake_settings_put ""; return 0 ;;
+    *) return 0 ;;
+    esac
+    local dev old changed=0 stopped=0 ready=0 rc=0
+    step "Sharing the upload fairly (CAKE)"
+    dev=$(cake_dev)
+    if [ -z "$dev" ]; then
+        warn "this machine has no default route, so I cannot tell which device carries the upload, and it is not shared fairly. Run the setup again once the network is up."
+        return 0
+    fi
+    apt_install iproute2 || warn "iproute2, which holds tc, could not be installed."
+    old=$(kv_get "$CAKE_ENV" HOLLOW_CAKE_DEV)
+    # Another device: the old one's queue goes with the settings that made it.
+    if [ -n "$old" ] && [ "$old" != "$dev" ] && unit_active "$CAKE_UNIT"; then
+        run_ok systemctl stop "$CAKE_UNIT"
+        stopped=1
+    fi
+    cake_settings_put "$dev"
+    [ "$PUT_CHANGED" = 1 ] && changed=1
+    put_file "$UNIT_DIR/$CAKE_UNIT" 0644 root root <"$DEPLOY/$CAKE_UNIT"
+    [ "$PUT_CHANGED" = 1 ] && changed=1
+    if cake_kernel_ready; then
+        ready=1
+        echo sch_cake | put_file "$CAKE_MODLOAD" 0644 root root
+        run_ok modprobe -q sch_cake
+    fi
+    run systemctl daemon-reload
+    run systemctl enable --quiet "$CAKE_UNIT"
+    if [ "$changed" = 1 ] && [ "$stopped" = 0 ] && unit_active "$CAKE_UNIT"; then
+        run systemctl reload "$CAKE_UNIT" || rc=1
+    else
+        run systemctl start "$CAKE_UNIT" || rc=1
+    fi
+    if [ "$rc" = 0 ]; then
+        say "  the upload is shared fairly between the hosts this machine sends to, at $CFG_CAKE_MBIT Mbit/s on $dev"
+    elif [ "$ready" = 0 ]; then
+        warn "this machine's kernel has no CAKE (the sch_cake module), so the upload is not shared fairly yet. On Ubuntu, sudo apt install linux-modules-extra-$(uname -r) adds it. Then run sudo hollow-relay-setup again. Everything else is set up, and check-host shows a FAIL line until then."
+    else
+        warn "the fair-share shaper did not start, so the upload is not shared fairly yet. See: journalctl -u $CAKE_UNIT"
+    fi
+    return 0
+}
+
+# The shaper, its unit and its module line gone, and with them the queue it
+# put on its device. Its settings are the caller's to rewrite or remove.
+cake_remove() {
+    local dev removed=0
+    dev=$(kv_get "$CAKE_ENV" HOLLOW_CAKE_DEV)
+    if unit_exists "$CAKE_UNIT"; then run_ok systemctl disable --now "$CAKE_UNIT"; fi
+    # Also when its unit had failed. Another root queue is the operator's.
+    if [ -n "$dev" ]; then
+        case "$(tc qdisc show dev "$dev" root 2>/dev/null)" in
+        "qdisc cake "*) run_ok tc qdisc del dev "$dev" root ;;
+        esac
+    fi
+    if [ -e "$UNIT_DIR/$CAKE_UNIT" ]; then run rm -f "$UNIT_DIR/$CAKE_UNIT"; removed=1; fi
+    if [ -e "$CAKE_MODLOAD" ]; then run rm -f "$CAKE_MODLOAD"; fi
+    if [ "$removed" = 1 ]; then run systemctl daemon-reload; fi
+    return 0
+}
+
+# For the status screen.
+cake_state() {
+    [ "${CFG_CAKE:-}" = on ] || { cake_text; return 0; }
+    case "$(systemctl is-active "$CAKE_UNIT" 2>/dev/null)" in
+    active) echo "on, $CFG_CAKE_MBIT Mbit/s on $(kv_get "$CAKE_ENV" HOLLOW_CAKE_DEV)" ;;
+    failed) echo "FAILED (journalctl -u $CAKE_UNIT)" ;;
+    *) echo "not in place (journalctl -u $CAKE_UNIT says why)" ;;
+    esac
+}
+
 node_install() {
     local v
     v=$(node --version 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p' || true)
@@ -1481,6 +1639,7 @@ native_apply() {
     relay_settings
     adopt_step stage
     turn_apply
+    cake_apply
     push_apply
     forwarder_apply
     adopt_step forwarder
@@ -1512,6 +1671,7 @@ native_uninstall() {
         run rm -f "$UNIT_DIR/$u" "$UNIT_DIR/$u.service"
     done
     turn_lock_remove
+    cake_remove
     run systemctl daemon-reload
     # After the stop, so no service process can swap a file for a link.
     if [ "$keep" = yes ]; then

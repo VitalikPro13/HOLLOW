@@ -46,6 +46,20 @@ inline nlohmann::json breaker_block(const breaker::Stats& st, bool enforced, siz
             {"cooling_devices", cooling_devices}};
 }
 
+// /server-stats' bandwidth_cap_mbps from the fair-share shaper's settings, HOLLOW_CAKE and
+// HOLLOW_CAKE_MBIT (deploy/hollow-cake.service): 0, so no field, when the shaper is off or
+// its bandwidth is not a whole number of Mbit/s from 1 to 100000.
+inline int64_t bandwidth_cap_mbps(const char* cake, const char* mbit) {
+    if (cake && strcasecmp(cake, "off") == 0) return 0;
+    if (!mbit || !*mbit) return 0;
+    int64_t v = 0;
+    for (const char* p = mbit; *p; ++p) {
+        if (*p < '0' || *p > '9' || v > 100000) return 0;
+        v = v * 10 + (*p - '0');
+    }
+    return (v >= 1 && v <= 100000) ? v : 0;
+}
+
 // PUBLIC_STATS from the relay's environment, trimmed and in any case: unset, empty, on,
 // true, yes or 1 keep the public activity; off, false, no or 0 turn it off. Anything else
 // turns it off too, with a line saying so: a typo must not leave a relay's activity public.

@@ -60,7 +60,7 @@ fake_elf() {
 SETUP_FILES=(setup/deploy/lib/common.sh setup/deploy/lib/release_feed.sh setup/install.sh setup/push-sidecar/index.js
     setup/push-sidecar/package-lock.json setup/push-sidecar/package.json setup/deploy/turn-port-lock.sh
     setup/deploy/hollow-turn-port-lock.service setup/deploy/hollow-turn-port-lock-refresh.service
-    setup/deploy/hollow-turn-port-lock-refresh.timer setup/deploy/coturn-port-lock.conf)
+    setup/deploy/hollow-turn-port-lock-refresh.timer setup/deploy/coturn-port-lock.conf setup/deploy/hollow-cake.service)
 stage_setup() { # <stage dir>
     local f
     for f in "${SETUP_FILES[@]}"; do
@@ -118,7 +118,8 @@ elf = b"\x7fELF\x02\x01\x01" + b"\x00" * 9 + b"\x03\x00" + bytes.fromhex(machine
 setup = ["setup/deploy/lib/common.sh", "setup/deploy/lib/release_feed.sh", "setup/install.sh", "setup/push-sidecar/index.js",
          "setup/push-sidecar/package-lock.json", "setup/push-sidecar/package.json", "setup/deploy/turn-port-lock.sh",
          "setup/deploy/hollow-turn-port-lock.service", "setup/deploy/hollow-turn-port-lock-refresh.service",
-         "setup/deploy/hollow-turn-port-lock-refresh.timer", "setup/deploy/coturn-port-lock.conf"]
+         "setup/deploy/hollow-turn-port-lock-refresh.timer", "setup/deploy/coturn-port-lock.conf",
+         "setup/deploy/hollow-cake.service"]
 entries = [("VERSION", f"version={version}\nbuild={build}\ncommit={commit}\n".encode(), 0o644),
            ("hollow-forwarder", elf, 0o755), ("hollow-relay", elf, 0o755)]
 entries += [(n, f"# {n}\n".encode(), 0o755 if n.endswith("install.sh") else 0o644) for n in setup]
@@ -288,7 +289,7 @@ expect_ok "a signed feed is accepted, fetched and recorded" "$CHECK_FETCH"' && h
     [ "$FEED_URL" = https://anonlisten.com/hollow/releases/hollow-relay-0.12.2-linux-x86_64.tar.gz ] &&
     [ "$FEED_SIZE" = "$(stat -c %s '"$SRV"'/hollow-relay-0.12.2-linux-x86_64.tar.gz)" ] &&
     [[ $FEED_SHA256 =~ ^[0-9a-f]{64}$ ]]'
-SETUP_LISTING="./setup ./setup/deploy ./setup/deploy/coturn-port-lock.conf ./setup/deploy/hollow-turn-port-lock-refresh.service ./setup/deploy/hollow-turn-port-lock-refresh.timer ./setup/deploy/hollow-turn-port-lock.service ./setup/deploy/lib ./setup/deploy/lib/common.sh ./setup/deploy/lib/release_feed.sh ./setup/deploy/turn-port-lock.sh ./setup/install.sh ./setup/push-sidecar ./setup/push-sidecar/index.js ./setup/push-sidecar/package-lock.json ./setup/push-sidecar/package.json "
+SETUP_LISTING="./setup ./setup/deploy ./setup/deploy/coturn-port-lock.conf ./setup/deploy/hollow-cake.service ./setup/deploy/hollow-turn-port-lock-refresh.service ./setup/deploy/hollow-turn-port-lock-refresh.timer ./setup/deploy/hollow-turn-port-lock.service ./setup/deploy/lib ./setup/deploy/lib/common.sh ./setup/deploy/lib/release_feed.sh ./setup/deploy/turn-port-lock.sh ./setup/install.sh ./setup/push-sidecar ./setup/push-sidecar/index.js ./setup/push-sidecar/package-lock.json ./setup/push-sidecar/package.json "
 if [ "$(cd "$DEST" && find . -mindepth 1 | LC_ALL=C sort | tr '\n' ' ')" = "./VERSION ./hollow-forwarder ./hollow-relay $SETUP_LISTING" ] \
     && [ "$(stat -c %a "$DEST/hollow-relay" "$DEST/hollow-forwarder" "$DEST/VERSION" | tr '\n' ' ')" = "755 755 644 " ] \
     && [ "$(cat "$DEST/VERSION")" = "$(printf 'version=0.12.2\nbuild=0\ncommit=%s' "$COMMIT")" ]; then

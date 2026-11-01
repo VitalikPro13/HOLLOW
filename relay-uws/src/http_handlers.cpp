@@ -6,6 +6,7 @@
 #include "version.h"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -126,7 +127,6 @@ static void handle_server_stats(HttpResponse* res, RelayState& state, const Conf
         {"mem_used_kb", mem_used_kb},
         {"rx_mbps", round2(rx_mbps)},
         {"tx_mbps", round2(tx_mbps)},
-        {"bandwidth_cap_mbps", 950},  // = the CAKE shaper ceiling on this box (measured raw 1047), not the nominal port
         {"online_users", state.online_users()},
         // Delivery diagnostics (non-identifying counters; see DeliveryDiag).
         {"send_backpressure", state.diag.send_backpressure},
@@ -148,6 +148,10 @@ static void handle_server_stats(HttpResponse* res, RelayState& state, const Conf
         {"budget_closed", state.diag.budget_closed}
     };
 
+    // The fair-share shaper's ceiling, from the settings hollow-cake.service reads; a relay
+    // with no shaper names no cap.
+    static const int64_t cap_mbps = server_stats::bandwidth_cap_mbps(getenv("HOLLOW_CAKE"), getenv("HOLLOW_CAKE_MBIT"));
+    if (cap_mbps > 0) resp["bandwidth_cap_mbps"] = cap_mbps;
     server_stats::keep_public(resp, config.public_stats);
     state.stats_cache.cached_json = resp.dump();
     state.stats_cache.fetched_at = now;

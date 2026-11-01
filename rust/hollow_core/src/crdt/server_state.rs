@@ -258,6 +258,10 @@ pub struct MemberSpan {
     /// (`node::standing`). Empty for the founder and seeded or pre-0.13 spans.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub admitted: Vec<(String, HlcTimestamp)>,
+    /// The full clock of the op that closed it: what a rejoin's ask names as the leave it
+    /// follows. `None` while open, and for spans closed before 0.14.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_hlc: Option<HlcTimestamp>,
 }
 
 /// Keep `by`'s earliest admission clock in `span`, one entry per distinct author.
@@ -573,6 +577,7 @@ impl ServerState {
                 asked_at,
                 from_hlc: Some(at.clone()),
                 admitted: Vec::new(),
+                until_hlc: None,
             });
         }
         if let (Some(by), Some(open)) = (by, spans.last_mut()) {
@@ -580,12 +585,13 @@ impl ServerState {
         }
     }
 
-    fn close_span(&mut self, master: &str, at_ms: u64) {
+    fn close_span(&mut self, master: &str, at: &HlcTimestamp) {
         if let Some(open) = self.member_record.get_mut(master)
             .and_then(|spans| spans.last_mut())
             .filter(|s| s.until_ms == u64::MAX)
         {
-            open.until_ms = at_ms.max(open.from_ms);
+            open.until_ms = at.physical_ms.max(open.from_ms);
+            open.until_hlc = Some(at.clone());
         }
     }
 
@@ -601,6 +607,22 @@ impl ServerState {
     /// When `master` last left, if the record shows it gone now.
     pub fn left_at(&self, master: &str) -> Option<u64> {
         self.member_record.get(master)?.last().filter(|s| s.until_ms != u64::MAX).map(|s| s.until_ms)
+    }
+
+    /// The clock of the op that ended `master`'s last membership, if it is gone now.
+    pub fn left_by(&self, master: &str) -> Option<&HlcTimestamp> {
+        self.member_record.get(master)?.last().filter(|s| s.until_ms != u64::MAX)?.until_hlc.as_ref()
+    }
+
+    /// Move our clock past the ask that admitted `master` (our own identity): its leave
+    /// must be stamped later than every ask of that membership, which may sit ahead of
+    /// the wall (`node::sync_handler::ask_stamp`), or its next ask repeats one.
+    pub fn witness_own_ask(&mut self, master: &str) {
+        let Some(at) = self.member_record.get(master).and_then(|s| s.last()).filter(|s| s.until_ms == u64::MAX).map(|s| s.asked_at) else {
+            return;
+        };
+        let (Ok(at), Some(hlc)) = (u64::try_from(at), self.hlc.as_mut()) else { return };
+        hlc.witness(&HlcTimestamp { physical_ms: at, counter: 0, actor: master.to_string() });
     }
 
     /// When `master`'s current membership began, if the record holds an open span.
@@ -1149,7 +1171,7 @@ impl ServerState {
                 if self.members.contains_key(peer_id) {
                     self.join_lock.note_removal(&op.hlc);
                 }
-                self.close_span(peer_id, op.hlc.physical_ms);
+                self.close_span(peer_id, &op.hlc);
                 self.members.remove(peer_id);
                 self.roles.remove(peer_id);
                 self.nicknames.remove(peer_id);
@@ -1340,7 +1362,7 @@ impl ServerState {
                 if self.members.contains_key(peer_id) {
                     self.join_lock.note_removal(&op.hlc);
                 }
-                self.close_span(peer_id, op.hlc.physical_ms);
+                self.close_span(peer_id, &op.hlc);
                 self.members.remove(peer_id);
                 self.roles.remove(peer_id);
                 self.nicknames.remove(peer_id);

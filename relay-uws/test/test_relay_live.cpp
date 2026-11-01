@@ -1199,6 +1199,47 @@ static void test_hidden_channel_copies() {
     check("a hidden socket's is never kept", !got(*t, bin(frame(0x06, {room, h->id.peer}, "hidden-chan"))));
 }
 
+static int64_t plan_w_of(const std::string& peer);
+
+// A guest's JSON `msg` broadcast shares the binary broadcasts' minute.
+static void test_guest_text_msg_counts_against_the_minute() {
+    printf("guest_text_msg_counts_against_the_minute\n");
+    const std::string room = room_name("guest-text");
+    auto m = login(Ident());
+    join(*m, room);
+    auto g = login(Ident(), "guest");
+    join(*g, room);
+    auto g2 = login(Ident(), "guest");
+    join(*g2, room);
+    settle({m.get()});
+    const auto text_from = [](const std::string& from) {
+        return json_where([from](const json& j) { return j.value("type", "") == "msg" && j.value("from", "") == from; });
+    };
+    // The W the breaker judged g's last frame at, read before anything else is sent.
+    const auto judged_text = [&]() {
+        g->send({{"type", "msg"}, {"room", room}, {"data", "g-text"}});
+        g->ws.pump(150);
+        return plan_w_of(g->id.peer);
+    };
+    const int64_t counted = judged_text();
+    for (int i = 0; i < 10; i++) g->send({{"type", "msg"}, {"room", room}, {"data", "g-text"}});
+    const int64_t refused = judged_text();
+    settle({g.get(), m.get()});
+    check("a guest's text broadcasts stop at ten a minute", count(*m, text_from(g->id.peer)) == 10);
+    check("a refused one is judged at one W, a delivered one at more", refused == 1 && counted > 1);
+    for (int i = 0; i < 6; i++) g2->send_bin(frame(0x03, {room}, "g2-bcast"));
+    for (int i = 0; i < 6; i++) g2->send({{"type", "msg"}, {"room", room}, {"data", "g2-text"}});
+    settle({g2.get(), m.get()});
+    const size_t binary = count(*m, bin(frame(0x05, {room, g2->id.peer}, "g2-bcast")));
+    const size_t text = count(*m, text_from(g2->id.peer));
+    check("and share one count with its binary ones", binary == 6 && text == 4);
+    auto n = login(Ident());
+    join(*n, room);
+    for (int i = 0; i < 12; i++) m->send({{"type", "msg"}, {"room", room}, {"data", "m-text"}});
+    settle({m.get(), n.get()});
+    check("a member's are not counted", count(*n, text_from(m->id.peer)) == 12);
+}
+
 static void test_guests() {
     printf("guests\n");
     const std::string room = room_name("guest");
@@ -2607,6 +2648,188 @@ static void test_hidden_presence() {
                                                discover(*b, r1).count(ida.peer) != 0);
 }
 
+// A sender a locked room hides reaches at most three provers per broadcast, the ones its
+// frame's seal head ranks first, and writes no ring but the join ring (0.14, AR-36): it may
+// be anyone holding the server id, so one frame must not cost every member device.
+static void test_hidden_sender_reach() {
+    printf("door rooms: a hidden sender reaches three provers and only the join ring\n");
+    Ident owner, change;
+    Door door;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    std::vector<std::unique_ptr<Peer>> provers;
+    for (int i = 0; i < 5; i++) {
+        provers.push_back(login3(Ident(), "new", 0));
+        Peer& p = *provers.back();
+        if (i == 0) {
+            p.send({{"type", "lock_put"}, {"server", room}, {"owner", ""},
+                    {"links", base_link(room, door, change, owner, nonce, true)}});
+            next_json(p, typed("lock_chain"));
+        }
+        join(p, room, {{"door_proof", door_proof(p, room, door)}});
+    }
+    // Away: proves the door, but an away device answers nothing, so with three provers on
+    // screen it is never picked.
+    auto away = login3(Ident(), "new", 0);
+    join(*away, room, {{"door_proof", door_proof(*away, room, door)}});
+    away->send({{"type", "inactive"}});
+    // In grace: its session holds the room, and keeps nothing a hidden sender sends.
+    Ident held_id;
+    auto held = login3(held_id, "new", 0);
+    join(*held, room, {{"door_proof", door_proof(*held, room, door)}});
+    settle({held.get()});
+    const uint64_t held_read = held->ws.counted;
+    held->ws.abort();
+    sleep_ms(300);
+    provers[0]->send(ring_control(room, "", {"general", std::string(door_room::JOIN_TOPIC)}, change));
+    auto q = login(Ident());
+    join(*q, room);
+    std::vector<Peer*> all{away.get(), q.get()};
+    for (auto& p : provers) all.push_back(p.get());
+    for (auto* p : all) settle({p});
+    for (auto* p : all) p->ws.inbox.clear();
+
+    // Every frame carries a fresh seal head, so the expected three are computed per frame.
+    auto expect = [&](const std::string& payload) {
+        door_room::ReachPicks picks(q->id.peer, payload);
+        for (auto& p : provers) picks.offer(p->id.peer);
+        return picks;
+    };
+    auto reached = [&](const Pred& pred) {
+        std::set<std::string> who;
+        for (auto* p : all) {
+            settle({p});
+            if (got(*p, pred)) who.insert(p->id.peer);
+        }
+        return who;
+    };
+    auto picked = [&](const door_room::ReachPicks& picks) {
+        std::set<std::string> who;
+        for (auto& p : provers) {
+            if (picks.picked(p->id.peer)) who.insert(p->id.peer);
+        }
+        return who;
+    };
+
+    const std::string ask = "\0HF1" + random_hex(4) + "hidden-ask";
+    q->send_bin(frame(0x03, {room}, ask));
+    const auto ask_to = reached(bin(frame(0x05, {room, q->id.peer}, ask)));
+    check("a hidden broadcast reaches three provers", ask_to.size() == door_room::HIDDEN_REACH);
+    check("the three its seal head ranks first", ask_to == picked(expect(ask)));
+    const std::string pub = "\0HF1" + random_hex(4) + "hidden-public";
+    q->send_bin(frame(0x0A, {room}, pub));
+    const auto pub_to = reached(bin(frame(0x05, {room, q->id.peer}, pub)));
+    check("a hidden public frame too", pub_to == picked(expect(pub)));
+    const std::string text = "hidden-msg-" + random_hex(8);
+    q->send({{"type", "msg"}, {"room", room}, {"data", text}});
+    const auto text_to = reached(json_where([&](const json& j) { return j.value("data", "") == text; }));
+    check("and a hidden message", text_to.size() == door_room::HIDDEN_REACH && text_to == picked(expect(text)));
+    check("never the away prover", !ask_to.count(away->id.peer) && !text_to.count(away->id.peer));
+    bool away_spared = true, three_each = true;
+    for (int i = 0; i < 12; i++) {
+        const std::string more = "\0HF1" + random_hex(4) + "hidden-more-" + std::to_string(i);
+        q->send_bin(frame(0x03, {room}, more));
+        const auto to = reached(bin(frame(0x05, {room, q->id.peer}, more)));
+        away_spared = away_spared && !to.count(away->id.peer);
+        three_each = three_each && to == picked(expect(more));
+    }
+    check("frame after frame, three provers and never the away one", away_spared && three_each);
+
+    const std::string chan = "\0HF1" + random_hex(4) + "hidden-chan";
+    q->send_bin(frame(0x07, {room, "general"}, chan));
+    check("a hidden topic frame reaches nobody",
+          reached(bin(frame(0x08, {room, "general", q->id.peer}, chan))).empty());
+    provers[0]->send(catchup(room, "general"));
+    settle({provers[0].get()});
+    check("and is not kept in the channel's ring", !got(*provers[0], bin(frame(0x08, {room, "general", q->id.peer}, chan))));
+    const std::string join_ring(door_room::JOIN_TOPIC);
+    const std::string parked = "\0HF1" + random_hex(4) + "hidden-parked";
+    q->send_bin(frame(0x07, {room, join_ring}, parked));
+    const auto parked_to = reached(bin(frame(0x08, {room, join_ring, q->id.peer}, parked)));
+    check("a hidden join-ring frame reaches three provers", parked_to == picked(expect(parked)) &&
+                                                                 parked_to.size() == door_room::HIDDEN_REACH);
+    provers[0]->send(catchup(room, join_ring));
+    settle({provers[0].get()});
+    check("and is kept in the join ring", got(*provers[0], bin(frame(0x08, {room, join_ring, q->id.peer}, parked))));
+
+    const std::string open = "\0HF1" + random_hex(4) + "prover-bcast";
+    provers[0]->send_bin(frame(0x03, {room}, open));
+    check("a prover's broadcast still reaches every other prover, the away one too",
+          reached(bin(frame(0x05, {room, provers[0]->id.peer}, open))).size() == provers.size());
+    auto back = login3(held_id, held->sid, held_read);
+    check("(the prover in grace resumes)", resumed(*back));
+    check("its ring kept the prover's broadcast", next(*back, bin(frame(0x05, {room, provers[0]->id.peer}, open))).has_value());
+    settle({back.get()});
+    check("and nothing the hidden sender sent", !got(*back, bin(frame(0x05, {room, q->id.peer}, ask))) &&
+                                                   !got(*back, json_where([&](const json& j) { return j.value("data", "") == text; })) &&
+                                                   !got(*back, bin(frame(0x08, {room, join_ring, q->id.peer}, parked))));
+}
+
+// A room whose provers are mostly away: a hidden sender's frame still reaches three, the
+// on-screen prover first and away ones for the slots left, so a door-less device's roster
+// notice is heard in a room of backgrounded phones.
+static void test_hidden_sender_reaches_away_provers() {
+    printf("door rooms: a hidden sender's free slots go to away provers\n");
+    Ident owner, change;
+    Door door;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    std::vector<std::unique_ptr<Peer>> provers;
+    for (int i = 0; i < 5; i++) {
+        provers.push_back(login3(Ident(), "new", 0));
+        Peer& p = *provers.back();
+        if (i == 0) {
+            p.send({{"type", "lock_put"}, {"server", room}, {"owner", ""},
+                    {"links", base_link(room, door, change, owner, nonce, true)}});
+            next_json(p, typed("lock_chain"));
+        }
+        join(p, room, {{"door_proof", door_proof(p, room, door)}});
+    }
+    Peer& on_screen = *provers[0];
+    for (size_t i = 1; i < provers.size(); i++) provers[i]->send({{"type", "inactive"}});
+    auto q = login(Ident());
+    join(*q, room);
+    for (auto& p : provers) settle({p.get()});
+    settle({q.get()});
+    for (auto& p : provers) p->ws.inbox.clear();
+
+    auto expect = [&](const std::string& payload) {
+        door_room::ReachPicks picks(q->id.peer, payload);
+        for (auto& p : provers) picks.offer(p->id.peer, p.get() != &on_screen);
+        std::set<std::string> who;
+        for (auto& p : provers) {
+            if (picks.picked(p->id.peer)) who.insert(p->id.peer);
+        }
+        return who;
+    };
+    auto reached = [&](const std::string& payload) {
+        std::set<std::string> who;
+        for (auto& p : provers) {
+            settle({p.get()});
+            if (got(*p, bin(frame(0x05, {room, q->id.peer}, payload)))) who.insert(p->id.peer);
+        }
+        return who;
+    };
+    bool three = true, with_on_screen = true, as_ranked = true;
+    for (int i = 0; i < 16; i++) {
+        const std::string ask = "\0HF1" + random_hex(4) + "away-fill-" + std::to_string(i);
+        q->send_bin(frame(0x03, {room}, ask));
+        const auto to = reached(ask);
+        three = three && to.size() == door_room::HIDDEN_REACH;
+        with_on_screen = with_on_screen && to.count(on_screen.id.peer);
+        as_ranked = as_ranked && to == expect(ask);
+    }
+    check("frame after frame, three provers", three);
+    check("the one on screen always among them", with_on_screen);
+    check("and the away ones its seal head ranks first", as_ranked);
+
+    on_screen.send({{"type", "inactive"}});
+    settle({&on_screen});
+    const std::string all_away = "\0HF1" + random_hex(4) + "all-away";
+    q->send_bin(frame(0x03, {room}, all_away));
+    check("with every prover away, still three", reached(all_away).size() == door_room::HIDDEN_REACH);
+}
+
 static void test_hidden_session() {
     printf("presence: a hidden device's session drops, resumes and moves as before, shown to nobody\n");
     const std::string room = room_name("hide-sess");
@@ -3366,13 +3589,16 @@ static void hs_one_ack_timer() {
     a->send({{"type", "discover_peers"}, {"room", room_name("hs-ack0")}});
     next(*a, typed("discovered_peers"));
     hb(*a, a->ws.counted);
-    // Late in the first window: a second timer would ack near 3.9 s, the first one by 2.25 s.
-    sleep_ms(std::max(0, 1900 - static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+    // Well inside the first window, so a sanitized relay counts it before the first timer
+    // fires (by 2.25 s); a second timer would ack near 3.4 s.
+    sleep_ms(std::max(0, 1400 - static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                     std::chrono::steady_clock::now() - t0).count())));
     a->send({{"type", "discover_peers"}, {"room", room_name("hs-ack1")}});
     auto ack = next_json(*a, typed("ack"), 3500);
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-    check("the ack comes by the first frame's deadline", ack && ack->value("h", 0) == 2 && ms < 3000);
+    const bool by_deadline = ack && ack->value("h", 0) == 2 && ms < 3200;
+    if (!by_deadline) printf("  ack h=%d after %lld ms\n", ack ? ack->value("h", 0) : -1, static_cast<long long>(ms));
+    check("the ack comes by the first frame's deadline", by_deadline);
 }
 
 static void hs_push_reach() {
@@ -4781,6 +5007,9 @@ static json breaker_of(const std::string& peer) {
 
 static int64_t spent_of(const std::string& peer) { return breaker_of(peer).value("spent", int64_t(-1)); }
 
+// The W the breaker judged `peer`'s last frame at (test builds note it).
+static int64_t plan_w_of(const std::string& peer) { return breaker_of(peer).value("plan_w", int64_t(-1)); }
+
 // /server-stats' breaker counts. The relay keeps an answer for 5 s, so a caller comparing
 // two reads waits that long in between.
 static json breaker_counts() {
@@ -4993,18 +5222,19 @@ static void test_breaker_audience() {
     check("and the poster pays for the members alone, the room's allowance for the rest",
           spent_of(p->id.peer) - after_bcast == 2);
     // D1 lets a hidden socket's broadcast reach the provers (a door ask, a join ask, a
-    // guest's sync ask: HOL-SEC-127), so it pays for each prover it reaches.
+    // guest's sync ask: HOL-SEC-127), so it pays for each prover it reaches and for the
+    // walk of the five sockets in the room that found them.
     const int64_t q_before = spent_of(q->id.peer);
     q->send_bin(frame(0x03, {room}, "hidden-ask"));
     check("a hidden socket's broadcast still reaches the provers",
           next(*p2, bin(frame(0x05, {room, q->id.peer}, "hidden-ask"))).has_value());
-    check("and its sender pays for both of them", spent_of(q->id.peer) - q_before == 3);
+    check("and its sender pays for both of them and the walk", spent_of(q->id.peer) - q_before == 1 + 2 + 1);
 }
 
 // MED 5: proofs that open nothing (strangers' junk) are judged at every lock move, but
 // the relay pays for them, never the moderator moving the lock: the same move costs the
 // mover the same with twenty junk proofs stored as with none.
-static int64_t breaker_move_cost(size_t junk) {
+static int64_t breaker_move_cost(size_t junk, size_t members = 0, int64_t* judged = nullptr) {
     Ident owner, change, change2;
     Door door, door2;
     const std::string nonce = random_hex(16);
@@ -5019,6 +5249,11 @@ static int64_t breaker_move_cost(size_t junk) {
         strangers.push_back(login3(Ident(), "new", 0));
         join(*strangers.back(), room, {{"door_proof", random_b64url32()}});
     }
+    // Members whose stored proofs open the door: a move judges each again.
+    for (size_t i = 0; i < members; i++) {
+        strangers.push_back(login3(Ident(), "new", 0));
+        join(*strangers.back(), room, {{"door_proof", door_proof(*strangers.back(), room, door)}});
+    }
     for (auto& p : strangers) settle({p.get()});
     settle({m.get()});
     const int64_t before = spent_of(m->id.peer);
@@ -5026,6 +5261,7 @@ static int64_t breaker_move_cost(size_t junk) {
     links.push_back(successor_link(room, 2, door2, change2, change));
     m->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", links}});
     next_json(*m, typed("lock_chain"));
+    if (judged) *judged = plan_w_of(m->id.peer);
     settle({m.get()});
     return spent_of(m->id.peer) - before;
 }
@@ -5037,6 +5273,96 @@ static void test_breaker_junk_proofs_do_not_cost_the_mover() {
     printf("    a move costs %lld W, %lld W with twenty junk proofs stored\n", static_cast<long long>(clean),
            static_cast<long long>(crowded));
     check("twenty junk proofs add nothing to the mover's charge", clean > 0 && crowded == clean);
+}
+
+// C6 of the 0.13 mutation pass: the W a lock move is judged at (its plan, before the
+// handler runs) prices the stored proofs it judges again, and never the junk ones.
+static void test_breaker_a_move_pays_for_member_proofs() {
+    printf("breaker (enforced): a lock move is judged at a door check per member proof, none per junk\n");
+    int64_t clean = -1, five = -1, junk = -1;
+    breaker_move_cost(0, 0, &clean);
+    breaker_move_cost(0, 5, &five);
+    breaker_move_cost(20, 0, &junk);
+    printf("    a move is judged at %lld W, %lld W with five members' proofs, %lld W with twenty junk\n",
+           static_cast<long long>(clean), static_cast<long long>(five), static_cast<long long>(junk));
+    check("a move with only the mover's proof: two links and one door check",
+          clean == breaker::lock_put_w(2, 1, 0));
+    check("five more members' proofs, five more door checks", five - clean == 5 * breaker::DH_W);
+    check("twenty junk proofs, none", junk == clean);
+}
+
+// C9 of the 0.13 mutation pass: only a member's leave is announced, so only it pays for
+// a walk of the room.
+static void test_breaker_a_non_member_leave_costs_one() {
+    printf("breaker (enforced): a leave of a room the socket is not in costs the frame alone\n");
+    const std::string room = room_name("brk-leave");
+    std::vector<std::unique_ptr<Peer>> members;
+    for (int i = 0; i < 6; i++) {
+        members.push_back(login3(Ident(), "new", 0));
+        join(*members.back(), room);
+    }
+    auto stranger = login3(Ident(), "new", 0);
+    auto member = login3(Ident(), "new", 0);
+    join(*member, room);
+    for (auto& p : members) settle({p.get()});
+    settle({stranger.get(), member.get()});
+    // The plan the leave was judged at, read before anything else is sent.
+    auto judged_leave = [&](Peer& p) {
+        p.send({{"type", "leave"}, {"room", room}});
+        p.ws.pump(150);
+        return plan_w_of(p.id.peer);
+    };
+    const int64_t outside = judged_leave(*stranger);
+    const int64_t inside = judged_leave(*member);
+    printf("    a non-member's leave is judged at %lld W, a member's at %lld W\n", static_cast<long long>(outside),
+           static_cast<long long>(inside));
+    check("a non-member's leave is judged at one", outside == 1);
+    check("a member's leave at telling the six others", inside == 1 + 6);
+}
+
+// A hidden sender pays for the three provers its broadcast reaches and for the walk of
+// the room that found them, which the relay makes once per frame.
+static void test_breaker_hidden_sender_pays_for_three() {
+    printf("breaker (enforced): a hidden sender pays for the three provers it reaches and the walk\n");
+    Ident owner, change;
+    Door door;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    std::vector<std::unique_ptr<Peer>> provers;
+    for (int i = 0; i < 6; i++) {
+        provers.push_back(login3(Ident(), "new", 0));
+        if (i == 0) {
+            provers[0]->send({{"type", "lock_put"}, {"server", room}, {"owner", ""},
+                              {"links", base_link(room, door, change, owner, nonce, true)}});
+            next_json(*provers[0], typed("lock_chain"));
+        }
+        join(*provers.back(), room, {{"door_proof", door_proof(*provers.back(), room, door)}});
+    }
+    Ident held_id;
+    auto held = login3(held_id, "new", 0);
+    join(*held, room, {{"door_proof", door_proof(*held, room, door)}});
+    settle({held.get()});
+    held->ws.abort();
+    sleep_ms(300);
+    auto q = login3(Ident(), "new", 0);
+    join(*q, room);
+    for (auto& p : provers) settle({p.get()});
+    settle({q.get()});
+    const int64_t before = spent_of(q->id.peer);
+    const int64_t built_before = breaker_of(q->id.peer).value("picks_built", int64_t(0));
+    q->send_bin(frame(0x03, {room}, "\0HF1" + random_hex(4) + "hidden-cost"));
+    q->ws.pump(150);
+    const int64_t judged = plan_w_of(q->id.peer);
+    const int64_t spent = spent_of(q->id.peer) - before;
+    const int64_t built = breaker_of(q->id.peer).value("picks_built", int64_t(0)) - built_before;
+    printf("    a hidden broadcast is judged at %lld W and costs %lld W\n", static_cast<long long>(judged),
+           static_cast<long long>(spent));
+    // The room's live sockets: the six provers and the hidden sender.
+    const int64_t walk = (int64_t(provers.size()) + 1 + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W;
+    check("the frame, three deliveries and the walk",
+          judged == 1 + static_cast<int64_t>(door_room::HIDDEN_REACH) + walk);
+    check("charged as judged", spent == judged);
+    check("its picks built once for the frame", built == 1);
 }
 
 // MED 5: a guest in an unlocked room is paid for by the room's allowance, like one outside
@@ -5468,6 +5794,94 @@ static void oom_unbufferable_fanout_refused_once() {
     check("the unbufferable frame was never delivered", never);
 }
 
+// A guest's frame its mode refuses (a topic frame, a broadcast past its minute's ten) is
+// refused before the send budget looks at it: a frame never delivered closes nobody.
+static void oom_guest_refusals_judged_first() {
+    printf("oom: a guest's refused frame is refused before the send budget judges it\n");
+    const uint64_t budget = env_u64("RELAY_LIVE_SEND_BUDGET");
+    if (budget == 0) {
+        check("(the relay runs with a small send budget)", false);
+        return;
+    }
+    const std::string room = room_name("oom-guest");
+    std::vector<std::unique_ptr<Peer>> readers;
+    for (int i = 0; i < 3; i++) {
+        readers.push_back(login(Ident()));
+        join(*readers.back(), room);
+    }
+    auto g = login(Ident(), "guest");
+    g->send({{"type", "join"}, {"room", room}});
+    sync(*g);
+    for (auto& r : readers) drain_inbox(*r);
+    const std::string big = "big:" + std::string(budget * 3 / 8, 'x');  // 3 copies > the budget
+    g->send_bin(frame(0x07, {room, "general"}, big));
+    check("a guest's topic frame past the budget leaves it connected", sync(*g) && !g->ws.closed());
+    for (int i = 0; i < 10; i++) g->send_bin(frame(0x03, {room}, "g" + std::to_string(i)));
+    g->send_bin(frame(0x03, {room}, big));
+    check("so does its eleventh broadcast of the minute", sync(*g) && !g->ws.closed());
+    bool readers_ok = true;
+    for (auto& r : readers) readers_ok = readers_ok && sync(*r) && !r->ws.closed();
+    check("and nobody else is closed for them", readers_ok);
+    bool never = true;
+    for (auto& r : readers) {
+        never = never && !got(*r, bin(frame(0x08, {room, "general", g->id.peer}, big))) &&
+                !got(*r, bin(frame(0x05, {room, g->id.peer}, big)));
+    }
+    check("neither frame was delivered", never);
+}
+
+// The send budget counts what a hidden sender's broadcast holds by the three provers it
+// reaches, not the room: a frame three copies of which fit is never refused for five.
+static void oom_hidden_sender_counts_three_copies() {
+    printf("oom: a hidden sender's broadcast is budgeted for the three provers it reaches\n");
+    const uint64_t budget = env_u64("RELAY_LIVE_SEND_BUDGET");
+    if (budget == 0) {
+        check("(the relay runs with a small send budget)", false);
+        return;
+    }
+    Ident owner, change;
+    Door door;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    std::vector<std::unique_ptr<Peer>> provers;
+    for (int i = 0; i < 5; i++) {
+        provers.push_back(login(Ident()));
+        if (i == 0) {
+            provers[0]->send({{"type", "lock_put"}, {"server", room}, {"owner", ""},
+                              {"links", base_link(room, door, change, owner, nonce, true)}});
+            next_json(*provers[0], typed("lock_chain"));
+        }
+        join(*provers.back(), room, {{"door_proof", door_proof(*provers.back(), room, door)}});
+    }
+    Ident sid;
+    auto q = login3(sid, "new", 0);
+    join(*q, room);
+    sync(*q);
+    for (auto& p : provers) drain_inbox(*p);
+    // Three copies fit the budget, five would not.
+    const std::string big = std::string("\0HF1", 4) + random_hex(4) + std::string(budget / 4, 'x');
+    q->send_bin(frame(0x03, {room}, big));
+    check("the hidden sender is not refused", sync(*q) && !q->ws.closed());
+    // Every prover keeps reading while the copies arrive: one left waiting past the stall
+    // window would be closed for it.
+    const Pred copy = bin(frame(0x05, {room, sid.peer}, big));
+    std::vector<bool> have(provers.size(), false);
+    size_t copies = 0;
+    for (int round = 0; round < 60 && copies < door_room::HIDDEN_REACH; round++) {
+        for (size_t i = 0; i < provers.size(); i++) {
+            if (!have[i] && next(*provers[i], copy, 50).has_value()) {
+                have[i] = true;
+                copies++;
+            }
+        }
+    }
+    for (size_t i = 0; i < provers.size(); i++) {
+        if (!have[i] && next(*provers[i], copy, 300).has_value()) copies++;
+    }
+    if (copies != door_room::HIDDEN_REACH) printf("  %zu copies arrived\n", copies);
+    check("and three provers get it", copies == door_room::HIDDEN_REACH);
+}
+
 // The walk both judges share counts at most two receivers per address block (the test
 // build's count; eight in production), so receivers piled behind one address cannot make
 // an honest frame trip: two copies fit the budget, a third is that address's to refuse.
@@ -5699,6 +6113,9 @@ int main(int argc, char** argv) {
             test_breaker_forwarder_exempt();
             test_breaker_audience();
             test_breaker_junk_proofs_do_not_cost_the_mover();
+            test_breaker_hidden_sender_pays_for_three();
+            test_breaker_a_move_pays_for_member_proofs();
+            test_breaker_a_non_member_leave_costs_one();
             test_breaker_unlocked_guest();
             test_breaker_fresh_session_counts_strangers_afresh();
             test_breaker_pause_holds_no_slot();
@@ -5707,6 +6124,17 @@ int main(int argc, char** argv) {
         } else {
             test_breaker_shadow();
         }
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =hidden: what a sender a locked room hides reaches, and a guest's minute (the w2-d
+    // mutation pass).
+    if (only && std::string(only) == "hidden") {
+        test_door_rooms();
+        test_hidden_sender_reach();
+        test_hidden_sender_reaches_away_provers();
+        test_guest_text_msg_counts_against_the_minute();
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
@@ -5759,6 +6187,8 @@ int main(int argc, char** argv) {
         oom_ended_socket_buffer_released();
         oom_full_receiver_closed_after_fanout();
         oom_ping_flood_counted();
+        oom_guest_refusals_judged_first();
+        oom_hidden_sender_counts_three_copies();
         oom_piled_receivers_never_trip_the_sender();
         oom_trips_are_no_breaker_trips();
         SSL_CTX_free(g_ctx);
@@ -5818,9 +6248,12 @@ int main(int argc, char** argv) {
         test_forwarder_rooms();
         test_hidden_channel_copies();
         test_guests();
+        test_guest_text_msg_counts_against_the_minute();
         test_fetch();
         test_fetch_hears_no_presence();
         test_door_rooms();
+        test_hidden_sender_reach();
+        test_hidden_sender_reaches_away_provers();
         test_rate_limit();
         test_rate_limit_idle_address();
     }

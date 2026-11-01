@@ -5,7 +5,7 @@
 
 CONF_FILE=/etc/hollow-relay/install.conf
 CONF_KEYS="mode binaries address host duckdns_name public_ip public_ip_fixed public_ipv6 staging
-turn push forwarder members_only member_keys grace_secs public_stats"
+turn push forwarder members_only member_keys grace_secs public_stats cake cake_mbit cake_dev"
 
 conf_save() {
     local k v
@@ -105,6 +105,7 @@ Members-only: off, anyone with the address can connect"
     t="$t
 Public stats page: $(public_stats_text)
 Wait for dropped connections: ${CFG_GRACE_SECS:-120} seconds
+Fair share of the upload: $(cake_state)
 Certificate: $(served_cert_expiry || echo unknown)$( [ "$CFG_STAGING" = yes ] && echo ", from the Let's Encrypt staging service, which the app does not trust")
 Updates: $UPDATE_TEXT"
     printf '%s' "$t"
@@ -402,6 +403,7 @@ manage_change() {
     fi
     items+=(public_stats "Public stats page: $(public_stats_norm "${CFG_PUBLIC_STATS:-on}")"
         grace "Wait for dropped connections: ${CFG_GRACE_SECS:-120} seconds"
+        cake "Fair share of the upload: $(cake_text)"
         address "The relay's address: $CFG_HOST")
     ui_menu change "Change a setting" "Which setting? I show its screen again, then apply the change. Everything else stays as it is." turn "${items[@]}"
     case "$UI_REPLY" in
@@ -427,6 +429,7 @@ manage_change() {
         CFG_MEMBER_KEYS=$(( ${#keys[@]} - 1 )) ;;
     public_stats) ask_public_stats ;;
     grace) ask_grace ;;
+    cake) ask_cake ;;
     address) preflight_run; ask_address; address_prepare ;;
     esac
     ssh_firewall_guard

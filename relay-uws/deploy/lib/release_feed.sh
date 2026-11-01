@@ -49,8 +49,9 @@ _HF_SETUP_MAX_FILES=512
 _HF_SETUP_MAX_FILE=1048576
 _HF_SETUP_MAX_BYTES=8388608
 # Besides these, every library install.sh sources (_hf_sourced_libs); the push
-# sender installs only from its lockfile, and TURN never runs without its port lock.
-_HF_SETUP_NEEDS="setup/deploy/coturn-port-lock.conf setup/deploy/hollow-turn-port-lock-refresh.service
+# sender installs only from its lockfile, TURN never runs without its port lock, and
+# the fair-share shaper installs its unit from the copy.
+_HF_SETUP_NEEDS="setup/deploy/coturn-port-lock.conf setup/deploy/hollow-cake.service setup/deploy/hollow-turn-port-lock-refresh.service
 setup/deploy/hollow-turn-port-lock-refresh.timer setup/deploy/hollow-turn-port-lock.service setup/deploy/lib/release_feed.sh
 setup/deploy/turn-port-lock.sh setup/install.sh setup/push-sidecar/package-lock.json setup/push-sidecar/package.json"
 # Every member's mtime is below 2^33 (MAX_MEMBER_MTIME): 2242-03-16 12:56:31

@@ -216,6 +216,80 @@ static void test_honest_nat_keeps_its_proofs() {
           crowded.proofs.size() == door_room::PENDING_FREE + door_room::PENDING_PER_GROUP);
 }
 
+// The order a hidden sender's frame picks its provers by, pinned: the client reads the
+// same order to know whether it is one of the few the frame reached (Rust
+// `door_room::tests::reach_rank_matches_the_relays_pinned_vector`), computed a third
+// time in Python. If the two drift apart, door asks and join requests go unanswered.
+static std::string sealed_head(int64_t ts) {
+    std::string f("\0HF1", 4);
+    for (int i = 7; i >= 0; i--) f.push_back(static_cast<char>((static_cast<uint64_t>(ts) >> (8 * i)) & 0xff));
+    return f + std::string(16, '\x01');
+}
+
+static void test_reach_order_is_pinned() {
+    const std::string frame = sealed_head(1700000000000);
+    const door_room::ReachOrder order(PEER, frame);
+    check("Alpha's pinned rank", order.rank("12D3KooWAlpha") == 0xc164aef3f2241427ULL);
+    check("Echo's pinned rank", order.rank("12D3KooWEcho") == 0x23b4c656d71e3bf2ULL);
+    check("only the seal head orders", door_room::ReachOrder(PEER, frame.substr(0, 12) + "other").rank("12D3KooWAlpha") ==
+                                           0xc164aef3f2241427ULL);
+    check("another sender orders otherwise",
+          door_room::ReachOrder("12D3KooWOther", frame).rank("12D3KooWAlpha") != 0xc164aef3f2241427ULL);
+}
+
+static void test_reach_picks_the_lowest_three() {
+    const std::vector<std::string> peers{"12D3KooWAlpha", "12D3KooWBravo", "12D3KooWCharlie", "12D3KooWDelta",
+                                         "12D3KooWEcho"};
+    door_room::ReachPicks picks(PEER, sealed_head(1700000000000));
+    for (const auto& p : peers) picks.offer(p);
+    picks.offer("12D3KooWEcho");
+    check("at most three", picks.size() == door_room::HIDDEN_REACH);
+    check("the three lowest ranks", picks.picked("12D3KooWEcho") && picks.picked("12D3KooWDelta") &&
+                                        picks.picked("12D3KooWBravo"));
+    check("no other", !picks.picked("12D3KooWAlpha") && !picks.picked("12D3KooWCharlie"));
+    door_room::ReachPicks reversed(PEER, sealed_head(1700000000000));
+    for (auto it = peers.rbegin(); it != peers.rend(); ++it) reversed.offer(*it);
+    check("whatever order they are offered in", reversed.picked("12D3KooWEcho") && reversed.picked("12D3KooWDelta") &&
+                                                    reversed.picked("12D3KooWBravo"));
+    door_room::ReachPicks next(PEER, sealed_head(1700000000001));
+    for (const auto& p : peers) next.offer(p);
+    check("the next frame picks afresh", next.picked("12D3KooWAlpha") && next.picked("12D3KooWBravo") &&
+                                             next.picked("12D3KooWDelta") && !next.picked("12D3KooWEcho"));
+    door_room::ReachPicks two(PEER, sealed_head(1));
+    two.offer("12D3KooWAlpha");
+    two.offer("12D3KooWBravo");
+    check("fewer provers, all of them", two.size() == 2 && two.picked("12D3KooWAlpha") && two.picked("12D3KooWBravo"));
+}
+
+// Away provers answer no ask but still hear a door-less device's roster notice: they fill
+// only the slots no on-screen prover takes. Rust `door_room::tests::
+// away_provers_fill_only_what_the_on_screen_leave` checks a client's view agrees. By rank
+// alone this frame orders Echo, Delta, Bravo, Charlie, Alpha.
+static void test_reach_picks_on_screen_first() {
+    door_room::ReachPicks one(PEER, sealed_head(1700000000000));
+    one.offer("12D3KooWEcho", true);
+    one.offer("12D3KooWAlpha");
+    one.offer("12D3KooWDelta", true);
+    one.offer("12D3KooWBravo", true);
+    one.offer("12D3KooWCharlie", true);
+    check("one on screen: picked, however it ranks", one.picked("12D3KooWAlpha"));
+    check("the away ones fill by rank", one.size() == 3 && one.picked("12D3KooWEcho") && one.picked("12D3KooWDelta"));
+    door_room::ReachPicks three(PEER, sealed_head(1700000000000));
+    three.offer("12D3KooWEcho", true);
+    three.offer("12D3KooWDelta", true);
+    three.offer("12D3KooWAlpha");
+    three.offer("12D3KooWBravo");
+    three.offer("12D3KooWCharlie");
+    check("three on screen: no away one", three.picked("12D3KooWAlpha") && three.picked("12D3KooWBravo") &&
+                                            three.picked("12D3KooWCharlie") && !three.picked("12D3KooWEcho") &&
+                                            !three.picked("12D3KooWDelta"));
+    door_room::ReachPicks away(PEER, sealed_head(1700000000000));
+    away.offer("12D3KooWCharlie", true);
+    away.offer("12D3KooWAlpha", true);
+    check("only away provers: all of them", away.size() == 2 && away.picked("12D3KooWCharlie") &&
+                                               away.picked("12D3KooWAlpha"));
+}
+
 int main() {
     if (sodium_init() < 0) return 1;
     test_pinned_proof();
@@ -223,6 +297,9 @@ int main() {
     test_junk_proofs();
     test_honest_nat_keeps_its_proofs();
     test_member_ahead_behind_a_full_group_in_a_crowded_room();
+    test_reach_order_is_pinned();
+    test_reach_picks_the_lowest_three();
+    test_reach_picks_on_screen_first();
     printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;
 }

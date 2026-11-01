@@ -235,6 +235,7 @@ mod tests {
             card: None,
             avatar_b64: String::new(),
             ask: None,
+            follows_leave: None,
         }
     }
 

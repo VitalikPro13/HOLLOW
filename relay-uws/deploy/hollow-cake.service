@@ -1,0 +1,76 @@
+# Shares this machine's upload fairly between the hosts it sends to (AR-01): CAKE
+# on the uplink, one equal share per destination host once the line is full, and
+# nothing held back while it has room. Fairness exists only where the shaper is
+# the bottleneck, so the bandwidth sits about 10 percent under the MEASURED raw
+# egress ceiling, never the nominal port. besteffort ignores DSCP, so no client
+# jumps the queue by marking its packets. Egress only: every byte the relay
+# receives leaves again.
+#
+# The setup writes /etc/hollow-relay/cake.env (root only, 0600, not secret) and
+# this unit; by hand:
+#   sudo install -D -m 0600 /dev/stdin /etc/hollow-relay/cake.env <<'EOF'
+#   HOLLOW_CAKE=on
+#   HOLLOW_CAKE_DEV=ens16
+#   HOLLOW_CAKE_MBIT=950
+#   EOF
+#   echo sch_cake | sudo tee /etc/modules-load.d/hollow-cake.conf
+#   sudo install -m 0644 hollow-cake.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now hollow-cake
+# The relay reads the same file for /server-stats' bandwidth_cap_mbps. After a
+# change, `sudo systemctl restart hollow-cake hollow-relay`.
+[Unit]
+Description=Share the upload fairly between the hosts this machine sends to (CAKE)
+After=network-online.target systemd-modules-load.service
+Wants=network-online.target
+# In place before anything sends.
+Before=hollow-relay.service hollow-coturn.service hollow-forwarder.service docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/hollow-relay/cake.env
+ExecStart=/usr/sbin/tc qdisc replace dev ${HOLLOW_CAKE_DEV} root cake bandwidth ${HOLLOW_CAKE_MBIT}mbit besteffort dual-dsthost
+ExecReload=/usr/sbin/tc qdisc replace dev ${HOLLOW_CAKE_DEV} root cake bandwidth ${HOLLOW_CAKE_MBIT}mbit besteffort dual-dsthost
+# The kernel's default queue comes back. Also when the device has none of ours.
+ExecStop=-/usr/sbin/tc qdisc del dev ${HOLLOW_CAKE_DEV} root
+
+# tc needs CAP_NET_ADMIN and nothing else: no account of its own to keep, no
+# root, no address it may reach.
+DynamicUser=yes
+User=hollow-cake
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_NETLINK
+IPAddressDeny=any
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+UMask=0077
+InaccessiblePaths=-/etc/letsencrypt -/etc/hollow-relay -/etc/hollow-push -/etc/hollow-forwarder -/etc/hollow-turn -/etc/hollow-duckdns -/etc/turnserver.conf
+
+[Install]
+WantedBy=multi-user.target

@@ -72,6 +72,7 @@ SETUP = [
     ("setup/deploy/hollow-turn-port-lock-refresh.service", b"# unit\n", 0o644),
     ("setup/deploy/hollow-turn-port-lock-refresh.timer", b"# timer\n", 0o644),
     ("setup/deploy/coturn-port-lock.conf", b"# drop-in\n", 0o644),
+    ("setup/deploy/hollow-cake.service", b"# unit\n", 0o644),
 ]
 
 

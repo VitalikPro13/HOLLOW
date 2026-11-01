@@ -1817,6 +1817,16 @@ pub(crate) fn send_join_rejection(
     }
 }
 
+/// A new join ask's stamp: now, or just past our own last leave of the server while our
+/// clock is still behind that leave's stamp (a co-member's clock ahead carries our HLC,
+/// and so the leave, past our wall). Members refuse an ask sealed and stamped no later
+/// than the leave. Capped at the drift bound the leave itself was held to.
+pub(crate) fn ask_stamp(left_at: Option<u64>) -> i64 {
+    let now = super::types::now_ms();
+    let past_leave = left_at.map_or(now, |left| i64::try_from(left).unwrap_or(i64::MAX).saturating_add(1));
+    now.max(past_leave.min(now.saturating_add(crate::crdt::hlc::MAX_DRIFT_MS as i64)))
+}
+
 /// Whether a join may start for `server_id`, logging a refusal: it becomes a room, a
 /// pending row and an MLS group key, so only a server's own id shape.
 pub(crate) fn joinable_server_id(server_id: &str) -> bool {
@@ -1849,6 +1859,8 @@ pub(crate) async fn handle_join_server(
     // already names.
     stored_key_package: Option<String>,
     stored_reply_secret: Option<String>,
+    // Our identity's newest leave of this server we hold (`LeaveBook::ask_floor`).
+    ask_floor: Option<crate::crdt::hlc::HlcTimestamp>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -1858,7 +1870,7 @@ pub(crate) async fn handle_join_server(
     hollow_log!("[HOLLOW-CRDT] Joining server {server_id}");
     // The request NONCE. Every answer names it, so an answer replayed out of a
     // three-day ring can never resolve the join the user made afterwards.
-    let requested_at = super::types::now_ms();
+    let requested_at = ask_stamp(ask_floor.as_ref().map(|left| left.physical_ms));
     // Our own signed device list, built ONCE and cached for the re-sends. A member
     // serving this from the ring has never been online with us, so it is the only
     // thing that attributes the request to our MASTER rather than to this device.
@@ -1921,6 +1933,7 @@ pub(crate) async fn handle_join_server(
         card,
         avatar_b64,
         ask: Some(crate::crdt::operations::JoinAsk::sign(&server_id, requested_at, master_keypair)),
+        follows_leave: ask_floor,
         opened_at: requested_at,
         ..Default::default()
     };
@@ -2667,6 +2680,7 @@ pub(crate) async fn handle_leave_server(
         hollow_log!("[HOLLOW-CRDT] Leaving server {server_id}");
         // Collect broadcast targets BEFORE apply_op removes us.
         let targets = other_member_targets(state, local_peer_str);
+        state.witness_own_ask(local_peer_str);
         let Some(op) = author_op(state, crdt_store, &server_id, CrdtPayload::MemberRemoved {
             peer_id: local_peer_str.to_string(),
         }) else {
@@ -4420,6 +4434,19 @@ mod tests {
         store
             .insert_channel_message("srv", "ch", sender, "x", false, ts, Some("sig"), Some("pk"), Some(mid), None, None, None, None)
             .unwrap();
+    }
+
+    /// A rejoin's ask goes just past our own leave while our clock is behind it, never
+    /// further than the drift bound the leave itself was held to.
+    #[test]
+    fn a_rejoin_is_stamped_past_our_own_leave_within_the_drift_bound() {
+        let now = super::super::types::now_ms();
+        assert!((now..now + 1_000).contains(&super::ask_stamp(None)), "no leave held: now");
+        assert!((now..now + 1_000).contains(&super::ask_stamp(Some(5))), "an old leave: now");
+        let ahead = now as u64 + 120_000;
+        assert_eq!(super::ask_stamp(Some(ahead)), ahead as i64 + 1, "just past a leave stamped ahead");
+        let bound = now + crate::crdt::hlc::MAX_DRIFT_MS as i64;
+        assert!((bound..bound + 1_000).contains(&super::ask_stamp(Some(u64::MAX))), "never past the drift bound");
     }
 
     #[test]

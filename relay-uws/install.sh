@@ -126,7 +126,7 @@ SSH_PLAN=none SSH_RESULT="" CHECK_RESULT=""
 CFG_MODE="" CFG_BINARIES="" CFG_ADDRESS="" CFG_HOST="" CFG_DUCKDNS_NAME="" CFG_DUCKDNS_TOKEN=""
 CFG_DUCKDNS_IP="" CFG_PUBLIC_IP="" CFG_PUBLIC_IP_FIXED=no CFG_PUBLIC_IPV6="" CFG_STAGING=no
 CFG_TURN=yes CFG_PUSH=yes CFG_FORWARDER=yes CFG_MEMBERS_ONLY=no CFG_MEMBER_KEYS=0 CFG_GRACE_SECS=120
-CFG_PUBLIC_STATS=on
+CFG_PUBLIC_STATS=on CFG_CAKE="" CFG_CAKE_MBIT="" CFG_CAKE_DEV=""
 
 fw_rules_now() {
     local http=no
@@ -169,6 +169,7 @@ Running: $parts
 Members-only: $( [ "$CFG_MEMBERS_ONLY" = yes ] && echo "yes, $CFG_MEMBER_KEYS keys" || echo "no, anyone with the address can connect")
 Public stats page: $(public_stats_text)
 Wait for dropped connections: $CFG_GRACE_SECS seconds
+Fair share of the upload: $(cake_text)
 
 On this machine:
 - The firewall turns on and lets in only these ports:
@@ -176,6 +177,7 @@ $(ports_text)
 - Swap turns off, now and after every reboot, and core dumps go off, so relay memory never reaches the disk.
 - The system journal is kept in memory only, for one hour.
 - The clock is kept synchronised, and fail2ban and automatic security updates are installed.
+$( [ "$CFG_CAKE" = on ] && echo "- CAKE shares the upload fairly between the hosts this machine sends to, up to $CFG_CAKE_MBIT Mbit/s.")
 $( [ "$CFG_TURN" = yes ] && echo "- TURN gets a port lock, a firewall rule that lets it reach only coturn's own ports$( [ "$CFG_FORWARDER" = yes ] && echo " and the forwarder's") on this machine.")
 $( [ "$CFG_MODE" = native ] && echo "- New service accounts, none of which can log in: $accounts.")
 $( [ "$CFG_ADDRESS" = duckdns ] && echo "- DuckDNS points $CFG_HOST at ${CFG_DUCKDNS_IP:-this machine}.")
@@ -347,6 +349,7 @@ cert_answers
 ask_turn
 ask_push
 ask_forwarder
+ask_cake
 ask_members
 ask_public_stats
 ask_grace

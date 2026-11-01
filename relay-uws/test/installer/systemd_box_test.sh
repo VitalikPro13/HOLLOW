@@ -634,6 +634,57 @@ unset -f have
 have() { command -v "$1" >/dev/null 2>&1; }
 rm -rf /opt/box-stray
 
+echo "the fair-share shaper"
+# the_shaper_shares_the_upload_under_systemd (AR-01): its sandbox lets tc put
+# CAKE on the default route's device, and check-host agrees.
+fair_part() { sed -n '/^Fair share$/,/^[A-Za-z]/p' <<<"$1"; }
+cake_dev=$(default_route_dev)
+CFG_CAKE=on CFG_CAKE_MBIT=900 CFG_CAKE_DEV=""
+RESTART_UNITS=()
+cake_apply >/dev/null 2>&1
+yes_ "the shaper runs" systemctl is-active --quiet hollow-cake
+yes_ "and starts on boot" systemctl is-enabled --quiet hollow-cake
+qd=$(tc qdisc show dev "$cake_dev" root)
+has "CAKE is the root queue of the default route's device" "$qd" "qdisc cake"
+has "at the bandwidth asked" "$qd" "bandwidth 900Mbit"
+has "per destination host" "$qd" "dual-dsthost"
+has "ignoring DSCP marks" "$qd" "besteffort"
+eq "as a dynamic account" "$(systemctl show -p User --value hollow-cake)" hollow-cake
+no_ "which the box's passwd never holds" grep -q '^hollow-cake:' /etc/passwd
+has "the relay restarts to name the cap" "${RESTART_UNITS[*]}" hollow-relay
+check=$(bash "$DEPLOY/check-host.sh" 2>&1)
+part=$(fair_part "$check")
+eq "check-host passes the shaper" "$(grep FAIL <<<"$part")" ""
+has "and says so" "$part" "ok    the upload is shared fairly between the hosts this machine sends to (CAKE, 900 Mbit/s on $cake_dev)"
+has "its sandbox passes" "$check" "ok    hollow-cake is sandboxed"
+has "its account cannot become root" "$check" "ok    hollow-cake runs as hollow-cake, which cannot become root"
+has "it keeps secrets out of Environment=" "$check" "ok    hollow-cake keeps its secrets out of Environment="
+lacks "and its settings file is closed" "$check" "cake.env is"
+echo "  check-host for the shaper:"
+grep -E 'hollow-cake|CAKE' <<<"$check" | sed 's/^/  | /'
+# A new bandwidth reloads it in place.
+inv=$(systemctl show -p InvocationID --value hollow-cake)
+CFG_CAKE_MBIT=800
+cake_apply >/dev/null 2>&1
+has "a new bandwidth reaches the queue" "$(tc qdisc show dev "$cake_dev" root)" "bandwidth 800Mbit"
+eq "by a reload, not a restart" "$(systemctl show -p InvocationID --value hollow-cake)" "$inv"
+systemctl stop hollow-cake
+part=$(fair_part "$(bash "$DEPLOY/check-host.sh" 2>&1)")
+has "a stopped shaper fails check-host" "$part" "FAIL  the fair-share shaper (CAKE) is not on $cake_dev"
+lacks "its stop gave the kernel's queue back" "$(tc qdisc show dev "$cake_dev" root)" "qdisc cake"
+systemctl start hollow-cake
+# turning_the_shaper_off_removes_its_queue_and_unit_and_says_off
+CFG_CAKE=off
+cake_apply >/dev/null 2>&1
+lacks "off: the queue is gone" "$(tc qdisc show dev "$cake_dev" root)" "qdisc cake"
+no_ "and the unit" test -e "$UNIT_DIR/hollow-cake.service"
+no_ "and the module line" test -e "$CAKE_MODLOAD"
+eq "its settings say off" "$(sed -n 's/^HOLLOW_CAKE=//p' "$CAKE_ENV")" off
+part=$(fair_part "$(bash "$DEPLOY/check-host.sh" 2>&1)")
+has "off is an ok line" "$part" "ok    the fair-share shaper (CAKE) is off by the operator's choice"
+eq "with nothing failing" "$(grep FAIL <<<"$part")" ""
+rm -f "$CAKE_ENV"
+
 echo ""
 echo "box $ID $VERSION_ID: $pass passed, $fail failed"
 [ "$fail" = 0 ]

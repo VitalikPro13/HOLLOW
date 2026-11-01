@@ -27,6 +27,11 @@ members_only=no
 member_keys=5            # with members_only=yes
 public_stats=on          # on (recommended) | off: the online count and traffic on the public stats page
 grace_secs=120           # 30 to 600
+# The fair-share shaper (CAKE): once the upload is full, every address this
+# machine sends to gets an equal share. It must sit under the line's real speed.
+cake=on                  # on (recommended) | off: when the provider or a router in front already shares fairly
+#cake_mbit=900           # with cake=on; default: 90 percent of the card's speed, else 900
+#cake_dev=ens3           # default: the device the default route leaves through
 ssh_keys=yes             # guide the switch to key-only SSH logins
 # The key that counts for the SSH switch, as ssh-keygen -lf ~/.ssh/id_ed25519.pub
 # prints it on your computer. A login with any other key never turns passwords off.
@@ -37,7 +42,7 @@ confirm=yes              # the plan screen
 
 # A re-run (the machine is already set up).
 #action=status           # status | update | downgrade | rebuild | change | keys | ssh | sshkey | check | uninstall | exit
-#change=turn             # with action=change: turn | push | forwarder | members | addkey | removekey | public_stats | grace | address
+#change=turn             # with action=change: turn | push | forwarder | members | addkey | removekey | public_stats | grace | cake | address
 #turn=no                 # ...then the new value, under the option's own key
 #remove_key=AB12-CD34-EF56-GH78   # with change=removekey
 # With action=sshkey while password logins are off: the new computer's public

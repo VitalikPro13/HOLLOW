@@ -915,6 +915,8 @@ pub(crate) struct PendingJoin {
     pub(crate) avatar_b64: String,
     /// Our signed ask for the current `requested_at` ([`PendingJoin::ask_again`]).
     pub(crate) ask: Option<crate::crdt::operations::JoinAsk>,
+    /// Our own leave every copy of this ask follows (`ServerJoinRequest::follows_leave`).
+    pub(crate) follows_leave: Option<crate::crdt::hlc::HlcTimestamp>,
     /// The `requested_at` the user's ask opened with, which `ask_again` keeps: the
     /// join's timers name it, so a timer armed for an earlier ask never acts on this one.
     pub(crate) opened_at: i64,
@@ -937,6 +939,8 @@ impl PendingJoin {
         if self.from_sibling {
             return;
         }
+        // Never back past the first ask: it may sit past our own last leave.
+        let at = at.max(self.requested_at.saturating_add(1));
         self.requested_at = at;
         self.ask = Some(crate::crdt::operations::JoinAsk::sign(server_id, at, master));
     }
@@ -1882,6 +1886,12 @@ pub(crate) enum HavenMessage {
         /// member copies it into `MemberAdded`, which every member refuses without it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ask: Option<crate::crdt::operations::JoinAsk>,
+        /// The clock of our own leave this ask follows, when we hold one: a member counts
+        /// `requested_at` against our leave only when that leave ended our last
+        /// membership, so an ask from an earlier rejoin, handed back, never outruns a
+        /// later leave stamped at the same clock lead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follows_leave: Option<crate::crdt::hlc::HlcTimestamp>,
     },
 
     #[serde(rename = "join_rejected")]

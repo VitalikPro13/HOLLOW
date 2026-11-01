@@ -303,9 +303,11 @@ pub const SETUP_MAX_FILE_BYTES: u64 = 1024 * 1024;
 pub const SETUP_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// What the next update reads from the copy it installs, besides every library
 /// install.sh sources ([`sourced_libs`]): the push sender installs only from
-/// its lockfile, and TURN never runs without its port lock.
-pub const SETUP_NEEDS: [&str; 9] = [
+/// its lockfile, TURN never runs without its port lock, and the fair-share
+/// shaper installs its unit from the copy.
+pub const SETUP_NEEDS: [&str; 10] = [
     "setup/deploy/coturn-port-lock.conf",
+    "setup/deploy/hollow-cake.service",
     "setup/deploy/hollow-turn-port-lock-refresh.service",
     "setup/deploy/hollow-turn-port-lock-refresh.timer",
     "setup/deploy/hollow-turn-port-lock.service",

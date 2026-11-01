@@ -201,6 +201,56 @@ We recommend no for most groups, since only the people you give the address to w
     fi
 }
 
+cake_question_text() {
+    local where="the upload"
+    [ -n "$1" ] && where="what leaves through $1"
+    cat <<EOF
+When this machine's upload is full, CAKE, a queue in the Linux kernel, gives each address it sends to an equal share. Someone pulling a large file or watching a busy screen share then cannot slow everyone else down. While the line has room, nobody is held back. It acts on $where.
+
+It only works when CAKE is the slowest point on the way out, so it runs a little under the line's real speed. The next screen asks for that number.
+
+We recommend on. Choose off if your provider already shares the line fairly, or if this machine sits behind a router or another machine that does.
+EOF
+}
+
+# cake_mbit_text <device> <suggested Mbit/s>
+cake_mbit_text() {
+    local speed card=$1
+    [ -n "$card" ] || card="this machine's network card"
+    speed=$(line_speed_mbit "$1")
+    if [ -n "$speed" ]; then
+        echo "$1 runs at $speed Mbit/s, so I suggest $2 Mbit/s, about 90 percent of that. CAKE has to sit under the line's speed, or the line decides who waits and nobody gets a fair share."
+    else
+        echo "I cannot read the speed of $card, which is common on virtual servers. Type about 90 percent of the upload speed your provider sells you, in Mbit/s. For a 1 Gbit/s port that is 900. CAKE has to sit under the line's speed, or the line decides who waits and nobody gets a fair share."
+    fi
+    cat <<EOF
+
+If you measured the upload, or your provider sells you less, use about 90 percent of that figure; behind a home router, the figure is your internet upload speed. A number that is too high does no harm but shares nothing. One that is too low slows the relay down for everyone.
+EOF
+}
+
+# The device comes from the default route; an answer file may name another
+# (cake_dev). Not asked on screen.
+ask_cake() {
+    local dev have
+    if ans_has cake_dev; then
+        CFG_CAKE_DEV=$(ans_get cake_dev)
+        if [ -n "$CFG_CAKE_DEV" ] && ! is_cake_dev "$CFG_CAKE_DEV"; then
+            die "the answer file gives cake_dev=$CFG_CAKE_DEV, which is not a network device on this machine."
+        fi
+    fi
+    dev=$(cake_dev)
+    ui_menu cake "Sharing the upload fairly" "$(cake_question_text "$dev")" \
+        "${CFG_CAKE:-on}" on "On (recommended)" off "Off"
+    CFG_CAKE=$UI_REPLY
+    [ "$CFG_CAKE" = on ] || return 0
+    have=${CFG_CAKE_MBIT:-}
+    is_cake_mbit "$have" || have=$(cake_default_mbit "$dev")
+    ask_valid cake_mbit "Upload speed for fair sharing" "$(cake_mbit_text "$dev" "$have")" \
+        "$have" is_cake_mbit "Type a whole number of Mbit/s from 1 to 100000, like 900."
+    CFG_CAKE_MBIT=$((10#$UI_REPLY))
+}
+
 # public_stats_norm <value>: on or off, read the way the relay reads
 # PUBLIC_STATS (server_stats.h): empty means on, and a value it does not know
 # means off.

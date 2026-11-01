@@ -1766,12 +1766,13 @@ async fn run_event_loop(
                             join_invites.clear();
                         }
                         join_invites.insert(server_id.clone(), (join_key.clone(), owner_pin.clone()));
+                        let ask_floor = leave_book.ask_floor(&server_id);
                         sync_handler::handle_join_server(
                             &mut pending_server_joins, &ws_cmd_tx,
                             &ws_room_peers, &cmd_tx,
                             server_id, twitch_proof_json, nsfw_confirmed, owner_pin, join_key,
                             &crdt_store, &master_keypair, &device_peer_id,
-                            &mls, &crypto_store, None, None,
+                            &mls, &crypto_store, None, None, ask_floor,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -3399,13 +3400,14 @@ async fn run_event_loop(
                                 }).await;
                             }
                             Some(row) => {
+                                let ask_floor = leave_book.ask_floor(&server_id);
                                 sync_handler::handle_join_server(
                                     &mut pending_server_joins, &ws_cmd_tx,
                                     &ws_room_peers, &cmd_tx,
                                     server_id, row.twitch_proof_json, row.nsfw_confirmed, row.owner_pin,
                                     row.join_key.unwrap_or_default(),
                                     &crdt_store, &master_keypair, &device_peer_id,
-                                    &mls, &crypto_store, row.key_package, row.reply_secret,
+                                    &mls, &crypto_store, row.key_package, row.reply_secret, ask_floor,
                                     &db_path, &db_passphrase,
                                 ).await;
                             }
@@ -5556,9 +5558,9 @@ async fn run_event_loop(
                                         super::door_room::note_heard(&from, &room);
                                     }
                                     match &msg {
-                                        HavenMessage::DoorAsk { server_id, nonce } => {
+                                        HavenMessage::DoorAsk { server_id, .. } => {
                                             door_rooms.answer_ask(
-                                                &room, server_id, nonce, &from, &olm, &server_states,
+                                                &room, server_id, frame_ts, &from, &olm, &server_states,
                                                 &ws_room_peers, &local_peer_str, &device_peer_id, &ws_cmd_tx,
                                             );
                                             continue;
@@ -11097,7 +11099,7 @@ async fn handle_incoming_request_inner(
         }
         HavenMessage::ServerJoinRequest {
             server_id, twitch_proof_json, nsfw_confirmed,
-            requested_at, device_list, parked, key_package, reply_key, card, avatar_b64, ask,
+            requested_at, device_list, parked, key_package, reply_key, card, avatar_b64, ask, follows_leave,
         } => {
             hollow_log!("[HOLLOW-CRDT] ServerJoinRequest from {peer_str} for server {server_id} (nonce {requested_at}, parked {parked})");
 
@@ -11144,10 +11146,19 @@ async fn handle_incoming_request_inner(
             let resolution_key = format!("{server_id}|{member_master}");
             // A request sealed before the joiner last left was answered in an earlier
             // membership; a ring or relay handing it back must not re-admit them. No clock
-            // slack: a voluntary leave is stamped by the joiner's own clock.
-            if server_states.get(&server_id).and_then(|s| s.left_at(&member_master))
-                .is_some_and(|left| frame_ts_ms.max(0) as u64 <= left)
-            {
+            // slack (a slack readmits an ask from just before the leave): a voluntary leave
+            // is stamped by the joiner's own clock. When that clock ran ahead, a new ask is
+            // stamped past the leave (`sync_handler::ask_stamp`) and names it: its stamp
+            // counts only against the leave that ended the last membership, so an earlier
+            // rejoin's ask never outruns a later leave stamped at the same clock lead.
+            let refused_as_old = server_states.get(&server_id).is_some_and(|s| {
+                s.left_at(&member_master).is_some_and(|left| {
+                    let follows = follows_leave.is_some() && s.left_by(&member_master) == follows_leave.as_ref();
+                    let stamp = if follows { frame_ts_ms.max(requested_at) } else { frame_ts_ms };
+                    stamp.max(0) as u64 <= left
+                })
+            });
+            if refused_as_old {
                 hollow_log!("[HOLLOW-SECURITY] Ignored a join request from {peer_str} for {server_id} sealed before the joiner left");
                 return;
             }
@@ -11241,6 +11252,19 @@ async fn handle_incoming_request_inner(
                         join_request_seen.retain(|_, t| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
                     }
                     join_request_seen.insert(seen_key, std::time::Instant::now());
+                    // A joiner the relay hides reached only the few members its frame
+                    // picked, maybe not the coordinator: one of those answers.
+                    let hidden_asker = !ws_room_peers.get(&server_id).is_some_and(|p| p.contains(peer_str));
+                    let picked_view;
+                    let mut election_view = ws_room_peers;
+                    if !is_sibling && !repeat_ask && hidden_asker {
+                        if !super::door_room::reached(&server_id, peer_str, frame_ts_ms, ws_room_peers, device_peer_id) {
+                            hollow_log!("[HOLLOW-CRDT] A hidden join ask for {server_id} reached other members first, leaving it to them");
+                            return;
+                        }
+                        picked_view = super::door_room::reached_view(&server_id, peer_str, frame_ts_ms, ws_room_peers, device_peer_id);
+                        election_view = &picked_view;
+                    }
                     if !is_sibling && !repeat_ask {
                         // Candidates are the CRDT members, minus the joiner itself: a
                         // REJOINING member is already in `members`, and electing them
@@ -11251,7 +11275,7 @@ async fn handle_incoming_request_inner(
                             .collect();
                         let rule = mls.as_ref().map(|m| super::standing::rule(m, state, &server_id)).unwrap_or_default();
                         let coordinator = crate::node::crypto_handler::elect_server_coordinator(
-                            state, &candidates, local_peer_str, ws_room_peers, &rule,
+                            state, &candidates, local_peer_str, election_view, &rule,
                         );
                         if coordinator.as_deref()
                             .is_some_and(|c| !super::resolver::same_identity(c, local_peer_str))

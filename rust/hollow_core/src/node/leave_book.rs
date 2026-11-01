@@ -319,6 +319,12 @@ impl LeaveBook {
         }
     }
 
+    /// The clock of our identity's newest leave of `server_id` we hold: a new ask to join
+    /// it names that leave and is stamped later, or members take it for one from before.
+    pub(crate) fn ask_floor(&self, server_id: &str) -> Option<HlcTimestamp> {
+        self.left_op(server_id).map(|op| op.hlc)
+    }
+
     /// A join of `server_id` holds us a member past our leave: the leave is history.
     pub(crate) fn forget_left(&mut self, server_id: &str) {
         if self.stored.left.remove(server_id).is_some() {

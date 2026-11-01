@@ -91,7 +91,7 @@ compose_turn_user() {
 # The .env lines the setup writes; every other line is the operator's.
 DOCKER_ENV_KEYS="RELAY_HOST DUCKDNS_TOKEN DUCKDNS_IP TURN_SECRET COMPOSE_PROFILES PUBLIC_IP PUBLIC_IPV6 LOCAL_IP
 HOLLOW_MEM_LIMIT OWN_CERT_DIR SESSION_GRACE_SECS HOLLOW_CONN_RATE_EXEMPT CERTBOT_STAGING FORWARDER_PEER_ID
-FWD_LICENSE_KEY PUBLIC_STATS"
+FWD_LICENSE_KEY PUBLIC_STATS HOLLOW_CAKE HOLLOW_CAKE_MBIT"
 
 docker_env() {
     local env=$STACK_DIR/.env turn_secret="" profiles=() exempt fwd_id own kept
@@ -133,6 +133,9 @@ docker_env() {
         printf 'FORWARDER_PEER_ID=%s\n' "$fwd_id"
         printf 'FWD_LICENSE_KEY=%s\n' "$FWD_KEY"
         printf 'PUBLIC_STATS=%s\n' "$(public_stats_norm "${CFG_PUBLIC_STATS:-on}")"
+        # The host's shaper (cake_apply), whose cap the relay names on /server-stats.
+        printf 'HOLLOW_CAKE=%s\n' "${CFG_CAKE:-}"
+        if [ "${CFG_CAKE:-}" = on ]; then printf 'HOLLOW_CAKE_MBIT=%s\n' "$CFG_CAKE_MBIT"; else echo "HOLLOW_CAKE_MBIT="; fi
         if [ -n "$kept" ]; then printf '\n%s\n' "$kept"; fi
     } | put_file "$env" 0600 root root
 }
@@ -188,6 +191,8 @@ docker_apply() {
     else
         turn_lock_remove
     fi
+    # A host queue, so the setup that owns the host puts it there.
+    cake_apply
     if [ "$DRY_RUN" = 1 ]; then
         say "  would run docker compose up -d --build (profiles: turn=$CFG_TURN forwarder=$CFG_FORWARDER)"
         conf_save
@@ -259,6 +264,7 @@ docker_uninstall() {
         fi
     fi
     turn_lock_remove
+    cake_remove
     if [ "$(systemctl show -p LoadState --value coturn 2>/dev/null)" = masked ]; then run_ok systemctl unmask coturn; fi
     run rm -rf "$DOCKER_DIR" /etc/hollow-relay /usr/local/sbin/hollow-relay-setup "$STATE_DIR"
     local rule

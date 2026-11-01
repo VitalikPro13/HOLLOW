@@ -508,6 +508,17 @@ struct Plan {
     uint64_t frame_bytes = 0;
 };
 
+// A lock_put's W: its links' signature checks, and a door check for each stored proof the
+// move judges again. A proof that opened nothing when shown (`pending`, a subset of
+// `proofs`) is the relay's cost: strangers piling junk into a room must not make a
+// moderator's kick expensive.
+inline int64_t lock_put_w(int64_t links, size_t proofs, size_t pending) {
+    return 2 + SIG_W * links + DH_W * static_cast<int64_t>(proofs - std::min(pending, proofs));
+}
+
+// A leave's W: only a member's leave is announced, so only it pays for the walk.
+inline int64_t leave_w(bool member, int64_t announce) { return 1 + (member ? announce : 0); }
+
 enum class Verdict : uint8_t { Pass, Work, Joins, Distinct };
 
 // The most a frame is judged at: what a pacing client's mirror, held RESERVE above the

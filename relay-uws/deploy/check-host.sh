@@ -19,7 +19,7 @@ ok()  { echo "  ok    $1"; }
 bad() { echo "  FAIL  $1"; fail=1; }
 
 units=()
-for u in hollow-relay hollow-push hollow-forwarder hollow-coturn coturn hollow-duckdns "$@"; do
+for u in hollow-relay hollow-push hollow-forwarder hollow-coturn coturn hollow-duckdns hollow-cake "$@"; do
     [ "$(systemctl show -p LoadState --value "$u" 2>/dev/null)" = loaded ] && units+=("$u")
 done
 if [ ${#units[@]} -eq 0 ]; then
@@ -33,13 +33,13 @@ for u in "${units[@]}"; do
         bad "$u runs as root"
     elif sudo -l -U "$user" 2>/dev/null | grep -q "may run"; then
         bad "$u runs as $user, who may use sudo"
-    elif id -nG "$user" | grep -qwE "sudo|admin|wheel|adm|docker|lxd"; then
+    elif id -nG "$user" 2>/dev/null | grep -qwE "sudo|admin|wheel|adm|docker|lxd"; then
         bad "$u runs as $user, a member of $(id -nG "$user")"
     else
         ok "$u runs as $user, which cannot become root"
     fi
     exe=$(systemctl show -p ExecStart --value "$u" | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -n 1)
-    if [ -n "$exe" ] && [ -n "$user" ] && [ "$user" != root ] && sudo -u "$user" test -w "$exe"; then
+    if [ -n "$exe" ] && [ -n "$user" ] && [ "$user" != root ] && sudo -u "$user" test -w "$exe" 2>/dev/null; then
         bad "$u can rewrite its own program $exe"
     fi
 done
@@ -426,6 +426,69 @@ if command -v docker >/dev/null 2>&1; then
         fi
     fi
 fi
+
+# The fair-share shaper (hollow-cake.service, AR-01): CAKE as the root queue of
+# the device the default route leaves through, under the line's speed, so it is
+# the bottleneck and shares the upload per destination host. Reads the setup's
+# settings (or none, for a shaper set up by hand); an off there is a choice.
+#   check_fair_share <settings file> <1 when a relay runs here> [<sysfs net dir>]
+check_fair_share() {
+    local conf=$1 relay_here=$2 net=${3:-/sys/class/net} want dev mbit route qd bw have speed failed=0
+    want=$(sed -n 's/^HOLLOW_CAKE=//p' "$conf" 2>/dev/null | tail -n 1)
+    if [ "$want" = off ]; then
+        ok "the fair-share shaper (CAKE) is off by the operator's choice"
+        return 0
+    fi
+    [ -r "$conf" ] || [ "$relay_here" = 1 ] || return 0
+    route=$(ip -o -4 route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+    [ -n "$route" ] || route=$(ip -o -6 route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+    dev=$(sed -n 's/^HOLLOW_CAKE_DEV=//p' "$conf" 2>/dev/null | tail -n 1)
+    mbit=$(sed -n 's/^HOLLOW_CAKE_MBIT=//p' "$conf" 2>/dev/null | tail -n 1)
+    [ -n "$dev" ] || dev=$route
+    if [ -z "$dev" ]; then
+        bad "no default route, so nothing shares this machine's upload fairly"
+        return 0
+    fi
+    qd=$(tc -j qdisc show dev "$dev" root 2>/dev/null)
+    if [[ "$qd" != *'"kind":"cake"'* ]]; then
+        if [ -r "$conf" ]; then
+            bad "the fair-share shaper (CAKE) is not on $dev (journalctl -u hollow-cake says why; a kernel without sch_cake needs linux-modules-extra-$(uname -r) on Ubuntu)"
+        else
+            bad "one host can take all of $dev's upload: no fair-share shaper (CAKE), and no settings for one in $conf (the setup turns it on, SELF_HOSTING.md says how by hand)"
+        fi
+        return 0
+    fi
+    bw=$(sed -n 's/.*"bandwidth":\([0-9][0-9]*\).*/\1/p' <<<"$qd" | head -n 1)
+    have=$(( ${bw:-0} / 125000 ))
+    if [ -z "$bw" ] || [ "$bw" = 0 ]; then
+        bad "CAKE on $dev has no bandwidth, so it never fills and shares nothing"; failed=1
+    elif [[ "$mbit" =~ ^[0-9]{1,6}$ ]] && [ "$bw" != $(( 10#$mbit * 125000 )) ]; then
+        bad "CAKE on $dev runs at $have Mbit/s, not the $mbit Mbit/s its settings name (sudo systemctl restart hollow-cake)"; failed=1
+    fi
+    speed=$(cat "$net/$dev/speed" 2>/dev/null)
+    if [ "$failed" = 0 ] && [[ "$speed" =~ ^[0-9]{2,6}$ ]] && [ "$have" -ge "$speed" ]; then
+        bad "CAKE on $dev at $have Mbit/s is not under the line's $speed Mbit/s, so it never fills and shares nothing"; failed=1
+    fi
+    if [[ "$qd" != *'"diffserv":"besteffort"'* ]]; then
+        bad "CAKE on $dev lets a client jump the queue by marking its packets (besteffort is missing)"; failed=1
+    fi
+    if [[ "$qd" != *'"flowmode":"dual-dsthost"'* ]]; then
+        bad "CAKE on $dev does not share per destination host (dual-dsthost is missing)"; failed=1
+    fi
+    if [ -n "$route" ] && [ "$dev" != "$route" ]; then
+        bad "CAKE sits on $dev, but the default route leaves through $route"; failed=1
+    fi
+    if [ -r "$conf" ] && ! systemctl is-enabled --quiet hollow-cake; then
+        bad "hollow-cake.service is not enabled, so the shaper is gone after a reboot"; failed=1
+    fi
+    [ "$failed" = 0 ] && ok "the upload is shared fairly between the hosts this machine sends to (CAKE, $have Mbit/s on $dev)"
+    return 0
+}
+
+echo "Fair share"
+relay_here=0
+{ [[ " ${units[*]} " == *" hollow-relay "* ]] || [ -n "${hollow_cids:-}" ]; } && relay_here=1
+check_fair_share /etc/hollow-relay/cake.env "$relay_here"
 
 if command -v fail2ban-client >/dev/null 2>&1; then
     echo "fail2ban"

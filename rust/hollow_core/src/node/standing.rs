@@ -588,6 +588,7 @@ mod tests {
                     asked_at: 0,
                     from_hlc: Some(hlc(*at)),
                     admitted: by.iter().map(|(a, t)| ((*a).to_string(), hlc(*t))).collect(),
+                    until_hlc: None,
                 }],
             );
         }
@@ -626,7 +627,7 @@ mod tests {
         s2.members.insert("0000_ground".into(), MemberInfo { peer_id: "0000_ground".into(), display_name: String::new() });
         s2.member_record.insert(
             "0000_ground".into(),
-            vec![MemberSpan { from_ms: 70, until_ms: u64::MAX, asked_at: 0, from_hlc: Some(hlc(70)), admitted: vec![("own".into(), hlc(70))] }],
+            vec![MemberSpan { from_ms: 70, until_ms: u64::MAX, asked_at: 0, from_hlc: Some(hlc(70)), admitted: vec![("own".into(), hlc(70))], until_hlc: None }],
         );
         assert_eq!(first_by_standing(&s2, ["0000_ground".to_string(), "b_late".to_string()]).as_deref(), Some("b_late"));
         // Position, not the member's own clock: admitted early by someone who left, it

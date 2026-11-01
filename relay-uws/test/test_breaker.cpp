@@ -449,6 +449,18 @@ static void test_guards() {
     check("a fan-out inside uncharged work costs nothing", g_work == 16);
 }
 
+// The plan's prices for a lock move and a leave (relay mutations C6, C9 of the 0.13 pass):
+// a move pays for the stored proofs it judges again but never for junk, a leave pays for
+// its announcement only when the room had it.
+static void test_plan_prices() {
+    check("a move pays a signature per link", lock_put_w(3, 0, 0) == 2 + 3 * SIG_W);
+    check("and a door check per proof it judges again", lock_put_w(1, 5, 0) == 2 + SIG_W + 5 * DH_W);
+    check("junk proofs cost the mover nothing", lock_put_w(1, 25, 20) == lock_put_w(1, 5, 0));
+    check("a pending count past the proofs saturates", lock_put_w(1, 2, 9) == lock_put_w(1, 0, 0));
+    check("a non-member's leave costs the frame alone", leave_w(false, 500) == 1);
+    check("a member's leave pays for its announcement", leave_w(true, 500) == 501);
+}
+
 int main() {
     printf("breaker\n");
     test_vectors();
@@ -465,6 +477,7 @@ int main() {
     test_start_pools();
     test_allowance();
     test_guards();
+    test_plan_prices();
     if (failures) {
         printf("%d FAILED\n", failures);
         return 1;

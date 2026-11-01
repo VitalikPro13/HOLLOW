@@ -658,11 +658,15 @@ t_setup_cannot_start() {
     setup_tree "$TMP/st"
     rm "$TMP/st/deploy/turn-port-lock.sh"
     no_ setup_new_check "$TMP/st"
+    # a_setup_copy_without_the_cake_unit_never_goes_live (cake_apply installs it from the copy)
+    setup_tree "$TMP/st"
+    rm "$TMP/st/deploy/hollow-cake.service"
+    no_ setup_new_check "$TMP/st"
     eq "what a copy needs: the next update's files and every library install.sh sources" \
         "$(setup_needs "$REPO/relay-uws" | LC_ALL=C sort | tr '\n' ' ')" \
         "$( { printf '%s\n' install.sh deploy/lib/release_feed.sh push-sidecar/package-lock.json push-sidecar/package.json \
                   deploy/turn-port-lock.sh deploy/hollow-turn-port-lock.service deploy/hollow-turn-port-lock-refresh.service \
-                  deploy/hollow-turn-port-lock-refresh.timer deploy/coturn-port-lock.conf; \
+                  deploy/hollow-turn-port-lock-refresh.timer deploy/coturn-port-lock.conf deploy/hollow-cake.service; \
               sed -n 's|^\. "\$DEPLOY/lib/\(.*\)"$|deploy/lib/\1|p' "$REPO/relay-uws/install.sh"; } | LC_ALL=C sort | tr '\n' ' ')"
     eq "the needs name release_feed.sh and the eleven libraries install.sh sources" "$(setup_needs "$REPO/relay-uws" | grep -c '^deploy/lib/')" 12
 }
@@ -2502,6 +2506,9 @@ in_sub t_summary
 . "$T/safety_tests.sh"
 # shellcheck source=screens_tests.sh
 . "$T/screens_tests.sh"
+# The fair-share shaper (CAKE).
+# shellcheck source=cake_tests.sh
+. "$T/cake_tests.sh"
 
 if [ "$(id -u)" = 0 ] && [ -r /etc/os-release ]; then
     echo "dry run"

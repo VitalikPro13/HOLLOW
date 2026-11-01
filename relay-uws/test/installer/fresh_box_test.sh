@@ -20,6 +20,8 @@ set -uo pipefail
 SRC=/src
 FEED=/root/feed
 W=/root/fresh-test
+# The fake releases carry the version the setup's floor names: an older one is refused.
+REL=$(sed -n 's/^_HF_MIN_VERSION=//p' "$SRC/relay-uws/deploy/lib/release_feed.sh")
 LIB=/usr/local/lib/hollow-relay
 mkdir -p "$W" "$FEED"
 
@@ -133,7 +135,7 @@ publish() {
     [ "$kind" = dead ] && relay=/bin/false
     install -m 0755 "$relay" "$s/hollow-relay"
     install -m 0755 /root/relay.bin "$s/hollow-forwarder"
-    printf 'version=0.12.2\nbuild=%s\ncommit=%s\n' "$b" "$(printf '%040d' 0)" >"$s/VERSION"
+    printf 'version=%s\nbuild=%s\ncommit=%s\n' "$REL" "$b" "$(printf '%040d' 0)" >"$s/VERSION"
     chmod 0644 "$s/VERSION"
     [ "$kind" = old ] || setup_tree "$s/setup" "b$b"
     case "$kind" in
@@ -144,7 +146,7 @@ publish() {
     cannotstart) printf 'false\n' >>"$s/setup/deploy/lib/questions.sh" ;;
     badsettings) printf '#!/bin/sh\nexit 7\n' >"$s/setup/deploy/harden-host.sh" ;;
     esac
-    name="hollow-relay-0.12.2-b$b-linux-x86_64.tar.gz"
+    name="hollow-relay-$REL-b$b-linux-x86_64.tar.gz"
     case "$kind" in
     link | dotdot)
         local tf=()
@@ -156,8 +158,8 @@ publish() {
     sha=$(sha256sum "$FEED/$name" | cut -d' ' -f1)
     size=$(stat -c %s "$FEED/$name")
     ISSUED=$((ISSUED + 1))
-    printf '{"feed":"relay","version":"0.12.2","build":%s,"issued":%s,"commit":"%s","artifacts":{"linux-x86_64":{"url":"https://anonlisten.com/hollow/releases/%s","sha256":"%s","size":%s}}}\n' \
-        "$b" "$ISSUED" "$(printf '%040d' 0)" "$name" "$sha" "$size" >"$FEED/relay.json"
+    printf '{"feed":"relay","version":"%s","build":%s,"issued":%s,"commit":"%s","artifacts":{"linux-x86_64":{"url":"https://anonlisten.com/hollow/releases/%s","sha256":"%s","size":%s}}}\n' \
+        "$REL" "$b" "$ISSUED" "$(printf '%040d' 0)" "$name" "$sha" "$size" >"$FEED/relay.json"
     { printf 'hollow-feed-sig-v1\0relay\0'; cat "$FEED/relay.json"; } >"$W/msg"
     openssl pkeyutl -sign -inkey "$W/feed.pem" -rawin -in "$W/msg" -out "$W/sig.bin"
     { base64 -w0 "$W/sig.bin"; echo; } >"$FEED/relay.json.sig"
@@ -194,7 +196,7 @@ out=$(flat "$W/install.out")
 lacks "the machine check reaches the internet without curl" "$out" "could not reach the internet"
 lacks "and never names a missing download program" "$out" "none of curl, wget or python3"
 has "the plan was confirmed" "$out" "Answer from the file (confirm): yes"
-has "the signed programs were installed" "$out" "installed version 0.12.2 (build 1), signature and checksum verified"
+has "the signed programs were installed" "$out" "installed version $REL (build 1), signature and checksum verified"
 [ "$rc" = 0 ] || { tail -n 40 "$W/install.out"; finish; }
 yes_ "the relay runs" relay_up
 yes_ "curl came with the setup, after the plan" command -v curl
@@ -227,6 +229,65 @@ has "check-host finds no report key on the disk" "$check" "ok    no report key o
 has "the status screen shows the lock" "$(hollow-relay-setup --answers "$W/ans_status0" 2>&1)" "TURN port lock: on"
 has "and the public stats page" "$(hollow-relay-setup --answers "$W/ans_status0" 2>&1)" "Public stats page: on"
 eq "relay.env names it" "$(sed -n 's/^PUBLIC_STATS=//p' /etc/hollow-relay/relay.env)" on
+
+# a_first_install_shares_the_upload_fairly (AR-01): on by default, from an
+# answer file that never names it.
+echo "the fair-share shaper on a stock server"
+echo "--- check-host after the first install"
+printf '%s\n' "$check"
+echo "--- end of check-host"
+fair_part() { sed -n '/^Fair share$/,/^[A-Za-z]/p' <<<"$1"; }
+stats() {
+    local out
+    for _ in $(seq 1 15); do
+        out=$(curl -sk --max-time 5 --connect-to "$PUBLIC_IP:443:127.0.0.1:443" "https://$PUBLIC_IP/server-stats") && [ -n "$out" ] &&
+            { printf '%s' "$out"; return 0; }
+        sleep 1
+    done
+}
+cake_dev=$(sed -n 's/^HOLLOW_CAKE_DEV=//p' /etc/hollow-relay/cake.env)
+cake_mbit=$(sed -n 's/^HOLLOW_CAKE_MBIT=//p' /etc/hollow-relay/cake.env)
+part=$(fair_part "$check")
+eq "check-host passes the shaper" "$(grep FAIL <<<"$part")" ""
+has "CAKE shares the upload of the default route's device" "$part" "ok    the upload is shared fairly between the hosts this machine sends to (CAKE, $cake_mbit Mbit/s on $cake_dev)"
+has "the shaper sits in its sandbox" "$check" "ok    hollow-cake is sandboxed"
+has "as no account that can become root" "$check" "ok    hollow-cake runs as hollow-cake, which cannot become root"
+eq "its settings are root's alone" "$(stat -c '%a %U' /etc/hollow-relay/cake.env)" "600 root"
+speed=$(cat "/sys/class/net/$cake_dev/speed" 2>/dev/null)
+if [[ "$speed" =~ ^[0-9]{2,6}$ ]]; then
+    eq "at 90 percent of the line" "$cake_mbit" $((speed * 9 / 10))
+else
+    eq "at the 1 Gbit/s guess for a card with no speed" "$cake_mbit" 900
+fi
+has "the relay names the shaper's cap" "$(stats)" "\"bandwidth_cap_mbps\":$cake_mbit"
+has "the status screen shows it" "$(hollow-relay-setup --answers "$W/ans_status0" 2>&1)" "Fair share of the upload: on, $cake_mbit Mbit/s on $cake_dev"
+systemctl stop hollow-cake
+part=$(fair_part "$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)")
+echo "--- check-host's fair share with the shaper stopped"
+printf '%s\n' "$part"
+has "a stopped shaper fails check-host" "$part" "FAIL  the fair-share shaper (CAKE) is not on $cake_dev"
+systemctl start hollow-cake
+# turning_the_shaper_off_from_the_menu_is_an_ok_line
+printf 'action=change\nchange=cake\ncake=off\nconfirm=yes\n' >"$W/ans_cake_off"
+PATH="$SAFE:$PATH" hollow-relay-setup --answers "$W/ans_cake_off" >"$W/cake_off.out" 2>&1
+rc=$?
+eq "the menu turns it off" "$rc" 0
+[ "$rc" = 0 ] || tail -n 30 "$W/cake_off.out"
+check=$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)
+has "off is an ok line" "$(fair_part "$check")" "ok    the fair-share shaper (CAKE) is off by the operator's choice"
+eq "with nothing failing there" "$(grep FAIL <<<"$(fair_part "$check")")" ""
+lacks "its queue is gone" "$(tc qdisc show dev "$cake_dev" root)" "qdisc cake"
+no_ "and its unit" test -e /etc/systemd/system/hollow-cake.service
+relay_up
+lacks "the relay names no cap" "$(stats)" "bandwidth_cap_mbps"
+printf 'action=change\nchange=cake\ncake=on\ncake_mbit=%s\nconfirm=yes\n' "$cake_mbit" >"$W/ans_cake_on"
+PATH="$SAFE:$PATH" hollow-relay-setup --answers "$W/ans_cake_on" >"$W/cake_on.out" 2>&1
+rc=$?
+eq "and back on" "$rc" 0
+[ "$rc" = 0 ] || tail -n 30 "$W/cake_on.out"
+has "with its queue back" "$(tc qdisc show dev "$cake_dev" root)" "qdisc cake"
+relay_up
+has "and the cap" "$(stats)" "\"bandwidth_cap_mbps\":$cake_mbit"
 
 # ---------------------------------------------------------------- downloads
 
@@ -432,7 +493,7 @@ KILL_AT=before PATH="$W/killmv:$SAFE:$PATH" hollow-relay-setup --answers "$W/ans
 no_ "the run was killed" test "$?" = 0
 eq "the relay programs are build 5" "$(installed_build)" 5
 eq "the setup is still b4" "$(copy_mark "$LIB/installer")" b4
-has "the status does not call it up to date" "$(status)" "the update to version 0.12.2 (build 5) stopped part of the way"
+has "the status does not call it up to date" "$(status)" "the update to version $REL (build 5) stopped part of the way"
 update f5
 eq "finishing it works" "$?" 0
 eq "the setup is b5" "$(copy_mark "$LIB/installer")" b5

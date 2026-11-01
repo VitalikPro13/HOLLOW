@@ -1430,7 +1430,8 @@ impl RelayInner {
                 if let Some(m) = inner.meter.as_mut() { m.send_to_room_cmds += 1; }
                 let data = inner.on_the_wire(from, &room_code, super::frame_auth::ROUTE_ROOM, data);
                 let n = data.len() as u64;
-                let delivered = inner.broadcast_data_except(&room_code, from, WsEvent::Message {
+                let reach = inner.hidden_reach(&room_code, from, &data, None);
+                let delivered = inner.broadcast_data_except(&room_code, from, reach.as_ref(), WsEvent::Message {
                     room: room_code.clone(),
                     from: from.to_string(),
                     data,
@@ -1445,9 +1446,13 @@ impl RelayInner {
                 // 0x0A: a prover's public frame reaches everyone a locked room hides too.
                 let data = inner.on_the_wire(from, &room_code, super::frame_auth::ROUTE_ROOM, data);
                 let to_all = inner.room_door(&room_code).is_some() && inner.receives(&room_code, from);
+                let reach = inner.hidden_reach(&room_code, from, &data, None);
                 let members = inner.room_slots(&room_code);
                 for m in members {
                     if m == from || inner.broadcast_deaf.contains(&m) || !(to_all || inner.shares(&room_code, &m, from)) {
+                        continue;
+                    }
+                    if reach.as_ref().is_some_and(|picks| !picks.contains(&m)) {
                         continue;
                     }
                     inner.write(&m, WsEvent::Message {
@@ -1495,6 +1500,11 @@ impl RelayInner {
             }
             WsCommand::SendToRoomTopic { room_code, topic, data } => {
                 let data = inner.on_the_wire(from, &room_code, super::frame_auth::ROUTE_ROOM, data);
+                // A sender the locked room hides writes only the join ring, to its picks.
+                let reach = inner.hidden_reach(&room_code, from, &data, Some(&topic));
+                if reach.as_ref().is_some_and(|_| topic != super::types::JOIN_TOPIC) {
+                    return;
+                }
                 // Tee into the channel's ring buffer when registered (relay
                 // offline catch-up), mirroring the real relay.
                 let key = (room_code.clone(), topic.clone());
@@ -1508,7 +1518,7 @@ impl RelayInner {
                 let n = data.len() as u64;
                 // Simplify topic routing to a plain room broadcast (no test
                 // exercises topic filtering yet).
-                let delivered = inner.fan_out(&room_code, from, WsEvent::Message {
+                let delivered = inner.fan_out(&room_code, from, reach.as_ref(), WsEvent::Message {
                     room: room_code.clone(),
                     from: from.to_string(),
                     data,
@@ -1844,6 +1854,31 @@ impl RelayInner {
         self.receives(room, pid) && Self::paired(room, pid, other)
     }
 
+    /// The provers a broadcast `frame` from `from` reaches when the locked room hides it,
+    /// as the relay picks them (`door_room.h`): the few the frame ranks first among the
+    /// live, on-screen provers, none at all on a topic but the join ring. `None` when
+    /// the room does not hide the sender.
+    fn hidden_reach(&self, room: &str, from: &str, frame: &[u8], topic: Option<&str>) -> Option<HashSet<String>> {
+        if self.room_door(room).is_none() || self.receives(room, from) {
+            return None;
+        }
+        if topic.is_some_and(|t| t != super::types::JOIN_TOPIC) {
+            return Some(HashSet::new());
+        }
+        let mut ranked: Vec<(u64, String)> = self
+            .rooms
+            .get(room)
+            .into_iter()
+            .flatten()
+            .filter(|m| m.as_str() != from && self.conns.get(*m).is_some_and(|c| c.online))
+            .filter(|m| self.shares(room, m, from) && !self.hidden.contains(*m))
+            .map(|m| (super::door_room::reach_rank(from, frame, m), m.clone()))
+            .collect();
+        ranked.sort();
+        ranked.truncate(super::door_room::HIDDEN_REACH);
+        Some(ranked.into_iter().map(|(_, m)| m).collect())
+    }
+
     /// The newest door of a self-certifying server room with a lock here: the room is
     /// door-locked.
     fn room_door(&self, room: &str) -> Option<String> {
@@ -2030,11 +2065,14 @@ impl RelayInner {
     /// `broadcast_deaf` devices (the backpressure-drop lever). Presence events
     /// keep using `broadcast_except` directly — the real relay's drop hits
     /// data frames on a wedged socket, not the membership protocol.
-    fn broadcast_data_except(&mut self, room: &str, from: &str, event: WsEvent) -> u64 {
+    fn broadcast_data_except(&mut self, room: &str, from: &str, reach: Option<&HashSet<String>>, event: WsEvent) -> u64 {
         let members = self.room_slots(room);
         let mut delivered = 0u64;
         for m in members {
             if m == from || self.broadcast_deaf.contains(&m) || !self.shares(room, &m, from) {
+                continue;
+            }
+            if reach.is_some_and(|picks| !picks.contains(&m)) {
                 continue;
             }
             if let Some(held) = self.held_broadcasts.get_mut(&(from.to_string(), m.clone())) {
@@ -2050,9 +2088,12 @@ impl RelayInner {
 
     /// A data frame for every slot of `room` but the sender's (topic frames: no
     /// backpressure lever, no hold).
-    fn fan_out(&mut self, room: &str, from: &str, event: WsEvent) -> u64 {
+    fn fan_out(&mut self, room: &str, from: &str, reach: Option<&HashSet<String>>, event: WsEvent) -> u64 {
         let mut delivered = 0u64;
         for m in self.room_slots(room) {
+            if reach.is_some_and(|picks| !picks.contains(&m)) {
+                continue;
+            }
             if m != from && self.shares(room, &m, from) && self.write(&m, event.clone()) {
                 delivered += 1;
             }
@@ -24183,6 +24224,7 @@ async fn authz_a_join_request_counts_only_in_the_join_box() {
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(&server_id, asked_at, &j.master_kp),
+        follows_leave: None,
     };
     relay.inject(&server_id, &j.device_id, &o.device_id, serde_json::to_vec(&plain).unwrap());
     flush_frames(&relay, &mut o).await;
@@ -24220,6 +24262,7 @@ async fn authz_a_join_request_counts_only_in_the_join_box() {
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(&server_id, held_at, &j.master_kp),
+        follows_leave: None,
     });
     let j_key = NativeKeypair::from_secret_bytes(&seed_bytes(237));
     relay.inject_raw_direct(
@@ -25505,6 +25548,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
             card: None,
             avatar_b64: String::new(),
             ask: join_ask(&server_id, now, asker),
+            follows_leave: None,
         });
         relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &tampered_device, bad);
     }
@@ -25526,6 +25570,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(&server_id, now, &legacy_kp),
+        follows_leave: None,
     });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &legacy_device, legacy);
 
@@ -26238,6 +26283,7 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(&server_id, asked_at, &b_key),
+        follows_leave: None,
     });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &b_device, legacy);
 
@@ -26562,6 +26608,7 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(&server_id, asked_at, &b_key),
+        follows_leave: None,
     });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &b_device, legacy);
 
@@ -27429,7 +27476,14 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-11-01: t14-lost-leave's review test added one spawn stagger, one settle after the
     // owner took the leave and one absence, an old leave that ends no rejoin (4.2 s, total
     // 1047.7 s, slack 1.3 s).
-    const BUDGET_MS: u64 = 1_049_000;
+    // 2026-11-01: w2-d proves three absences: a hidden join ask its frame did not pick,
+    // judged only after the 10 s join hold (`w2d_a_hidden_ask_its_frame_did_not_pick_us_for_is_left_to_others`,
+    // 12.0 s), a door grant the frame left out (`w2d_a_door_ask_is_answered_by_the_members_its_frame_picks`,
+    // 2.0 s) and a pre-leave ask handed back (`w2d_an_ask_from_before_the_leave_handed_back_readmits_nobody`,
+    // 3.0 s) (17.0 s, total 1064.7 s, slack 1.3 s).
+    // 2026-11-01: w2-d's fix round waits for the end of M's join hold before the first
+    // absence (12.0 s -> 2.0 s; total 1054.7 s, slack 1.3 s).
+    const BUDGET_MS: u64 = 1_056_000;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -32587,6 +32641,7 @@ async fn join_lock_the_card_rides_inside_the_request() {
         server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, requested_at: 5,
         device_list: Some(list), parked: false, key_package: None, reply_key: fresh_reply_key(),
         card: Some(foreign), avatar_b64: String::new(), ask: None,
+        follows_leave: None,
     });
     relay.inject(&server_id, &j.device_id, &o.device_id, forged);
     sleep_ms(500).await; // absence proof: a card that must never be stored
@@ -34963,6 +35018,7 @@ async fn authz_a_join_request_from_before_a_leave_never_readmits() {
             card: None,
             avatar_b64: String::new(),
             ask: join_ask(&server_id, at, &m_key),
+            follows_leave: None,
         });
         super::frame_auth::seal_at(&m_key, &server_id, &o_device, at, [nonce; 16], &body)
     };
@@ -35851,6 +35907,7 @@ async fn authz_a_member_back_from_away_admits_no_banned_identitys_live_ask() {
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(&server_id, asked_at, &m.master_kp),
+        follows_leave: None,
     };
     let invite = super::sealed_box::public_of(&join_secret_of(&server_id).expect("a harness-created server"));
     let sealed = super::join_lane::seal_to_members(&first.door_key().unwrap(), &invite, first.n, &server_id, &m.device_id, &again)
@@ -35905,6 +35962,7 @@ fn ask_sealed_to(server_id: &str, m: &TestNode, door: &super::join_lock::LockLin
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(server_id, asked_at, &m.master_kp),
+        follows_leave: None,
     };
     let invite = super::sealed_box::public_of(&join_secret_of(server_id).expect("a harness-created server"));
     super::join_lane::seal_to_members(&door.door_key().unwrap(), &invite, door.n, server_id, &m.device_id, &again).expect("seals")
@@ -41238,6 +41296,7 @@ async fn authz_a_resolution_never_answers_an_ask_made_after_it() {
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(&server_id, now, &j.master_kp),
+        follows_leave: None,
     };
     relay.inject(&server_id, &j.device_id, &o.device_id, sealed_to_members(&relay, &server_id, &j.device_id, &parked));
     assert!(
@@ -41280,6 +41339,7 @@ async fn authz_a_resolution_counts_only_from_a_member() {
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(&server_id, now, &j.master_kp),
+        follows_leave: None,
     };
     relay.inject(&server_id, &j.device_id, &o.device_id, sealed_to_members(&relay, &server_id, &j.device_id, &parked));
     assert!(
@@ -46244,6 +46304,7 @@ async fn a_join_resolved_from_an_owners_second_device_counts() {
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(&server_id, at, &j.master_kp),
+        follows_leave: None,
     };
     let asked = super::frame_auth::now_ms();
     let answered = super::types::HavenMessage::ServerJoinResolved {
@@ -54007,6 +54068,7 @@ async fn g13_join_hold_waits_for_the_final_round() {
         card: None,
         avatar_b64: String::new(),
         ask: join_ask(&sid, asked_at, &j_key),
+        follows_leave: None,
     });
     relay.inject_topic(&sid, super::types::JOIN_TOPIC, &j, parked);
 
@@ -59368,4 +59430,365 @@ async fn w2b_a_stale_leaf_whose_authority_never_answers_asks_the_next_member() {
     relay.release_direct(&ids[1], &ids[0]);
     assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &sid, 30).await.is_some(), "one group");
     drop(nodes);
+}
+
+// w2-d
+
+/// The relay shows `member` the server's room and its loop sees `owner` there, so an ask
+/// it drops is judged by the reach rule, not by our own hidden spell after joining.
+async fn w2d_member_sees_room(relay: &MockRelay, server_id: &str, member: &TestNode, owner: &TestNode) {
+    assert!(expect_sees_room(relay, server_id, &member.device_id).await, "precondition: the relay shows the member the room");
+    assert!(wait_until(10, async || member.sees_peer(&owner.device_id).await).await, "precondition: the member sees the owner");
+}
+
+/// A seal time from `from` on at which a hidden `sender`'s frame, ranked over `room`
+/// (the devices a member sees, itself included), picks `picked` among its first three
+/// and leaves every device of `left_out` behind them.
+fn w2d_seal_where(from: i64, sender: &str, room: &[String], picked: &[&str], left_out: &[&str]) -> i64 {
+    (from..from + 50_000)
+        .find(|t| {
+            let head = super::door_room::seal_head(*t);
+            let mut ranked: Vec<(u64, &str)> =
+                room.iter().map(|d| (super::door_room::reach_rank(sender, &head, d), d.as_str())).collect();
+            ranked.sort_unstable();
+            let first: Vec<&str> = ranked.iter().take(super::door_room::HIDDEN_REACH).map(|(_, d)| *d).collect();
+            picked.iter().all(|d| first.contains(d)) && left_out.iter().all(|d| !first.contains(d))
+        })
+        .expect("a seal time with that order")
+}
+
+/// A join request from a joiner the relay hides, as a hand-built device `device_tag` of
+/// master `master_tag` would broadcast it: sealed to the members and as a frame at
+/// `sealed_at`, asked at `asked_at`.
+fn w2d_hidden_ask(relay: &MockRelay, server_id: &str, master_tag: u8, device_tag: u8, sealed_at: i64, asked_at: i64) -> Vec<u8> {
+    w2d_hidden_ask_after(relay, server_id, master_tag, device_tag, sealed_at, asked_at, None)
+}
+
+/// [`w2d_hidden_ask`] naming `follows_leave` as the joiner's own leave it follows.
+fn w2d_hidden_ask_after(
+    relay: &MockRelay,
+    server_id: &str,
+    master_tag: u8,
+    device_tag: u8,
+    sealed_at: i64,
+    asked_at: i64,
+    follows_leave: Option<crate::crdt::hlc::HlcTimestamp>,
+) -> Vec<u8> {
+    let master = keys(master_tag);
+    let device = keys(device_tag);
+    let request = super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.to_string(), twitch_proof_json: None, nsfw_confirmed: false, requested_at: asked_at,
+        device_list: Some(legacy_roster(master_tag, &[device_tag], None)), parked: false, key_package: None,
+        reply_key: fresh_reply_key(), card: None, avatar_b64: String::new(), ask: join_ask(server_id, asked_at, &master),
+        follows_leave,
+    };
+    let body = sealed_to_members(relay, server_id, &device.peer_id(), &request);
+    let mut nonce = [0u8; super::frame_auth::NONCE_LEN];
+    getrandom::fill(&mut nonce).unwrap();
+    super::frame_auth::seal_at(&device, server_id, super::frame_auth::ROUTE_ROOM, sealed_at, nonce, &body)
+}
+
+/// 0.14 (AR-36): the relay hands a hidden joiner's broadcast to the three members its
+/// frame picks, which may leave out the join coordinator. A picked member that is not
+/// the coordinator serves the join instead of leaving it to someone who never heard it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_a_hidden_joiner_is_served_by_the_members_its_frame_reached() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, _j, server_id) = owner_member_and_joiner(&relay, 101, 102, 103).await;
+    w2d_member_sees_room(&relay, &server_id, &m, &o).await;
+    let joiner = keys(104).peer_id();
+    let device = keys(105).peer_id();
+    // Three more provers M sees, so a frame can pick M and leave the owner out.
+    let fakes: Vec<String> = [131u8, 132, 133].iter().map(|t| keys(*t).peer_id()).collect();
+    for fake in &fakes {
+        relay.inject_presence(&m.device_id, &server_id, fake);
+    }
+    let room: Vec<String> = fakes.iter().cloned().chain([o.device_id.clone(), m.device_id.clone()]).collect();
+    let now = super::frame_auth::now_ms();
+    let sealed = w2d_seal_where(now, &device, &room, &[&m.device_id], &[&o.device_id]);
+    // Only M hears it, as the relay hands it to the three it picks and not the owner.
+    relay.inject(&server_id, &device, &m.device_id, w2d_hidden_ask(&relay, &server_id, 104, 105, sealed, now));
+    assert!(
+        wait_until(15, async || m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&joiner))).await,
+        "the member the hidden ask reached admits the joiner",
+    );
+    drop(o);
+}
+
+/// The other half on a relay that does not pick: a member the frame's order leaves out
+/// of the first three in the room it sees serves nothing, so a hidden ask costs at most
+/// three members whatever relay carries it. A later frame that picks it is served.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_a_hidden_ask_its_frame_did_not_pick_us_for_is_left_to_others() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, _j, server_id) = owner_member_and_joiner(&relay, 106, 107, 108).await;
+    w2d_member_sees_room(&relay, &server_id, &m, &o).await;
+    let joiner = keys(109).peer_id();
+    let device = keys(110).peer_id();
+    // Three more provers M sees (presence queues ahead of the asks injected below).
+    let others: Vec<String> = [111u8, 112, 113].iter().map(|t| keys(*t).peer_id()).chain([o.device_id.clone()]).collect();
+    for other in &others[..3] {
+        relay.inject_presence(&m.device_id, &server_id, other);
+    }
+    let now = super::frame_auth::now_ms();
+    let room: Vec<String> = others.iter().cloned().chain([m.device_id.clone()]).collect();
+    // Picks only provers that are no members (so M alone would elect itself), then M
+    // and not the owner (so M is the one the picks elect).
+    let left_out = w2d_seal_where(now, &device, &room, &[], &[&m.device_id, &o.device_id]);
+    let picked = w2d_seal_where(now, &device, &room, &[&m.device_id], &[&o.device_id]);
+    // M just regained the room, so it holds asks until a member's sync or HOLD_WAIT: an
+    // ask its frame picks, from another joiner, shows the hold is over before we judge.
+    let early = keys(127).peer_id();
+    let early_device = keys(128).peer_id();
+    let early_at = w2d_seal_where(now, &early_device, &room, &[&m.device_id], &[&o.device_id]);
+    relay.inject(&server_id, &early_device, &m.device_id, w2d_hidden_ask(&relay, &server_id, 127, 128, early_at, now));
+    assert!(
+        wait_until(15, async || m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&early))).await,
+        "precondition: M's join hold is over",
+    );
+    relay.inject(&server_id, &device, &m.device_id, w2d_hidden_ask(&relay, &server_id, 109, 110, left_out, now));
+    sleep_ms(2_000).await; // absence proof: a member the frame did not pick serves nothing
+    assert!(
+        !m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&joiner)),
+        "a member the frame did not pick leaves the ask to the three it did",
+    );
+    relay.inject(&server_id, &device, &m.device_id, w2d_hidden_ask(&relay, &server_id, 109, 110, picked, now + 1));
+    assert!(
+        wait_until(15, async || m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&joiner))).await,
+        "the same ask in a frame that picks it is served",
+    );
+    drop(o);
+}
+
+/// The join slack item: a member's clock ahead carries ours, so our leave is stamped
+/// minutes past our wall clock. Joining again right away must still be served: the new
+/// ask is stamped past our own leave, and members judge it by that stamp.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_a_rejoin_inside_our_own_leaves_clock_lead_is_served() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 114, 115, 116).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |e| matches!(e, NetworkEvent::ServerJoined { server_id: s, .. } if *s == server_id)).await,
+        "precondition: J joins",
+    );
+    let ahead = 120_000u64;
+    let renamed = forge_crdt_op(
+        &server_id, &o.master_id, crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "From ahead".into() },
+        ahead, Some(&o.master_kp),
+    );
+    send_as(&relay, &server_id, &o, &j, sync_response(&server_id, &[renamed])).await;
+    assert!(
+        wait_until(10, async || j.live_server_state(&server_id).await.is_some_and(|s| s.name() == "From ahead")).await,
+        "precondition: J's clock witnessed the op from ahead",
+    );
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    let floor = crate::crdt::hlc::wall_clock_ms() + ahead / 2;
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.and_then(|s| s.left_at(&j.master_id)).is_some_and(|l| l > floor)).await,
+        "precondition: the owner holds J's leave, stamped ahead of the wall clock",
+    );
+    drain_events(&mut j);
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(20), |e| matches!(e, NetworkEvent::ServerJoined { server_id: s, .. } if *s == server_id)).await,
+        "J joins again inside its leave's clock lead",
+    );
+    assert!(o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id)), "the owner counts J again");
+    drop(m);
+}
+
+/// The evidence for keeping no slack: an ask J sealed while a member, newer than the
+/// one that admitted it, handed back by a relay after J left must not put J back in.
+/// The same ask sealed after the leave is served (the path is otherwise open).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_an_ask_from_before_the_leave_handed_back_readmits_nobody() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 117, 118, 119).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |e| matches!(e, NetworkEvent::ServerJoined { server_id: s, .. } if *s == server_id)).await,
+        "precondition: J joins",
+    );
+    let before = super::frame_auth::now_ms();
+    let kept = w2d_hidden_ask(&relay, &server_id, 119, 119, before, before);
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&j.master_id) && s.left_at(&j.master_id).is_some())).await,
+        "precondition: the owner holds J's leave",
+    );
+    relay.inject(&server_id, &j.device_id, &o.device_id, kept);
+    sleep_ms(3_000).await; // absence proof: an ask from before the leave admits nobody
+    assert!(
+        !o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id)),
+        "an ask J sealed before it left does not put it back",
+    );
+    let after = super::frame_auth::now_ms();
+    relay.inject(&server_id, &j.device_id, &o.device_id, w2d_hidden_ask(&relay, &server_id, 119, 119, after, after));
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id))).await,
+        "an ask sealed after the leave is served",
+    );
+    drop(m);
+}
+
+/// The door ask's half of the hidden-sender limit: a member answers a hidden member's
+/// ask only when the ask's frame picked it among the first three it sees, as the relay
+/// hands it to those three alone; so a relay that does not pick still gets three grants.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_a_door_ask_is_answered_by_the_members_its_frame_picks() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 120, 121, 122).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |e| matches!(e, NetworkEvent::ServerJoined { server_id: s, .. } if *s == server_id)).await,
+        "precondition: J joins",
+    );
+    w2d_member_sees_room(&relay, &server_id, &m, &o).await;
+    // J's own door ask after joining is answered before we record.
+    w2d_member_sees_room(&relay, &server_id, &j, &m).await;
+    assert!(wait_until(10, async || m.sees_peer(&j.device_id).await).await, "precondition: M sees J");
+    expect_relay_drained(&relay, &m, "w2d-j-grant").await;
+    let others: Vec<String> =
+        [123u8, 124, 125].iter().map(|t| keys(*t).peer_id()).chain([o.device_id.clone(), j.device_id.clone()]).collect();
+    for other in &others[..3] {
+        relay.inject_presence(&m.device_id, &server_id, other);
+    }
+    let now = super::frame_auth::now_ms();
+    // The owner asks: J's own ask was just answered, and a second grant waits ASK_GAP.
+    let asker = o.device_id.clone();
+    let pick = |first: bool| {
+        (now..now + 10_000)
+            .find(|t| {
+                let head = super::door_room::seal_head(*t);
+                let ours = super::door_room::reach_rank(&asker, &head, &m.device_id);
+                others.iter().filter(|d| **d != asker).all(|d| (super::door_room::reach_rank(&asker, &head, d) > ours) == first)
+            })
+            .expect("a seal time with that order")
+    };
+    let ask = |sealed_at: i64, nonce: u8| {
+        let body = serde_json::to_vec(&super::types::HavenMessage::DoorAsk { server_id: server_id.clone(), nonce: "00".into() }).unwrap();
+        super::frame_auth::seal_at(&keys(120), &server_id, super::frame_auth::ROUTE_ROOM, sealed_at, [nonce; super::frame_auth::NONCE_LEN], &body)
+    };
+    relay.set_recording(&m.device_id, true);
+    relay.inject(&server_id, &asker, &m.device_id, ask(pick(false), 5));
+    sleep_ms(2_000).await; // absence proof: a member the ask's frame did not pick grants nothing
+    assert_eq!(door_grants_from(&relay, &m.device_id, 0), 0, "a member the frame left out does not answer");
+    relay.inject(&server_id, &asker, &m.device_id, ask(pick(true), 6));
+    assert!(
+        wait_until(10, async || door_grants_from(&relay, &m.device_id, 0) > 0).await,
+        "the member the ask's frame picks hands over the door",
+    );
+}
+
+/// The joiner's half of the slack item: a re-ask (a retry, a lock moved) from a clock
+/// still behind the first ask, which sits past our own leave, never goes back below it.
+#[test]
+fn w2d_asking_again_never_goes_back_past_the_first_ask() {
+    let master = NativeKeypair::from_secret_bytes(&seed_bytes(126));
+    let sid = "ab".repeat(20);
+    let mut join = super::types::PendingJoin { requested_at: 1_700_000_120_000, ..Default::default() };
+    join.ask_again(&sid, 1_700_000_000_000, &master);
+    assert_eq!(join.requested_at, 1_700_000_120_001, "a re-ask from a clock behind the first ask goes just past it");
+    assert_eq!(join.ask.as_ref().map(|a| a.at), Some(1_700_000_120_001), "and its signed ask names that stamp");
+    join.ask_again(&sid, 1_700_000_500_000, &master);
+    assert_eq!(join.requested_at, 1_700_000_500_000, "a clock past it stamps now");
+}
+
+/// Review finding 3: J leaves inside a clock lead, rejoins (its ask stamped past that
+/// leave), and a re-ask of that rejoin waits parked in the ring. J leaves again inside the
+/// same lead. The parked re-ask, handed back, names the first leave and so counts only by
+/// its seal: it must not put J back, though its stamp sits past the second leave. J's own
+/// ask after the second leave is served.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_a_parked_reask_handed_back_after_a_second_leave_readmits_nobody() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 136, 137, 138).await;
+    let joined = async |j: &mut TestNode, what: &str| {
+        drain_events(j);
+        j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+        assert!(
+            wait_event(j, std::time::Duration::from_secs(20), |e| matches!(e, NetworkEvent::ServerJoined { server_id: s, .. } if *s == server_id)).await,
+            "{what}",
+        );
+    };
+    joined(&mut j, "precondition: J joins").await;
+    let ahead = 120_000u64;
+    let renamed = forge_crdt_op(
+        &server_id, &o.master_id, crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "From ahead".into() },
+        ahead, Some(&o.master_kp),
+    );
+    send_as(&relay, &server_id, &o, &j, sync_response(&server_id, &[renamed])).await;
+    assert!(
+        wait_until(10, async || j.live_server_state(&server_id).await.is_some_and(|s| s.name() == "From ahead")).await,
+        "precondition: J's clock witnessed the op from ahead",
+    );
+    let floor = crate::crdt::hlc::wall_clock_ms() + ahead / 2;
+    let jm = j.master_id.clone();
+    let gone = async |what: &str| {
+        assert!(
+            wait_until(15, async || o.live_server_state(&server_id).await.and_then(|s| s.left_at(&jm)).is_some_and(|l| l > floor)).await,
+            "{what}",
+        );
+        o.live_server_state(&server_id).await.and_then(|s| s.left_by(&jm).cloned()).expect("the owner holds the leave's clock")
+    };
+    let span_ask = async || {
+        o.live_server_state(&server_id).await
+            .and_then(|s| s.member_record.get(&jm).and_then(|spans| spans.last()).map(|span| span.asked_at))
+            .unwrap_or_default()
+    };
+
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    let first_leave = gone("precondition: the owner holds J's leave, stamped ahead of the wall clock").await;
+    joined(&mut j, "precondition: J rejoins inside its leave's clock lead").await;
+    assert!(wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id))).await);
+    let rejoin_ask = span_ask().await;
+    // What J would park after a lock move during that rejoin: a re-ask past its first ask,
+    // naming the leave it followed, sealed while J was joining.
+    let reask_at = rejoin_ask + 2;
+    let parked = w2d_hidden_ask_after(
+        &relay, &server_id, 138, 138, super::frame_auth::now_ms(), reask_at, Some(first_leave.clone()),
+    );
+
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&j.master_id))).await,
+        "precondition: the owner holds J's second leave",
+    );
+    let second_leave = gone("precondition: the second leave sits inside the same lead").await;
+    assert_ne!(second_leave, first_leave, "precondition: a second leave");
+    assert!(
+        reask_at > o.live_server_state(&server_id).await.and_then(|s| s.left_at(&j.master_id)).unwrap_or(u64::MAX) as i64,
+        "precondition: the parked re-ask is stamped past the second leave",
+    );
+    relay.inject(&server_id, &j.device_id, &o.device_id, parked);
+    joined(&mut j, "J's own ask after its second leave is served").await;
+    let admitted_by = span_ask().await;
+    assert_ne!(admitted_by, reask_at, "the parked re-ask from the earlier rejoin did not put J back");
+    assert!(admitted_by > rejoin_ask, "J's new ask, past the one that admitted it before, did");
+    drop(m);
 }

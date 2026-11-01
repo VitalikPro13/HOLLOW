@@ -886,8 +886,8 @@ mod tests {
         Member { mode: 0o644, ..file(name, format!("# {name}\n").into_bytes()) }
     }
 
-    pub(crate) const SETUP: [&str; 11] = [
-        "setup/deploy/coturn-port-lock.conf", "setup/deploy/hollow-turn-port-lock-refresh.service",
+    pub(crate) const SETUP: [&str; 12] = [
+        "setup/deploy/coturn-port-lock.conf", "setup/deploy/hollow-cake.service", "setup/deploy/hollow-turn-port-lock-refresh.service",
         "setup/deploy/hollow-turn-port-lock-refresh.timer", "setup/deploy/hollow-turn-port-lock.service",
         "setup/deploy/lib/common.sh", "setup/deploy/lib/release_feed.sh", "setup/deploy/turn-port-lock.sh", "setup/install.sh",
         "setup/push-sidecar/index.js", "setup/push-sidecar/package-lock.json", "setup/push-sidecar/package.json",

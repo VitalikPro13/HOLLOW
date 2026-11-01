@@ -23,6 +23,9 @@ ExecStart=/usr/local/bin/hollow-relay \
 # TURN_SECRET, HOLLOW_PUSH_TOKEN and HOLLOW_CONN_RATE_EXEMPT, root-only (0600).
 # Never Environment=: any local account can read those through `systemctl show`.
 EnvironmentFile=/etc/hollow-relay/relay.env
+# The fair-share shaper's settings (hollow-cake.service), for /server-stats'
+# bandwidth_cap_mbps. Not secret; without the file the stats name no cap.
+EnvironmentFile=-/etc/hollow-relay/cake.env
 StateDirectory=hollow-relay
 StateDirectoryMode=0700
 Restart=always

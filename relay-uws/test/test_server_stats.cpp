@@ -87,6 +87,18 @@ int main() {
     check("anything else turns them off", !server_stats::parse_public_stats("maybe"));
     check("only spaces means on, as empty does", server_stats::parse_public_stats("   "));
 
+    // bandwidth_cap_mbps_comes_from_the_shapers_settings (deploy/hollow-cake.service).
+    check("the shaper's bandwidth is the cap", server_stats::bandwidth_cap_mbps("on", "950") == 950);
+    check("whatever HOLLOW_CAKE says short of off", server_stats::bandwidth_cap_mbps(nullptr, "800") == 800);
+    check("a shaper turned off names no cap", server_stats::bandwidth_cap_mbps("off", "950") == 0);
+    check("in any case", server_stats::bandwidth_cap_mbps("OFF", "950") == 0);
+    check("no settings, no cap", server_stats::bandwidth_cap_mbps(nullptr, nullptr) == 0);
+    check("an empty bandwidth, no cap", server_stats::bandwidth_cap_mbps("on", "") == 0);
+    for (const char* t : {"0", "100001", "9.5", "950mbit", " 950", "-1", "99999999999999999999"}) {
+        check(std::string("'") + t + "' is no cap", server_stats::bandwidth_cap_mbps("on", t) == 0);
+    }
+    check("the largest it takes", server_stats::bandwidth_cap_mbps("on", "100000") == 100000);
+
     if (failures) {
         printf("%d failure(s)\n", failures);
         return 1;

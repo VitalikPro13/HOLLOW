@@ -22,6 +22,7 @@
 #include <cstring>
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -2139,38 +2140,96 @@ static void try_channel_push_notify(const std::string& target, const std::string
 static bool subscribed(const std::unordered_map<std::string, std::unordered_set<std::string>>& subs,
                        const std::string& room, const std::string& topic);
 
-// Whether a fan-out from `sender` reaches the live room peer `pid`: the one rule the
-// delivery loops, the breaker's plan and the send budget's prediction all walk (`topic`
-// for a 0x07 send, else null).
-static bool fanout_reaches(const Audience& aud, bool public_frame, const std::string& pid, const std::string& sender,
-                           const PerSocketData* d, const std::string& room, const std::string* topic) {
-    if (pid == sender || !(public_frame || aud.shares(pid, sender))) return false;
-    return !topic || subscribed(d->subscriptions, room, *topic);
-}
+// One broadcast from `sender` into a room: the one rule the delivery loops, the breaker's
+// plan and the send budget's prediction all walk (`topic` for a 0x07 send, else null). A
+// sender the locked room hides reaches only the few provers its frame picks, and on a
+// topic only the join ring (door_room::HIDDEN_REACH): it may be anyone holding the id.
+// One room broadcast as the first judge walked it, for the send budget and the delivery to
+// reuse (CastSeen::matches names the broadcast it saw): a hidden sender's picks are built
+// once per frame, as the breaker priced them.
+struct CastSeen {
+    bool looked = false;
+    std::string room;
+    bool to_all = false;
+    bool has_topic = false;
+    std::string topic;
+    // The sender is in the room and its walk counted these copies.
+    bool walked = false;
+    uint64_t budget_copies = 0;
+    std::optional<door_room::ReachPicks> picks;
 
-// What a fan-out writes to now: fanout_reaches, less a socket that writes nothing more
-// (write_raw skips it in the delivery).
-static bool fanout_writes(const Audience& aud, bool public_frame, const std::string& pid, const std::string& sender,
-                          const PerSocketData* d, const std::string& room, const std::string* topic) {
-    return !d->write_dead && fanout_reaches(aud, public_frame, pid, sender, d, room, topic);
+    bool matches(const std::string& r, bool all, const std::string* t) const {
+        return looked && room == r && to_all == all && has_topic == (t != nullptr) && (!t || topic == *t);
+    }
+};
+
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+// How many times each peer's frames built a hidden sender's picks (test builds only).
+static std::unordered_map<std::string, int64_t> g_test_picks_built;
+#endif
+
+struct Cast {
+    const Audience& aud;
+    const std::string& sender;
+    const std::string& room;
+    const std::string* topic;
+    bool public_frame = false;
+    bool hidden = false;
+    std::optional<door_room::ReachPicks> picks;
+
+    // Whether the fan-out reaches the live room peer `pid`.
+    bool reaches(const std::string& pid, const PerSocketData* d) const {
+        if (hidden) return picks && picks->picked(pid);
+        if (pid == sender || !(public_frame || aud.shares(pid, sender))) return false;
+        return !topic || subscribed(d->subscriptions, room, *topic);
+    }
+
+    // What it writes to now: less a socket that writes nothing more (write_raw skips it).
+    bool writes(const std::string& pid, const PerSocketData* d) const { return !d->write_dead && reaches(pid, d); }
+
+    // Whether it reaches `pid`'s session in grace (a topic send checks its filter too).
+    bool reaches_held(const std::string& pid) const {
+        return !hidden && pid != sender && (public_frame || aud.shares(pid, sender));
+    }
+};
+
+// `frame` is what the sender wrote (its seal head orders a hidden sender's picks); `seen`
+// hands over the picks this frame's earlier walk built.
+static Cast cast_of(const Audience& aud, const WsRoom& r, const std::string& sender, const std::string& room,
+                    bool to_all, const std::string* topic, std::string_view frame, const CastSeen* seen = nullptr) {
+    Cast c{aud, sender, room, topic};
+    c.public_frame = to_all && aud.locked && aud.sees(sender);
+    c.hidden = aud.locked && !aud.sees(sender);
+    if (!c.hidden || (topic && *topic != door_room::JOIN_TOPIC)) return c;
+    if (seen && seen->picks && seen->matches(room, to_all, topic)) {
+        c.picks = seen->picks;
+        return c;
+    }
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+    if (g_test_picks_built.size() > 4096) g_test_picks_built.clear();
+    g_test_picks_built[sender]++;
+#endif
+    c.picks.emplace(sender, frame);
+    for (const auto& [pid, sock] : r.peers) {
+        const PerSocketData* d = sock->getUserData();
+        // Away provers only fill slots no on-screen one takes: they answer no ask, but
+        // still hear a door-less device's roster notice.
+        if (pid == sender || d->is_guest || d->is_fetch || d->write_dead) continue;
+        if (!aud.shares(pid, sender) || (topic && !subscribed(d->subscriptions, room, *topic))) continue;
+        c.picks->offer(pid, d->hidden);
+    }
+    return c;
 }
 
 // The bytes a fan-out holds at once, walking the room the way the delivery does and
 // counting at most so many recipients per block and per share, so sockets a stranger piles
 // into the room cannot inflate it. The delivery walks it again under FanoutScope (an
 // admission may have closed sockets since).
-static uint64_t fanout_bytes(const PerSocketData* data, const std::string& room, uint64_t per_copy,
-                             RelayState& state, bool to_all, const std::string* topic) {
-    auto rit = state.ws_rooms.find(room);
-    if (rit == state.ws_rooms.end()) return 0;
-    if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return 0;
-    // Audience keeps a view of the name: hand it the map's key, never a temporary.
-    const Audience aud = audience(state, rit->second, rit->first);
-    const bool public_frame = to_all && aud.locked && aud.sees(data->peer_id);
-    return send_budget::predict(rit->second.peers, per_copy, state.send_ledger.limits, [&](const auto& peer)
+static uint64_t fanout_bytes(const Cast& cast, const WsRoom& r, uint64_t per_copy, RelayState& state) {
+    return send_budget::predict(r.peers, per_copy, state.send_ledger.limits, [&](const auto& peer)
         -> std::optional<std::pair<std::string, uint64_t>> {
         const PerSocketData* d = peer.second->getUserData();
-        if (!fanout_writes(aud, public_frame, peer.first, data->peer_id, d, room, topic)) return std::nullopt;
+        if (!cast.writes(peer.first, d)) return std::nullopt;
         return std::make_pair(recipient_block(d), d->budget_share);
     });
 }
@@ -2234,7 +2293,7 @@ static void handle_binary_channel_direct(PerSocketData* data,
 }
 
 static void handle_msg(PerSocketData* data, const std::string& room,
-                        const std::string& msg_data, RelayState& state) {
+                        const std::string& msg_data, RelayState& state, const CastSeen& seen) {
     auto rit = state.ws_rooms.find(room);
     if (rit == state.ws_rooms.end()) return;
 
@@ -2252,14 +2311,13 @@ static void handle_msg(PerSocketData* data, const std::string& room,
     const Bytes out = shared_bytes(broadcast.dump());
     const Meta meta{socket_share(state, data)};
     const Audience aud = audience(state, rit->second, room);
-    FanoutScope counted(state.send_ledger.limits, fanout_bytes(data, room, out->size(), state, false, nullptr));
+    const Cast cast = cast_of(aud, rit->second, data->peer_id, room, false, nullptr, msg_data, &seen);
+    FanoutScope counted(state.send_ledger.limits, fanout_bytes(cast, rit->second, out->size(), state));
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (fanout_reaches(aud, false, pid, data->peer_id, peer_ws->getUserData(), room, nullptr)) {
-            send_stream(peer_ws, out, false, meta);
-        }
+        if (cast.reaches(pid, peer_ws->getUserData())) send_stream(peer_ws, out, false, meta);
     }
     for (const auto& pid : rit->second.held) {
-        if (pid != data->peer_id && aud.shares(pid, data->peer_id)) send_held(state, pid, out, false, meta);
+        if (cast.reaches_held(pid)) send_held(state, pid, out, false, meta);
     }
 }
 
@@ -2374,8 +2432,8 @@ static void handle_binary_direct(PerSocketData* data,
 // 0x03 reaches whoever sees the room; 0x0A (`to_all`) is a public frame, which a
 // prover's send also hands to everyone a locked room hides (guests reading public
 // channels). Both arrive as 0x05.
-static void handle_binary_msg(PerSocketData* data,
-                               std::string_view raw, RelayState& state, bool to_all = false) {
+static void handle_binary_msg(PerSocketData* data, std::string_view raw, RelayState& state, bool to_all,
+                              const CastSeen& seen) {
     const auto f = binary_frame::parse_broadcast(raw);
     if (!f) return;
     const std::string_view room_code = f->room, payload = f->payload;
@@ -2389,19 +2447,15 @@ static void handle_binary_msg(PerSocketData* data,
     std::string forwarded = binary_frame::out_frame(0x05, {room_code, data->peer_id}, payload);
 
     const Audience aud = audience(state, rit->second, room_str);
-    const bool public_frame = to_all && aud.locked && aud.sees(data->peer_id);
+    const Cast cast = cast_of(aud, rit->second, data->peer_id, room_str, to_all, nullptr, payload, &seen);
     const Bytes out = shared_bytes(std::move(forwarded));
     const Meta meta{socket_share(state, data)};
-    FanoutScope counted(state.send_ledger.limits, fanout_bytes(data, room_str, out->size(), state, to_all, nullptr));
+    FanoutScope counted(state.send_ledger.limits, fanout_bytes(cast, rit->second, out->size(), state));
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (fanout_reaches(aud, public_frame, pid, data->peer_id, peer_ws->getUserData(), room_str, nullptr)) {
-            send_stream(peer_ws, out, true, meta);
-        }
+        if (cast.reaches(pid, peer_ws->getUserData())) send_stream(peer_ws, out, true, meta);
     }
     for (const auto& pid : rit->second.held) {
-        if (pid != data->peer_id && (public_frame || aud.shares(pid, data->peer_id))) {
-            send_held(state, pid, out, true, meta);
-        }
+        if (cast.reaches_held(pid)) send_held(state, pid, out, true, meta);
     }
 }
 
@@ -2556,8 +2610,8 @@ static void handle_subscribe(PerSocketData* data, const std::string& room, const
     }
 }
 
-static void handle_binary_topic_msg(PerSocketData* data,
-                                     std::string_view raw, RelayState& state) {
+static void handle_binary_topic_msg(PerSocketData* data, std::string_view raw, RelayState& state,
+                                    const CastSeen& seen) {
     const auto f = binary_frame::parse_topic(raw);
     if (!f) return;
     const std::string_view room_code = f->room, topic = f->topic, payload = f->payload;
@@ -2570,12 +2624,15 @@ static void handle_binary_topic_msg(PerSocketData* data,
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
 
     std::string forwarded = binary_frame::out_frame(0x08, {room_code, topic, data->peer_id}, payload);
+    const Audience aud = audience(state, rit->second, room_str);
+    const Cast cast = cast_of(aud, rit->second, data->peer_id, room_str, false, &topic_str, payload, &seen);
 
     // Tee into the channel's ring buffer when registered (server owner opted
     // into relay catch-up). Ciphertext only; per-channel caps + retention +
     // the global budget bound RAM. One stored copy serves every late joiner, so
-    // a forwarder's room, whose members never meet, keeps none.
-    {
+    // a forwarder's room, whose members never meet, keeps none. A sender the room
+    // hides writes only the join ring.
+    if (!cast.hidden || topic == door_room::JOIN_TOPIC) {
         std::string key = room_str;
         key.push_back('\0');
         key += topic_str;
@@ -2603,18 +2660,15 @@ static void handle_binary_topic_msg(PerSocketData* data,
         }
     }
 
-    const Audience aud = audience(state, rit->second, room_str);
     const Bytes out = shared_bytes(std::move(forwarded));
     const Meta meta{socket_share(state, data)};
-    FanoutScope counted(state.send_ledger.limits, fanout_bytes(data, room_str, out->size(), state, false, &topic_str));
+    FanoutScope counted(state.send_ledger.limits, fanout_bytes(cast, rit->second, out->size(), state));
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (fanout_reaches(aud, false, pid, data->peer_id, peer_ws->getUserData(), room_str, &topic_str)) {
-            send_stream(peer_ws, out, true, meta);
-        }
+        if (cast.reaches(pid, peer_ws->getUserData())) send_stream(peer_ws, out, true, meta);
     }
     // A session in grace keeps its filter.
     for (const auto& pid : rit->second.held) {
-        if (pid == data->peer_id || !aud.shares(pid, data->peer_id)) continue;
+        if (!cast.reaches_held(pid)) continue;
         const session::Session* s = grace_session(state, pid);
         if (s && subscribed(s->subscriptions, room_str, topic_str)) send_held(state, pid, out, true, meta);
     }
@@ -2936,7 +2990,7 @@ static bool handle_session_control(SSLWebSocket* ws, PerSocketData* data, const 
 
 static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                                  const json& j, const std::string& type, RelayState& state,
-                                 const Config& config) {
+                                 const Config& config, const CastSeen& seen) {
     if (handle_session_control(ws, data, j, type, state)) return;
 
     if (type == "join") {
@@ -2956,7 +3010,7 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         data->presence_withheld.erase(room);
         if (session::Session* s = live_session(state, data)) s->rooms.erase(room);
     } else if (type == "msg") {
-        handle_msg(data, j.value("room", ""), j.value("data", ""), state);
+        handle_msg(data, j.value("room", ""), j.value("data", ""), state, seen);
     } else if (type == "direct") {
         handle_direct(data, j.value("room", ""), j.value("target", ""),
                       j.value("data", ""), state);
@@ -3141,7 +3195,7 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
     // command now and falls through silently, like any other.
 }
 
-// DoS protection: per-IP limits (34 conns, 10 new/min), guest rate limiting (10 binary/min),
+// DoS protection: per-IP limits (34 conns, 10 new/min), guest rate limiting (10 broadcasts/min),
 // Ed25519 auth + license key revocation. IPs tracked in-memory only, never logged.
 
 
@@ -3825,7 +3879,7 @@ static breaker::Account* breaker_payer(RelayState& state, PerSocketData* data) {
 }
 
 // The deliveries one room broadcast makes, walked once with the delivery loops' own
-// predicate (fanout_writes) for both judges: whoever shares the room with the sender (the
+// predicate (Cast::writes) for both judges: whoever shares the room with the sender (the
 // members part), for a public frame the sockets outside its audience too, and the copies
 // the send budget counts (at most so many per block and share, as fanout_bytes does).
 struct CastWalk {
@@ -3833,17 +3887,19 @@ struct CastWalk {
     breaker::Tally outside;
     size_t live = 0;
     uint64_t budget_copies = 0;
+    bool hidden = false;
+    std::optional<door_room::ReachPicks> picks;
 };
 
 static CastWalk walk_cast(RelayState& state, const PerSocketData* data, const WsRoom& r, const std::string& room,
-                          bool to_all, const std::string* topic) {
+                          bool to_all, const std::string* topic, std::string_view frame) {
     CastWalk w;
     const Audience aud = audience(state, r, room);
-    const bool public_frame = to_all && aud.locked && aud.sees(data->peer_id);
+    Cast cast = cast_of(aud, r, data->peer_id, room, to_all, topic, frame);
     send_budget::Recipients counted(state.send_ledger.limits);
     for (const auto& [pid, sock] : r.peers) {
         const PerSocketData* d = sock->getUserData();
-        if (!fanout_writes(aud, public_frame, pid, data->peer_id, d, room, topic)) continue;
+        if (!cast.writes(pid, d)) continue;
         const bool shares = aud.shares(pid, data->peer_id);
         // A guest is no member device the poster can count (presence never lists one), so
         // the room's allowance pays for it, in an unlocked room too (MED 5).
@@ -3852,37 +3908,22 @@ static CastWalk walk_cast(RelayState& state, const PerSocketData* data, const Ws
         if (counted.take(recipient_block(d), d->budget_share)) w.budget_copies++;
     }
     for (const auto& pid : r.held) {
-        if (pid == data->peer_id) continue;
+        if (!cast.reaches_held(pid)) continue;
         const bool shares = aud.shares(pid, data->peer_id);
-        if (!shares && !public_frame) continue;
         const session::Session* s = grace_session(state, pid);
         if (!s || (topic && !subscribed(s->subscriptions, room, *topic))) continue;
         (shares ? w.members : w.outside).add(s->group);
     }
+    w.hidden = cast.hidden;
+    w.picks = std::move(cast.picks);
     return w;
 }
-
-// One room broadcast as the breaker's plan walked it, for the send budget to judge from the
-// same walk (CastSeen::matches names the broadcast it saw).
-struct CastSeen {
-    bool looked = false;
-    std::string room;
-    bool to_all = false;
-    bool has_topic = false;
-    std::string topic;
-    // The sender is in the room and its walk counted these copies.
-    bool walked = false;
-    uint64_t budget_copies = 0;
-
-    bool matches(const std::string& r, bool all, const std::string* t) const {
-        return looked && room == r && to_all == all && has_topic == (t != nullptr) && (!t || topic == *t);
-    }
-};
 
 // A broadcast's exact charge: the frame and its members part, the outside part from the
 // room's allowance (each group capped there too); what the allowance cannot cover is free.
 static void plan_cast(RelayState& state, const PerSocketData* data, const std::string& room, bool to_all,
-                      const std::string* topic, size_t frame_bytes, breaker::Plan& plan, CastSeen* seen) {
+                      const std::string* topic, std::string_view frame, size_t frame_bytes, breaker::Plan& plan,
+                      CastSeen* seen) {
     plan.exact = true;
     plan.w = 1;
     if (seen) {
@@ -3890,14 +3931,20 @@ static void plan_cast(RelayState& state, const PerSocketData* data, const std::s
     }
     auto rit = state.ws_rooms.find(room);
     if (rit == state.ws_rooms.end() || !rit->second.peers.count(data->peer_id)) return;
-    CastWalk w = walk_cast(state, data, rit->second, room, to_all, topic);
+    CastWalk w = walk_cast(state, data, rit->second, room, to_all, topic, frame);
     if (seen) {
         seen->walked = true;
         seen->budget_copies = w.budget_copies;
+        seen->picks = std::move(w.picks);
     }
     plan.recipients = w.live;
     plan.frame_bytes = frame_bytes;
     plan.w = 1 + w.members.cost();
+    // A hidden sender reaches a few, but the relay walks the whole room to find them.
+    if (w.hidden) {
+        const int64_t walked = static_cast<int64_t>(rit->second.peers.size());
+        plan.w += (walked + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W;
+    }
     plan.outside = w.outside.cost();
     if (plan.outside > 0) plan.room = room;
 }
@@ -3978,7 +4025,9 @@ static breaker::Plan plan_text(RelayState& state, const PerSocketData* data, con
     }
     if (!j.is_object()) return plan;
     if (type == "msg") {
-        plan_cast(state, data, json_text(j, "room"), false, nullptr, frame_bytes, plan, seen);
+        const auto f = msg_plan::fields(j);
+        plan_cast(state, data, json_text(j, "room"), false, nullptr, f ? f->data : std::string_view(), frame_bytes,
+                  plan, seen);
     } else if (type == "join") {
         const std::string room = json_text(j, "room");
         breaker::Tally t = walk_announce(state, room, data->peer_id);
@@ -3992,10 +4041,8 @@ static breaker::Plan plan_text(RelayState& state, const PerSocketData* data, con
         // Only a member's leave is announced: a non-member's costs no walk of the room.
         const std::string room = json_text(j, "room");
         auto rit = state.ws_rooms.find(room);
-        plan.w = 1;
-        if (rit != state.ws_rooms.end() && rit->second.peers.count(data->peer_id)) {
-            plan.w += walk_announce(state, room, data->peer_id).cost();
-        }
+        const bool member = rit != state.ws_rooms.end() && rit->second.peers.count(data->peer_id);
+        plan.w = breaker::leave_w(member, member ? walk_announce(state, room, data->peer_id).cost() : 0);
     } else if (type == "direct") {
         plan.w = 3;
         plan_deposit(state, data, json_text(j, "room"), json_text(j, "target"), false, plan);
@@ -4004,14 +4051,9 @@ static breaker::Plan plan_text(RelayState& state, const PerSocketData* data, con
     } else if (type == "lock_put") {
         auto links = j.find("links");
         const int64_t n = links != j.end() && links->is_array() ? static_cast<int64_t>(links->size()) : 0;
-        plan.w = 2 + breaker::SIG_W * n;
         auto rit = state.ws_rooms.find(json_text(j, "server"));
-        if (rit != state.ws_rooms.end()) {
-            const auto& doors = rit->second.doors;
-            // Saturating: pending is a subset of proofs (test_door_room), never trusted to be.
-            plan.w += breaker::DH_W *
-                      static_cast<int64_t>(doors.proofs.size() - std::min(doors.pending.size(), doors.proofs.size()));
-        }
+        const door_room::Doors* doors = rit == state.ws_rooms.end() ? nullptr : &rit->second.doors;
+        plan.w = breaker::lock_put_w(n, doors ? doors->proofs.size() : 0, doors ? doors->pending.size() : 0);
     } else if (type == "lock_get") {
         auto locks = j.find("locks");
         const size_t n = locks != j.end() && locks->is_array() ? std::min<size_t>(locks->size(), 256) : 0;
@@ -4038,14 +4080,14 @@ static breaker::Plan plan_binary(RelayState& state, const PerSocketData* data, s
         case 0x03:
         case 0x0A:
             if (auto f = binary_frame::parse_broadcast(raw)) {
-                plan_cast(state, data, std::string(f->room), raw[0] == 0x0A, nullptr,
+                plan_cast(state, data, std::string(f->room), raw[0] == 0x0A, nullptr, f->payload,
                           f->payload.size() + f->room.size() + data->peer_id.size() + 3, plan, seen);
             }
             break;
         case 0x07:
             if (auto f = binary_frame::parse_topic(raw)) {
                 const std::string topic(f->topic);
-                plan_cast(state, data, std::string(f->room), false, &topic,
+                plan_cast(state, data, std::string(f->room), false, &topic, f->payload,
                           f->payload.size() + f->room.size() + f->topic.size() + data->peer_id.size() + 4, plan,
                           seen);
             }
@@ -4078,11 +4120,20 @@ static breaker::Plan plan_binary(RelayState& state, const PerSocketData* data, s
 // The bytes a broadcast from `data` holds at once in send buffers: from the breaker's walk
 // when it made one of this broadcast, else walked here.
 static uint64_t cast_budget_bytes(RelayState& state, const PerSocketData* data, const std::string& room, bool to_all,
-                                  const std::string* topic, uint64_t per_copy, const CastSeen& seen) {
+                                  std::string_view frame, const std::string* topic, uint64_t per_copy,
+                                  CastSeen& seen) {
     if (seen.matches(room, to_all, topic)) {
         return seen.walked ? send_budget::held_bytes(seen.budget_copies, per_copy) : 0;
     }
-    return fanout_bytes(data, room, per_copy, state, to_all, topic);
+    seen = CastSeen{true, room, to_all, topic != nullptr, topic ? *topic : std::string()};
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end() || !rit->second.peers.count(data->peer_id)) return 0;
+    // Audience keeps a view of the name: hand it the map's key, never a temporary.
+    const Audience aud = audience(state, rit->second, rit->first);
+    Cast cast = cast_of(aud, rit->second, data->peer_id, rit->first, to_all, topic, frame);
+    const uint64_t bytes = fanout_bytes(cast, rit->second, per_copy, state);
+    seen.picks = std::move(cast.picks);
+    return bytes;
 }
 
 // Judges a fan-out of `predicted` bytes from `ws`: over the budget, the heaviest share's
@@ -4099,7 +4150,7 @@ static send_budget::Admit admit_fanout(SSLWebSocket* ws, uint64_t predicted, Rel
 // only to size the fan-out; the handler parses again to deliver. Pass for any other frame
 // and a malformed one (the handler drops it and it still counts).
 static send_budget::Admit binary_fanout_plan(SSLWebSocket* ws, std::string_view raw, RelayState& state,
-                                             const CastSeen& seen) {
+                                             CastSeen& seen) {
     if (raw.size() < 2) return send_budget::Admit::Pass;
     const uint8_t opcode = static_cast<uint8_t>(raw[0]);
     const PerSocketData* data = ws->getUserData();
@@ -4108,25 +4159,26 @@ static send_budget::Admit binary_fanout_plan(SSLWebSocket* ws, std::string_view 
         if (!f) return send_budget::Admit::Pass;
         const std::string room(f->room), topic(f->topic);
         const uint64_t per = binary_frame::out_frame_size({room, topic, data->peer_id}, f->payload);
-        return admit_fanout(ws, cast_budget_bytes(state, data, room, false, &topic, per, seen), state);
+        return admit_fanout(ws, cast_budget_bytes(state, data, room, false, f->payload, &topic, per, seen), state);
     }
     if (opcode != 0x03 && opcode != 0x0A) return send_budget::Admit::Pass;
     const auto f = binary_frame::parse_broadcast(raw);
     if (!f) return send_budget::Admit::Pass;
     const std::string room(f->room);
     const uint64_t per = binary_frame::out_frame_size({room, data->peer_id}, f->payload);
-    return admit_fanout(ws, cast_budget_bytes(state, data, room, /*to_all=*/opcode == 0x0A, nullptr, per, seen), state);
+    return admit_fanout(
+        ws, cast_budget_bytes(state, data, room, /*to_all=*/opcode == 0x0A, f->payload, nullptr, per, seen), state);
 }
 
 // How the send budget judges the text "msg" broadcast. Never throws (it runs outside the
 // handler's try): a field of the wrong type passes here and is refused by the handler.
 static send_budget::Admit text_msg_fanout_plan(SSLWebSocket* ws, const json& j, RelayState& state,
-                                               const CastSeen& seen) {
+                                               CastSeen& seen) {
     const auto f = msg_plan::fields(j);
     if (!f) return send_budget::Admit::Pass;
     const PerSocketData* data = ws->getUserData();
     const uint64_t per = msg_plan::out_size(*f->room, data->peer_id, f->data);
-    return admit_fanout(ws, cast_budget_bytes(state, data, *f->room, false, nullptr, per, seen), state);
+    return admit_fanout(ws, cast_budget_bytes(state, data, *f->room, false, f->data, nullptr, per, seen), state);
 }
 
 // Acts on the send budget's verdict; true when the frame stops here. A Trip closes the
@@ -4155,6 +4207,30 @@ struct FrameGuard {
     bool closed = false;
 };
 static FrameGuard* g_frame = nullptr;
+
+// Whether a guest's broadcast, binary or the JSON `msg` twin, is past this minute's
+// GUEST_BINARY_PER_MIN; both forms share one count. Counts one it lets through.
+static bool guest_broadcast_refused(PerSocketData* data) {
+    auto now = std::chrono::steady_clock::now();
+    if ((now - data->minute_window_start) > std::chrono::seconds(60)) {
+        data->binary_frames_this_minute = 0;
+        data->minute_window_start = now;
+    }
+    if (data->binary_frames_this_minute >= GUEST_BINARY_PER_MIN) return true;
+    data->binary_frames_this_minute++;
+    data->last_binary_activity = now;
+    return false;
+}
+
+// Whether a guest's binary frame is refused: no directs and no topic frames (the web viewer
+// only reads, and 0x07 feeds the catch-up rings), and broadcasts within the minute's count.
+static bool guest_refuses(PerSocketData* data, std::string_view message) {
+    if (message.size() < 2) return false;
+    const uint8_t opcode = static_cast<uint8_t>(message[0]);
+    if (opcode == 0x04 || opcode == 0x07 || opcode == 0x08 || opcode == 0x09) return true;
+    if (opcode != 0x03 && opcode != 0x0A) return false;
+    return guest_broadcast_refused(data);
+}
 
 // Judges a frame before it is counted. True when the breaker tripped (enforced mode): the
 // socket is closing 1013 after a reconnect hint, and the frame is neither counted nor
@@ -4198,6 +4274,14 @@ static void breaker_charge(RelayState& state, PerSocketData* data, const breaker
 }
 
 #ifdef HOLLOW_RELAY_TEST_LOOPBACK
+// The W the breaker judged each peer's last frame at, for the live tests' plan-level checks.
+static std::unordered_map<std::string, int64_t> g_test_plan_w;
+
+static void note_test_plan(const PerSocketData* data, const breaker::Plan& plan) {
+    if (g_test_plan_w.size() > 4096) g_test_plan_w.clear();
+    g_test_plan_w[data->peer_id] = plan.w;
+}
+
 // The live tests read one payer's buckets (test builds only).
 std::string breaker_test_report(const std::string& peer) {
     if (!g_state) return "{}";
@@ -4217,6 +4301,10 @@ std::string breaker_test_report(const std::string& peer) {
         out["start"] = copy.start_credit;
         out["tripped"] = copy.tripped;
     }
+    auto planned = g_test_plan_w.find(peer);
+    out["plan_w"] = planned == g_test_plan_w.end() ? int64_t(-1) : planned->second;
+    auto built = g_test_picks_built.find(peer);
+    out["picks_built"] = built == g_test_picks_built.end() ? int64_t(0) : built->second;
     out["cooldown_ms"] = state.cooldowns.remaining_ms(breaker_hash(state, 'd', peer), steady_ms(), limits());
     out["session_paused_ms"] =
         sit != state.sessions.end() ? std::max<int64_t>(0, sit->second.breaker_until_ms - steady_ms()) : 0;
@@ -4403,42 +4491,61 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
 #ifdef HOLLOW_RELAY_MEASURE
                 measure_text(data, j, type);
 #endif
+                // Refused before either judge, like a guest's binary broadcast.
+                const bool refused = data->is_guest && type == "msg" && guest_broadcast_refused(data);
                 // The breaker judges first (in shadow mode it counts what enforcement would
                 // trip), then the send budget from the walk the breaker's plan made.
                 breaker::Plan plan;
                 CastSeen seen;
                 if (payer) {
-                    try {
-                        plan = plan_text(state, data, j, type, message.size(), &seen);
-                    } catch (const std::exception&) {
-                        plan = breaker::Plan();
-                        seen = CastSeen();
+                    if (refused) {
+                        plan.w = 1;
+                    } else {
+                        try {
+                            plan = plan_text(state, data, j, type, message.size(), &seen);
+                        } catch (const std::exception&) {
+                            plan = breaker::Plan();
+                            seen = CastSeen();
+                        }
                     }
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+                    note_test_plan(data, plan);
+#endif
                     if (breaker_trips(state, ws, data, *payer, plan)) return;
                 }
-                if (type == "msg" && budget_stops(state, ws, s, text_msg_fanout_plan(ws, j, state, seen))) return;
+                if (type == "msg" && !refused && budget_stops(state, ws, s, text_msg_fanout_plan(ws, j, state, seen))) return;
                 if (s && session::client_type_counts(type)) count_in(state, ws, *s);
                 breaker::Scope scope;
-                if (!j.is_discarded()) {
+                if (!j.is_discarded() && !refused) {
                     // A field of the wrong JSON type makes value() throw, and an
                     // exception unwinding into uSockets' C frames would end the
                     // process on one malformed frame from any client.
                     try {
                         std::optional<breaker::Uncharged> exact;
                         if (plan.exact) exact.emplace();
-                        handle_text_message(ws, data, j, type, state, config);
+                        handle_text_message(ws, data, j, type, state, config, seen);
                     } catch (const std::exception&) {
                     }
                 }
                 if (payer && !guard.closed) breaker_charge(state, data, plan, scope.spent());
             } else if (opCode == uWS::OpCode::BINARY) {
+                // Refused before either judge: a frame never delivered must not trip its
+                // guest or make the send budget close anyone for it.
+                const bool refused = data->is_guest && guest_refuses(data, message);
                 breaker::Plan plan;
                 CastSeen seen;
                 if (payer) {
-                    plan = plan_binary(state, data, message, &seen);
+                    if (refused) {
+                        plan.w = 1;
+                    } else {
+                        plan = plan_binary(state, data, message, &seen);
+                    }
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+                    note_test_plan(data, plan);
+#endif
                     if (breaker_trips(state, ws, data, *payer, plan)) return;
                 }
-                if (budget_stops(state, ws, s, binary_fanout_plan(ws, message, state, seen))) return;
+                if (!refused && budget_stops(state, ws, s, binary_fanout_plan(ws, message, state, seen))) return;
                 breaker::Scope scope;
                 struct Charge {
                     RelayState& state;
@@ -4458,25 +4565,9 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                 if (message.size() == 1 && static_cast<uint8_t>(message[0]) == 0x00) {
                     return;
                 }
+                if (refused) return;
                 if (message.size() > 1) {
                     uint8_t opcode = static_cast<uint8_t>(message[0]);
-
-                    // Guest binary restrictions
-                    if (data->is_guest) {
-                        // No SendDirect and no channel topic for guests: the web
-                        // viewer only reads, and 0x07 feeds the catch-up rings.
-                        if (opcode == 0x04 || opcode == 0x07 || opcode == 0x08 || opcode == 0x09) return;
-                        if (opcode == 0x03 || opcode == 0x0A) {
-                            auto now = std::chrono::steady_clock::now();
-                            if ((now - data->minute_window_start) > std::chrono::seconds(60)) {
-                                data->binary_frames_this_minute = 0;
-                                data->minute_window_start = now;
-                            }
-                            if (data->binary_frames_this_minute >= GUEST_BINARY_PER_MIN) return;
-                            data->binary_frames_this_minute++;
-                            data->last_binary_activity = now;
-                        }
-                    }
 
                     try {
                     switch (opcode) {
@@ -4487,10 +4578,10 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                             handle_binary_direct(data, message, state);
                             break;
                         case 0x03:
-                            handle_binary_msg(data, message, state);
+                            handle_binary_msg(data, message, state, /*to_all=*/false, seen);
                             break;
                         case 0x0A:
-                            handle_binary_msg(data, message, state, /*to_all=*/true);
+                            handle_binary_msg(data, message, state, /*to_all=*/true, seen);
                             break;
                         case 0x04:
                             handle_binary_direct_msg(data, message, state);
@@ -4501,7 +4592,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                             handle_binary_direct_msg(data, message, state, /*is_image=*/true);
                             break;
                         case 0x07:
-                            handle_binary_topic_msg(data, message, state);
+                            handle_binary_topic_msg(data, message, state, seen);
                             break;
                         case 0x09:
                             // Targeted channel message for an offline server

@@ -51,7 +51,7 @@ ui_init() {
 # recommended choice.
 ANSWER_KEYS="action mode binaries address duckdns_name duckdns_token duckdns_token_file
 domain ip public_ip public_ipv6 email staging turn push forwarder members_only
-member_keys grace_secs public_stats ssh_keys ssh_key_fingerprint ssh_wait_secs confirm keep_data change remove_key
+member_keys grace_secs public_stats cake cake_mbit cake_dev ssh_keys ssh_key_fingerprint ssh_wait_secs confirm keep_data change remove_key
 continue_anyway ssh_public_key adopt harden interrupted replace_setup"
 
 ui_load_answers() {
@@ -461,7 +461,7 @@ If you stay here, the DuckDNS token can come from a file instead of a paste." \
 # Answers so far, kept while a first install is under way so a stopped run
 # can start again with them. Never the DuckDNS token or a key: only these.
 DRAFT_FILE=/var/lib/hollow-installer/answers.draft
-DRAFT_KEYS="mode binaries address duckdns_name domain ip public_ip turn push forwarder members_only member_keys public_stats grace_secs ssh_keys"
+DRAFT_KEYS="mode binaries address duckdns_name domain ip public_ip turn push forwarder members_only member_keys public_stats grace_secs cake cake_mbit ssh_keys"
 DRAFT_ON=0
 declare -A DRAFT=()
 declare -A DRAFT_NOW=()

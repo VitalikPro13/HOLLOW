@@ -65,8 +65,75 @@ const GRANT_DOMAIN: &[u8] = b"hollow-door-grant1";
 const ASK_GAP: Duration = Duration::from_secs(20);
 /// Former members' devices we remember telling: past it the oldest is forgotten.
 const TOLD_CAP: usize = 4096;
-/// How many of the members who see an ask answer it.
-const ANSWERERS: usize = 3;
+/// How many provers a broadcast from a sender the relay hides reaches, and so how many
+/// members answer a door ask or a hidden joiner's request (relay `door_room::HIDDEN_REACH`).
+pub(crate) const HIDDEN_REACH: usize = 3;
+/// The bytes of a frame the relay orders those provers by: its magic and seal time.
+const REACH_SEED_BYTES: usize = 12;
+
+/// Where `peer` falls in the order one frame of a hidden `sender` picks its provers by,
+/// lowest first; `head` is the frame's start. Pinned with the relay's
+/// `door_room::ReachOrder` (test_door_room.cpp): if they drift, door asks and hidden
+/// joins go unanswered.
+pub(crate) fn reach_rank(sender: &str, head: &[u8], peer: &str) -> u64 {
+    const PRIME: u64 = 0x100000001b3;
+    let mut h: u64 = 0xcbf29ce484222325;
+    let head = &head[..head.len().min(REACH_SEED_BYTES)];
+    for part in [b"hollow-reach1\n".as_slice(), sender.as_bytes(), b"\n", head, b"\n", peer.as_bytes()] {
+        for &c in part {
+            h = (h ^ u64::from(c)).wrapping_mul(PRIME);
+        }
+    }
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d049bb133111eb);
+    h ^ (h >> 31)
+}
+
+/// The head of a frame sealed at `sealed_at` (`frame_auth::seal`): what the relay ranks by.
+pub(crate) fn seal_head(sealed_at: i64) -> [u8; REACH_SEED_BYTES] {
+    let mut head = [0u8; REACH_SEED_BYTES];
+    head[..4].copy_from_slice(&super::frame_auth::MAGIC);
+    head[4..].copy_from_slice(&sealed_at.to_be_bytes());
+    head
+}
+
+/// Whether `us` is among the [`HIDDEN_REACH`] devices of `room` a frame the hidden
+/// `sender` sealed at `sealed_at` picks: the relay delivers it to those alone, and on a
+/// relay that does not pick, only they answer. Fresh per frame, so no device id can be
+/// ground to take the slots. Our view lists only on-screen peers, and the relay hands away
+/// ones only the slots on-screen ones leave, so the two agree.
+pub(crate) fn reached(room: &str, sender: &str, sealed_at: i64, ws_room_peers: &WsRoomPeers, us: &str) -> bool {
+    let head = seal_head(sealed_at);
+    let ours = (reach_rank(sender, &head, us), us);
+    ws_room_peers
+        .get(room)
+        .into_iter()
+        .flatten()
+        .filter(|d| d.as_str() != sender && d.as_str() != us)
+        .filter(|d| (reach_rank(sender, &head, d), d.as_str()) < ours)
+        .count()
+        < HIDDEN_REACH
+}
+
+/// The room as a hidden `sender`'s frame sealed at `sealed_at` reached it: the
+/// [`HIDDEN_REACH`] devices of `room` it picks, by our view, `us` ranked too. One answerer
+/// is elected from it, so the few the frame reached do not all serve it.
+pub(crate) fn reached_view(room: &str, sender: &str, sealed_at: i64, ws_room_peers: &WsRoomPeers, us: &str) -> WsRoomPeers {
+    let head = seal_head(sealed_at);
+    let mut ranked: Vec<(u64, &str)> = ws_room_peers
+        .get(room)
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .chain([us])
+        .filter(|d| *d != sender)
+        .map(|d| (reach_rank(sender, &head, d), d))
+        .collect();
+    ranked.sort_unstable();
+    ranked.dedup();
+    let picked = ranked.into_iter().take(HIDDEN_REACH).map(|(_, d)| d.to_string()).collect();
+    [(room.to_string(), picked)].into()
+}
 
 /// The identity `device` speaks for: its master, unless it is a bare master id, a
 /// revoked device or one its roster disowns (HOL-SEC-083).
@@ -213,17 +280,16 @@ impl DoorRooms {
         true
     }
 
-    /// A device the relay hides in `room` asked for its door. We answer when it is a
-    /// device of a current member, we hold a door, and we are among the first few of
-    /// the members who see the room by a per-asker order (so not everyone answers). A
-    /// former member's device is told of its removal instead, when an Olm session
-    /// with it can carry the notice.
+    /// A device the relay hides in `room` asked for its door, in a frame sealed at
+    /// `sealed_at`. We answer when it is a device of a current member, we hold a door,
+    /// and the frame [`reached`] us. A former member's device is told of its removal
+    /// instead, when an Olm session with it can carry the notice.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn answer_ask(
         &mut self,
         room: &str,
         server_id: &str,
-        nonce: &str,
+        sealed_at: i64,
         asker: &str,
         olm: &crate::crypto::OlmManager,
         server_states: &ServerStates,
@@ -241,11 +307,11 @@ impl DoorRooms {
         };
         if !state.is_member(&master) {
             return olm.has_session(asker)
-                && self.first_to_answer(room, asker, nonce, ws_room_peers, our_device, local_master)
+                && reached(room, asker, sealed_at, ws_room_peers, our_device)
                 && self.tell_removal(room, asker, &master, state, ws_cmd_tx);
         }
         let Some((n, _, secret)) = state.join_lock.newest_door() else { return false };
-        if !self.first_to_answer(room, asker, nonce, ws_room_peers, our_device, local_master) {
+        if !reached(room, asker, sealed_at, ws_room_peers, our_device) {
             return false;
         }
         let key = (room.to_string(), asker.to_string());
@@ -264,31 +330,6 @@ impl DoorRooms {
         hollow_log!("[HOLLOW-WS] Handing door {n} of {room} to {asker}, a member's device the relay hides");
         let _ = ws_cmd_tx.send(WsCommand::SendDirect { room_code: room.to_string(), target_peer: asker.to_string(), data });
         true
-    }
-
-    /// Whether we are among the first [`ANSWERERS`] identities in the room by an order
-    /// the asker's fresh `nonce` salts: one slot per master (its lowest device answers),
-    /// so no identity fills the slots with many devices or ids ground in advance.
-    fn first_to_answer(&self, room: &str, asker: &str, nonce: &str, ws_room_peers: &WsRoomPeers, our_device: &str, local_master: &str) -> bool {
-        use sha2::{Digest, Sha256};
-        let rank = |master: &str| Sha256::digest(format!("{asker}\n{nonce}\n{master}").as_bytes());
-        let devices: Vec<&String> = ws_room_peers
-            .get(room)
-            .into_iter()
-            .flatten()
-            .filter(|d| d.as_str() != asker && !super::resolver::is_bare_master(d))
-            .collect();
-        if devices.iter().any(|d| d.as_str() < our_device && super::resolver::same_identity(d, local_master)) {
-            return false;
-        }
-        let asker_master = super::resolver::resolve(asker);
-        let masters: std::collections::HashSet<String> = devices
-            .iter()
-            .map(|d| super::resolver::resolve(d))
-            .filter(|m| m != local_master && *m != asker_master)
-            .collect();
-        let ours = rank(local_master);
-        masters.iter().filter(|m| rank(m) < ours).count() < ANSWERERS
     }
 
     /// A former member's device asked: hand it the op that removed it, with what its
@@ -382,7 +423,7 @@ impl DoorRooms {
 mod tests {
     use super::super::resolver;
     use super::super::ws_client::WsCommand;
-    use super::{speaks_for, DoorRooms, HavenMessage, WsRoomPeers, ANSWERERS};
+    use super::{reach_rank, reached, reached_view, seal_head, speaks_for, DoorRooms, HavenMessage, WsRoomPeers, HIDDEN_REACH};
     use std::collections::HashSet;
     use crate::crdt::hlc::HlcTimestamp;
     use crate::crdt::operations::{CrdtOp, CrdtPayload, JoinAsk};
@@ -402,42 +443,70 @@ mod tests {
         op
     }
 
-    /// Design g13w2-f §4.7: one identity with many (ground) devices fills at most one
-    /// answerer slot, answered by its lowest device, and which identities answer
-    /// changes with the asker's fresh nonce, so nothing can be ground in advance.
+    /// The order the relay picks a hidden sender's provers by, pinned with
+    /// relay-uws/test/test_door_room.cpp (and a third time in Python): drift means door
+    /// asks and hidden joins reach members that think the relay picked someone else.
     #[test]
-    fn g13w2f_door_answerers_are_three_identities_whatever_their_device_ids() {
-        let _g = resolver::test_lock();
-        resolver::clear_for_test();
-        let mut links: Vec<(String, String)> = (1..=6).map(|i| (format!("x{i}"), "X".to_string())).collect();
-        links.extend([("a1", "A"), ("b1", "B"), ("c1", "C")].map(|(d, m)| (d.to_string(), m.to_string())));
-        resolver::warm_from_links(&links);
-        let mut room: HashSet<String> = links.iter().map(|(d, _)| d.clone()).collect();
-        room.insert("asker".into());
+    fn reach_rank_matches_the_relays_pinned_vector() {
+        let sender = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+        let head = seal_head(1_700_000_000_000);
+        assert_eq!(reach_rank(sender, &head, "12D3KooWAlpha"), 0xc164aef3f2241427);
+        assert_eq!(reach_rank(sender, &head, "12D3KooWEcho"), 0x23b4c656d71e3bf2);
+        let mut frame = head.to_vec();
+        frame.extend_from_slice(b"anything after the head");
+        assert_eq!(reach_rank(sender, &frame, "12D3KooWAlpha"), 0xc164aef3f2241427, "only the head orders");
+    }
+
+    /// Design g13w2-f §4.7, as the relay now limits a hidden sender (0.14): the members
+    /// that answer a door ask are the three devices the ask's own frame picks, so
+    /// nothing can be ground in advance and every new ask picks afresh.
+    #[test]
+    fn door_answerers_are_the_three_the_asks_frame_picks() {
+        let devices: Vec<String> = ["12D3KooWAlpha", "12D3KooWBravo", "12D3KooWCharlie", "12D3KooWDelta", "12D3KooWEcho"]
+            .map(String::from)
+            .to_vec();
+        let mut room: HashSet<String> = devices.iter().cloned().collect();
+        let asker = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+        room.insert(asker.to_string());
         let peers: WsRoomPeers = [("r".to_string(), room)].into();
-        let doors = DoorRooms::default();
-        let answering = |nonce: &str| -> Vec<String> {
-            let mut v: Vec<String> = links
-                .iter()
-                .filter(|(d, m)| doors.first_to_answer("r", "asker", nonce, &peers, d, m))
-                .map(|(d, _)| d.clone())
-                .collect();
-            v.sort();
-            v
+        let answering = |sealed_at: i64| -> HashSet<&str> {
+            devices.iter().map(String::as_str).filter(|d| reached("r", asker, sealed_at, &peers, d)).collect()
         };
-        let mut x_left_out = false;
-        let mut x_in = false;
-        for n in 0..32 {
-            let who = answering(&format!("nonce-{n}"));
-            assert_eq!(who.len(), ANSWERERS, "three answerers for nonce {n}: {who:?}");
-            let xs: Vec<&String> = who.iter().filter(|d| d.starts_with('x')).collect();
-            assert!(xs.len() <= 1, "one identity took two slots: {who:?}");
-            assert!(xs.iter().all(|d| d.as_str() == "x1"), "only the identity's lowest device answers: {who:?}");
-            x_left_out |= xs.is_empty();
-            x_in |= !xs.is_empty();
+        // The relay's picks for these two frames (test_door_room.cpp).
+        assert_eq!(answering(1_700_000_000_000), HashSet::from(["12D3KooWEcho", "12D3KooWDelta", "12D3KooWBravo"]));
+        assert_eq!(answering(1_700_000_000_001), HashSet::from(["12D3KooWBravo", "12D3KooWDelta", "12D3KooWAlpha"]));
+        for t in 0..32 {
+            assert_eq!(answering(1_700_000_000_000 + t).len(), HIDDEN_REACH, "three answer frame {t}");
+            let view = reached_view("r", asker, 1_700_000_000_000 + t, &peers, "12D3KooWAlpha");
+            let elected_from: HashSet<&str> = view["r"].iter().map(String::as_str).collect();
+            assert_eq!(elected_from, answering(1_700_000_000_000 + t), "the answerer is elected from the same three");
         }
-        assert!(x_left_out && x_in, "the nonce reorders the identities");
-        resolver::clear_for_test();
+        assert!(reached("empty", asker, 1, &peers, "12D3KooWAlpha"), "alone in a room we see, we are picked");
+    }
+
+    /// The relay fills a hidden sender's free slots with away provers (test_door_room.cpp
+    /// `test_reach_picks_on_screen_first`, same frame), but a client's view lists only
+    /// on-screen peers: each on-screen device still knows it was picked, and elects only
+    /// among on-screen ones, as the relay's picks hold every one of them.
+    #[test]
+    fn away_provers_fill_only_what_the_on_screen_leave() {
+        let asker = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+        let view = |on_screen: &[&str]| -> WsRoomPeers {
+            let mut room: HashSet<String> = on_screen.iter().map(|d| d.to_string()).collect();
+            room.insert(asker.to_string());
+            [("r".to_string(), room)].into()
+        };
+        let t = 1_700_000_000_000;
+        // Alpha alone on screen, ranked last of five: the relay still picks it.
+        let one = view(&["12D3KooWAlpha"]);
+        assert!(reached("r", asker, t, &one, "12D3KooWAlpha"), "the one on screen knows it was picked");
+        let elected: HashSet<String> = reached_view("r", asker, t, &one, "12D3KooWAlpha")["r"].clone();
+        assert_eq!(elected, HashSet::from(["12D3KooWAlpha".to_string()]), "and elects among on-screen picks alone");
+        // Three on screen: the relay picks those three and no away one.
+        let three = view(&["12D3KooWAlpha", "12D3KooWBravo", "12D3KooWCharlie"]);
+        for d in ["12D3KooWAlpha", "12D3KooWBravo", "12D3KooWCharlie"] {
+            assert!(reached("r", asker, t, &three, d), "{d} is picked by its view as by the relay");
+        }
     }
 
     /// HOL-SEC-114: a kicked member's device that asks for the door is handed its
@@ -472,7 +541,7 @@ mod tests {
         let peers = std::collections::HashMap::new();
         let mut olm = crate::crypto::OlmManager::new();
         let ask = |doors: &mut DoorRooms, states: &std::collections::HashMap<String, ServerState>, olm: &crate::crypto::OlmManager, asker: &str| {
-            doors.answer_ask(&sid, &sid, "", asker, olm, states, &peers, &owner, "our-device", &tx)
+            doors.answer_ask(&sid, &sid, 0, asker, olm, states, &peers, &owner, "our-device", &tx)
         };
 
         assert!(!ask(&mut doors, &states, &olm, "kicked-device") && rx.try_recv().is_err(), "told with no session to carry it");
