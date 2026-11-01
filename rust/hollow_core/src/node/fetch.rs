@@ -4,6 +4,7 @@
 //! the SERVER room for a channel wake (MLS group ciphertext fanned out per
 //! offline member, or signed public-channel plaintext). No CRDT, no gossip.
 
+use crate::storage::ChannelInsert;
 use std::time::Duration;
 
 use base64::Engine;
@@ -564,11 +565,13 @@ fn try_process_channel_msg(
                     ) {
                         return None;
                     }
-                    insert_channel_row(
+                    if insert_channel_row(
                         db_path, db_passphrase, &sid, &cid, &sender_master, &text, ts,
                         sig.as_deref(), pk.as_deref(), mid.as_deref(), reply_to.as_deref(),
                         file_id.as_deref(), order_us, album.as_deref(), link_preview.as_ref(),
-                    );
+                    ) == Some(ChannelInsert::Cleared) {
+                        return None;
+                    }
                     let mentions_me = fetched_post_mentions(
                         state.as_ref()?, local_master, &text, reply_to.as_deref(), db_path, db_passphrase,
                     );
@@ -631,11 +634,13 @@ fn try_process_channel_msg(
             ) {
                 return None;
             }
-            insert_channel_row(
+            if insert_channel_row(
                 db_path, db_passphrase, &server_id, &channel_id, &sender_master, &text, ts,
                 sig.as_deref(), pk.as_deref(), Some(&mid), reply_to.as_deref(),
                 file_id.as_deref(), order_us, album.as_deref().map(String::as_str), link_preview.as_ref(),
-            );
+            ) == Some(ChannelInsert::Cleared) {
+                return None;
+            }
             let mentions_me = fetched_post_mentions(
                 &state, local_master, &text, reply_to.as_deref(), db_path, db_passphrase,
             );
@@ -849,8 +854,13 @@ fn insert_channel_row(
     order_us: Option<i64>,
     album: Option<&str>,
     link_preview: Option<&LinkPreviewRef>,
-) {
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+) -> Option<ChannelInsert> {
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    // History this device cleared shows no banner either.
+    if store.refuse_below_floor(server_id, channel_id, sender, ts, mid) {
+        return Some(ChannelInsert::Cleared);
+    }
+    {
         let exists = mid.map(|m| store.channel_message_exists(m)).unwrap_or(false);
         hollow_log!(
             "[HOLLOW-FETCH] insert channel msg {}/{} from={} mid={:?} exists={}",
@@ -863,15 +873,17 @@ fn insert_channel_row(
             );
             // Persist the preview too: dedup by mid means the full app never
             // re-ingests this row, so a dropped card is lost forever.
-            if let (Ok(n), Some(lp), Some(message_id)) = (inserted, link_preview, mid) {
-                if n > 0 {
+            if let (Ok(n), Some(lp), Some(message_id)) = (&inserted, link_preview, mid) {
+                if *n > 0 {
                     if let Ok(lp_json) = serde_json::to_string(lp) {
                         let _ = store.update_channel_link_preview(message_id, &lp_json);
                     }
                 }
             }
+            return Some(if inserted == Ok(1) { ChannelInsert::Stored } else { ChannelInsert::Duplicate });
         }
     }
+    Some(ChannelInsert::Duplicate)
 }
 
 /// Attempt to decrypt a single incoming WS message as a DM.
@@ -2367,5 +2379,30 @@ mod tests {
         assert!(posted("srv-a-t08", "a-t08-server"), "the same public post in a server is stored");
         assert!(!posted(&meeting, "a-t08-meeting"), "a meeting's public frame was stored");
         crate::node::resolver::clear_all();
+    }
+}
+
+// w2-c
+#[cfg(test)]
+mod w2c_cleared {
+    use super::*;
+
+    /// The push fetch tells cleared history from a duplicate, so its banner never
+    /// shows for a message this device cleared.
+    #[test]
+    fn w2c_a_push_never_brings_back_cleared_history() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("p.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let t = 10 * crate::crdt::hlc::MAX_DRIFT_MS as i64;
+        {
+            let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+            store.insert_channel_message("srv", "ch", "alice", "a", false, t, None, None, Some("m1"), None, None, None, None).unwrap();
+            store.clear_channel_history(t + 5_000).unwrap();
+        }
+        let row = |mid: &str, ts: i64| insert_channel_row(&path, &pass, "srv", "ch", "alice", "a", ts, None, None, Some(mid), None, None, None, None, None);
+        assert_eq!(row("m1", t), Some(ChannelInsert::Cleared), "a cleared message came back by push");
+        assert_eq!(row("m2", t + 10), Some(ChannelInsert::Stored));
+        assert_eq!(row("m2", t + 10), Some(ChannelInsert::Duplicate));
     }
 }

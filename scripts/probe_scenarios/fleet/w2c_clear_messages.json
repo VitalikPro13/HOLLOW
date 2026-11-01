@@ -1,0 +1,512 @@
+{
+ "_": [
+  "w2-c: Clear server messages (Settings > Files & storage > Clean up) on throwaway peers.",
+  "a creates the server and posts; b clears its server history, which stays cleared; a keeps its copy, and a newer post still reaches b.",
+  "run: scripts/fleet.ps1 -Scenario w2c_clear_messages -Peers a,b (remap onto your own letters)"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "w2cclear"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:w2cclear",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:w2cclear"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "server:w2cclear",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "w2cclear"
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "w2cclear"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:probe-b",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "older post 1 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "older post 2 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "older post 3 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:older post 3 ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-01-history-before"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "b",
+   "op": "reveal",
+   "target": "text:Files & storage",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Files & storage",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-02-storage-page"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Clean up",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-03-cleanup-menu"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Clear server messages",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-04-confirm"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "dialog > text:Clear",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "contains:Cleared 3 messages",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-05-cleared-toast"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 4000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Clean up",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-06-cleanup-menu-after"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "w2cclear"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 12000
+  },
+  {
+   "peer": "b",
+   "op": "expect_no_text",
+   "value": "older post 1 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-07-channel-after-clear"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "newer post ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:newer post ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "b",
+   "op": "expect_no_text",
+   "value": "older post 2 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-08-new-post-arrives"
+  },
+  {
+   "peer": "a",
+   "op": "expect_text",
+   "value": "older post 1 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2c-09-other-member-keeps-history"
+  },
+  {
+   "peer": "b",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "b",
+   "op": "reveal",
+   "target": "text:Files & storage",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Files & storage",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Clean up",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-10-cleanup-menu-light"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "b",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "escape"
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:w2cclear"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Server settings"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Overview",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "server:w2cclear",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "server:w2cclear",
+   "timeout_ms": 90000
+  }
+ ]
+}

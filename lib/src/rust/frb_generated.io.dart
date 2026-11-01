@@ -171,6 +171,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ChannelGrantFfi dco_decode_channel_grant_ffi(dynamic raw);
 
   @protected
+  ClearedMessages dco_decode_cleared_messages(dynamic raw);
+
+  @protected
   ConferenceInfo dco_decode_conference_info(dynamic raw);
 
   @protected
@@ -905,6 +908,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ChannelGrantFfi sse_decode_channel_grant_ffi(SseDeserializer deserializer);
+
+  @protected
+  ClearedMessages sse_decode_cleared_messages(SseDeserializer deserializer);
 
   @protected
   ConferenceInfo sse_decode_conference_info(SseDeserializer deserializer);
@@ -1832,6 +1838,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_channel_grant_ffi(
     ChannelGrantFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_cleared_messages(
+    ClearedMessages self,
     SseSerializer serializer,
   );
 

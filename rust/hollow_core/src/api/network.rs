@@ -1603,6 +1603,8 @@ pub fn start_node() -> Result<String, String> {
 
     let olm = {
         let store = MessageStore::open(&db_path, &passphrase)?;
+        // A history clear cut short (a crash, a kill, a phone suspending it) finishes here.
+        super::storage::finish_interrupted_clear(&store);
         // Seed the Lamport chat clock from the highest stored stamp so a restart cannot
         // mint stamps below messages we already hold.
         crate::chat_clock::observe(store.max_chat_stamp_us());

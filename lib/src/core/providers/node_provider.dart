@@ -8,6 +8,8 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
+import 'package:hollow/src/core/services/relay_triggers.dart'
+    show holdingStorageTask;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Node state: status + last error.
@@ -36,7 +38,8 @@ class NodeNotifier extends Notifier<NodeState> {
     state = state.copyWith(status: NodeStatus.starting, error: null);
     try {
       final networkService = ref.read(networkServiceProvider);
-      final peerId = await networkService.startNode();
+      // The start can run a one-time database rebuild: never frozen half done.
+      final peerId = await holdingStorageTask(networkService.startNode);
 
       final identity = ref.read(identityProvider.notifier);
       identity.state = identity.state.copyWith(peerId: peerId);

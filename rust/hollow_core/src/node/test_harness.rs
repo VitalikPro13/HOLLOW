@@ -59792,3 +59792,269 @@ async fn w2d_a_parked_reask_handed_back_after_a_second_leave_readmits_nobody() {
     assert!(admitted_by > rejoin_ask, "J's new ask, past the one that admitted it before, did");
     drop(m);
 }
+
+// w2-c
+
+/// J clears its server history (Settings > Storage) and it stays cleared: the ask J's
+/// node now builds brings none of it back, nor does an ask that names nothing (a peer
+/// that serves it all anyway), O keeps every row, and O's next post still reaches J.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2c_cleared_history_stays_cleared_and_stays_on_other_members() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 236;
+    let (mut o, mut j, server_id) = session_server_pair(&relay, O, 238).await;
+    let general = general_channel_of(&server_id);
+
+    let founded = o
+        .live_server_state(&server_id)
+        .await
+        .and_then(|s| s.op_log.iter().map(|op| op.hlc.physical_ms as i64).min())
+        .expect("the owner holds its server");
+    const ROWS: i64 = 40;
+    let rows: Vec<(i64, String)> = (0..ROWS).map(|i| (founded + 1 + i, format!("w2c-old-{i}"))).collect();
+    assert!(wait_until(5, async || founded + ROWS < super::types::now_ms()).await, "the server is older than its rows");
+    plant_signed_channel_rows(&o.store(), O, &server_id, &general, &rows);
+    let planted = |n: &TestNode| n.channel_messages(&server_id, &general).iter().filter(|m| m.text.starts_with("paged w2c-old-")).count();
+    // An ask that names no sender: a responder serves the whole history. `nth` keeps two
+    // such asks apart for the responder's repeat check.
+    let ask_all = |nth: i64| super::types::HavenMessage::ChannelSyncRequest {
+        server_id: server_id.clone(),
+        channel_id: general.clone(),
+        since_timestamp: nth,
+        sender_timestamps: HashMap::new(),
+        gap: None,
+    };
+    let answered = async |relay: &MockRelay, j: &mut TestNode, o: &mut TestNode, ask: super::types::HavenMessage, tag: &str| {
+        relay.hold_direct(&o.device_id, &j.device_id);
+        send_envelope_as(j, o, &carried(ask)).await;
+        assert!(wait_until(10, async || !relay.held_kinds(&o.device_id, &j.device_id).is_empty()).await, "{tag}: O never answered J");
+        relay.release_held(&o.device_id, &j.device_id);
+        settle_round_trip(relay, j, o, tag).await;
+    };
+
+    answered(&relay, &mut j, &mut o, ask_all(1), "w2c-first").await;
+    assert!(
+        wait_until(30, async || {
+            drain_events(&mut j);
+            planted(&j) == ROWS as usize
+        })
+        .await,
+        "precondition: J synced O's history ({} of {ROWS})",
+        planted(&j),
+    );
+
+    let cleared = j.store().clear_channel_history(super::types::now_ms()).expect("J clears its history");
+    assert!(cleared.messages >= ROWS as u64, "J cleared {} rows", cleared.messages);
+    assert_eq!(planted(&j), 0, "the clear left rows");
+
+    // The catch-up J's node asks after the clear names where it cleared to.
+    let ask = super::sync_handler::channel_sync_request(&j.store(), &server_id, &general, true);
+    let super::types::HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, .. } = &ask else { panic!("a channel ask") };
+    // From past the outright refusal: the skew window below the floor comes again and
+    // the cleared ids there are refused by their hash.
+    let start = j.store().channel_ask_start(&server_id, &general).expect("J cleared the channel");
+    assert!(*since_timestamp == start - 1 && gap.is_none(), "J asks from {since_timestamp} with {gap:?}");
+    assert!(sender_timestamps.values().all(|ts| *ts >= start), "J asks for rows it refuses: {sender_timestamps:?}");
+    answered(&relay, &mut j, &mut o, ask, "w2c-catch-up").await;
+    assert_eq!(planted(&j), 0, "J's catch-up brought cleared history back");
+
+    // O serving everything anyway lands nothing older than the clear.
+    answered(&relay, &mut j, &mut o, ask_all(2), "w2c-served-all").await;
+    assert_eq!(planted(&j), 0, "history served anyway was stored again");
+    assert_eq!(planted(&o), ROWS as usize, "the clear reached O's history");
+
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), text: "after the clear".into(), message_id: "w2c-live".into(), reply_to_mid: None, link_preview: None })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || {
+            drain_events(&mut j);
+            j.channel_messages(&server_id, &general).iter().any(|m| m.text == "after the clear")
+        })
+        .await,
+        "a post after the clear never reached J",
+    );
+    assert_eq!(planted(&j), 0, "a later post brought cleared history back");
+}
+
+// w2-c round 2
+
+/// Tell `target` that `hidden` left every room the two share, while the relay keeps it.
+fn w2c_hide_from(relay: &MockRelay, target: &str, hidden: &str) {
+    let inner = relay.inner.lock().unwrap();
+    let Some(conn) = inner.conns.get(target) else { return };
+    for (room, peers) in inner.rooms.iter().filter(|(_, peers)| peers.contains(target) && peers.contains(hidden)) {
+        let peers = peers.iter().filter(|p| *p != hidden).cloned().collect();
+        conn.deliver(target, WsEvent::RoomMembers { room: room.clone(), peers });
+    }
+}
+
+/// Plant `rows` signed posts by `author` into each of `nodes` (after the server's founding).
+fn w2c_plant(nodes: &[&TestNode], author: u8, owner: &str, server_id: &str, channel_id: &str, start: i64, rows: std::ops::Range<i64>) {
+    for node in nodes {
+        let store = node.store();
+        store.begin_transaction().unwrap();
+        for i in rows.clone() {
+            plant_signed_channel_row(&store, author, server_id, channel_id, node.device_id == owner, start + i, &format!("w2c2-{i}"), &format!("history {i}"));
+        }
+        store.commit_transaction().unwrap();
+    }
+}
+
+/// The member whose Welcome lets J in cleared its copy of the history, so J's first
+/// channel ask goes to a holder of nothing: J still ends with the whole history, from
+/// the next holder, at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2c_a_cleared_holder_never_ends_a_joiners_catch_up() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    const ROWS: i64 = 300;
+    let relay = MockRelay::new();
+    let (o_tag, k_tag, j_tag) = (226u8, 227u8, 228u8);
+    let (o_m, k_m, j_m) = (keys(o_tag).peer_id(), keys(k_tag).peer_id(), keys(j_tag).peer_id());
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&k_m, &j_m]).await;
+    let mut k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&o_m, &j_m]).await;
+    let mut j = spawn_node_with_friends(&relay, j_tag, j_tag, &[&o_m, &k_m]).await;
+    expect_dm_pair_ready(&relay, &o, &k, 15).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    expect_dm_pair_ready(&relay, &k, &j, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Cleared holder").await;
+    let general = general_channel_of(&server_id);
+    join_and_wait(&mut k, &server_id).await;
+    expect_mls_leaf(&o, &server_id, &k.device_id, 15).await;
+    let founded = o
+        .live_server_state(&server_id)
+        .await
+        .and_then(|s| s.op_log.iter().map(|op| op.hlc.physical_ms as i64).min())
+        .expect("the owner holds its server");
+    assert!(wait_until(10, async || founded + ROWS + 1 < super::types::now_ms()).await);
+    w2c_plant(&[&o, &k], o_tag, &o.device_id, &server_id, &general, founded + 1, 0..ROWS);
+    o.store().clear_channel_history(super::types::now_ms()).expect("O clears its history");
+    assert_eq!(g13w3_rows(&o, &server_id, &general), 0, "precondition: O holds none of the history");
+
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    let whole = g13w3_until_rows(&mut [&mut j, &mut o, &mut k], 0, &server_id, &general, ROWS, 30).await;
+    assert!(g13w3_channel_asks_to(&j, &o.device_id).await >= 1, "precondition: J asked O, which cleared its history");
+    assert!(whole, "J kept {} of {ROWS} rows: the holder that cleared ended its catch-up", g13w3_rows(&j, &server_id, &general));
+}
+
+/// A returning member asks the one holder it sees, which cleared its history; the
+/// other holder shows up while that ask is out. The member still takes what it missed,
+/// from the other holder, without waiting for another catch-up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2c_a_cleared_holder_never_ends_a_returning_members_catch_up() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    const ROWS: i64 = 300;
+    let relay = MockRelay::new();
+    let (o_tag, k_tag, j_tag) = (229u8, 230u8, 231u8);
+    let (o_m, k_m, j_m) = (keys(o_tag).peer_id(), keys(k_tag).peer_id(), keys(j_tag).peer_id());
+    // J and K are no friends, so nothing but the server room shows J that K is online.
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&k_m, &j_m]).await;
+    let mut k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&o_m]).await;
+    let mut j = spawn_node_with_friends(&relay, j_tag, j_tag, &[&o_m]).await;
+    expect_dm_pair_ready(&relay, &o, &k, 15).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Returning member").await;
+    let general = general_channel_of(&server_id);
+    join_and_wait(&mut k, &server_id).await;
+    join_and_wait(&mut j, &server_id).await;
+    expect_mls_leaf(&o, &server_id, &k.device_id, 15).await;
+    expect_mls_leaf(&o, &server_id, &j.device_id, 15).await;
+
+    // J held the first half before it went away; O and K hold all of it, then O clears.
+    let start = super::types::now_ms() - 60_000;
+    w2c_plant(&[&o, &k], o_tag, &o.device_id, &server_id, &general, start, 0..ROWS);
+    w2c_plant(&[&j], o_tag, &o.device_id, &server_id, &general, start, 0..ROWS / 2);
+    o.store().clear_channel_history(super::types::now_ms()).expect("O clears its history");
+
+    // J sees only O when it asks; K is back in view while O's answer is still on its way.
+    relay.hold_direct(&o.device_id, &j.device_id);
+    let before = g13w3_channel_asks_to(&j, &o.device_id).await;
+    let k_before = g13w3_channel_asks_to(&j, &k.device_id).await;
+    w2c_hide_from(&relay, &j.device_id, &k.device_id);
+    assert!(wait_until(5, async || !j.sees_peer(&k.device_id).await).await, "precondition: J no longer sees K");
+    // An open asks nothing just after the join-time history came in; it asks once that passes.
+    let asked = wait_until(20, async || {
+        let _ = j.cmd_tx.send(NodeCommand::RequestChannelSync { server_id: server_id.clone(), channel_id: general.clone() }).await;
+        g13w3_channel_asks_to(&j, &o.device_id).await > before
+    })
+    .await;
+    assert!(asked, "J asks O");
+    assert_eq!(g13w3_channel_asks_to(&j, &k.device_id).await, k_before, "precondition: J asked only O");
+    relay.inject_room_members_everywhere(&j.device_id);
+    assert!(wait_until(5, async || j.sees_peer(&k.device_id).await).await, "precondition: J sees K again");
+    relay.release_held(&o.device_id, &j.device_id);
+
+    let whole = g13w3_until_rows(&mut [&mut j, &mut o, &mut k], 0, &server_id, &general, ROWS, 20).await;
+    assert!(whole, "J kept {} of {ROWS} rows: the holder that cleared ended its catch-up", g13w3_rows(&j, &server_id, &general));
+}
+
+/// A guest reading a public channel where the one member answering cleared its copy:
+/// the page says more follows, never that the channel starts there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2c_a_cleared_member_never_shows_a_guest_the_channels_start() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, server_id) = three_member_server(&relay, 232, 233, 234).await;
+    let mut g = spawn_node_with_friends(&relay, 235, 235, &[]).await;
+    let general = general_channel_of(&server_id);
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic { server_id: server_id.clone(), channel_id: general.clone(), is_public: true })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || x.server_state(&server_id).is_some_and(|s| s.is_channel_public(&general))).await, "X learns the channel is public");
+    let post = async |text: &str, mid: &str| {
+        o.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(), channel_id: general.clone(), text: text.into(),
+                message_id: mid.into(), reply_to_mid: None, link_preview: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            wait_until(10, async || x.channel_messages(&server_id, &general).iter().any(|m| m.text == text)).await,
+            "X holds {text}",
+        );
+    };
+    post("before the clear", "w2c2-g1").await;
+    x.store().clear_channel_history(super::types::now_ms()).expect("X clears its history");
+    post("after the clear", "w2c2-g2").await;
+
+    // Only X answers the guest.
+    relay.swallow_direct(&o.device_id, &g.device_id);
+    relay.swallow_direct(&m.device_id, &g.device_id);
+    g.cmd_tx.send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut g, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::PublicChannelListReceived { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "the guest sees the public channel"
+    );
+    g.cmd_tx
+        .send(NodeCommand::RequestPublicChannelSync { server_id: server_id.clone(), channel_id: general.clone(), before_timestamp: None })
+        .await
+        .unwrap();
+    let mut page = None;
+    wait_event(&mut g, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::PublicChannelSyncReceived { messages, has_more, .. } = ev {
+            page = Some((messages.iter().map(|m| m.text.clone()).collect::<Vec<_>>(), *has_more));
+        }
+        page.is_some()
+    })
+    .await;
+    assert_eq!(page, Some((vec!["after the clear".to_string()], true)), "a cleared member showed the guest the channel's start");
+}

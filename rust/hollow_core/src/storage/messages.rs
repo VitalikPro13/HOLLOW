@@ -354,6 +354,205 @@ pub(crate) fn migrate(conn: &Connection, sql: &str) {
     conn.execute_batch(sql).unwrap_or(());
 }
 
+/// One stored row per message id; rows from before ids carry none and are not keyed.
+const CHANNEL_MID_INDEX: &str = "CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_msgs_msg_id
+     ON channel_messages (message_id) WHERE message_id IS NOT NULL;";
+
+/// The sync watermarks seek each sender's first and last row on it
+/// (`channel_sender_spans`).
+const CHANNEL_SENDER_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_channel_msgs_sender_ts
+     ON channel_messages (server_id, channel_id, sender_id, timestamp)";
+
+/// Keep `channel_messages_fts` (external content, keyed by row id) in step.
+const CHANNEL_FTS_TRIGGERS: &str = "
+    CREATE TRIGGER IF NOT EXISTS channel_messages_fts_ai AFTER INSERT ON channel_messages BEGIN
+        INSERT INTO channel_messages_fts(rowid, text) VALUES (new.id, new.text);
+    END;
+    CREATE TRIGGER IF NOT EXISTS channel_messages_fts_ad AFTER DELETE ON channel_messages BEGIN
+        INSERT INTO channel_messages_fts(channel_messages_fts, rowid, text) VALUES('delete', old.id, old.text);
+    END;
+    CREATE TRIGGER IF NOT EXISTS channel_messages_fts_au AFTER UPDATE ON channel_messages BEGIN
+        INSERT INTO channel_messages_fts(channel_messages_fts, rowid, text) VALUES('delete', old.id, old.text);
+        INSERT INTO channel_messages_fts(rowid, text) VALUES (new.id, new.text);
+    END;";
+
+/// Senders a cleared channel names in its sync asks, at most: past it a sender first
+/// met below the floor is served again at each catch-up, and dropped again.
+const MAX_FLOOR_SENDERS: i64 = 4096;
+
+/// Rows one history-clear transaction deletes, so the node's writers never wait on
+/// the whole clear.
+const CLEAR_BATCH_ROWS: i64 = 2000;
+
+/// Cleared ids a channel remembers within `CLEAR_SKEW_MS` of its floor; past it the
+/// outright refusal moves up to the oldest one it had to forget.
+const MAX_CLEARED_IDS: i64 = 4096;
+
+/// One batch of the rows the floors refuse, into `temp.clear_batch`. The CROSS JOINs
+/// keep the floors outermost: with no planner statistics SQLite walks every channel row.
+const CLEAR_BATCH_SELECT: &str = "INSERT OR IGNORE INTO temp.clear_batch (id, mid)
+     SELECT id, mid FROM (
+         SELECT m.id, m.message_id AS mid FROM channel_floors f
+         CROSS JOIN channel_messages m ON m.server_id = f.server_id AND m.channel_id = f.channel_id
+         WHERE m.timestamp <= COALESCE(f.exact_from, f.floor_ts)
+         UNION ALL
+         SELECT m.id, m.message_id FROM channel_floors f
+         CROSS JOIN channel_messages m ON m.server_id = f.server_id AND m.channel_id = f.channel_id
+         WHERE m.message_id IS NULL AND m.timestamp <= f.floor_ts
+         UNION ALL
+         SELECT id, message_id FROM channel_messages WHERE id IN (SELECT id FROM temp.clear_near)
+     ) LIMIT ?1";
+
+/// The held rows at a remembered cleared id's time past the outright refusal, floors
+/// outermost as above.
+const CLEARED_NEAR_SELECT: &str = "SELECT DISTINCT m.id, m.message_id, f.server_id, f.channel_id FROM channel_floors f
+     CROSS JOIN channel_cleared_ids k ON k.server_id = f.server_id AND k.channel_id = f.channel_id
+     CROSS JOIN channel_messages m ON m.server_id = k.server_id AND m.channel_id = k.channel_id AND m.timestamp = k.ts
+     WHERE m.message_id IS NOT NULL AND k.ts > COALESCE(f.exact_from, f.floor_ts)";
+
+/// How far a member's clock may trail ours: a row this far behind a floor or more is
+/// cleared history whatever its id; nearer, only an id this device cleared is.
+const CLEAR_SKEW_MS: i64 = crate::crdt::hlc::MAX_DRIFT_MS as i64;
+
+/// What a cleared row's id is remembered by: never the id itself.
+fn cleared_id_hash(mid: &str) -> i64 {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::new().chain_update(b"hollow-cleared-id1:").chain_update(mid.as_bytes()).finalize();
+    i64::from_be_bytes(digest[..8].try_into().unwrap_or_default())
+}
+
+/// SQL true for a row this device cleared, given the placeholders of its server,
+/// channel, timestamp and `cleared_id_hash` (NULL for a row without an id).
+fn floor_refuses_sql(sid: &str, cid: &str, ts: &str, hash: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM channel_floors f WHERE f.server_id = {sid} AND f.channel_id = {cid}
+           AND ({ts} <= COALESCE(f.exact_from, f.floor_ts)
+                OR ({hash} IS NULL AND {ts} <= f.floor_ts)
+                OR EXISTS (SELECT 1 FROM channel_cleared_ids k
+                           WHERE k.server_id = {sid} AND k.channel_id = {cid} AND k.mid_hash = {hash})))"
+    )
+}
+
+/// True while `channel_messages` still carries the `UNIQUE(..., text)` table
+/// constraint of databases from before 0.14.
+fn has_content_key(conn: &Connection) -> bool {
+    conn.prepare("SELECT 1 FROM pragma_index_list('channel_messages') WHERE origin = 'u'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false)
+}
+
+/// Give free pages back to the file system (`auto_vacuum = INCREMENTAL`): all of them,
+/// or at most `pages`. The pragma frees one page per step, so it is stepped to the end;
+/// `execute_batch` steps once and frees one page.
+fn release_free_pages(conn: &Connection, pages: Option<u32>) {
+    let sql = pages.map_or("PRAGMA incremental_vacuum".to_string(), |n| format!("PRAGMA incremental_vacuum({n})"));
+    if let Ok(mut stmt) = conn.prepare(&sql) {
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Ok(Some(_)) = rows.next() {}
+        }
+    }
+}
+
+fn table_exists(conn: &Connection, name: &str) -> bool {
+    conn.prepare_cached("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")
+        .and_then(|mut s| s.exists([name]))
+        .unwrap_or(false)
+}
+
+/// Run `body` in one `BEGIN IMMEDIATE` transaction: committed whole, or rolled back
+/// whole on any error.
+fn in_write_tx<T>(conn: &Connection, body: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+    conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| format!("begin: {e}"))?;
+    let done = body(conn).and_then(|out| conn.execute_batch("COMMIT").map(|_| out).map_err(|e| format!("commit: {e}")));
+    if done.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    done
+}
+
+/// Remember the ids a clear takes within `CLEAR_SKEW_MS` of a channel's floor (the
+/// newest `MAX_CLEARED_IDS`; past them the outright refusal moves up) and above it,
+/// and forget the ones the outright refusal now covers.
+fn remember_cleared_ids(conn: &Connection, sid: &str, cid: &str, floor: i64, old_exact: Option<i64>) -> rusqlite::Result<()> {
+    let mut exact = floor.saturating_sub(CLEAR_SKEW_MS).max(old_exact.unwrap_or(i64::MIN));
+    let near: Vec<(String, i64)> = conn
+        .prepare(
+            "SELECT message_id, timestamp FROM channel_messages
+             WHERE server_id = ?1 AND channel_id = ?2 AND message_id IS NOT NULL AND timestamp > ?3 AND timestamp <= ?4
+             ORDER BY timestamp DESC LIMIT ?5",
+        )?
+        .query_map(params![sid, cid, exact, floor, MAX_CLEARED_IDS + 1], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    // A clock ahead of ours stamps past the floor, which never passes our clock: those
+    // rows go by id, the nearest to the floor first.
+    let fast: Vec<(String, i64)> = conn
+        .prepare(
+            "SELECT message_id, timestamp FROM channel_messages
+             WHERE server_id = ?1 AND channel_id = ?2 AND message_id IS NOT NULL AND timestamp > ?3
+             ORDER BY timestamp ASC LIMIT ?4",
+        )?
+        .query_map(params![sid, cid, floor, MAX_CLEARED_IDS], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut put = conn.prepare("INSERT OR REPLACE INTO channel_cleared_ids (server_id, channel_id, mid_hash, ts) VALUES (?1, ?2, ?3, ?4)")?;
+    for (mid, ts) in near.iter().chain(&fast) {
+        put.execute(params![sid, cid, cleared_id_hash(mid), ts])?;
+    }
+    conn.execute(
+        "DELETE FROM channel_cleared_ids WHERE server_id = ?1 AND channel_id = ?2 AND ts > ?3 AND mid_hash NOT IN (
+             SELECT mid_hash FROM channel_cleared_ids WHERE server_id = ?1 AND channel_id = ?2 AND ts > ?3
+             ORDER BY ts ASC LIMIT ?4)",
+        params![sid, cid, floor, MAX_CLEARED_IDS],
+    )?;
+    // Only ids at or below the floor move the outright refusal, which never passes it.
+    let forgotten: Option<i64> = conn
+        .query_row(
+            "SELECT ts FROM channel_cleared_ids WHERE server_id = ?1 AND channel_id = ?2 AND ts <= ?3
+             ORDER BY ts DESC LIMIT 1 OFFSET ?4",
+            params![sid, cid, floor, MAX_CLEARED_IDS],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(cut) = forgotten {
+        exact = exact.max(cut);
+    }
+    conn.execute("DELETE FROM channel_cleared_ids WHERE server_id = ?1 AND channel_id = ?2 AND ts <= ?3", params![sid, cid, exact])?;
+    conn.execute("UPDATE channel_floors SET exact_from = ?3 WHERE server_id = ?1 AND channel_id = ?2", params![sid, cid, exact])?;
+    Ok(())
+}
+
+/// Move the last rows of 0.12's one-row-per-device `revoked_devices` into
+/// `revoked_marks` and drop it, in one transaction. Until it lands, reads and lifts
+/// take the old table too, so a failed move never lets a removed device back.
+fn move_old_revocations(conn: &Connection) -> Result<(), String> {
+    if !table_exists(conn, "revoked_devices") {
+        return Ok(());
+    }
+    in_write_tx(conn, |conn| {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO revoked_marks (device_peer_id, master_peer_id)
+                 SELECT device_peer_id, master_peer_id FROM revoked_devices;
+             DROP TABLE revoked_devices;",
+        )
+        .map_err(|e| e.to_string())
+    })
+}
+
+/// A column definition read back from the table being rebuilt: only the plain shapes
+/// our own DDL writes, so nothing a foreign database's schema says is run as SQL.
+fn plain_column(name: &str, ty: &str, notnull: bool, default: Option<&str>, pk: bool) -> Option<String> {
+    let name_ok = !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && !name.as_bytes()[0].is_ascii_digit();
+    if !name_ok || default.is_some() {
+        return None;
+    }
+    if pk {
+        return (name == "id" && ty.eq_ignore_ascii_case("INTEGER")).then(|| "id INTEGER PRIMARY KEY AUTOINCREMENT".to_string());
+    }
+    let ty = ["TEXT", "INTEGER", "BLOB", "REAL"].into_iter().find(|t| t.eq_ignore_ascii_case(ty))?;
+    Some(format!("{name} {ty}{}", if notnull { " NOT NULL" } else { "" }))
+}
+
 /// Drain a mapped-row iterator into a Vec, labeling the first read error.
 fn collect_rows<T>(
     rows: impl Iterator<Item = rusqlite::Result<T>>,
@@ -602,6 +801,25 @@ pub struct StoredCard {
     pub pk: String,
 }
 
+/// What clearing this device's server history took away.
+#[derive(Debug, Default)]
+pub struct ClearedHistory {
+    pub messages: u64,
+    /// The cleared messages' files (`file_id`, `file_ext`), whose rows are gone: the
+    /// caller unlinks our own download of each through `at_rest`.
+    pub files: Vec<(String, String)>,
+}
+
+/// How a channel row fared at [`MessageStore::insert_channel_message_judged`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelInsert {
+    Stored,
+    /// The id is already stored.
+    Duplicate,
+    /// History this device cleared: nothing about it may show or be stored.
+    Cleared,
+}
+
 /// The path of a store that lives in this process's memory only, for as long as one
 /// connection to it stays open; `name` keeps one node's store apart from another's.
 pub fn guest_store_path(name: &str) -> String {
@@ -764,6 +982,9 @@ impl MessageStore {
         ddl(conn, "live_frame_nonces share index",
             "CREATE INDEX IF NOT EXISTS live_frame_nonces_share ON live_frame_nonces (placed, share, expires_ms)")?;
 
+        // No content key: two distinct posts alike in one millisecond are two rows, and a
+        // message id is stored once (`CHANNEL_MID_INDEX`). A database from before keeps
+        // its `UNIQUE(..., text)` table until `rebuild_channel_messages` runs at start.
         ddl(conn, "channel_messages table",
             "CREATE TABLE IF NOT EXISTS channel_messages (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -772,31 +993,14 @@ impl MessageStore {
                 sender_id  TEXT    NOT NULL,
                 text       TEXT    NOT NULL,
                 is_mine    INTEGER NOT NULL,
-                timestamp  INTEGER NOT NULL,
-                UNIQUE(server_id, channel_id, sender_id, timestamp, text)
+                timestamp  INTEGER NOT NULL
             )")?;
 
         ddl(conn, "channel_messages index",
             "CREATE INDEX IF NOT EXISTS idx_channel_msgs ON channel_messages (server_id, channel_id, timestamp)")?;
 
-        // SQLite cannot ALTER constraints, so uniqueness is a unique index. It is PARTIAL
-        // (message_id IS NULL) because the original full-table content index treated two
-        // DISTINCT rapid messages with identical text in the same millisecond as a
-        // duplicate and dropped the second. Rows carrying a message_id dedup at every
-        // insert site; the content index and its cleanup DELETE apply only to legacy rows
-        // without one, and that DELETE must NEVER eat distinct mid rows.
         migrate(conn, "DROP INDEX IF EXISTS idx_channel_msgs_unique;");
-        conn.execute_batch(
-            "DELETE FROM channel_messages WHERE message_id IS NULL AND id NOT IN (
-                SELECT MIN(id) FROM channel_messages WHERE message_id IS NULL
-                GROUP BY server_id, channel_id, sender_id, timestamp, text
-             );
-             CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_msgs_unique_legacy
-             ON channel_messages (server_id, channel_id, sender_id, timestamp, text)
-             WHERE message_id IS NULL;"
-        ).unwrap_or_else(|e| {
-            crate::hollow_log!("[HOLLOW] channel_messages legacy dedup migration failed: {e}");
-        });
+        migrate(conn, "DROP INDEX IF EXISTS idx_channel_msgs_unique_legacy;");
 
         // -- CRDT tables (Phase 3) --
 
@@ -866,7 +1070,7 @@ impl MessageStore {
             ("", "ALTER TABLE channel_messages ADD COLUMN message_id TEXT;"),
             ("", "ALTER TABLE channel_messages ADD COLUMN edited_at INTEGER;"),
             ("", "CREATE INDEX IF NOT EXISTS idx_messages_msg_id ON messages (message_id);"),
-            ("", "CREATE INDEX IF NOT EXISTS idx_channel_msgs_msg_id ON channel_messages (message_id);"),
+            ("", CHANNEL_MID_INDEX),
             // Edit history preserves previous text as evidence, plus prev_* columns for the
             // edit chain's provenance.
             ("message_edits table",
@@ -1093,6 +1297,51 @@ impl MessageStore {
             "CREATE INDEX IF NOT EXISTS idx_messages_peer_updated ON messages (peer_id, updated_at)")?;
         ddl(conn, "idx_channel_msgs_updated",
             "CREATE INDEX IF NOT EXISTS idx_channel_msgs_updated ON channel_messages (server_id, channel_id, updated_at)")?;
+        // A table still keyed by content seeks senders on that key; building a second
+        // index over its history inside `open()` would be a long write in any process.
+        if !has_content_key(conn) {
+            ddl(conn, "channel_messages sender index", CHANNEL_SENDER_INDEX)?;
+        }
+
+        // Where this device cleared a channel's history (Settings > Storage): rows at or
+        // before `floor_ts` are never stored again, and sync asks start there. The
+        // senders it held are named in those asks so nobody serves them again. Local by
+        // nature; a backup or link snapshot leaves them behind (`scrub_device_secrets`).
+        ddl(conn, "channel_floors table",
+            "CREATE TABLE IF NOT EXISTS channel_floors (
+                server_id  TEXT    NOT NULL,
+                channel_id TEXT    NOT NULL,
+                floor_ts   INTEGER NOT NULL,
+                PRIMARY KEY (server_id, channel_id)
+            )")?;
+        ddl(conn, "channel_floor_senders table",
+            "CREATE TABLE IF NOT EXISTS channel_floor_senders (
+                server_id  TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                sender_id  TEXT NOT NULL,
+                PRIMARY KEY (server_id, channel_id, sender_id)
+            )")?;
+        // Rows up to `exact_from` are refused outright; above it, up to the floor, only
+        // the ids this device cleared there, so a slow clock's later post still lands.
+        migrate(conn, "ALTER TABLE channel_floors ADD COLUMN exact_from INTEGER;");
+        ddl(conn, "channel_cleared_ids table",
+            "CREATE TABLE IF NOT EXISTS channel_cleared_ids (
+                server_id  TEXT    NOT NULL,
+                channel_id TEXT    NOT NULL,
+                mid_hash   INTEGER NOT NULL,
+                ts         INTEGER NOT NULL,
+                PRIMARY KEY (server_id, channel_id, mid_hash)
+            ) WITHOUT ROWID")?;
+        ddl(conn, "idx_cleared_ids_ts",
+            "CREATE INDEX IF NOT EXISTS idx_cleared_ids_ts ON channel_cleared_ids (server_id, channel_id, ts)")?;
+        // A clear's downloads still to unlink: its batches commit before the unlink, so a
+        // crash between them leaves the names here for the next start.
+        ddl(conn, "channel_cleared_files table",
+            "CREATE TABLE IF NOT EXISTS channel_cleared_files (
+                file_id  TEXT NOT NULL,
+                file_ext TEXT NOT NULL,
+                PRIMARY KEY (file_id, file_ext)
+            ) WITHOUT ROWID")?;
 
         // -- Migration: avatar/banner BLOB columns on user_profiles --
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN avatar BLOB;");
@@ -1291,7 +1540,7 @@ impl MessageStore {
 
         // Content-sync FTS: the FTS table reads the main table on demand and triggers
         // keep it in sync.
-        conn.execute_batch(
+        conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                 text, content='messages', content_rowid='id'
             );
@@ -1309,17 +1558,8 @@ impl MessageStore {
             CREATE VIRTUAL TABLE IF NOT EXISTS channel_messages_fts USING fts5(
                 text, content='channel_messages', content_rowid='id'
             );
-            CREATE TRIGGER IF NOT EXISTS channel_messages_fts_ai AFTER INSERT ON channel_messages BEGIN
-                INSERT INTO channel_messages_fts(rowid, text) VALUES (new.id, new.text);
-            END;
-            CREATE TRIGGER IF NOT EXISTS channel_messages_fts_ad AFTER DELETE ON channel_messages BEGIN
-                INSERT INTO channel_messages_fts(channel_messages_fts, rowid, text) VALUES('delete', old.id, old.text);
-            END;
-            CREATE TRIGGER IF NOT EXISTS channel_messages_fts_au AFTER UPDATE ON channel_messages BEGIN
-                INSERT INTO channel_messages_fts(channel_messages_fts, rowid, text) VALUES('delete', old.id, old.text);
-                INSERT INTO channel_messages_fts(rowid, text) VALUES (new.id, new.text);
-            END;"
-        ).unwrap_or_else(|e| {
+            {CHANNEL_FTS_TRIGGERS}"
+        )).unwrap_or_else(|e| {
             crate::hollow_log!("[HOLLOW] FTS5 setup failed (non-fatal): {e}");
         });
 
@@ -1374,16 +1614,9 @@ impl MessageStore {
                 master_peer_id TEXT NOT NULL,
                 PRIMARY KEY (device_peer_id, master_peer_id)
             )")?;
-        // The one-row-per-device table 0.12 reads stays dual-written until 0.14, so a
-        // downgrade, a restored backup or a linked 0.12 install keeps every refusal; its
-        // rows are copied in at every start, and reads take both, so a failed copy refuses.
-        ddl(conn, "revoked_devices table",
-            "CREATE TABLE IF NOT EXISTS revoked_devices (
-                device_peer_id TEXT PRIMARY KEY,
-                master_peer_id TEXT NOT NULL
-            )")?;
-        migrate(conn, "INSERT OR IGNORE INTO revoked_marks (device_peer_id, master_peer_id)
-                       SELECT device_peer_id, master_peer_id FROM revoked_devices");
+        if let Err(e) = move_old_revocations(conn) {
+            crate::hollow_log!("[HOLLOW] revoked_devices not moved yet, still read: {e}");
+        }
 
         // When THIS node first saw a device's pending join in a base: the clock its seven
         // days run on (design ID-1). Per base, so a recovery restarts it. Local by
@@ -1667,6 +1900,15 @@ impl MessageStore {
             .map_err(|e| format!("Failed to open database for migration: {e}"))?;
         conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", passphrase))
             .map_err(|e| format!("Failed to set encryption key: {e}"))?;
+        let _ = conn.execute_batch("PRAGMA busy_timeout = 4000;");
+
+        let rebuilt = match Self::rebuild_channel_messages(&conn) {
+            Ok(rebuilt) => rebuilt,
+            Err(e) => {
+                crate::hollow_log!("[HOLLOW] channel_messages kept its content key for now: {e}");
+                false
+            }
+        };
 
         let auto_vac: i32 = conn
             .query_row("PRAGMA auto_vacuum;", [], |r| r.get(0))
@@ -1675,8 +1917,88 @@ impl MessageStore {
             conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")
                 .map_err(|e| format!("auto_vacuum migration failed: {e}"))?;
         }
-        let _ = conn.execute_batch("PRAGMA incremental_vacuum(100);");
+        release_free_pages(&conn, if rebuilt { None } else { Some(100) });
         Ok(())
+    }
+
+    /// Rebuild a `channel_messages` table still keyed by content (before 0.14): the same
+    /// rows, ids and columns, its indexes and search triggers, no content key, one row per
+    /// message id (the oldest), and the sender index. One transaction: a failure or a
+    /// crash leaves the old table whole and the next start tries again. Runs only in the
+    /// startup window, never in `open()`: it rewrites the whole history.
+    pub(crate) fn rebuild_channel_messages(conn: &Connection) -> Result<bool, String> {
+        if !has_content_key(conn) {
+            return Ok(false);
+        }
+        let columns: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('channel_messages') ORDER BY cid")
+                .map_err(|e| format!("columns: {e}"))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)? != 0))
+                })
+                .map_err(|e| format!("columns: {e}"))?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (name, ty, notnull, default, pk) = row.map_err(|e| format!("columns: {e}"))?;
+                let def = plain_column(&name, &ty, notnull, default.as_deref(), pk)
+                    .ok_or_else(|| format!("column {name:?} is not one this build writes"))?;
+                out.push((name, def));
+            }
+            out
+        };
+        let has = |col: &str| columns.iter().any(|(name, _)| name == col);
+        if !has("message_id") {
+            // The first open of this process adds it; the next start rebuilds.
+            return Ok(false);
+        }
+        let names = columns.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
+        let defs = columns.iter().map(|(_, def)| def.as_str()).collect::<Vec<_>>().join(", ");
+        in_write_tx(conn, |conn| {
+            let run = |what: &str, sql: &str| conn.execute_batch(sql).map_err(|e| format!("{what}: {e}"));
+            run("drop a leftover", "DROP TABLE IF EXISTS channel_messages_rebuild")?;
+            run("create", &format!("CREATE TABLE channel_messages_rebuild ({defs})"))?;
+            let kept = conn
+                .execute(
+                    &format!(
+                        "INSERT INTO channel_messages_rebuild ({names})
+                         SELECT {names} FROM channel_messages
+                         WHERE message_id IS NULL
+                            OR id IN (SELECT MIN(id) FROM channel_messages WHERE message_id IS NOT NULL GROUP BY message_id)
+                         ORDER BY id"
+                    ),
+                    [],
+                )
+                .map_err(|e| format!("copy: {e}"))?;
+            let seq: Option<i64> = conn
+                .query_row("SELECT seq FROM sqlite_sequence WHERE name = 'channel_messages'", [], |r| r.get(0))
+                .ok();
+            let held: i64 = conn
+                .query_row("SELECT COUNT(*) FROM channel_messages", [], |r| r.get(0))
+                .map_err(|e| format!("count: {e}"))?;
+            run("drop", "DROP TABLE channel_messages")?;
+            run("rename", "ALTER TABLE channel_messages_rebuild RENAME TO channel_messages")?;
+            // A dropped copy's id is never handed out again.
+            if let Some(seq) = seq {
+                conn.execute("UPDATE sqlite_sequence SET seq = MAX(seq, ?1) WHERE name = 'channel_messages'", [seq])
+                    .map_err(|e| format!("sequence: {e}"))?;
+            }
+            run("time index", "CREATE INDEX idx_channel_msgs ON channel_messages (server_id, channel_id, timestamp)")?;
+            run("id index", CHANNEL_MID_INDEX)?;
+            run("sender index", CHANNEL_SENDER_INDEX)?;
+            if has("updated_at") {
+                run("updated index", "CREATE INDEX idx_channel_msgs_updated ON channel_messages (server_id, channel_id, updated_at)")?;
+            }
+            if table_exists(conn, "channel_messages_fts") {
+                run("search triggers", CHANNEL_FTS_TRIGGERS)?;
+                if kept as i64 != held {
+                    run("search rebuild", "INSERT INTO channel_messages_fts(channel_messages_fts) VALUES('rebuild')")?;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(true)
     }
 
     pub fn wal_checkpoint(&self) -> Result<(), String> {
@@ -2480,6 +2802,12 @@ impl MessageStore {
     ) -> Option<crate::node::types::GapDigest> {
         let latest = self.get_latest_channel_timestamp(server_id, channel_id).ok()??;
         let (from, until) = gap_window((latest - SYNC_LOOKBACK_MS).max(0))?;
+        // What a floor refuses outright is never wanted back, so the digest never shows it as missing.
+        let from = match self.channel_ask_start(server_id, channel_id) {
+            Some(start) if start >= until => return None,
+            Some(start) => from.max(start),
+            None => from,
+        };
         self.gap_digest(
             "SELECT message_id, timestamp FROM channel_messages
              WHERE server_id = ?1 AND channel_id = ?2 AND timestamp >= ?3 AND timestamp < ?4
@@ -2840,7 +3168,8 @@ impl MessageStore {
 
     // -- Channel message methods --
 
-    /// Insert a channel message. Returns rows inserted, 0 for a duplicate.
+    /// Insert a channel message. Returns rows inserted, 0 for a duplicate or for
+    /// history this device cleared.
     ///
     /// `order_us`: see [`Self::insert`].
     #[allow(clippy::too_many_arguments)]
@@ -2860,17 +3189,261 @@ impl MessageStore {
         order_us: Option<i64>,
         album_id: Option<&str>,
     ) -> Result<usize, String> {
+        self.insert_channel_message_judged(
+            server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key,
+            message_id, reply_to_mid, file_id, order_us, album_id,
+        )
+        .map(|outcome| usize::from(outcome == ChannelInsert::Stored))
+    }
+
+    /// [`Self::insert_channel_message`], telling a duplicate from cleared history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_channel_message_judged(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        sender_id: &str,
+        text: &str,
+        is_mine: bool,
+        timestamp: i64,
+        signature: Option<&str>,
+        public_key: Option<&str>,
+        message_id: Option<&str>,
+        reply_to_mid: Option<&str>,
+        file_id: Option<&str>,
+        order_us: Option<i64>,
+        album_id: Option<&str>,
+    ) -> Result<ChannelInsert, String> {
         let order_us = order_us.unwrap_or(timestamp.saturating_mul(1000));
         // Lamport chat clock — see [`Self::insert`] and chat_clock.rs.
         crate::chat_clock::observe(order_us.max(timestamp.saturating_mul(1000)));
+        // History this device cleared is refused in the same statement, on every path:
+        // live, sync and push alike.
+        let hash = message_id.map(cleared_id_hash);
         let rows = self.conn
             .execute(
-                "INSERT OR IGNORE INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us, album_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![server_id, channel_id, sender_id, text, is_mine as i32, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us, album_id],
+                &format!(
+                    "INSERT OR IGNORE INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us, album_id)
+                     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                     WHERE NOT {}",
+                    floor_refuses_sql("?1", "?2", "?6", "?14"),
+                ),
+                params![server_id, channel_id, sender_id, text, is_mine as i32, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us, album_id, hash],
             )
             .map_err(|e| format!("Failed to insert channel message: {e}"))?;
-        Ok(rows)
+        if rows > 0 {
+            return Ok(ChannelInsert::Stored);
+        }
+        Ok(if self.refuse_below_floor(server_id, channel_id, sender_id, timestamp, message_id) {
+            ChannelInsert::Cleared
+        } else {
+            ChannelInsert::Duplicate
+        })
+    }
+
+    /// Whether a channel row, or a header, reaction or card riding one, is history
+    /// this device cleared. Pure: see [`Self::refuse_below_floor`].
+    pub fn channel_floor_refuses(&self, server_id: &str, channel_id: &str, timestamp: i64, message_id: Option<&str>) -> bool {
+        self.conn
+            .prepare_cached(&format!("SELECT {}", floor_refuses_sql("?1", "?2", "?3", "?4")))
+            .and_then(|mut s| {
+                s.query_row(params![server_id, channel_id, timestamp, message_id.map(cleared_id_hash)], |r| r.get(0))
+            })
+            .unwrap_or(false)
+    }
+
+    /// [`Self::channel_floor_refuses`], and a sender first met in cleared history
+    /// joins the senders the channel's sync asks name, so no one serves its old rows
+    /// again; bounded per channel.
+    pub fn refuse_below_floor(&self, server_id: &str, channel_id: &str, sender_id: &str, timestamp: i64, message_id: Option<&str>) -> bool {
+        if !self.channel_floor_refuses(server_id, channel_id, timestamp, message_id) {
+            return false;
+        }
+        let _ = self.conn.execute(
+            "INSERT OR IGNORE INTO channel_floor_senders (server_id, channel_id, sender_id)
+             SELECT ?1, ?2, ?3
+             WHERE (SELECT COUNT(*) FROM channel_floor_senders WHERE server_id = ?1 AND channel_id = ?2) < ?4",
+            params![server_id, channel_id, sender_id, MAX_FLOOR_SENDERS],
+        );
+        true
+    }
+
+    /// Test-only: the connection, for writing a row past every gate.
+    #[cfg(test)]
+    pub(crate) fn conn_for_test(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Clear every server channel's history on THIS device; see [`Self::clear_history_in`].
+    pub fn clear_channel_history(&self, now_ms: i64) -> Result<ClearedHistory, String> {
+        self.clear_history_in(None, &[], now_ms)
+    }
+
+    /// Clear the history of every channel of `server_id` (every server when `None`) on
+    /// THIS device (Settings > Storage, or a server's settings). Each channel first gets
+    /// its floor: its newest row but never past `now_ms`, or `now_ms` for a channel of
+    /// `channels` (server, channel) holding nothing yet. The ids cleared within
+    /// `CLEAR_SKEW_MS` of it are remembered, and the senders it held. Then every row
+    /// the floors refuse goes with what hangs off it, and the file shrinks. Nothing is
+    /// sent: other members keep theirs.
+    pub fn clear_history_in(&self, server_id: Option<&str>, channels: &[(String, String)], now_ms: i64) -> Result<ClearedHistory, String> {
+        in_write_tx(&self.conn, |conn| {
+            let err = |what: &'static str| move |e: rusqlite::Error| format!("{what}: {e}");
+            conn.execute(
+                "INSERT INTO channel_floors (server_id, channel_id, floor_ts)
+                 SELECT server_id, channel_id, MIN(MAX(timestamp), ?1) FROM channel_messages
+                 WHERE ?2 IS NULL OR server_id = ?2
+                 GROUP BY server_id, channel_id
+                 ON CONFLICT(server_id, channel_id) DO UPDATE SET floor_ts = MAX(floor_ts, excluded.floor_ts)",
+                params![now_ms, server_id],
+            )
+            .map_err(err("floors"))?;
+            for (sid, cid) in channels.iter().filter(|(sid, _)| server_id.is_none_or(|s| s == sid)) {
+                conn.execute(
+                    "INSERT INTO channel_floors (server_id, channel_id, floor_ts)
+                     SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM channel_messages WHERE server_id = ?1 AND channel_id = ?2)
+                     ON CONFLICT(server_id, channel_id) DO UPDATE SET floor_ts = MAX(floor_ts, excluded.floor_ts)",
+                    params![sid, cid, now_ms],
+                )
+                .map_err(err("empty channel floors"))?;
+            }
+            let floors: Vec<(String, String, i64, Option<i64>)> = {
+                let mut stmt = conn
+                    .prepare("SELECT server_id, channel_id, floor_ts, exact_from FROM channel_floors WHERE ?1 IS NULL OR server_id = ?1")
+                    .map_err(err("read floors"))?;
+                let rows = stmt.query_map([server_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(err("read floors"))?;
+                collect_rows(rows, "floor")?
+            };
+            for (sid, cid, floor, old_exact) in floors {
+                remember_cleared_ids(conn, &sid, &cid, floor, old_exact).map_err(err("cleared ids"))?;
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO channel_floor_senders (server_id, channel_id, sender_id)
+                 SELECT DISTINCT m.server_id, m.channel_id, m.sender_id FROM channel_floors f
+                 JOIN channel_messages m ON m.server_id = f.server_id AND m.channel_id = f.channel_id
+                 WHERE ?1 IS NULL OR f.server_id = ?1",
+                [server_id],
+            )
+            .map(|_| ())
+            .map_err(err("floor senders"))
+        })
+        .map_err(|e| format!("Failed to mark the cleared history: {e}"))?;
+        self.finish_cleared_history()
+    }
+
+    /// Delete every row the floors refuse, with its edits, deletions, reactions and file
+    /// rows, a batch per transaction, then give the file's pages back. The second half
+    /// of a clear, and at start the rest of one a crash or kill cut short.
+    pub fn finish_cleared_history(&self) -> Result<ClearedHistory, String> {
+        let pending: bool = self
+            .conn
+            .query_row("SELECT EXISTS (SELECT 1 FROM channel_floors) OR EXISTS (SELECT 1 FROM channel_cleared_files)", [], |r| r.get(0))
+            .map_err(|e| format!("Failed to read the floors: {e}"))?;
+        if !pending {
+            return Ok(ClearedHistory::default());
+        }
+        self.conn
+            .execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS clear_batch (id INTEGER PRIMARY KEY, mid TEXT);
+                 CREATE TEMP TABLE IF NOT EXISTS clear_near (id INTEGER PRIMARY KEY);
+                 DELETE FROM temp.clear_near;",
+            )
+            .map_err(|e| format!("Failed to prepare the clear: {e}"))?;
+        self.mark_cleared_near_floors().map_err(|e| format!("Failed to find the cleared rows: {e}"))?;
+        let mut cleared = ClearedHistory::default();
+        loop {
+            let batch = in_write_tx(&self.conn, |conn| {
+                let run = |sql: &str| conn.execute_batch(sql).map_err(|e| e.to_string());
+                run("DELETE FROM temp.clear_batch")?;
+                let rows = conn
+                    .execute(CLEAR_BATCH_SELECT, [CLEAR_BATCH_ROWS])
+                    .map_err(|e| e.to_string())?;
+                if rows > 0 {
+                    // Ids are sender-chosen: a DM sharing one keeps its evidence.
+                    run(
+                        "INSERT OR IGNORE INTO channel_cleared_files (file_id, file_ext)
+                             SELECT file_id, file_ext FROM files
+                             WHERE context_type = 'channel' AND message_id IN (SELECT mid FROM temp.clear_batch);
+                         DELETE FROM file_chunks WHERE file_id IN (SELECT file_id FROM files
+                             WHERE context_type = 'channel' AND message_id IN (SELECT mid FROM temp.clear_batch));
+                         DELETE FROM files
+                             WHERE context_type = 'channel' AND message_id IN (SELECT mid FROM temp.clear_batch);
+                         DELETE FROM message_edits WHERE message_id IN (SELECT mid FROM temp.clear_batch)
+                             AND NOT EXISTS (SELECT 1 FROM messages d WHERE d.message_id = message_edits.message_id);
+                         DELETE FROM message_deletions WHERE message_id IN (SELECT mid FROM temp.clear_batch)
+                             AND NOT EXISTS (SELECT 1 FROM messages d WHERE d.message_id = message_deletions.message_id);
+                         DELETE FROM message_reactions WHERE message_id IN (SELECT mid FROM temp.clear_batch)
+                             AND NOT EXISTS (SELECT 1 FROM messages d WHERE d.message_id = message_reactions.message_id);
+                         DELETE FROM reaction_removals WHERE message_id IN (SELECT mid FROM temp.clear_batch)
+                             AND NOT EXISTS (SELECT 1 FROM messages d WHERE d.message_id = reaction_removals.message_id);
+                         DELETE FROM channel_messages WHERE id IN (SELECT id FROM temp.clear_batch);
+                         DELETE FROM temp.clear_near WHERE id IN (SELECT id FROM temp.clear_batch);",
+                    )?;
+                }
+                Ok(rows)
+            })
+            .map_err(|e| format!("Failed to clear messages: {e}"))?;
+            if batch == 0 {
+                break;
+            }
+            cleared.messages += batch as u64;
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_id, file_ext FROM channel_cleared_files")
+            .map_err(|e| format!("Failed to read the cleared files: {e}"))?;
+        let names = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| format!("Failed to read the cleared files: {e}"))?;
+        cleared.files = collect_rows(names, "cleared file")?;
+        if cleared.messages > 0 {
+            // Space only: a failure here leaves a larger file, never a wrong one.
+            let _ = self.conn.execute_batch("INSERT INTO channel_messages_fts(channel_messages_fts) VALUES('optimize');");
+            release_free_pages(&self.conn, None);
+            let _ = self.wal_checkpoint();
+        }
+        Ok(cleared)
+    }
+
+    /// Forget the names of cleared files once the caller has unlinked them.
+    pub fn forget_cleared_files(&self, files: &[(String, String)]) -> Result<(), String> {
+        in_write_tx(&self.conn, |conn| {
+            let mut forget = conn
+                .prepare("DELETE FROM channel_cleared_files WHERE file_id = ?1 AND file_ext = ?2")
+                .map_err(|e| e.to_string())?;
+            for (file_id, ext) in files {
+                forget.execute(params![file_id, ext]).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .map_err(|e| format!("Failed to forget the cleared files: {e}"))
+    }
+
+    /// The rows past the outright refusal whose id this device cleared (within
+    /// `CLEAR_SKEW_MS` below a floor, or stamped above it), into `temp.clear_near`:
+    /// their ids are known only by hash, so each is found by its remembered time.
+    fn mark_cleared_near_floors(&self) -> rusqlite::Result<()> {
+        let mut near = self.conn.prepare(CLEARED_NEAR_SELECT)?;
+        let rows = near
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut cleared = self.conn.prepare(
+            "SELECT 1 FROM channel_cleared_ids WHERE server_id = ?1 AND channel_id = ?2 AND mid_hash = ?3",
+        )?;
+        let mut keep = self.conn.prepare("INSERT OR IGNORE INTO temp.clear_near (id) VALUES (?1)")?;
+        for (id, mid, sid, cid) in rows {
+            if cleared.exists(params![sid, cid, cleared_id_hash(&mid)])? {
+                keep.execute([id])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Server channel messages this device holds.
+    pub fn count_all_channel_messages(&self) -> Result<u32, String> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM channel_messages", [], |r| r.get(0))
+            .map_err(|e| format!("Failed to count channel messages: {e}"))
     }
 
     /// Load recent messages for a channel, oldest-first, excluding hidden ones.
@@ -2900,18 +3473,69 @@ impl MessageStore {
         Ok(messages)
     }
 
-    /// Get the most recent message timestamp for a channel (for sync requests).
+    /// How far this device's history of a channel reaches, for sync asks and catch-up:
+    /// its newest row, or the floor it cleared the channel up to when that is newer.
     pub fn get_latest_channel_timestamp(
         &self,
         server_id: &str,
         channel_id: &str,
     ) -> Result<Option<i64>, String> {
         self.query_opt_ts(
-            "SELECT MAX(timestamp) FROM channel_messages
-             WHERE server_id = ?1 AND channel_id = ?2",
+            "SELECT MAX(ts) FROM (
+                 SELECT MAX(timestamp) AS ts FROM channel_messages WHERE server_id = ?1 AND channel_id = ?2
+                 UNION ALL
+                 SELECT floor_ts FROM channel_floors WHERE server_id = ?1 AND channel_id = ?2
+             )",
             &[&server_id, &channel_id],
             "latest timestamp",
         )
+    }
+
+    /// The first timestamp a sync ask of a channel this device cleared wants: just past
+    /// the outright refusal, as a slow clock's newer post may land up to the floor.
+    pub fn channel_ask_start(&self, server_id: &str, channel_id: &str) -> Option<i64> {
+        self.conn
+            .prepare_cached("SELECT COALESCE(exact_from, floor_ts) + 1 FROM channel_floors WHERE server_id = ?1 AND channel_id = ?2")
+            .and_then(|mut s| s.query_row(params![server_id, channel_id], |r| r.get(0)))
+            .ok()
+    }
+
+    /// Whether a channel sync ask wants rows at or below the floor this device cleared
+    /// to, which it no longer holds: a plain watermark below it, a sender named at or
+    /// below it, a sender it cleared that the ask leaves out (served in full), or a gap
+    /// digest (`gap_from`) starting at or below it.
+    pub fn channel_ask_reaches_floor(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        since: i64,
+        sender_timestamps: &HashMap<String, i64>,
+        gap_from: Option<i64>,
+    ) -> bool {
+        let Some(floor) = self.channel_floor(server_id, channel_id) else { return false };
+        if gap_from.is_some_and(|from| from <= floor) {
+            return true;
+        }
+        if sender_timestamps.is_empty() {
+            return since < floor;
+        }
+        if sender_timestamps.values().any(|ts| *ts <= floor) {
+            return true;
+        }
+        let cleared = self
+            .conn
+            .prepare_cached("SELECT sender_id FROM channel_floor_senders WHERE server_id = ?1 AND channel_id = ?2")
+            .and_then(|mut s| s.query_map(params![server_id, channel_id], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>());
+        // Unreadable: answered as reaching it, never as the whole channel.
+        cleared.map_or(true, |senders| senders.iter().any(|s| !sender_timestamps.contains_key(s)))
+    }
+
+    /// Where this device cleared a channel's history, if it did.
+    pub fn channel_floor(&self, server_id: &str, channel_id: &str) -> Option<i64> {
+        self.conn
+            .prepare_cached("SELECT floor_ts FROM channel_floors WHERE server_id = ?1 AND channel_id = ?2")
+            .and_then(|mut s| s.query_row(params![server_id, channel_id], |r| r.get(0)))
+            .ok()
     }
 
     /// Latest timestamp of the LOCAL user's own channel messages (`is_mine = 1`, so it
@@ -3166,7 +3790,9 @@ impl MessageStore {
                          WHERE s.server_id = ?1 AND s.channel_id = ?2 AND s.message_id = ?3
                        UNION ALL SELECT CAST(value AS INTEGER) FROM app_settings WHERE key = ?4
                        UNION ALL SELECT MAX(o.timestamp) FROM channel_messages o
-                         WHERE o.server_id = ?1 AND o.channel_id = ?2 AND o.is_mine = 1))",
+                         WHERE o.server_id = ?1 AND o.channel_id = ?2 AND o.is_mine = 1
+                       UNION ALL SELECT COALESCE(c.exact_from, c.floor_ts) FROM channel_floors c
+                         WHERE c.server_id = ?1 AND c.channel_id = ?2))",
                 params![server_id, channel_id, last_seen_message_id,
                         format!("seen_ts:ch:{server_id}:{channel_id}")],
                 |row| row.get::<_, i64>(0),
@@ -3233,7 +3859,9 @@ impl MessageStore {
                        WHERE s.server_id = ?1 AND s.channel_id = ?2 AND s.message_id = ?{param_idx}
                      UNION ALL SELECT CAST(value AS INTEGER) FROM app_settings WHERE key = ?3
                      UNION ALL SELECT MAX(o.timestamp) FROM channel_messages o
-                       WHERE o.server_id = ?1 AND o.channel_id = ?2 AND o.is_mine = 1))"
+                       WHERE o.server_id = ?1 AND o.channel_id = ?2 AND o.is_mine = 1
+                     UNION ALL SELECT COALESCE(c.exact_from, c.floor_ts) FROM channel_floors c
+                       WHERE c.server_id = ?1 AND c.channel_id = ?2))"
             );
             param_idx += 1;
             f
@@ -3241,7 +3869,9 @@ impl MessageStore {
             "AND timestamp > COALESCE((SELECT MAX(v) FROM (
                  SELECT CAST(value AS INTEGER) AS v FROM app_settings WHERE key = ?3
                  UNION ALL SELECT MAX(o.timestamp) FROM channel_messages o
-                   WHERE o.server_id = ?1 AND o.channel_id = ?2 AND o.is_mine = 1)), -1)"
+                   WHERE o.server_id = ?1 AND o.channel_id = ?2 AND o.is_mine = 1
+                 UNION ALL SELECT COALESCE(c.exact_from, c.floor_ts) FROM channel_floors c
+                   WHERE c.server_id = ?1 AND c.channel_id = ?2)), -1)"
                 .to_string()
         };
 
@@ -3291,19 +3921,36 @@ impl MessageStore {
         server_id: &str,
         channel_id: &str,
     ) -> Result<HashMap<String, i64>, String> {
+        // A responder serves a sender from its watermark on, inclusive, and a cleared
+        // channel stores nothing again at or before its outright refusal: asks start past it.
+        let after_floor = self.channel_ask_start(server_id, channel_id).unwrap_or(0);
         let mut map = HashMap::new();
         for span in self.channel_sender_spans(server_id, channel_id)? {
             // Lookback overlap: a MAX(timestamp) watermark permanently skips a message MISSED
             // while a newer one arrived, so ask from `watermark - LOOKBACK`. The overlap is
             // deduplicated by message_id on receipt.
-            map.insert(span.sender, (span.last - SYNC_LOOKBACK_MS).max(0));
+            map.insert(span.sender, (span.last - SYNC_LOOKBACK_MS).max(after_floor).max(0));
+        }
+        if after_floor > 0 {
+            // A sender the ask leaves out is served in full, so a cleared channel names
+            // every sender it held.
+            let mut stmt = self
+                .conn
+                .prepare_cached("SELECT sender_id FROM channel_floor_senders WHERE server_id = ?1 AND channel_id = ?2")
+                .map_err(|e| format!("Failed to prepare floor senders: {e}"))?;
+            let senders = stmt
+                .query_map(params![server_id, channel_id], |r| r.get::<_, String>(0))
+                .map_err(|e| format!("Failed to query floor senders: {e}"))?;
+            for sender in collect_rows(senders, "floor sender")? {
+                map.entry(sender).or_insert(after_floor);
+            }
         }
         Ok(map)
     }
 
     /// Every sender of one channel with its oldest and newest row. Two index seeks per
-    /// sender on the `(server_id, channel_id, sender_id, timestamp, ...)` unique index,
-    /// never a pass over the channel's rows: sync asks this once per page.
+    /// sender on `idx_channel_msgs_sender_ts`, never a pass over the channel's rows:
+    /// sync asks this once per page.
     fn channel_sender_spans(&self, server_id: &str, channel_id: &str) -> Result<Vec<SenderSpan>, String> {
         let mut stmt = self
             .conn
@@ -3629,7 +4276,8 @@ impl MessageStore {
     /// the database leaving this device (a backup, a link snapshot): the Olm account,
     /// sessions and read marks, the replay guard's nonces, the MLS identity and groups, a
     /// 0.11 stored recovery phrase, and the image
-    /// verdicts (only this install's own decodes may vouch for bytes, AR-28). Deleted
+    /// verdicts (only this install's own decodes may vouch for bytes, AR-28), and the
+    /// floors of history this device cleared (a new device syncs it whole). Deleted
     /// pages are zeroed and the file rebuilt, so no free page still holds them.
     pub fn scrub_device_secrets(&self) -> Result<(), String> {
         self.conn
@@ -3643,7 +4291,11 @@ impl MessageStore {
                  DELETE FROM mls_identity;
                  DELETE FROM mls_storage;
                  DELETE FROM app_settings WHERE key = 'recovery_mnemonic';
-                 DELETE FROM image_verdicts;",
+                 DELETE FROM image_verdicts;
+                 DELETE FROM channel_floors;
+                 DELETE FROM channel_floor_senders;
+                 DELETE FROM channel_cleared_ids;
+                 DELETE FROM channel_cleared_files;",
             )
             .map_err(|e| format!("Failed to scrub device secrets: {e}"))?;
         self.conn
@@ -4008,21 +4660,17 @@ impl MessageStore {
 
     /// Forget `master`'s revocation of devices its recovery, signed with the phrase,
     /// brought back: only the phrase can do that, and only for its own identity.
-    ///
-    /// The old table's row is `master`'s only if it names it: it moves to a master whose
-    /// removal stands, or goes with the last one, else the copy at open revives it.
     pub fn clear_revoked_devices(&self, master_peer_id: &str, devices: &[String]) -> Result<(), String> {
+        // An old row not moved yet is lifted with its own master's mark, never another's.
+        let old = table_exists(&self.conn, "revoked_devices");
         for dev in devices {
-            for sql in [
-                "DELETE FROM revoked_marks WHERE device_peer_id = ?1 AND master_peer_id = ?2",
-                "UPDATE revoked_devices SET master_peer_id =
-                    (SELECT master_peer_id FROM revoked_marks WHERE device_peer_id = ?1 ORDER BY 1 LIMIT 1)
-                 WHERE device_peer_id = ?1 AND master_peer_id = ?2
-                   AND EXISTS (SELECT 1 FROM revoked_marks WHERE device_peer_id = ?1)",
-                "DELETE FROM revoked_devices WHERE device_peer_id = ?1 AND master_peer_id = ?2",
-            ] {
+            let tables: &[&str] = if old { &["revoked_marks", "revoked_devices"] } else { &["revoked_marks"] };
+            for table in tables {
                 self.conn
-                    .execute(sql, rusqlite::params![dev, master_peer_id])
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE device_peer_id = ?1 AND master_peer_id = ?2"),
+                        rusqlite::params![dev, master_peer_id],
+                    )
                     .map_err(|e| format!("Failed to clear revoked device: {e}"))?;
             }
         }
@@ -4033,27 +4681,28 @@ impl MessageStore {
     /// recovery brings the device back.
     pub fn record_revoked_devices(&self, master_peer_id: &str, devices: &[String]) -> Result<(), String> {
         for dev in devices {
-            for sql in [
-                "INSERT OR IGNORE INTO revoked_marks (device_peer_id, master_peer_id) VALUES (?1, ?2)",
-                "INSERT OR IGNORE INTO revoked_devices (device_peer_id, master_peer_id) VALUES (?1, ?2)",
-            ] {
-                self.conn
-                    .execute(sql, rusqlite::params![dev, master_peer_id])
-                    .map_err(|e| format!("Failed to record revoked device: {e}"))?;
-            }
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO revoked_marks (device_peer_id, master_peer_id) VALUES (?1, ?2)",
+                    rusqlite::params![dev, master_peer_id],
+                )
+                .map_err(|e| format!("Failed to record revoked device: {e}"))?;
         }
         Ok(())
     }
 
-    /// Every (device, master) recorded by [`Self::record_revoked_devices`], with any old
-    /// row the copy at open has not reached.
+    /// Every (device, master) recorded by [`Self::record_revoked_devices`], with the rows
+    /// of a 0.12 table whose move has not landed yet.
     pub fn revoked_marks(&self) -> Result<Vec<(String, String)>, String> {
+        let sql = if table_exists(&self.conn, "revoked_devices") {
+            "SELECT device_peer_id, master_peer_id FROM revoked_marks
+             UNION SELECT device_peer_id, master_peer_id FROM revoked_devices ORDER BY 1, 2"
+        } else {
+            "SELECT device_peer_id, master_peer_id FROM revoked_marks ORDER BY 1, 2"
+        };
         let mut stmt = self
             .conn
-            .prepare_cached(
-                "SELECT device_peer_id, master_peer_id FROM revoked_marks
-                 UNION SELECT device_peer_id, master_peer_id FROM revoked_devices ORDER BY 1, 2",
-            )
+            .prepare_cached(sql)
             .map_err(|e| format!("Failed to prepare revoked_marks: {e}"))?;
         let rows = stmt
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
@@ -9760,7 +10409,7 @@ mod md_link_paths {
 }
 
 #[cfg(test)]
-mod g13w3_revoked_marks {
+mod w2c_revoked_marks {
     use super::*;
 
     const KEY: &str = "abababababababababababababababababababababababababababababababab";
@@ -9791,18 +10440,17 @@ mod g13w3_revoked_marks {
         .unwrap();
     }
 
-    /// A database from before revocations were kept per master keeps every refusal
-    /// across the upgrade, keeps the old table for a downgrade, and one identity's
-    /// lifting leaves another's removal standing.
+    /// 0.14: a database from before keeps every refusal, its old table moves into the
+    /// per-master marks and is gone, and one identity's lifting leaves another's removal.
     #[test]
-    fn g13w3_revoked_devices_survive_the_move_to_per_master_marks() {
+    fn w2c_old_revocations_move_into_the_marks_and_the_old_table_goes() {
         let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("messages.db");
         let open = || MessageStore::open(db.to_str().unwrap(), KEY).unwrap();
         old_db(&db, "");
         let store = open();
         assert_eq!(rows(&store, "revoked_marks"), vec![pair("dev-old", "master-o")], "the old rows were not copied");
-        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev-old", "master-o")], "the old table lost its rows: a downgrade forgets them");
+        assert!(!table_exists(&store.conn, "revoked_devices"), "the old table outlived its move");
 
         store.record_revoked_devices("master-x", &["dev-old".to_string()]).unwrap();
         store.clear_revoked_devices("master-x", &["dev-old".to_string()]).unwrap();
@@ -9811,75 +10459,57 @@ mod g13w3_revoked_marks {
         assert_eq!(open().revoked_marks().unwrap().len(), 1, "a second open lost a mark");
     }
 
-    /// A copy that fails at open (a busy or full disk) loses nothing: the old rows still
-    /// refuse in that session and the next start copies them.
+    /// The copy and the drop are one step: a copy that fails (a busy or full disk) keeps
+    /// the old table, whose rows still refuse in that session, and the next start moves
+    /// them.
     #[test]
-    fn g13w3_a_failed_copy_keeps_the_old_revocations() {
+    fn w2c_a_failed_move_keeps_the_old_table_and_refuses() {
         let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("messages.db");
         let open = || MessageStore::open(db.to_str().unwrap(), KEY).unwrap();
         old_db(
             &db,
             "CREATE TABLE revoked_marks (device_peer_id TEXT NOT NULL, master_peer_id TEXT NOT NULL, PRIMARY KEY (device_peer_id, master_peer_id));
-             CREATE TRIGGER fail_copy BEFORE INSERT ON revoked_marks BEGIN SELECT RAISE(ABORT, 'copy failed'); END;",
+             CREATE TRIGGER fail_copy BEFORE INSERT ON revoked_marks WHEN new.device_peer_id = 'dev-old' BEGIN SELECT RAISE(ABORT, 'copy failed'); END;",
         );
         let store = open();
         assert!(rows(&store, "revoked_marks").is_empty(), "precondition: the copy failed");
-        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev-old", "master-o")], "a failed copy lost the old rows");
+        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev-old", "master-o")], "a failed copy dropped the old rows");
         assert_eq!(store.revoked_marks().unwrap(), vec![pair("dev-old", "master-o")], "a failed copy stopped refusing in this session");
+        assert!(store.get_all_revoked_devices().unwrap().contains(&"dev-old".to_string()));
+
+        // A removal recorded meanwhile lands in the marks only.
+        store.record_revoked_devices("master-y", &["dev-new".to_string()]).unwrap();
+        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev-old", "master-o")], "a record still wrote the old table");
         store.conn.execute_batch("DROP TRIGGER fail_copy").unwrap();
         // The next process's first open.
         MessageStore::init_schema(&store.conn).unwrap();
-        assert_eq!(rows(&store, "revoked_marks"), vec![pair("dev-old", "master-o")], "the next start never copied");
+        assert!(!table_exists(&store.conn, "revoked_devices"), "the next start never dropped the old table");
+        assert_eq!(rows(&store, "revoked_marks"), vec![pair("dev-new", "master-y"), pair("dev-old", "master-o")], "the next start never moved it");
     }
 
-    /// Every refusal also lands in the old table, the first master's row kept as 0.12
-    /// kept it, so a downgrade or a 0.12 install restoring this database still refuses.
+    /// While a failed move leaves the old table, a lift by the master its row names
+    /// takes that row too (else the next start's move brings it back), and a lift by
+    /// anyone else leaves it.
     #[test]
-    fn g13w3_revocations_are_dual_written_first_master_wins() {
+    fn w2c_a_lift_before_the_move_takes_only_its_own_old_row() {
         let tmp = crate::test_tmp::tempdir().unwrap();
         let store = MessageStore::open(tmp.path().join("messages.db").to_str().unwrap(), KEY).unwrap();
-        store.record_revoked_devices("master-o", &["dev".to_string()]).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TABLE revoked_devices (device_peer_id TEXT PRIMARY KEY, master_peer_id TEXT NOT NULL);
+                 INSERT INTO revoked_devices VALUES ('dev', 'master-o');",
+            )
+            .unwrap();
         store.record_revoked_devices("master-x", &["dev".to_string()]).unwrap();
-        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev", "master-o")]);
-        assert_eq!(rows(&store, "revoked_marks"), vec![pair("dev", "master-o"), pair("dev", "master-x")]);
-    }
-
-    /// A lift moves the old table's row to a master whose removal stands, and erases it
-    /// with the last one, so the copy at open never brings a lifted removal back.
-    #[test]
-    fn g13w3_a_lift_keeps_the_old_table_in_step() {
-        let tmp = crate::test_tmp::tempdir().unwrap();
-        let db = tmp.path().join("messages.db");
-        let open = || MessageStore::open(db.to_str().unwrap(), KEY).unwrap();
-        let store = open();
-        store.record_revoked_devices("master-o", &["dev".to_string()]).unwrap();
-        store.record_revoked_devices("master-x", &["dev".to_string()]).unwrap();
-        store.clear_revoked_devices("master-o", &["dev".to_string()]).unwrap();
-        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev", "master-x")], "the old table forgot a removal that stands");
-        drop(store);
-        let store = open();
-        assert_eq!(store.revoked_marks().unwrap(), vec![pair("dev", "master-x")], "an open brought a lifted removal back");
         store.clear_revoked_devices("master-x", &["dev".to_string()]).unwrap();
-        assert!(rows(&store, "revoked_devices").is_empty(), "the old table kept a device every roster lifted");
-        drop(store);
-        assert!(open().revoked_marks().unwrap().is_empty(), "an open brought a lifted removal back");
-    }
-
-    /// An old row the copy has not reached yet is another master's removal: a lift by
-    /// someone else leaves it.
-    #[test]
-    fn g13w3_a_lift_spares_another_masters_uncopied_row() {
-        let tmp = crate::test_tmp::tempdir().unwrap();
-        let store = MessageStore::open(tmp.path().join("messages.db").to_str().unwrap(), KEY).unwrap();
-        store.conn.execute_batch("INSERT INTO revoked_devices VALUES ('dev', 'master-o')").unwrap();
-        store.record_revoked_devices("master-x", &["dev".to_string()]).unwrap();
-        store.record_revoked_devices("master-y", &["dev".to_string()]).unwrap();
-        store.clear_revoked_devices("master-x", &["dev".to_string()]).unwrap();
-        assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev", "master-o")], "another master's lift moved the old row");
-        store.clear_revoked_devices("master-y", &["dev".to_string()]).unwrap();
         assert_eq!(rows(&store, "revoked_devices"), vec![pair("dev", "master-o")], "another master's lift erased the old row");
         assert_eq!(store.revoked_marks().unwrap(), vec![pair("dev", "master-o")]);
+        store.clear_revoked_devices("master-o", &["dev".to_string()]).unwrap();
+        assert!(rows(&store, "revoked_devices").is_empty(), "its own master's lift left the old row");
+        MessageStore::init_schema(&store.conn).unwrap();
+        assert!(store.revoked_marks().unwrap().is_empty(), "the move brought a lifted removal back");
     }
 }
 
@@ -10087,5 +10717,964 @@ mod g13w3_sync_cost {
         let kept: Vec<u64> = store.load_ops_for_server("S", None).unwrap().iter().map(|o| o.hlc.physical_ms).collect();
         assert!(kept.contains(&200), "the late leave the batch carried was dropped: {kept:?}");
         assert!(!kept.contains(&100) && !kept.contains(&150), "rows the checkpoint covers stayed: {kept:?}");
+    }
+}
+
+#[cfg(test)]
+mod w2c_storage {
+    use super::*;
+
+    const KEY: &str = "abababababababababababababababababababababababababababababababab";
+
+    fn post(store: &MessageStore, ch: &str, sender: &str, ts: i64, text: &str, mid: &str) -> usize {
+        store
+            .insert_channel_message("srv", ch, sender, text, false, ts, None, None, Some(mid), None, None, None, None)
+            .unwrap()
+    }
+
+    fn mids(store: &MessageStore, ch: &str) -> Vec<String> {
+        let mut stmt = store
+            .conn
+            .prepare("SELECT message_id FROM channel_messages WHERE server_id = 'srv' AND channel_id = ?1 ORDER BY id")
+            .unwrap();
+        stmt.query_map([ch], |r| r.get::<_, String>(0)).unwrap().map(|r| r.unwrap()).collect()
+    }
+
+    fn file_store(tmp: &std::path::Path) -> MessageStore {
+        MessageStore::open(tmp.join("messages.db").to_str().unwrap(), KEY).unwrap()
+    }
+
+    fn index_names(store: &MessageStore) -> Vec<String> {
+        let mut stmt = store
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'channel_messages' ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0)).unwrap().map(|r| r.unwrap()).collect()
+    }
+
+    /// A database as 0.13 leaves it: the `UNIQUE(..., text)` table, every later column,
+    /// search and its triggers. Two rows share an id, as a race between two writers
+    /// could leave them.
+    fn old_channel_db(db: &std::path::Path) {
+        {
+            let old = Connection::open(db).unwrap();
+            old.execute_batch(&format!(
+                "PRAGMA key = \"x'{KEY}'\";
+                 CREATE TABLE channel_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, server_id TEXT NOT NULL, channel_id TEXT NOT NULL,
+                    sender_id TEXT NOT NULL, text TEXT NOT NULL, is_mine INTEGER NOT NULL, timestamp INTEGER NOT NULL,
+                    UNIQUE(server_id, channel_id, sender_id, timestamp, text));"
+            ))
+            .unwrap();
+        }
+        let store = file_store(db.parent().unwrap());
+        assert!(has_content_key(&store.conn), "precondition: the old table keeps its content key on open");
+        assert!(
+            !index_names(&store).iter().any(|n| n == "idx_channel_msgs_sender_ts"),
+            "an open indexed a whole old history",
+        );
+        // 0.13's id index was not unique.
+        store
+            .conn
+            .execute_batch("DROP INDEX idx_channel_msgs_msg_id; CREATE INDEX idx_channel_msgs_msg_id ON channel_messages (message_id);")
+            .unwrap();
+        assert_eq!(post(&store, "ch", "alice", 1_000, "hello", "m1"), 1);
+        assert_eq!(post(&store, "ch", "bob", 2_000, "searchable words", "m2"), 1);
+        assert_eq!(post(&store, "ch", "bob", 2_000, "searchable words", "m3"), 0, "precondition: the old key drops a post alike");
+        store
+            .conn
+            .execute_batch("INSERT INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, message_id) VALUES ('srv', 'ch', 'carol', 'second copy', 0, 3000, 'm1')")
+            .unwrap();
+    }
+
+    /// Two different posts alike in sender, millisecond and text are two messages.
+    #[test]
+    fn w2c_two_posts_alike_in_one_millisecond_both_land() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = file_store(tmp.path());
+        assert_eq!(post(&store, "ch", "alice", 1_000, "lol", "m1"), 1);
+        assert_eq!(post(&store, "ch", "alice", 1_000, "lol", "m2"), 1, "the content key dropped a distinct post");
+        assert_eq!(mids(&store, "ch"), vec!["m1", "m2"]);
+    }
+
+    /// Dedup is by message id: one id is one row, whatever its text, so two writers
+    /// racing past the exists check still store a message once.
+    #[test]
+    fn w2c_one_message_id_is_stored_once() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = file_store(tmp.path());
+        assert_eq!(post(&store, "ch", "alice", 1_000, "first", "m1"), 1);
+        assert_eq!(post(&store, "ch", "alice", 1_000, "edited copy", "m1"), 0, "a second row took the same id");
+        assert_eq!(post(&store, "other", "alice", 5_000, "elsewhere", "m1"), 0, "a second row took the same id");
+        let legacy = |ts: i64| store.insert_channel_message("srv", "ch", "x", "no id", false, ts, None, None, None, None, None, None, None).unwrap();
+        assert_eq!((legacy(1), legacy(1)), (1, 1), "rows without an id are not keyed");
+    }
+
+    /// The sync watermarks read each sender's first and last row by index seeks, on a
+    /// new database and on a rebuilt one alike.
+    #[test]
+    fn w2c_sender_watermarks_seek_the_sender_index() {
+        let plan = |store: &MessageStore| -> String {
+            let mut stmt = store
+                .conn
+                .prepare("EXPLAIN QUERY PLAN SELECT MAX(timestamp) FROM channel_messages WHERE server_id = 'srv' AND channel_id = 'ch' AND sender_id = 'bob'")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(3)).unwrap().map(|r| r.unwrap()).collect::<Vec<_>>().join(" | ")
+        };
+        let fresh = crate::test_tmp::tempdir().unwrap();
+        let p = plan(&file_store(fresh.path()));
+        assert!(p.contains("idx_channel_msgs_sender_ts"), "a new database plans {p}");
+
+        let old = crate::test_tmp::tempdir().unwrap();
+        let db = old.path().join("messages.db");
+        old_channel_db(&db);
+        MessageStore::migrate_auto_vacuum_once(db.to_str().unwrap(), KEY).unwrap();
+        let p = plan(&file_store(old.path()));
+        assert!(p.contains("idx_channel_msgs_sender_ts"), "a rebuilt database plans {p}");
+    }
+
+    /// The start-up rebuild of a 0.13 database: the content key is gone, every row keeps
+    /// its id and columns (one row per message id, the oldest), search still finds old
+    /// and new rows, and ids keep counting up.
+    #[test]
+    fn w2c_an_old_database_loses_its_content_key_and_keeps_its_history() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("messages.db");
+        old_channel_db(&db);
+        let before: Vec<(i64, String, String)> = {
+            let store = file_store(tmp.path());
+            let mut stmt = store.conn.prepare("SELECT id, message_id, text FROM channel_messages ORDER BY id").unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(|r| r.unwrap()).collect()
+        };
+        MessageStore::migrate_auto_vacuum_once(db.to_str().unwrap(), KEY).unwrap();
+
+        let store = file_store(tmp.path());
+        assert!(!has_content_key(&store.conn), "the content key survived the rebuild");
+        let after: Vec<(i64, String, String)> = {
+            let mut stmt = store.conn.prepare("SELECT id, message_id, text FROM channel_messages ORDER BY id").unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(after, before[..2].to_vec(), "the rebuild lost a row or kept a second copy of an id");
+        for name in ["idx_channel_msgs", "idx_channel_msgs_msg_id", "idx_channel_msgs_sender_ts", "idx_channel_msgs_updated"] {
+            assert!(index_names(&store).iter().any(|n| n == name), "{name} is missing after the rebuild");
+        }
+        assert_eq!(store.search_channel_messages("srv", "ch", "searchable", 10).unwrap().len(), 1, "search lost an old row");
+        assert_eq!(post(&store, "ch", "bob", 2_000, "searchable words", "m3"), 1, "a post alike is still dropped");
+        assert_eq!(store.search_channel_messages("srv", "ch", "searchable", 10).unwrap().len(), 2, "search misses a new row");
+        let newest: i64 = store.conn.query_row("SELECT MAX(id) FROM channel_messages", [], |r| r.get(0)).unwrap();
+        assert!(newest > before.iter().map(|r| r.0).max().unwrap(), "ids started over");
+        // Once rebuilt, a later start leaves the table alone.
+        assert!(!MessageStore::rebuild_channel_messages(&store.conn).unwrap());
+    }
+
+    /// A rebuild that fails late (after the old table is dropped) changes nothing: the
+    /// old table, its key, rows and search stay, and the next start finishes it.
+    #[test]
+    fn w2c_a_failed_rebuild_leaves_the_old_table_whole() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("messages.db");
+        old_channel_db(&db);
+        {
+            let store = file_store(tmp.path());
+            store
+                .conn
+                .execute_batch("DROP INDEX idx_channel_msgs_updated; CREATE INDEX idx_channel_msgs_updated ON friends (peer_id);")
+                .unwrap();
+        }
+        let store = file_store(tmp.path());
+        let err = MessageStore::rebuild_channel_messages(&store.conn).unwrap_err();
+        assert!(err.contains("updated index"), "failed elsewhere: {err}");
+        assert!(has_content_key(&store.conn), "a failed rebuild left a half-built table");
+        assert_eq!(mids(&store, "ch"), vec!["m1", "m2", "m1"], "a failed rebuild lost rows");
+        assert_eq!(store.search_channel_messages("srv", "ch", "searchable", 10).unwrap().len(), 1, "a failed rebuild broke search");
+        assert!(!table_exists(&store.conn, "channel_messages_rebuild"));
+
+        store.conn.execute_batch("DROP INDEX idx_channel_msgs_updated").unwrap();
+        assert!(MessageStore::rebuild_channel_messages(&store.conn).unwrap(), "the next start did not rebuild");
+        assert!(!has_content_key(&store.conn));
+    }
+
+    /// A schema the rebuild does not recognise (a foreign database's) is left alone,
+    /// never run as SQL.
+    #[test]
+    fn w2c_a_rebuild_refuses_a_column_it_did_not_write() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("messages.db");
+        old_channel_db(&db);
+        let store = file_store(tmp.path());
+        store.conn.execute_batch("ALTER TABLE channel_messages ADD COLUMN \"x) ; DROP TABLE friends; --\" TEXT").unwrap();
+        assert!(MessageStore::rebuild_channel_messages(&store.conn).is_err());
+        assert!(has_content_key(&store.conn) && table_exists(&store.conn, "friends"));
+    }
+
+    /// The rebuild reads column shapes back from the table it replaces; anything our own
+    /// DDL never writes is refused rather than spliced into SQL.
+    #[test]
+    fn w2c_only_plain_columns_are_rebuilt() {
+        assert_eq!(plain_column("text", "TEXT", true, None, false).as_deref(), Some("text TEXT NOT NULL"));
+        assert_eq!(plain_column("lp_at", "integer", false, None, false).as_deref(), Some("lp_at INTEGER"));
+        assert_eq!(plain_column("id", "INTEGER", false, None, true).as_deref(), Some("id INTEGER PRIMARY KEY AUTOINCREMENT"));
+        for (name, ty, default, pk) in [
+            ("x) ; DROP TABLE friends; --", "TEXT", None, false),
+            ("Text", "TEXT", None, false),
+            ("1col", "TEXT", None, false),
+            ("", "TEXT", None, false),
+            ("note", "TEXT); DROP TABLE friends; --", None, false),
+            ("note", "VARCHAR(10)", None, false),
+            ("note", "TEXT", Some("'x'"), false),
+            ("rowkey", "INTEGER", None, true),
+        ] {
+            assert_eq!(plain_column(name, ty, false, default, pk), None, "{name:?} {ty:?} passed");
+        }
+    }
+
+    /// Clearing takes this device's server history and keeps it gone: each channel's
+    /// floor sits at its newest row, nothing at or before it is stored again on any
+    /// path, a newer post lands, and a sender first met below the floor is named.
+    #[test]
+    fn w2c_cleared_history_is_refused_when_it_comes_back() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = file_store(tmp.path());
+        let t = 10 * CLEAR_SKEW_MS;
+        post(&store, "ch", "alice", t + 1_000, "a", "m1");
+        post(&store, "ch", "bob", t + 2_000, "b", "m2");
+        post(&store, "quiet", "alice", t + 500, "c", "m3");
+        let cleared = store.clear_channel_history(t + 10_000).unwrap();
+        assert_eq!(cleared.messages, 3);
+        assert_eq!(store.count_all_channel_messages().unwrap(), 0);
+        assert_eq!((store.channel_floor("srv", "ch"), store.channel_floor("srv", "quiet")), (Some(t + 2_000), Some(t + 500)));
+
+        assert_eq!(post(&store, "ch", "alice", t + 1_000, "a", "m1"), 0, "a cleared message came back");
+        assert_eq!(post(&store, "ch", "bob", t + 2_000, "b", "m2"), 0, "the newest cleared message came back");
+        assert_eq!(post(&store, "ch", "dave", t + 2_000 - CLEAR_SKEW_MS, "d", "m4"), 0, "an old message never held came in");
+        assert_eq!(post(&store, "ch", "bob", t + 2_001, "new", "m5"), 1, "a post after the clear was refused");
+        assert_eq!(post(&store, "fresh", "bob", 1, "elsewhere", "m6"), 1, "a channel never cleared refused history");
+        assert_eq!(mids(&store, "ch"), vec!["m5"]);
+
+        let marks = store.get_per_sender_timestamps("srv", "ch").unwrap();
+        let start = t + 2_001 - CLEAR_SKEW_MS;
+        assert_eq!(marks.get("alice"), Some(&start), "a cleared sender is not named where asks start");
+        assert_eq!(marks.get("dave"), Some(&start), "a sender met below the floor is not named");
+        assert_eq!(marks.get("bob"), Some(&start), "a lookback reached past where asks start");
+    }
+
+    /// A cleared channel asks from just past its outright refusal: the per-sender marks
+    /// and the gap digest never ask for what it refuses whatever its id.
+    #[test]
+    fn w2c_a_cleared_channel_asks_from_its_floor() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = file_store(tmp.path());
+        let day = 24 * 60 * 60 * 1000;
+        let floor = 40 * day;
+        post(&store, "ch", "alice", floor - 5 * day, "old", "m1");
+        post(&store, "ch", "alice", floor, "newest", "m2");
+        store.clear_channel_history(floor + day).unwrap();
+        assert_eq!(store.get_latest_channel_timestamp("srv", "ch").unwrap(), Some(floor));
+        let start = floor - CLEAR_SKEW_MS + 1;
+        assert_eq!(store.get_per_sender_timestamps("srv", "ch").unwrap(), HashMap::from([("alice".to_string(), start)]));
+        assert!(store.channel_gap_anchor("srv", "ch").is_none(), "an empty cleared channel sent a digest");
+
+        // Days later, the digest behind the newest post stops at the floor.
+        post(&store, "ch", "bob", floor + 3 * day, "later", "m3");
+        let gap = store.channel_gap_anchor("srv", "ch").expect("a digest behind the newest post");
+        assert_eq!(gap.from, start, "the digest reaches below where asks start");
+    }
+
+    /// The floor never passes the clock: a post stamped ahead of it goes by its id, and
+    /// a post sent after the clear is never refused for it.
+    #[test]
+    fn w2c_a_floor_never_reaches_past_now() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = file_store(tmp.path());
+        post(&store, "ch", "skewed", 50_000, "from the future", "m1");
+        post(&store, "ch", "alice", 9_000, "now-ish", "m2");
+        assert_eq!(store.clear_channel_history(10_000).unwrap().messages, 2);
+        assert_eq!(store.channel_floor("srv", "ch"), Some(10_000));
+        assert!(mids(&store, "ch").is_empty());
+        assert_eq!(post(&store, "ch", "alice", 10_001, "after", "m3"), 1);
+    }
+
+    /// The clear takes what hangs off a cleared message (edits, deletions, reactions,
+    /// file rows) and hands back its downloads; DMs and their reactions stay.
+    #[test]
+    fn w2c_clear_takes_what_hangs_off_the_messages_and_leaves_dms() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = file_store(tmp.path());
+        post(&store, "ch", "alice", 1_000, "with a file", "cm1");
+        store.insert("friend", "a dm", false, 1_000, None, None, Some("dm1"), None, None, None, None).unwrap();
+        assert!(store.add_reaction("cm1", "+1", "bob", 1_100, None, None).unwrap());
+        assert!(store.add_reaction("dm1", "+1", "friend", 1_100, None, None).unwrap());
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO message_edits (message_id, old_text, new_text, edited_at) VALUES ('cm1', 'a', 'b', 1200);
+                 INSERT INTO message_deletions (message_id, deleted_text, deleted_at) VALUES ('cm1', 'b', 1300);",
+            )
+            .unwrap();
+        store
+            .insert_file_metadata("f1", "a", "png", "image/png", 5, 1, true, None, None, Some("cm1"), "channel", "srv:ch", "alice", false, 1_000, None, None, None)
+            .unwrap();
+        store
+            .insert_file_metadata("f2", "b", "png", "image/png", 5, 1, true, None, None, Some("dm1"), "dm", "friend", "friend", false, 1_000, None, None, None)
+            .unwrap();
+        // A DM file naming a cleared channel message's id (a peer reusing it) stays.
+        store
+            .insert_file_metadata("f3", "c", "png", "image/png", 5, 1, true, None, None, Some("cm1"), "dm", "friend", "friend", false, 1_000, None, None, None)
+            .unwrap();
+        store.conn.execute_batch("UPDATE files SET disk_path = '/files/' || file_id, completed_at = 1").unwrap();
+
+        let cleared = store.clear_channel_history(10_000).unwrap();
+        assert_eq!(cleared.files, vec![("f1".to_string(), "png".to_string())]);
+        let count = |sql: &str| -> i64 { store.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM message_edits WHERE message_id = 'cm1'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM message_deletions WHERE message_id = 'cm1'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM message_reactions WHERE message_id = 'cm1'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM files WHERE file_id = 'f1'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM messages WHERE message_id = 'dm1'"), 1, "a DM was cleared");
+        assert_eq!(count("SELECT COUNT(*) FROM message_reactions WHERE message_id = 'dm1'"), 1, "a DM lost its reaction");
+        assert_eq!(count("SELECT COUNT(*) FROM files WHERE file_id IN ('f2', 'f3')"), 2, "a DM lost its file");
+    }
+
+    /// More history than one batch is cleared whole, search forgets it, and the file
+    /// gives its pages back.
+    #[test]
+    fn w2c_a_long_history_is_cleared_whole() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        MessageStore::migrate_auto_vacuum_once(tmp.path().join("messages.db").to_str().unwrap(), KEY).unwrap();
+        let store = file_store(tmp.path());
+        let n = CLEAR_BATCH_ROWS * 2 + 7;
+        for i in 0..n {
+            post(&store, "ch", "alice", 1_000 + i, "needle", &format!("m{i}"));
+        }
+        let pages = |p: &str| -> i64 { store.conn.query_row(&format!("PRAGMA {p}"), [], |r| r.get(0)).unwrap() };
+        let held = pages("page_count");
+        assert_eq!(store.clear_channel_history(1_000_000).unwrap().messages, n as u64);
+        assert_eq!(store.count_all_channel_messages().unwrap(), 0);
+        assert_eq!(pages("freelist_count"), 0, "the clear kept its freed pages");
+        assert!(pages("page_count") < held, "the file did not shrink");
+        assert!(store.search_channel_messages("srv", "ch", "needle", 10).unwrap().is_empty(), "search still finds cleared rows");
+    }
+
+    /// Measures the start-up rebuild and a clear on a 0.13-shaped encrypted file of
+    /// `W2C_ROWS` channel rows (default 100k) with link cards, and writes the numbers to
+    /// `W2C_MEASURE_OUT`. Run by hand: `cargo test --lib w2c_measure -- --ignored`.
+    #[test]
+    #[ignore]
+    fn w2c_measure_rebuild_and_clear_on_a_large_history() {
+        let rows: i64 = std::env::var("W2C_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("messages.db");
+        old_channel_db(&db);
+        let size = || -> u64 {
+            ["", "-wal"].iter().filter_map(|x| std::fs::metadata(format!("{}{x}", db.display())).ok()).map(|m| m.len()).sum()
+        };
+        {
+            let store = file_store(tmp.path());
+            // A 0.13 database is already incremental: the measure is the rebuild alone.
+            store.conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;").unwrap();
+            let card = serde_json::json!({"url": "https://example.com/a/long/path", "title": "A link card title", "description": "x".repeat(280)}).to_string();
+            store.begin_transaction().unwrap();
+            for i in 0..rows {
+                let mid = format!("{:08x}-0000-4000-8000-{:012x}", i, i);
+                let text = format!("message {i} with an ordinary amount of text in it, about a line long");
+                store
+                    .insert_channel_message("srv", &format!("ch{}", i % 8), &format!("12D3KooWsender{:04}", i % 300), &text, false, 1_700_000_000_000 + i * 1_000, Some(&"s".repeat(88)), Some(&"p".repeat(60)), Some(&mid), None, None, None, None)
+                    .unwrap();
+                store.conn.execute("UPDATE channel_messages SET link_preview_json = ?1 WHERE message_id = ?2", params![card, mid]).unwrap();
+            }
+            store.commit_transaction().unwrap();
+            store.wal_checkpoint().unwrap();
+        }
+        let before = size();
+        let (rebuild_ms, release_ms) = {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(&format!("PRAGMA key = \"x'{KEY}'\";")).unwrap();
+            let started = std::time::Instant::now();
+            assert!(MessageStore::rebuild_channel_messages(&conn).unwrap());
+            let rebuild_ms = started.elapsed().as_millis();
+            let started = std::time::Instant::now();
+            release_free_pages(&conn, None);
+            (rebuild_ms, started.elapsed().as_millis())
+        };
+        let store = file_store(tmp.path());
+        store.wal_checkpoint().unwrap();
+        let rebuilt = size();
+        assert!(!has_content_key(&store.conn));
+        // `old_channel_db` holds two rows of its own.
+        assert_eq!(store.count_all_channel_messages().unwrap() as i64, rows + 2);
+        let started = std::time::Instant::now();
+        assert_eq!(store.clear_channel_history(i64::MAX).unwrap().messages as i64, rows + 2);
+        let clear_ms = started.elapsed().as_millis();
+        let cleared = size();
+        let pragma = |p: &str| -> i64 { store.conn.query_row(&format!("PRAGMA {p}"), [], |r| r.get(0)).unwrap_or(-1) };
+        let report = format!(
+            "rows={rows} before={before} rebuilt={rebuilt} (-{:.1}%) rebuild_ms={rebuild_ms} release_ms={release_ms} cleared={cleared} clear_ms={clear_ms} auto_vacuum={} freelist={} pages={}\n",
+            100.0 * (before as f64 - rebuilt as f64) / before as f64,
+            pragma("auto_vacuum"), pragma("freelist_count"), pragma("page_count"),
+        );
+        if let Ok(out) = std::env::var("W2C_MEASURE_OUT") {
+            std::fs::write(out, report).unwrap();
+        }
+    }
+
+    /// A copy of the database leaving this device (backup, link snapshot) leaves the
+    /// floors behind: the new device syncs the whole history.
+    #[test]
+    fn w2c_a_device_copy_forgets_the_floors() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = file_store(tmp.path());
+        post(&store, "ch", "alice", 1_000, "a", "m1");
+        store.clear_channel_history(10_000).unwrap();
+        store.scrub_device_secrets().unwrap();
+        assert_eq!(store.channel_floor("srv", "ch"), None);
+        assert_eq!(post(&store, "ch", "alice", 1_000, "a", "m1"), 1, "the copy still refuses the history");
+    }
+}
+
+// w2-c: the hostile review's cases.
+#[cfg(test)]
+mod w2c_review_cases {
+    use super::*;
+    use crate::identity::native_identity::NativeKeypair;
+
+    const KEY: &str = "abababababababababababababababababababababababababababababababab";
+
+    fn file_store(tmp: &std::path::Path, name: &str) -> MessageStore {
+        MessageStore::open(tmp.join(name).to_str().unwrap(), KEY).unwrap()
+    }
+
+    fn post(store: &MessageStore, sender: &str, ts: i64, text: &str, mid: &str) -> usize {
+        store
+            .insert_channel_message("srv", "ch", sender, text, false, ts, None, None, Some(mid), None, None, None, None)
+            .unwrap()
+    }
+
+    fn pk_b64(k: &NativeKeypair) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(k.public_key_protobuf())
+    }
+
+    /// After a clear, every channel's "last seen" pointer names a row that is gone, and
+    /// a missing seen row counts nothing: new posts and mentions stop counting as unread.
+    #[test]
+    fn w2c_unread_counts_survive_a_clear() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = file_store(tmp.path(), "messages.db");
+        post(&store, "alice", 1_000, "seen before the clear", "m1");
+        store.clear_channel_history(10_000).unwrap();
+        post(&store, "alice", 20_000, "new after the clear", "m2");
+        post(&store, "bob", 21_000, "@me look", "m3");
+        assert_eq!(store.count_unread_channel("srv", "ch", "m1"), 2, "posts after a clear stopped counting as unread");
+        let (total, mentions) = store.count_unread_channel_with_mentions("srv", "ch", Some("m1"), &["@me".to_string()]);
+        assert_eq!((total, mentions), (2, 1), "posts and mentions after a clear stopped counting");
+    }
+
+    /// A page that served a sender this device never held (in full, from its first row)
+    /// ends far below the floor; the next page asks EVERY sender from that end, so the
+    /// responder re-serves the whole cleared history between there and the floor.
+    #[test]
+    fn w2c_a_next_page_after_a_clear_never_asks_below_the_floor() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let j = file_store(tmp.path(), "j.db");
+        let o = file_store(tmp.path(), "o.db");
+        // Xavier's rows sit far below the floor, past any clock's skew.
+        let t = 10 * CLEAR_SKEW_MS;
+        for (i, ts) in [t + 1_000, t + 2_000, t + 3_000, t + 5_000].into_iter().enumerate() {
+            post(&j, "alice", ts, "old", &format!("a{i}"));
+            post(&o, "alice", ts, "old", &format!("a{i}"));
+        }
+        post(&o, "xavier", 100, "never held by J", "x1");
+        post(&o, "xavier", 200, "never held by J", "x2");
+        j.clear_channel_history(t + 10_000).unwrap();
+        assert_eq!(j.channel_floor("srv", "ch"), Some(t + 5_000));
+
+        // O served xavier's old rows (J's ask did not name him); J refused them.
+        let served: Vec<crate::node::types::SyncMessageItem> = serde_json::from_value(serde_json::json!([
+            { "s": "xavier", "t": "never held by J", "ts": 100, "mid": "x1" },
+            { "s": "xavier", "t": "never held by J", "ts": 200, "mid": "x2" },
+        ]))
+        .unwrap();
+        assert_eq!(post(&j, "xavier", 100, "never held by J", "x1"), 0);
+        assert_eq!(post(&j, "xavier", 200, "never held by J", "x2"), 0);
+        let end = crate::node::sync_handler::ChannelPageEnd::of(&served).unwrap();
+        let ask = crate::node::sync_handler::channel_next_page_request(&j, "srv", "ch", end);
+        let crate::node::types::HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, .. } = ask else {
+            panic!("a channel ask")
+        };
+        let (env, _) = crate::node::sync_handler::build_channel_sync_batch(
+            &o, "srv", "ch", since_timestamp, &sender_timestamps, gap.as_ref(),
+        )
+        .unwrap();
+        let crate::node::types::MessageEnvelope::ChannelSyncBatch { messages, .. } = env else { panic!("a batch") };
+        // Only the skew window below the floor comes again, and J refuses it by id.
+        assert!(messages.iter().all(|m| m.ts > t + 5_000 - CLEAR_SKEW_MS), "the next page re-served history past the skew; J asked {sender_timestamps:?}");
+        assert!(
+            messages.iter().all(|m| j.channel_floor_refuses("srv", "ch", m.ts, m.mid.as_deref())),
+            "the next page re-served a row J takes",
+        );
+    }
+
+    /// A cleared item served again (a sender past the cap, an edit on the plain path, an
+    /// ask that names nothing) has its row refused, but its reactions still land.
+    #[test]
+    fn w2c_a_cleared_items_reactions_are_not_stored_again() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = file_store(tmp.path(), "messages.db");
+        let alice = NativeKeypair::from_secret_bytes(&[11; 32]);
+        let bob = NativeKeypair::from_secret_bytes(&[12; 32]);
+        let (a, b) = (alice.peer_id(), bob.peer_id());
+        let (mid, ts, text) = ("5b1c2f0e-0000-4000-8000-000000000001", 1_000i64, "cleared");
+        store
+            .insert_channel_message("srv", "ch", &a, text, false, ts, None, None, Some(mid), None, None, Some(ts * 1000), None)
+            .unwrap();
+        store.clear_channel_history(10_000).unwrap();
+
+        let extras = crate::node::crypto_handler::SignedExtras {
+            mid: Some(mid), reply_to: None, file_id: None, order_us: Some(ts * 1000), lp_digest: None, album: None,
+        };
+        let (sig, pk) = crate::node::crypto_handler::sign_message_versioned(&alice, &pk_b64(&alice), "ch", "srv:ch", &a, ts, &extras, text);
+        let (rsig, rpk) = crate::node::crypto_handler::sign_message(&bob, &pk_b64(&bob), &format!("reaction:{mid}:+1:{}", ts + 5));
+        let item: crate::node::types::SyncMessageItem = serde_json::from_value(serde_json::json!({
+            "s": a, "t": text, "ts": ts, "sig": sig, "pk": pk, "mid": mid, "order_us": ts * 1000,
+            "reactions": [{ "e": "+1", "p": b, "ts": ts + 5, "sig": rsig, "pk": rpk }],
+        }))
+        .unwrap();
+        let mut cache = crate::node::crypto_handler::PkCache::new();
+        let (inserted, _) = crate::node::sync_handler::ingest_synced_channel_item(&store, "srv", "ch", &item, "local", &mut cache);
+        assert_eq!(inserted, 0, "precondition: the floor refused the row");
+        let reactions: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM message_reactions WHERE message_id = ?1", [mid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reactions, 0, "a cleared message's reaction was stored again");
+    }
+
+    /// Edits, deletions and reactions are keyed by message id alone; a DM whose id
+    /// equals a cleared channel message's (ids are sender-chosen) loses its evidence.
+    #[test]
+    fn w2c_a_clear_keeps_a_dms_evidence_under_a_shared_id() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = file_store(tmp.path(), "messages.db");
+        post(&store, "alice", 1_000, "channel post", "shared");
+        store.insert("friend", "a dm", false, 1_000, None, None, Some("shared"), None, None, None, None).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO message_edits (message_id, old_text, new_text, edited_at) VALUES ('shared', 'dm before', 'a dm', 1200);
+                 INSERT INTO message_deletions (message_id, deleted_text, deleted_at) VALUES ('shared', 'a dm', 1300);
+                 INSERT INTO message_reactions (message_id, emoji, peer_id, added_at) VALUES ('shared', '+1', 'friend', 1100);
+                 INSERT INTO reaction_removals (message_id, emoji, peer_id, removed_at) VALUES ('shared', '+1', 'friend', 1150);",
+            )
+            .unwrap();
+        store.clear_channel_history(10_000).unwrap();
+        let count = |sql: &str| -> i64 { store.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM messages WHERE message_id = 'shared'"), 1);
+        for table in ["message_edits", "message_deletions", "message_reactions", "reaction_removals"] {
+            assert_eq!(count(&format!("SELECT COUNT(*) FROM {table} WHERE message_id = 'shared'")), 1, "the clear erased a DM's {table}");
+        }
+    }
+}
+
+// w2-c
+#[cfg(test)]
+mod w2c_floors {
+    use super::*;
+
+    const KEY: &str = "abababababababababababababababababababababababababababababababab";
+    const T: i64 = 10 * CLEAR_SKEW_MS;
+
+    fn store(tmp: &std::path::Path) -> MessageStore {
+        MessageStore::open(tmp.join("messages.db").to_str().unwrap(), KEY).unwrap()
+    }
+
+    fn post(store: &MessageStore, sid: &str, ch: &str, ts: i64, mid: Option<&str>) -> usize {
+        store.insert_channel_message(sid, ch, "alice", "x", false, ts, None, None, mid, None, None, None, None).unwrap()
+    }
+
+    fn count(store: &MessageStore, sql: &str) -> i64 {
+        store.conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// A member whose clock trails ours posts after the clear, stamped just before the
+    /// floor: it lands. What the clear took is refused there by its id, and anything
+    /// further back than any clock's skew, or without an id, outright.
+    #[test]
+    fn w2c_a_slow_clocks_post_after_a_clear_lands() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let s = store(tmp.path());
+        post(&s, "srv", "ch", T, Some("m1"));
+        post(&s, "srv", "ch", T + 1_000, Some("m2"));
+        s.clear_channel_history(T + 5_000).unwrap();
+        assert_eq!(post(&s, "srv", "ch", T, Some("m1")), 0, "a cleared message came back near the floor");
+        assert_eq!(post(&s, "srv", "ch", T + 500, Some("slow")), 1, "a slow clock's new post was refused");
+        assert_eq!(post(&s, "srv", "ch", T + 1_000 - CLEAR_SKEW_MS, Some("old")), 0, "history past the skew came in");
+        assert_eq!(post(&s, "srv", "ch", T + 1_001 - CLEAR_SKEW_MS, Some("near")), 1);
+        assert_eq!(post(&s, "srv", "ch", T + 500, None), 0, "a row without an id came in below the floor");
+        assert!(s.channel_floor_refuses("srv", "ch", T + 999_999, Some("m2")), "a cleared id passed above its floor");
+        // A second clear takes the slow post too, and still refuses the first one's ids.
+        s.clear_channel_history(T + 6_000).unwrap();
+        assert_eq!(post(&s, "srv", "ch", T + 500, Some("slow")), 0, "the second clear's history came back");
+        assert_eq!(post(&s, "srv", "ch", T, Some("m1")), 0, "the first clear's history came back");
+    }
+
+    /// The ids a channel remembers are bounded: past the cap the oldest go, and the
+    /// outright refusal moves up over them, so none of them comes back.
+    #[test]
+    fn w2c_cleared_ids_are_bounded() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let s = store(tmp.path());
+        let n = MAX_CLEARED_IDS + 10;
+        s.begin_transaction().unwrap();
+        for i in 0..n {
+            post(&s, "srv", "ch", T + i, Some(&format!("m{i}")));
+        }
+        s.commit_transaction().unwrap();
+        s.clear_channel_history(T + n + 1_000).unwrap();
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM channel_cleared_ids"), MAX_CLEARED_IDS);
+        for i in [0, 9, 10, n - 1] {
+            assert_eq!(post(&s, "srv", "ch", T + i, Some(&format!("m{i}"))), 0, "m{i} came back");
+        }
+        // A later clear with nothing new never moves the cut back over forgotten ids.
+        s.clear_channel_history(T + n + 2_000).unwrap();
+        for i in [0, 9] {
+            assert_eq!(post(&s, "srv", "ch", T + i, Some(&format!("m{i}"))), 0, "m{i} came back after a second clear");
+        }
+        assert_eq!(post(&s, "srv", "ch", T + 9, Some("new-at-cut")), 0, "the cut moved down");
+        assert_eq!(post(&s, "srv", "ch", T + 10, Some("new-above-cut")), 1, "the cut moved past the remembered ids");
+        s.clear_channel_history(T + n + 3_000).unwrap();
+        assert!(count(&s, "SELECT COUNT(*) FROM channel_cleared_ids") <= MAX_CLEARED_IDS, "a later clear grew the set past its cap");
+    }
+
+    /// A channel holding nothing at the clear (a server still backfilling) is cleared
+    /// up to now too; a server's own clear leaves every other server alone.
+    #[test]
+    fn w2c_a_server_clear_takes_its_empty_channels_and_nothing_else() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let s = store(tmp.path());
+        post(&s, "srv", "ch", T, Some("m1"));
+        post(&s, "other", "ch", T, Some("o1"));
+        let channels = [("srv", "empty"), ("other", "quiet")].map(|(a, b)| (a.to_string(), b.to_string()));
+        let now = T + 10 * CLEAR_SKEW_MS;
+        assert_eq!(s.clear_history_in(Some("srv"), &channels, now).unwrap().messages, 1);
+        assert_eq!(s.channel_floor("srv", "empty"), Some(now));
+        assert_eq!(post(&s, "srv", "empty", now - CLEAR_SKEW_MS, Some("backfill")), 0, "an empty channel's history came in");
+        assert_eq!(post(&s, "srv", "empty", now - 1_000, Some("slow")), 1);
+        assert_eq!((s.channel_floor("other", "ch"), s.channel_floor("other", "quiet")), (None, None), "another server got a floor");
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM channel_messages WHERE server_id = 'other'"), 1, "another server was cleared");
+    }
+
+    /// A clear cut short (a crash between its batches) finishes later: rows the floors
+    /// refuse go, a slow clock's post that landed meanwhile stays.
+    #[test]
+    fn w2c_an_interrupted_clear_finishes_later() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let s = store(tmp.path());
+        post(&s, "srv", "ch", T, Some("m1"));
+        post(&s, "srv", "ch", T - 2 * CLEAR_SKEW_MS, Some("m0"));
+        s.clear_channel_history(T + 5_000).unwrap();
+        // What the batches had still to delete when the process died, put back raw.
+        s.conn
+            .execute_batch(&format!(
+                "INSERT INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, message_id)
+                 VALUES ('srv', 'ch', 'alice', 'x', 0, {T}, 'm1'), ('srv', 'ch', 'alice', 'x', 0, {}, 'm0'),
+                        ('srv', 'ch', 'alice', 'x', 0, {T}, NULL);",
+                T - 2 * CLEAR_SKEW_MS,
+            ))
+            .unwrap();
+        assert_eq!(post(&s, "srv", "ch", T - 10, Some("slow")), 1);
+        assert_eq!(s.finish_cleared_history().unwrap().messages, 3);
+        let left: Vec<String> = {
+            let mut stmt = s.conn.prepare("SELECT message_id FROM channel_messages").unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(left, vec!["slow".to_string()]);
+        assert_eq!(s.finish_cleared_history().unwrap().messages, 0, "a finished clear found more to delete");
+    }
+}
+
+// w2-c round 2
+#[cfg(test)]
+mod w2c_round2 {
+    use super::*;
+    use crate::node::channel_asks::Page;
+    use crate::node::sync_handler::{build_channel_sync_batch, channel_next_page_request, channel_sync_request, ChannelPageEnd};
+    use crate::node::types::{HavenMessage, MessageEnvelope, SyncMessageItem};
+
+    const KEY: &str = "abababababababababababababababababababababababababababababababab";
+    const T: i64 = 10 * CLEAR_SKEW_MS;
+
+    fn store(tmp: &std::path::Path, name: &str) -> MessageStore {
+        MessageStore::open(tmp.join(name).to_str().unwrap(), KEY).unwrap()
+    }
+
+    fn post_in(store: &MessageStore, ch: &str, sender: &str, mid: &str, ts: i64) -> usize {
+        store.insert_channel_message("srv", ch, sender, mid, false, ts, None, None, Some(mid), None, None, None, None).unwrap()
+    }
+
+    fn post(store: &MessageStore, sender: &str, mid: &str, ts: i64) -> usize {
+        post_in(store, "ch", sender, mid, ts)
+    }
+
+    fn ask(store: &MessageStore, ch: &str) -> (i64, HashMap<String, i64>, Option<crate::node::types::GapDigest>) {
+        let HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, .. } = channel_sync_request(store, "srv", ch, true)
+        else {
+            panic!("a channel ask")
+        };
+        (since_timestamp, sender_timestamps, gap)
+    }
+
+    fn answer(holder: &MessageStore, since: i64, marks: &HashMap<String, i64>) -> (Page, Vec<SyncMessageItem>) {
+        let (env, _) = build_channel_sync_batch(holder, "srv", "ch", since, marks, None).unwrap();
+        let MessageEnvelope::ChannelSyncBatch { messages, has_more, .. } = env else { panic!("a batch") };
+        (Page::of(has_more, ChannelPageEnd::of(&messages).as_ref()), messages)
+    }
+
+    fn marks(pairs: &[(&str, i64)]) -> HashMap<String, i64> {
+        pairs.iter().map(|(s, t)| (s.to_string(), *t)).collect()
+    }
+
+    /// A device that cleared its history holds nothing at or below its floor, so an ask
+    /// reaching there (a joiner's, a returning member's, one leaving out a sender it
+    /// held) is answered as stuck with nothing in it: the asker moves to another holder
+    /// instead of ending its catch-up, or following this one past what it cleared.
+    #[test]
+    fn w2c_a_cleared_holder_never_ends_an_ask_below_its_floor() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let holder = store(tmp.path(), "holder.db");
+        for (i, s) in ["alice", "bob", "alice", "bob"].iter().enumerate() {
+            post(&holder, s, &format!("old{i}"), T + 1_000 * (i as i64 + 1));
+        }
+        holder.clear_channel_history(T + 10_000).unwrap();
+        let floor = holder.channel_floor("srv", "ch").unwrap();
+        assert_eq!(floor, T + 4_000);
+        let joiner = store(tmp.path(), "joiner.db");
+        let (since, first, _) = ask(&joiner, "ch");
+        let stuck_and_empty = |(page, rows): (Page, Vec<SyncMessageItem>)| (page, rows.len());
+        assert_eq!(stuck_and_empty(answer(&holder, since, &first)), (Page::Stuck, 0), "a joiner's first ask ended at a cleared holder");
+
+        post(&holder, "carol", "after1", floor + 5_000);
+        post(&holder, "carol", "after2", floor + 6_000);
+        assert_eq!(stuck_and_empty(answer(&holder, since, &first)), (Page::Stuck, 0), "a cleared holder served its post-clear rows as the channel");
+        // A returning member whose watermark sits at or below the floor.
+        let back = marks(&[("alice", floor), ("bob", floor + 1), ("carol", floor + 1)]);
+        assert_eq!(answer(&holder, 0, &back).0, Page::Stuck, "a returning member's ask ended at a cleared holder");
+        // An ask leaving out a sender the holder cleared serves that sender in full.
+        let partial = marks(&[("bob", floor + 1), ("carol", floor + 1)]);
+        assert_eq!(answer(&holder, 0, &partial).0, Page::Stuck, "an ask leaving out a cleared sender ended");
+        // A legacy ask reaching below the floor.
+        assert_eq!(answer(&holder, floor - 1, &HashMap::new()).0, Page::Stuck, "a legacy ask below the floor ended");
+
+        // Asks wholly past the floor are served as usual.
+        let past = marks(&[("alice", floor + 1), ("bob", floor + 1), ("carol", floor + 1)]);
+        let (page, rows) = answer(&holder, 0, &past);
+        assert_eq!((page, rows.len()), (Page::Last, 2), "an ask past the floor was refused");
+        let (page, rows) = answer(&holder, floor, &HashMap::new());
+        assert_eq!((page, rows.len()), (Page::Last, 2), "a legacy ask past the floor was refused");
+    }
+
+    /// The floor lets a slow clock's new post land down to `exact_from`, so every sync ask
+    /// starts there: per-sender watermarks, the plain watermark, the gap digest and the
+    /// next page. The cleared ids in that window are refused again by their hash.
+    #[test]
+    fn w2c_sync_asks_reach_a_slow_clocks_post_the_floor_accepts() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let us = store(tmp.path(), "us.db");
+        post(&us, "alice", "m1", T);
+        us.clear_channel_history(T + 5_000).unwrap();
+        let exact = T - CLEAR_SKEW_MS;
+        let slow_ts = T - 60_000;
+        assert!(!us.channel_floor_refuses("srv", "ch", slow_ts, Some("slow")), "precondition: the floor lets the slow post land");
+
+        let responder = store(tmp.path(), "responder.db");
+        post(&responder, "alice", "m1", T);
+        post(&responder, "alice", "slow", slow_ts);
+        let (since, wm, _) = ask(&us, "ch");
+        assert_eq!(wm.get("alice"), Some(&(exact + 1)), "a sender is asked from past the floor, not from past exact_from");
+        let (_, rows) = answer(&responder, since, &wm);
+        assert!(rows.iter().any(|m| m.mid.as_deref() == Some("slow")), "sync never serves the slow clock's post");
+
+        // A channel cleared while empty names no sender: the plain watermark reaches it.
+        let now = T + 10 * CLEAR_SKEW_MS;
+        us.clear_history_in(None, &[("srv".to_string(), "empty".to_string())], now).unwrap();
+        let (since, wm, _) = ask(&us, "empty");
+        assert!(wm.is_empty());
+        assert_eq!(since, now - CLEAR_SKEW_MS, "the plain watermark starts at the floor, past exact_from");
+
+        // The gap digest behind a later post, and a next page, start at exact_from too.
+        let day = 24 * 60 * 60 * 1000;
+        post(&us, "bob", "later", T + 3 * day);
+        let gap = us.channel_gap_anchor("srv", "ch").expect("a digest behind the newest post");
+        assert_eq!(gap.from, exact + 1, "the digest starts at the floor, past exact_from");
+        let served: Vec<SyncMessageItem> = serde_json::from_value(serde_json::json!([
+            { "s": "xavier", "t": "x", "ts": 100, "mid": "x1" },
+            { "s": "xavier", "t": "x", "ts": 200, "mid": "x2" },
+        ]))
+        .unwrap();
+        let HavenMessage::ChannelSyncRequest { since_timestamp, .. } =
+            channel_next_page_request(&us, "srv", "ch", ChannelPageEnd::of(&served).unwrap())
+        else {
+            panic!("a channel ask")
+        };
+        assert_eq!(since_timestamp, exact + 1, "a next page starts at the floor, past exact_from");
+    }
+
+    /// A member whose clock runs ahead posted just before the clear: the post is stamped
+    /// past our clock and so past the floor, and it goes with the clear all the same.
+    /// Its id is refused after, and a post made after the clear still lands.
+    #[test]
+    fn w2c_a_fast_clocks_post_goes_with_the_clear() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let s = store(tmp.path(), "messages.db");
+        let now = T;
+        post(&s, "alice", "normal", now - 1_000);
+        post(&s, "bob", "fast", now + 60_000);
+        let cleared = s.clear_channel_history(now).unwrap();
+        assert_eq!(cleared.messages, 2, "the clear left the fast clock's post");
+        assert_eq!(s.count_all_channel_messages().unwrap(), 0);
+        assert_eq!(s.channel_floor("srv", "ch"), Some(now), "the floor passed our clock");
+        assert_eq!(post(&s, "bob", "fast", now + 60_000), 0, "the fast post came back");
+        assert_eq!(post(&s, "bob", "next", now + 1), 1, "a post after the clear was refused");
+        // The start-up finish takes nothing posted since.
+        assert_eq!(s.finish_cleared_history().unwrap().messages, 0);
+    }
+
+    /// Posts stamped ahead of our clock cannot move the outright refusal past the floor,
+    /// however many there are: a post made after the clear still lands.
+    #[test]
+    fn w2c_fast_posts_never_move_the_cut_past_the_floor() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let s = store(tmp.path(), "messages.db");
+        let now = T;
+        s.begin_transaction().unwrap();
+        post(&s, "alice", "normal", now - 1_000);
+        for i in 0..MAX_CLEARED_IDS + 10 {
+            post(&s, "bob", &format!("f{i}"), now + 60_000 + i);
+        }
+        s.commit_transaction().unwrap();
+        s.clear_channel_history(now).unwrap();
+        assert_eq!(post(&s, "carol", "after", now + 1), 1, "the flood moved the cut past the floor");
+        // A second flood while the first one's ids still sit above the next floor.
+        s.begin_transaction().unwrap();
+        for i in 0..MAX_CLEARED_IDS + 10 {
+            post(&s, "bob", &format!("g{i}"), now + 120_000 + i);
+        }
+        s.commit_transaction().unwrap();
+        s.clear_channel_history(now + 2).unwrap();
+        let above: i64 = s.conn.query_row("SELECT COUNT(*) FROM channel_cleared_ids WHERE ts > ?1", [now + 2], |r| r.get(0)).unwrap();
+        assert!(above <= MAX_CLEARED_IDS, "the ids above the floor grew past their cap: {above}");
+        assert_eq!(post(&s, "carol", "after2", now + 3), 1, "the second flood moved the cut past the floor");
+    }
+
+    /// Fast ids take none of the near ids' room: with the near window full, the outright
+    /// refusal stays where the near ids alone put it, so a slow clock's new post just
+    /// above it still lands.
+    #[test]
+    fn w2c_fast_ids_never_move_the_cut_over_near_ids() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let s = store(tmp.path(), "messages.db");
+        let now = T;
+        s.begin_transaction().unwrap();
+        for i in 0..MAX_CLEARED_IDS {
+            post(&s, "alice", &format!("n{i}"), now - 1 - i);
+        }
+        for i in 0..10 {
+            post(&s, "bob", &format!("f{i}"), now + 60_000 + i);
+        }
+        s.commit_transaction().unwrap();
+        s.clear_channel_history(now).unwrap();
+        assert_eq!(post(&s, "carol", "slow", now - MAX_CLEARED_IDS - 5), 1, "fast ids moved the cut over the near ids");
+        assert_eq!(post(&s, "alice", "n0", now - 1), 0, "a near id came back");
+    }
+
+    fn file_row(s: &MessageStore, fid: &str, ext: &str, mid: &str) {
+        s.insert_file_metadata(fid, "a", ext, "image/png", 5, 1, true, None, None, Some(mid), "channel", "srv:ch", "alice", false, 1_000, None, None, None)
+            .unwrap();
+    }
+
+    /// The names of a clear's files outlive a crash between its batches and the unlink:
+    /// they stay until the caller has unlinked them, and the start-up finish hands them
+    /// back.
+    #[test]
+    fn w2c_a_cut_short_clear_still_names_its_files() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        {
+            let s = store(tmp.path(), "messages.db");
+            post(&s, "alice", "cm1", 1_000);
+            post(&s, "alice", "cm2", 2_000);
+            file_row(&s, "f1abcdef", "png", "cm1");
+            file_row(&s, "f2abcdef", "c++", "cm2");
+            let cleared = s.clear_channel_history(10_000).unwrap();
+            assert_eq!(cleared.files.len(), 2);
+            // The process dies here, before anything is unlinked.
+        }
+        let s = store(tmp.path(), "messages.db");
+        let rest = s.finish_cleared_history().unwrap();
+        let mut names = rest.files.clone();
+        names.sort();
+        let want = [("f1abcdef", "png"), ("f2abcdef", "c++")].map(|(a, b)| (a.to_string(), b.to_string())).to_vec();
+        assert_eq!((rest.messages, names), (0, want), "a crash lost a cleared file's name");
+        s.forget_cleared_files(&rest.files).unwrap();
+        assert!(s.finish_cleared_history().unwrap().files.is_empty(), "an unlinked name was handed back again");
+    }
+
+    fn plan(s: &MessageStore, sql: &str) -> Vec<String> {
+        let mut stmt = s.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let n = stmt.parameter_count();
+        stmt.query_map(rusqlite::params_from_iter(std::iter::repeat_n(0i64, n)), |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    /// Every start runs the finish of a cut-short clear: on a device that never cleared
+    /// it reads nothing, and on one that did it walks only the cleared channels, never
+    /// the whole message table (no planner statistics on a fresh database).
+    #[test]
+    fn w2c_a_start_reads_no_channel_rows() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let s = store(tmp.path(), "messages.db");
+        post(&s, "alice", "m1", T);
+        let rest = s.finish_cleared_history().unwrap();
+        assert_eq!((rest.messages, rest.files.len()), (0, 0));
+        let staged = count_rows(&s, "SELECT COUNT(*) FROM sqlite_temp_master WHERE name IN ('clear_batch', 'clear_near')");
+        assert_eq!(staged, 0, "a start with nothing cleared staged a clear");
+        // A name still to unlink is handed back with no floor left to read.
+        s.conn.execute("INSERT INTO channel_cleared_files (file_id, file_ext) VALUES ('f1abcdef', 'png')", []).unwrap();
+        assert_eq!(s.finish_cleared_history().unwrap().files.len(), 1, "a start skipped a name still to unlink");
+        s.forget_cleared_files(&[("f1abcdef".to_string(), "png".to_string())]).unwrap();
+
+        s.clear_channel_history(T + 10_000).unwrap();
+        // Every step on the message table seeks one cleared channel: a scan, or a walk of
+        // the whole message_id index, reads every row.
+        for sql in [CLEAR_BATCH_SELECT, CLEARED_NEAR_SELECT] {
+            let steps = plan(&s, sql);
+            let walks = |d: &String| (d.starts_with("SCAN m") || d.starts_with("SEARCH m ")) && !d.contains("(server_id=? AND channel_id=?");
+            assert!(!steps.iter().any(walks), "a start walks the message table: {steps:?}");
+        }
+    }
+
+    fn count_rows(s: &MessageStore, sql: &str) -> i64 {
+        s.conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// An ask whose gap digest reaches at or below the floor wants rows this device no
+    /// longer holds there, however far past it the watermarks sit.
+    #[test]
+    fn w2c_a_gap_below_the_floor_is_never_answered_whole() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let holder = store(tmp.path(), "holder.db");
+        post(&holder, "alice", "old", T + 1_000);
+        holder.clear_channel_history(T + 10_000).unwrap();
+        let floor = holder.channel_floor("srv", "ch").unwrap();
+        post(&holder, "alice", "after", floor + 5_000);
+        let past = marks(&[("alice", floor + 1)]);
+        let with_gap = |from: i64| {
+            let gap = crate::node::types::GapDigest { from, until: floor + 10_000, days: Vec::new() };
+            let (env, _) = build_channel_sync_batch(&holder, "srv", "ch", 0, &past, Some(&gap)).unwrap();
+            let MessageEnvelope::ChannelSyncBatch { messages, has_more, .. } = env else { panic!("a batch") };
+            Page::of(has_more, ChannelPageEnd::of(&messages).as_ref())
+        };
+        assert_eq!(with_gap(floor), Page::Stuck, "a gap at the floor was answered as complete");
+        assert_eq!(with_gap(floor + 1), Page::Last, "a gap past the floor was refused");
     }
 }

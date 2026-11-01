@@ -24,6 +24,8 @@ import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
+import 'package:hollow/src/ui/settings/storage_section.dart'
+    show confirmAndClearServerMessages;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The smallest pledge a member can make, in MB.
@@ -165,6 +167,7 @@ class _OnThisDevice extends ConsumerWidget {
           serverName: serverName,
           downloads: downloads,
         ),
+        _ServerMessagesRow(serverId: serverId, serverName: serverName),
       ],
     );
   }
@@ -559,6 +562,35 @@ class _DownloadedFilesRow extends ConsumerWidget {
         touch: touch,
         danger: true,
         onPressed: has ? () => _clear(context, ref) : null,
+        child: const Text('Clear'),
+      ),
+    );
+  }
+}
+
+/// Clears this server's messages from this device only (Settings > Files &
+/// storage does every server at once).
+class _ServerMessagesRow extends ConsumerWidget {
+  final String serverId;
+  final String serverName;
+  const _ServerMessagesRow({required this.serverId, required this.serverName});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final touch = SettingsDensity.touchOf(context);
+    return SettingsRow(
+      title: 'Message history',
+      subtitle: 'Clear it from this device. Other members keep theirs.',
+      trailing: HollowButton.outline(
+        compact: !touch,
+        touch: touch,
+        danger: true,
+        onPressed: () => confirmAndClearServerMessages(
+          context,
+          ref.read(storageActionsProvider),
+          serverId: serverId,
+          serverName: serverName,
+        ),
         child: const Text('Clear'),
       ),
     );

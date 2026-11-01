@@ -1,0 +1,306 @@
+{
+ "_": [
+  "w2-c part 2, after w2c_clear_messages with b restarted on its own data (fleet.ps1 -Peers <b> -ReuseData -KeepOthers -Live).",
+  "b's cleared history stays gone across the restart (the relay ring replay shows nothing), then b clears this one server from its settings; a keeps everything and a newer post still reaches b.",
+  "run: scripts/fleet.ps1 -Scenario w2c_clear_after_restart -Peers a,b -Attach (remap onto your own letters); deletes the server at the end"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000,
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "w2cclear"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 20000
+  },
+  {
+   "peer": "b",
+   "op": "expect_no_text",
+   "value": "older post"
+  },
+  {
+   "peer": "b",
+   "op": "expect_text",
+   "value": "newer post"
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-11-after-restart"
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "w2cclear"
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "batch two A ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "batch two B ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:batch two B ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Server settings",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "type:ServerSettingsPlace > type:SettingsRailItem > text:Files & storage",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:ServerSettingsPlace > type:SettingsRailItem > text:Files & storage",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "b",
+   "op": "reveal",
+   "target": "text:Message history",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-12-server-files-storage"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Clear",
+   "index": 1
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-13-server-confirm"
+  },
+  {
+   "peer": "b",
+   "op": "expect_text",
+   "value": "Clear messages from w2cclear?"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "contains:every message in w2cclear on this device",
+   "timeout_ms": 3000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "dialog > text:Clear"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "contains:Cleared 3 messages",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-14-server-cleared-toast"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 4000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Close server settings",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "w2cclear"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "b",
+   "op": "expect_no_text",
+   "value": "batch two"
+  },
+  {
+   "peer": "b",
+   "op": "expect_no_text",
+   "value": "newer post"
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2c-15-channel-after-server-clear"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "after server clear ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:after server clear ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "expect_text",
+   "value": "older post 1"
+  },
+  {
+   "peer": "a",
+   "op": "expect_text",
+   "value": "batch two A"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2c-16-other-member-keeps-all"
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Close server settings",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Close server settings",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:w2cclear"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Server settings"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "server:w2cclear",
+   "timeout_ms": 30000
+  }
+ ]
+}

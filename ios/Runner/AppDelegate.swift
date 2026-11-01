@@ -118,21 +118,29 @@ final class ForegroundBannerPresenter: NSObject, UNUserNotificationCenterDelegat
   }
 }
 
-/// The background task relay_triggers.dart holds while it closes the relay
-/// socket after the app leaves the screen: Dart begins it, suspends the socket,
-/// and ends it once the suspend has returned.
+/// A background task Dart holds across work that must not be frozen half done:
+/// the relay suspend after the app leaves the screen (relay_triggers.dart), and
+/// a database write long enough to outlast the background grace (node start,
+/// clearing messages). iOS ends an app frozen holding the shared container's
+/// database lock (0xdead10cc). A counted task is held by every begin until its
+/// own end, as two writes may overlap (a clear during a node start).
 final class RelayBackgroundTask {
   private let channel: FlutterMethodChannel
+  private let name: String
+  private let counted: Bool
+  private var holders = 0
   private var task: UIBackgroundTaskIdentifier = .invalid
 
-  init(channel: FlutterMethodChannel) {
+  init(channel: FlutterMethodChannel, name: String = "hollow.relay.suspend", counted: Bool = false) {
     self.channel = channel
+    self.name = name
+    self.counted = counted
     channel.setMethodCallHandler { [weak self] call, result in
       switch call.method {
       case "begin":
         result(self?.begin())
       case "end":
-        self?.end()
+        self?.release()
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -143,8 +151,9 @@ final class RelayBackgroundTask {
   /// The seconds iOS still grants, or nil when it sets no limit (the foreground
   /// reports the largest double).
   private func begin() -> Double? {
+    holders += 1
     if task == .invalid {
-      task = UIApplication.shared.beginBackgroundTask(withName: "hollow.relay.suspend") {
+      task = UIApplication.shared.beginBackgroundTask(withName: name) {
         [weak self] in self?.expire()
       }
     }
@@ -158,7 +167,15 @@ final class RelayBackgroundTask {
     end()
   }
 
+  private func release() {
+    holders = max(holders - 1, 0)
+    if !counted || holders == 0 {
+      end()
+    }
+  }
+
   private func end() {
+    holders = 0
     guard task != .invalid else { return }
     UIApplication.shared.endBackgroundTask(task)
     task = .invalid
@@ -191,6 +208,7 @@ final class RelayBackgroundTask {
 
   private var relayTriggers: RelayTriggers?
   private var relayBackgroundTask: RelayBackgroundTask?
+  private var storageBackgroundTask: RelayBackgroundTask?
 
   /// The hardware key registers before the storyboard starts the Flutter engine,
   /// so Dart's first unlock can never run without it.
@@ -335,6 +353,13 @@ final class RelayBackgroundTask {
         channel: FlutterMethodChannel(
           name: "hollow/relay_background",
           binaryMessenger: controller.binaryMessenger))
+      // hollow/storage_background -> the task held across long database writes.
+      storageBackgroundTask = RelayBackgroundTask(
+        channel: FlutterMethodChannel(
+          name: "hollow/storage_background",
+          binaryMessenger: controller.binaryMessenger),
+        name: "hollow.storage.write",
+        counted: true)
     }
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)

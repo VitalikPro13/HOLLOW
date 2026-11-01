@@ -9597,6 +9597,13 @@ async fn handle_incoming_request_inner(
                         hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader for {fid} from {peer_str}: {reason}");
                         return;
                     }
+                    // A file of history this device cleared gets no card and no bytes.
+                    if let (Some(s), Some(c)) = (sid.as_deref(), cid.as_deref())
+                        && store.channel_floor_refuses(s, c, ts, mid.as_deref())
+                    {
+                        hollow_log!("[HOLLOW-STORAGE] FileHeader {fid} in {s}/{c} is cleared history, dropped");
+                        return;
+                    }
                     let already_complete = file_handler::file_bytes_on_disk(&store, &fid);
                     drop(store);
                     // The stream this header's bytes ride from its sender to us.
@@ -14211,6 +14218,10 @@ async fn handle_incoming_request_inner(
                         store.get_visible_channel_messages_before(&server_id, &channel_id, i64::MAX, limit)
                     };
                     if let Ok(msgs) = messages_result {
+                        let floor = store.channel_floor(&server_id, &channel_id);
+                        let Some(below_floor) = super::sync_handler::guest_page_more(floor, msgs.len(), limit as usize, msgs.last().map(|m| m.timestamp)) else {
+                            return;
+                        };
                         let msg_ids: Vec<String> = msgs.iter().filter_map(|m| m.message_id.clone()).collect();
                         let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
                         let file_ids: Vec<&str> = msgs.iter().filter_map(|m| m.file_id.as_deref()).collect();
@@ -14269,7 +14280,7 @@ async fn handle_incoming_request_inner(
                                 reactions,
                             });
                         }
-                        let has_more = truncated || msgs.len() as i32 >= limit;
+                        let has_more = truncated || msgs.len() as i32 >= limit || below_floor;
 
                         let unique_senders: std::collections::HashSet<&str> = items.iter().map(|m| m.s.as_str()).collect();
                         let own = super::profile_card::own_card(master_keypair, db_path, db_passphrase);

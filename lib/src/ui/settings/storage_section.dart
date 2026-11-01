@@ -152,7 +152,9 @@ class _SummaryHeader extends StatelessWidget {
                       ),
                     ),
                     TextSpan(
-                      text: ' used on this computer',
+                      text: SettingsDensity.touchOf(context)
+                          ? ' used on this device'
+                          : ' used on this computer',
                       style: HollowTypography.body
                           .copyWith(color: hollow.textSecondary),
                     ),
@@ -160,7 +162,12 @@ class _SummaryHeader extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: HollowSpacing.lg),
-              _CleanupButton(downloads: downloads, cache: cache, assets: assets),
+              _CleanupButton(
+                downloads: downloads,
+                cache: cache,
+                assets: assets,
+                serverMessages: breakdown.serverMessageCount,
+              ),
             ],
           ),
         ),
@@ -318,19 +325,78 @@ Future<void> _confirmAndClear(
   }
 }
 
+/// "1,234", for counts people read.
+String _grouped(int n) => n
+    .toString()
+    .replaceAllMapped(RegExp(r'\B(?=(\d{3})+(?!\d))'), (_) => ',');
+
+String _messageCount(int n) =>
+    n == 1 ? '1 message' : '${_grouped(n)} messages';
+
+/// Clears this device's history of one server ([serverId], named
+/// [serverName]) or of every server inside the confirm, then says what went.
+/// Local only: other members keep theirs, and it never syncs back.
+Future<void> confirmAndClearServerMessages(
+  BuildContext context,
+  StorageActions actions, {
+  String? serverId,
+  String? serverName,
+}) async {
+  storage_api.ClearedMessages? cleared;
+  final whose = serverId == null
+      ? 'every server message on this device, with its downloaded files. '
+            'Direct messages stay.'
+      : 'every message in ${serverName ?? 'this server'} on this device, '
+            'with its downloaded files.';
+  final ok = await showHollowConfirm(
+    context: context,
+    title: serverId == null
+        ? 'Clear server messages?'
+        : 'Clear messages from ${serverName ?? 'this server'}?',
+    message: 'Deletes $whose Other members keep their copies, and this '
+        'device will not download these messages again. Archives you export '
+        'later will not include them, so export the ones you want to keep '
+        'first.',
+    confirmLabel: 'Clear',
+    destructive: true,
+    onConfirm: () async =>
+        cleared = await actions.clearServerMessages(serverId: serverId),
+  );
+  final done = cleared;
+  if (!ok || done == null || !context.mounted) return;
+  final messages = done.messages.toInt();
+  final freed = done.bytesFreed.toInt();
+  final count = _messageCount(messages);
+  HollowToast.show(
+    context,
+    messages == 0
+        ? 'No messages to clear'
+        : freed > 0
+        ? 'Cleared $count. ${formatBytes(freed)} freed on this device.'
+        : 'Cleared $count',
+    type: messages == 0 ? HollowToastType.info : HollowToastType.success,
+  );
+}
+
 /// The destructive clears, each with its size. Held-for-friends shards are
 /// absent on purpose: they are not ours to drop.
 class _CleanupButton extends ConsumerWidget {
-  const _CleanupButton(
-      {required this.downloads, required this.cache, required this.assets});
+  const _CleanupButton({
+    required this.downloads,
+    required this.cache,
+    required this.assets,
+    required this.serverMessages,
+  });
   final int downloads;
   final int cache;
   final int assets;
+  final int serverMessages;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final actions = ref.read(storageActionsProvider);
-    final enabled = downloads > 0 || cache > 0 || assets > 0;
+    final enabled =
+        downloads > 0 || cache > 0 || assets > 0 || serverMessages > 0;
 
     return Builder(
       builder: (buttonContext) => HollowButton.ghost(
@@ -384,6 +450,15 @@ class _CleanupButton extends ConsumerWidget {
                             'has them when needed.',
                         run: actions.clearUnreferencedAssets,
                       ),
+                    ),
+                    HollowMenuItem(
+                      icon: LucideIcons.messagesSquare,
+                      label: 'Clear server messages',
+                      trailing: _messageCount(serverMessages),
+                      enabled: serverMessages > 0,
+                      isDanger: true,
+                      onTap: () =>
+                          confirmAndClearServerMessages(context, actions),
                     ),
                   ],
                 ),

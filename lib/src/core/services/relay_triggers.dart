@@ -68,7 +68,13 @@ class NoRelayBackgroundTask implements RelayBackgroundTask {
 /// `UIApplication.beginBackgroundTask`, held by AppDelegate.swift.
 class IosRelayBackgroundTask implements RelayBackgroundTask {
   static const channelName = 'hollow/relay_background';
-  static const _channel = MethodChannel(channelName);
+
+  /// The task held across a long database write ([holdingStorageTask]).
+  static const storageChannelName = 'hollow/storage_background';
+
+  IosRelayBackgroundTask({String channel = channelName})
+    : _channel = MethodChannel(channel);
+  final MethodChannel _channel;
 
   @override
   Future<Duration?> begin() async {
@@ -448,4 +454,21 @@ RelayTriggers wireRelayTriggers(Ref ref, RelayTriggers triggers) {
   });
   ref.onDispose(triggers.dispose);
   return triggers..start();
+}
+
+/// Runs [work] holding an iOS background task, so a database write that
+/// outlasts the background grace (the node start's one-time rebuild, clearing
+/// messages) is not frozen holding the shared container's lock (0xdead10cc).
+/// Elsewhere it just runs [work].
+Future<T> holdingStorageTask<T>(Future<T> Function() work) async {
+  if (!Platform.isIOS) return work();
+  final task = IosRelayBackgroundTask(
+    channel: IosRelayBackgroundTask.storageChannelName,
+  );
+  await task.begin();
+  try {
+    return await work();
+  } finally {
+    task.end();
+  }
 }

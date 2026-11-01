@@ -1,0 +1,176 @@
+{
+ "_": [
+  "w2-c on a phone, part 2: after w2c_clear_messages_mobile, the app relaunched on its own data (xcrun simctl terminate + launch).",
+  "The cleared posts stay gone after the restart, then the server's own settings clear its messages."
+ ],
+ "peers": [
+  "a"
+ ],
+ "steps": [
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Chats",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:w2c-phone",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:w2c-phone",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:general",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Attach a file",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "expect_no_text",
+   "value": "phone post"
+  },
+  {
+   "peer": "a",
+   "op": "expect_text",
+   "value": "phone after clear"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-08-after-restart"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "long_press",
+   "target": "text:w2c-phone",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Server settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Files & storage",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Files & storage",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Message history",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-09-server-files-storage"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Clear",
+   "index": 1
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-10-server-confirm"
+  },
+  {
+   "peer": "a",
+   "op": "expect_text",
+   "value": "Clear messages from w2c-phone?"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Clear"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "contains:Cleared 1 message",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-11-server-cleared-toast"
+  }
+ ]
+}

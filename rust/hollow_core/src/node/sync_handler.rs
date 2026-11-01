@@ -613,13 +613,12 @@ pub(crate) fn channel_sync_request(
     channel_id: &str,
     with_gap: bool,
 ) -> HavenMessage {
+    let latest = store.get_latest_channel_timestamp(server_id, channel_id).unwrap_or(None).unwrap_or(0);
     HavenMessage::ChannelSyncRequest {
         server_id: server_id.to_string(),
         channel_id: channel_id.to_string(),
-        since_timestamp: store
-            .get_latest_channel_timestamp(server_id, channel_id)
-            .unwrap_or(None)
-            .unwrap_or(0),
+        // Served `timestamp >` it: a cleared channel's starts where its asks do.
+        since_timestamp: store.channel_ask_start(server_id, channel_id).map_or(latest, |start| latest.min(start - 1)),
         sender_timestamps: store.get_per_sender_timestamps(server_id, channel_id).unwrap_or_default(),
         gap: if with_gap { store.channel_gap_anchor(server_id, channel_id) } else { None },
     }
@@ -660,17 +659,20 @@ pub(crate) fn channel_next_page_request(
     channel_id: &str,
     end: ChannelPageEnd,
 ) -> HavenMessage {
+    // A page that served a sender we never held ends below a floor we cleared to;
+    // the next one starts where our asks do, or it would serve the cleared history again.
+    let from = store.channel_ask_start(server_id, channel_id).map_or(end.last, |start| end.last.max(start));
     let mut sender_timestamps: HashMap<String, i64> = store
         .get_per_sender_timestamps(server_id, channel_id)
         .unwrap_or_default()
         .into_keys()
-        .map(|sender| (sender, end.last))
+        .map(|sender| (sender, from))
         .collect();
-    sender_timestamps.extend(end.senders.into_iter().map(|sender| (sender, end.last)));
+    sender_timestamps.extend(end.senders.into_iter().map(|sender| (sender, from)));
     HavenMessage::ChannelSyncRequest {
         server_id: server_id.to_string(),
         channel_id: channel_id.to_string(),
-        since_timestamp: end.last,
+        since_timestamp: from,
         sender_timestamps,
         gap: None,
     }
@@ -752,6 +754,20 @@ pub(crate) fn sibling_next_page_request(
     HavenMessage::DmSiblingSyncRequest { per_convo_since, gaps: HashMap::new() }
 }
 
+/// A guest page (newest first, at most `limit` rows, the oldest at `oldest`) from a
+/// device that cleared the channel to `floor`: one reaching the floor is never the
+/// channel's start, so it says more follows, and with no row it is not sent at all
+/// (`None`); every other member answers the guest too.
+pub(crate) fn guest_page_more(floor: Option<i64>, rows: usize, limit: usize, oldest: Option<i64>) -> Option<bool> {
+    let Some(floor) = floor else { return Some(false) };
+    let reaches = rows < limit || oldest.is_some_and(|ts| ts <= floor);
+    match (reaches, rows) {
+        (false, _) => Some(false),
+        (true, 0) => None,
+        (true, _) => Some(true),
+    }
+}
+
 pub(crate) fn build_channel_sync_batch(
     store: &crate::storage::MessageStore,
     sid: &str,
@@ -763,6 +779,20 @@ pub(crate) fn build_channel_sync_batch(
     // still missing at the next sync and is served then.
     gap: Option<&GapDigest>,
 ) -> Result<(MessageEnvelope, usize), String> {
+    // We hold nothing at or below a floor we cleared to: an ask reaching there gets no
+    // rows and more to come (`Page::Stuck`), so the asker moves to another holder now.
+    // Any row would move its watermarks past the history we no longer hold.
+    if store.channel_ask_reaches_floor(sid, cid, since_timestamp, sender_timestamps, gap.map(|g| g.from)) {
+        let below = MessageEnvelope::ChannelSyncBatch {
+            sid: sid.to_string(),
+            cid: cid.to_string(),
+            messages: Vec::new(),
+            total: 0,
+            has_more: Some(true),
+            target: None,
+        };
+        return Ok((below, 0));
+    }
     // One row past the page says whether more follow, without counting what is left:
     // a count on every page made a long first sync quadratic.
     let (mut messages, per_sender_more) = if !sender_timestamps.is_empty() {
@@ -4211,6 +4241,11 @@ pub(crate) fn ingest_synced_channel_item(
     if !super::message_ops::change_may_touch_row(store, &scope, msg.mid.as_deref()) {
         return (0, Vec::new());
     }
+    // History this device cleared: neither the row nor anything riding it (file
+    // header, reactions, hidden flag, card) is stored or shown again.
+    if store.refuse_below_floor(sid, cid, &msg.s, msg.ts, msg.mid.as_deref()) {
+        return (0, Vec::new());
+    }
     let sig_verified = sig_check == BackfillSig::Valid;
     // Multi-device: a message authored by ANY of our own devices is ours.
     let is_mine = super::resolver::same_identity(&msg.s, local_peer);
@@ -4628,5 +4663,22 @@ mod g13_twin_tests {
             }
         }
         assert_eq!(carried_to, [member], "the member got no carried twin over the relay");
+    }
+}
+
+// w2-c round 2
+#[cfg(test)]
+mod w2c_guest_floor {
+    use super::guest_page_more;
+
+    /// A guest page from a device that cleared the channel: served as usual while it
+    /// stays above the floor, says more follows once it reaches it, not sent when empty.
+    #[test]
+    fn w2c_guest_pages_from_a_cleared_device() {
+        assert_eq!(guest_page_more(None, 3, 50, Some(1)), Some(false), "a device that never cleared");
+        assert_eq!(guest_page_more(Some(100), 50, 50, Some(101)), Some(false), "a full page above the floor");
+        assert_eq!(guest_page_more(Some(100), 50, 50, Some(100)), Some(true), "a page reaching the floor");
+        assert_eq!(guest_page_more(Some(100), 3, 50, Some(500)), Some(true), "rows ran out at the floor");
+        assert_eq!(guest_page_more(Some(100), 0, 50, None), None, "an empty page from a cleared device was sent");
     }
 }

@@ -30,6 +30,7 @@ class _Api implements RustLibApi {
   final pledges = <BigInt>[];
   final settings = <String, String>{};
   final cleared = <String>[];
+  final messageClears = <String?>[];
   int members = 3;
 
   @override
@@ -56,6 +57,7 @@ class _Api implements RustLibApi {
     vaultShardBytes: BigInt.zero,
     assetBlobBytes: BigInt.zero,
     assetBlobCount: 0,
+    serverMessageCount: 0,
     contexts: [
       storage_api.StorageContextUsage(
         contextType: 'channel',
@@ -79,6 +81,17 @@ class _Api implements RustLibApi {
   }) async {
     cleared.add(contextId);
     return _gib;
+  }
+
+  @override
+  Future<storage_api.ClearedMessages> crateApiStorageClearServerMessages({
+    String? serverId,
+  }) async {
+    messageClears.add(serverId);
+    return storage_api.ClearedMessages(
+      messages: BigInt.from(4),
+      bytesFreed: BigInt.zero,
+    );
   }
 
   @override
@@ -339,12 +352,29 @@ void main() {
 
   testWidgets("Clear removes only this server's downloads", (tester) async {
     await _pump(tester, touch: false);
-    await tester.tap(find.text('Clear'));
+    await tester.tap(find.text('Clear').first);
     await tester.pumpAndSettle();
     expect(find.text('Clear downloaded files?'), findsOneWidget);
     await tester.tap(find.text('Clear').last);
     await tester.pumpAndSettle();
     expect(_api.cleared, ['$_sid:general']);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets("Message history clears this server's messages alone", (
+    tester,
+  ) async {
+    _api.messageClears.clear();
+    await _pump(tester, touch: false);
+    await tester.ensureVisible(find.text('Message history'));
+    await tester.tap(find.text('Clear').at(1));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Clear messages from'), findsOneWidget);
+    await tester.tap(find.text('Clear').last);
+    await tester.pumpAndSettle();
+    expect(_api.messageClears, [_sid]);
+    expect(find.text('Cleared 4 messages'), findsOneWidget);
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
   });

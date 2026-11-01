@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use crate::crdt::server_state::ServerState;
+use crate::storage::ChannelInsert;
 use super::crypto_handler::{
     link_preview_digest, sign_message, sign_message_versioned,
     verify_message_signature, verify_message_signature_v2, PkCache, SignedExtras,
@@ -2655,7 +2656,7 @@ pub(crate) async fn handle_envelope_channel_message(
         }
     }
 
-    let Some((is_new, reply_author)) = persist_incoming_channel_message(
+    let Some((stored, reply_author)) = persist_incoming_channel_message(
         &sid, &cid, &sender_peer_id, &text, is_mine, ts,
         sig.as_deref(), pk.as_deref(), mid.as_deref(),
         reply_to.as_deref(), file_id.as_deref(), order_us, album.as_deref(),
@@ -2668,9 +2669,14 @@ pub(crate) async fn handle_envelope_channel_message(
         );
         return;
     };
-    // ALWAYS emit: a ChannelSyncBatch racing this live message inserts the row
-    // first without emitting, and suppressing the live event too left an open pane
-    // stale until re-entry. Dart dedups by mid and skips unread on `duplicate`.
+    // History this device cleared (a relay replay, a slow clock) never shows.
+    if stored == ChannelInsert::Cleared {
+        hollow_log!("[HOLLOW-STORAGE] cleared history from {sender_peer_id} in {sid}/{cid} not shown (mid={mid:?})");
+        return;
+    }
+    // Otherwise ALWAYS emit: a ChannelSyncBatch racing this live message inserts the
+    // row first without emitting, and suppressing the live event too left an open
+    // pane stale until re-entry. Dart dedups by mid and skips unread on `duplicate`.
     let reply_to_own = reply_author
         .is_some_and(|a| super::resolver::same_identity(&a, local_peer));
     let _ = event_tx.send(NetworkEvent::ChannelMessageReceived {
@@ -2686,7 +2692,7 @@ pub(crate) async fn handle_envelope_channel_message(
         public_key: pk,
         album_id: album.map(Box::new),
         reply_to_own,
-        duplicate: !is_new,
+        duplicate: stored == ChannelInsert::Duplicate,
         is_own: is_mine,
     }).await;
 }
@@ -2907,8 +2913,8 @@ fn live_change_dropped(server_state: Option<&ServerState>, sender: &str, cid: &s
     true
 }
 
-/// Persist one incoming channel message with message-id dedup. The content UNIQUE
-/// index is legacy-only, so identical-text spam in the same millisecond persists
+/// Persist one incoming channel message. Dedup is by message id (pre-check here,
+/// unique index in the schema), so identical-text posts in one millisecond persist
 /// as distinct messages. `None` when the store could not be opened, and the caller
 /// then emits nothing. Sync, and owns the store.
 #[allow(clippy::too_many_arguments)]
@@ -2929,30 +2935,33 @@ fn persist_incoming_channel_message(
     link_preview: &Option<LinkPreviewRef>,
     db_path: &str,
     db_passphrase: &str,
-) -> Option<(bool, Option<String>)> {
+) -> Option<(ChannelInsert, Option<String>)> {
     let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok()?;
+    if store.refuse_below_floor(sid, cid, sender_peer_id, ts, mid) {
+        return Some((ChannelInsert::Cleared, None));
+    }
     // Replied-to message's author (MASTER id), so the event's `reply_to_own` lets
     // mentions-only gate on "reply to ME" (#42). Same store open; absent = None.
     let reply_author = reply_to.and_then(|m| store.get_channel_message_sender(m));
     let already = mid
         .map(|m| store.channel_message_exists(m))
         .unwrap_or(false);
-    let is_new = if already {
-        false
+    let stored = if already {
+        ChannelInsert::Duplicate
     } else {
-        store.insert_channel_message(
+        store.insert_channel_message_judged(
             sid, cid, sender_peer_id, text, is_mine, ts,
             sig, pk, mid, reply_to, file_id, order_us, album,
-        ).map(|r| r > 0).unwrap_or(false)
+        ).unwrap_or(ChannelInsert::Duplicate)
     };
-    if is_new {
+    if stored == ChannelInsert::Stored {
         if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid) {
             if let Ok(lp_json) = serde_json::to_string(lp) {
                 let _ = store.update_channel_link_preview(message_id, &lp_json);
             }
         }
     }
-    Some((is_new, reply_author))
+    Some((stored, reply_author))
 }
 
 /// Handle a LIVE channel `MessageEnvelope::EditMessage` from any transport;
@@ -4719,4 +4728,81 @@ pub(crate) async fn deliver_channel_hint(
         server_id, channel_id, from_peer: sender_device.to_string(),
         message_id, has_everyone, mentioned_names, is_reply_to_own,
     }).await;
+}
+
+// w2-c
+#[cfg(test)]
+mod w2c_cleared {
+    use super::*;
+    use crate::identity::native_identity::NativeKeypair;
+
+    const SKEW: i64 = crate::crdt::hlc::MAX_DRIFT_MS as i64;
+
+    async fn deliver(tx: &mpsc::Sender<NetworkEvent>, k: &NativeKeypair, local: &str, mid: &str, ts: i64, path: &str, pass: &str) {
+        use base64::Engine as _;
+        let pk = base64::engine::general_purpose::STANDARD.encode(k.public_key_protobuf());
+        let extras = SignedExtras { mid: Some(mid), reply_to: None, file_id: None, order_us: Some(ts * 1000), lp_digest: None, album: None };
+        let (sig, pk) = sign_message_versioned(k, &pk, "ch", "srv:ch", &k.peer_id(), ts, &extras, "hello");
+        handle_envelope_channel_message(
+            tx, k, None, &mut SlowModeClock::default(), local, k.peer_id(), "srv".into(), "ch".into(),
+            "hello".into(), ts, sig, pk, Some(mid.into()), None, None, None, Some(ts * 1000), None, path, pass,
+        ).await;
+    }
+
+    /// History this device cleared, delivered live again (the relay ring replays the
+    /// half hour before a reconnect), reaches no pane: no event at all, not even a
+    /// duplicate one, which Dart would append. A post after the clear still shows.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn w2c_cleared_history_reaches_no_pane() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("m.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let (alice, us) = (NativeKeypair::from_secret_bytes(&[31; 32]), NativeKeypair::from_secret_bytes(&[32; 32]));
+        let t = 10 * SKEW;
+        {
+            let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+            store.insert_channel_message("srv", "ch", &alice.peer_id(), "hello", false, t, None, None, Some("m1"), None, None, None, None).unwrap();
+            store.clear_channel_history(t + 5_000).unwrap();
+        }
+        let (tx, mut rx) = mpsc::channel(16);
+        let local = us.peer_id();
+        deliver(&tx, &alice, &local, "m1", t, &path, &pass).await;
+        deliver(&tx, &alice, &local, "m0", t - SKEW, &path, &pass).await;
+        assert!(rx.try_recv().is_err(), "cleared history reached the pane");
+        // A row a clear cut short has still to delete shows no more than a refused one.
+        crate::storage::MessageStore::open(&path, &pass).unwrap().conn_for_test().execute(
+            "INSERT INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, message_id) VALUES ('srv', 'ch', ?1, 'hello', 0, ?2, 'left')",
+            rusqlite::params![alice.peer_id(), t - 2 * SKEW],
+        ).unwrap();
+        deliver(&tx, &alice, &local, "left", t - 2 * SKEW, &path, &pass).await;
+        assert!(rx.try_recv().is_err(), "a row still to be cleared reached the pane");
+        deliver(&tx, &alice, &local, "m2", t + 10, &path, &pass).await;
+        let shown = rx.try_recv().expect("a post after the clear did not show");
+        assert!(matches!(shown, NetworkEvent::ChannelMessageReceived { ref message_id, duplicate: false, .. } if message_id == "m2"));
+    }
+
+    /// Every arm that shows a header or a push banner asks the floor first: the Olm
+    /// header arm and both push channel arms (the MLS header arm has its own test).
+    #[test]
+    fn w2c_cleared_history_gates_stay_wired() {
+        let node = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node");
+        let read = |f: &str| std::fs::read_to_string(node.join(f)).expect("read node source").replace("\r\n", "\n");
+        let (swarm, fetch) = (read("swarm.rs"), read("fetch.rs"));
+        let arm = |src: &str, from: &str, to: &str| {
+            let start = src.find(from).unwrap_or_else(|| panic!("missing {from}"));
+            let end = src[start..].find(to).unwrap_or_else(|| panic!("missing {to}"));
+            src[start..start + end].to_string()
+        };
+        let olm = arm(&swarm, "Ok(MessageEnvelope::FileHeader { inner }) => {", "insert_file_metadata(");
+        assert!(olm.contains("channel_floor_refuses("), "swarm.rs: the Olm header arm stores cleared history's files");
+        assert_eq!(
+            fetch.matches("== Some(ChannelInsert::Cleared) {\n").count(), 2,
+            "fetch.rs: a push channel arm shows a banner for cleared history",
+        );
+        let api = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("api").join("network.rs");
+        let start = std::fs::read_to_string(api).expect("read network.rs");
+        assert!(start.contains("super::storage::finish_interrupted_clear(&store);"), "network.rs: a clear cut short never finishes");
+    }
 }

@@ -667,3 +667,22 @@ fn compute_archive_hash(
 
     hasher.finalize().into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 0.14 writes format 2 (the `hollow-archive1` tagged signature) and what it writes
+    /// opens with a valid signature; format 1 archives keep opening (loader tests).
+    #[test]
+    fn w2c_an_export_is_format_2_and_verifies() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let store = MessageStore::open(tmp.path().join("messages.db").to_str().unwrap(), &"ab".repeat(32)).unwrap();
+        let keypair = NativeKeypair::from_secret_bytes(&[7; 32]);
+        let target = ArchiveTarget::Channel { server_id: "srv".into(), channel_id: "ch".into(), channel_name: Some("general".into()) };
+        let bytes = export_archive(&store, &keypair, target, FileMode::Placeholder, tmp.path()).unwrap();
+        let loaded = crate::archive::loader::load_archive(&bytes).unwrap();
+        assert_eq!(loaded.manifest.format_version, 2, "the export still writes format 1");
+        assert!(loaded.archive_signature_valid, "a format 2 export does not verify");
+    }
+}

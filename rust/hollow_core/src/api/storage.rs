@@ -1167,7 +1167,16 @@ pub struct StorageBreakdown {
     /// inside the encrypted DB.
     pub asset_blob_bytes: u64,
     pub asset_blob_count: u32,
+    /// Server channel messages this device holds ("Clear server messages").
+    pub server_message_count: u32,
     pub contexts: Vec<StorageContextUsage>,
+}
+
+/// What "Clear server messages" took away.
+pub struct ClearedMessages {
+    pub messages: u64,
+    /// The database shrink plus the cleared messages' downloads.
+    pub bytes_freed: u64,
 }
 
 /// Sum the byte sizes of regular files directly inside `dir`; files/ and vault_cache/
@@ -1219,6 +1228,7 @@ pub fn get_storage_breakdown() -> Result<StorageBreakdown, String> {
         dir_size_bytes(&dir)
     };
     let (asset_blob_bytes, asset_blob_count) = ms.asset_blob_usage()?;
+    let server_message_count = ms.count_all_channel_messages()?;
 
     Ok(StorageBreakdown {
         total_db_bytes,
@@ -1227,8 +1237,111 @@ pub fn get_storage_breakdown() -> Result<StorageBreakdown, String> {
         vault_shard_bytes,
         asset_blob_bytes,
         asset_blob_count,
+        server_message_count,
         contexts,
     })
+}
+
+/// Clear the history of one server's channels (`server_id`), or of every server
+/// (`None`), from THIS device (Settings > Storage, a server's settings), and keep it
+/// cleared: sync and backfill never store it again (the channel floors). DMs stay,
+/// and nothing is sent, so every other member keeps their copy.
+#[frb]
+pub fn clear_server_messages(server_id: Option<String>) -> Result<ClearedMessages, String> {
+    let db = crate::identity::data_dir()?.join("messages.db");
+    let on_disk = || -> u64 {
+        ["", "-wal"]
+            .iter()
+            .filter_map(|suffix| std::fs::metadata(format!("{}{suffix}", db.display())).ok())
+            .map(|m| m.len())
+            .sum()
+    };
+    let before = on_disk();
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    // A channel holding nothing yet (a server still backfilling) gets its floor too.
+    let channels: Vec<(String, String)> = ms
+        .load_all_servers()?
+        .into_iter()
+        .filter(|(sid, _)| server_id.as_deref().is_none_or(|s| s == sid))
+        .filter_map(|(sid, json)| {
+            let state = serde_json::from_str::<crate::crdt::server_state::ServerState>(&json).ok()?;
+            Some(state.channels.into_keys().map(move |cid| (sid.clone(), cid)))
+        })
+        .flatten()
+        .collect();
+    let cleared = ms.clear_history_in(server_id.as_deref(), &channels, crate::node::frame_auth::now_ms())?;
+    drop(guard);
+    let (file_bytes, settled) = unlink_cleared_files(&cleared);
+    // The rest stay named (an unlink or this forget failed): the next start tries again.
+    if let Some(ms) = store.lock().ok().as_ref().and_then(|g| g.as_ref()) {
+        let _ = ms.forget_cleared_files(&settled);
+    }
+    hollow_log!("[HOLLOW-STORAGE] cleared {} server messages from this device", cleared.messages);
+    Ok(ClearedMessages {
+        messages: cleared.messages,
+        bytes_freed: before.saturating_sub(on_disk()) + file_bytes,
+    })
+}
+
+/// Finish a history clear a crash or kill cut short, at start before anything shows
+/// the rows it had still to delete, and unlink the downloads it had still to unlink.
+pub(crate) fn finish_interrupted_clear(store: &MessageStore) {
+    match store.finish_cleared_history() {
+        Ok(rest) if rest.messages > 0 || !rest.files.is_empty() => {
+            let (_, settled) = unlink_cleared_files(&rest);
+            let _ = store.forget_cleared_files(&settled);
+            hollow_log!("[HOLLOW-STORAGE] finished an interrupted clear: {} messages, {} files", rest.messages, rest.files.len());
+        }
+        Ok(_) => {}
+        Err(e) => hollow_log!("[HOLLOW-STORAGE] an interrupted clear did not finish yet: {e}"),
+    }
+}
+
+/// Unlink our own download of each cleared file, at the name it was written under
+/// (`final_file_path`; only that name: a share we seed or a vault copy is not the
+/// message's to take, and a stored path may name a former container), and the voice
+/// playback cache once a voice note went. Returns the bytes freed and the names done
+/// with (gone from disk, or never ours to take); a download still there keeps its name.
+pub(crate) fn unlink_cleared_files(cleared: &crate::storage::messages::ClearedHistory) -> (u64, Vec<(String, String)>) {
+    let files_dir = crate::vault::pipeline::files_dir();
+    let mut freed = 0u64;
+    let mut voice = false;
+    let mut settled = Vec::with_capacity(cleared.files.len());
+    for (file_id, ext) in &cleared.files {
+        let path = crate::node::file_transfer::final_file_path(file_id, ext);
+        // Names come from peers' headers: one named file directly inside files/, or nothing.
+        let named = path.file_stem().is_some_and(|stem| !stem.is_empty() && stem != ".");
+        if named && path.parent() == Some(files_dir.as_path()) {
+            voice |= matches!(ext.to_ascii_lowercase().as_str(), "ogg" | "opus");
+            if let Ok(meta) = std::fs::metadata(&path)
+                && crate::node::at_rest::remove(&path).is_ok()
+            {
+                freed += meta.len();
+            }
+            if std::fs::symlink_metadata(&path).is_ok() {
+                continue;
+            }
+        }
+        settled.push((file_id.clone(), ext.clone()));
+    }
+    // Windows keeps WAV copies of voice notes keyed by source path and time, which a
+    // gone source no longer names: the cache goes whole and refills on the next play.
+    if voice
+        && let Ok(entries) = crate::identity::data_dir().map(|d| d.join("audio_cache")).and_then(|d| std::fs::read_dir(d).map_err(|e| e.to_string()))
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                if crate::node::at_rest::remove(&path).is_ok() {
+                    freed += len;
+                }
+            }
+        }
+    }
+    (freed, settled)
 }
 
 /// Every asset hash still referenced by a personal set or replicated CRDT state.
@@ -5511,5 +5624,144 @@ mod landing_tests {
         drop(held);
         landing.join().unwrap().unwrap();
         assert_eq!(pair_in_root().as_deref(), Ok("linked"));
+    }
+}
+
+// w2-c
+#[cfg(test)]
+mod w2c_clear_files {
+    use super::*;
+
+    /// A clear unlinks our own download of each cleared file by its deterministic name
+    /// (wherever an old row said it lay), never a name that leaves `files/`, and drops
+    /// the voice playback cache once a voice note went.
+    #[test]
+    fn w2c_a_clear_unlinks_our_downloads_by_name() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(data.join("audio_cache")).unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &data) };
+        let files = crate::vault::pipeline::files_dir();
+        for (name, body) in [("f1.png", &b"12345"[..]), ("v1.ogg", b"123"), ("keep.png", b"1")] {
+            std::fs::write(files.join(name), body).unwrap();
+        }
+        std::fs::write(data.join("escape.png"), b"1").unwrap();
+        std::fs::write(data.join("audio_cache").join("0a1b_2c.wav"), b"wave").unwrap();
+        let cleared = crate::storage::messages::ClearedHistory {
+            messages: 3,
+            files: [("f1", "png"), ("../escape", "png"), ("v1", "ogg"), ("gone", "png")]
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .to_vec(),
+        };
+        let (freed, _) = unlink_cleared_files(&cleared);
+        unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        assert!(!files.join("f1.png").exists() && !files.join("v1.ogg").exists(), "a cleared download stayed");
+        assert!(files.join("keep.png").exists(), "a file no clear named went");
+        assert!(data.join("escape.png").exists(), "a peer's name led outside files/");
+        assert!(!data.join("audio_cache").join("0a1b_2c.wav").exists(), "a voice note's playback copy stayed");
+        assert_eq!(freed, 5 + 3 + 4);
+    }
+
+    /// Downloads are written at `final_file_path`, which keeps only the alphanumerics of
+    /// the id and extension: the clear unlinks that name, not the raw `{id}.{ext}`.
+    #[test]
+    fn w2c_a_clear_unlinks_the_download_where_it_was_written() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &data) };
+        let written = crate::node::file_transfer::final_file_path("f1abcdef", "c++");
+        std::fs::write(&written, b"int main() {}").unwrap();
+        let cleared = crate::storage::messages::ClearedHistory { messages: 1, files: vec![("f1abcdef".to_string(), "c++".to_string())] };
+        let (freed, _) = unlink_cleared_files(&cleared);
+        let nameless = crate::storage::messages::ClearedHistory { messages: 1, files: vec![("..".to_string(), "".to_string())] };
+        let (_, nameless_done) = unlink_cleared_files(&nameless);
+        let files_kept = crate::vault::pipeline::files_dir().is_dir();
+        unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        assert!(!written.exists(), "the download at {written:?} outlived the clear (freed {freed})");
+        assert!(files_kept, "a name with nothing in it reached the files folder itself");
+        assert_eq!(nameless_done.len(), 1, "a name that is never ours stays to be tried at every start");
+    }
+
+    /// A clear whose batches committed but whose downloads were never unlinked (a crash,
+    /// a kill, a suspend) unlinks them at the next start, once.
+    #[test]
+    fn w2c_the_next_start_unlinks_a_cut_short_clears_files() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &data) };
+        let db = data.join("messages.db");
+        let key = "ab".repeat(32);
+        {
+            let ms = MessageStore::open(db.to_str().unwrap(), &key).unwrap();
+            ms.insert_channel_message("srv", "ch", "alice", "x", false, 1_000, None, None, Some("cm1"), None, None, None, None).unwrap();
+            ms.insert_file_metadata("f1abcdef", "a", "png", "image/png", 5, 1, true, None, None, Some("cm1"), "channel", "srv:ch", "alice", false, 1_000, None, None, None)
+                .unwrap();
+            assert_eq!(ms.clear_channel_history(10_000).unwrap().files.len(), 1);
+            // The process dies here, before the unlink.
+        }
+        let download = crate::node::file_transfer::final_file_path("f1abcdef", "png");
+        std::fs::write(&download, b"12345").unwrap();
+        let ms = MessageStore::open(db.to_str().unwrap(), &key).unwrap();
+        finish_interrupted_clear(&ms);
+        let gone = !download.exists();
+        let names_left = ms.finish_cleared_history().unwrap().files;
+        unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        assert!(gone, "the next start kept a cut-short clear's download");
+        assert!(names_left.is_empty(), "the start left the unlinked names to unlink again");
+    }
+
+    /// A download the unlink could not take (held open, say) keeps its name, so the next
+    /// start tries again; the names it did take, or that were never there, are forgotten.
+    /// Both the clear itself and the start-up finish.
+    #[test]
+    fn w2c_a_name_whose_unlink_failed_is_kept() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &data) };
+        let db = data.join("messages.db");
+        let key = "ab".repeat(32);
+        let ms = MessageStore::open(db.to_str().unwrap(), &key).unwrap();
+        for (mid, fid) in [("cm1", "f1abcdef"), ("cm2", "f2abcdef"), ("cm3", "f3abcdef")] {
+            ms.insert_channel_message("srv", "ch", "alice", "x", false, 1_000, None, None, Some(mid), None, None, None, None).unwrap();
+            ms.insert_file_metadata(fid, "a", "png", "image/png", 5, 1, true, None, None, Some(mid), "channel", "srv:ch", "alice", false, 1_000, None, None, None)
+                .unwrap();
+        }
+        // A directory at the download's name: the unlink fails on every platform.
+        let stuck = crate::node::file_transfer::final_file_path("f1abcdef", "png");
+        std::fs::create_dir_all(stuck.join("held")).unwrap();
+        std::fs::write(crate::node::file_transfer::final_file_path("f2abcdef", "png"), b"12345").unwrap();
+        let names = |ms: &MessageStore| ms.finish_cleared_history().unwrap().files;
+        set_test_store(ms);
+        let cleared = clear_server_messages(None).map(|c| c.messages);
+        let ms = get_store().lock().unwrap().take().unwrap();
+        let after_clear = names(&ms);
+        finish_interrupted_clear(&ms);
+        let after_failed_start = names(&ms);
+        std::fs::remove_dir_all(&stuck).unwrap();
+        std::fs::write(&stuck, b"12345").unwrap();
+        finish_interrupted_clear(&ms);
+        let after_start = names(&ms);
+        let unlinked = !stuck.exists();
+        unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        let kept = vec![("f1abcdef".to_string(), "png".to_string())];
+        assert_eq!(cleared, Ok(3));
+        assert_eq!(after_clear, kept, "the clear forgot a name it could not unlink, or kept one it did");
+        assert_eq!(after_failed_start, kept, "a start forgot a name it could not unlink");
+        assert!(unlinked && after_start.is_empty(), "the start did not unlink and forget the kept name ({after_start:?})");
     }
 }

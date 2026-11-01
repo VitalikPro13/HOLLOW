@@ -69,6 +69,7 @@ class _Api implements RustLibApi {
     vaultShardBytes: BigInt.zero,
     assetBlobBytes: BigInt.zero,
     assetBlobCount: 0,
+    serverMessageCount: 0,
     contexts: [
       storage_api.StorageContextUsage(
         contextType: 'channel',

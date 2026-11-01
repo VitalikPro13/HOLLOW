@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-/// The format new archives are written in. 0.14 flips it to 2, the domain-tagged
-/// signature; until then a 0.12 viewer must still open what we export.
-pub(crate) const ARCHIVE_WRITE_FORMAT: u32 = 1;
+/// The format new archives are written in: 2, the domain-tagged signature. Format 1
+/// (0.13 and before) still opens and verifies, so an archive saved then stays readable.
+pub(crate) const ARCHIVE_WRITE_FORMAT: u32 = 2;
 
 /// What the archive signature signs for `format_version`: format 1 signed the bare
 /// content hash (C-OLM-07), format 2 tags it. None for a format this build cannot read.

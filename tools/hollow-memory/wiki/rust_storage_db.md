@@ -72,9 +72,10 @@ CREATE TABLE IF NOT EXISTS channel_messages (
     sender_id  TEXT    NOT NULL,
     text       TEXT    NOT NULL,
     is_mine    INTEGER NOT NULL,
-    timestamp  INTEGER NOT NULL,
-    UNIQUE(server_id, channel_id, sender_id, timestamp, text)
+    timestamp  INTEGER NOT NULL
 )
+-- 0.14: no content key. A 0.13 database's UNIQUE(server_id, channel_id, sender_id,
+-- timestamp, text) table is rebuilt once at start (rebuild_channel_messages).
 -- Migrated columns:
 --   signature TEXT
 --   public_key TEXT
@@ -90,10 +91,13 @@ CREATE TABLE IF NOT EXISTS channel_messages (
 
 Indexes:
 - `idx_channel_msgs ON channel_messages (server_id, channel_id, timestamp)` -- per-channel lookups
-- `idx_channel_msgs_unique ON channel_messages (server_id, channel_id, sender_id, timestamp, text)` UNIQUE -- dedup
-- `idx_channel_msgs_msg_id ON channel_messages (message_id)` -- edit/delete lookups
+- `idx_channel_msgs_msg_id ON channel_messages (message_id) WHERE message_id IS NOT NULL` UNIQUE -- one row per message id; edit/delete lookups
+- `idx_channel_msgs_sender_ts ON channel_messages (server_id, channel_id, sender_id, timestamp)` -- the sync watermarks' per-sender seeks
+- `idx_channel_msgs_updated ON channel_messages (server_id, channel_id, updated_at)`
 
-Migration note: The UNIQUE constraint and index are enforced at open time. If duplicates exist, a cleanup DELETE runs first (keeping MIN(id) per group), then the unique index is created.
+Migration note (0.14): `migrate_auto_vacuum_once` (start-up, one connection) rebuilds a table still keyed by content in ONE transaction: same ids and columns, the oldest row per message id, the sequence carried, indexes and FTS triggers recreated. A failure leaves the old table for the next start. `init_schema` never builds the sender index on an old table (a long write in any process).
+
+Cleared history (Settings > Files & storage > Clean up "Clear server messages" for every server; a server's own Files & storage "Messages" for one): `channel_floors (server_id, channel_id, floor_ts, exact_from)` + `channel_floor_senders (server_id, channel_id, sender_id)` + `channel_cleared_ids (server_id, channel_id, mid_hash, ts)` (WITHOUT ROWID, at most 4096 per channel at or below the floor plus 4096 stamped above it, index on ts) + `channel_cleared_files (file_id, file_ext)` (downloads still to unlink, written in each batch's transaction, forgotten only once the name is gone from disk, drained at start). `insert_channel_message` refuses, in the same statement (`floor_refuses_sql`), rows at or before `exact_from` (floor minus `MAX_DRIFT_MS`), id-less rows at or before the floor, and ids whose hash the clear remembered; a slow clock's new post within the skew lands. `insert_channel_message_judged` tells `Cleared` from `Duplicate`, so the live and push paths show nothing for cleared history. Sync asks start at `channel_ask_start` = `exact_from` + 1 (`get_per_sender_timestamps`, `channel_sync_request`'s `since`, `channel_gap_anchor`, `channel_next_page_request`), so a slow clock's accepted post arrives by sync too; `get_latest_channel_timestamp` (ring catch-up) still reads the floor. A cleared device answers an ask reaching its floor with no rows and `has_more` (`channel_ask_reaches_floor`), so the asker moves to another holder; unread counts read `exact_from` as a read mark. `finish_cleared_history` deletes what the floors refuse (the clear's second half, and at start the rest of one cut short); with no floor and no pending name it reads nothing, and its two statements CROSS JOIN from `channel_floors` (a fresh database has no planner statistics, so SQLite otherwise scans every channel row at each launch; guard `w2c_a_start_reads_no_channel_rows`). Local only, dropped from backups and link snapshots by `scrub_device_secrets`. Startup rebuild measured 1.8 s per 100k rows on the M4 mini (rebuild alone, plus 0.5 s giving pages back).
 
 ### Channel Message Operations
 
@@ -783,7 +787,7 @@ Two formats detected by `encryption::detect_format()`:
 
 ## Dedup indexes, unread counts, sync lookback (2026-07-03)
 
-- **Content UNIQUE indexes are LEGACY-ONLY:** `idx_messages_dedup_legacy` + `idx_channel_msgs_unique_legacy` are partial (`WHERE message_id IS NULL`). The old full-table versions dropped DISTINCT identical-text same-millisecond messages via INSERT OR IGNORE. Rows with a mid dedup via `dm_message_exists`/`channel_message_exists` pre-checks at every insert site. The channel migration cleanup DELETE is scoped to `message_id IS NULL`.
+- **No content keys on channel rows (0.14):** `channel_messages` dedups by message id only (the unique partial `idx_channel_msgs_msg_id` plus the `channel_message_exists` pre-checks); the DM table keeps its partial `idx_messages_dedup_legacy` (`WHERE message_id IS NULL`). The old full-table content keys dropped DISTINCT identical-text same-millisecond messages via INSERT OR IGNORE.
 - **Unread counts are millisecond-granular:** `count_unread_dm` / `count_unread_channel` / `count_unread_channel_with_mentions` count rows with `timestamp >` the seen row's timestamp (seen resolved by message_id; missing seen → 0). Never rowid (backfill rows have higher rowids), never the full order_us tuple (Dart marks seen from a ms-sorted `.last`). Regression test: `unread_counts_are_millisecond_granular`.
 - **`SYNC_LOOKBACK_MS` (30 min):** `get_per_sender_timestamps` subtracts it (channels), and `dm_sync_anchor` subtracts it from `get_latest_dm_timestamp[_any]`. Overlap is mid-deduped on receipt. The lookback alone still lost any row more than 30 min older than the newest (issue #90), hence the gap digest below.
 - **Gap digest (#90, 2026-09-23):** every DM and channel sync request carries a `GapDigest { from, until, days }` of what the requester holds in the 30 days behind its lookback-adjusted `since`: per UTC day, row count + XOR of `mid_hash` (FNV-1a of the message_id, frozen forever; rows without a mid excluded). Built by `dm_sync_anchor(convo, any_direction)` / `channel_gap_anchor(sid, cid)`; responders call `get_dm_gap_messages(convo, digest, mine_only, limit)` / `get_channel_gap_messages(...)`, which re-serve every row on a day whose digest differs (a day only the requester holds is skipped). A digest wider than window + 1 day, empty or inverted is ignored (`gap_span_ok`). DM rows are only ever hidden, never deleted, so a re-serve cannot resurrect anything; channel retention would need an ingest cutoff if it ever starts pruning (it currently never does, see memory `project_issue90_dm_gap_digest`).

@@ -1,0 +1,372 @@
+{
+ "_": [
+  "w2-c on a phone, one throwaway peer: posts in its own server, then Settings > Files & storage > Clean up > Clear server messages, and the channel is empty after.",
+  "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario w2c_clear_messages_mobile -Peers a=<sim letter>"
+ ],
+ "peers": [
+  "a"
+ ],
+ "steps": [
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Add a server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "w2c-phone"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:w2c-phone",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:w2c-phone",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:general",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "field",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "phone post 1 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:phone post 1 ${RUN}",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "field",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "phone post 2 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:phone post 2 ${RUN}",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "field",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "phone post 3 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:phone post 3 ${RUN}",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-01-history-before"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Network",
+   "index": 0,
+   "dy": -400
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:Files & storage",
+   "timeout_ms": 5000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Files & storage",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-02-storage"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Clean up",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-03-cleanup-menu"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Clear server messages",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-04-confirm"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Clear",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "contains:Cleared 3 messages",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-05-cleared-toast"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 4000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Chats",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:general",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 3000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Attach a file",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "expect_no_text",
+   "value": "phone post 1 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-06-channel-after-clear"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "field",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "phone after clear ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Send message"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:phone after clear ${RUN}",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "expect_no_text",
+   "value": "phone post 2"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w2cm-07-post-after-clear"
+  }
+ ]
+}

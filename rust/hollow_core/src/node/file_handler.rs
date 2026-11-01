@@ -3445,6 +3445,13 @@ pub(crate) async fn handle_envelope_file_header(
         hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader for {fid} from {sender_peer_id}: {reason}");
         return;
     }
+    // A file of history this device cleared gets no card and no bytes.
+    if let (Some(s), Some(c)) = (sid.as_deref(), cid.as_deref())
+        && store.channel_floor_refuses(s, c, ts, mid.as_deref())
+    {
+        hollow_log!("[HOLLOW-STORAGE] FileHeader {fid} in {s}/{c} is cleared history, dropped");
+        return;
+    }
     let complete = file_bytes_on_disk(&store, &fid);
     // A committed card belongs to the author its id names, whoever delivered it.
     let card_owner = match author.as_deref() {
@@ -4124,6 +4131,31 @@ mod tests {
             "the header of a completed file left its own stream's early bytes behind",
         );
         assert!(early.contains_key(&other), "a header took another device's stream as its own");
+    }
+
+    // w2-c
+    /// A header for a message this device cleared stores no card and takes no key.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn w2c_a_cleared_messages_header_registers_nothing() {
+        let _g = super::super::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("hdr.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let (mut state, _owner) = crate::crdt::testkeys::owned_state("srv", "S", 1);
+        let bob = crate::crdt::testkeys::keys(2).1;
+        let op = state.create_op(crate::crdt::operations::CrdtPayload::MemberAdded {
+            peer_id: bob.clone(), display_name: "m".into(), follow: None, ask: None,
+        });
+        state.apply_op(&op).unwrap();
+        let states = HashMap::from([("srv".to_string(), state)]);
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        store.insert_channel_message("srv", "srv-general", &bob, "a file", false, 1, None, None, Some("m1"), None, None, None, None).unwrap();
+        store.clear_channel_history(10_000).unwrap();
+        let (mut pending, mut early) = (HashMap::new(), HashMap::new());
+        deliver_header(&states, &mut pending, &mut early, &bob, "f9", &path, &pass).await;
+        assert!(!pending.contains_key("f9"), "a cleared message's file took a key");
+        assert!(store.get_file_metadata("f9").unwrap().is_none(), "a cleared message's file card was stored");
     }
 
     /// A-D2: a card riding a signed item must describe the file its committed id

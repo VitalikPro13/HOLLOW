@@ -2,7 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/core/services/relay_triggers.dart'
+    show holdingStorageTask;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Live storage-usage breakdown for the Storage Manager UI (Settings → Storage).
@@ -110,6 +114,28 @@ class StorageActions {
       return 0;
     } finally {
       _refresh();
+    }
+  }
+
+  /// Clear one server's messages ([serverId]) or every server's from this
+  /// device (DMs stay). Throws on a failure so the confirm shows it; open
+  /// channels reload from the cleared database.
+  Future<storage_api.ClearedMessages> clearServerMessages({
+    String? serverId,
+  }) async {
+    try {
+      return await holdingStorageTask(
+        () => storage_api.clearServerMessages(serverId: serverId),
+      );
+    } finally {
+      _refresh();
+      final chats = _ref.read(channelChatProvider.notifier);
+      final servers = serverId == null
+          ? _ref.read(serverListProvider).keys.toList()
+          : [serverId];
+      for (final id in servers) {
+        chats.clearServerCache(id);
+      }
     }
   }
 
