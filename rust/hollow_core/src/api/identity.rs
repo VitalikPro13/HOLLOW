@@ -27,6 +27,10 @@ pub struct DuressStatus {
     /// The code was set before this identity was tied to the device's hardware, so
     /// its slot still opens with Argon2id alone: setting it again binds it too.
     pub rebind_due: bool,
+    /// The identity moved to the keys-group hardware key (iOS, HOL-SEC-187) and the
+    /// code is still on the first key, which a team change loses: setting it again
+    /// moves it too.
+    pub transfer_due: bool,
 }
 
 /// Current protection status of the identity file.
@@ -99,17 +103,29 @@ fn forget_missed_tries() {
 /// Whether a password-derived key may be cached in the OS keychain for `root`: only
 /// the OS's own data root on Windows and macOS (see `default_eligible_for`). A folder
 /// elsewhere can move to another machine or account, and a session with no keychain
-/// (ssh) would only fail or ask.
+/// (ssh) would only fail or ask. The root alone decides: what the keychain answers
+/// right now never drops a cached key (store rule 4, review F5).
 fn password_keychain_allowed(root: &std::path::Path) -> bool {
     #[cfg(test)]
     if let Some(allowed) = TEST_KEYCHAIN_ROOT.with(std::cell::Cell::get) {
-        return allowed && crate::identity::platform_keystore::is_available();
+        return allowed;
     }
     let env = std::env::var("HOLLOW_DATA_DIR").ok();
     let os_default = dirs::data_dir().map(|d| d.join("hollow"));
-    crate::identity::platform_keystore::is_available()
-        && default_eligible_for(this_os(), env.as_deref(), root, os_default.as_deref(), debug_defaults_hook())
+    default_eligible_for(this_os(), env.as_deref(), root, os_default.as_deref(), debug_defaults_hook())
 }
+
+/// Whether a new key may go into the OS keychain now. A keychain that gave no
+/// definite answer changes nothing: the caller stops before anything is written.
+fn keychain_takes_new_keys() -> Result<bool, String> {
+    match crate::identity::platform_keystore::protected_writable() {
+        crate::identity::platform_keystore::Writable::Yes(_) => Ok(true),
+        crate::identity::platform_keystore::Writable::No => Ok(false),
+        crate::identity::platform_keystore::Writable::Unknown => Err(KEYCHAIN_NO_ANSWER.into()),
+    }
+}
+
+const KEYCHAIN_NO_ANSWER: &str = "This computer's keychain didn't answer, so nothing changed. Try again.";
 
 #[cfg(test)]
 thread_local! {
@@ -148,12 +164,20 @@ fn keychain_key_that_decrypts_at(
     // password key is healed only where it may be cached at all.
     let cached_password = matches!(encryption::detect_format(bytes),
         Ok(encryption::IdentityFormat::Encrypted { flags, .. }) if encryption::flags_has_password(flags));
-    if heal
-        && source != platform_keystore::Source::Profile
-        && (!cached_password || password_keychain_allowed(root))
-        && let Err(e) = platform_keystore::store_key_at(root, &key)
-    {
-        hollow_log!("[HOLLOW-ID] The keychain key opens the identity but could not be kept in this profile's slot: {e}");
+    if !heal {
+        return Some(key);
+    }
+    let kept = source == platform_keystore::Source::Profile
+        || ((!cached_password || password_keychain_allowed(root))
+            && platform_keystore::store_key_at(root, &key)
+                .inspect_err(|e| {
+                    hollow_log!("[HOLLOW-ID] The keychain key opens the identity but could not be kept in this profile's slot: {e}");
+                })
+                .is_ok());
+    // The profile slot now holds the proven key: copies the move left beside it
+    // would only outlive a wipe.
+    if kept {
+        platform_keystore::drop_copies(root);
     }
     Some(key)
 }
@@ -205,10 +229,14 @@ fn open_secret(secret: &str, bytes: &[u8], salt: &[u8; 16], on_duress: Duress) -
         encryption::IdentityFormat::Encrypted { flags, .. } => flags,
         encryption::IdentityFormat::Plaintext => return Err("File is not encrypted".into()),
     };
-    let hw = hw_key::existing(&crate::identity::data_dir()?)?;
+    let root = crate::identity::data_dir()?;
+    let hw = hw_key::existing(&root, flags)?;
+    // A slot left on a key the keystore lost (the first key, after a team change)
+    // still costs its one operation, on the identity's key, where it opens nothing.
+    let duress_hw = hw_key::existing(&root, crate::identity::duress::probe_flags(&root))?.or_else(|| hw.clone());
     let identity_key = encryption::slot_key(secret, salt, flags, hw.as_ref());
     let identity_opens = matches!(&identity_key, Ok(Some(k)) if encryption::decrypt_identity(bytes, k).is_ok());
-    let duress = crate::identity::duress::probe_with(secret, hw.as_ref());
+    let duress = crate::identity::duress::probe_with(secret, duress_hw.as_ref());
     match (identity_key, identity_opens, duress) {
         (Ok(Some(key)), true, _) => Ok(key),
         (_, _, Ok(Some(_))) if on_duress == Duress::Inert => Err(WRONG_SECRET.into()),
@@ -329,6 +357,7 @@ fn unlock_identity_with(password: Option<String>, how: Secret) -> Result<Identit
                 let bytes = drop_cached_key_off_os_root(&dir, flags, &bytes, &wrapping_key).unwrap_or(bytes);
                 if encryption::flags_has_device_bound(flags) {
                     repair_device_file(secret, &salt, &wrapping_key);
+                    move_to_group_key(&dir, secret);
                 } else {
                     tie_to_hardware(&dir, &bytes, &wrapping_key);
                 }
@@ -419,6 +448,48 @@ fn tie_to_hardware(root: &std::path::Path, bytes: &[u8], key: &[u8; 32]) {
     }
 }
 
+/// iOS (HOL-SEC-187): a bound identity whose hardware key the system keeps in the
+/// app-ID group, which a team change loses, moves at an unlock with the secret in
+/// hand onto a new key in the keys group, under the same salt: the identity file
+/// first, then the device file (`repair_device_file` heals a cut between them). The
+/// duress slot cannot follow (its code is never known): it keeps the first key until
+/// the code is set again. Any failure keeps the old wrap, which still opens.
+fn move_to_group_key(root: &std::path::Path, secret: &str) {
+    use crate::identity::{encryption, hw_key, platform_keystore};
+    let Ok(bytes) = std::fs::read(root.join("identity.key")) else { return };
+    let Ok(encryption::IdentityFormat::Encrypted { flags, salt, .. }) = encryption::detect_format(&bytes) else {
+        return;
+    };
+    if !encryption::flags_has_device_bound(flags) || flags & encryption::FLAG_GROUP_KEY != 0 {
+        return;
+    }
+    if hw_key::regroup(root) != Some(hw_key::Regroup::Refused) {
+        return;
+    }
+    let moved = (|| -> Result<(), String> {
+        let old_key = encryption::get_session_key().ok_or("not unlocked")?;
+        let Some(hw) = hw_key::make_group_key(root)? else { return Ok(()) };
+        let stretched = zeroize::Zeroizing::new(encryption::derive_wrapping_key_from_password(secret, &salt)?);
+        let new_key = bound_key(&stretched, &salt, &hw)?;
+        let plaintext = encryption::decrypt_identity(&bytes, &old_key)?;
+        let device = identity::device_key::load_device_keypair_with_key(&old_key)?;
+        let keychain = encryption::flags_has_os_keychain(flags);
+        let encrypted = encryption::encrypt_with_flags(&plaintext, &new_key, &salt, flags | encryption::FLAG_GROUP_KEY)?;
+        if keychain {
+            platform_keystore::store_key_at(root, &new_key)?;
+        }
+        encryption::write_key_file(&root.join("identity.key"), &encrypted)?;
+        encryption::set_session_key(new_key);
+        identity::device_key::rewrite_device_key_protection(&device, Some(&new_key), true, keychain)?;
+        hw_key::drop_first_key_if_unused(root, crate::identity::duress::first_key_needed(root));
+        hollow_log!("[HOLLOW-ID] The app lock moved to this device's keys-group hardware key");
+        Ok(())
+    })();
+    if let Err(e) = moved {
+        hollow_log!("[HOLLOW-ID] The app lock stays on its first hardware key for now: {e}");
+    }
+}
+
 /// The device-bound wrapping key for a stretched secret, after the hardware gave the
 /// same answer twice: a key that answers differently each time would lock the file
 /// it just wrote.
@@ -444,7 +515,19 @@ fn repair_device_file(secret: &str, salt: &[u8; 16], key: &[u8; 32]) {
         return;
     }
     let Ok(stretched) = encryption::derive_wrapping_key_from_password(secret, salt) else { return };
-    let Ok(device) = device_key::load_device_keypair_with_key(&stretched) else { return };
+    let stretched = zeroize::Zeroizing::new(stretched);
+    // The earlier wrap: Argon2id alone, or the first hardware key when the move to
+    // the keys-group key stopped between the two files.
+    let first_key = crate::identity::data_dir()
+        .ok()
+        .and_then(|d| crate::identity::hw_key::existing(&d, 0).ok().flatten())
+        .and_then(|hw| bound_key(&stretched, salt, &hw).ok());
+    let Some(device) = std::iter::once(*stretched)
+        .chain(first_key)
+        .find_map(|k| device_key::load_device_keypair_with_key(&k).ok())
+    else {
+        return;
+    };
     let keychain = crate::identity::data_dir()
         .ok()
         .and_then(|d| std::fs::read(d.join("identity.key")).ok())
@@ -496,7 +579,7 @@ pub fn app_lock_secret_opens_identity(secret: String) -> Result<bool, String> {
         encryption::IdentityFormat::Encrypted { flags, salt, .. }
             if encryption::flags_has_password(flags) =>
         {
-            let hw = hw_key::existing(&dir)?;
+            let hw = hw_key::existing(&dir, flags)?;
             let key = encryption::slot_key(&secret, &salt, flags, hw.as_ref())?;
             Ok(key.is_some_and(|k| encryption::decrypt_identity(&bytes, &k).is_ok()))
         }
@@ -572,7 +655,7 @@ pub fn enable_password_protection(
         None => *stretched,
     };
 
-    let use_keychain = !require_on_launch && password_keychain_allowed(&dir);
+    let use_keychain = !require_on_launch && password_keychain_allowed(&dir) && keychain_takes_new_keys()?;
     let mut flags = 0x01;
     if use_keychain {
         flags |= 0x02;
@@ -636,7 +719,9 @@ pub fn change_password(old_password: String, new_password: String) -> Result<(),
         _ => return Err("Identity is not password-protected".into()),
     };
     let had_keychain = encryption::flags_has_os_keychain(old_flags);
-    let keep_keychain = had_keychain && password_keychain_allowed(&dir);
+    // The cached key follows the new password only into a keychain that takes it; a
+    // definite no drops the flag, and a keychain that cannot say changes nothing.
+    let keep_keychain = had_keychain && password_keychain_allowed(&dir) && keychain_takes_new_keys()?;
 
     let old_key = open_typed_secret(&old_password, &bytes, &old_salt)?;
     let plaintext = encryption::decrypt_identity(&bytes, &old_key)?;
@@ -654,7 +739,7 @@ pub fn change_password(old_password: String, new_password: String) -> Result<(),
     // The key a device-bound duress slot was wrapped with stays: a bound file only
     // ever takes the key it has, and a keystore that cannot say is no reason to make one.
     let hw = if encryption::flags_has_device_bound(old_flags) {
-        Some(crate::identity::hw_key::existing(&dir)?.ok_or(crate::identity::hw_key::MISSING)?)
+        Some(crate::identity::hw_key::existing(&dir, old_flags)?.ok_or(crate::identity::hw_key::MISSING)?)
     } else {
         crate::identity::hw_key::ensure(&dir, false)?
     };
@@ -674,7 +759,7 @@ pub fn change_password(old_password: String, new_password: String) -> Result<(),
     let encrypted = encryption::encrypt_with_flags(&plaintext, &new_key, &new_salt, new_flags)?;
 
     if keep_keychain {
-        let _ = platform_keystore::store_key_at(&dir, &new_key);
+        platform_keystore::store_key_at(&dir, &new_key)?;
     }
 
     encryption::write_key_file(&path, &encrypted)?;
@@ -779,7 +864,7 @@ fn code_is_the_password(code: &str) -> Result<bool, String> {
         Ok(encryption::IdentityFormat::Encrypted { salt, flags, .. }) => (salt, flags),
         _ => return Ok(false),
     };
-    let hw = crate::identity::hw_key::existing(&dir)?;
+    let hw = crate::identity::hw_key::existing(&dir, flags)?;
     Ok(encryption::slot_key(code, &salt, flags, hw.as_ref())?
         .is_some_and(|k| encryption::decrypt_identity(&bytes, &k).is_ok()))
 }
@@ -875,6 +960,7 @@ pub fn duress_status() -> DuressStatus {
         // No password, no prompt to type a code into, whatever an older version left set.
         enabled,
         rebind_due: enabled && duress_slot_left_unbound(),
+        transfer_due: enabled && duress_slot_left_on_first_key(),
         scope,
         notify_friends,
         available,
@@ -883,6 +969,19 @@ pub fn duress_status() -> DuressStatus {
 
 /// The duress slot predates its identity's hardware binding. Read from the two files'
 /// headers alone, never by trying a code; the slot of a code set since is bound.
+fn duress_slot_left_on_first_key() -> bool {
+    use crate::identity::encryption;
+    let Ok(dir) = crate::identity::data_dir() else { return false };
+    let identity = match std::fs::read(dir.join("identity.key")).map(|b| encryption::detect_format(&b)) {
+        Ok(Ok(encryption::IdentityFormat::Encrypted { flags, .. })) => flags,
+        _ => return false,
+    };
+    let Some(slot) = crate::identity::duress::stored_flags() else { return false };
+    identity & encryption::FLAG_GROUP_KEY != 0
+        && encryption::flags_has_device_bound(slot)
+        && slot & encryption::FLAG_GROUP_KEY == 0
+}
+
 fn duress_slot_left_unbound() -> bool {
     use crate::identity::encryption;
     let Ok(dir) = crate::identity::data_dir() else { return false };
@@ -921,7 +1020,7 @@ pub fn set_require_password_on_launch(require: bool) -> Result<(), String> {
     };
     let had_keychain = encryption::flags_has_os_keychain(flags);
 
-    let want_keychain = !require && password_keychain_allowed(&dir);
+    let want_keychain = !require && password_keychain_allowed(&dir) && keychain_takes_new_keys()?;
     if want_keychain == had_keychain {
         return Ok(());
     }
@@ -1009,7 +1108,7 @@ fn lands_as(path: &std::path::Path, key: &[u8; 32], plain: &[u8]) -> bool {
 /// puts the files and this profile's slot back exactly as they were.
 fn switch_to_keychain(root: &std::path::Path) -> Result<[u8; 32], String> {
     use crate::identity::{encryption, platform_keystore};
-    if !platform_keystore::is_available() {
+    if !platform_keystore::may_offer() {
         return Err("OS keychain is not available on this platform".into());
     }
     let key_path = root.join("identity.key");
@@ -1235,8 +1334,8 @@ fn default_eligible() -> bool {
     let Ok(root) = crate::identity::data_dir() else { return false };
     let env = std::env::var("HOLLOW_DATA_DIR").ok();
     let os_default = dirs::data_dir().map(|d| d.join("hollow"));
-    crate::identity::platform_keystore::is_available()
-        && default_eligible_for(this_os(), env.as_deref(), &root, os_default.as_deref(), debug_defaults_hook())
+    default_eligible_for(this_os(), env.as_deref(), &root, os_default.as_deref(), debug_defaults_hook())
+        && crate::identity::platform_keystore::may_offer()
 }
 
 /// Whether this profile gets keychain protection by default, and the offer to
@@ -1281,6 +1380,48 @@ pub fn protect_new_identity_by_default(phrase: String) -> Result<bool, String> {
     }
     phrase_is_this_identitys(&root, &phrase)?;
     switch_to_keychain(&root).map(|_| true)
+}
+
+/// macOS, once per start, after the pending wipe and `settle_relink` and before the
+/// launch unlock or any prompt: moves every Hollow key out of the login keychain (and
+/// out of the app-ID group once the keys group works) into the data-protection
+/// keychain, copy first, delete last (HOL-SEC-187). Nothing else starts it: wipes,
+/// forgets, unlocks and typed secrets never do. Elsewhere it does nothing.
+#[frb]
+pub fn settle_keychain_move() -> Result<(), String> {
+    let root = crate::identity::data_dir()?;
+    settle_keychain_move_at(&root, std::env::var("HOLLOW_DATA_DIR").ok().as_deref());
+    Ok(())
+}
+
+fn settle_keychain_move_at(root: &std::path::Path, env_override: Option<&str>) {
+    use crate::identity::{encryption, platform_keystore};
+    let flagged = std::fs::read(root.join("identity.key")).ok().is_some_and(|b| {
+        matches!(encryption::detect_format(&b), Ok(encryption::IdentityFormat::Encrypted { flags, .. })
+            if encryption::flags_has_os_keychain(flags))
+    });
+    if !keychain_move_allowed(env_override, password_keychain_allowed(root), flagged, debug_defaults_hook()) {
+        return;
+    }
+    let moved = platform_keystore::settle_move(root);
+    if moved != platform_keystore::Moved::default() {
+        hollow_log!(
+            "[HOLLOW-ID] Keychain move: {} moved, {} kept for the next start, {} left alone",
+            moved.moved,
+            moved.kept,
+            moved.skipped
+        );
+    }
+}
+
+/// The move touches the keychain only for a profile whose keys belong in it: the
+/// OS's own data root, or a root an older build already locked to the keychain;
+/// never an override session.
+fn keychain_move_allowed(env_override: Option<&str>, root_eligible: bool, keychain_flag: bool, debug_hook: bool) -> bool {
+    if env_override.is_some_and(|v| !v.is_empty()) && !debug_hook {
+        return false;
+    }
+    root_eligible || keychain_flag
 }
 
 /// Turn keychain protection off: the identity goes back to plaintext files.
@@ -1384,7 +1525,7 @@ pub fn verify_identity_password_at(
                         Err(e) => Err(e),
                     };
                 }
-                let hw = crate::identity::hw_key::existing(std::path::Path::new(&data_dir))?;
+                let hw = crate::identity::hw_key::existing(std::path::Path::new(&data_dir), flags)?;
                 let key = encryption::slot_key(pw, &salt, flags, hw.as_ref())?;
                 return Ok(key.is_some_and(|k| encryption::decrypt_identity(&bytes, &k).is_ok()));
             }
@@ -1404,7 +1545,7 @@ fn protection_status_of(path: &std::path::Path) -> Result<ProtectionStatus, Stri
             is_encrypted: false,
             has_password: false,
             has_os_keychain: false,
-            os_keychain_available: crate::identity::platform_keystore::is_available(),
+            os_keychain_available: crate::identity::platform_keystore::may_offer(),
         });
     }
 
@@ -1416,13 +1557,13 @@ fn protection_status_of(path: &std::path::Path) -> Result<ProtectionStatus, Stri
             is_encrypted: false,
             has_password: false,
             has_os_keychain: false,
-            os_keychain_available: crate::identity::platform_keystore::is_available(),
+            os_keychain_available: crate::identity::platform_keystore::may_offer(),
         }),
         encryption::IdentityFormat::Encrypted { flags, .. } => Ok(ProtectionStatus {
             is_encrypted: true,
             has_password: encryption::flags_has_password(flags),
             has_os_keychain: encryption::flags_has_os_keychain(flags),
-            os_keychain_available: crate::identity::platform_keystore::is_available(),
+            os_keychain_available: crate::identity::platform_keystore::may_offer(),
         }),
     }
 }
@@ -2531,6 +2672,234 @@ mod b5_device_bound_tests {
         crate::identity::device_key::load_device_keypair_with_key(&key).is_ok()
     }
 
+    // -- HOL-SEC-187: the enclave key and the keys group --
+
+    fn first_alias(fx: &Fx) -> String {
+        format!("hollow_applock_hw.{}", hw_key::profile_id(fx.root(), false).unwrap())
+    }
+
+    /// A 0.12.2 to 0.13 lock: bound, its key in the app-ID group, a real duress code.
+    fn lock_in_app_id_group(fx: &Fx, stub: &Stub) {
+        enable_password_protection(PIN.into(), true).expect("enable");
+        duress::set_code(CODE, duress::SCOPE_DEVICE, false, None).expect("set code");
+        stub.put_in_app_id_group(&first_alias(fx));
+        encryption::clear_session_key();
+    }
+
+    #[test]
+    fn a_key_the_system_regroups_stays_the_same_key() {
+        let stub = Stub::new(Kind::EcdhP256);
+        let fx = fx(Some(stub.clone()));
+        lock_in_app_id_group(&fx, &stub);
+        let before = stub.snapshot();
+        unlock_identity(Some(PIN.into())).expect("opens");
+        assert!(!stub.in_app_id_group(&first_alias(&fx)), "the key was not offered the keys group");
+        assert_eq!(stub.snapshot(), before, "a regrouped key was replaced");
+        assert_eq!(fx.flags() & encryption::FLAG_GROUP_KEY, 0, "a re-bind ran though the key moved");
+        assert!(!duress_slot_left_on_first_key(), "the transfer note for a code that never needs it");
+    }
+
+    #[test]
+    fn a_key_left_in_the_app_id_group_still_opens_until_it_moves() {
+        let stub = Stub::new(Kind::EcdhP256);
+        let fx = fx(Some(stub.clone()));
+        lock_in_app_id_group(&fx, &stub);
+        stub.refuse_regroup();
+        hw_key::install_for_test(Some(stub.clone()));
+        let _ = unlock_identity(None);
+        assert_eq!(fx.flags() & encryption::FLAG_GROUP_KEY, 0, "moved without the secret");
+        unlock_identity(Some(PIN.into())).expect("the key in the app-ID group still opens");
+        assert!(device_key_opens());
+    }
+
+    #[test]
+    fn a_bound_identity_moves_to_the_group_key_at_the_next_unlock() {
+        for stored in [false, true] {
+            let stub = Stub::new(Kind::EcdhP256);
+            let fx = fx(Some(stub.clone()));
+            lock_in_app_id_group(&fx, &stub);
+            stub.refuse_regroup();
+            if stored {
+                unlock_identity_with_stored_secret(PIN.into(), false).expect("launch secret");
+            } else {
+                unlock_identity(Some(PIN.into())).expect("typed");
+            }
+            assert_ne!(fx.flags() & encryption::FLAG_GROUP_KEY, 0, "stored={stored}: never moved");
+            assert!(stub.in_app_id_group(&first_alias(&fx)), "stored={stored}: the first key went while the duress slot needs it");
+            assert_eq!(stub.key_count(), 2);
+            encryption::clear_session_key();
+            unlock_identity(Some(PIN.into())).expect("opens on the group key");
+            assert!(device_key_opens(), "stored={stored}: the device file stayed behind");
+            assert!(!opens_with_argon_alone(&fx, "identity.key", PIN));
+        }
+    }
+
+    /// The first move fails half way: the identity file moved, the device file did
+    /// not. The next unlock heals the device file from the first key.
+    #[test]
+    fn a_move_to_the_group_key_cut_between_the_files_heals() {
+        let stub = Stub::new(Kind::Hmac);
+        let fx = fx(Some(stub.clone()));
+        lock_in_app_id_group(&fx, &stub);
+        stub.refuse_regroup();
+        let device_before = fx.read("identity.device");
+        unlock_identity(Some(PIN.into())).expect("moves");
+        std::fs::write(fx.root().join("identity.device"), device_before).unwrap();
+        encryption::clear_session_key();
+        unlock_identity(Some(PIN.into())).expect("opens");
+        assert!(device_key_opens(), "the device file was not healed");
+    }
+
+    #[test]
+    fn the_duress_slot_keeps_its_old_key_until_the_code_is_set_again() {
+        let stub = Stub::new(Kind::EcdhP256);
+        let fx = fx(Some(stub.clone()));
+        lock_in_app_id_group(&fx, &stub);
+        stub.refuse_regroup();
+        unlock_identity(Some(PIN.into())).expect("moves");
+        assert_eq!(fx.read("identity.duress")[6] & encryption::FLAG_GROUP_KEY, 0);
+        assert!(duress_slot_left_on_first_key(), "the transfer note is not due");
+        encryption::clear_session_key();
+        assert_eq!(unlock_identity(Some(CODE.into())).err().as_deref(), Some("duress"), "the code stopped firing");
+    }
+
+    #[test]
+    fn setting_the_code_again_moves_it_and_frees_the_first_key() {
+        let stub = Stub::new(Kind::Hmac);
+        let fx = fx(Some(stub.clone()));
+        lock_in_app_id_group(&fx, &stub);
+        stub.refuse_regroup();
+        unlock_identity(Some(PIN.into())).expect("moves");
+        duress::set_code(CODE, duress::SCOPE_DEVICE, false, None).expect("set again");
+        assert_ne!(fx.read("identity.duress")[6] & encryption::FLAG_GROUP_KEY, 0);
+        assert!(!duress_slot_left_on_first_key(), "the note outlived the move");
+        assert!(!stub.in_app_id_group(&first_alias(&fx)) && stub.key_count() == 1, "the first key outlived its last file");
+        encryption::clear_session_key();
+        unlock_identity(Some(PIN.into())).expect("opens");
+        assert_eq!(unlock_identity(Some(CODE.into())).err().as_deref(), Some("duress"));
+    }
+
+    #[test]
+    fn every_try_costs_the_same_hardware_operations_with_two_keys() {
+        let stub = Stub::new(Kind::Hmac);
+        let fx = fx(Some(stub.clone()));
+        lock_in_app_id_group(&fx, &stub);
+        stub.refuse_regroup();
+        unlock_identity(Some(PIN.into())).expect("moves");
+        for secret in [PIN, "000000"] {
+            encryption::clear_session_key();
+            let _ = hw_key::take_hw_count();
+            let _ = encryption::take_derive_count();
+            let _ = unlock_identity(Some(secret.into()));
+            assert_eq!(hw_key::take_hw_count(), 2, "{secret}");
+            assert_eq!(encryption::take_derive_count(), 2, "{secret}");
+        }
+        attempts::succeeded(fx.root());
+        encryption::clear_session_key();
+        let _ = hw_key::take_hw_count();
+        let _ = encryption::take_derive_count();
+        assert_eq!(unlock_identity(Some(CODE.into())).err().as_deref(), Some("duress"));
+        assert_eq!(hw_key::take_hw_count(), 2, "the duress code costs the same");
+        assert_eq!(encryption::take_derive_count(), 2, "the duress code costs the same");
+    }
+
+    /// After the team change the first key is gone. A duress slot still on it costs
+    /// its one operation all the same (on the identity's key, opening nothing), so a
+    /// stopwatch cannot tell whether the code was set again (review, HOL-SEC-187).
+    #[test]
+    fn a_try_costs_two_hardware_operations_after_the_first_key_is_gone() {
+        // The 0.13 dummy slot (no code ever set) first, then a real code.
+        let stub = Stub::new(Kind::Hmac);
+        let dummy = fx(Some(stub.clone()));
+        enable_password_protection(PIN.into(), true).expect("enable");
+        stub.put_in_app_id_group(&first_alias(&dummy));
+        stub.refuse_regroup();
+        encryption::clear_session_key();
+        unlock_identity(Some(PIN.into())).expect("moves to the group key");
+        hw_key::Oracle::delete(&*stub, &first_alias(&dummy));
+        encryption::clear_session_key();
+        let _ = hw_key::take_hw_count();
+        let _ = unlock_identity(Some("000000".into()));
+        assert_eq!(hw_key::take_hw_count(), 2, "a wrong PIN beside a dummy left on the lost key");
+        drop(dummy);
+
+        let stub = Stub::new(Kind::Hmac);
+        let coded = fx(Some(stub.clone()));
+        lock_in_app_id_group(&coded, &stub);
+        stub.refuse_regroup();
+        unlock_identity(Some(PIN.into())).expect("moves to the group key");
+        hw_key::Oracle::delete(&*stub, &first_alias(&coded));
+        let cost = |secret: &str| {
+            attempts::succeeded(coded.root());
+            encryption::clear_session_key();
+            let _ = hw_key::take_hw_count();
+            let _ = encryption::take_derive_count();
+            let answer = unlock_identity(Some(secret.into())).err();
+            (hw_key::take_hw_count(), encryption::take_derive_count(), answer)
+        };
+        assert_eq!(cost("000000"), (2, 2, Some(WRONG_SECRET.into())), "a wrong PIN");
+        assert_eq!(cost(CODE), (2, 2, Some(WRONG_SECRET.into())), "a code left on the lost key");
+        assert!(cost(PIN).2.is_none(), "the identity still opens");
+        duress::set_code(CODE, duress::SCOPE_DEVICE, false, None).expect("set again");
+        assert_eq!(cost("000000"), (2, 2, Some(WRONG_SECRET.into())), "a wrong PIN once the code is set again");
+        assert_eq!(cost(CODE), (2, 2, Some("duress".into())), "a code set again");
+    }
+
+    /// A build whose profile lacks the keys group (the personal-team variant) makes
+    /// its keys in the app-ID group: the identity never takes `FLAG_GROUP_KEY` for
+    /// such a key, so the move reruns where it can and no duress note fires.
+    #[test]
+    fn a_group_key_made_outside_the_keys_group_never_takes_the_flag() {
+        let stub = Stub::new(Kind::EcdhP256);
+        let fx = fx(Some(stub.clone()));
+        lock_in_app_id_group(&fx, &stub);
+        stub.refuse_regroup();
+        stub.create_in_app_id_group();
+        unlock_identity(Some(PIN.into())).expect("opens");
+        assert_eq!(fx.flags() & encryption::FLAG_GROUP_KEY, 0, "the flag names a key the team change loses");
+        assert!(!duress_slot_left_on_first_key(), "the transfer note for a move that never happened");
+        assert_eq!(stub.key_count(), 1, "the stray group key stayed");
+        encryption::clear_session_key();
+        unlock_identity(Some(PIN.into())).expect("the first key still opens");
+        assert_eq!(unlock_identity(Some(CODE.into())).err().as_deref(), Some("duress"));
+    }
+
+    #[test]
+    fn making_a_key_never_deletes_one_in_another_group() {
+        let stub = Stub::new(Kind::EcdhP256);
+        let fx = fx(Some(stub.clone()));
+        lock_in_app_id_group(&fx, &stub);
+        stub.refuse_regroup();
+        let first = stub.snapshot().into_iter().find(|(a, _)| *a == first_alias(&fx)).unwrap();
+        unlock_identity(Some(PIN.into())).expect("moves");
+        assert!(stub.snapshot().contains(&first), "making the group key replaced the first key");
+    }
+
+    #[test]
+    fn a_sweep_keeps_both_keys_of_the_live_profile() {
+        let stub = Stub::new(Kind::Hmac);
+        let fx = fx(Some(stub.clone()));
+        hw_key::one_profile_for_test(true);
+        lock_in_app_id_group(&fx, &stub);
+        stub.refuse_regroup();
+        unlock_identity(Some(PIN.into())).expect("moves");
+        assert_eq!(hw_key::sweep_orphans(fx.root()), 0);
+        assert_eq!(stub.key_count(), 2);
+        hw_key::forget(fx.root());
+        assert_eq!(stub.key_count(), 0, "a wipe left a hardware key");
+    }
+
+    #[test]
+    fn a_sweep_takes_a_gone_profiles_group_key_too() {
+        let stub = Stub::new(Kind::Hmac);
+        let fx = fx(Some(stub.clone()));
+        hw_key::one_profile_for_test(true);
+        enable_password_protection(PIN.into(), true).expect("enable");
+        hw_key::Oracle::create(&*stub, "hollow_applock_hw.00000000000000aa.k").unwrap();
+        assert_eq!(hw_key::sweep_orphans(fx.root()), 1);
+        assert_eq!(stub.key_count(), 1, "a gone profile's keys-group key outlived the sweep");
+    }
+
     /// The threat AR-24 names: a byte copy of the folder, without the phone's key,
     /// cannot check one guess, the right PIN included, for either key file.
     #[test]
@@ -3241,5 +3610,276 @@ mod b5_device_bound_tests {
         let lines = crate::log::take_captured();
         assert!(!lines.iter().any(|l| l.contains("hardware_key_missing")), "{lines:?}");
         assert_eq!(fx.flags() & encryption::FLAG_DEVICE_BOUND, 0);
+    }
+}
+
+#[cfg(test)]
+mod keychain_move_tests {
+    //! HOL-SEC-187: the macOS keys move into the data-protection keychain at one
+    //! fixed point per start, and what the keychain answers never costs a key.
+
+    use super::*;
+    use crate::identity::encryption;
+    use crate::identity::native_identity::NativeKeypair;
+    use crate::identity::platform_keystore::test_support::*;
+    use crate::identity::platform_keystore::{self, Store, Writable};
+
+    const PIN: &str = "482916";
+    const NEW: &str = "593104";
+    const CODE: &str = "731905";
+
+    struct Fx {
+        _g: std::sync::MutexGuard<'static, ()>,
+        tmp: crate::test_tmp::TestDir,
+    }
+
+    impl Drop for Fx {
+        fn drop(&mut self) {
+            encryption::clear_session_key();
+            keychain_root_for_test(None);
+            clear_faults();
+            use_mac_layout(None);
+        }
+    }
+
+    impl Fx {
+        fn root(&self) -> &std::path::Path {
+            self.tmp.path()
+        }
+        fn flags(&self) -> u8 {
+            match encryption::detect_format(&std::fs::read(self.root().join("identity.key")).unwrap()).unwrap() {
+                encryption::IdentityFormat::Encrypted { flags, .. } => flags,
+                _ => 0,
+            }
+        }
+        fn slot(&self) -> String {
+            profile_slot_name(self.root())
+        }
+    }
+
+    /// A fresh root on the OS's own data root, under the macOS layout.
+    fn fx() -> Fx {
+        let g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().expect("tempdir");
+        // SAFETY: serialized by the lock above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        encryption::clear_session_key();
+        crate::identity::hw_key::install_for_test(None);
+        use_mac_layout(Some(true));
+        keychain_root_for_test(Some(true));
+        Fx { _g: g, tmp }
+    }
+
+    /// An identity sealed under `key` with `flags`, and its device file.
+    fn lay_down(fx: &Fx, key: &[u8; 32], salt: [u8; 16], flags: u8) {
+        let plain = NativeKeypair::from_secret_bytes(&[0x61; 32]).to_protobuf_encoding().unwrap();
+        let sealed = encryption::encrypt_with_flags(&plain, key, &salt, flags).unwrap();
+        std::fs::write(fx.root().join("identity.key"), sealed).unwrap();
+        let device = NativeKeypair::from_secret_bytes(&[0x62; 32]);
+        crate::identity::device_key::rewrite_device_key_protection(&device, Some(key), flags & 0x01 != 0, flags & 0x02 != 0)
+            .unwrap();
+        encryption::clear_session_key();
+    }
+
+    /// A `0x03` identity (password, its key cached for a silent start) whose key an
+    /// older build left in the login keychain.
+    fn cached_in_login_keychain(fx: &Fx) -> [u8; 32] {
+        let salt = [0x23u8; 16];
+        let key = encryption::derive_wrapping_key_from_password(PIN, &salt).unwrap();
+        lay_down(fx, &key, salt, 0x03);
+        old_build_writes(&fx.slot(), &key);
+        key
+    }
+
+    fn refuse_both_groups() {
+        inject(Fault::KeysRefused);
+        inject(Fault::AppIdRefused);
+        use_mac_layout(Some(true));
+        assert_eq!(platform_keystore::protected_writable(), Writable::No);
+    }
+
+    #[test]
+    fn a_missing_entitlement_keeps_the_legacy_key_and_deletes_nothing() {
+        let fx = fx();
+        let key = cached_in_login_keychain(&fx);
+        refuse_both_groups();
+        settle_keychain_move_at(fx.root(), None);
+        unlock_identity(None).expect("the silent start still opens from the login keychain");
+        encryption::clear_session_key();
+        unlock_identity(Some(PIN.into())).expect("typed");
+        assert_ne!(fx.flags() & 0x02, 0, "a refused keychain dropped the cached key");
+        change_password(PIN.into(), NEW.into()).expect("change");
+        assert_eq!(held(Store::Legacy, &fx.slot()), Some(key.to_vec()), "a key was deleted");
+        // SAFETY: serialized by the fixture's lock; the debug hook makes this root count
+        // as the OS's own, so only the keychain's answer can refuse the offer.
+        unsafe { std::env::set_var("HOLLOW_TEST_KEYCHAIN_DEFAULTS", "1") };
+        let offered = keychain_default_eligible();
+        unsafe { std::env::remove_var("HOLLOW_TEST_KEYCHAIN_DEFAULTS") };
+        assert!(!offered, "keychain protection offered where it cannot be kept");
+        assert!(!get_identity_protection_status().unwrap().os_keychain_available);
+    }
+
+    /// Store rule 4 (review F5): a probe that fails or cannot say never takes the
+    /// silent start off the OS's own data root.
+    #[test]
+    fn a_failed_probe_never_drops_the_cached_key_on_the_os_root() {
+        for fault in [Fault::KeysRefused, Fault::ProbeUnknown] {
+            let fx = fx();
+            let salt = [0x24u8; 16];
+            let key = encryption::derive_wrapping_key_from_password(PIN, &salt).unwrap();
+            lay_down(&fx, &key, salt, 0x03);
+            set_profile(fx.root(), &key);
+            inject(fault);
+            if fault == Fault::KeysRefused {
+                inject(Fault::AppIdRefused);
+            }
+            use_mac_layout(Some(true));
+            unlock_identity(Some(PIN.into())).expect("typed");
+            assert_ne!(fx.flags() & 0x02, 0, "{fault:?}: the cached key was dropped");
+            assert_eq!(held(Store::Keys, &fx.slot()), Some(key.to_vec()), "{fault:?}: the cached key left the keychain");
+            if fault == Fault::ProbeUnknown {
+                encryption::clear_session_key();
+                unlock_identity(Some(PIN.into())).expect("typed");
+                let err = set_require_password_on_launch(true).and_then(|()| set_require_password_on_launch(false));
+                assert!(err.is_err_and(|e| e.contains("nothing changed")), "an unknown answer wrote a new key");
+            }
+        }
+    }
+
+    /// A password change carries the cached key into a keychain that takes it, drops
+    /// the keychain flag where it definitely cannot (else every start asks for the
+    /// password with a stale key beside the file), and changes nothing where the
+    /// keychain gave no answer.
+    #[test]
+    fn a_password_change_keeps_the_cached_key_only_where_the_keychain_takes_it() {
+        let opens_silently = || {
+            encryption::clear_session_key();
+            let opened = unlock_identity(None).is_ok();
+            encryption::clear_session_key();
+            opened
+        };
+        let f = fx();
+        let salt = [0x25u8; 16];
+        let key = encryption::derive_wrapping_key_from_password(PIN, &salt).unwrap();
+        lay_down(&f, &key, salt, 0x03);
+        set_profile(f.root(), &key);
+        change_password(PIN.into(), NEW.into()).expect("change");
+        assert_ne!(f.flags() & 0x02, 0, "a working keychain lost the cached key");
+        assert!(opens_silently(), "the cached key did not follow the new password");
+        drop(f);
+
+        let f = fx();
+        lay_down(&f, &key, salt, 0x03);
+        set_profile(f.root(), &key);
+        let before = std::fs::read(f.root().join("identity.key")).unwrap();
+        inject(Fault::ProbeUnknown);
+        use_mac_layout(Some(true));
+        let err = change_password(PIN.into(), NEW.into()).expect_err("a keychain that cannot say");
+        assert!(err.contains("nothing changed"), "{err}");
+        assert_eq!(std::fs::read(f.root().join("identity.key")).unwrap(), before, "an unknown answer changed the file");
+        clear_faults();
+        use_mac_layout(Some(true));
+        assert!(opens_silently());
+        drop(f);
+
+        // A keychain that said yes but did not keep the key changes nothing either.
+        let f = fx();
+        lay_down(&f, &key, salt, 0x03);
+        set_profile(f.root(), &key);
+        let before = std::fs::read(f.root().join("identity.key")).unwrap();
+        let _ = platform_keystore::protected_writable();
+        inject(Fault::StoreFails);
+        assert!(change_password(PIN.into(), NEW.into()).is_err(), "a key the keychain did not keep");
+        clear_faults();
+        assert_eq!(std::fs::read(f.root().join("identity.key")).unwrap(), before, "the file moved without its key");
+        drop(f);
+
+        let f = fx();
+        lay_down(&f, &key, salt, 0x03);
+        set_profile(f.root(), &key);
+        refuse_both_groups();
+        change_password(PIN.into(), NEW.into()).expect("change");
+        assert_eq!(f.flags() & 0x02, 0, "the flag outlived a keychain that refused the new key");
+        assert_eq!(held(Store::Keys, &f.slot()), Some(key.to_vec()), "a refused keychain deleted a key");
+        encryption::clear_session_key();
+        unlock_identity(Some(NEW.into())).expect("the new password opens it");
+    }
+
+    #[test]
+    fn a_portable_or_override_session_moves_nothing() {
+        assert!(!keychain_move_allowed(Some("/elsewhere"), true, true, false));
+        assert!(keychain_move_allowed(Some("/elsewhere"), true, true, true), "the debug fleet hook");
+        assert!(!keychain_move_allowed(None, false, false, false));
+        assert!(keychain_move_allowed(None, true, false, false));
+        assert!(keychain_move_allowed(None, false, true, false), "a pinned root an older build locked");
+
+        let fx = fx();
+        lay_down(&fx, &[0x31; 32], [0; 16], 0x02);
+        old_build_writes(&fx.slot(), &[0x31; 32]);
+        settle_keychain_move_at(fx.root(), Some("/override"));
+        assert_eq!(held(Store::Legacy, &fx.slot()), Some(vec![0x31; 32]), "an override session moved a key");
+        keychain_root_for_test(Some(false));
+        std::fs::write(fx.root().join("identity.key"), b"plain").unwrap();
+        settle_keychain_move_at(fx.root(), None);
+        assert_eq!(held(Store::Legacy, &fx.slot()), Some(vec![0x31; 32]), "a root off the OS root moved a key");
+        lay_down(&fx, &[0x31; 32], [0; 16], 0x02);
+        settle_keychain_move_at(fx.root(), None);
+        assert_eq!(held(Store::Keys, &fx.slot()), Some(vec![0x31; 32]));
+        assert!(held(Store::Legacy, &fx.slot()).is_none());
+    }
+
+    /// The move has one fixed point: an unlock may heal a key into the protected
+    /// keychain, but never deletes the login keychain's item.
+    #[test]
+    fn an_unlock_never_moves_a_key() {
+        let fx = fx();
+        lay_down(&fx, &[0x41; 32], [0; 16], 0x02);
+        old_build_writes(&fx.slot(), &[0x41; 32]);
+        unlock_identity(None).expect("opens from the login keychain");
+        assert_eq!(held(Store::Legacy, &fx.slot()), Some(vec![0x41; 32]), "an unlock deleted the old item");
+        settle_keychain_move_at(fx.root(), None);
+        assert!(held(Store::Legacy, &fx.slot()).is_none());
+        assert_eq!(held(Store::Keys, &fx.slot()), Some(vec![0x41; 32]));
+    }
+
+    #[test]
+    fn a_duress_wipe_moves_nothing() {
+        let _fx = fx();
+        keychain_root_for_test(Some(false));
+        enable_password_protection(PIN.into(), true).expect("enable");
+        set_duress_code(PIN.into(), CODE.into(), crate::identity::duress::SCOPE_IDENTITY.into(), false, None)
+            .expect("duress");
+        let other = format!("wrapping_key.{}", "cd".repeat(8));
+        old_build_writes(&other, &[0x51; 32]);
+        encryption::clear_session_key();
+        let _ = take_writes();
+        assert_eq!(unlock_identity(Some(CODE.into())).err().as_deref(), Some("duress"));
+        assert_eq!(held(Store::Legacy, &other), Some(vec![0x51; 32]), "the wipe moved another profile's key");
+        assert!(names_in(Store::Keys).is_empty(), "the wipe wrote the protected keychain");
+        assert_eq!(take_writes(), 0);
+    }
+
+    #[test]
+    fn a_typed_unlock_reads_no_keychain() {
+        let fx = fx();
+        enable_password_protection(PIN.into(), true).expect("enable");
+        old_build_writes(&fx.slot(), &[0x61; 32]);
+        encryption::clear_session_key();
+        let _ = take_reads();
+        unlock_identity(Some(PIN.into())).expect("typed");
+        assert!(take_reads().is_empty(), "a typed unlock read the keychain");
+    }
+
+    #[test]
+    fn heal_leaves_no_conflict_copy_behind() {
+        let fx = fx();
+        lay_down(&fx, &[0x71; 32], [0; 16], 0x02);
+        plant(Store::Keys, &fx.slot(), &[0x70; 32]);
+        old_build_writes(&fx.slot(), &[0x71; 32]);
+        settle_keychain_move_at(fx.root(), None);
+        assert!(names_in(Store::Keys).iter().any(|n| n.contains(".m.")), "the move left no copy to heal from");
+        unlock_identity(None).expect("opens from the copy");
+        assert_eq!(held(Store::Keys, &fx.slot()), Some(vec![0x71; 32]), "the proven key was not kept");
+        assert_eq!(names_in(Store::Keys), vec![fx.slot()], "a copy outlived the heal");
     }
 }

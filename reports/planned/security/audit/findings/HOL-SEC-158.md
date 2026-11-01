@@ -26,8 +26,9 @@ local-only and cleared after 60 s.
 
 ## Residual risk
 
-The macOS Rust keychain item keeps its class (the data-protection keychain needs a signing
-change); checked on devices in the regression pass.
+Resolved in 0.14 (HOL-SEC-187): the macOS Rust keychain item moves into the
+data-protection keychain, class `AfterFirstUnlockThisDeviceOnly`, never synchronizable.
+Checked on devices in the regression pass.
 
 ## Test
 

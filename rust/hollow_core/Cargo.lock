@@ -1929,6 +1929,7 @@ dependencies = [
  "bip39",
  "blind-rsa-signatures",
  "bs58",
+ "core-foundation",
  "crdts",
  "dirs",
  "ed25519-dalek",

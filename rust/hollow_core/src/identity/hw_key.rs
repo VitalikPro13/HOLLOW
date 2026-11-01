@@ -79,9 +79,22 @@ pub(crate) enum Presence {
     Unknown,
 }
 
-/// The platform side. `create` makes a fresh key under `alias` (replacing one) and
-/// refuses anything not in secure hardware; `apply` answers `None` when the operation
-/// failed, which on a key that exists is a busy keystore, never a lost key.
+/// What asking the keystore to move a key into the keys group answered (iOS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub(crate) enum Regroup {
+    /// The key is in the keys group now (moved, or made there).
+    InKeys,
+    /// The system kept it in the app-ID group, which a team change loses.
+    Refused,
+    Absent,
+    Unknown,
+}
+
+/// The platform side. `create` makes a fresh key under `alias` (replacing one in the
+/// group it writes, never elsewhere) and refuses anything not in secure hardware;
+/// `apply` answers `None` when the operation failed, which on a key that exists is a
+/// busy keystore, never a lost key. `delete` removes `alias` in every group.
 pub(crate) trait Oracle: Send + Sync {
     fn kind(&self) -> Kind;
     fn create(&self, alias: &str) -> Result<Level, String>;
@@ -90,6 +103,11 @@ pub(crate) trait Oracle: Send + Sync {
     fn delete(&self, alias: &str);
     /// Every alias of an app-lock key the keystore holds, `None` when it could not say.
     fn list(&self) -> Option<Vec<String>>;
+    /// Keystores without access groups hold every key where it stays.
+    fn regroup(&self, alias: &str) -> Regroup {
+        let _ = alias;
+        Regroup::InKeys
+    }
 }
 
 static ORACLE: RwLock<Option<Arc<dyn Oracle>>> = RwLock::new(None);
@@ -192,10 +210,21 @@ fn alias_of(id: &str) -> String {
     format!("{ALIAS_PREFIX}{id}")
 }
 
+/// The key a re-bind makes in the keys group, for files carrying `FLAG_GROUP_KEY`.
+fn group_alias_of(id: &str) -> String {
+    format!("{ALIAS_PREFIX}{id}.k")
+}
+
 /// The profile id an alias names, only for an alias of exactly our shape.
 fn id_of_alias(alias: &str) -> Option<&str> {
-    let id = alias.strip_prefix(ALIAS_PREFIX)?;
+    let rest = alias.strip_prefix(ALIAS_PREFIX)?;
+    let id = rest.strip_suffix(".k").unwrap_or(rest);
     (id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))).then_some(id)
+}
+
+/// The alias a file with `flags` is wrapped under.
+fn alias_for(id: &str, flags: u8) -> String {
+    if flags & crate::identity::encryption::FLAG_GROUP_KEY != 0 { group_alias_of(id) } else { alias_of(id) }
 }
 
 /// Most keys one sweep deletes; more wait for the next.
@@ -245,6 +274,7 @@ pub(crate) fn sweep_orphans(root: &Path) -> usize {
 }
 
 /// The hardware key of one profile, ready to use.
+#[derive(Clone)]
 pub(crate) struct Bound {
     oracle: Arc<dyn Oracle>,
     alias: String,
@@ -260,12 +290,12 @@ impl Bound {
     }
 }
 
-/// The profile's existing key, `Ok(None)` with no oracle, no id or a key the keystore
-/// says is gone, [`BUSY`] when the keystore could not say.
-pub(crate) fn existing(root: &Path) -> Result<Option<Bound>, String> {
+/// The existing key a file with `flags` is wrapped under, `Ok(None)` with no oracle,
+/// no id or a key the keystore says is gone, [`BUSY`] when the keystore could not say.
+pub(crate) fn existing(root: &Path, flags: u8) -> Result<Option<Bound>, String> {
     let Some(oracle) = oracle() else { return Ok(None) };
     let Some(id) = profile_id(root, false) else { return Ok(None) };
-    let alias = alias_of(&id);
+    let alias = alias_for(&id, flags);
     match oracle.exists(&alias) {
         Presence::Present => Ok(Some(Bound { oracle, alias })),
         Presence::Absent => Ok(None),
@@ -290,6 +320,7 @@ pub(crate) fn ensure(root: &Path, fresh: bool) -> Result<Option<Bound>, String> 
     if make {
         if fresh {
             oracle.delete(&alias);
+            oracle.delete(&group_alias_of(&id));
         }
         match oracle.create(&alias) {
             Ok(level) => crate::hollow_log!("[HOLLOW-ID] The app lock is tied to this device's hardware ({})", level.name()),
@@ -303,8 +334,48 @@ pub(crate) fn ensure(root: &Path, fresh: bool) -> Result<Option<Bound>, String> 
     Ok(Some(Bound { oracle, alias }))
 }
 
-/// Deletes the profile's key. Part of a wipe, so it says nothing.
+/// Deletes the profile's keys. Part of a wipe, so it says nothing.
 pub(crate) fn forget(root: &Path) {
+    if let (Some(oracle), Some(id)) = (oracle(), profile_id(root, false)) {
+        oracle.delete(&alias_of(&id));
+        oracle.delete(&group_alias_of(&id));
+    }
+}
+
+/// Asks the keystore to move the profile's first key into the keys group, where a
+/// team change keeps it. `None` with no oracle or no id.
+pub(crate) fn regroup(root: &Path) -> Option<Regroup> {
+    let (oracle, id) = (oracle()?, profile_id(root, false)?);
+    Some(oracle.regroup(&alias_of(&id)))
+}
+
+/// The keys-group key a re-bind wraps the identity under, made fresh: nothing on disk
+/// carries `FLAG_GROUP_KEY` before the identity file that the caller writes next.
+pub(crate) fn make_group_key(root: &Path) -> Result<Option<Bound>, String> {
+    let Some(oracle) = oracle().filter(|_| !refused()) else { return Ok(None) };
+    let id = profile_id(root, false).ok_or("No hardware key to move")?;
+    let alias = group_alias_of(&id);
+    if let Err(e) = oracle.create(&alias) {
+        crate::hollow_log!("[HOLLOW-ID] The app lock stays on its first hardware key: {e}");
+        return Ok(None);
+    }
+    // `FLAG_GROUP_KEY` promises a key the team change keeps: one that landed anywhere
+    // else would strand the move and fire the duress note for nothing.
+    match oracle.regroup(&alias) {
+        Regroup::InKeys => Ok(Some(Bound { oracle, alias })),
+        other => {
+            oracle.delete(&alias);
+            crate::hollow_log!("[HOLLOW-ID] The app lock stays on its first hardware key: the new key is not in the keys group ({other:?})");
+            Ok(None)
+        }
+    }
+}
+
+/// Deletes the first key once no file needs it any more.
+pub(crate) fn drop_first_key_if_unused(root: &Path, still_needed: bool) {
+    if still_needed {
+        return;
+    }
     if let (Some(oracle), Some(id)) = (oracle(), profile_id(root, false)) {
         oracle.delete(&alias_of(&id));
     }
@@ -446,7 +517,7 @@ mod android {
 
 #[cfg(target_os = "ios")]
 mod ios {
-    //! `AppDelegate.swift` registers five C functions over the Secure Enclave at
+    //! `AppDelegate.swift` registers six C functions over the Secure Enclave at
     //! launch. The extension never does, so it never binds anything.
 
     use super::*;
@@ -456,6 +527,8 @@ mod ios {
     type ExistsFn = unsafe extern "C" fn(*const c_char) -> i32;
     type ApplyFn = unsafe extern "C" fn(*const c_char, *const u8, usize, *mut u8) -> i32;
     type DeleteFn = unsafe extern "C" fn(*const c_char);
+    /// 1 in the keys group, 0 refused (stays in the app-ID group), 2 absent, -1 unknown.
+    type RegroupFn = unsafe extern "C" fn(*const c_char) -> i32;
     /// Writes the held aliases, newline-separated and NUL-terminated, into the buffer
     /// of the given size; answers the bytes written before the NUL, or -1.
     type ListFn = unsafe extern "C" fn(*mut c_char, usize) -> i32;
@@ -469,6 +542,7 @@ mod ios {
         apply: ApplyFn,
         delete: DeleteFn,
         list: ListFn,
+        regroup: RegroupFn,
     }
 
     fn c(alias: &str) -> Option<CString> {
@@ -523,6 +597,17 @@ mod ios {
             let text = std::str::from_utf8(&buf[..n]).ok()?;
             Some(text.split('\n').filter(|a| !a.is_empty()).map(str::to_string).collect())
         }
+
+        fn regroup(&self, alias: &str) -> Regroup {
+            let Some(a) = c(alias) else { return Regroup::Unknown };
+            // SAFETY: as above.
+            match unsafe { (self.regroup)(a.as_ptr()) } {
+                1 => Regroup::InKeys,
+                0 => Regroup::Refused,
+                2 => Regroup::Absent,
+                _ => Regroup::Unknown,
+            }
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -532,8 +617,9 @@ mod ios {
         apply: ApplyFn,
         delete: DeleteFn,
         list: ListFn,
+        regroup: RegroupFn,
     ) {
-        install(Arc::new(Enclave { create, exists, apply, delete, list }));
+        install(Arc::new(Enclave { create, exists, apply, delete, list, regroup }));
     }
 }
 
@@ -567,6 +653,11 @@ pub(crate) mod stub {
         /// The next this many `exists` calls cannot say.
         unknown_exists: std::sync::atomic::AtomicU32,
         list_fails: std::sync::atomic::AtomicBool,
+        /// Aliases whose key sits in the app-ID group.
+        app_id_group: Mutex<std::collections::HashSet<String>>,
+        regroup_refused: std::sync::atomic::AtomicBool,
+        /// Keys are made in the app-ID group: a build whose profile lacks the keys group.
+        creates_in_app_id_group: std::sync::atomic::AtomicBool,
     }
 
     impl Stub {
@@ -579,6 +670,9 @@ pub(crate) mod stub {
                 applies: 0.into(),
                 unknown_exists: 0.into(),
                 list_fails: false.into(),
+                app_id_group: Mutex::new(std::collections::HashSet::new()),
+                regroup_refused: false.into(),
+                creates_in_app_id_group: false.into(),
             })
         }
 
@@ -591,6 +685,9 @@ pub(crate) mod stub {
                 applies: 0.into(),
                 unknown_exists: 0.into(),
                 list_fails: false.into(),
+                app_id_group: Mutex::new(std::collections::HashSet::new()),
+                regroup_refused: false.into(),
+                creates_in_app_id_group: false.into(),
             })
         }
 
@@ -634,6 +731,24 @@ pub(crate) mod stub {
         pub(crate) fn key_count(&self) -> usize {
             self.keys.lock().unwrap().len()
         }
+
+        /// Moves `alias`'s key into the app-ID group, where 0.12.2 to 0.13 made it.
+        pub(crate) fn put_in_app_id_group(&self, alias: &str) {
+            self.app_id_group.lock().unwrap().insert(alias.to_string());
+        }
+
+        /// The system refuses to change a key's group.
+        pub(crate) fn refuse_regroup(&self) {
+            self.regroup_refused.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        pub(crate) fn create_in_app_id_group(&self) {
+            self.creates_in_app_id_group.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        pub(crate) fn in_app_id_group(&self, alias: &str) -> bool {
+            self.keys.lock().unwrap().contains_key(alias) && self.app_id_group.lock().unwrap().contains(alias)
+        }
     }
 
     impl Oracle for Stub {
@@ -654,6 +769,11 @@ pub(crate) mod stub {
                 }
             }
             self.keys.lock().unwrap().insert(alias.to_string(), k);
+            if self.creates_in_app_id_group.load(std::sync::atomic::Ordering::SeqCst) {
+                self.app_id_group.lock().unwrap().insert(alias.to_string());
+            } else {
+                self.app_id_group.lock().unwrap().remove(alias);
+            }
             Ok(Level::StrongBox)
         }
 
@@ -692,6 +812,21 @@ pub(crate) mod stub {
 
         fn delete(&self, alias: &str) {
             self.keys.lock().unwrap().remove(alias);
+            self.app_id_group.lock().unwrap().remove(alias);
+        }
+
+        fn regroup(&self, alias: &str) -> Regroup {
+            if !self.keys.lock().unwrap().contains_key(alias) {
+                return Regroup::Absent;
+            }
+            if !self.app_id_group.lock().unwrap().contains(alias) {
+                return Regroup::InKeys;
+            }
+            if self.regroup_refused.load(std::sync::atomic::Ordering::SeqCst) {
+                return Regroup::Refused;
+            }
+            self.app_id_group.lock().unwrap().remove(alias);
+            Regroup::InKeys
         }
 
         fn list(&self) -> Option<Vec<String>> {
@@ -804,7 +939,7 @@ mod tests {
         s.fail_exists(1);
         assert_eq!(ensure(tmp.path(), false).err().as_deref(), Some(BUSY));
         s.fail_exists(1);
-        assert_eq!(existing(tmp.path()).err().as_deref(), Some(BUSY));
+        assert_eq!(existing(tmp.path(), 0).err().as_deref(), Some(BUSY));
         assert!(ensure(tmp.path(), false).unwrap().is_some());
         assert_eq!(s.snapshot(), keys, "the key was replaced");
         install_for_test(None);
@@ -816,7 +951,7 @@ mod tests {
         install_for_test(None);
         assert!(!available());
         assert!(ensure(tmp.path(), true).unwrap().is_none());
-        assert!(existing(tmp.path()).unwrap().is_none());
+        assert!(existing(tmp.path(), 0).unwrap().is_none());
     }
 
     // f-applock-followups

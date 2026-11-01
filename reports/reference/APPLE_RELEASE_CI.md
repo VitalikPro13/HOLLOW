@@ -211,11 +211,14 @@ is one.
 |---|---|---|
 | `DEVELOPER_ID_P12_BASE64` | secret | Keychain Access on the Mac that holds "Developer ID Application: NAME (TEAM)": export the certificate WITH its private key as a .p12 (only that one identity), then `base64 -i DeveloperID.p12 \| pbcopy` |
 | `DEVELOPER_ID_P12_PASSWORD` | secret | the password typed at that export |
+| `DEVELOPER_ID_PROFILE_BASE64` | secret | HOL-SEC-187: developer.apple.com > Profiles > "+" > Distribution > **Developer ID**, App ID `com.anonlisten.hollow` (with the App Groups capability holding `group.com.anonlisten.hollow.keys`), the SAME Developer ID Application certificate as the .p12; download the `.provisionprofile`, then `base64 -i Hollow_Developer_ID.provisionprofile \| pbcopy`. Remade whenever the certificate changes |
 | `NOTARY_KEY_ID` | secret | App Store Connect > Users and Access > Integrations > App Store Connect API > Team Keys > "+", name "Hollow notary", Access **Developer**: the new key's Key ID |
 | `NOTARY_ISSUER_ID` | secret | the Issuer ID shown above that key list |
 | `NOTARY_KEY_P8_BASE64` | secret | that key's `AuthKey_<id>.p8` (downloadable once): `base64 -i AuthKey_<id>.p8 \| pbcopy` |
 | `MAC_TEAM_ID` | variable | the 10-character Team ID (developer.apple.com > Membership) |
 | `MAC_SIGN_NAME` | variable | the NAME part of the Developer ID certificate's common name (`security find-identity -v -p codesigning` on that Mac) |
+| `MAC_PREVIOUS_RELEASE_ZIP_URL` | variable (repository) | the signed updater zip of the last release before 0.14 (`hollow-0.13.0-macos.zip`), which `macos-keychain-check` runs against |
+| `MAC_PREVIOUS_RELEASE_ZIP_SHA256` | variable (repository) | its sha256, as published in that release's SHA256SUMS |
 
 ### `apple-asc-upload`
 

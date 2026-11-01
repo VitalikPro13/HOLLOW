@@ -277,6 +277,18 @@ final class RelayBackgroundTask {
         }
       }
 
+      // hollow/keychain_groups → the two groups App Lock names on every call
+      // (app_lock_service.dart, HOL-SEC-187).
+      let groups = FlutterMethodChannel(
+        name: "hollow/keychain_groups",
+        binaryMessenger: controller.binaryMessenger)
+      groups.setMethodCallHandler { call, result in
+        guard call.method == "groups", let keys = HollowHwKey.keysGroup,
+          let appId = HollowHwKey.appIdGroup
+        else { return result(nil) }
+        result(["keys": keys, "appId": appId])
+      }
+
       // hollow/privacy → phrase screens, App Lock and secrets on the clipboard
       // (privacy_screen.dart, secret_clipboard.dart).
       let privacy = FlutterMethodChannel(
@@ -403,10 +415,15 @@ final class RelayBackgroundTask {
 }
 
 /// The Secure Enclave key that ties the app lock's wrap to this iPhone
-/// (`identity/hw_key.rs`). Rust calls these five C functions; Swift only runs the
+/// (`identity/hw_key.rs`). Rust calls these six C functions; Swift only runs the
 /// enclave. The key is usable while the phone is unlocked, on this device only, and
 /// asks for neither the passcode nor Face ID, so a new face or finger never strands
 /// the identity. The extension registers nothing and binds nothing.
+///
+/// HOL-SEC-187: every keychain call names one group. Keys are made in the keys
+/// group (the app-ID group only where a build lacks it), found there first and then
+/// in the app-ID group where 0.12.2 to 0.13 made them, and a delete names each
+/// group in turn, so making a key never removes one in another group.
 enum HollowHwKey {
   typealias AliasFn = @convention(c) (UnsafePointer<CChar>?) -> Int32
   typealias ApplyFn = @convention(c) (
@@ -414,19 +431,25 @@ enum HollowHwKey {
   ) -> Int32
   typealias DeleteFn = @convention(c) (UnsafePointer<CChar>?) -> Void
   typealias ListFn = @convention(c) (UnsafeMutablePointer<CChar>?, Int) -> Int32
-  typealias RegisterFn = @convention(c) (AliasFn, AliasFn, ApplyFn, DeleteFn, ListFn) -> Void
+  typealias RegisterFn = @convention(c) (AliasFn, AliasFn, ApplyFn, DeleteFn, ListFn, AliasFn) -> Void
+
+  static let keysGroup = Bundle.main.object(forInfoDictionaryKey: "HollowKeysGroup") as? String
+  static let appIdGroup = Bundle.main.object(forInfoDictionaryKey: "HollowAppIdGroup") as? String
+
+  /// Lookup order: the keys group, then the app-ID group.
+  static var groups: [String] { [keysGroup, appIdGroup].compactMap { $0 } }
 
   /// No enclave, nothing registers, and the wrap stays Argon2id. (An Apple silicon
   /// simulator reports one and binds like a phone.)
   static func register() {
-    guard SecureEnclave.isAvailable else { return }
+    guard SecureEnclave.isAvailable, !groups.isEmpty else { return }
     // RTLD_DEFAULT: the symbol lives in the hollow_core framework.
     guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "hollow_hw_key_register")
     else {
       NSLog("[HOLLOW-HWKEY] register symbol missing")
       return
     }
-    unsafeBitCast(sym, to: RegisterFn.self)(hwCreate, hwExists, hwApply, hwDelete, hwList)
+    unsafeBitCast(sym, to: RegisterFn.self)(hwCreate, hwExists, hwApply, hwDelete, hwList, hwRegroup)
     NSLog("[HOLLOW-HWKEY] registered")
   }
 
@@ -437,35 +460,40 @@ enum HollowHwKey {
     return Data("\(tagPrefix)\(String(cString: alias))".utf8)
   }
 
-  /// The alias of every app-lock key the keychain holds, nil when it failed to say.
+  /// The alias of every app-lock key in either group, nil when one failed to say.
   static func aliases() -> [String]? {
-    let query: [String: Any] = [
-      kSecClass as String: kSecClassKey,
-      kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-      kSecMatchLimit as String: kSecMatchLimitAll,
-      kSecReturnAttributes as String: true,
-    ]
-    var items: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &items)
-    if status == errSecItemNotFound { return [] }
-    guard status == errSecSuccess, let found = items as? [[String: Any]] else {
-      NSLog("[HOLLOW-HWKEY] keychain did not list: %d", status)
-      return nil
+    var all = Set<String>()
+    for group in groups {
+      let query: [String: Any] = [
+        kSecClass as String: kSecClassKey,
+        kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+        kSecAttrAccessGroup as String: group,
+        kSecMatchLimit as String: kSecMatchLimitAll,
+        kSecReturnAttributes as String: true,
+      ]
+      var items: CFTypeRef?
+      let status = SecItemCopyMatching(query as CFDictionary, &items)
+      if status == errSecItemNotFound || status == errSecMissingEntitlement { continue }
+      guard status == errSecSuccess, let found = items as? [[String: Any]] else {
+        NSLog("[HOLLOW-HWKEY] keychain did not list: %d", status)
+        return nil
+      }
+      for attributes in found {
+        guard let tag = attributes[kSecAttrApplicationTag as String] as? Data,
+          let text = String(data: tag, encoding: .utf8), text.hasPrefix(tagPrefix)
+        else { continue }
+        all.insert(String(text.dropFirst(tagPrefix.count)))
+      }
     }
-    return found.compactMap { attributes in
-      guard let tag = attributes[kSecAttrApplicationTag as String] as? Data,
-        let text = String(data: tag, encoding: .utf8), text.hasPrefix(tagPrefix)
-      else { return nil }
-      return String(text.dropFirst(tagPrefix.count))
-    }
+    return all.sorted()
   }
 
-  /// The key under [tag], and the keychain's status: `errSecItemNotFound` is the only
-  /// answer that means the key is gone.
-  static func lookup(_ tag: Data) -> (SecKey?, OSStatus) {
+  /// The key under [tag] in [group], and the keychain's status.
+  static func lookup(_ tag: Data, in group: String) -> (SecKey?, OSStatus) {
     let query: [String: Any] = [
       kSecClass as String: kSecClassKey,
       kSecAttrApplicationTag as String: tag,
+      kSecAttrAccessGroup as String: group,
       kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
       kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
       kSecReturnRef as String: true,
@@ -477,41 +505,65 @@ enum HollowHwKey {
     return ((found as! SecKey), status)
   }
 
+  /// The key under [tag], keys group first. `errSecItemNotFound` only when no group
+  /// has it; a group this build may not use counts as not holding it.
+  static func lookup(_ tag: Data) -> (SecKey?, OSStatus) {
+    var answer: OSStatus = errSecItemNotFound
+    for group in groups {
+      let (key, status) = lookup(tag, in: group)
+      if key != nil { return (key, status) }
+      if status != errSecItemNotFound && status != errSecMissingEntitlement { answer = status }
+    }
+    return (nil, answer)
+  }
+
   static func find(_ tag: Data) -> SecKey? { lookup(tag).0 }
 
-  static func remove(_ tag: Data) {
+  static func remove(_ tag: Data, in group: String) {
     let query: [String: Any] = [
       kSecClass as String: kSecClassKey,
       kSecAttrApplicationTag as String: tag,
+      kSecAttrAccessGroup as String: group,
     ]
     SecItemDelete(query as CFDictionary)
   }
+
+  /// A fresh key under [tag] in [group], replacing one there only.
+  static func create(_ tag: Data, in group: String) -> Bool {
+    remove(tag, in: group)
+    guard
+      let access = SecAccessControlCreateWithFlags(
+        nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .privateKeyUsage, nil)
+    else { return false }
+    let attributes: [String: Any] = [
+      kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+      kSecAttrKeySizeInBits as String: 256,
+      kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+      kSecAttrAccessGroup as String: group,
+      kSecPrivateKeyAttrs as String: [
+        kSecAttrIsPermanent as String: true,
+        kSecAttrApplicationTag as String: tag,
+        kSecAttrAccessControl as String: access,
+        kSecAttrAccessGroup as String: group,
+      ] as [String: Any],
+    ]
+    var error: Unmanaged<CFError>?
+    return SecKeyCreateRandomKey(attributes as CFDictionary, &error) != nil
+  }
 }
 
+/// A group key (`.k`, what a re-bind wraps under) is made only in the keys group:
+/// one in the app-ID group would be lost at the team change it exists to survive.
 private let hwCreate: HollowHwKey.AliasFn = { alias in
-  guard let tag = HollowHwKey.tag(alias) else { return 0 }
-  HollowHwKey.remove(tag)
-  guard
-    let access = SecAccessControlCreateWithFlags(
-      nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .privateKeyUsage, nil)
-  else { return 0 }
-  let attributes: [String: Any] = [
-    kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-    kSecAttrKeySizeInBits as String: 256,
-    kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-    kSecPrivateKeyAttrs as String: [
-      kSecAttrIsPermanent as String: true,
-      kSecAttrApplicationTag as String: tag,
-      kSecAttrAccessControl as String: access,
-    ] as [String: Any],
-  ]
-  var error: Unmanaged<CFError>?
-  guard SecKeyCreateRandomKey(attributes as CFDictionary, &error) != nil else {
-    NSLog("[HOLLOW-HWKEY] key not made")
-    return 0
+  guard let alias = alias, let tag = HollowHwKey.tag(alias) else { return 0 }
+  let groups = String(cString: alias).hasSuffix(".k")
+    ? [HollowHwKey.keysGroup].compactMap { $0 } : HollowHwKey.groups
+  for group in groups where HollowHwKey.create(tag, in: group) {
+    NSLog("[HOLLOW-HWKEY] key made, level=secure enclave, %@", group == HollowHwKey.keysGroup ? "keys group" : "app-ID group")
+    return 1
   }
-  NSLog("[HOLLOW-HWKEY] key made, level=secure enclave")
-  return 1
+  NSLog("[HOLLOW-HWKEY] key not made")
+  return 0
 }
 
 /// 1 the key is there, 0 the keychain says it is not, -1 it failed to say (locked,
@@ -547,8 +599,36 @@ private let hwApply: HollowHwKey.ApplyFn = { alias, input, length, out in
   return 1
 }
 
+/// A wipe or a sweep: the alias goes in every group, each named in turn.
 private let hwDelete: HollowHwKey.DeleteFn = { alias in
-  if let tag = HollowHwKey.tag(alias) { HollowHwKey.remove(tag) }
+  guard let tag = HollowHwKey.tag(alias) else { return }
+  for group in HollowHwKey.groups { HollowHwKey.remove(tag, in: group) }
+}
+
+/// 1 the key is in the keys group (now or already), 0 the system kept it in the
+/// app-ID group, 2 no such key, -1 the keychain could not say or this build may not
+/// use the keys group.
+private let hwRegroup: HollowHwKey.AliasFn = { alias in
+  guard let tag = HollowHwKey.tag(alias), let keys = HollowHwKey.keysGroup,
+    let appId = HollowHwKey.appIdGroup
+  else { return -1 }
+  if HollowHwKey.lookup(tag, in: keys).0 != nil { return 1 }
+  let query: [String: Any] = [
+    kSecClass as String: kSecClassKey,
+    kSecAttrApplicationTag as String: tag,
+    kSecAttrAccessGroup as String: appId,
+  ]
+  let change: [String: Any] = [kSecAttrAccessGroup as String: keys]
+  let status = SecItemUpdate(query as CFDictionary, change as CFDictionary)
+  NSLog("[HOLLOW-HWKEY] move into the keys group: %d", status)
+  switch status {
+  case errSecSuccess: return HollowHwKey.lookup(tag, in: keys).0 != nil ? 1 : 0
+  case errSecItemNotFound: return 2
+  // A profile without the keys group (the personal-team build) says nothing about
+  // what the system allows a release.
+  case errSecInteractionNotAllowed, errSecMissingEntitlement: return -1
+  default: return 0
+  }
 }
 
 /// The held aliases, newline-separated and NUL-terminated, as many whole ones as fit

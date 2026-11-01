@@ -1046,6 +1046,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     try {
       await recovery_api.settleRelink();
     } catch (_) {}
+    // macOS: keys an older build left in the login keychain move into the
+    // data-protection keychain here, before any unlock or prompt (HOL-SEC-187).
+    try {
+      await identity_api.settleKeychainMove();
+    } catch (_) {}
 
     // A link transfer stashed an encrypted .hollow blob. Import it FIRST, in the
     // same pre-node-start window a manual restore uses, then fall through as a

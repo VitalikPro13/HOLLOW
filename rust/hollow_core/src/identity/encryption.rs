@@ -12,6 +12,10 @@ pub(crate) const FLAG_OS_KEYCHAIN: u8 = 0x02;
 /// The password's wrap also needs this device's hardware key (`hw_key`). A build
 /// older than the flag reads it as a plain password file and cannot open it.
 pub(crate) const FLAG_DEVICE_BOUND: u8 = 0x04;
+/// A device-bound file tied to the profile's keys-group hardware key, made where the
+/// first key could not change its keychain group (iOS, HOL-SEC-187). Each file names
+/// its own key, so a duress slot left on the first key keeps working.
+pub(crate) const FLAG_GROUP_KEY: u8 = 0x08;
 
 static SESSION_KEY: OnceLock<Mutex<Option<[u8; 32]>>> = OnceLock::new();
 

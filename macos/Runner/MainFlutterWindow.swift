@@ -10,6 +10,19 @@ class MainFlutterWindow: NSWindow {
   private var relayTriggers: RelayTriggers?
 
   override func awakeFromNib() {
+    // Before the engine exists, so no Dart can reach the keychain first. A bundle
+    // that fails the check ends here: never the key-missing screen, which would ask
+    // for the phrase inside a process running someone else's code.
+    BundleSeal.enforceAtStart { _ in
+      let alert = NSAlert()
+      alert.alertStyle = .critical
+      alert.messageText = "Hollow is damaged"
+      alert.informativeText =
+        "Some of its files changed after it was installed, so it won't open. Download Hollow again from hollow.anonlisten.com."
+      alert.addButton(withTitle: "Quit")
+      NSApp.activate(ignoringOtherApps: true)
+      alert.runModal()
+    }
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
@@ -41,6 +54,14 @@ class MainFlutterWindow: NSWindow {
       } else {
         result(FlutterMethodNotImplemented)
       }
+    }
+
+    // App Lock reads its launch secret only in a process the start check verified.
+    let sealChannel = FlutterMethodChannel(
+      name: "hollow/bundle_seal",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    sealChannel.setMethodCallHandler { call, result in
+      call.method == "verified" ? result(BundleSeal.verified) : result(FlutterMethodNotImplemented)
     }
 
     let relayChannel = FlutterMethodChannel(

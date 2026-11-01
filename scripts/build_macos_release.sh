@@ -22,6 +22,9 @@
 # Signing config comes from the environment, else scripts/release.local.env:
 #   MAC_TEAM_ID, MAC_SIGN_NAME   the "Developer ID Application" identity
 #   MAC_SIGN_KEYCHAIN            optional: the keychain that holds it (CI's temporary one)
+#   MAC_PROVISION_PROFILE        the Developer ID provisioning profile (.provisionprofile) of
+#                                com.anonlisten.hollow naming group.com.anonlisten.hollow.keys
+#                                and this certificate (HOL-SEC-187: the keychain group)
 #   notarization, either         MAC_NOTARY_PROFILE (a notarytool keychain profile)
 #                         or     NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID
 #                                (an App Store Connect API key, .p8)
@@ -96,6 +99,10 @@ if [ "$SIGNED" = 1 ] && [ "$STAGE" != build ]; then
   # Application leaf of this team.
   REQ="=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.CN] = \"$ID\" and certificate leaf[subject.OU] = \"$MAC_TEAM_ID\""
   if [ -n "${MAC_SIGN_KEYCHAIN:-}" ]; then CODESIGN+=(--keychain "$MAC_SIGN_KEYCHAIN"); fi
+  if [ "$STAGE" = all ] || [ "$STAGE" = sign ]; then
+    : "${MAC_PROVISION_PROFILE:?MAC_PROVISION_PROFILE missing (the Developer ID profile, HOL-SEC-187)}"
+    [ -f "$MAC_PROVISION_PROFILE" ] || { echo "ERROR: no profile at $MAC_PROVISION_PROFILE" >&2; exit 1; }
+  fi
 fi
 if [ "$SIGNED" = 1 ] && { runs sign || runs package; }; then
   if [ -n "${NOTARY_KEY_PATH:-}" ]; then
@@ -288,6 +295,15 @@ if runs sign && [ "$SIGNED" = 1 ]; then
   ENT_SHIP="$WORK/Hollow.entitlements"
   cp "$ENT" "$ENT_SHIP"
   /usr/libexec/PlistBuddy -c "Delete :com.apple.security.cs.disable-library-validation" "$ENT_SHIP" 2>/dev/null || true
+  # HOL-SEC-187: the identity key lives in the data-protection keychain under the keys
+  # group, which only builds carrying this team's Developer ID profile may claim. Added
+  # here, never to Release.entitlements: an ad-hoc build claiming them does not launch.
+  BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$APP/Contents/Info.plist")"
+  [ "$BUNDLE_ID" = com.anonlisten.hollow ] || { echo "ERROR: unexpected bundle id $BUNDLE_ID" >&2; exit 1; }
+  /usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string $MAC_TEAM_ID.$BUNDLE_ID" "$ENT_SHIP"
+  /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $MAC_TEAM_ID" "$ENT_SHIP"
+  /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" "$ENT_SHIP"
+  /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups:0 string group.com.anonlisten.hollow.keys" "$ENT_SHIP"
 
   echo "==> sign nested dylibs / framework binaries"
   find "$APP/Contents/Frameworks" -type f \( -name "*.dylib" -o -perm +111 \) -print0 > "$WORK/nested"
@@ -321,12 +337,18 @@ if runs sign && [ "$SIGNED" = 1 ]; then
     fi
   done < "$WORK/helpers"
 
+  # Every nested Mach-O is final now: its hash goes into Info.plist, which the app's
+  # own signature below binds (macos/Runner/BundleSeal.swift checks it at start).
+  echo "==> seal the nested code, embed the profile"
+  bash "$SCRIPT_DIR/macos_load_gate.sh" seal "$APP"
+  cp "$MAC_PROVISION_PROFILE" "$APP/Contents/embedded.provisionprofile"
+
   echo "==> sign the app bundle (with entitlements)"
   sign --options runtime --entitlements "$ENT_SHIP" "$APP"
 
   codesign --verify --deep --strict --verbose=2 "$APP"
   verify_macho_signatures "$APP"
-  bash "$SCRIPT_DIR/macos_load_gate.sh" signed "$APP" "$MAC_TEAM_ID"
+  bash "$SCRIPT_DIR/macos_load_gate.sh" signed "$APP" "$MAC_TEAM_ID" "$ENT_SHIP"
 
   # Stapled before it goes into the DMG and the zip, so the app a user drags out
   # opens offline.

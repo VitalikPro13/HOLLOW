@@ -74,15 +74,24 @@ fn write_slot(plaintext: &[u8], key: &[u8; 32], salt: &[u8; 16], flags: u8) -> R
 /// flags of a dummy and of a real code never differ. A slot written before the
 /// identity was tied keeps its own flags: re-wrapping it would need the code.
 fn slot_flags() -> u8 {
-    let bound = super::data_dir()
+    let identity = super::data_dir()
         .ok()
         .and_then(|d| std::fs::read(d.join("identity.key")).ok())
         .and_then(|b| match encryption::detect_format(&b) {
             Ok(encryption::IdentityFormat::Encrypted { flags, .. }) => Some(flags),
             _ => None,
         })
-        .is_some_and(encryption::flags_has_device_bound);
-    if bound { 0x01 | encryption::FLAG_DEVICE_BOUND } else { 0x01 }
+        .unwrap_or(0);
+    let bound = encryption::flags_has_device_bound(identity);
+    if bound { 0x01 | encryption::FLAG_DEVICE_BOUND | (identity & encryption::FLAG_GROUP_KEY) } else { 0x01 }
+}
+
+/// The stored slot's flags, `None` without a readable slot.
+pub(crate) fn stored_flags() -> Option<u8> {
+    match std::fs::read(slot_path().ok()?).map(|b| encryption::detect_format(&b)) {
+        Ok(Ok(encryption::IdentityFormat::Encrypted { flags, .. })) => Some(flags),
+        _ => None,
+    }
 }
 
 pub(crate) fn set_code(
@@ -111,10 +120,26 @@ pub(crate) fn set_code(
     let mut salt = [0u8; 16];
     random(&mut salt)?;
     let flags = slot_flags();
-    let hw = super::hw_key::existing(&super::data_dir()?)?;
+    let root = super::data_dir()?;
+    let hw = super::hw_key::existing(&root, flags)?;
     let key = encryption::slot_key(code, &salt, flags, hw.as_ref())?
         .ok_or(super::hw_key::MISSING)?;
-    write_slot(&plaintext, &key, &salt, flags)
+    write_slot(&plaintext, &key, &salt, flags)?;
+    super::hw_key::drop_first_key_if_unused(&root, first_key_needed(&root));
+    Ok(())
+}
+
+/// Whether a file still opens with the profile's first hardware key: a bound file
+/// without `FLAG_GROUP_KEY`, the identity or this slot.
+pub(crate) fn first_key_needed(root: &std::path::Path) -> bool {
+    let on_first = |flags: Option<u8>| {
+        flags.is_some_and(|f| encryption::flags_has_device_bound(f) && f & encryption::FLAG_GROUP_KEY == 0)
+    };
+    let identity = std::fs::read(root.join("identity.key")).ok().and_then(|b| match encryption::detect_format(&b) {
+        Ok(encryption::IdentityFormat::Encrypted { flags, .. }) => Some(flags),
+        _ => None,
+    });
+    identity.is_none() || on_first(identity) || on_first(stored_flags())
 }
 
 /// A slot nothing can ever open. Same size, same layout, random key.
@@ -127,7 +152,11 @@ pub(crate) fn set_dummy() -> Result<(), String> {
     random(&mut key)?;
     let out = write_slot(&plaintext, &key, &salt, slot_flags());
     key.fill(0);
-    out
+    out?;
+    if let Ok(root) = super::data_dir() {
+        super::hw_key::drop_first_key_if_unused(&root, first_key_needed(&root));
+    }
+    Ok(())
 }
 
 pub(crate) fn remove() -> Result<(), String> {
@@ -145,10 +174,24 @@ pub(crate) fn remove() -> Result<(), String> {
 /// the duress code, so the caller must not take it for a wrong one.
 pub(crate) fn probe(code: &str) -> Result<Option<DuressConfig>, String> {
     let hw = match super::data_dir() {
-        Ok(d) => super::hw_key::existing(&d)?,
+        Ok(d) => super::hw_key::existing(&d, probe_flags(&d))?,
         Err(_) => None,
     };
     probe_with(code, hw.as_ref())
+}
+
+/// The flags that pick the hardware key a probe runs on: the slot's own, else the
+/// identity's, so a try always costs one hardware operation where a key exists.
+pub(crate) fn probe_flags(root: &std::path::Path) -> u8 {
+    stored_flags().unwrap_or_else(|| {
+        std::fs::read(root.join("identity.key"))
+            .ok()
+            .and_then(|b| match encryption::detect_format(&b) {
+                Ok(encryption::IdentityFormat::Encrypted { flags, .. }) => Some(flags),
+                _ => None,
+            })
+            .unwrap_or(0)
+    })
 }
 
 /// ALWAYS derives exactly once, and with `hw` runs exactly one hardware operation,

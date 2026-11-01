@@ -59,6 +59,11 @@ device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
   or the keystore could not say) to `HardwareKeyBusyDialog`, Try again first, and a
   stored secret (launch, biometric) is dropped ONLY on `isWrongSecret`. Wiki
   `security_write_gates` §43.
+- iOS keychain groups (HOL-SEC-187): App Lock entries and the enclave key live in the
+  keys app group `$(HOLLOW_APP_GROUP).keys` (Runner only, never an extension); every
+  keychain call names its group (Dart via `hollow/keychain_groups`, Swift via Info.plist
+  `HollowKeysGroup`/`HollowAppIdGroup`); an unnamed query matches EVERY group. Moves copy,
+  read back, then delete. Wiki `security_write_gates` §43b.
 
 ## Notifications
 

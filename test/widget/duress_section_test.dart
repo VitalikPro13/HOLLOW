@@ -153,6 +153,7 @@ void main() {
           notifyFriends: false,
           available: false,
           rebindDue: false,
+          transferDue: false,
         ),
       );
 
@@ -171,6 +172,7 @@ void main() {
           notifyFriends: false,
           available: false,
           rebindDue: false,
+          transferDue: false,
         ),
         protectionStatus: protection(hasPassword: true, hasOsKeychain: true),
       );
@@ -191,6 +193,7 @@ void main() {
           notifyFriends: false,
           available: true,
           rebindDue: false,
+          transferDue: false,
         ),
         protectionStatus: protection(hasPassword: true),
       );
@@ -230,6 +233,7 @@ void main() {
           notifyFriends: false,
           available: true,
           rebindDue: false,
+          transferDue: false,
         ),
         protectionStatus: protection(hasPassword: true),
       );
@@ -261,6 +265,7 @@ void main() {
           notifyFriends: true,
           available: true,
           rebindDue: false,
+          transferDue: false,
         ),
         protectionStatus: protection(hasPassword: true),
       );
@@ -322,6 +327,7 @@ void main() {
       notifyFriends: false,
       available: true,
       rebindDue: false,
+          transferDue: false,
     );
 
     testWidgets('a wrong app password lands on its field and keeps the input',
@@ -334,6 +340,7 @@ void main() {
             notifyFriends: false,
             available: true,
             rebindDue: false,
+          transferDue: false,
           ),
           protectionStatus: protection(hasPassword: true));
 
@@ -474,14 +481,32 @@ void main() {
       );
     });
 
-    identity_api.DuressStatus status({bool enabled = true, bool due = true}) =>
+    identity_api.DuressStatus status(
+            {bool enabled = true, bool due = true, bool transfer = false}) =>
         identity_api.DuressStatus(
           enabled: enabled,
           scope: 'device',
           notifyFriends: false,
           available: true,
           rebindDue: due,
+          transferDue: transfer,
         );
+
+    // HOL-SEC-187: App Lock moved to the keys-group key and the code stayed on the
+    // first one. Most people already dismissed the 0.12.2 note, so this one has
+    // its own marker.
+    testWidgets('the_transfer_note_shows_even_after_the_0122_note', (tester) async {
+      await AppLockService().markDuressRebindAsked();
+      await pumpCard(tester, const DuressCodeCard(wideScopes: true),
+          status: status(due: false, transfer: true),
+          protectionStatus: protection(hasPassword: true));
+      expect(find.text(kDuressTransferBody), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      await pumpCard(tester, const DuressCodeCard(wideScopes: true),
+          status: status(due: false, transfer: true),
+          protectionStatus: protection(hasPassword: true));
+      expect(find.text(kDuressTransferBody), findsNothing, reason: 'shown once');
+    });
 
     testWidgets('is offered once per profile', (tester) async {
       await pumpCard(tester, const DuressCodeCard(wideScopes: true),

@@ -13,7 +13,7 @@ void main() {
   const path = 'scripts/build_macos_release.sh';
 
   final gate = RegExp(
-    r'macos_load_gate\.sh"?\s+(strip|check|signed)\s+"?([^"\s]+)"?(\s+\S+)?',
+    r'macos_load_gate\.sh"?\s+(strip|check|seal|signed)\s+"?([^"\s]+)"?(\s+\S+)?(\s+\S+)?',
   );
   final signCall = RegExp(r'^\s*(sign\s|codesign\s+--force\b)');
 
@@ -121,5 +121,57 @@ void main() {
     );
     expect(copy, isNot(-1));
     expect(drop, allOf(isNot(-1), lessThan(withEnt.first)));
+  });
+
+  // HOL-SEC-187: the keys group, the profile that authorises it, and the seal the
+  // main executable checks every library against before the keychain opens.
+  test('the nested code is sealed after its last signature, before the app', () {
+    final appSign = lastWhere(
+      (l) => signCall.hasMatch(l) && l.trimRight().endsWith(r'"$APP"'),
+    );
+    final seal = firstWhere((l) => gateCall(l, 'seal', r'$APP'));
+    expect(seal, allOf(isNot(-1), lessThan(appSign)));
+    final nestedSigns = [
+      for (var i = 0; i < appSign; i++)
+        if (signCall.hasMatch(lines[i]) && !lines[i].trimRight().endsWith(r'"$APP"')) i,
+    ];
+    expect(nestedSigns, isNotEmpty);
+    expect(seal, greaterThan(nestedSigns.last),
+        reason: 'a nested signature after the seal changes a sealed hash');
+    final embed = firstWhere(
+      (l) => RegExp(r'^\s*cp "\$MAC_PROVISION_PROFILE" "\$APP/Contents/embedded\.provisionprofile"').hasMatch(l),
+    );
+    expect(embed, allOf(isNot(-1), lessThan(appSign)));
+  });
+
+  test('the shipped entitlements claim the keys group the gate then reads back', () {
+    String add(String key) => lines.firstWhere(
+          (l) => l.contains('PlistBuddy') && l.contains('Add :$key') && l.contains(r'"$ENT_SHIP"'),
+          orElse: () => '',
+        );
+    expect(add('com.apple.application-identifier'), contains(r'$MAC_TEAM_ID.$BUNDLE_ID'));
+    expect(add('com.apple.developer.team-identifier'), contains(r'$MAC_TEAM_ID'));
+    expect(add('com.apple.security.application-groups:0'), contains('group.com.anonlisten.hollow.keys'));
+    final signed = lastWhere((l) => gateCall(l, 'signed', r'$APP'));
+    expect(gate.firstMatch(lines[signed])![4]?.trim(), r'"$ENT_SHIP"',
+        reason: 'signed compares the entitlements with the computed set');
+    final shipped = File('macos/Runner/Release.entitlements').readAsStringSync();
+    for (final claim in ['application-groups', 'application-identifier', 'team-identifier']) {
+      expect(shipped, isNot(contains(claim)),
+          reason: 'an ad-hoc build claiming $claim does not launch');
+    }
+  });
+
+  test('flutter_debug_config_never_takes_the_release_identity', () {
+    final debug = File('macos/Flutter/Flutter-Debug.xcconfig')
+        .readAsLinesSync()
+        .where((l) => !l.trimLeft().startsWith('//'))
+        .toList();
+    expect(debug.where((l) => l.contains('LocalSigning')), isEmpty);
+    expect(debug, contains('HOLLOW_CODE_SIGN_IDENTITY = -'));
+    expect(debug, contains('HOLLOW_DEVELOPMENT_TEAM ='));
+    final runnerDebug = File('macos/Runner/Configs/Debug.xcconfig').readAsStringSync();
+    expect(runnerDebug, isNot(contains('LocalSigning')));
+    expect(runnerDebug, isNot(contains('Flutter-Release')));
   });
 }

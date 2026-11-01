@@ -28,6 +28,12 @@ const String kDuressRebindBody =
     'It was set before App Lock was tied to this phone. Setting it again '
     'ties the code to this phone too.';
 
+/// The one-time note once App Lock moved to this phone's keys-group key while the
+/// duress code stayed on the first one (HOL-SEC-187).
+const String kDuressTransferBody =
+    'App Lock now uses a new key on this phone, but your duress code still '
+    'uses the old one. Set it again so it keeps working after a coming update.';
+
 /// Wire values of the destroy scope. They are persisted and read by Rust, so
 /// they are never derived from a label.
 const String kDuressScopeDevice = 'device';
@@ -141,13 +147,20 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
   static const _title = 'Duress code';
 
   /// Whether this visit shows the one-time note to set an old code again: null
-  /// until this profile's marker was read. Marked the first time it shows.
+  /// until this profile's marker was read. Marked the first time it shows. The
+  /// move to the keys-group key has its own marker: most people saw the 0.12.2 one.
   bool? _rebindShown;
 
-  Future<void> _claimRebindNote() async {
+  Future<void> _claimRebindNote({required bool transfer}) async {
     final appLock = AppLockService();
-    final show = !await appLock.duressRebindAsked();
-    if (show) await appLock.markDuressRebindAsked();
+    final show = transfer
+        ? !await appLock.duressTransferAsked()
+        : !await appLock.duressRebindAsked();
+    if (show) {
+      await (transfer
+          ? appLock.markDuressTransferAsked()
+          : appLock.markDuressRebindAsked());
+    }
     if (mounted) setState(() => _rebindShown = show);
   }
 
@@ -210,10 +223,11 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
         ],
       ),
     );
-    if (!status.rebindDue) return row;
+    final transfer = status.transferDue;
+    if (!transfer && !status.rebindDue) return row;
     if (_rebindShown == null) {
       _rebindShown = false;
-      _claimRebindNote();
+      _claimRebindNote(transfer: transfer);
     }
     if (_rebindShown != true) return row;
     return Column(
@@ -223,7 +237,7 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
         row,
         SettingsRow(
           title: kDuressRebindTitle,
-          subtitle: kDuressRebindBody,
+          subtitle: transfer ? kDuressTransferBody : kDuressRebindBody,
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [

@@ -19,6 +19,13 @@
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>$(HOLLOW_APP_GROUP)</string>
+		<!--
+		  HOL-SEC-187: the keychain group App Lock entries and the Secure Enclave
+		  key live in. An app transfer keeps an app group (it moves with the app),
+		  while the app-ID group below changes with the team. The app only: the
+		  extensions never claim it.
+		-->
+		<string>$(HOLLOW_APP_GROUP).keys</string>
 	</array>
 	<!--
 	  Keychain access for flutter_secure_storage (App Lock biometric secret +

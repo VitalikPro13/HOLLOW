@@ -1,8 +1,7 @@
 #include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"
 #include "ephemeral/Flutter-Generated.xcconfig"
-// Signing defaults: ad-hoc identity, no team, so any clone builds and runs
-// locally. LocalSigning.xcconfig (gitignored, see the .example) overrides
-// both for a Developer ID signed and notarized release.
+// Debug is always ad-hoc and never includes LocalSigning.xcconfig: a debug engine
+// runs Dart from a file, and anything the team signs can be loaded into the release
+// (HOL-SEC-187). It also never opens a keychain-protected identity.
 HOLLOW_CODE_SIGN_IDENTITY = -
 HOLLOW_DEVELOPMENT_TEAM =
-#include? "LocalSigning.xcconfig"

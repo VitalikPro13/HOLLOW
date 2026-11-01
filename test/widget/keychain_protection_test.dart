@@ -365,7 +365,8 @@ void main() {
                   scope: 'device',
                   notifyFriends: false,
                   available: false,
-                  rebindDue: false)),
+                  rebindDue: false,
+                  transferDue: false)),
         ]),
         child: MaterialApp(
           navigatorKey: hollowNavigatorKey,

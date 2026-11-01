@@ -131,6 +131,8 @@ windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Wi
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+# Raw SecItem calls for the data-protection keychain (HOL-SEC-187); already in the tree.
+core-foundation = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

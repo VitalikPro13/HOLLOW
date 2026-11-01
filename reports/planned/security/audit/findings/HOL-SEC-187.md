@@ -3,9 +3,11 @@
 ```
 ID:          HOL-SEC-187                 Status: Partially fixed on local branch
                                           security/0.14-mac-dylib (2026-10-31): load paths and
-                                          the library validation waiver fixed, ship with 0.14;
-                                          the keychain slot old builds open is not (design
-                                          track pending); retest on the signed build
+                                          the library validation waiver fixed; the keychain
+                                          item old builds open moves to the data-protection
+                                          keychain in 0.14 (design approved 2026-10-31, built
+                                          on security/0.14-keychain 2026-11-01); retest on the
+                                          signed build (release-apple.yml macos-keychain-check)
 Severity:    High                        (Impact H: code running inside the signed app holds what
                                           the app holds: the keychain slot that opens without a
                                           prompt for Hollow's signature, the identity in memory,
@@ -89,15 +91,58 @@ system for a missing library: the loader refuses relative paths in a hardened pr
 it skips `/usr/local/lib` for a process with entitlements. With validation on, anything not
 signed by our team or Apple is refused even if it were found.
 
+The identity key moves from the login keychain into the data-protection keychain, in an
+access group only builds signed with Hollow's provisioning profile can claim, this device
+only. At the first 0.14 launch each Hollow key in the login keychain is copied there, read
+back, and only then deleted; nothing writes the login keychain again. Builds before 0.14
+claim no keychain group and cannot see the new item. Before it reads a key, the app checks
+that every library it loaded is the one this release shipped, so an old Hollow cannot put
+its own older code into the new one. The certificate that signed the old builds is revoked
+once Macs run builds of the new team.
+
+- `identity/platform_keystore.rs`: keys go only to the data-protection keychain, group
+  `group.com.anonlisten.hollow.keys` (the app-ID group where a Mac refuses it),
+  `AfterFirstUnlockThisDeviceOnly`, never synchronizable, updated in place. Reads try the
+  keys group, then the app-ID group, then (until the move) the login keychain. Every macOS
+  keychain call waits for `hollow_bundle_checked`. `settle_move` (FFI
+  `settle_keychain_move`, once per start after the pending wipe and `settle_relink`,
+  before any unlock) moves only `wrapping_key` and `wrapping_key.<16 hex>` with 32-byte
+  values, at most 32 a start, own slots first: quiet read with the item's persistent
+  reference, add (never overwrite: a different value goes to `<slot>.m.<hash>`), read back
+  byte for byte, delete by that reference. Where the keys group works it promotes app-ID
+  items the same way. Writability is probed and answered three ways (yes, no, unknown);
+  the cached-key drop path reads only the root rule. Wipes forget the slot and its copies
+  in every keychain, and machine-slot items only where each opens the wiped identity.
+- `macos/Runner/BundleSeal.swift`: before the Flutter engine exists, every loaded image
+  inside the bundle must match `HollowSealedImages` (cdhash of each slice, written by
+  `macos_load_gate.sh seal` before the main signature) by its in-memory code directory
+  and a sample of its code pages in memory, and no image outside it may carry our team.
+  The list counts only when the `Info.plist` bytes it was read from hash to the Info.plist
+  slot of the main executable's code directory, the one whose hash is the cdhash the
+  kernel validated the process against; the executable is the image dyld loaded, never
+  `Bundle.main`. Any mismatch at start, or keychain entitlements without a bound list and
+  a team, ends the process before the engine with a "Hollow is damaged, download it again"
+  alert (decided 2026-11-01): never the key-missing screen, never the App Lock launch
+  secret. A later image that fails ends the process too. Ad-hoc development builds (no
+  list, no keychain entitlement) still start, with the keychain shut.
+- The release sign stage embeds the Developer ID profile and adds the application
+  identifier, the team identifier and the keys group to the shipped entitlements;
+  `macos_load_gate.sh signed` refuses a missing, foreign, expired or non-Developer-ID
+  profile, an unauthorised claim, entitlements other than the computed set, a debug (JIT)
+  engine and an inexact seal. Debug builds are always ad-hoc.
+- iOS: App Lock entries and the Secure Enclave key move into the keys app group (every
+  call names its group); a key the system will not regroup is replaced at the next unlock
+  by a new keys-group key (`FLAG_GROUP_KEY`), the duress slot keeping the first key until
+  its code is set again.
+
 ## Residual risk
 
-The finding is only partly fixed.
-
-- Old signed builds still open the keychain slot. They meet the keychain item's designated
-  requirement, and they waive library validation. This stays open until the identity key
-  moves to storage only fixed builds can read (a separate design track, pending).
-- Privacy grants (camera, microphone, screen) cannot be limited to a version. An old build
-  keeps them for as long as the user granted them to Hollow.
+- Until the old team's certificate is revoked, old builds keep the privacy grants (camera,
+  microphone, screen) and can show phishing screens. An item a quiet read cannot open
+  stays where it is. A Time Machine copy of the login keychain from before 0.14 still
+  holds the key. Whoever holds the keys group registration can read the items (the signing
+  team's power). A Mac moved by Migration Assistant after 0.14 asks for the phrase; one
+  moved from a 0.13 Mac stays a clone of it.
 - Library validation admits any Mach-O signed by our team, old Hollow libraries included.
   Nothing that loads code from a data path, a download or a plug-in folder may ever be
   signed with this team.
@@ -133,6 +178,54 @@ already verifies every slice; an x86_64-only edit fails without the flag).
 after the build and before the sign stage, strip and check of the app before its first
 signature, `signed` with a team after the app's last signature, and every signature with
 entitlements using the copy minus the waiver; 11 of 11 script mutants fail it.
+Keychain move (Rust, fake two-keychain backend with a hook between steps and faults):
+`a_legacy_key_moves_into_the_protected_keychain_then_leaves`,
+`a_move_cut_short_keeps_both_and_finishes_at_the_next_start`,
+`a_protected_copy_that_does_not_read_back_keeps_the_legacy_key`,
+`a_legacy_key_rewritten_during_the_move_is_never_deleted`, `two_movers_at_once_keep_every_key`,
+`a_conflicting_legacy_key_never_overwrites_the_protected_one`,
+`heal_leaves_no_conflict_copy_behind`, `a_wipe_forgets_the_conflict_copies_too`,
+`planted_legacy_items_are_not_moved`, `a_flood_of_planted_slots_never_holds_back_our_own`,
+`every_profiles_slot_moves_not_only_the_running_one`,
+`the_machine_slot_moves_once_and_is_never_written`,
+`a_wipe_takes_only_the_machine_items_that_open_its_identity`,
+`an_item_in_the_app_id_group_opens_and_moves_once_the_keys_group_works`,
+`no_flow_writes_the_legacy_keychain`, `no_source_writes_the_legacy_keychain`,
+`a_missing_entitlement_keeps_the_legacy_key_and_deletes_nothing` (store and identity level),
+`a_failed_probe_never_drops_the_cached_key_on_the_os_root`, `an_unknown_probe_is_not_cached`,
+`a_portable_or_override_session_moves_nothing`, `an_unlock_never_moves_a_key`,
+`a_duress_wipe_moves_nothing`, `a_wipe_forgets_the_key_in_both_keychains`,
+`a_keychain_store_never_asks_the_person`, `a_protected_write_never_deletes_first`,
+`a_typed_unlock_reads_no_keychain`, `the_protected_store_reads_nothing_before_the_bundle_check`,
+`only_our_groups_open_the_keychain`. Enclave keys: `a_key_the_system_regroups_stays_the_same_key`,
+`a_key_left_in_the_app_id_group_still_opens_until_it_moves`,
+`a_bound_identity_moves_to_the_group_key_at_the_next_unlock`,
+`a_move_to_the_group_key_cut_between_the_files_heals`,
+`the_duress_slot_keeps_its_old_key_until_the_code_is_set_again`,
+`setting_the_code_again_moves_it_and_frees_the_first_key`,
+`every_try_costs_the_same_hardware_operations_with_two_keys`,
+`making_a_key_never_deletes_one_in_another_group`, `a_sweep_keeps_both_keys_of_the_live_profile`.
+Dart: `test/app_lock_keychain_groups_test.dart` (the cut-short move, never a delete before
+the copy reads back, a delete of the old entry leaves the new one, every call names a
+group, a build without the keys group, the transfer note's own marker),
+`the_transfer_note_shows_even_after_the_0122_note`, `test/keychain_groups_guard_test.dart`
+(every iOS keychain query names a group, only the app claims the keys group, one launch
+point for the move before the unlock, the macOS self-check before the engine) and
+`flutter_debug_config_never_takes_the_release_identity` with the seal, profile and
+entitlement cases in `test/macos_load_gate_guard_test.dart`. Gate: 13 more cases in
+`macos_load_gate_test.sh` (missing, foreign, expired and non-Developer-ID profiles, an
+unauthorised group or app id, entitlements other than the computed set, a Mach-O missing
+from or mismatching `HollowSealedImages`, a JIT engine, seal never listing the main
+executable). Self-check: `scripts/macos_bundle_seal_test.sh` (ad-hoc scratch bundle: a
+sealed bundle passes, a sealed library loaded later is accepted, an unsealed one ends the
+process, a swapped library and an Info.plist edited after signing each end the process
+before the engine, old code under a sealed directory fails the page check, a development
+build without a list starts, a build claiming keychain groups without a list ends).
+Signed run: `scripts/macos_keychain_check.sh` on throwaway macOS 14, 15 and 26 runners
+(the move with the login item gone, 0.13 and a library planted in it refused, a framework
+swapped for 0.13's, an edited Info.plist and this team's framework moved outside the
+bundle each ending the start before the engine).
+
 `check` fails on the installed 0.12.2 app and on a fresh unsigned release build (nine run
 paths each) and passes after `strip`. A probe placed inside that build, signed with the
 release entitlements, opens every bundled framework: before `strip` dyld also mapped 19

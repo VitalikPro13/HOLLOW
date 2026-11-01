@@ -3,7 +3,8 @@
 #
 #   bash scripts/macos_load_gate_test.sh
 #
-# Needs a Mac with the Xcode command line tools; signs only ad-hoc, never with a keychain.
+# Needs a Mac with the Xcode command line tools; signs only ad-hoc, never with a keychain
+# (the test profiles are signed with a throwaway openssl key in the scratch folder).
 set -euo pipefail
 
 GATE="${GATE:-$(cd "$(dirname "$0")" && pwd)/macos_load_gate.sh}"
@@ -247,6 +248,110 @@ if printf '%s\n' "$out" | grep -E "^FAIL Contents/Frameworks/libown.dylib: its s
 else
   bad "signed did not flag the stale signature"
   printf '%s\n' "$out" | sed 's/^/       /'
+fi
+
+# 18. HOL-SEC-187 (signed): the Developer ID profile, the entitlements, the sealed image
+#     list and the Flutter engine. Ad-hoc bundles carry no team, so each case asserts the
+#     one FAIL line it is about; the profiles are signed with a throwaway openssl key.
+T=ABCDE12345
+KEYS=group.com.anonlisten.hollow.keys
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$W/pk.pem" -out "$W/pc.pem" -days 2 -subj "/CN=gate-test" 2>/dev/null
+make_profile() { # make_profile OUT TEAM ALLDEVICES EXPIRES APPID GROUP...
+  local out="$1" team="$2" all="$3" expires="$4" appid="$5" g groups=""
+  shift 5
+  for g in "$@"; do groups="$groups<string>$g</string>"; done
+  cat > "$W/profile.xml" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>TeamIdentifier</key><array><string>$team</string></array>
+<key>Platform</key><array><string>OSX</string></array>
+$([ "$all" = true ] && echo '<key>ProvisionsAllDevices</key><true/>')
+<key>ExpirationDate</key><date>$expires</date>
+<key>Entitlements</key><dict>
+<key>com.apple.application-identifier</key><string>$appid</string>
+<key>com.apple.developer.team-identifier</key><string>$team</string>
+<key>com.apple.security.application-groups</key><array>$groups</array>
+</dict>
+<key>DeveloperCertificates</key><array/>
+</dict></plist>
+PLIST
+  openssl smime -sign -signer "$W/pc.pem" -inkey "$W/pk.pem" -in "$W/profile.xml" -outform der -nodetach -binary -out "$out"
+}
+cat > "$W/ship.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.application-identifier</key><string>$T.com.anonlisten.hollow</string>
+<key>com.apple.developer.team-identifier</key><string>$T</string>
+<key>com.apple.security.application-groups</key><array><string>$KEYS</string></array>
+</dict></plist>
+PLIST
+# A shipped-shape bundle: nested code signed, sealed, the profile in, then the host.
+new_shipped() { # new_shipped APP [PROFILE]
+  local app="$1"
+  new_app "$app"
+  printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>host</string><key>CFBundleIdentifier</key><string>com.anonlisten.hollow</string></dict></plist>' > "$app/Contents/Info.plist"
+  codesign -f -s - "$app/Contents/Frameworks/libown.dylib" 2>/dev/null
+  bash "$GATE" seal "$app" >/dev/null
+  if [ -n "${2:-}" ]; then cp "$2" "$app/Contents/embedded.provisionprofile"; fi
+  codesign -f -s - --entitlements "$W/ship.plist" "$app/Contents/MacOS/host" 2>/dev/null
+}
+names() { # names NAME PATTERN CMD...: the gate prints a FAIL line matching PATTERN
+  local name="$1" pattern="$2" out
+  shift 2
+  out="$("$@" 2>&1 || true)"
+  if printf '%s\n' "$out" | grep -E "^FAIL .*$pattern" >/dev/null; then ok "$name"; else bad "$name"; printf '%s\n' "$out" | sed 's/^/       /'; fi
+}
+never() { # never NAME PATTERN CMD...: no FAIL line matches PATTERN
+  local name="$1" pattern="$2" out
+  shift 2
+  out="$("$@" 2>&1 || true)"
+  if printf '%s\n' "$out" | grep -E "^FAIL .*$pattern" >/dev/null; then bad "$name"; printf '%s\n' "$out" | sed 's/^/       /'; else ok "$name"; fi
+}
+LATER=2044-01-01T00:00:00Z
+make_profile "$W/good.provisionprofile" "$T" true "$LATER" "$T.com.anonlisten.hollow" "$KEYS"
+new_shipped "$W/ship.app" "$W/good.provisionprofile"
+SHIPPED='provisionprofile|HollowSealedImages|entitlements|JIT'
+never "a shipped bundle with a valid profile and an exact seal passes the new checks" "$SHIPPED" \
+  bash "$GATE" signed "$W/ship.app" "$T" "$W/ship.plist"
+new_shipped "$W/noprof.app"
+names "no profile is refused" "embedded.provisionprofile: missing" bash "$GATE" signed "$W/noprof.app" "$T"
+make_profile "$W/team.provisionprofile" ZZZZZ99999 true "$LATER" "$T.com.anonlisten.hollow" "$KEYS"
+new_shipped "$W/team.app" "$W/team.provisionprofile"
+names "a profile of another team is refused" "the profile is for team 'ZZZZZ99999'" bash "$GATE" signed "$W/team.app" "$T"
+make_profile "$W/old.provisionprofile" "$T" true 2020-01-01T00:00:00Z "$T.com.anonlisten.hollow" "$KEYS"
+new_shipped "$W/old.app" "$W/old.provisionprofile"
+names "an expired profile is refused" "the profile expired" bash "$GATE" signed "$W/old.app" "$T"
+make_profile "$W/dev.provisionprofile" "$T" false "$LATER" "$T.com.anonlisten.hollow" "$KEYS"
+new_shipped "$W/dev.app" "$W/dev.provisionprofile"
+names "a profile that is not Developer ID is refused" "not a Developer ID profile" bash "$GATE" signed "$W/dev.app" "$T"
+make_profile "$W/nogroup.provisionprofile" "$T" true "$LATER" "$T.com.anonlisten.hollow" group.com.anonlisten.hollow
+new_shipped "$W/nogroup.app" "$W/nogroup.provisionprofile"
+names "a claim the profile does not authorise is refused" "does not authorise the app group $KEYS" bash "$GATE" signed "$W/nogroup.app" "$T"
+make_profile "$W/appid.provisionprofile" "$T" true "$LATER" "$T.com.anonlisten.other" "$KEYS"
+new_shipped "$W/appid.app" "$W/appid.provisionprofile"
+names "another app's profile is refused" "does not authorise com.apple.application-identifier" bash "$GATE" signed "$W/appid.app" "$T"
+printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict/></plist>' > "$W/empty.plist"
+names "entitlements other than the computed set are refused" "entitlements differ" bash "$GATE" signed "$W/ship.app" "$T" "$W/empty.plist"
+new_shipped "$W/late.app" "$W/good.provisionprofile"
+clang -dynamiclib "$W/x.c" -o "$W/late.app/Contents/Frameworks/libx.dylib"
+codesign -f -s - "$W/late.app/Contents/Frameworks/libx.dylib" 2>/dev/null
+names "a Mach-O missing from HollowSealedImages is refused" "libx.dylib: not in HollowSealedImages" bash "$GATE" signed "$W/late.app" "$T"
+new_shipped "$W/swap.app" "$W/good.provisionprofile"
+clang -dynamiclib "$W/x.c" -o "$W/swap.app/Contents/Frameworks/libown.dylib" -install_name @rpath/libown.dylib
+codesign -f -s - "$W/swap.app/Contents/Frameworks/libown.dylib" 2>/dev/null
+names "a swapped Mach-O is refused" "libown.dylib: not in HollowSealedImages under its hash" bash "$GATE" signed "$W/swap.app" "$T"
+names "and its stale hash is named" "libown.dylib: HollowSealedImages names a hash it does not have" bash "$GATE" signed "$W/swap.app" "$T"
+new_shipped "$W/jit.app" "$W/good.provisionprofile"
+mkdir -p "$W/jit.app/Contents/Frameworks/App.framework/Resources/flutter_assets"
+: > "$W/jit.app/Contents/Frameworks/App.framework/Resources/flutter_assets/kernel_blob.bin"
+names "a debug (JIT) Flutter engine is refused" "debug \(JIT\) Flutter engine" bash "$GATE" signed "$W/jit.app" "$T"
+if /usr/libexec/PlistBuddy -c "Print :HollowSealedImages" "$W/ship.app/Contents/Info.plist" | grep -E '^ +[0-9a-f]{40} Contents/Frameworks/libown.dylib$' >/dev/null \
+   && ! /usr/libexec/PlistBuddy -c "Print :HollowSealedImages" "$W/ship.app/Contents/Info.plist" | grep -F "MacOS/host" >/dev/null; then
+  ok "seal lists every nested Mach-O and never the main executable"
+else
+  bad "seal wrote: $(/usr/libexec/PlistBuddy -c "Print :HollowSealedImages" "$W/ship.app/Contents/Info.plist" 2>&1 | tr '\n' ' ')"
 fi
 
 echo

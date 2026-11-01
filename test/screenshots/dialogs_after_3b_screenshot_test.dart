@@ -134,6 +134,7 @@ void main() {
               notifyFriends: false,
               available: true,
               rebindDue: false,
+          transferDue: false,
             )),
       ]),
       child: RepaintBoundary(

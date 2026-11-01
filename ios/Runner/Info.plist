@@ -49,6 +49,13 @@
 	     (HOLLOW_APP_GROUP, Flutter/Variant-*.xcconfig); Swift reads it here. -->
 	<key>HollowAppGroup</key>
 	<string>$(HOLLOW_APP_GROUP)</string>
+	<!-- HOL-SEC-187: the keychain groups every App Lock and Secure Enclave call
+	     names: the keys group first, the app-ID group where builds before 0.14
+	     wrote. -->
+	<key>HollowKeysGroup</key>
+	<string>$(HOLLOW_APP_GROUP).keys</string>
+	<key>HollowAppIdGroup</key>
+	<string>$(AppIdentifierPrefix)$(HOLLOW_BUNDLE_ID)</string>
 	<!-- The loopback media server is the only cleartext destination: video and
 	     audio players cannot open an encrypted file, so they fetch it over plain
 	     HTTP from 127.0.0.1. NSAllowsLocalNetworking covers exactly that and

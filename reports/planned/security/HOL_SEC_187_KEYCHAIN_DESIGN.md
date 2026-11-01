@@ -309,17 +309,28 @@ the attacker cannot swap without losing the entitlements:
 - The release sign stage writes the cdhash of every Mach-O in the bundle into the app's
   `Info.plist` (key `HollowSealedImages`) before the main executable is signed, so the
   list is bound to the main signature.
-- At start, before Rust touches any keychain item, Swift walks every loaded image
-  (`_dyld_image_count`), and for each image inside the bundle computes the cdhash of its
-  in-memory code directory (the one the kernel validates pages against, so a swap back on
-  disk after loading does not fool it) and compares it with the list.
+- At start, before Rust touches any keychain item, Swift takes the list only from
+  `Info.plist` bytes read once that hash to the Info.plist slot of the main executable's
+  code directory, the in-memory one whose hash equals the cdhash the kernel validated the
+  process against (`csops` `CS_OPS_CDHASH`); the main executable is the image dyld loaded
+  as `MH_EXECUTE`, never `Bundle.main` (fix round: an `Info.plist` edited after signing
+  re-sealed a swapped framework, review HIGH-1). Then it walks every loaded image
+  (`_dyld_image_count`), and for each image inside the bundle compares the cdhash of its
+  in-memory code directory with the list and checks page 0 and 31 random `__TEXT` pages in
+  memory against that directory's page hashes (the directory mapping can change with the
+  file after the load; `__TEXT` is what runs).
 - A `_dyld_register_func_for_add_image` callback does the same for every image loaded
   later (mdk opens its plugin libraries at run time) and aborts the process on a mismatch.
 - Only after the start check passes does Swift call a Rust switch (`hollow_bundle_checked`,
   registered like `hollow_hw_key_register`); the macOS protected store refuses every read
   and write until it is set, so a host where Swift never ran (a swapped core) reads nothing.
-  Fail closed: a mismatch means no keychain this run, the key-missing screen, nothing
-  deleted, a log line.
+- Decided by Vitalik (2026-11-01): any start mismatch, and a build that claims keychain
+  entitlements without a bound list or a team, ENDS the process before the Flutter engine
+  exists: a native alert ("Hollow is damaged", download it again from
+  hollow.anonlisten.com), then exit status 78. Never the key-missing screen, which would
+  ask for the phrase inside a process running someone else's code, and never the App Lock
+  launch secret (its macOS read also asks the check, `hollow/bundle_seal`). Ad-hoc and
+  Debug builds (no team, no keychain entitlement, no list) still start, keychain shut.
 - Second layer on macOS 14 and later: a library load constraint pinned to the team and the
   release's cdhashes (`codesign` library constraints; tooling UNVERIFIED, U14).
 - Cost and the callback's timing before an image's initialisers run are UNVERIFIED (U14);
@@ -652,12 +663,13 @@ enclave key re-group or re-bind. Nothing here is remote-reachable.
 
 | # | Claim | How |
 |---|---|---|
-| U1 | macOS accepts an iOS-style app group as a data-protection keychain group with a Developer ID profile, on 12 to 26 | D3 per version (12 and 13 only with the VMs) |
-| U2 | an old build (no entitlements) gets `errSecMissingEntitlement` for our group, a dylib inside it too | signed runner |
-| U3 | `SecItemUpdate` can re-group an enclave key, and it then works from another team's app | D2 |
-| U4 | group container files survive the group transfer | D2 (file), step 4 |
-| U5 | the portal offers App Groups for a Developer ID profile of `com.anonlisten.hollow` | step 0 |
-| U6 | an old-team Developer ID app keeps launching after its App ID and group leave the team | D3 F1 case, DTS |
+| U1 | macOS accepts an iOS-style app group as a data-protection keychain group with a Developer ID profile, on 12 to 26 | D3: PASS on macOS 15.7.4 only (2026-11-01 drill, old iMac, write and read, procinfo "entitlements validated"); 12, 13, 14 and 26 not run, the runtime fallback covers them |
+| U2 | an old build (no entitlements) gets `errSecMissingEntitlement` for our group, a dylib inside it too | D3: PASS (an ad-hoc copy claiming the group got -34018; an ad-hoc copy claiming the full set was killed at launch). The signed runner repeats it for the real 0.13 with a planted library |
+| U3 | `SecItemUpdate` can re-group an enclave key, and it then works from another team's app | D2: PASS on iOS 18.7.8 (2026-11-01, Vitalik's iPhone 13 mini): status 0, same ECDH before and after, and a new-team app got identical ECDH outputs after the group moved teams; a key made directly in the group survived the move too. Other iOS versions stay on the runtime fallback (re-bind) |
+| U4 | group container files survive the group transfer | D2/D3 (file): PASS on iOS 18.7.8 and macOS 15.7.4 (2026-11-01), the new-team app read the file and the old-team app kept reading everything; step 4 still checks the real app |
+| U5 | the portal offers App Groups for a Developer ID profile of `com.anonlisten.hollow` | PASS (2026-11-01 drill) |
+| U6 | an old-team Developer ID app keeps launching after its App ID and group leave the team | D3 F1 case: PASS at 0 h only on macOS 15.7.4 (launch, read, file; Gatekeeper "accepted, source=Developer ID") and on iOS (ad-hoc A); the restart and 48 h cases were NOT run (the old Mac could not restart). DTS question still open |
+| (drill) | the new team can register a group name the old team deleted | accepted at once, no waiting window (2026-11-01); the back-to-back rule of 4.2 still holds |
 | U7 | a new-team re-grant replaces TCC's stored requirement | after step 4 |
 | U8 | `AfterFirstUnlockThisDeviceOnly` items on macOS survive a locked-screen restart and do not restore elsewhere | signed runner; Migration Assistant if a spare Mac exists |
 | U9 | macOS App Lock writes fail today, and work with the profile | signed 0.13, then 0.14 on the runner |
@@ -665,7 +677,7 @@ enclave key re-group or re-bind. Nothing here is remote-reachable.
 | U11 | GitHub macOS runners have a working data-protection keychain | the first runner job |
 | U12 | the app's private container and UserDefaults survive the real transfer | step 4 |
 | U13 | push re-registers after the transfer | step 4 |
-| U14 | the in-memory cdhash check and the add-image callback run before an image's code, at an acceptable cost; macOS 14 library constraints pin cdhashes | signed runner measurement |
+| U14 | the in-memory cdhash check and the add-image callback run before an image's code, at an acceptable cost; macOS 14 library constraints pin cdhashes | Partly answered (fix round, 2026-11-01): initialisers of libraries linked at launch run BEFORE the check (dyld runs them before the executable's code), so the check stops a swapped library from reaching the keychain, the engine or the person, not from running its constructors; library constraints stay the only layer that stops those. Cost on an M4 mini: the whole start check on the real release bundle (38 sealed slices, ad-hoc dry run with the hardened runtime) took 11.9 and 17.5 ms; a full static validation of every image would add about 300 ms per start (hollow_core alone 239 MB, 240 ms), so the check samples 32 `__TEXT` pages per image in memory instead. Signed runner still measures the signed bundle |
 
 ## 9. Found on the way (outside this scope)
 

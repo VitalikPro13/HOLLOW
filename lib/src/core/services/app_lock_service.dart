@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:local_auth/local_auth.dart';
@@ -26,14 +27,50 @@ abstract class AppLockStore {
   Future<Map<String, String>> readAll();
 }
 
+/// The two keychain groups an iOS build names on every App Lock call
+/// (HOL-SEC-187): the keys app group, which an app transfer keeps, and the app-ID
+/// group (`<team prefix>.<bundle id>`), where builds before 0.14 wrote and which a
+/// team change loses. Swift reads both from Info.plist.
+@immutable
+class KeychainGroups {
+  final String keys;
+  final String appId;
+  const KeychainGroups({required this.keys, required this.appId});
+}
+
+const _groupsChannel = MethodChannel('hollow/keychain_groups');
+
+Future<KeychainGroups?> _platformGroups() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+  try {
+    final m = await _groupsChannel.invokeMapMethod<String, String>('groups');
+    final keys = m?['keys'];
+    final appId = m?['appId'];
+    if (keys == null || appId == null || keys.isEmpty || appId.isEmpty) {
+      return null;
+    }
+    return KeychainGroups(keys: keys, appId: appId);
+  } catch (e) {
+    debugPrint('[HOLLOW-APPLOCK] no keychain groups: $e');
+    return null;
+  }
+}
+
 /// flutter_secure_storage under the this-device-only class: the items never travel
 /// in a backup or to a new phone, so a copied identity file stays useless without
-/// this device (C-06).
+/// this device (C-06). On iOS every call names its group: entries live in the keys
+/// group, are read from the app-ID group until they moved, and are deleted in both.
 class SecureAppLockStore implements AppLockStore {
+  SecureAppLockStore({Future<KeychainGroups?> Function()? groups})
+      : _groupsOf = groups ?? _platformGroups;
+
   static const _iOptions =
       IOSOptions(accessibility: KeychainAccessibility.unlocked_this_device);
   static const _mOptions =
       MacOsOptions(accessibility: KeychainAccessibility.unlocked_this_device);
+  static const _legacyI = IOSOptions();
+  static const _legacyM = MacOsOptions();
+  static const _probeKey = 'hollow_app_lock_group_probe';
 
   final _storage = const FlutterSecureStorage(
     aOptions: AndroidOptions(),
@@ -41,45 +78,161 @@ class SecureAppLockStore implements AppLockStore {
     mOptions: _mOptions,
   );
 
-  @override
-  Future<String?> read(String key) => _storage.read(key: key);
+  final Future<KeychainGroups?> Function() _groupsOf;
+  Future<KeychainGroups?>? _groups;
+  String? _target;
+
+  Future<KeychainGroups?> _known() => _groups ??= _groupsOf();
+
+  /// `errSecMissingEntitlement`: this build's profile lacks the group, for good.
+  static bool _missingEntitlement(Object e) =>
+      e is PlatformException &&
+      (e.details == -34018 || '${e.code} ${e.message}'.contains('-34018'));
+
+  static IOSOptions _in(String group, {bool legacyClass = false}) => IOSOptions(
+        groupId: group,
+        accessibility: legacyClass
+            ? KeychainAccessibility.unlocked
+            : KeychainAccessibility.unlocked_this_device,
+      );
+
+  /// Where new entries go: the keys group once a write there worked, else the
+  /// app-ID group. Only a success or a missing entitlement is kept for the
+  /// process; any other failure (a locked or busy keychain) is asked again next
+  /// time, so one bad moment never parks the entries where a team change loses them.
+  Future<String?> _writeGroup() async {
+    if (_target != null) return _target;
+    final g = await _known();
+    if (g == null) return null;
+    try {
+      await _storage.write(key: _probeKey, value: '1', iOptions: _in(g.keys));
+      await _storage.delete(key: _probeKey, iOptions: _in(g.keys));
+      return _target = g.keys;
+    } catch (e) {
+      debugPrint('[HOLLOW-APPLOCK] keys group refused, app-ID group: $e');
+      if (_missingEntitlement(e)) _target = g.appId;
+      return g.appId;
+    }
+  }
 
   @override
-  Future<void> write(String key, String value) =>
-      _storage.write(key: key, value: value);
+  Future<String?> read(String key) async {
+    final g = await _known();
+    if (g == null) return _storage.read(key: key);
+    Object? failed;
+    for (final group in [g.keys, g.appId]) {
+      try {
+        final v = await _storage.read(key: key, iOptions: _in(group));
+        if (v != null) return v;
+      } catch (e) {
+        // A build without the keys group is refused there; the other may hold it.
+        failed = e;
+      }
+    }
+    if (failed != null) throw failed;
+    return null;
+  }
 
   @override
-  Future<void> delete(String key) => _storage.delete(key: key);
+  Future<void> write(String key, String value) async {
+    final group = await _writeGroup();
+    if (group == null) return _storage.write(key: key, value: value);
+    return _storage.write(key: key, value: value, iOptions: _in(group));
+  }
+
+  /// Deletes in both groups, each named: an unnamed delete matches every group.
+  @override
+  Future<void> delete(String key) async {
+    final g = await _known();
+    if (g == null) return _storage.delete(key: key);
+    Object? failed;
+    for (final group in [g.keys, g.appId]) {
+      try {
+        await _storage.delete(key: key, iOptions: _in(group));
+      } catch (e) {
+        failed = e;
+      }
+    }
+    if (failed != null) throw failed;
+  }
 
   @override
-  Future<Map<String, String>> readAll() => _storage.readAll();
+  Future<Map<String, String>> readAll() async {
+    final g = await _known();
+    if (g == null) return _storage.readAll();
+    final all = await _storage.readAll(iOptions: _in(g.appId));
+    try {
+      all.addAll(await _storage.readAll(iOptions: _in(g.keys)));
+    } catch (e) {
+      if (await _writeGroup() == g.keys) rethrow;
+    }
+    return all;
+  }
+
+  /// iOS with the keys group: every entry in the app-ID group (either class) is
+  /// copied into the keys group, read back, and only then deleted where it was. A
+  /// move cut short leaves both copies, and the next start finishes it.
+  Future<bool> _moveToKeysGroup() async {
+    final g = await _known();
+    if (g == null || await _writeGroup() != g.keys) return false;
+    for (final legacyClass in [false, true]) {
+      final Map<String, String> old;
+      try {
+        old = await _storage.readAll(
+            iOptions: _in(g.appId, legacyClass: legacyClass));
+      } catch (e) {
+        debugPrint('[HOLLOW-APPLOCK] app-ID group not listed: $e');
+        continue;
+      }
+      for (final entry in old.entries) {
+        if (entry.key == _probeKey) continue;
+        try {
+          var held = await _storage.read(key: entry.key, iOptions: _in(g.keys));
+          if (held == null) {
+            await _storage.write(
+                key: entry.key, value: entry.value, iOptions: _in(g.keys));
+            held = await _storage.read(key: entry.key, iOptions: _in(g.keys));
+          }
+          if (held == null) continue;
+          await _storage.delete(key: entry.key, iOptions: _in(g.appId));
+        } catch (e) {
+          debugPrint('[HOLLOW-APPLOCK] an entry waits in the app-ID group: $e');
+        }
+      }
+    }
+    return true;
+  }
 
   /// Items written before the class changed carry the migrating `unlocked`
-  /// class, which the new query no longer matches. Re-saves each under the
-  /// this-device class; deleting first is what lets the add through, since the
-  /// class is not part of an item's identity.
+  /// class, which the new query no longer matches. Where the keys group works
+  /// they move there with the group move (copy, read back, delete). Elsewhere each
+  /// is re-saved under the this-device class; deleting first is what lets the add
+  /// through, since the class is not part of an item's identity.
   Future<void> migrateAccessibility(Iterable<String> keys) async {
     if (defaultTargetPlatform != TargetPlatform.iOS &&
         defaultTargetPlatform != TargetPlatform.macOS) {
       return;
     }
-    const legacyI = IOSOptions();
-    const legacyM = MacOsOptions();
+    if (await _moveToKeysGroup()) return;
+    final group = await _writeGroup();
+    final legacyI =
+        group == null ? _legacyI : _in(group, legacyClass: true);
+    final currentI = group == null ? _iOptions : _in(group);
     for (final key in keys) {
       String? old;
       try {
-        old =
-            await _storage.read(key: key, iOptions: legacyI, mOptions: legacyM);
+        old = await _storage.read(
+            key: key, iOptions: legacyI, mOptions: _legacyM);
         if (old == null) continue;
-        await _storage.delete(key: key);
-        await _storage.write(key: key, value: old);
+        await _storage.delete(key: key, iOptions: currentI);
+        await _storage.write(key: key, value: old, iOptions: currentI);
       } catch (e) {
         debugPrint('[HOLLOW-APPLOCK] keychain class migration skipped: $e');
         // A failed re-save must not cost the person their stored secret.
         if (old != null) {
           try {
             await _storage.write(
-                key: key, value: old, iOptions: legacyI, mOptions: legacyM);
+                key: key, value: old, iOptions: legacyI, mOptions: _legacyM);
           } catch (_) {}
         }
       }
@@ -103,6 +256,7 @@ class AppLockService {
     profileId: _rustProfileId,
     opensIdentity: _rustOpensIdentity,
     launchSecretAllowed: _rustLaunchSecretAllowed,
+    sealVerified: _platformSealVerified,
   );
   factory AppLockService() => _instance;
 
@@ -111,16 +265,19 @@ class AppLockService {
     required String? Function(bool create) profileId,
     required Future<bool> Function(String secret) opensIdentity,
     required bool Function() launchSecretAllowed,
+    required Future<bool> Function() sealVerified,
     bool? oneProfile,
   })  : _store = store,
         _profileIdOf = profileId,
         _opensIdentity = opensIdentity,
         _launchSecretAllowedOf = launchSecretAllowed,
+        _sealVerified = sealVerified,
         _oneProfile = oneProfile ?? (Platform.isAndroid || Platform.isIOS);
 
   /// A fresh service over fakes, in place of the app's one. [oneProfile]: the
   /// install can hold only one profile, as a phone. [launchSecretAllowed]: the
-  /// data root may keep a launch secret in the OS secure storage.
+  /// data root may keep a launch secret in the OS secure storage. [sealVerified]:
+  /// the macOS bundle check passed in this process.
   @visibleForTesting
   static AppLockService debugReplace({
     required AppLockStore store,
@@ -128,12 +285,14 @@ class AppLockService {
     required Future<bool> Function(String secret) opensIdentity,
     bool oneProfile = false,
     bool launchSecretAllowed = true,
+    bool sealVerified = true,
   }) =>
       _instance = AppLockService._(
           store: store,
           profileId: profileId,
           opensIdentity: opensIdentity,
           launchSecretAllowed: () => launchSecretAllowed,
+          sealVerified: () async => sealVerified,
           oneProfile: oneProfile);
 
   static String? _rustProfileId(bool create) =>
@@ -151,6 +310,20 @@ class AppLockService {
     }
   }
 
+  static const _sealChannel = MethodChannel('hollow/bundle_seal');
+
+  /// macOS: whether `BundleSeal.swift` verified every loaded library (HOL-SEC-187).
+  /// No answer is no: the person types the secret instead.
+  static Future<bool> _platformSealVerified() async {
+    if (defaultTargetPlatform != TargetPlatform.macOS) return true;
+    try {
+      return await _sealChannel.invokeMethod<bool>('verified') ?? false;
+    } catch (e) {
+      debugPrint('[HOLLOW-APPLOCK] bundle check unknown: $e');
+      return false;
+    }
+  }
+
   static const _kLockType = 'hollow_app_lock_type'; // 'pin' | 'password'
   static const _kBiometricSecret = 'hollow_app_lock_secret';
   // The unlock secret the OS keystore holds so Hollow can start on its own
@@ -164,6 +337,10 @@ class AppLockService {
   // Set once the person was told a duress code from before 0.12.2 can be set
   // again to be tied to this device too.
   static const _kDuressRebindAsked = 'hollow_app_lock_duress_rebind_asked';
+  // Set once the person was told to set the duress code again after App Lock
+  // moved to the keys-group key (HOL-SEC-187). Its own marker: most people saw
+  // the 0.12.2 note already.
+  static const _kDuressTransferAsked = 'hollow_app_lock_duress_transfer_asked';
 
   static const _entries = [
     _kLockType,
@@ -177,6 +354,7 @@ class AppLockService {
     ..._entries,
     _kLegacyChecked,
     _kDuressRebindAsked,
+    _kDuressTransferAsked,
   ];
 
   /// `<base>.<16 hex>`: an entry some profile's id names.
@@ -188,6 +366,7 @@ class AppLockService {
   final String? Function(bool create) _profileIdOf;
   final Future<bool> Function(String secret) _opensIdentity;
   final bool Function() _launchSecretAllowedOf;
+  final Future<bool> Function() _sealVerified;
   final bool _oneProfile;
 
   /// Held once known: a wipe deletes the id file, and its clean-up still has to
@@ -390,8 +569,10 @@ class AppLockService {
   /// keychain dialog at launch).
   bool get _storeOff => !_oneProfile && !launchSecretAllowed;
 
+  /// Read only in a process whose own libraries the macOS bundle check verified:
+  /// the launch secret opens the identity.
   Future<String?> readLaunchSecret() async {
-    if (!launchSecretAllowed) return null;
+    if (!launchSecretAllowed || !await _sealVerified()) return null;
     try {
       final v = await _read(_kLaunchSecret);
       return (v == null || v.isEmpty) ? null : v;
@@ -464,6 +645,26 @@ class AppLockService {
       await _write(_kDuressRebindAsked, '1');
     } catch (e) {
       debugPrint('[HOLLOW-APPLOCK] markDuressRebindAsked failed: $e');
+    }
+  }
+
+  /// Whether the one-time note to set the duress code again after the move to the
+  /// keys-group hardware key was shown.
+  Future<bool> duressTransferAsked() async {
+    if (_storeOff) return true;
+    try {
+      return await _read(_kDuressTransferAsked) != null;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Future<void> markDuressTransferAsked() async {
+    if (_storeOff) return;
+    try {
+      await _write(_kDuressTransferAsked, '1');
+    } catch (e) {
+      debugPrint('[HOLLOW-APPLOCK] markDuressTransferAsked failed: $e');
     }
   }
 

@@ -83,6 +83,16 @@ release pipeline is the `release` skill.
   the CI dry run): ad-hoc + library validation refuses the app's own ad-hoc frameworks
   ("different Team IDs"). The release signs with the file minus that key. Never sign a
   distributed build with the waiver: it lets any file dropped into a user-owned bundle load.
+- HOL-SEC-187 keychain: the sign stage seals every nested Mach-O's cdhash into Info.plist
+  (`macos_load_gate.sh seal`, after the last nested signature, before the app's), embeds
+  the Developer ID profile (`MAC_PROVISION_PROFILE`, CI secret
+  `DEVELOPER_ID_PROFILE_BASE64`) and adds application-identifier, team-identifier and
+  `group.com.anonlisten.hollow.keys` to the shipped entitlements, never to
+  `Release.entitlements`; `signed` checks the profile, the claims, the seal and refuses a
+  JIT engine. Debug is ALWAYS ad-hoc (`Flutter-Debug.xcconfig` never includes
+  `LocalSigning.xcconfig`) and so never opens a keychain-protected identity: develop on
+  throwaway data roots. `BundleSeal.checkAtStart()` stays the first line of
+  `MainFlutterWindow.awakeFromNib`. Wiki `security_write_gates` §43b.
 - Library validation on means no legacy DAL camera plug-ins in Hollow (macOS 12/13 only;
   14.1+ dropped them everywhere); Camera Extensions run out of process and still work.
 

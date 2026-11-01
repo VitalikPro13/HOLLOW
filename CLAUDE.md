@@ -1,12 +1,12 @@
 # HOLLOW: Project Instructions for Claude Code
 
 ## What Is This
-Distributed, encrypted Discord alternative: no central servers, members host it. `HOLLOW_PLAN.md` = architecture, phases, TODO.
+Distributed, encrypted Discord alternative; no central servers, members host it. `HOLLOW_PLAN.md` = architecture, phases, TODO.
 
 ## Tech Stack
 - **UI:** Flutter (Dart), 6 platforms
 - **Backend:** Rust via `flutter_rust_bridge` v2.11.1
-- **Networking:** WSS relay (signaling, text/CRDT/MLS) + WebRTC data channels (files) + WebRTC media.
+- **Networking:** WSS relay (signaling, text/CRDT/MLS), WebRTC data channels (files) + media.
 - **E2EE:** vodozemac (Olm) DMs, OpenMLS 0.9 servers, SFrame (AES-128-GCM) media
 - **Local DB:** SQLCipher
 - **Identity:** Ed25519 via BIP-39 mnemonic
@@ -35,14 +35,14 @@ flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust
 # Relay deploy: scp src/*.cpp *.h *.c -> ~/relay-uws/src/ + CMakeLists.txt -> ~/relay-uws/, cmake+make, `sudo install` -> /usr/local/bin, restart; NO setcap (`feedback_relay_rules`)
 # Relay tests (on the VPS, before every deploy): bash relay-uws/test/run_tests.sh, then SANITIZE=1 (ASan+UBSan)
 
-# Windows release (build->sign->installer->zip; Certum PIN prompt)
+# Windows release (build->sign->installer->zip, Certum PIN)
 pwsh scripts\build_release.ps1  # full pipeline (-SkipBuild to repackage)
 pwsh scripts\sign_release.ps1  # sign every .exe/.dll in Release
 ```
 **Releases: load the `release` skill FIRST** (incl. the go-live gate; `reference_release_pipeline`). **Certum signing:** CNG binding self-heals; output `installer\Output\` (`reference_certum_signing_procedure`). **Linux release = BOTH artifacts uploaded + `scripts/publish_flatpak_repo.sh` (VM, own GPG-signed OSTree repo, NEVER Flathub) BEFORE the LAST step `scripts\sign_manifest.ps1`** (key OUTSIDE repo, `project_update_integrity`, `project_linux_auto_update`). **Zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
 
 ## Area Rule Books (READ the matching one BEFORE working in that area)
-This file keeps the rules that break things silently ANYWHERE (security, crypto, multi-device, data integrity). Area traps live in wiki rule books, `tools/hollow-memory/wiki/`. **Workflow, every task: first name the areas it touches, read those books whole (plus the search workflow below for the feature), then do the whole job.** This file alone is NOT the full rule set. A new area-only rule goes into its book, never here:
+This file keeps the rules that break things silently ANYWHERE (security, crypto, multi-device, data integrity). Area traps live in wiki rule books (`tools/hollow-memory/wiki/`). **Every task: name its areas, read those books whole (plus the search workflow below), then the whole job.** This file is NOT the full rule set. A new area-only rule goes in its book, never here:
 - `rules_media_calls.md`: calls, voice channels, meetings, WebRTC, audio, screen share, forked flutter_webrtc/libwebrtc, ffmpeg.
 - `rules_ui_flutter.md` (+ the `hollow-ui` skill): any widget, dialog, menu, list, shell, theme, scale, provider-driven UI.
 - `rules_platforms.md`: Windows/Linux/macOS runners, flatpak, updater, restart, single instance, Android build, Skia.
@@ -56,14 +56,14 @@ All UI = Hollow widgets (`src/ui/components/`; icons Lucide, `brand_icons.dart`,
 ## Key Architecture Notes
 - **Multi-node harness (`node/test_harness.rs`) = PRIMARY testing for distributed logic;** ALWAYS verify ring-1/ring-2 changes there; it does NOT cover media/native/relay C++ or device->master attribution (process-global resolver). `feedback_harness_first_testing`.
 - **Node modules:** `swarm.rs` = event-loop dispatcher; domain logic in focused modules as `handle_*()`; types in `types.rs`. No SwarmContext; pass state vars individually (`feedback_swarmcontext_borrow`). New envelope variants -> the owner's `handle_envelope_*()` (`feedback_envelope_dispatch_pattern`).
-- **Persistence actors:** `CrdtStore` + `CryptoStore` own long-lived SQLCipher conns in spawn_blocking threads, fire-and-forget mpsc (batched per server). node/ reaches the message store ONLY via `MessageStore::lease` (warm pooled conns, `storage/store_pool.rs`; 3 idle, 2 on phones, 2 MB cache), NEVER `MessageStore::open()` there (floor `store_open_floor.rs` + harness guard). `feedback_sqlcipher_open_hygiene`. An event Dart answers by re-reading CRDT state waits for the commit (`reads_persisted_server_state`, else the UI lags one change).
+- **Persistence actors:** `CrdtStore`, `CryptoStore` own long-lived SQLCipher conns (spawn_blocking), fire-and-forget mpsc per server. node/ reaches the message store ONLY via `MessageStore::lease` (warm pooled conns, `storage/store_pool.rs`; 3 idle, 2 on phones, 2 MB cache), NEVER `MessageStore::open()` there (floor `store_open_floor.rs` + harness guard). `feedback_sqlcipher_open_hygiene`. An event Dart answers by re-reading CRDT state waits for the commit (`reads_persisted_server_state`, else the UI lags).
 - **Peer state in swarm.rs:** `ws_room_peers` + `synced_peers`; PeerJoined -> key exchange + sync; 30s keepalive in ws_client.rs.
-- **Relay domain:** `relayDomainProvider` + `set_relay_url()`, default `relay.anonlisten.com`; ALL WS/signaling/STUN/TURN URLs derive from it.
+- **Relay domain:** `relayDomainProvider` + `set_relay_url()` (default `relay.anonlisten.com`); ALL WS/signaling/STUN/TURN URLs derive from it.
 - **CRITICAL: Dart traps that fail SILENTLY**; read before debugging layout or a stuck Future. `feedback_dart_patterns`, `feedback_badge_stack_clips_avatar_frame`.
-- **Logging:** `hollow_log!` -> stderr + `hollow_debug.log`; `hollow_crash.log` = Flutter errors. **NEVER `eprintln!`/`println!` in hollow_core:** a dead stderr (closed terminal) PANICS, killing the node while the window lives. `feedback_linux_stderr_epipe_panic`.
+- **Logging:** `hollow_log!` -> stderr + `hollow_debug.log`; Flutter errors -> `hollow_crash.log`. **NEVER `eprintln!`/`println!` in hollow_core:** a dead stderr (closed terminal) PANICS the node while the window lives. `feedback_linux_stderr_epipe_panic`.
 - **CRITICAL: user-visible text carries ZERO em dashes** (UI, docs, legal, Rust errors, website); comments/logs exempt. NEVER a colon in its place. Settings labels = SENTENCE case; Title Case only for section/doc titles, permission names, proper nouns. **Every body of user-facing copy (changelog, news, store, website, help, legal) goes through the `sepia` skill BEFORE Vitalik sees it; changelog = ONE plain sentence per change.** `feedback_vitalik_writing_voice`.
 - **Storage & profiles (#47):** data root `dirs::data_dir()/hollow` (override `set_data_dir()`/`HOLLOW_DATA_DIR`); desktop precedence env > `--portable` > profiles.json PIN > marker > `hollow_data` WITH identity (NEVER `data`); keychain = PER-PROFILE slots. `project_portable_mode`, `project_issue47_sframe_keystore_fix`.
-- **CRITICAL: identity at-rest protection:** password (blocks launch) or OS keychain (silent). Keychain = DEFAULT on Win/mac OS data root only, after a typed phrase check (new) or the FULL phrase (existing), verified first; NEVER silent, never Linux/portable/override; a missing key deletes nothing; the legacy slot is read-only. `unlock_identity()` before any identity/DB op. `project_identity_protection`.
+- **CRITICAL: identity at-rest protection:** password (blocks launch) or OS keychain (silent). Keychain = DEFAULT on Win/mac OS data root only, after a typed phrase check (new) or the FULL phrase (existing), verified first; NEVER silent, never Linux/portable/override; a missing key deletes nothing; the legacy slot is read-only. macOS keys ONLY in the data-protection keychain (`group.com.anonlisten.hollow.keys`, device-only), read only after the bundle self-check; nothing writes the login keychain; legacy items: copy, read back, THEN delete by reference. Every Apple keychain call names a group; extensions never claim it (HOL-SEC-187). `unlock_identity()` before identity/DB ops. `project_identity_protection`.
 - **Deep links:** `hollow://` on all 6 platforms via `DeepLinkService` (init pre-runApp). Invites COPY `webServerInviteLink()` (FRAGMENT url, id never hits server logs); ALL link input bars parse via `inviteIdFromInput`/`classifyHollowLink`. `project_deep_linking`.
 - **Self-hosting (`relay-uws/SELF_HOSTING.md` = THE guide, ONE `.env`):** TURN URIs from `--domain`; invites stamp the SENDER's relay (`required relay:` on every builder); a differing relay = ONE dialog `relay_switch_dialog.dart`, NEVER auto-switch; `relayStatusProvider` null = unknown. `project_self_hosting_overhaul_2026_09`.
 - **Relay access keys:** SELF-HOSTED opt-in only (`keys.json`, app caches `set_license_key()`); the official relay keeps them OFF, open to all, no alpha/limited-access copy. `project_official_relay_open`.
@@ -168,9 +168,9 @@ All UI = Hollow widgets (`src/ui/components/`; icons Lucide, `brand_icons.dart`,
 - **Widget tests:** `pumpHollowMobile()` mocks FFI. **VERIFY UI BY DRIVING THE APP on THROWAWAY fleet peers:** `scripts/fleet.ps1` (NEVER `ui_probe.ps1`'s default = Vitalik's REAL identity; a missed step goes `-Live`); also iOS Simulators on the mini (mobile default), Android emulators (`FLEET_BACKEND=android`, ADD for platform bugs: notifications, native, permissions), Linux laptop. `feedback_probe_throwaway_identities_only`, `feedback_mobile_parity_always`, wiki `fleet_probe`.
 
 ## Search tools = THE dev workflow (hollow-memory MCP + LSP)
-- Every task and subagent brief, in order: `memory_search` (what we know) -> `code_search` (where) -> LSP references/callers -> Grep as the completeness floor -> READ the code -> harness/fleet prove it. Tools point, never prove. `feedback_semantic_search_first`.
-- `memory_search(query)` = memory+wiki+reports+plan/whitepaper/CLAUDE.md, meaning + keywords; ALWAYS before designing or re-investigating. Both indexes refresh changed files per search (code once git tracks it).
-- `code_search(query)` LOCATES code by what it does, never proves completeness: "every call site/arm" sweeps = Grep as the floor PLUS LSP `findReferences`/`incomingCalls` (Rust + Dart; catches aliased calls, misses code that does not resolve mid-edit). `reference_code_search_tooling`.
+- Every task/brief, in order: `memory_search` (known) -> `code_search` (where) -> LSP callers -> Grep (completeness floor) -> READ -> harness/fleet prove. Tools only point. `feedback_semantic_search_first`.
+- `memory_search(query)` = memory+wiki+reports+plan/whitepaper/CLAUDE.md, meaning + keywords; ALWAYS before designing or re-investigating; indexes refresh per search (code once tracked).
+- `code_search(query)` LOCATES, never proves completeness: "every call site/arm" sweeps = Grep floor PLUS LSP `findReferences`/`incomingCalls` (Rust + Dart; misses code unresolved mid-edit). `reference_code_search_tooling`.
 
 ## Rules
 - Never commit secrets, keys or credentials.
@@ -180,4 +180,4 @@ All UI = Hollow widgets (`src/ui/components/`; icons Lucide, `brand_icons.dart`,
 - **HARD budget: 50,000 chars.** Entries = 1–3 lines: rule + memory pointer. This file keeps what breaks SILENTLY ANYWHERE (crypto, security, multi-device, data integrity, the relay); an area-only trap goes to its wiki rule book (listed above), never dropped. Buy room by COMPRESSING prose or moving an area rule, NEVER by deleting a rule.
 - **SSH hosts (relay VPS, Mac, VM, Hostinger):** `BUILD_GUIDE.md` (gitignored); key-only, free for checks/logs/deploys.
 - **Local dev:** checks/tests/codegen free.
-- **Agent team (`.claude/agents/`, local):** `builder` (Opus high) / `builder-secure` (Opus high: security, crypto, identity, MLS, CRDT authority, relay, protocols) work in own worktrees (Mac lead `~/dev/wt`, PC `D:\dev\wt` via `scripts/pc_sync.sh`), every long run to a FRESH `runner` (Haiku, verbatim digest, never edits); `Explore` = Haiku scout; `reviewer` = hostile Opus high. NEVER a bare general-purpose agent for building (it inherits the lead's model AND xhigh); ~350k context = HANDOFF to a fresh builder, never a stop; measure waves with `scripts/usage_report.py`. `feedback_agent_team_tiers`.
+- **Agent team (`.claude/agents/`, local):** `builder` (Opus high) / `builder-secure` (Opus high: security, crypto, identity, MLS, CRDT authority, relay, protocols) work in own worktrees (Mac `~/dev/wt`, PC `D:\dev\wt` via `scripts/pc_sync.sh`), long runs to a FRESH `runner` (Haiku, verbatim digest, never edits); `Explore` = Haiku scout; `reviewer` = hostile Opus high. NEVER a bare general-purpose agent for building (inherits the lead's model AND xhigh); ~350k context = HANDOFF, never a stop; measure waves: `scripts/usage_report.py`. `feedback_agent_team_tiers`.

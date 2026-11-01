@@ -52,6 +52,7 @@ void main() {
                 notifyFriends: false,
                 available: false,
                 rebindDue: false,
+          transferDue: false,
               )),
         ]),
         child: MaterialApp(
