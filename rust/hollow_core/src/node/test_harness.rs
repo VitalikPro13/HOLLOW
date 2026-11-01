@@ -27378,7 +27378,13 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // total 1032.8 s, slack 1.0 s).
     // 2026-10-31 merge of b14-flakes and b14-bounds: both blocks together (total 1039.0 s,
     // slack 1.0 s).
-    const BUDGET_MS: u64 = 1_040_000;
+    // 2026-11-01: t14-lost-leave added two spawn staggers between sibling devices and one
+    // absence, leaves that are not our identity's own ending no join (4.5 s, total 1043.5 s,
+    // slack 1.5 s).
+    // 2026-11-01: t14-lost-leave's review test added one spawn stagger, one settle after the
+    // owner took the leave and one absence, an old leave that ends no rejoin (4.2 s, total
+    // 1047.7 s, slack 1.3 s).
+    const BUDGET_MS: u64 = 1_049_000;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -44784,8 +44790,11 @@ async fn t1_sibling_stale_announce_after_a_leave_does_not_rejoin() {
     let _clock = super::frame_auth::clock_ahead_for_test(2 * super::frame_auth::LIVE_SKEW_MS);
     t1_return(&relay, &d2.device_id, T1Away::Expired);
     assert!(
-        wait_until(15, async || relay.room_devices(&server_id).contains(&d2.device_id)).await,
-        "precondition: device 2 acted on the late announce and ran the join flow"
+        wait_until(15, async || {
+            relay.room_devices(&server_id).contains(&d2.device_id) || t14_book_holds(&d2, "left", &server_id)
+        })
+        .await,
+        "precondition: device 2 acted on the late announce (and on the leave behind it)"
     );
     let back = wait_until(15, async || {
         d2.servers().contains(&server_id) || x.raw_crdt_member_keys(&server_id).contains(&m_master)
@@ -45088,8 +45097,11 @@ async fn t1_review_stale_announce_for_a_left_server_leaves_no_join_behind() {
     drain_events(&mut d2);
     t1_return(&relay, &d2.device_id, T1Away::Expired);
     assert!(
-        wait_until(15, async || relay.room_devices(&server_id).contains(&d2.device_id)).await,
-        "precondition: device 2 acted on the late announce and ran the join flow"
+        wait_until(15, async || {
+            relay.room_devices(&server_id).contains(&d2.device_id) || t14_book_holds(&d2, "left", &server_id)
+        })
+        .await,
+        "precondition: device 2 acted on the late announce (and on the leave behind it)"
     );
     let surfaced = wait_event(&mut d2, std::time::Duration::from_secs(10), |ev| {
         matches!(ev,
@@ -58258,7 +58270,6 @@ async fn a_removal_of_a_friendship_our_accept_stamped_reaches_a_sibling_through_
 /// span and the sibling that only heard the join announced drops the server.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-#[ignore = "known bug: lost leave + sibling rejoin, 0.14 track"]
 async fn leave_racing_a_sibling_announce_join_stays_left() {
     let _g = test_guard();
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
@@ -58498,4 +58509,563 @@ async fn review_b14_a_reasked_file_after_session_loss_is_served() {
     super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
     drop(a);
     drop(b);
+}
+
+// t14-lost-leave
+
+/// The owner's view of `master`: whether its log holds the identity's own leave, and
+/// whether it still counts the identity a member.
+async fn t14_owner_view(o: &TestNode, sid: &str, master: &str) -> (bool, bool) {
+    let Some(state) = o.live_server_state(sid).await else { return (false, true) };
+    let saw = state.op_log.iter().any(|op| {
+        op.author == master
+            && matches!(&op.payload, crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id } if peer_id == master)
+    });
+    (saw, state.is_member(master))
+}
+
+/// Whether `node`'s leave book holds `sid` in `part` ("pending" or "left").
+fn t14_book_holds(node: &TestNode, part: &str, sid: &str) -> bool {
+    node.store()
+        .load_setting("leave_book")
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .is_some_and(|book| book[part].get(sid).is_some())
+}
+
+/// `node`'s identity leaving `sid`, signed by its master as a device of it would.
+fn t14_own_leave(node: &TestNode, sid: &str) -> super::types::HavenMessage {
+    let payload = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: node.master_id.clone() };
+    // A second ahead: a seal clock running ahead of the wall never hides it behind the announce.
+    crdt_broadcast(sid, &forge_crdt_op(sid, &node.master_id, payload, 1_000, Some(&node.master_kp)))
+}
+
+/// What the leaver does while the owner is away.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum T14Away {
+    Stay,
+    Restart,
+    /// Its socket drops and comes back: the new one must prove the held door again.
+    Reconnect,
+}
+
+/// A member joins, the owner goes away, the member leaves and does `away`. The owner
+/// (on its own device `o_dev`, or its master's) must hold the leave once it is back.
+async fn t14_leave_while_the_owner_is_away(away: T14Away, o_dev: Option<u8>) {
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 158;
+    const M: u8 = 159;
+    const B: u8 = 160;
+    if let Some(dev) = o_dev {
+        let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O)).peer_id();
+        super::resolver::seed_self(&o_master, &[NativeKeypair::from_secret_bytes(&seed_bytes(dev)).peer_id()]);
+    }
+    let mut o = spawn_node_with_friends(&relay, O, o_dev.unwrap_or(O), &[]).await;
+    let mut b = spawn_node_with_friends(&relay, M, B, &[]).await;
+    let m_master = b.master_id.clone();
+    let sid = create_server_and_wait(&mut o, "Away").await;
+    b.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+        })
+        .await,
+        "B never joined",
+    );
+    assert!(wait_until(10, async || t14_owner_view(&o, &sid, &m_master).await == (false, true)).await, "the owner counts M");
+
+    go_offline(&relay, &o, &sid).await;
+    b.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(wait_until(10, async || g13_dropped(&b, &sid).await).await, "B drops the server at once");
+    assert!(wait_until(10, async || t14_book_holds(&b, "pending", &sid)).await, "B keeps its leave on its way");
+    let b = match away {
+        T14Away::Stay => b,
+        T14Away::Restart => restart_node(&relay, b, M, B).await,
+        T14Away::Reconnect => {
+            relay.set_online(&b.device_id, false);
+            assert!(wait_until(10, async || !relay.room_devices(&sid).contains(&b.device_id)).await, "B's socket drops");
+            relay.set_online(&b.device_id, true);
+            b
+        }
+    };
+
+    relay.set_online(&o.device_id, true);
+    assert!(
+        wait_until(40, async || t14_owner_view(&o, &sid, &m_master).await == (true, false)).await,
+        "the owner never got the leave M made while it was away ({away:?}): {:?}",
+        t14_owner_view(&o, &sid, &m_master).await,
+    );
+    assert!(
+        wait_until(20, async || !relay.room_devices(&sid).contains(&b.device_id)).await,
+        "B stays in the server's room after the owner holds its leave",
+    );
+}
+
+/// A member that leaves while the owner is away, before any owner device could read
+/// its leave, keeps it on its way until the owner is back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_leave_made_while_the_owner_is_away_reaches_it_on_return() {
+    let _g = test_guard();
+    t14_leave_while_the_owner_is_away(T14Away::Stay, None).await;
+}
+
+/// A leave still on its way when the app stops is sent again after the restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_leave_pending_at_shutdown_reaches_the_owner_after_restart() {
+    let _g = test_guard();
+    t14_leave_while_the_owner_is_away(T14Away::Restart, None).await;
+}
+
+/// A device joining a server one of its siblings announced drops that join when its own
+/// identity's leave of the server arrives, and only then: a leave a stranger hands on,
+/// one whose signature is not our master's, or another identity's leave changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn an_announced_join_ends_only_on_its_own_identitys_leave() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 161;
+    const M: u8 = 162;
+    const B: u8 = 163;
+    const C: u8 = 164;
+    const X: u8 = 165;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let x_master = NativeKeypair::from_secret_bytes(&seed_bytes(X)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+    let mut o = spawn_node_with_friends(&relay, O, O, &[]).await;
+    let b = spawn_node_with_friends(&relay, M, B, &[]).await;
+    // Spawn stagger (see `session_server_pair`).
+    sleep_ms(1500).await;
+    let c = spawn_node_with_friends(&relay, M, C, &[&x_master]).await;
+    let x = spawn_node_with_friends(&relay, X, X, &[&m_master]).await;
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
+    expect_olm_confirmed(&b, &c, 20).await;
+    expect_dm_pair_ready(&relay, &x, &c, 20).await;
+    let sid = create_server_and_wait(&mut o, "Announced").await;
+
+    // M is no member, so no one serves the join and it stays open.
+    let announce = super::types::HavenMessage::SiblingServerAnnounce {
+        server_id: sid.clone(),
+        owner: Some(o.master_id.clone()),
+        join_key: invite_key(&sid),
+        fresh: true,
+    };
+    carry_as(&b, &c, announce).await;
+    assert!(wait_until(10, async || relay.room_devices(&sid).contains(&c.device_id)).await, "C starts the announced join");
+
+    let removal = |author: &str, removed: &str, signer: &NativeKeypair| {
+        let payload = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: removed.to_string() };
+        crdt_broadcast(&sid, &forge_crdt_op(&sid, author, payload, 1_000, Some(signer)))
+    };
+    // A stranger hands on our real leave; our device hands on a leave signed by another
+    // key, another identity's leave, another identity removing us, and us removing it.
+    carry_as(&x, &c, t14_own_leave(&c, &sid)).await;
+    carry_as(&b, &c, removal(&m_master, &m_master, &x.master_kp)).await;
+    carry_as(&b, &c, t14_own_leave(&x, &sid)).await;
+    carry_as(&b, &c, removal(&x_master, &m_master, &x.master_kp)).await;
+    carry_as(&b, &c, removal(&m_master, &x_master, &c.master_kp)).await;
+    let elsewhere = "0123456789abcdef0123456789abcdef01234567";
+    let payload = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: m_master.clone() };
+    carry_as(&b, &c, crdt_broadcast(&sid, &forge_crdt_op(elsewhere, &m_master, payload, 1_000, Some(&c.master_kp)))).await;
+    // Absence: none of these ends the join.
+    sleep_ms(1_500).await;
+    assert!(
+        relay.room_devices(&sid).contains(&c.device_id),
+        "a removal that is not our identity's own leave, from our own device, ended our join",
+    );
+
+    carry_as(&b, &c, t14_own_leave(&c, &sid)).await;
+    assert!(
+        wait_until(10, async || !relay.room_devices(&sid).contains(&c.device_id)).await,
+        "C kept joining a server its identity left",
+    );
+}
+
+/// A sibling that holds its identity's leave of a server, across a restart, refuses a
+/// later join of it that only a membership from before the leave answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_sibling_refuses_a_join_its_identity_left_after_a_restart() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 166;
+    const M: u8 = 167;
+    const B: u8 = 168;
+    const C: u8 = 169;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+    let mut o = spawn_node_with_friends(&relay, O, O, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, M, B, &[]).await;
+    // Spawn stagger (see `session_server_pair`).
+    sleep_ms(1500).await;
+    let c = spawn_node_with_friends(&relay, M, C, &[]).await;
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
+    expect_olm_confirmed(&b, &c, 20).await;
+    let sid = create_server_and_wait(&mut o, "Left").await;
+    b.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+        })
+        .await,
+        "B never joined",
+    );
+    // B's own announce may have started a join on C: let it finish before the leave.
+    let _ = wait_until(10, async || c.live_server_state(&sid).await.is_some_and(|s| s.is_member(&m_master))).await;
+
+    // The leave reaches C alone; B and the owner keep the membership.
+    carry_as(&b, &c, t14_own_leave(&c, &sid)).await;
+    assert!(wait_until(10, async || g13_dropped(&c, &sid).await).await, "C drops the server its identity left");
+    assert!(wait_until(10, async || t14_book_holds(&c, "left", &sid)).await, "C holds its identity's leave");
+    let mut c = restart_node(&relay, c, M, C).await;
+    expect_olm_confirmed(&b, &c, 20).await;
+    drain_events(&mut c);
+
+    let announce = super::types::HavenMessage::SiblingServerAnnounce {
+        server_id: sid.clone(),
+        owner: Some(o.master_id.clone()),
+        join_key: invite_key(&sid),
+        fresh: true,
+    };
+    carry_as(&b, &c, announce).await;
+    let joined = wait_event(&mut c, std::time::Duration::from_secs(12), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+    })
+    .await;
+    assert!(!joined, "C joined again a server its identity left, on a membership from before the leave");
+    assert!(g13_dropped(&c, &sid).await, "C holds the server its identity left");
+    assert!(
+        wait_until(10, async || !relay.room_devices(&sid).contains(&c.device_id)).await,
+        "C stays in the room of a join it refused",
+    );
+}
+
+/// A device that rejoins a server while its earlier leave of it is still on its way
+/// drops that leave: landing later, it would end the membership the rejoin made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_rejoin_drops_a_leave_still_on_its_way() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 170;
+    const X: u8 = 171;
+    const M: u8 = 172;
+    const B: u8 = 173;
+    let mut o = spawn_node_with_friends(&relay, O, O, &[]).await;
+    let mut x = spawn_node_with_friends(&relay, X, X, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, M, B, &[]).await;
+    let sid = create_server_and_wait(&mut o, "Back again").await;
+    for node in [&mut x, &mut b] {
+        node.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+        assert!(
+            wait_event(node, std::time::Duration::from_secs(10), |ev| {
+                matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+            })
+            .await,
+            "a member never joined",
+        );
+    }
+    go_offline(&relay, &o, &sid).await;
+    b.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(wait_until(10, async || t14_book_holds(&b, "pending", &sid)).await, "B keeps its leave for the away owner");
+    assert!(wait_until(15, async || !x.live_server_state(&sid).await.is_some_and(|s| s.is_member(&b.master_id))).await, "X takes the leave");
+
+    drain_events(&mut b);
+    b.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+        })
+        .await,
+        "B never rejoined",
+    );
+    assert!(
+        wait_until(10, async || !t14_book_holds(&b, "pending", &sid)).await,
+        "B still holds the leave its rejoin outlived",
+    );
+}
+
+// t14-lost-leave-review
+
+/// A leave handed to an owner device whose socket died unseen must still reach the
+/// owner once it is back: a hand-off is not a landing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14r_a_leave_handed_to_a_dead_owner_socket_still_lands() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 240;
+    const M: u8 = 241;
+    const B: u8 = 242;
+    let mut o = spawn_node_with_friends(&relay, O, O, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, M, B, &[]).await;
+    let m_master = b.master_id.clone();
+    let sid = create_server_and_wait(&mut o, "Dead socket").await;
+    b.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+        })
+        .await,
+        "B never joined",
+    );
+    assert!(wait_until(10, async || t14_owner_view(&o, &sid, &m_master).await == (false, true)).await, "the owner counts M");
+    expect_olm_confirmed(&o, &b, 20).await;
+
+    // Everything B hands the owner is lost on the way, as on a socket that died unseen.
+    relay.swallow_direct(&b.device_id, &o.device_id);
+    b.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(wait_until(10, async || g13_dropped(&b, &sid).await).await, "B drops the server at once");
+    let handed = || {
+        b.store()
+            .load_setting("leave_book")
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+            .is_some_and(|book| {
+                book["left"].get(&sid).is_some()
+                    && book["pending"].get(&sid).is_none_or(|p| p["reached"].to_string().contains(&o.master_id))
+            })
+    };
+    assert!(wait_until(10, async || handed()).await, "precondition: B handed its leave to the owner's device");
+    relay.release_direct(&b.device_id, &o.device_id);
+    assert!(
+        wait_until(40, async || t14_owner_view(&o, &sid, &m_master).await == (true, false)).await,
+        "the owner never got a leave B handed to its dead socket (B still holds it: {}): {:?}",
+        t14_book_holds(&b, "pending", &sid),
+        t14_owner_view(&o, &sid, &m_master).await,
+    );
+    assert!(
+        wait_until(20, async || !t14_book_holds(&b, "pending", &sid)).await,
+        "B keeps a leave the owner holds",
+    );
+}
+
+/// An old leave of ours that reaches a sibling late, sealed afresh (a copy parked behind
+/// a key exchange), must not end a join of the server our identity rejoined since.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14r_a_stale_leave_sealed_late_does_not_end_a_rejoin() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 243;
+    const M: u8 = 244;
+    const B: u8 = 245;
+    const C: u8 = 246;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+    let mut o = spawn_node_with_friends(&relay, O, O, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, M, B, &[]).await;
+    sleep_ms(1500).await;
+    let c = spawn_node_with_friends(&relay, M, C, &[]).await;
+    expect_siblings_counted(&[&b, &c], &m_master, &[&b_dev, &c_dev], 20).await;
+    expect_olm_confirmed(&b, &c, 20).await;
+    let sid = create_server_and_wait(&mut o, "Rejoined").await;
+    b.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+        })
+        .await,
+        "B never joined",
+    );
+    let _ = wait_until(10, async || c.live_server_state(&sid).await.is_some_and(|s| s.is_member(&m_master))).await;
+
+    // The identity leaves; keep the real leave op.
+    b.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(wait_until(10, async || g13_dropped(&b, &sid).await && g13_dropped(&c, &sid).await).await, "both drop");
+    let old_leave: String = b
+        .store()
+        .load_setting("leave_book")
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|book| book["left"][&sid]["op_json"].as_str().map(str::to_string))
+        .expect("B holds its own leave");
+    assert!(wait_until(15, async || t14_owner_view(&o, &sid, &m_master).await == (true, false)).await, "the owner took the leave");
+    sleep_ms(1200).await;
+
+    // The identity rejoins; C's announced join waits on its lock read.
+    relay.hold_lock_reads(&c.device_id);
+    drain_events(&mut b);
+    b.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+        })
+        .await,
+        "B never rejoined",
+    );
+    assert!(
+        wait_until(10, async || relay.room_devices(&sid).contains(&c.device_id) && relay.held_lock_reads(&c.device_id) > 0).await,
+        "precondition: C runs the join B announced",
+    );
+
+    // The old leave arrives late, sealed now.
+    carry_as(&b, &c, super::types::HavenMessage::CrdtOpBroadcast { server_id: sid.clone(), op_json: old_leave }).await;
+    sleep_ms(1500).await;
+    relay.release_lock_reads(&c.device_id);
+    assert!(
+        wait_until(20, async || c.live_server_state(&sid).await.is_some_and(|s| s.is_member(&m_master))).await,
+        "C ended the join of a server its identity rejoined, on a leave from before the rejoin",
+    );
+}
+
+// t14-lost-leave-fix
+
+/// A leave whose new socket must prove the held door again, without a restart, still
+/// reaches the owner: the server's room is the only one they share.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_leave_pending_across_a_reconnect_reaches_the_owner() {
+    let _g = test_guard();
+    t14_leave_while_the_owner_is_away(T14Away::Reconnect, None).await;
+}
+
+/// An owner on a device of its own (not its master's id) is handed the leave and
+/// answers for it like any owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_leave_reaches_an_owner_on_a_device_of_its_own() {
+    let _g = test_guard();
+    t14_leave_while_the_owner_is_away(T14Away::Stay, Some(161)).await;
+}
+
+/// A leave on its way ends when the owner it waits on deletes the server, whoever hands
+/// on the owner's deletion: no one is left to need it, and the room goes with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_pending_leave_ends_when_the_owner_deletes_the_server() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 247;
+    const X: u8 = 248;
+    const M: u8 = 249;
+    const B: u8 = 250;
+    let mut o = spawn_node_with_friends(&relay, O, O, &[]).await;
+    let mut x = spawn_node_with_friends(&relay, X, X, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, M, B, &[]).await;
+    let sid = create_server_and_wait(&mut o, "Closing").await;
+    for node in [&mut x, &mut b] {
+        node.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+        assert!(
+            wait_event(node, std::time::Duration::from_secs(10), |ev| {
+                matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+            })
+            .await,
+            "a member never joined",
+        );
+    }
+    expect_olm_confirmed(&x, &b, 20).await;
+    go_offline(&relay, &o, &sid).await;
+    b.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(wait_until(10, async || t14_book_holds(&b, "pending", &sid)).await, "B keeps its leave for the away owner");
+    assert!(relay.room_devices(&sid).contains(&b.device_id), "precondition: the leave keeps the room");
+
+    let payload = crate::crdt::operations::CrdtPayload::ServerDeleted { deleted_at: crate::crdt::hlc::wall_clock_ms() as i64 };
+    let deleted = forge_crdt_op(&sid, &o.master_id, payload, 1_000, Some(&o.master_kp));
+    carry_as(&x, &b, crdt_broadcast(&sid, &deleted)).await;
+    assert!(
+        wait_until(10, async || !t14_book_holds(&b, "pending", &sid)).await,
+        "B keeps a leave of a server its owner deleted",
+    );
+    assert!(
+        wait_until(10, async || !relay.room_devices(&sid).contains(&b.device_id)).await,
+        "B stays in the room of a server its owner deleted",
+    );
+}
+
+/// A leave that reaches the owner only after an owner checkpoint covering its clock must
+/// still end the leaver's membership there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_leave_landing_behind_the_owners_checkpoint_still_closes_the_span() {
+    use crate::crdt::operations::CrdtPayload;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 251;
+    const X: u8 = 252;
+    const M: u8 = 253;
+    const B: u8 = 254;
+    let mut o = spawn_node_with_friends(&relay, O, O, &[]).await;
+    let mut x = spawn_node_with_friends(&relay, X, X, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, M, B, &[]).await;
+    let m_master = b.master_id.clone();
+    let sid = create_server_and_wait(&mut o, "Behind").await;
+    for node in [&mut x, &mut b] {
+        node.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+        assert!(
+            wait_event(node, std::time::Duration::from_secs(10), |ev| {
+                matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+            })
+            .await,
+            "a member never joined",
+        );
+    }
+    expect_olm_confirmed(&o, &b, 20).await;
+    expect_olm_confirmed(&o, &x, 20).await;
+
+    // B's leave reaches no one for now.
+    relay.swallow_direct(&b.device_id, &o.device_id);
+    relay.swallow_direct(&b.device_id, &x.device_id);
+    b.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(wait_until(10, async || g13_dropped(&b, &sid).await).await, "B drops the server at once");
+    assert!(wait_until(10, async || t14_book_holds(&b, "left", &sid)).await, "B holds its own leave");
+    let leave = b
+        .store()
+        .load_setting("leave_book")
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|book| book["left"][&sid]["op_json"].as_str().and_then(|j| serde_json::from_str::<crate::crdt::operations::CrdtOp>(j).ok()))
+        .expect("B holds its own leave");
+
+    // The owner writes past the leave's clock, then checkpoints with B still a member.
+    o.cmd_tx.send(NodeCommand::RenameServer { server_id: sid.clone(), new_name: "Moved on".into() }).await.unwrap();
+    assert!(
+        wait_until(10, async || o.live_server_state(&sid).await.is_some_and(|s| s.horizon() > leave.hlc)).await,
+        "the owner's state moves past the leave",
+    );
+    let state = o.live_server_state(&sid).await.expect("the owner's state");
+    let base = state.checkpoint_json(&o.master_id, &[], crate::crdt::hlc::wall_clock_ms()).expect("a checkpoint");
+    let checkpoint = forge_crdt_op(
+        &sid, &o.master_id, CrdtPayload::ServerCheckpoint { state: base, covers: state.horizon() }, 1_000, Some(&o.master_kp),
+    );
+    carry_as(&x, &o, crdt_broadcast(&sid, &checkpoint)).await;
+    assert!(
+        wait_until(10, async || o.live_server_state(&sid).await.is_some_and(|s| s.checkpoint_hlc.is_some())).await,
+        "precondition: the owner holds its checkpoint",
+    );
+
+    relay.release_direct(&b.device_id, &o.device_id);
+    relay.release_direct(&b.device_id, &x.device_id);
+    assert!(
+        wait_until(60, async || !t14_owner_view(&o, &sid, &m_master).await.1).await,
+        "the owner still counts M after its leave landed behind the owner's checkpoint",
+    );
 }

@@ -365,7 +365,7 @@ fn other_member_targets(state: &ServerState, local_peer: &str) -> Vec<String> {
 /// Fan a member-removal CRDT op to the remaining members (collected before the
 /// removal applied) and to our OWN online siblings, which the master-keyed member
 /// list excludes. `skip` = the removed identity, which gets the op inside a
-/// `MemberKickBroadcast` instead ([`carry_kick_notice`]); `None` for a voluntary leave.
+/// `MemberKickBroadcast` instead ([`carry_kick_notice`]).
 #[allow(clippy::too_many_arguments)]
 fn broadcast_removal_op(
     ws_cmd_tx: &WsCmdTx,
@@ -2654,6 +2654,8 @@ pub(crate) async fn handle_leave_server(
     server_id: String,
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
+    leave_book: &mut super::leave_book::LeaveBook,
+    door: Option<(u64, zeroize::Zeroizing<[u8; 32]>)>,
 ) -> bool {
     if let Some(state) = server_states.get_mut(&server_id) {
         // The owner is fixed for the server's life, so the only way out is a delete.
@@ -2671,13 +2673,16 @@ pub(crate) async fn handle_leave_server(
             return deny(event_tx, "You can't leave this server right now").await;
         };
 
-        // Leaving is an identity-level action: `skip: None`, so the fan also sends
-        // the self-removal op to our OWN siblings, each applying it because
-        // peer_id == op.author. The acting device already left.
-        broadcast_removal_op(
-            ws_cmd_tx, ws_room_peers, &targets, None,
-            local_peer_str, local_device_id, &server_id, &op,
-        );
+        // Leaving is an identity-level action: our own devices drop the server on it
+        // at once. The members get it from the leave book, which keeps the op, the room
+        // and its door until the owner holds it: until then the server counts us.
+        if let Ok(op_json) = serde_json::to_string(&op) {
+            let msg = HavenMessage::CrdtOpBroadcast { server_id: server_id.clone(), op_json };
+            super::olm_lane::carry_to_every_own_device(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, &msg);
+        }
+        if let Some(dropped) = leave_book.begin(&server_id, &op, state.anchor_owner(), targets, door, local_device_id) {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: dropped });
+        }
 
         // MLS: remove ALL of OUR leaves from the group (this device + any sibling
         // device's leaf — leaving the server means none of our devices stay).
@@ -2702,12 +2707,11 @@ pub(crate) async fn handle_leave_server(
     }
 
     server_states.remove(&server_id);
-
-
-    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
-        room_code: server_id.clone(),
-    });
-
+    if !leave_book.holds_room(&server_id) {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+            room_code: server_id.clone(),
+        });
+    }
     crdt_store.delete_server(server_id.clone());
 
     let _ = event_tx.send(NetworkEvent::ServerDeleted {
@@ -3851,6 +3855,33 @@ pub(crate) async fn handle_check_pending_join_timeout(
             server_id,
         }).await;
     }
+}
+
+// ── 17a. A join our identity left before it completed ────────────────
+
+/// End a join another device of ours announced, for a server our identity has since
+/// left: no join of ours may outlive our own leave. A state the join adopted goes with
+/// it; the room stays only while a leave of this device still needs it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn end_join_we_left(
+    pending_server_joins: &mut HashMap<String, PendingJoin>,
+    server_states: &mut HashMap<String, ServerState>,
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    keep_room: bool,
+    server_id: &str,
+) {
+    let Some(pending) = pending_server_joins.remove(server_id) else { return };
+    hollow_log!("[HOLLOW-CRDT] Our identity left {server_id}: ending the join our other device announced");
+    if server_states.remove(server_id).is_some() {
+        crdt_store.delete_server(server_id.to_string());
+    }
+    if !keep_room {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: server_id.to_string() });
+    }
+    discard_join_key_package(mls, crypto_store, server_id, pending.key_package.as_deref());
 }
 
 // ── 17b. DiscardPendingJoin (user action) ─────────────────────────────

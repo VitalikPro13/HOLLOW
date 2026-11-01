@@ -373,6 +373,11 @@ pub struct ServerState {
     pub(super) held: Vec<(CrdtOp, std::time::Instant)>,
     #[serde(skip)]
     pub(crate) id_memo: super::digest::IdMemo,
+    /// Members' own leaves the current checkpoint covers that still end the span it
+    /// lists them in (`close_late_leaves`): kept in the log, at most one per member.
+    /// Persisted as judged: a restored log no longer holds what judged them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) late_leaves: Vec<(String, HlcTimestamp)>,
     /// Set by the node right after `set_hlc` on any state that authors ops.
     /// Never persisted and never sent: it is our own secret.
     #[serde(skip)]
@@ -396,8 +401,10 @@ impl ServerState {
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
             member_record, join_secret, join_lock, owner_pin, checkpoint_hlc, standing_folded,
-            op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, signer: _,
+            op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, late_leaves: _, signer: _,
         } = self;
+        // Judged against this replica's own checkpoint: a snapshot or a new checkpoint
+        // made from it carries none.
         ServerState {
             server_id: server_id.clone(),
             name: name.clone(),
@@ -430,6 +437,7 @@ impl ServerState {
             op_log_dedup: HashSet::new(),
             held: Vec::new(),
             id_memo: Default::default(),
+            late_leaves: Vec::new(),
             signer: None,
         }
     }
@@ -469,6 +477,7 @@ impl ServerState {
             op_log_dedup: HashSet::new(),
             held: Vec::new(),
             id_memo: Default::default(),
+            late_leaves: Vec::new(),
             signer: None,
         }
     }
@@ -761,7 +770,62 @@ impl ServerState {
         for op in &self.op_log {
             self.op_log_dedup.insert((op.author.clone(), op.hlc.clone()));
         }
+        if let Some(base) = self.checkpoint_hlc.clone() {
+            let genesis = super::anchor::is_genesis_id(&self.server_id);
+            let kept: Vec<CrdtOp> = std::mem::take(&mut self.op_log).into_iter().filter(|o| self.retains(o, &base, genesis)).collect();
+            self.op_log = kept;
+            self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+        }
         self.witness_retained();
+    }
+
+    /// A checkpoint at `covers` just rebased this state: each member's own leave among
+    /// `candidates` that it overwrote, from a member it still lists by a span opened
+    /// before that leave, ends that span again at the leave's own clock, so a later
+    /// rejoin still wins. Returns the leaves it applied.
+    pub(super) fn close_late_leaves(&mut self, candidates: &[CrdtOp], covers: &HlcTimestamp) -> Vec<CrdtOp> {
+        let mut closed = Vec::new();
+        for op in candidates {
+            // An admission of that member after the leave, among what this fold holds,
+            // is a rejoin: the leave stays history.
+            let rejoined = candidates.iter().chain(self.op_log.iter()).any(|o| {
+                matches!(&o.payload, CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == op.author)
+                    && o.hlc > op.hlc
+                    && o.hlc <= *covers
+            });
+            if !rejoined && self.leave_outlives_checkpoint(op, covers) {
+                self.apply_payload(op);
+                self.late_leaves.push((op.author.clone(), op.hlc.clone()));
+                closed.push(op.clone());
+            }
+        }
+        closed
+    }
+
+    /// `op` is a member's own leave at or before `covers` that this state, as the
+    /// checkpoint left it, still counts that member through: a span whose exact opening
+    /// clock and every admission it records come before the leave, never the owner's.
+    fn leave_outlives_checkpoint(&self, op: &CrdtOp, covers: &HlcTimestamp) -> bool {
+        if !is_self_leave(op) || op.hlc > *covers || !self.members.contains_key(&op.author) {
+            return false;
+        }
+        if self.current_owner().as_deref() == Some(op.author.as_str()) {
+            return false;
+        }
+        self.member_record
+            .get(&op.author)
+            .and_then(|spans| spans.last())
+            .is_some_and(|span| {
+                span.until_ms == u64::MAX
+                    && span.from_hlc.as_ref().is_some_and(|from| *from < op.hlc)
+                    && span.admitted.iter().all(|(_, at)| *at < op.hlc)
+            })
+    }
+
+    /// Whether the log keeps `op` under the checkpoint at `base`: what [`retained_under`]
+    /// keeps, and the late leaves that checkpoint left standing.
+    pub(crate) fn retains(&self, op: &CrdtOp, base: &HlcTimestamp, genesis: bool) -> bool {
+        retained_under(op, base, genesis) || self.late_leaves.iter().any(|(a, h)| *a == op.author && *h == op.hlc)
     }
 
     /// Generate a new CrdtOp with our HLC, signed with our master key, but do NOT apply
@@ -840,7 +904,7 @@ impl ServerState {
             channel_layout: _, labels: _, label_assignments: _, emotes: _,
             stickers: _, deleted: _, member_record: _, owner_pin: _,
             checkpoint_hlc: _, standing_folded: _, op_log: _, hlc: _, op_log_dedup: _, held: _,
-            id_memo: _, signer: _,
+            id_memo: _, late_leaves: _, signer: _,
         } = self;
 
         if name.clamp_hlc(max_ms) {
@@ -923,7 +987,9 @@ impl ServerState {
     pub(super) fn prune_before_checkpoint(&mut self) {
         let Some(base) = self.checkpoint_hlc.clone() else { return };
         let genesis = super::anchor::is_genesis_id(&self.server_id);
-        self.op_log.retain(|o| retained_under(o, &base, genesis));
+        let late = std::mem::take(&mut self.late_leaves);
+        self.op_log.retain(|o| retained_under(o, &base, genesis) || late.iter().any(|(a, h)| *a == o.author && *h == o.hlc));
+        self.late_leaves = late;
         self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
     }
 
@@ -942,6 +1008,9 @@ impl ServerState {
             CrdtPayload::ServerCheckpoint { state, covers } => {
                 if let Ok(base) = serde_json::from_str::<ServerState>(state) {
                     self.rebase_on(base, &op.author, covers);
+                    self.late_leaves.clear();
+                    let logged: Vec<CrdtOp> = self.op_log.iter().filter(|o| is_self_leave(o) && o.hlc <= *covers).cloned().collect();
+                    self.close_late_leaves(&logged, covers);
                 }
             }
 
@@ -1403,7 +1472,7 @@ impl ServerState {
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
             member_record, join_secret, join_lock,
             owner_pin: _, checkpoint_hlc: _, standing_folded: _, op_log: _, hlc: _, op_log_dedup: _,
-            held: _, id_memo: _, signer: _,
+            held: _, id_memo: _, late_leaves: _, signer: _,
         } = base;
         self.name = name;
         self.channels = channels;
@@ -1451,8 +1520,10 @@ impl ServerState {
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
             member_record, join_secret, join_lock, checkpoint_hlc,
-            owner_pin: _, standing_folded: _, op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, signer: _,
+            owner_pin: _, standing_folded: _, op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _,
+            late_leaves: _, signer: _,
         } = fresh;
+        self.late_leaves.clear();
         self.name = name;
         self.channels = channels;
         self.members = members;
@@ -2258,6 +2329,11 @@ pub(crate) fn retained_under(op: &CrdtOp, base: &HlcTimestamp, genesis: bool) ->
         CrdtPayload::ServerCreated { .. } if genesis => true,
         _ => op.hlc > *base,
     }
+}
+
+/// A member's own leave: the only op a member's word alone ends its membership with.
+pub(crate) fn is_self_leave(op: &CrdtOp) -> bool {
+    matches!(&op.payload, CrdtPayload::MemberRemoved { peer_id } if *peer_id == op.author)
 }
 
 /// An op's place in the fold: a checkpoint sits at what it covers.

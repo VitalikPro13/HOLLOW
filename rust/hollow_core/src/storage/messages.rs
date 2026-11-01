@@ -2712,6 +2712,11 @@ impl MessageStore {
                    AND op_json NOT LIKE '%\"ServerCreated\"%'",
                 params![first.server_id, base.physical_ms as i64, base.counter as i64],
             );
+            // A member's own leave this batch carries below the base is one the fold kept
+            // (`ServerState::close_late_leaves`).
+            for op in ops.iter().filter(|o| crate::crdt::server_state::is_self_leave(o) && o.hlc < *base) {
+                let _ = self.insert_crdt_op(op);
+            }
         }
     }
 
@@ -10056,5 +10061,31 @@ mod g13w3_sync_cost {
         assert!(large.0 < small.0 * 2, "a page costs {} at 20k rows, {} at 2k", large.0, small.0);
         assert!(large.1 < small.1 * 2, "the watermarks cost {} at 20k rows, {} at 2k", large.1, small.1);
         assert!(large.2 < small.2 * 2, "a catch-up page costs {} at 20k rows, {} at 2k", large.2, small.2);
+    }
+
+    /// Storing a checkpoint drops every row it covers, except a member's own leave the
+    /// same batch carries: the fold kept it (`ServerState::close_late_leaves`).
+    #[test]
+    fn a_checkpoint_batch_keeps_the_late_leave_it_carries() {
+        use crate::crdt::hlc::HlcTimestamp;
+        use crate::crdt::operations::CrdtPayload as P;
+        let store = MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store");
+        let op = |tag: u8, ms: u64, payload: P| {
+            let (kp, id, pk) = crate::crdt::testkeys::keys(tag);
+            let mut op = CrdtOp { server_id: "S".into(), hlc: HlcTimestamp { physical_ms: ms, counter: 0, actor: id.clone() }, author: id, payload, auth: None };
+            op.sign(&kp, &pk);
+            op
+        };
+        let member = crate::crdt::testkeys::keys(2).1;
+        let rename = op(1, 100, P::ServerRenamed { new_name: "old".into() });
+        let kick = op(1, 150, P::MemberRemoved { peer_id: crate::crdt::testkeys::keys(3).1 });
+        store.persist_admitted_ops(&[rename.clone(), kick.clone()], None);
+        let leave = op(2, 200, P::MemberRemoved { peer_id: member });
+        let base = HlcTimestamp { physical_ms: 300, counter: 0, actor: String::new() };
+        let checkpoint = op(1, 400, P::ServerCheckpoint { state: "{}".into(), covers: base.clone() });
+        store.persist_admitted_ops(&[checkpoint, leave.clone()], Some(&base));
+        let kept: Vec<u64> = store.load_ops_for_server("S", None).unwrap().iter().map(|o| o.hlc.physical_ms).collect();
+        assert!(kept.contains(&200), "the late leave the batch carried was dropped: {kept:?}");
+        assert!(!kept.contains(&100) && !kept.contains(&150), "rows the checkpoint covers stayed: {kept:?}");
     }
 }
