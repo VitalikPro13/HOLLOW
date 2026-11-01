@@ -1667,6 +1667,8 @@ pub(crate) struct DebugSnapshotReply {
     pub mls_epoch_auth: std::collections::HashMap<String, String>,
     /// group key -> every leaf as `(device, last written by a commit, its own tally epochs)`.
     pub mls_leaf_tallies: std::collections::HashMap<String, Vec<(String, bool, Vec<u64>)>>,
+    /// group key -> the devices whose leaf does not declare the tally.
+    pub mls_undeclared: std::collections::HashMap<String, Vec<String>>,
     /// peer DEVICE id -> Olm session status: "none" | "unconfirmed" | "confirmed".
     pub olm_sessions: std::collections::HashMap<String, String>,
     /// peer DEVICE id -> the id of the Olm session we encrypt with; both sides of a
@@ -2050,7 +2052,8 @@ pub(crate) enum HavenMessage {
         channel_id: Option<String>,
     },
 
-    /// KeyPackage from a peer wanting to join an MLS group.
+    /// KeyPackage from a peer wanting to join an MLS group. Rides Olm only: whoever
+    /// reads it can seat its device in a group of its own (standing residual R6).
     /// `channel_id` selects server group (None) vs a channel subgroup (Some).
     #[serde(rename = "mls_kp")]
     MlsKeyPackage {
@@ -2139,7 +2142,7 @@ pub(crate) enum HavenMessage {
 
     /// What a KeyPackage's receiver did with it, so a leafless asker steps on to the
     /// next member at once instead of after the re-ask timer. `package` is
-    /// [`super::standing::package_tag`]. Routing metadata, like the package itself.
+    /// [`super::standing::package_tag`]. Rides Olm, like the package it answers.
     #[serde(rename = "mls_kp_ack")]
     MlsKeyPackageAck {
         server_id: String,
@@ -4531,6 +4534,9 @@ impl HavenMessage {
             | Self::ProfileCard { .. }
             | Self::RosterSync { .. }
             | Self::IdentityDestroyed { .. }
+            | Self::MlsKeyPackage { .. }
+            | Self::MlsKeyPackageForward { .. }
+            | Self::MlsKeyPackageAck { .. }
             | Self::SyncResponse { .. } => Lane::Carried,
             Self::ServerJoinRequest { .. }
             | Self::ServerStateSnapshot { .. }
@@ -4594,11 +4600,8 @@ impl HavenMessage {
             | Self::PublicChannelSyncResponse { .. }
             | Self::KeyRequest { .. }
             | Self::KeyBundle { .. }
-            | Self::MlsKeyPackage { .. }
             | Self::MlsKeyPackageRequest { .. }
             | Self::MlsEpochProbe { .. }
-            | Self::MlsKeyPackageForward { .. }
-            | Self::MlsKeyPackageAck { .. }
             | Self::MlsUpdateTurn { .. }
             | Self::MlsUpdateTurnCommit { .. }
             | Self::MlsUpdateTurnDeclined { .. }
@@ -6054,7 +6057,7 @@ mod standing_wire_tests {
             serde_json::to_string(&ack).unwrap(),
             r#"{"type":"mls_kp_ack","server_id":"s","channel_id":"c","package":"00ff","outcome":"forwarded","via":"m"}"#,
         );
-        assert_eq!(ack.lane(), Lane::Relay);
+        assert_eq!(ack.lane(), Lane::Carried);
         assert!(ack.live_only());
         match serde_json::from_str::<HavenMessage>(r#"{"type":"mls_kp_ack","server_id":"s"}"#).unwrap() {
             HavenMessage::MlsKeyPackageAck { package, outcome, channel_id, via, .. } => {
@@ -6065,5 +6068,22 @@ mod standing_wire_tests {
         for (o, s) in [(KpOutcome::Commit, "commit"), (KpOutcome::Cannot, "cannot")] {
             assert_eq!(serde_json::to_string(&o).unwrap(), format!("\"{s}\""));
         }
+    }
+
+    /// Whoever reads a KeyPackage can seat its device in a group of their own (R6), so
+    /// every frame that carries one, or answers one, rides Olm; the request names none.
+    #[test]
+    fn key_packages_their_forwards_and_acks_ride_olm_only() {
+        let kp = HavenMessage::MlsKeyPackage { server_id: "s".into(), key_package: "AAAA".into(), channel_id: None };
+        let forward = HavenMessage::MlsKeyPackageForward { server_id: "s".into(), key_package: "AAAA".into(), channel_id: Some("c".into()) };
+        let ack = HavenMessage::MlsKeyPackageAck { server_id: "s".into(), channel_id: None, package: "00".into(), outcome: KpOutcome::Commit, via: None };
+        for msg in [&kp, &forward, &ack] {
+            assert_eq!(msg.lane(), Lane::Carried, "{} rides Olm", msg.wire_kind());
+            assert!(msg.live_only(), "{} is acted on only while fresh", msg.wire_kind());
+            let carried = MessageEnvelope::Carried { msg: Box::new(msg.clone()), at_ms: 0 };
+            assert!(carried.live_only(), "and so is its carried envelope");
+        }
+        let request = HavenMessage::MlsKeyPackageRequest { server_id: "s".into(), channel_id: None };
+        assert_eq!(request.lane(), Lane::Relay, "a request carries no package");
     }
 }

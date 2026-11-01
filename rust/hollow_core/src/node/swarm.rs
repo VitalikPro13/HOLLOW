@@ -574,7 +574,7 @@ use super::crypto_handler::{
     persist_mls_state, persist_crypto_state, persist_olm_read,
     peer_is_reachable, is_mls_coordinator, is_vault_coordinator, ws_room_for_peer,
     send_mls_broadcast, send_encrypted_message,
-    send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer, send_raw_to_identity,
+    send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer,
 };
 use super::destroy;
 use super::file_asks;
@@ -1149,8 +1149,8 @@ async fn run_event_loop(
                                 }
                                 None
                             } else {
-                                // Groups formed before bound leaves keep working: the old key
-                                // stays as the legacy signer until the batch tick rebinds.
+                                // A leaf from before bound leaves waits for a bound member's
+                                // repair, which the batch tick asks for.
                                 let mut mgr = mgr;
                                 mgr.adopt_device_identity(&device_keypair, &master_keypair);
                                 // Meetings never outlive the process: what nothing loaded
@@ -1162,7 +1162,7 @@ async fn run_event_loop(
                                         persist_mls_state(&mgr, &crypto_store);
                                     }
                                 }
-                                hollow_log!("[HOLLOW-MLS] Restored MLS identity from DB (credential {cred_id}), {} group(s) still to rebind", mgr.unbound_own_groups().len());
+                                hollow_log!("[HOLLOW-MLS] Restored MLS identity from DB (credential {cred_id}), {} own leaf/leaves still to repair", mgr.unbound_own_groups().len());
                                 Some(mgr)
                             }
                         }
@@ -3663,6 +3663,7 @@ async fn run_event_loop(
                                 snap.mls_leaf_tallies.insert(sid.clone(), mls_mgr.leaf_records(&sid).into_iter().filter_map(|r| {
                                     Some((r.identity?.device, r.commit_written, r.tally.map(|t| t.epochs).unwrap_or_default()))
                                 }).collect());
+                                snap.mls_undeclared.insert(sid.clone(), mls_mgr.leaf_records(&sid).into_iter().filter(|r| !r.declares).filter_map(|r| Some(r.identity?.device)).collect());
                                 if let Ok(ep) = mls_mgr.epoch(&sid) {
                                     snap.mls_epoch.insert(sid.clone(), ep);
                                 }
@@ -4392,7 +4393,7 @@ async fn run_event_loop(
                                                     hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {peer_id} for bootstrap (PeerJoined)");
                                                     if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, &crypto_store, sid, false) {
                                                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                        super::frame_budget::pace_plain_to_identity_of(
+                                                        super::frame_budget::pace_carried_to_identity_of(
                                                             &mut frame_budget, &ws_cmd_tx, &ws_room_peers, &device_peer_id,
                                                             &peer_id, &HavenMessage::MlsKeyPackage {
                                                                 server_id: sid.clone(),
@@ -4964,7 +4965,7 @@ async fn run_event_loop(
                                             hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {pid_str} for bootstrap (RoomMembers)");
                                             if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, &crypto_store, sid, false) {
                                                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                super::frame_budget::pace_plain_to_identity_of(
+                                                super::frame_budget::pace_carried_to_identity_of(
                                                     &mut frame_budget, &ws_cmd_tx, &ws_room_peers, &device_peer_id,
                                                     pid_str, &HavenMessage::MlsKeyPackage {
                                                         server_id: sid.clone(),
@@ -5811,7 +5812,8 @@ async fn run_event_loop(
                                             ).await;
                                             continue;
                                         }
-                                        let (msg, from) = if matches!(*msg, HavenMessage::MlsKeyPackageForward { .. }) {
+                                        let unwrapped = matches!(*msg, HavenMessage::MlsKeyPackageForward { .. });
+                                        let (msg, from) = if unwrapped {
                                             // A 0.12.2-shaped test node drops the frame type, as 0.12.2 does.
                                             if super::standing::knobs::on(super::standing::knobs::Knob::OldLeaf, &device_peer_id) {
                                                 continue;
@@ -5824,7 +5826,7 @@ async fn run_event_loop(
                                             (msg, from.clone())
                                         };
                                         let synced = join_hold.sync_mark(&msg, &from, &server_states);
-                                        handle_incoming_request(
+                                        let request = handle_incoming_request(
                                             &mut olm, &crypto_store, &crdt_store, &mut crdt_resync, &event_tx,
                                             &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                                             &mut server_states, &bundle_keypair,
@@ -5878,7 +5880,12 @@ async fn run_event_loop(
                                             *msg,
                                             frame_ts,
                                         &mut next,
-                                        ).await;
+                                        );
+                                        if unwrapped {
+                                            super::mls_turns::VIA_FORWARD.scope((), request).await;
+                                        } else {
+                                            request.await;
+                                        }
                                         join_hold.synced(synced);
                                     }
                                     sync_handler::note_completed_join(&mut recent_joins, &pending_server_joins, &server_states, &local_peer_str, &room, joining);
@@ -5997,13 +6004,13 @@ async fn run_event_loop(
 
                     let our_turn = mls_turn.take();
 
-                    // Phase 1: our own leaves that predate binding. Before any commit of
-                    // ours, since receivers refuse commits from an unbound leaf.
+                    // Phase 1: our own leaves that predate binding ask a repair; receivers
+                    // refuse every commit from an unbound leaf.
                     if our_turn {
-                        crate::node::crypto_handler::rebind_unbound_leaves(
-                            mls_mgr, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                        crate::node::crypto_handler::repair_unbound_leaves(
+                            mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers,
                             &server_states, &mut mls_bootstrap_requested, &local_peer_str, &device_peer_id,
-                        ).await;
+                        );
                     }
 
                     // Phase 1b: leaves our view removed (a leave, a missed removal commit).
@@ -6083,7 +6090,7 @@ async fn run_event_loop(
                             &queued_removals, queued_adds,
                             |kp| mls_mgr.key_package_minted_for(kp, &group_key),
                             &ourselves, &rules,
-                            (super::standing::tree_declares(&mls_mgr.leaf_records(&group_key))
+                            (super::standing::ratchet_on(state, &mls_mgr.leaf_records(&group_key))
                                 && !super::standing::knobs::on(super::standing::knobs::Knob::NoRatchet, &device_peer_id))
                                 .then_some(&declares as &dyn Fn(&[u8]) -> bool),
                         );
@@ -8026,7 +8033,6 @@ async fn after_welcome_joined(
             mls_mgr.pin_committer(group_key, host);
         }
     }
-    mls_mgr.drop_unused_legacy();
     persist_mls_state(mls_mgr, crypto_store);
     mls_bootstrap_requested.remove(group_key);
     // The Welcome the eviction grace was holding for. The wait
@@ -12010,13 +12016,12 @@ async fn handle_incoming_request_inner(
                             if may_bootstrap {
                                 if let Some(coordinator) = coordinator {
                                     if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, crypto_store, &group_key, false) {
-                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                        let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+                                        let msg = HavenMessage::MlsKeyPackage {
                                             server_id: server_id.clone(),
-                                            key_package: kp_b64,
+                                            key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
                                             channel_id: msg_channel_id.clone(),
-                                        }).unwrap_or_default();
-                                        let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, data);
+                                        };
+                                        let sent = crate::node::crypto_handler::carry_key_package_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, &msg);
                                         if sent > 0 {
                                             hollow_log!("[HOLLOW-MLS] Sent KeyPackage to coordinator {coordinator} ({sent} device(s)) for {group_key} bootstrap (triggered by message)");
                                             mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
@@ -12632,8 +12637,9 @@ async fn handle_incoming_request_inner(
             };
             let rules = super::mls_authority::GroupRules::Server { state, channel: kp_channel_id.as_deref() };
             let old_shaped = super::standing::knobs::on(super::standing::knobs::Knob::OldLeaf, device_peer_id);
+            let forwarded_here = super::mls_turns::came_forwarded();
             let ack = |outcome| {
-                if !old_shaped {
+                if !old_shaped && !forwarded_here {
                     super::standing::ack_key_package(ws_cmd_tx, ws_room_peers, peer_str, &server_id, kp_channel_id.clone(), &kp_bytes, outcome, None);
                 }
             };
@@ -12707,7 +12713,7 @@ async fn handle_incoming_request_inner(
                             takes_forwards(c)
                                 && super::mls_turns::forward_key_package(ws_cmd_tx, ws_room_peers, device_peer_id, c, &server_id, kp_channel_id.clone(), &key_package)
                         });
-                        if forwarded {
+                        if forwarded && !forwarded_here {
                             // Names the committer, so a repair's asker takes its Welcome.
                             super::standing::ack_key_package(
                                 ws_cmd_tx, ws_room_peers, peer_str, &server_id, kp_channel_id.clone(), &kp_bytes,

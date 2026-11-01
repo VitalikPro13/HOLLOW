@@ -448,6 +448,16 @@ pub(crate) async fn tick(
         }
         let records = mls.leaf_records(&group_key);
         let leaves = records.len();
+        // Our own leaf from before the tally refreshes at once, off the cadence: until it
+        // declares, we stand for leadership only while no online leaf does.
+        let own_stale = records.iter().any(|r| r.identity.as_ref().is_some_and(|i| i.device == local_device) && !r.declares);
+        let own_key = (group_key.clone(), local_device.to_string());
+        if own_stale && book.granted.get(&own_key).is_none_or(|t| t.elapsed() >= LEASE) {
+            book.last_turn.insert(group_key.clone(), now);
+            book.granted.insert(own_key, now);
+            refresh_own_leaf(mls, crypto_store, ws_cmd_tx, event_tx, local_master, local_device, &group_key, epoch).await;
+            continue;
+        }
         let last = *book.last_turn.entry(group_key.clone()).or_insert(started);
         if last.elapsed() < turn_spacing(leaves) {
             continue;
@@ -490,18 +500,36 @@ pub(crate) async fn tick(
     }
 }
 
-/// Per local device, the KeyPackages it already passed on or was passed, by digest:
-/// each is forwarded at most once there, so two members whose elections disagree
-/// hand it back at most once.
-type Forwarded = std::collections::BTreeMap<String, std::collections::VecDeque<[u8; 16]>>;
-static FORWARDED: std::sync::Mutex<Forwarded> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+/// Per local device, KeyPackage digests, bounded: 256 per device, 64 devices.
+type Seen = std::collections::BTreeMap<String, std::collections::VecDeque<[u8; 16]>>;
+/// The KeyPackages a device already passed on or was passed: each is forwarded at most
+/// once there, so two members whose elections disagree hand it back at most once.
+static FORWARDED: std::sync::Mutex<Seen> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-fn first_forward(local_device: &str, key_package_b64: &str) -> bool {
+tokio::task_local! {
+    /// Set while the KeyPackage a forward carried is handled, and only then: its asker
+    /// sent it elsewhere and counts acks only from there, so an ack from us would cost a
+    /// key exchange for nothing. A later direct copy of the same package is acked.
+    pub(crate) static VIA_FORWARD: ();
+}
+
+/// Whether the KeyPackage being handled reached us inside a forward ([`VIA_FORWARD`]).
+pub(crate) fn came_forwarded() -> bool {
+    VIA_FORWARD.try_with(|_| ()).is_ok()
+}
+
+fn tag_of(key_package_b64: &str) -> [u8; 16] {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(key_package_b64.as_bytes());
     let mut tag = [0u8; 16];
     tag.copy_from_slice(&digest[..16]);
-    let Ok(mut all) = FORWARDED.lock() else { return false };
+    tag
+}
+
+/// Notes `key_package_b64` for `local_device` in `book`; false when it was there already.
+fn note_seen(book: &std::sync::Mutex<Seen>, local_device: &str, key_package_b64: &str) -> bool {
+    let tag = tag_of(key_package_b64);
+    let Ok(mut all) = book.lock() else { return false };
     if !all.contains_key(local_device) && all.len() >= 64 {
         all.clear();
     }
@@ -514,6 +542,10 @@ fn first_forward(local_device: &str, key_package_b64: &str) -> bool {
         seen.pop_front();
     }
     true
+}
+
+fn first_forward(local_device: &str, key_package_b64: &str) -> bool {
+    note_seen(&FORWARDED, local_device, key_package_b64)
 }
 
 /// Pass a KeyPackage we will not commit on to `coordinator`'s devices, once. True when

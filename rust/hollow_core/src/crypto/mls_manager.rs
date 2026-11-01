@@ -520,10 +520,6 @@ pub(crate) struct MlsManager {
     whole_save_due: std::sync::atomic::AtomicBool,
     signer: SignatureKeyPair,
     credential_with_key: CredentialWithKey,
-    /// The pre-0.12 identity (a random key and a bare id), kept only to rebind our
-    /// own leaf in groups formed before leaves were bound. Persisted in place of the
-    /// device identity until no group needs it.
-    legacy: Option<(SignatureKeyPair, CredentialWithKey)>,
     /// server_id → MlsGroup
     groups: HashMap<String, MlsGroup>,
     /// RAM-only ring of recent commit frames per group, `(post_merge_epoch, base64)`,
@@ -609,7 +605,6 @@ impl MlsManager {
             whole_save_due: std::sync::atomic::AtomicBool::new(false),
             signer,
             credential_with_key,
-            legacy: None,
             groups,
             commit_cache: HashMap::new(),
             epoch_digests: HashMap::new(),
@@ -732,17 +727,10 @@ impl MlsManager {
     }
 
     /// Make this device's key our signer and our credential the bound one. A restored
-    /// signer that is a different key becomes the legacy signer, kept only to rebind
-    /// our leaf in place in groups formed before leaves were bound.
+    /// signer that is a different key (from before leaves were bound) is dropped: a leaf
+    /// it signed is unbound, and a bound member repairs it.
     pub fn adopt_device_identity(&mut self, device: &NativeKeypair, master: &NativeKeypair) {
-        let (signer, credential_with_key) = device_identity(device, master);
-        if self.signer.public() == signer.public() {
-            self.credential_with_key = credential_with_key;
-            return;
-        }
-        let old_signer = std::mem::replace(&mut self.signer, signer);
-        let old_credential = std::mem::replace(&mut self.credential_with_key, credential_with_key);
-        self.legacy = Some((old_signer, old_credential));
+        (self.signer, self.credential_with_key) = device_identity(device, master);
     }
 
     /// The id baked into this manager's own credential: the device for a bound one,
@@ -765,18 +753,15 @@ impl MlsManager {
         Some(String::from_utf8_lossy(raw).into_owned())
     }
 
-    /// The signer to persist: the legacy one while a group still needs it, so a
-    /// restart can finish the rebind; the device key otherwise.
+    /// The signer to persist.
     pub fn signer_bytes(&self) -> Result<Vec<u8>, String> {
-        let signer = self.legacy.as_ref().map_or(&self.signer, |(s, _)| s);
-        serde_json::to_vec(signer)
+        serde_json::to_vec(&self.signer)
             .map_err(|e| format!("Failed to serialize MLS signer: {e}"))
     }
 
     /// The credential persisted alongside [`Self::signer_bytes`].
     pub fn credential_bytes(&self) -> Result<Vec<u8>, String> {
-        let credential = self.legacy.as_ref().map_or(&self.credential_with_key, |(_, c)| c);
-        serde_json::to_vec(credential)
+        serde_json::to_vec(&self.credential_with_key)
             .map_err(|e| format!("Failed to serialize MLS credential: {e}"))
     }
 
@@ -846,6 +831,7 @@ impl MlsManager {
     /// repair.
     pub fn generate_key_package(&self) -> Result<Vec<u8>, String> {
         let kp = KeyPackage::builder()
+            .leaf_node_capabilities(self.leaf_capabilities())
             .build(
                 CIPHERSUITE,
                 &self.provider,
@@ -887,6 +873,12 @@ impl MlsManager {
 
     fn new_leaf_extensions(&self, group_key: &str) -> Extensions<LeafNode> {
         if self.old_shaped() { mint_stamp(group_key) } else { stamped_leaf_extensions(group_key) }
+    }
+
+    /// Whether a test made this device found groups as a 0.13 build did, requiring
+    /// nothing of their leaves (`Knob::NoRatchet`).
+    fn founds_unrequired(&self) -> bool {
+        crate::node::standing::knobs::on(crate::node::standing::knobs::Knob::NoRatchet, &self.credential_identity())
     }
 
     /// Whether a test made this device mint leaves without the tally (a 0.12.2 leaf).
@@ -1007,6 +999,12 @@ impl MlsManager {
     /// Create a new MLS group for a server (called by server owner).
     pub fn create_group(&mut self, server_id: &str) -> Result<(), String> {
         let group_id = GroupId::from_slice(server_id.as_bytes());
+        // A meeting's guests may run 0.13, whose knocks list no tally.
+        let required = if self.old_shaped() || self.founds_unrequired() || crate::node::conference::is_conference_sid(server_id) {
+            Extensions::empty()
+        } else {
+            super::mls_tally::tally_required().map_err(|e| format!("Failed to require the tally: {e:?}"))?
+        };
         let config = MlsGroupCreateConfig::builder()
             .ciphersuite(CIPHERSUITE)
             .use_ratchet_tree_extension(true)
@@ -1018,6 +1016,7 @@ impl MlsManager {
             .capabilities(self.leaf_capabilities())
             .with_leaf_node_extensions(self.new_leaf_extensions(server_id))
             .map_err(|e| format!("Failed to stamp our leaf: {e:?}"))?
+            .with_group_context_extensions(required)
             .build();
 
         let group = MlsGroup::new_with_group_id(
@@ -1138,14 +1137,19 @@ impl MlsManager {
             .collect();
         let epoch = group.epoch().as_u64();
         let mut params = None;
+        let own = tree.iter().find(|r| r.index == own_index.u32());
         if !old_shaped
-            && let Some(me) = tree.iter().find(|r| r.index == own_index.u32()).and_then(|r| r.identity.clone())
+            && let Some(me) = own.and_then(|r| r.identity.clone())
         {
             let input = super::mls_rate::RateInput {
                 epoch, leaves: &tree, committer: &me, adds: &added_ids, removes: &removed_views, no_proposals: false,
             };
             let charges = super::mls_rate::charges(&input);
-            if !remove_indices.is_empty() || charges.any() {
+            // A leaf of ours from before the tally rides along on every commit until it
+            // declares, so we stand under standing again (a fresh joiner's leaf alone must
+            // never lead).
+            let own_declares = own.is_some_and(|r| r.declares);
+            if !remove_indices.is_empty() || charges.any() || !own_declares {
                 // Where receivers judge our tally, one we cannot derive is one they refuse:
                 // committing it would leave us alone at the next epoch.
                 let tally = match super::mls_rate::expected_tally(&input, &charges, super::mls_tally::today()) {
@@ -1496,74 +1500,6 @@ impl MlsManager {
             .is_some_and(|g| own_leaf_bound(g, self.signer.public(), &self.leaf_cache))
     }
 
-    /// Whether our unbound leaf in the group is the legacy one we can rebind in place.
-    pub fn can_rebind_in_place(&self, group_key: &str) -> bool {
-        let Some((legacy, _)) = self.legacy.as_ref() else { return false };
-        self.groups
-            .get(group_key)
-            .and_then(|g| g.own_leaf_node())
-            .is_some_and(|leaf| leaf.signature_key().as_slice() == legacy.public())
-    }
-
-    /// Rebind our own legacy leaf in place: one commit replacing its key with the
-    /// device key and its credential with the bound one, signed by the legacy key.
-    /// Only the group authority does this (anyone else asks it for a repair), so
-    /// commits stay linear. The caller broadcasts, then merges.
-    pub fn rebind_own_leaf(&mut self, group_key: &str) -> Result<Vec<u8>, String> {
-        // The bound leaf declares the tally and states our master's history unchanged:
-        // a rebind is judged by no rate rule, so it must not move it either way.
-        let tree = self.leaf_records(group_key);
-        let epoch = self.epoch(group_key)?;
-        let master = classify_leaf(self.credential_with_key.credential.serialized_content(), self.signer.public())
-            .bound()
-            .map(|b| b.master.clone())
-            .ok_or("our credential is not bound")?;
-        let epochs = match super::mls_tally::master_tally(&tree, &master, epoch) {
-            super::mls_tally::MasterTally::List(list) => list,
-            super::mls_tally::MasterTally::Unreadable => Vec::new(),
-        };
-        let tally = super::mls_tally::Tally { refreshed_day: super::mls_tally::today(), epochs, carried: Vec::new() }.checked()?;
-        let params = LeafNodeParameters::builder()
-            .with_capabilities(self.leaf_capabilities())
-            .with_extensions(if self.old_shaped() { mint_stamp(group_key) } else { super::mls_tally::with_tally(&mint_stamp(group_key), &tally) })
-            .build();
-        let (legacy_signer, _) = self.legacy.as_ref().ok_or("no legacy signer to rebind with")?;
-        let group = self.groups.get_mut(group_key)
-            .ok_or_else(|| format!("No MLS group for server {group_key}"))?;
-        let own_key = group.own_leaf_node().map(|l| l.signature_key().as_slice().to_vec());
-        if own_key.as_deref() != Some(legacy_signer.public()) {
-            return Err(format!("our leaf in {group_key} is not the legacy leaf"));
-        }
-        let bundle = group
-            .self_update_with_new_signer(
-                &self.provider,
-                legacy_signer,
-                NewSignerBundle {
-                    signer: &self.signer,
-                    credential_with_key: self.credential_with_key.clone(),
-                },
-                params,
-            )
-            .map_err(|e| format!("Failed to rebind our leaf: {e:?}"))?;
-        TlsSerialize::tls_serialize_detached(bundle.commit())
-            .map_err(|e| format!("Failed to serialize rebind commit: {e:?}"))
-    }
-
-    /// Forget the legacy signer once no group's own leaf uses it. Returns whether it
-    /// was dropped, so the caller persists.
-    pub fn drop_unused_legacy(&mut self) -> bool {
-        let Some((legacy, _)) = self.legacy.as_ref() else { return false };
-        let in_use = self.groups.values().any(|g| {
-            g.own_leaf_node()
-                .is_some_and(|l| l.signature_key().as_slice() == legacy.public())
-        });
-        if in_use {
-            return false;
-        }
-        self.legacy = None;
-        true
-    }
-
     fn welcome_facts(&self, group_key: &str, staged: &StagedWelcome) -> WelcomeFacts {
         let sender = staged
             .welcome_sender()
@@ -1828,6 +1764,7 @@ impl MlsManager {
         before_merge: impl FnOnce(),
     ) -> Result<Verdict, CommitError> {
         let tree = self.leaf_records(server_id);
+        let old_shaped = self.old_shaped();
         let group = self.groups.get_mut(server_id)
             .ok_or_else(|| format!("No MLS group for server {server_id}"))?;
 
@@ -1904,6 +1841,10 @@ impl MlsManager {
         }
         if let Some(path) = staged.update_path_leaf_node().filter(|l| !super::mls_tally::declares(l)) {
             facts.undeclared.push(leaf_node_view(&self.leaf_cache, path));
+        }
+        // A 0.12.2-shaped test node judges as 0.12.2 did, with no ratchet.
+        if old_shaped {
+            facts.undeclared.clear();
         }
         for proposal in staged.remove_proposals() {
             let index = proposal.remove_proposal().removed();
@@ -2411,7 +2352,9 @@ impl MlsManager {
             credential: BasicCredential::new(credential_text.as_bytes().to_vec()).into(),
             signature_key: self.signer.to_public_vec().into(),
         };
+        // Declares what our own leaves do, so only the claim is wrong.
         let kp = KeyPackage::builder()
+            .leaf_node_capabilities(self.leaf_capabilities())
             .build(CIPHERSUITE, &self.provider, &self.signer, credential_with_key)
             .unwrap();
         TlsSerialize::tls_serialize_detached(kp.key_package()).unwrap()
@@ -2428,6 +2371,7 @@ impl MlsManager {
     pub(crate) fn key_package_expiring_in(&self, secs: u64) -> Vec<u8> {
         let kp = KeyPackage::builder()
             .key_package_lifetime(Lifetime::new(secs))
+            .leaf_node_capabilities(self.leaf_capabilities())
             .build(CIPHERSUITE, &self.provider, &self.signer, self.credential_with_key.clone())
             .unwrap();
         TlsSerialize::tls_serialize_detached(kp.key_package()).unwrap()
@@ -2822,7 +2766,6 @@ mod tests {
             &["server1".to_string()],
         ).unwrap();
         alice2.adopt_device_identity(&keypair(2), &keypair(1));
-        assert!(!alice2.drop_unused_legacy(), "the persisted signer IS the device key");
 
         assert!(alice2.has_group("server1"));
         assert_eq!(alice2.member_count("server1"), 2);
@@ -3300,84 +3243,36 @@ mod tests {
         assert!(legacy.add_member("s", &peer.generate_key_package().unwrap()).is_err());
     }
 
-    /// Groups formed before 0.12 switch without re-forming: the authority rebinds its own
-    /// leaf in place, every other member is repaired in one commit, nobody forks, and
-    /// each ends up attributed to its real device.
+    /// 0.14 keeps no pre-0.12 signer: the device key is what persists, and a group whose
+    /// own leaf predates bound leaves stays mute until a bound member repairs it.
     #[test]
-    fn a_legacy_group_rebinds_in_place_without_forking() {
-        let owner_master = keypair(1);
-        let owner_device = keypair(2);
+    fn a_pre_0_12_signer_is_dropped_and_its_leaf_repaired_by_a_bound_member() {
+        let (owner_master, owner_device) = (keypair(1), keypair(2));
         let mut owner = MlsManager::new_legacy(&owner_master.peer_id());
         owner.create_group("s").unwrap();
-        let mut friend = MlsManager::new_legacy("12D3KooWLegacyFriend");
-        let mut sibling = MlsManager::new_legacy("12D3KooWLegacySibling");
-        let adds = vec![
-            ("12D3KooWLegacyFriend".to_string(), friend.generate_key_package().unwrap()),
-            ("12D3KooWLegacySibling".to_string(), sibling.generate_key_package().unwrap()),
-        ];
-        // Legacy groups were formed before any rule: seat the leaves directly.
+        let (mut friend, _) = bound(3, 4);
+        // Legacy groups were formed before any rule: seat the leaf directly.
+        let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(friend.generate_key_package().unwrap()).unwrap();
+        let kp = kp_in.validate(owner.provider.crypto(), ProtocolVersion::Mls10).unwrap();
         let group = owner.groups.get_mut("s").unwrap();
-        let kps: Vec<KeyPackage> = adds.iter().map(|(_, b)| {
-            let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(b).unwrap();
-            kp_in.validate(owner.provider.crypto(), ProtocolVersion::Mls10).unwrap()
-        }).collect();
-        let (_, welcome, _) = group.add_members(&owner.provider, &owner.signer, &kps).unwrap();
+        let (_, welcome, _) = group.add_members(&owner.provider, &owner.signer, &[kp]).unwrap();
         owner.merge_pending_commit("s").unwrap();
-        let welcome = TlsSerialize::tls_serialize_detached(&welcome).unwrap();
-        friend.join_from_welcome("s", &welcome).unwrap();
-        sibling.join_from_welcome("s", &welcome).unwrap();
+        friend.join_from_welcome("s", &TlsSerialize::tls_serialize_detached(&welcome).unwrap()).unwrap();
 
-        // 0.12: the owner adopts its device key and rebinds in place.
         owner.adopt_device_identity(&owner_device, &owner_master);
-        assert!(owner.can_rebind_in_place("s"));
-        let rebind = owner.rebind_own_leaf("s").unwrap();
-        owner.merge_pending_commit("s").unwrap();
-        assert!(owner.own_leaf_bound("s"));
-        assert!(owner.drop_unused_legacy());
+        let persisted: SignatureKeyPair = serde_json::from_slice(&owner.signer_bytes().unwrap()).unwrap();
+        assert_eq!(persisted.public(), device_identity(&owner_device, &owner_master).0.public(), "the old signer persists");
+        assert_eq!(owner.unbound_own_groups(), vec!["s".to_string()]);
+        assert!(owner.encrypt("s", b"too early").is_err(), "an unbound own leaf speaks");
 
-        let mut seen = CommitFacts::default();
-        friend.process_commit_judged("s", &rebind, |f| { seen = f.clone(); Verdict::Accept }).unwrap();
-        assert_eq!(seen.committer, Some(LeafView::Unbound(owner_master.peer_id())));
-        assert_eq!(
-            seen.path_leaf,
-            Some(LeafView::Bound(LeafIdentity { device: owner_device.peer_id(), master: owner_master.peer_id() }))
-        );
-        assert!(seen.adds.is_empty() && seen.removes.is_empty() && !seen.other_proposals);
-        assert_eq!(
-            seen.path_tally.as_ref().and_then(|t| t.as_ref()).map(|t| (t.epochs.clone(), t.carried.len())),
-            Some((Vec::new(), 0)),
-            "the rebound leaf declares the tally and states its history unchanged",
-        );
-        sibling.process_commit("s", &rebind).unwrap();
-
-        // The friend adopts its own device key: it may not speak until repaired.
-        let (friend_master, friend_device) = (keypair(3), keypair(4));
-        friend.adopt_device_identity(&friend_device, &friend_master);
-        assert!(friend.encrypt("s", b"too early").is_err());
-        let kp = friend.generate_key_package().unwrap();
-        let repair = owner
-            .commit_membership("s", &["12D3KooWLegacyFriend".to_string()], &[(friend_device.peer_id(), kp)])
+        let repair = friend
+            .commit_membership("s", &[owner_master.peer_id()], &[(owner_device.peer_id(), owner.generate_key_package().unwrap())])
             .unwrap();
-        owner.merge_pending_commit("s").unwrap();
-        sibling.process_commit("s", &repair.commit).unwrap();
-        friend.join_from_welcome("s", &repair.welcome.unwrap()).unwrap();
-        assert!(friend.own_leaf_bound("s"));
-        assert!(friend.drop_unused_legacy());
-
-        let ct = friend.encrypt("s", b"bound now").unwrap();
-        let (pt, sender) = sibling.decrypt("s", &ct).unwrap();
-        assert_eq!(pt, b"bound now".to_vec());
-        assert_eq!(sender, LeafIdentity { device: friend_device.peer_id(), master: friend_master.peer_id() });
-        assert_eq!(owner.decrypt("s", &friend.encrypt("s", b"again").unwrap()).unwrap().1.device, friend_device.peer_id());
-
-        // The sibling is still unbound: its messages decrypt but prove nobody.
-        let unbound_ct = sibling.encrypt("s", b"legacy");
-        assert!(unbound_ct.is_err(), "a legacy manager never adopted a device key, its leaf is unbound");
-        assert_eq!(
-            friend.export_secret("s", "sframe", b"", 32).unwrap(),
-            owner.export_secret("s", "sframe", b"", 32).unwrap(),
-            "no fork"
-        );
+        friend.merge_pending_commit("s").unwrap();
+        owner.join_from_welcome("s", &repair.welcome.unwrap()).unwrap();
+        assert!(owner.own_leaf_bound("s") && owner.unbound_own_groups().is_empty());
+        let (pt, sender) = friend.decrypt("s", &owner.encrypt("s", b"bound now").unwrap()).unwrap();
+        assert_eq!((pt, sender.device), (b"bound now".to_vec(), owner_device.peer_id()));
     }
 
     /// A member's commit that holds never pushes out another member's held commit,
@@ -3583,7 +3478,7 @@ mod persisted_storage_fixture {
     /// THE upgrade guard: an `mls_identity` blob written by openmls 0.8.1 must
     /// still load, keep its group id and epoch, and derive the SAME SFrame
     /// secret. A silent format change breaks this and nothing else. It is also a
-    /// real pre-0.12 identity, so it must rebind in place to become usable.
+    /// real pre-0.12 identity, so its leaf waits for a repair once the device key is ours.
     #[test]
     fn persisted_0_8_1_storage_still_loads() {
         let dir = fixture_dir();
@@ -3654,18 +3549,11 @@ mod persisted_storage_fixture {
             "SFrame export secret changed after reloading 0.8.1 state"
         );
 
-        // A pre-0.12 leaf is unbound, so the group only becomes usable once rebound.
-        assert!(restored.encrypt(&server_id, b"too early").is_err());
+        // A pre-0.12 leaf is unbound: the group stays mute until a bound member repairs it.
         let (device, master) = (super::test_keys::keypair(2), super::test_keys::keypair(1));
         restored.adopt_device_identity(&device, &master);
-        assert!(restored.can_rebind_in_place(&server_id));
-        restored.rebind_own_leaf(&server_id).expect("legacy leaf rebinds in place");
-        restored.merge_pending_commit(&server_id).unwrap();
-        assert!(restored.drop_unused_legacy());
-        let ct = restored
-            .encrypt(&server_id, b"after the upgrade")
-            .expect("rebound group must encrypt");
-        assert!(!ct.is_empty());
+        assert!(restored.encrypt(&server_id, b"too early").is_err());
+        assert_eq!(restored.unbound_own_groups(), vec![server_id]);
     }
 }
 
@@ -4509,5 +4397,52 @@ mod standing_tests {
         let kp = old.generate_key_package_for("s", false);
         set(Knob::OldLeaf, &old_dev, false);
         assert!(!owner.key_package_declares(&kp.unwrap()));
+    }
+
+    /// A group we found requires the tally in its context, so OpenMLS itself refuses a
+    /// pre-0.13 leaf: the ratchet's second layer, whatever a committer's planner does.
+    #[test]
+    fn a_group_we_found_refuses_a_leaf_without_the_tally() {
+        use crate::node::standing::knobs::{set, Knob};
+        let (mut owner, _) = bound(9, 10);
+        owner.create_group("s").unwrap();
+        let (old, old_dev) = bound(11, 12);
+        set(Knob::OldLeaf, &old_dev, true);
+        let kp = old.generate_key_package_for("s", false);
+        set(Knob::OldLeaf, &old_dev, false);
+        assert!(owner.add_member("s", &kp.unwrap()).is_err(), "a leaf without the tally was added");
+        let (fresh, _) = bound(13, 14);
+        assert!(owner.add_member("s", &fresh.generate_key_package_for("s", false).unwrap()).is_ok());
+    }
+
+    /// A committer whose own leaf predates the tally writes one that declares it into the
+    /// very commit that seats someone, so one fresh joiner's leaf never stands alone.
+    #[test]
+    fn a_commit_by_a_leaf_without_the_tally_refreshes_it() {
+        use crate::node::standing::knobs::{set, Knob};
+        let (mut owner, owner_dev) = bound(19, 20);
+        set(Knob::OldLeaf, &owner_dev, true);
+        owner.create_group("s").unwrap();
+        set(Knob::OldLeaf, &owner_dev, false);
+        let declares = |m: &super::MlsManager| m.leaf_records("s").iter().find(|r| r.identity.as_ref().is_some_and(|i| i.device == owner_dev)).map(|r| r.declares);
+        assert_eq!(declares(&owner), Some(false), "precondition: our leaf predates the tally");
+        let (joiner, jdev) = bound(21, 22);
+        owner.commit_membership("s", &[], &[(jdev, joiner.generate_key_package_for("s", false).unwrap())]).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        assert_eq!(declares(&owner), Some(true), "the seating commit left our leaf without the tally");
+    }
+
+    /// A meeting's group requires nothing of its leaves: a 0.13 guest's knock lists no tally.
+    #[test]
+    fn a_meeting_group_we_found_takes_a_leaf_without_the_tally() {
+        use crate::node::standing::knobs::{set, Knob};
+        let sid = crate::node::conference::conf_server_id(&crate::node::conference::derive_conf_id("host", "n1"));
+        let (mut host, _) = bound(15, 16);
+        host.create_group(&sid).unwrap();
+        let (guest, guest_dev) = bound(17, 18);
+        set(Knob::OldLeaf, &guest_dev, true);
+        let kp = guest.generate_key_package_for(&sid, false);
+        set(Knob::OldLeaf, &guest_dev, false);
+        assert!(host.add_member(&sid, &kp.unwrap()).is_ok(), "a meeting refused a guest's leaf without the tally");
     }
 }

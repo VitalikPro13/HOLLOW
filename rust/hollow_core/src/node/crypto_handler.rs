@@ -837,12 +837,15 @@ pub(crate) fn olm_frame(
         Ok(Some((pickle, version))) => crypto_store.save_session_awaited(device.to_string(), pickle, version),
         Ok(None) | Err(_) => crate::crypto::SessionSaved::failed(),
     };
-    OlmFrame {
+    let frame = OlmFrame {
         data: serde_json::to_vec(&encrypted_frame(olm, message_type, ciphertext)).unwrap_or_default(),
         saved,
         device: device.to_string(),
         plaintext: plaintext.to_string(),
-    }
+    };
+    #[cfg(test)]
+    super::test_harness::label_carried_frame(&frame.data, plaintext);
+    frame
 }
 
 impl OlmFrame {
@@ -2124,27 +2127,15 @@ pub(crate) fn request_subgroup_bootstrap(
         Ok(kp) => kp,
         Err(e) => { hollow_log!("[HOLLOW-MLS] subgroup KP gen failed: {e}"); return false; }
     };
-    let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+    let msg = HavenMessage::MlsKeyPackage {
         server_id: server_id.to_string(),
-        key_package: kp_b64,
+        key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
         channel_id: Some(channel_id.to_string()),
-    }).unwrap_or_default();
+    };
     let sent = if ours {
-        let mut sent = 0;
-        for dev in &siblings {
-            if let Some(room) = ws_room_for_peer(ws_room_peers, dev) {
-                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                    room_code: room,
-                    target_peer: dev.clone(),
-                    data: data.clone(),
-                });
-                sent += 1;
-            }
-        }
-        sent
+        siblings.iter().filter(|dev| carry_key_package(ws_cmd_tx, ws_room_peers, dev, &msg)).count()
     } else {
-        send_raw_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, data)
+        carry_key_package_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, &msg)
     };
     if sent > 0 {
         hollow_log!("[HOLLOW-MLS] Sent subgroup KeyPackage to coordinator {coordinator} for {server_id}#{channel_id} ({sent} device(s))");
@@ -2228,13 +2219,12 @@ pub(crate) fn request_server_group_bootstrap(
         Ok(kp) => kp,
         Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
     };
-    let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+    let msg = HavenMessage::MlsKeyPackage {
         server_id: server_id.to_string(),
-        key_package: kp_b64,
+        key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
         channel_id: None,
-    }).unwrap_or_default();
-    let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, owner, data);
+    };
+    let sent = carry_key_package_to_identity(ws_cmd_tx, ws_room_peers, owner, &msg);
     if sent > 0 {
         hollow_log!("[HOLLOW-MLS] Sent server-group KeyPackage to owner {owner} for {server_id} ({sent} device(s))");
     }
@@ -2243,8 +2233,8 @@ pub(crate) fn request_server_group_bootstrap(
 
 /// The member a leafless ask of ours goes to next, and whether it starts a new pass. A
 /// Legacy server keeps the old single target (the owner, else the lowest online
-/// member); any other walks the members by standing, the old-rule target last, one
-/// target per ask (design g13w2-f §4.3).
+/// member); any other walks the members by standing, one target per ask (design
+/// g13w2-f §4.3).
 pub(crate) fn leaf_ask_target(
     mls: &MlsManager,
     server: &crate::crdt::server_state::ServerState,
@@ -2252,11 +2242,11 @@ pub(crate) fn leaf_ask_target(
     local_master: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) -> Option<(String, bool)> {
-    let old = old_bootstrap_target(server, local_master, ws_room_peers).filter(|t| !super::resolver::same_identity(t, local_master));
     if server.anchor() == crate::crdt::server_state::Anchor::Legacy {
+        let old = old_bootstrap_target(server, local_master, ws_room_peers).filter(|t| !super::resolver::same_identity(t, local_master));
         return old.map(|t| (t, true));
     }
-    let order = super::standing::walk_order(server, local_master, ws_room_peers, old.as_deref());
+    let order = super::standing::walk_order(server, local_master, ws_room_peers);
     super::standing::next_walk_target(&order, &mls.lead.walk_asked(server_id))
 }
 
@@ -2288,22 +2278,12 @@ pub(crate) fn walk_leaf_ask(
             Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
         },
     };
-    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+    let msg = HavenMessage::MlsKeyPackage {
         server_id: server_id.to_string(),
         key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
         channel_id: None,
-    }).unwrap_or_default();
-    let mut reached = Vec::new();
-    for dev in &devices {
-        if let Some(room) = ws_room_for_peer(ws_room_peers, dev) {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                room_code: room,
-                target_peer: dev.clone(),
-                data: data.clone(),
-            });
-            reached.push(dev.clone());
-        }
-    }
+    };
+    let reached: Vec<String> = devices.into_iter().filter(|dev| carry_key_package(ws_cmd_tx, ws_room_peers, dev, &msg)).collect();
     if reached.is_empty() {
         return false;
     }
@@ -2349,29 +2329,19 @@ pub(crate) fn request_server_leaf(
         Ok(kp) => kp,
         Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
     };
-    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+    let msg = HavenMessage::MlsKeyPackage {
         server_id: server_id.to_string(),
         key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
         channel_id: None,
-    }).unwrap_or_default();
-    let mut sent = 0;
-    for dev in &targets {
-        if let Some(room) = ws_room_for_peer(ws_room_peers, dev) {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                room_code: room,
-                target_peer: dev.clone(),
-                data: data.clone(),
-            });
-            sent += 1;
-        }
-    }
+    };
+    let sent = targets.iter().filter(|dev| carry_key_package(ws_cmd_tx, ws_room_peers, dev, &msg)).count();
     if sent > 0 {
         hollow_log!("[HOLLOW-MLS] Asked {targets:?} for a leaf in {server_id}");
     }
     sent > 0
 }
 
-/// Send the KeyPackage `data` a just-admitted member mints for its first leaf: to our
+/// Send the KeyPackage a just-admitted member mints for its first leaf: to our
 /// own other devices when our identity owns the server (one of them holds the group,
 /// or they settle which founds it), else to the bootstrap target, else to the member
 /// that answered our join. True when the batch tick must not ask again: a second
@@ -2390,11 +2360,11 @@ pub(crate) fn send_join_leaf_ask(
     responder: &str,
     kp_bytes: Vec<u8>,
 ) -> bool {
-    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+    let msg = HavenMessage::MlsKeyPackage {
         server_id: server_id.to_string(),
         key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
         channel_id: None,
-    }).unwrap_or_default();
+    };
     let owner_is_us = server.members.keys().any(|m| {
         super::resolver::same_identity(m, local_master)
             && server.roles.get(m).is_some_and(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
@@ -2406,7 +2376,7 @@ pub(crate) fn send_join_leaf_ask(
     };
     if !siblings.is_empty() {
         for dev in &siblings {
-            send_raw_to_peer(ws_cmd_tx, ws_room_peers, dev, data.clone());
+            carry_key_package(ws_cmd_tx, ws_room_peers, dev, &msg);
         }
         hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to our own devices {siblings:?} for {server_id}");
         return true;
@@ -2419,7 +2389,7 @@ pub(crate) fn send_join_leaf_ask(
     if server.anchor() != crate::crdt::server_state::Anchor::Legacy && !super::resolver::same_identity(responder, local_master) {
         return false;
     }
-    let reached = send_raw_to_identity(ws_cmd_tx, ws_room_peers, responder, data);
+    let reached = carry_key_package_to_identity(ws_cmd_tx, ws_room_peers, responder, &msg);
     hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to join responder {responder} for {server_id} (no bootstrap target yet)");
     // Unstamped for anyone else, so the message-triggered rescue can still ask.
     reached > 0 && super::resolver::same_identity(responder, local_master)
@@ -3066,19 +3036,43 @@ pub(crate) fn send_key_package_to_identity_of(
     peer_str: &str,
     msg: &HavenMessage,
 ) {
-    let data = serde_json::to_vec(msg).unwrap_or_default();
     for dev in online_devices_for(ws_room_peers, peer_str) {
         if dev != peer_str {
-            send_raw_to_peer(ws_cmd_tx, ws_room_peers, &dev, data.clone());
+            carry_key_package(ws_cmd_tx, ws_room_peers, &dev, msg);
         }
     }
-    if let Some(room) = send_room_for_peer(ws_room_peers, peer_str) {
-        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-            room_code: room,
-            target_peer: peer_str.to_string(),
-            data,
-        });
+    carry_key_package(ws_cmd_tx, ws_room_peers, peer_str, msg);
+}
+
+/// Send a KeyPackage frame (`MlsKeyPackage`, its forward or its ack) to one device we
+/// can reach, inside Olm: whoever reads a package can seat its device in a group of
+/// its own (standing residual R6). The one way node code sends one.
+pub(crate) fn carry_key_package(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    device: &str,
+    msg: &HavenMessage,
+) -> bool {
+    if send_room_for_peer(ws_room_peers, device).is_none() {
+        return false;
     }
+    super::olm_lane::carry(ws_cmd_tx, device, None, msg, super::olm_lane::NoSession::Queue);
+    true
+}
+
+/// [`carry_key_package`] to every online device of `identity` (a master or a device),
+/// the KeyPackage counterpart of [`send_raw_to_identity`]. Returns how many there were.
+pub(crate) fn carry_key_package_to_identity(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    identity: &str,
+    msg: &HavenMessage,
+) -> usize {
+    let mut devices = online_devices_for(ws_room_peers, identity);
+    if devices.is_empty() && ws_room_for_peer(ws_room_peers, identity).is_some() {
+        devices.push(identity.to_string());
+    }
+    devices.iter().filter(|dev| carry_key_package(ws_cmd_tx, ws_room_peers, dev, msg)).count()
 }
 
 /// Send pre-serialized bytes to a specific peer via the WS relay.
@@ -3359,15 +3353,15 @@ pub(crate) async fn after_commit_merged(
     CommitApplyOutcome::Applied
 }
 
-/// Rebind our own leaf wherever it still predates bound leaves. As the group
-/// authority we rebind in place, one commit cached for catch-up; otherwise we hand
-/// the authority a fresh KeyPackage and its repair replaces our leaf. Throttled per
-/// group by the bootstrap stamp, which also makes the repair's Welcome asked-for.
+/// Ask a repair wherever our own leaf is unbound (from before leaves were bound): a
+/// fresh KeyPackage to the group authority, whose remove + re-add replaces it, or, as
+/// the authority, to our catch-up responder (to a sibling of ours when a lower device
+/// of ours commits). Throttled per group by the bootstrap stamp, which also makes the
+/// repair's Welcome asked-for.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn rebind_unbound_leaves(
+pub(crate) fn repair_unbound_leaves(
     mls_mgr: &mut MlsManager,
     crypto_store: &CryptoStore,
-    event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
@@ -3388,58 +3382,101 @@ pub(crate) async fn rebind_unbound_leaves(
         let authority = group_authority(state, channel_id.as_deref(), local_peer_str, ws_room_peers, &lead);
         let we_are_authority =
             authority.as_deref().is_some_and(|a| super::resolver::same_identity(a, local_peer_str));
-        // Two devices of the authority that upgrade together would each rebind and fork
-        // the group: one rebinds, the others are re-added by it. A device that already
-        // asked and is still unbound rebinds itself, as the sibling may never come.
+        // A device that asked its sibling once and is still unbound asks the responder.
         let we_act = mls_bootstrap_requested.contains_key(&group_key)
             || we_commit_for_our_identity(mls_mgr, &group_key, local_peer_str, local_device, ws_room_peers, &[]);
-
-        if we_are_authority && we_act && mls_mgr.can_rebind_in_place(&group_key) {
-            let commit = match mls_mgr.rebind_own_leaf(&group_key) {
-                Ok(commit) => commit,
-                Err(e) => {
-                    hollow_log!("[HOLLOW-MLS] Rebinding our leaf in {group_key} failed: {e}");
-                    continue;
-                }
-            };
-            if let Err(e) = mls_mgr.merge_pending_commit(&group_key) {
-                hollow_log!("[HOLLOW-MLS] Merging our rebind in {group_key} failed: {e}");
-                continue;
-            }
-            mls_mgr.drop_unused_legacy();
-            persist_mls_state(mls_mgr, crypto_store);
-            if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
-                let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
-                let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
-                    server_id: server_id.clone(), epoch, sframe_key,
-                    channel_id: channel_id.clone(),
-                }).await;
-            }
-            let epoch = mls_mgr.epoch(&group_key).ok();
-            let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit);
-            broadcast_mls_commit(mls_mgr, ws_cmd_tx, &server_id, channel_id.clone(), commit_b64, epoch);
-            hollow_log!("[HOLLOW-MLS] Rebound our leaf in {group_key} in place");
-            continue;
-        }
-
-        let target = if we_are_authority && !we_act {
-            Some(local_peer_str.to_string())
-        } else if we_are_authority {
+        let target = if !we_are_authority {
+            authority
+        } else if we_act {
             epoch_catchup_responder(state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str, &lead)
         } else {
-            authority
+            Some(local_peer_str.to_string())
         };
         let Some(target) = target else { continue };
         let Ok(kp_bytes) = mint_group_key_package(mls_mgr, crypto_store, &group_key, false) else { continue };
-        let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+        let msg = HavenMessage::MlsKeyPackage {
             server_id: server_id.clone(),
             key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
             channel_id: channel_id.clone(),
-        })
-        .unwrap_or_default();
-        if send_raw_to_identity(ws_cmd_tx, ws_room_peers, &target, data) > 0 {
+        };
+        if carry_key_package_to_identity(ws_cmd_tx, ws_room_peers, &target, &msg) > 0 {
             mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
             hollow_log!("[HOLLOW-MLS] Asked {target} to repair our unbound leaf in {group_key}");
+        }
+    }
+    ask_repair_of_stale_leaves(mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, server_states, mls_bootstrap_requested, local_peer_str, local_device);
+}
+
+/// Per group, the masters we already asked this run to repair our leaf from before the
+/// tally, in the order asked.
+static STALE_ASKED: std::sync::Mutex<std::collections::BTreeMap<String, Vec<String>>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Where our next stale-leaf repair ask goes: the group's authority first, then every
+/// other online member by standing, each once per run, so an authority that cannot hear a
+/// carried KeyPackage (a 0.12.2 device) never ends the asking. `None` once all were asked.
+fn next_stale_ask_target(authority: Option<String>, by_standing: Vec<String>, asked: &[String]) -> Option<String> {
+    let order: Vec<String> = authority.iter().cloned().chain(by_standing.into_iter().filter(|m| Some(m) != authority.as_ref())).collect();
+    super::standing::next_walk_target(&order, asked).and_then(|(target, restart)| (!restart).then_some(target))
+}
+
+/// Ask a member to repair our bound leaf that predates the tally into one that declares
+/// it: until then we stand for leadership only while no online leaf declares. The
+/// group's authority first; with no Welcome within the bootstrap timeout, the next member
+/// by standing, each once per run. As the authority we refresh it ourselves (the turn tick).
+#[allow(clippy::too_many_arguments)]
+fn ask_repair_of_stale_leaves(
+    mls_mgr: &mut MlsManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
+    mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    local_peer_str: &str,
+    local_device: &str,
+) {
+    if super::standing::knobs::on(super::standing::knobs::Knob::OldLeaf, local_device) {
+        return;
+    }
+    for group_key in mls_mgr.group_ids() {
+        let stale = mls_mgr
+            .leaf_records(&group_key)
+            .iter()
+            .any(|r| r.identity.as_ref().is_some_and(|i| i.device == local_device) && !r.declares);
+        let (server_id, channel_id) = crate::crypto::split_group_key(&group_key);
+        let Some(state) = server_states.get(&server_id) else { continue };
+        if !stale
+            || super::conference::is_conference_sid(&server_id)
+            || state.anchor() == crate::crdt::server_state::Anchor::Legacy
+            || mls_bootstrap_requested.get(&group_key).is_some_and(|t| t.elapsed() < super::swarm::MLS_BOOTSTRAP_TIMEOUT)
+        {
+            continue;
+        }
+        let asked_key = format!("{local_device}|{group_key}");
+        let asked = STALE_ASKED.lock().map(|a| a.get(&asked_key).cloned().unwrap_or_default()).unwrap_or_default();
+        let lead = responder_view(mls_mgr, state, &server_id, channel_id.as_deref());
+        let authority = group_authority(state, channel_id.as_deref(), local_peer_str, ws_room_peers, &lead);
+        // As the authority we refresh our own leaf; nobody else is asked.
+        if authority.as_deref().is_some_and(|a| super::resolver::same_identity(a, local_peer_str)) {
+            continue;
+        }
+        let holders: Vec<String> = mls_mgr.group_leaves(&group_key).iter().filter_map(|l| l.bound().map(|b| b.master.clone())).collect();
+        let by_standing = super::standing::walk_order(state, local_peer_str, ws_room_peers)
+            .into_iter()
+            .filter(|m| !lead.excludes(m) && holders.iter().any(|h| h == m))
+            .collect();
+        let Some(target) = next_stale_ask_target(authority, by_standing, &asked) else { continue };
+        let Ok(kp_bytes) = mint_group_key_package(mls_mgr, crypto_store, &group_key, false) else { continue };
+        let msg = HavenMessage::MlsKeyPackage {
+            server_id: server_id.clone(),
+            key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
+            channel_id: channel_id.clone(),
+        };
+        if carry_key_package_to_identity(ws_cmd_tx, ws_room_peers, &target, &msg) > 0 {
+            mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+            if let Ok(mut a) = STALE_ASKED.lock() {
+                a.entry(asked_key).or_default().push(target.clone());
+            }
+            hollow_log!("[HOLLOW-MLS] Asked {target} to repair our leaf from before the tally in {group_key}");
         }
     }
 }
@@ -3479,13 +3516,12 @@ pub(crate) fn ask_leaf_repair(
         return false;
     }
     let Ok(kp_bytes) = mint_group_key_package(mls_mgr, crypto_store, group_key, false) else { return false };
-    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+    let msg = HavenMessage::MlsKeyPackage {
         server_id,
         key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
         channel_id,
-    })
-    .unwrap_or_default();
-    if send_raw_to_identity(ws_cmd_tx, ws_room_peers, &target, data) == 0 {
+    };
+    if carry_key_package_to_identity(ws_cmd_tx, ws_room_peers, &target, &msg) == 0 {
         return false;
     }
     mls_bootstrap_requested.insert(group_key.to_string(), std::time::Instant::now());
@@ -3565,8 +3601,8 @@ impl Lead {
 }
 
 /// The [`Lead`] for answering a group: masters our copy shows unfit to answer for it
-/// (catch-up, repairs) at their cap or keeping a pre-0.13 leaf where every other
-/// master's carries a tally, and under standing the responder we found silent.
+/// (catch-up, repairs) at their cap or keeping a leaf without a tally, and under
+/// standing the responder we found silent.
 pub(crate) fn responder_view(
     mls: &MlsManager,
     state: &crate::crdt::server_state::ServerState,
@@ -6442,7 +6478,7 @@ mod tests {
 
         assert!(ask(&mls, &state, &online, "lr_srv"));
         assert_eq!(minted(&mls), 1);
-        assert!(matches!(rx.try_recv(), Ok(super::super::ws_client::WsCommand::SendDirect { target_peer, .. }) if target_peer == "lr_owner"));
+        assert!(matches!(rx.try_recv(), Ok(super::super::ws_client::WsCommand::Carry { device, .. }) if device == "lr_owner"), "carried to the owner");
         super::super::resolver::clear_all();
     }
 
@@ -6654,7 +6690,7 @@ mod standing_golden_tests {
         }
         state.roles.insert("p1".into(), AdminLwwReg::new(MemberRole::Admin, crate::crdt::hlc::HlcTimestamp::zero("a"), 3));
         let leaves: HashMap<String, String> = ["own", "p0", "p1", "unfit"].iter().map(|m| (m.to_string(), m.to_string())).collect();
-        let on = Rule::Standing(Some(leaves));
+        let on = Rule::Standing(Some(leaves.into()));
         let members: Vec<String> = ["p0", "p1", "unfit"].iter().map(|m| m.to_string()).collect();
         let peers: Peers = [("room".to_string(), members.iter().cloned().collect())].into();
         let unfit: HashSet<String> = ["unfit".to_string()].into();
@@ -6728,5 +6764,19 @@ mod standing_golden_tests {
         assert!(may_repair_our_leaf(&state, None, "b", &peers, "a", &Lead::default()), "control: the old rule names the lowest id");
         assert!(!may_repair_our_leaf(&state, None, "b", &peers, "a", &abstain));
         assert!(may_repair_our_leaf(&state, None, "b", &peers, "own", &abstain));
+    }
+
+    /// The stale-leaf ask goes to the authority first, then each other member by standing
+    /// once, and stops after one pass: an authority that never answers (a 0.12.2 device
+    /// drops a carried KeyPackage) does not end the asking, and nothing loops.
+    #[test]
+    fn a_stale_leaf_ask_walks_past_an_authority_that_never_answers() {
+        let order = || vec!["own".to_string(), "adm".to_string(), "mem".to_string()];
+        let ask = |asked: &[&str]| next_stale_ask_target(Some("adm".into()), order(), &asked.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        assert_eq!(ask(&[]).as_deref(), Some("adm"), "the authority first");
+        assert_eq!(ask(&["adm"]).as_deref(), Some("own"), "then by standing");
+        assert_eq!(ask(&["adm", "own"]).as_deref(), Some("mem"));
+        assert_eq!(ask(&["adm", "own", "mem"]), None, "one pass per run");
+        assert_eq!(next_stale_ask_target(None, order(), &[]).as_deref(), Some("own"), "no authority online");
     }
 }

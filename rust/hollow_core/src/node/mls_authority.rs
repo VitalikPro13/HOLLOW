@@ -85,24 +85,8 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
         (LeafView::Bound(before), Some(LeafView::Bound(after))) if before != after => {
             return Verdict::Refuse(format!("committer {} turns into {}", before.device, after.device));
         }
-        (LeafView::Unbound(raw), Some(LeafView::Bound(after))) => {
-            if raw != &after.device && raw != &after.master {
-                return Verdict::Refuse(format!("legacy leaf {raw} rebinds as {}", after.device));
-            }
-            if !facts.adds.is_empty() || !facts.removes.is_empty() {
-                return Verdict::Refuse("a rebind carries membership changes".into());
-            }
-            if refused(after) {
-                return Verdict::Refuse(format!("rebinds as revoked or disowned device {}", after.device));
-            }
-            return match rules {
-                GroupRules::Meeting { host } if *host != Some(after.master.as_str()) => {
-                    Verdict::Refuse("committer is not the meeting's host".into())
-                }
-                _ => rules.membership(&after.master, "rebinding committer"),
-            };
-        }
-        (LeafView::Unbound(raw), None) => {
+        // An unbound leaf never commits, not even to bind itself; a bound member repairs it.
+        (LeafView::Unbound(raw), _) => {
             return Verdict::Refuse(format!("committed by unbound leaf {raw}"));
         }
         (LeafView::Bound(identity), _) => identity,
@@ -126,16 +110,16 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
             return Verdict::Refuse(format!("epoch rate: {why}"));
         }
     }
-    // The standing ratchet (design g13w2-f §3): an all-0.13 tree admits no leaf without
-    // the tally capability but the anchored owner's, or one stale leaf turns the gate off.
+    // The standing ratchet (design g13w2-f §3): an anchored server's groups take no leaf
+    // without the tally capability, the owner's included, so no pre-0.13 leaf joins one.
     if let GroupRules::Server { state, .. } = rules
-        && super::standing::tree_declares(&facts.tree)
+        && super::standing::ratchet_on(state, &facts.tree)
         && let Some(leaf) = facts
             .undeclared
             .iter()
-            .find(|l| !l.bound().is_some_and(|b| super::crypto_handler::is_anchor_owner(state, &b.master)))
+            .find(|l| !l.bound().is_some_and(|b| super::standing::ratchet_exempts(state, &b.master)))
     {
-        return Verdict::Refuse(format!("writes leaf {} without the tally capability into an all-0.13 group", leaf.id()));
+        return Verdict::Refuse(format!("writes leaf {} without the tally capability", leaf.id()));
     }
     if refused(committer) {
         return Verdict::Refuse(format!("committed by revoked or disowned device {}", committer.device));
@@ -252,8 +236,8 @@ pub(crate) fn plan_membership(
     minted_for_group: impl Fn(&[u8]) -> Option<u64>,
     ourselves: &LeafIdentity,
     rules: &GroupRules,
-    // The tree is all-0.13 (`standing::tree_declares`) and whether a package declares the
-    // tally capability: the committer's half of the standing ratchet.
+    // Whether a package declares the tally capability, where the standing ratchet holds
+    // (`standing::ratchet_on`): the committer's half of it.
     ratchet: Option<&KeyPackageDeclares>,
 ) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
     let mut adds = Vec::new();
@@ -267,9 +251,9 @@ pub(crate) fn plan_membership(
         {
             continue;
         }
-        let owner = matches!(rules, GroupRules::Server { state, .. } if super::crypto_handler::is_anchor_owner(state, &identity.master));
-        if !owner && ratchet.is_some_and(|declares| !declares(&kp)) {
-            crate::hollow_log!("[HOLLOW-MLS] Not adding {device}: its leaf lacks the tally capability and every leaf here has it");
+        let exempt = matches!(rules, GroupRules::Server { state, .. } if super::standing::ratchet_exempts(state, &identity.master));
+        if !exempt && ratchet.is_some_and(|declares| !declares(&kp)) {
+            crate::hollow_log!("[HOLLOW-MLS] Not adding {device}: its leaf lacks the tally capability");
             continue;
         }
         if let Some(minted) = minted_for_group(&kp) {
@@ -600,28 +584,26 @@ mod tests {
         assert!(refused(&CommitFacts { path_leaf: Some(LeafView::Unbound("x".into())), ..facts(owner.clone()) }));
         assert!(refused(&CommitFacts { path_leaf: Some(leaf("alice-d", "alice")), ..facts(owner.clone()) }),
             "a committer may not turn into someone else");
-        assert!(refused(&facts(LeafView::Unbound("owner".into()))), "unbound committer without a rebind");
+        assert!(refused(&facts(LeafView::Unbound("owner".into()))), "an unbound committer");
         assert!(refused(&CommitFacts {
             path_leaf: Some(leaf("owner-d", "owner")),
             ..facts(LeafView::Unbound("alice".into()))
-        }), "a legacy leaf may rebind only as itself");
-        assert!(refused(&CommitFacts {
-            path_leaf: Some(leaf("owner-d", "owner")),
-            adds: vec![leaf("bob-d", "alice")],
-            ..facts(LeafView::Unbound("owner".into()))
-        }), "a rebind carries nothing else");
+        }), "an unbound leaf binding itself as someone else");
     }
 
+    /// An unbound leaf never commits, not even to bind itself as its own device; a bound
+    /// member repairs it instead.
     #[test]
-    fn a_legacy_leaf_rebinds_as_its_own_device_or_master() {
+    fn an_unbound_leaf_never_commits_not_even_to_rebind_itself() {
         let state = server(&["owner", "alice"]);
         let rules = GroupRules::Server { state: &state, channel: None };
         let rebind = |legacy: &str| CommitFacts {
             path_leaf: Some(leaf("alice-d", "alice")),
             ..facts(LeafView::Unbound(legacy.into()))
         };
-        assert_eq!(commit_verdict(&rebind("alice"), &rules), Verdict::Accept);
-        assert_eq!(commit_verdict(&rebind("alice-d"), &rules), Verdict::Accept);
+        for legacy in ["alice", "alice-d"] {
+            assert!(matches!(commit_verdict(&rebind(legacy), &rules), Verdict::Refuse(_)), "{legacy} rebound itself");
+        }
     }
 
     /// Rules our view may lag on hold instead of refusing.
@@ -767,8 +749,6 @@ mod tests {
                 Verdict::Refuse(_) => assert!(!add_waits, "the add of {what} is refused before its roster arrives"),
                 Verdict::Accept => panic!("{what} was added"),
             }
-            let rebind = CommitFacts { path_leaf: Some(bad.clone()), ..facts(LeafView::Unbound("alice".into())) };
-            assert!(matches!(commit_verdict(&rebind, &rules), Verdict::Refuse(_)), "a legacy leaf rebound as {what}");
         }
         assert_eq!(
             commit_verdict(&CommitFacts { removes: vec![leaf("alice", "alice")], ..facts(leaf("alice-d", "alice")) }, &rules),
@@ -1018,10 +998,10 @@ mod tests {
         assert!(!asked_for_leaf("s1", "s1", None, &named(true)), "an unbound sender");
     }
 
-    /// Unit 4: the receiver half of the standing ratchet. In an all-0.13 tree a commit
-    /// writing a leaf without the tally capability (an add or the committer's path leaf)
-    /// is refused, unless the leaf is the anchored owner's; an older tree and meetings
-    /// take it.
+    /// Unit 4: the receiver half of the standing ratchet. A commit writing a leaf without
+    /// the tally capability (an add or the committer's path leaf) is refused in every
+    /// anchored server, the owner's leaf included; a Legacy server ratchets once its tree
+    /// declares, sparing its owner; meetings take it.
     #[test]
     fn the_ratchet_matrix() {
         let state = server(&["owner", "alice", "bob"]);
@@ -1058,12 +1038,21 @@ mod tests {
         assert!(!ratchet(&commit_verdict(&path(leaf("alice-d", "alice"), &off), &rules)), "off, a stale path leaf");
         let meeting = GroupRules::Meeting { host: Some("owner") };
         assert!(!ratchet(&commit_verdict(&add(&on, leaf("bob-d", "bob"), false), &meeting)), "meetings are exempt");
+
+        let mut anchored = server(&["owner", "alice", "bob"]);
+        anchored.server_id = "0123456789abcdef0123456789abcdef01234567".into();
+        assert_ne!(anchored.anchor(), crate::crdt::server_state::Anchor::Legacy, "precondition");
+        let rules = GroupRules::Server { state: &anchored, channel: None };
+        assert!(ratchet(&commit_verdict(&add(&off, leaf("bob-d", "bob"), false), &rules)), "anchored, beside a stale leaf");
+        assert!(!ratchet(&commit_verdict(&add(&off, leaf("bob-d", "bob"), true), &rules)), "anchored, a declaring add");
+        assert!(ratchet(&commit_verdict(&add(&on, leaf("owner-d2", "owner"), false), &rules)), "anchored, the owner's old device");
+        assert!(ratchet(&commit_verdict(&path(leaf("owner-d", "owner"), &off), &rules)), "anchored, the owner's stale path leaf");
     }
 
-    /// The committer half: in an all-0.13 tree the planner drops a stale KeyPackage of
-    /// anyone but the anchored owner.
+    /// The committer half: where the ratchet holds the planner drops a stale KeyPackage,
+    /// sparing only a Legacy server's owner.
     #[test]
-    fn the_planner_ratchet_spares_only_the_owner() {
+    fn the_planner_ratchet_spares_only_a_legacy_owner() {
         use crate::identity::native_identity::NativeKeypair;
         let kp_of = |tag: u8| {
             let mut secret = [0u8; 32];
@@ -1073,7 +1062,8 @@ mod tests {
         };
         let (owner, owner_d2, bob, bob_d) = (kp_of(1), kp_of(2), kp_of(3), kp_of(4));
         let state = server(&[&owner.peer_id(), &bob.peer_id()]);
-        let rules = GroupRules::Server { state: &state, channel: None };
+        let mut anchored = state.clone();
+        anchored.server_id = "0123456789abcdef0123456789abcdef01234567".into();
         let ourselves = LeafIdentity { device: "owner-d".into(), master: owner.peer_id() };
         let queued = vec![
             (owner_d2.peer_id(), crate::crypto::mls_tally::stray_key_package(&owner_d2, &owner, "s1")),
@@ -1082,14 +1072,16 @@ mod tests {
         let leaves = vec![leaf("owner-d", &owner.peer_id())];
         let none = std::collections::HashMap::new();
         let stale = |_: &[u8]| false;
-        let plan = |ratchet: Option<&KeyPackageDeclares>| {
+        let plan = |state: &ServerState, ratchet: Option<&KeyPackageDeclares>| {
+            let rules = GroupRules::Server { state, channel: None };
             plan_membership(&leaves, &none, &[], queued.clone(), |_| None, &ourselves, &rules, ratchet).1
                 .into_iter()
                 .map(|(d, _)| d)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(plan(None), vec![owner_d2.peer_id(), bob_d.peer_id()], "off: both");
-        assert_eq!(plan(Some(&stale)), vec![owner_d2.peer_id()], "on: only the owner's old device");
+        assert_eq!(plan(&state, None), vec![owner_d2.peer_id(), bob_d.peer_id()], "off: both");
+        assert_eq!(plan(&state, Some(&stale)), vec![owner_d2.peer_id()], "Legacy: only the owner's old device");
+        assert!(plan(&anchored, Some(&stale)).is_empty(), "anchored: not even the owner's old device");
     }
 
     /// Every inbound MLS frame names its group by a server's or a meeting's id and a

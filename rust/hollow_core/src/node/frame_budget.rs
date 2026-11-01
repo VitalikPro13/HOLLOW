@@ -441,9 +441,9 @@ pub(crate) fn pace_plain(
     }
 }
 
-/// [`pace_plain`] to `peer` and every other online device of its identity, whom
+/// [`pace_carried`] to `peer` and every other online device of its identity, whom
 /// `crypto_handler::send_key_package_to_identity_of` sends a KeyPackage.
-pub(crate) fn pace_plain_to_identity_of(
+pub(crate) fn pace_carried_to_identity_of(
     budget: &mut FrameBudget,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -453,10 +453,10 @@ pub(crate) fn pace_plain_to_identity_of(
 ) {
     for device in super::crypto_handler::online_devices_for(ws_room_peers, peer) {
         if device != peer {
-            pace_plain(budget, ws_cmd_tx, ws_room_peers, us, &device, msg);
+            pace_carried(budget, ws_cmd_tx, us, &device, msg);
         }
     }
-    pace_plain(budget, ws_cmd_tx, ws_room_peers, us, peer, msg);
+    pace_carried(budget, ws_cmd_tx, us, peer, msg);
 }
 
 /// Put `items` back at the front of `device`'s pending queue, ahead of anything queued
@@ -890,10 +890,12 @@ mod tests {
         let mut b = FrameBudget::default();
         let ask = HavenMessage::SyncRequest { server_id: "s".into(), state_vector_json: "{}".into(), mls_epoch: None, nonce: None, full: None, digest: None, dg: None };
         let key_ask = HavenMessage::MlsKeyPackageRequest { server_id: "s".into(), channel_id: None };
+        let key_package = HavenMessage::MlsKeyPackage { server_id: "s".into(), key_package: "AAAA".into(), channel_id: None };
         pace_carried(&mut b, &ws_cmd_tx, "pace-me", "pace-friend-a", &ask);
         pace_carried(&mut b, &ws_cmd_tx, "pace-me", "pace-sibling", &ask);
         pace_plain(&mut b, &ws_cmd_tx, &rooms, "pace-me", "pace-sibling", &key_ask);
-        pace_plain_to_identity_of(&mut b, &ws_cmd_tx, &rooms, "pace-me", "pace-friend-a", &key_ask);
+        pace_plain(&mut b, &ws_cmd_tx, &rooms, "pace-me", "pace-friend-a", &key_ask);
+        pace_carried_to_identity_of(&mut b, &ws_cmd_tx, &rooms, "pace-me", "pace-friend-a", &key_package);
 
         let mut at_once = Vec::new();
         while let Ok(cmd) = ws_cmd_rx.try_recv() {
@@ -915,8 +917,8 @@ mod tests {
         lanes.sort();
         assert_eq!(
             lanes,
-            vec![("pace-friend-a".to_string(), vec!["olm", "plain"]), ("pace-friend-b".to_string(), vec!["plain"])],
-            "the friend's asks wait in its lanes, a KeyPackage ask in every device's",
+            vec![("pace-friend-a".to_string(), vec!["olm", "plain", "olm"]), ("pace-friend-b".to_string(), vec!["olm"])],
+            "the friend's asks wait in its lanes, a KeyPackage in every device's, inside Olm",
         );
     }
 

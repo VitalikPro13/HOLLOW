@@ -435,6 +435,45 @@ impl TapFrame {
             .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
             .unwrap_or_else(|| "binary".into())
     }
+
+    /// [`Self::kind`], except that an Olm frame carrying a KeyPackage message reads as
+    /// that message's kind ([`label_carried_frame`]): what tests hold, swallow and count
+    /// by. Never what the relay can read; `lane_leaks` and `readable` go by the body.
+    pub(crate) fn label(&self) -> String {
+        frame_label(&self.body).unwrap_or_else(|| self.kind())
+    }
+}
+
+/// The KeyPackage messages inside the Olm frames the nodes sealed, by ciphertext (test only).
+static CARRIED_LABELS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, super::types::HavenMessage>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Note the message inside an Olm frame that carries a KeyPackage message, so harness
+/// tests keep naming, reading and re-sending those frames after they moved inside Olm.
+pub(crate) fn label_carried_frame(frame: &[u8], plaintext: &str) {
+    let Ok(super::types::MessageEnvelope::Carried { msg, .. }) = serde_json::from_str(plaintext) else { return };
+    if !matches!(msg.wire_kind().as_str(), "mls_kp" | "mls_kp_forward" | "mls_kp_ack") {
+        return;
+    }
+    if let Ok(super::types::HavenMessage::Encrypted { body, .. }) = serde_json::from_slice(super::frame_auth::unchecked_body(frame)) {
+        CARRIED_LABELS.lock().unwrap_or_else(|p| p.into_inner()).insert(body, *msg);
+    }
+}
+
+fn carried_message(body: &[u8]) -> Option<super::types::HavenMessage> {
+    let Ok(super::types::HavenMessage::Encrypted { body, .. }) = serde_json::from_slice(body) else { return None };
+    CARRIED_LABELS.lock().unwrap_or_else(|p| p.into_inner()).get(&body).cloned()
+}
+
+fn frame_label(body: &[u8]) -> Option<String> {
+    carried_message(body).map(|m| m.wire_kind())
+}
+
+/// The message a recorded frame holds: its plaintext body, or the KeyPackage message a
+/// node sealed inside it ([`label_carried_frame`]).
+pub(crate) fn recorded_message(frame: &[u8]) -> serde_json::Result<super::types::HavenMessage> {
+    let body = super::frame_auth::unchecked_body(frame);
+    carried_message(body).map_or_else(|| serde_json::from_slice(body), Ok)
 }
 
 impl Wiretap {
@@ -1168,7 +1207,7 @@ impl MockRelay {
                         topic: None,
                         body: super::frame_auth::unchecked_body(&m.data).to_vec(),
                     }
-                    .kind())
+                    .label())
                     .collect()
             })
             .unwrap_or_default()
@@ -1181,7 +1220,7 @@ impl MockRelay {
         let held = inner.held_directs.remove(&key).unwrap_or_default();
         let (go, stay): (Vec<_>, Vec<_>) = held.into_iter().partition(|m| {
             TapFrame { from: m.from.clone(), room: m.room.clone(), to: None, topic: None, body: super::frame_auth::unchecked_body(&m.data).to_vec() }
-                .kind() == kind
+                .label() == kind
         });
         for m in go {
             inner.deliver_direct(&m.room, &m.from, target, m.data, m.direct);
@@ -1195,7 +1234,7 @@ impl MockRelay {
         if let Some(held) = inner.held_directs.get_mut(&(from.to_string(), target.to_string())) {
             held.retain(|m| {
                 TapFrame { from: m.from.clone(), room: m.room.clone(), to: None, topic: None, body: super::frame_auth::unchecked_body(&m.data).to_vec() }
-                    .kind() != kind
+                    .label() != kind
             });
         }
     }
@@ -2060,7 +2099,7 @@ impl RelayInner {
             return 0;
         }
         if !self.swallowed_kinds.is_empty() {
-            let kind = TapFrame { from: from.to_string(), room: room.to_string(), to: None, topic: None, body: super::frame_auth::unchecked_body(&data).to_vec() }.kind();
+            let kind = TapFrame { from: from.to_string(), room: room.to_string(), to: None, topic: None, body: super::frame_auth::unchecked_body(&data).to_vec() }.label();
             if self.swallowed_kinds.contains(&(from.to_string(), kind)) {
                 return 0;
             }
@@ -3290,6 +3329,12 @@ impl TestNode {
             .unwrap_or_default();
         v.sort();
         v
+    }
+
+    /// The devices whose leaf in `group_key` does not declare the tally; None when the
+    /// loop did not reply.
+    pub(crate) async fn mls_undeclared(&self, group_key: &str) -> Option<Vec<String>> {
+        Some(self.debug_snapshot().await?.mls_undeclared.get(group_key).cloned().unwrap_or_default())
     }
 
     /// The current MLS epoch for `server_id` (None if no group / no reply).
@@ -24728,7 +24773,7 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
             .iter()
             .filter(|f| {
                 matches!(
-                    serde_json::from_slice::<super::types::HavenMessage>(super::frame_auth::unchecked_body(f)),
+                    recorded_message(f),
                     Ok(super::types::HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. })
                         if *sid == server_id
                 )
@@ -30508,7 +30553,7 @@ fn recorded_key_packages(relay: &MockRelay, device: &str, server_id: &str) -> Ve
     relay
         .recorded_frames(device)
         .iter()
-        .filter_map(|f| match serde_json::from_slice::<super::types::HavenMessage>(super::frame_auth::unchecked_body(f)) {
+        .filter_map(|f| match recorded_message(f) {
             Ok(super::types::HavenMessage::MlsKeyPackage { server_id: sid, key_package, .. }) if sid == server_id => {
                 base64::engine::general_purpose::STANDARD.decode(key_package).ok()
             }
@@ -30547,9 +30592,10 @@ async fn expect_channel_post_arrives(sender: &TestNode, receiver: &mut TestNode,
     assert!(got, "{} must still read {}'s post {text:?}", receiver.device_id, sender.device_id);
 }
 
-/// D1, D10 (relay half of HOL-SEC-017): the relay speaks for a member device with a
-/// KeyPackage of its own, once under the device's bare id and once with the device's
-/// real certificate copied over another key. Neither is seated.
+/// D1, D10 (relay half of HOL-SEC-017): a KeyPackage of someone else's keys speaks for a
+/// member device, once under the device's bare id and once with the device's real
+/// certificate copied over another key, from the relay and from the device itself.
+/// Neither is seated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_no_one_seats_a_leaf_in_another_devices_name() {
@@ -30565,11 +30611,10 @@ async fn authz_no_one_seats_a_leaf_in_another_devices_name() {
     let v_certificate = crate::crypto::MlsManager::new(&keys(151), &keys(151)).unwrap().own_credential_text();
     let copied = crate::crypto::MlsManager::new(&keys(160), &keys(160)).unwrap().key_package_claiming(&v_certificate);
     for kp in [bare, copied] {
-        relay.inject_direct(&server_id, &v.device_id, &o.device_id, frame(&super::types::HavenMessage::MlsKeyPackage {
-            server_id: server_id.clone(),
-            key_package: b64(&kp),
-            channel_id: None,
-        }));
+        let msg = super::types::HavenMessage::MlsKeyPackage { server_id: server_id.clone(), key_package: b64(&kp), channel_id: None };
+        // In the clear from the relay, and inside V's own Olm session (a modified client).
+        relay.inject_direct(&server_id, &v.device_id, &o.device_id, frame(&msg));
+        carry_as(&v, &o, msg).await;
     }
     // ABSENCE: nothing to poll for "not seated"; two batch ticks (BUDGET_MS).
     sleep_ms(4500).await;
@@ -43244,7 +43289,7 @@ async fn a_sibling_joining_its_own_server_asks_for_one_leaf() {
     sleep_ms(4500).await;
     pass_held_but(&relay, &b.device_id, &c.device_id, "mls_welcome");
     let asks = |relay: &MockRelay| {
-        relay.wiretap().frames.iter().filter(|f| f.from == c.device_id && f.kind() == "mls_kp").count()
+        relay.wiretap().frames.iter().filter(|f| f.from == c.device_id && f.label() == "mls_kp").count()
     };
     assert_eq!(asks(&relay), 1, "C asked for a second leaf while its Welcome was on the way");
 
@@ -43799,7 +43844,7 @@ async fn a_groupless_owner_device_leaves_the_joiner_to_its_sibling(groupless_sor
     assert!(
         wait_until(20, async || {
             relay.wiretap().frames.iter().any(|f| {
-                f.from == v.device_id && f.to.as_deref() == Some(groupless_dev.as_str()) && f.kind() == "mls_kp"
+                f.from == v.device_id && f.to.as_deref() == Some(groupless_dev.as_str()) && f.label() == "mls_kp"
             })
         })
         .await,
@@ -44185,7 +44230,7 @@ async fn a_sibling_joining_an_announced_server_asks_for_its_leaf_once() {
     let pump = HeldKindPump::start(&relay, &low_dev, &high_dev, "mls_welcome");
     let asks = || {
         relay.wiretap().frames.iter()
-            .filter(|f| f.from == high_dev && f.to.as_deref() == Some(low_dev.as_str()) && f.kind() == "mls_kp")
+            .filter(|f| f.from == high_dev && f.to.as_deref() == Some(low_dev.as_str()) && f.label() == "mls_kp")
             .count()
     };
     assert!(wait_until(30, async || asks() >= 1).await, "the new device asks for its leaf");
@@ -44237,7 +44282,7 @@ async fn an_owner_device_joining_beside_a_member_asks_only_its_sibling() {
     let high = spawn_node_seeded(&relay, O_MASTER, high_tag, &[&v_master], Some(o_roster)).await;
     let asks_to = |to: &str| {
         relay.wiretap().frames.iter()
-            .filter(|f| f.from == high_dev && f.to.as_deref() == Some(to) && f.kind() == "mls_kp")
+            .filter(|f| f.from == high_dev && f.to.as_deref() == Some(to) && f.label() == "mls_kp")
             .count()
     };
     assert!(wait_until(40, async || asks_to(&low_dev) >= 1).await, "the new device asks its sibling for its leaf");
@@ -47743,7 +47788,7 @@ async fn md_mls_scene_and_commit(relay: &MockRelay, tags: [u8; 5]) -> (MdMlsScen
     relay.set_recording(&o_dev2, true);
     let o2 = spawn_node_seeded(relay, o_m, o_d2, &[&c_master], Some(o_roster)).await;
     let is_kp = |f: &Vec<u8>| {
-        matches!(serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+        matches!(recorded_message(f),
             Ok(HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. }) if *sid == server_id)
     };
     let mut kp = None;
@@ -47766,7 +47811,7 @@ async fn md_mls_scene_and_commit(relay: &MockRelay, tags: [u8; 5]) -> (MdMlsScen
     relay.set_broadcast_deaf(&o_dev1, true);
     relay.hold_direct(&c_dev, &o_dev1);
     relay.set_recording(&c_dev, true);
-    relay.inject_direct(&server_id, &o_dev2, &c_dev, super::frame_auth::unchecked_body(&kp.unwrap()).to_vec());
+    carry_as(&o2, &c, recorded_message(&kp.unwrap()).expect("the recorded KeyPackage")).await;
     let mut commit = None;
     assert!(
         wait_until(30, async || {
@@ -47905,7 +47950,7 @@ async fn a_held_add_whose_roster_never_comes_lapses_unmerged_and_heals_only_once
     );
     let asked = || {
         relay.recorded_frames(&o_dev1).iter().any(|f| {
-            matches!(serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+            matches!(recorded_message(f),
                 Ok(HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. }) if *sid == server_id)
         })
     };
@@ -47986,7 +48031,7 @@ fn md_mls2_key_packages(relay: &MockRelay, device: &str, server_id: &str) -> usi
         .recorded_frames(device)
         .iter()
         .filter(|f| {
-            matches!(serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+            matches!(recorded_message(f),
                 Ok(HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. }) if sid == server_id)
         })
         .count()
@@ -48194,11 +48239,11 @@ async fn an_add_vouched_after_the_bound_costs_no_repair_where_the_group_did_not_
             });
             if commit.is_none() && !injected {
                 let kp = relay.recorded_frames(&m_dev2).into_iter().find(|f| {
-                    matches!(serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+                    matches!(recorded_message(f),
                         Ok(HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. }) if *sid == server_id)
                 });
                 if let Some(kp) = kp {
-                    relay.inject_direct(&server_id, &m_dev2, &m_dev1, super::frame_auth::unchecked_body(&kp).to_vec());
+                    carry_as(&m2, &m1, recorded_message(&kp).expect("the recorded KeyPackage")).await;
                     injected = true;
                 }
             }
@@ -54135,7 +54180,7 @@ async fn g13s3_refreshed(node: &TestNode, group_key: &str) -> Option<Vec<String>
 }
 
 fn g13s3_frames(relay: &MockRelay, kind: &str) -> usize {
-    relay.wiretap().frames.iter().filter(|f| f.kind() == kind).count()
+    relay.wiretap().frames.iter().filter(|f| f.label() == kind).count()
 }
 
 /// AR-25: every leaf refreshes itself on a turn the committer hands out and relays,
@@ -54534,18 +54579,17 @@ async fn g13s3_key_packages_in_a_loop_get_bounded_repairs() {
     let relay = MockRelay::new();
     let (nodes, server_id) = g13s3_server(&relay, &[222, 223, 224], "KeyPackage Loop").await;
     assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &server_id, 30).await.is_some());
-    let (o, b) = (nodes[0].device_id.clone(), nodes[2].device_id.clone());
+    let o = nodes[0].device_id.clone();
     relay.start_wiretap();
     for _ in 0..12 {
         // B's own keys minting packages its node never sees: a modified client.
         let kp = crate::crypto::mls_tally::stray_key_package(&tag_kp(224), &tag_kp(224), &server_id);
-        let frame = serde_json::to_vec(&super::types::HavenMessage::MlsKeyPackage {
+        let msg = super::types::HavenMessage::MlsKeyPackage {
             server_id: server_id.clone(),
             key_package: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &kp),
             channel_id: None,
-        })
-        .unwrap();
-        relay.inject_direct(&server_id, &b, &o, frame);
+        };
+        carry_as(&nodes[2], &nodes[0], msg).await;
         sleep_ms(1000).await; // pacing: the loop is the point, one KeyPackage a second
     }
     sleep_ms(1500).await; // absence: no further repair after the last one
@@ -54614,7 +54658,7 @@ async fn g13s3_a_capped_stand_in_authority_cannot_repair_honest_members_onto_its
     assert_eq!(a.mls_epoch(&server_id).await, Some(start + 3), "the honest member refused the fourth and stayed");
     let tap = relay.wiretap();
     assert!(
-        !tap.frames.iter().any(|fr| fr.from == a.device_id && fr.kind() == "mls_kp" && fr.to.as_deref() == Some(f.device_id.as_str())),
+        !tap.frames.iter().any(|fr| fr.from == a.device_id && fr.label() == "mls_kp" && fr.to.as_deref() == Some(f.device_id.as_str())),
         "the honest member handed the capped flooder a KeyPackage",
     );
     // A join now: the capped flooder is not elected to commit it, the honest member is.
@@ -54663,14 +54707,13 @@ async fn g13s3_a_stand_in_coordinators_repairs_carry_their_charge_and_keep_one_g
     relay.start_wiretap();
     for _ in 0..2 {
         let kp = crate::crypto::mls_tally::stray_key_package(&tag_kp(b_tag), &tag_kp(b_tag), &server_id);
-        let frame = serde_json::to_vec(&super::types::HavenMessage::MlsKeyPackage {
+        let msg = super::types::HavenMessage::MlsKeyPackage {
             server_id: server_id.clone(),
             key_package: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &kp),
             channel_id: None,
-        })
-        .unwrap();
+        };
         let before = mls_commits_from(&relay, &a.device_id);
-        relay.inject_direct(&server_id, &b.device_id, &a.device_id, frame);
+        carry_as(b, a, msg).await;
         // The second repair may rightly wait for b's window; the wait just bounds it.
         let _ = wait_until(5, async || mls_commits_from(&relay, &a.device_id) > before).await;
     }
@@ -56606,7 +56649,7 @@ async fn g13w2f_a_ground_low_id_never_becomes_the_stand_in_committer() {
 
     let tap = relay.wiretap();
     let sent = |from: &str, to: &str, kind: &str| {
-        tap.frames.iter().filter(|f| f.from == from && f.to.as_deref() == Some(to) && f.kind() == kind).count()
+        tap.frames.iter().filter(|f| f.from == from && f.to.as_deref() == Some(to) && f.label() == kind).count()
     };
     let (by_x, by_a) = (mls_commits_from(&relay, &x.device_id), mls_commits_from(&relay, &a.device_id));
     let (welcomes_x, welcomes_a) = (sent(&x.device_id, &j.device_id, "mls_welcome"), sent(&a.device_id, &j.device_id, "mls_welcome"));
@@ -56707,11 +56750,12 @@ async fn g13w3_server_as(
             expect_dm_pair_ready(relay, &nodes[i], &nodes[j], 25).await;
         }
     }
-    let server_id = create_server_and_wait(&mut nodes[0], name).await;
     let owner = nodes[0].device_id.clone();
+    // Old leaves sit only in a group founded before 0.14, seated past the ratchet.
     if !old.is_empty() {
         knobs.set(G13w3Knob::NoRatchet, &owner);
     }
+    let server_id = create_server_and_wait(&mut nodes[0], name).await;
     for i in 1..seated {
         if !old.contains(&i) {
             knobs.clear(G13w3Knob::NoRatchet, &owner);
@@ -56755,7 +56799,7 @@ async fn g13w3_owner_away(relay: &MockRelay, owner: &TestNode, others: &[&TestNo
 }
 
 fn g13w3_sent(relay: &MockRelay, from: &str, to: &str, kind: &str) -> usize {
-    relay.wiretap().frames.iter().filter(|f| f.from == from && f.to.as_deref() == Some(to) && f.kind() == kind).count()
+    relay.wiretap().frames.iter().filter(|f| f.from == from && f.to.as_deref() == Some(to) && f.label() == kind).count()
 }
 
 /// Epoch probes `from` sent `to` that ask for an answer (echoes left out).
@@ -57020,11 +57064,11 @@ async fn g13w2f_the_join_answerer_follows_standing() {
     drop(nodes);
 }
 
-/// One member holding a 0.12.2 leaf keeps the server on the old rule: the lowest id
-/// commits for the absent owner, the admin does not.
+/// A member keeping a 0.12.2 leaf under the lowest id (the squatter) neither keeps the
+/// server on the old rule nor leads: the admin commits for the absent owner.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn g13w2f_a_mixed_group_keeps_the_old_rule_exactly() {
+async fn g13w2f_a_squatted_old_leaf_keeps_no_server_on_the_old_rule() {
     let _g = test_guard();
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
@@ -57038,49 +57082,63 @@ async fn g13w2f_a_mixed_group_keeps_the_old_rule_exactly() {
     join_and_wait(&mut nodes[3], &sid).await;
     expect_mls_leaf(&nodes[2], &sid, &ids[3], 40).await;
     let (by_old, by_admin) = (mls_commits_from(&relay, &ids[1]), mls_commits_from(&relay, &ids[2]));
-    assert!(by_old >= 1 && by_admin == 0, "the old rule's committer adds the joiner: lowest id {by_old}, admin {by_admin}");
+    assert!(by_admin >= 1 && by_old == 0, "standing's committer adds the joiner: admin {by_admin}, lowest id {by_old}");
     assert!(quiet_agreed_group(&[&nodes[1], &nodes[2], &nodes[3]], &sid, 30).await.is_some(), "one group");
     drop(nodes);
 }
 
-/// In an all-0.13 group a 0.12.2 leaf never enters. The committer's planner drops it on
-/// its own (first joiner); a committer without it is refused by every receiver (second).
+/// A 0.12.2 leaf never enters an anchored server's group, by each layer alone: the
+/// committer's planner and every receiver's judge in a group founded before 0.14 that
+/// already holds such a leaf (so neither leans on an all-0.13 tree).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn g13w2f_an_all_013_group_refuses_an_incapable_leaf() {
+async fn g13w2f_an_anchored_group_refuses_an_incapable_leaf_by_every_layer() {
     let _g = test_guard();
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut knobs = G13w3Knobs::default();
-    let (mut nodes, sid) = g13w3_server(&relay, &mut knobs, &[126, 127, 128, 129], "Ratchet", 2, &[], &[]).await;
+    let (mut nodes, _) = g13w3_server(&relay, &mut knobs, &[126, 127, 128, 129, 138], "Ratchet", 2, &[], &[]).await;
     let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
-    knobs.set(G13w3Knob::OldLeaf, &ids[2]);
-    knobs.set(G13w3Knob::OldLeaf, &ids[3]);
+    for old in &ids[2..] {
+        knobs.set(G13w3Knob::OldLeaf, old);
+    }
+    // Founded before 0.14, the squatter seated while the owner was still alone in it.
+    knobs.set(G13w3Knob::NoRatchet, &ids[0]);
+    let pre = create_server_and_wait(&mut nodes[0], "Founded before 0.14").await;
+    join_and_wait(&mut nodes[2], &pre).await;
+    expect_mls_leaf(&nodes[0], &pre, &ids[2], 30).await;
+    knobs.clear(G13w3Knob::NoRatchet, &ids[0]);
+    join_and_wait(&mut nodes[1], &pre).await;
+    expect_mls_leaf(&nodes[0], &pre, &ids[1], 30).await;
+    expect_mls_leaf(&nodes[1], &pre, &ids[2], 30).await;
 
-    // The committer layer alone: the owner's own tree never takes the old leaf.
-    join_and_wait(&mut nodes[2], &sid).await;
+    // The committer layer alone: the owner's own tree never takes the next old leaf.
+    join_and_wait(&mut nodes[3], &pre).await;
     sleep_ms(5000).await; // absence across two batch ticks and a leaf ask
     assert!(
-        nodes[0].mls_members_checked(&sid).await.is_some_and(|v| !v.contains(&ids[2])),
-        "the committer seated a 0.12.2 leaf in an all-0.13 group",
+        nodes[0].mls_members_checked(&pre).await.is_some_and(|v| !v.contains(&ids[3])),
+        "the committer seated a 0.12.2 leaf",
     );
 
-    // The receiver layer alone: a committer without the ratchet adds the next one, and
-    // the member refuses that commit.
+    // The receiver layer alone: a committer without the ratchet adds one, and the member
+    // refuses that commit.
     knobs.set(G13w3Knob::NoRatchet, &ids[0]);
-    join_and_wait(&mut nodes[3], &sid).await;
-    expect_mls_leaf(&nodes[0], &sid, &ids[3], 30).await;
+    join_and_wait(&mut nodes[4], &pre).await;
+    expect_mls_leaf(&nodes[0], &pre, &ids[4], 30).await;
     sleep_ms(3000).await; // absence: the member never merges it
     assert!(
-        nodes[1].mls_members_checked(&sid).await.is_some_and(|v| !v.contains(&ids[3])),
-        "a receiver merged a commit adding a 0.12.2 leaf to an all-0.13 group",
+        nodes[1].mls_members_checked(&pre).await.is_some_and(|v| !v.contains(&ids[4])),
+        "a receiver merged a commit adding a 0.12.2 leaf",
     );
+
+    // OpenMLS alone (a group founded since 0.14 requires the tally): unit
+    // `a_group_we_found_refuses_a_leaf_without_the_tally`.
     drop(nodes);
 }
 
-/// The last 0.12.2 leaf refreshing itself turns standing on, in one group: then the
-/// admin, not the lowest id, commits for the absent owner.
+/// The last 0.12.2 leaf refreshing itself keeps one group, and the admin, not the lowest
+/// id, still commits for the absent owner (standing held before the upgrade too).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn g13w2f_the_last_upgrade_turns_standing_on_without_a_fork() {
@@ -57106,54 +57164,6 @@ async fn g13w2f_the_last_upgrade_turns_standing_on_without_a_fork() {
     drop(nodes);
 }
 
-/// The upgrade commit and a racing commit fork the group into an ON side and an OFF
-/// side; the OFF side is repaired onto the ON side, never the other way. The admin sits
-/// alone on the OFF side, so the ON side probes it first and must not yield to it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn g13w2f_a_fork_across_the_gate_flip_heals_to_the_013_side() {
-    let _g = test_guard();
-    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
-    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
-    let relay = MockRelay::new();
-    let mut knobs = G13w3Knobs::default();
-    let l = g13w3_ground(110..=170, &[133, 134, 135]);
-    let (nodes, sid) = g13w3_server(&relay, &mut knobs, &[133, l, 134, 135], "Flip", 4, &[1], &[(3, "admin")]).await;
-    let (o, ln, a, b) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3]);
-    g13w3_owner_away(&relay, o, &[ln, a, b]).await;
-    let (start, _) = quiet_agreed_group(&[ln, a, b], &sid, 30).await.expect("one group before");
-
-    for (from, to) in [(&ln, &b), (&b, &ln), (&b, &a), (&a, &b), (&ln, &o), (&b, &o)] {
-        relay.hold_broadcasts(&from.device_id, &to.device_id);
-    }
-    knobs.clear(G13w3Knob::OldLeaf, &ln.device_id);
-    g13s3_force_self_update(ln, &sid).await; // the flip, seen by the admin
-    g13s3_force_self_update(b, &sid).await; // the race, seen by nobody
-    assert!(wait_until(10, async || a.mls_epoch(&sid).await == Some(start + 1)).await, "the member took the flip");
-    relay.start_wiretap();
-    for (from, to) in [(&ln, &b), (&b, &ln), (&b, &a), (&a, &b), (&ln, &o), (&b, &o)] {
-        relay.release_broadcasts(&from.device_id, &to.device_id);
-    }
-    let mut healed = None;
-    for k in 0..15 {
-        g13s3_post(a, &sid, &format!("flip-a-{k}")).await;
-        g13s3_post(b, &sid, &format!("flip-b-{k}")).await;
-        healed = quiet_agreed_group(&[ln, a, b], &sid, 8).await;
-        if healed.is_some() {
-            break;
-        }
-    }
-    assert!(healed.is_some(), "one group again: l={:?} a={:?} b={:?}", ln.mls_epoch_state(&sid).await, a.mls_epoch_state(&sid).await, b.mls_epoch_state(&sid).await);
-    let welcomed = |to: &str| relay.wiretap().frames.iter().filter(|f| f.kind() == "mls_welcome" && f.to.as_deref() == Some(to)).count();
-    assert!(
-        welcomed(&a.device_id) == 0 && welcomed(&ln.device_id) == 0,
-        "the 0.13 side was repaired onto the old side: member {} upgraded {}",
-        welcomed(&a.device_id),
-        welcomed(&ln.device_id),
-    );
-    drop(nodes);
-}
-
 /// With the owner online it commits every join, in an all-0.13 server and in a mixed one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -57166,9 +57176,10 @@ async fn g13w2f_the_owner_back_online_leads_under_both_rules() {
     let l = g13w3_ground(110..=170, &[136, 137, 139]);
     let (mut nodes, on_sid) = g13w3_server(&relay, &mut knobs, &[136, 137, l, 139], "On", 2, &[], &[(1, "admin")]).await;
     let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    // A server founded before 0.14 with a squatted 0.12.2 leaf, as the other rule's case.
+    knobs.set(G13w3Knob::NoRatchet, &ids[0]);
     let off_sid = create_server_and_wait(&mut nodes[0], "Off").await;
     knobs.set(G13w3Knob::OldLeaf, &ids[2]);
-    knobs.set(G13w3Knob::NoRatchet, &ids[0]);
     join_and_wait(&mut nodes[2], &off_sid).await;
     expect_mls_leaf(&nodes[0], &off_sid, &ids[2], 30).await;
     knobs.clear(G13w3Knob::NoRatchet, &ids[0]);
@@ -57244,12 +57255,12 @@ async fn g13w2f_review_a_ground_id_never_receives_a_leafless_askers_key_package(
         .wiretap()
         .frames
         .iter()
-        .find(|f| f.from == ids[4] && f.kind() == "mls_kp")
-        .map(|f| f.body.clone())
+        .find(|f| f.from == ids[4] && f.label() == "mls_kp")
+        .and_then(|f| recorded_message(&f.body).ok())
         .expect("the joiner's KeyPackage on the wire");
     let before = mls_commits_from(&relay, &ids[1]);
     relay.release_direct(&ids[4], &ids[1]);
-    relay.inject_direct(&sid, &ids[4], &ids[1], package);
+    carry_as(&nodes[4], &nodes[1], package).await;
     expect_relay_drained(&relay, &nodes[1], "late-package").await;
     sleep_ms(4500).await; // absence across two batch ticks
     assert_eq!(mls_commits_from(&relay, &ids[1]), before, "a package that already seats its device was committed again");
@@ -57349,9 +57360,9 @@ async fn g13w2f_review_a_silent_admin_is_skipped_after_15s() {
     drop(nodes);
 }
 
-/// The owner's own 0.12.2 device is seated despite the ratchet (both layers exempt the
-/// anchored owner), keeps the server on the old rule, and alone online seats a joiner
-/// in the one group: no second copy.
+/// The owner's own 0.12.2 device gets no leaf in an anchored server (the ratchet spares
+/// nobody since 0.14), so it founds no second lineage either; once it updates it takes
+/// its seat in the one group.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn g13w2f_review_an_owners_old_device_alone_founds_no_second_lineage() {
@@ -57364,19 +57375,21 @@ async fn g13w2f_review_an_owners_old_device_alone_founds_no_second_lineage() {
     let o_master = tag_kp(o_tag).peer_id();
     let o2_dev = tag_kp(o2_tag).peer_id();
     super::resolver::seed_self(&o_master, &[tag_kp(o1_tag).peer_id(), o2_dev.clone()]);
-    let (mut nodes, sid) =
+    let (nodes, sid) =
         g13w3_server_as(&relay, &mut knobs, Some(o1_tag), &[o_tag, 162, 163], "Old Owner Device", 2, &[], &[]).await;
-    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
     knobs.set(G13w3Knob::OldLeaf, &o2_dev);
+    relay.start_wiretap();
     let o2 = spawn_node_on(&relay, o_tag, o2_tag).await;
-    expect_mls_leaf(&nodes[0], &sid, &o2_dev, 40).await;
-    expect_mls_leaf(&nodes[1], &sid, &o2_dev, 30).await;
-    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &o2], &sid, 30).await.is_some(), "the old owner device sits in the one group");
-
-    g13w3_owner_away(&relay, &nodes[0], &[&nodes[1], &o2]).await;
-    join_and_wait(&mut nodes[2], &sid).await;
-    expect_mls_leaf(&nodes[2], &sid, &ids[2], 40).await;
-    assert!(quiet_agreed_group(&[&nodes[1], &o2, &nodes[2]], &sid, 30).await.is_some(), "one lineage with the joiner");
+    let o1_dev = nodes[0].device_id.clone();
+    let asked = || g13w3_sent(&relay, &o2_dev, &o1_dev, "mls_kp");
+    assert!(wait_until(30, async || asked() >= 1).await, "the old device asked its sibling for a leaf");
+    let old_asks = asked();
+    knobs.clear(G13w3Knob::OldLeaf, &o2_dev);
+    // Its next leaf ask (MLS_BOOTSTRAP_TIMEOUT after the last) carries a tally, and only
+    // that one seats it: a seat on an old package would come before it.
+    expect_mls_leaf(&nodes[0], &sid, &o2_dev, 90).await;
+    assert!(asked() > old_asks, "the owner's 0.12.2 device was seated on a package without the tally");
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &o2], &sid, 30).await.is_some(), "one lineage once it updated");
     drop(o2);
     drop(nodes);
 }
@@ -57598,11 +57611,7 @@ async fn g13w3f_forged_fork_probes_make_many_members_commit_one_readd() {
     }
     for v in [a, b, c] {
         let kp = crate::crypto::throwaway_key_package_for_test(&hostile, &sid);
-        relay.inject_direct(&sid, &p.device_id, &v.device_id, frame(&super::types::HavenMessage::MlsKeyPackage {
-            server_id: sid.clone(),
-            key_package: b64(&kp),
-            channel_id: None,
-        }));
+        carry_as(p, v, super::types::HavenMessage::MlsKeyPackage { server_id: sid.clone(), key_package: b64(&kp), channel_id: None }).await;
     }
     // ABSENCE: no extra commit across two batch ticks (BUDGET_MS).
     sleep_ms(6000).await;
@@ -57722,6 +57731,7 @@ async fn g13w3m_a_forwarded_repair_seats_the_prober_through_the_named_committer(
     relay.hold_broadcasts(&a.device_id, &m.device_id);
     relay.release_direct(&a.device_id, &m.device_id);
     let kps = g13w3_sent(&relay, &m.device_id, &b.device_id, "mls_kp");
+    let acks = g13w3_sent(&relay, &a.device_id, &m.device_id, "mls_kp_ack");
     let commits = (mls_commits_from(&relay, &a.device_id), mls_commits_from(&relay, &b.device_id));
     relay.inject_direct(&sid, &b.device_id, &m.device_id, frame(&super::types::HavenMessage::MlsKeyPackageRequest {
         server_id: sid.clone(),
@@ -57738,12 +57748,35 @@ async fn g13w3m_a_forwarded_repair_seats_the_prober_through_the_named_committer(
         "b passed the package to the admin and told the member",
     );
     assert!(
+        !relay.wiretap().frames.iter().any(|f| matches!(f.kind().as_str(), "mls_kp" | "mls_kp_forward" | "mls_kp_ack")),
+        "a KeyPackage, its forward or its ack in the clear",
+    );
+    assert!(
         wait_until(15, async || relay.held_kinds(&a.device_id, &m.device_id).iter().any(|k| k == "mls_welcome")).await,
         "the admin committed the repair: held {:?}",
         relay.held_kinds(&a.device_id, &m.device_id),
     );
     assert_eq!(mls_commits_from(&relay, &b.device_id), commits.1, "b committed the repair it only passed on");
     assert_eq!(mls_commits_from(&relay, &a.device_id), commits.0 + 1, "one commit, from the admin");
+    assert_eq!(
+        g13w3_sent(&relay, &a.device_id, &m.device_id, "mls_kp_ack"),
+        acks,
+        "the admin acked a package that reached it only through b's forward",
+    );
+    // The same package straight from the member is no forward: that copy is acked.
+    let package = relay
+        .wiretap()
+        .frames
+        .iter()
+        .rev()
+        .find(|f| f.from == m.device_id && f.to.as_deref() == Some(b.device_id.as_str()) && f.label() == "mls_kp")
+        .and_then(|f| recorded_message(&f.body).ok())
+        .expect("the member's repair package on the wire");
+    carry_as(m, a, package).await;
+    assert!(
+        wait_until(10, async || g13w3_sent(&relay, &a.device_id, &m.device_id, "mls_kp_ack") > acks).await,
+        "the admin left a direct copy of a package it was once forwarded unacked",
+    );
     relay.release_held_kind(&a.device_id, &m.device_id, "mls_welcome");
     let ours = a.mls_epoch_state(&sid).await;
     assert!(
@@ -59068,4 +59101,271 @@ async fn a_leave_landing_behind_the_owners_checkpoint_still_closes_the_span() {
         wait_until(60, async || !t14_owner_view(&o, &sid, &m_master).await.1).await,
         "the owner still counts M after its leave landed behind the owner's checkpoint",
     );
+}
+
+// w2-b
+
+/// Every KeyPackage frame of a join between two strangers (the joiner's ask, the
+/// committer's ack) rides Olm: the relay reads no package it could hand to a member
+/// that seats the joiner onto a group of its own (standing residual R6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2b_c24_a_joiners_key_package_never_rides_in_the_clear() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let mut o = spawn_node_with_friends(&relay, 241, 241, &[]).await;
+    let mut j = spawn_node_with_friends(&relay, 242, 242, &[]).await;
+    let sid = create_server_and_wait(&mut o, "Sealed asks").await;
+    join_and_wait(&mut j, &sid).await;
+    expect_mls_leaf(&o, &sid, &j.device_id, 40).await;
+    expect_mls_leaf(&j, &sid, &j.device_id, 40).await;
+
+    let tap = relay.wiretap();
+    let in_clear: Vec<String> = tap
+        .frames
+        .iter()
+        .filter(|f| matches!(f.kind().as_str(), "mls_kp" | "mls_kp_forward" | "mls_kp_ack"))
+        .map(|f| format!("{} from {} to {:?}", f.kind(), f.from, f.to))
+        .collect();
+    assert!(in_clear.is_empty(), "a KeyPackage frame the relay could read: {in_clear:?}");
+    assert_eq!(tap.lane_leaks(), Vec::<String>::new());
+    let carried = tap.frames.iter().filter(|f| f.from == j.device_id && f.label() == "mls_kp").count();
+    assert!(carried >= 1, "the joiner's KeyPackage went out inside Olm");
+}
+
+/// A KeyPackage sent in the clear, sealed by the joiner's own device as a modified
+/// client would, seats nobody: what rides Olm only never counts in the clear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2b_a_key_package_in_the_clear_seats_nobody() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 243, 243, &[]).await;
+    let mut j = spawn_node_with_friends(&relay, 244, 244, &[]).await;
+    let sid = create_server_and_wait(&mut o, "Plain asks").await;
+    // The joiner's own asks wait, so only the injected one could seat it meanwhile.
+    relay.swallow_direct(&j.device_id, &o.device_id);
+    join_and_wait(&mut j, &sid).await;
+    let kp = crate::crypto::mls_tally::stray_key_package(&keys(244), &keys(244), &sid);
+    relay.inject_direct(&sid, &j.device_id, &o.device_id, frame(&super::types::HavenMessage::MlsKeyPackage {
+        server_id: sid.clone(),
+        key_package: b64(&kp),
+        channel_id: None,
+    }));
+    expect_no_mls_leaf(&o, &sid, &j.device_id, 6).await;
+    // Control: the joiner's own carried ask seats it once it gets through.
+    relay.release_direct(&j.device_id, &o.device_id);
+    expect_mls_leaf(&o, &sid, &j.device_id, 60).await;
+}
+
+// w2-b-review
+
+/// Two strangers with fresh-install ids (device != master) and no Olm session: the
+/// joiner's carried KeyPackage starts the key exchange, waits for it, and seats it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2b_strangers_with_device_ids_seat_a_joiner_over_a_fresh_olm_session() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 211, 212, &[]).await;
+    let mut j = spawn_node_with_friends(&relay, 213, 214, &[]).await;
+    assert_ne!(o.device_id, o.master_id, "precondition: fresh-install shape");
+    let sid = create_server_and_wait(&mut o, "Fresh strangers").await;
+    relay.start_wiretap();
+    join_and_wait(&mut j, &sid).await;
+    expect_mls_leaf(&o, &sid, &j.device_id, 40).await;
+    expect_mls_leaf(&j, &sid, &j.device_id, 30).await;
+    let tap = relay.wiretap();
+    assert!(
+        !tap.frames.iter().any(|f| matches!(f.kind().as_str(), "mls_kp" | "mls_kp_forward" | "mls_kp_ack")),
+        "a KeyPackage frame in the clear",
+    );
+}
+
+/// The owner away, a stranger with no Olm session to anyone joins: its walk reaches the
+/// stand-in admin over a key exchange its carried KeyPackage starts, and it is seated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2b_a_stranger_joining_while_the_owner_is_away_is_seated_by_the_stand_in() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 215, 216, &[]).await;
+    let mut a = spawn_node_with_friends(&relay, 217, 218, &[]).await;
+    let sid = create_server_and_wait(&mut o, "Away strangers").await;
+    join_and_wait(&mut a, &sid).await;
+    expect_mls_leaf(&o, &sid, &a.device_id, 40).await;
+    expect_mls_leaf(&a, &sid, &a.device_id, 30).await;
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: sid.clone(), peer_id: a.master_id.clone(), new_role: "admin".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || a.live_role(&sid, &a.master_id).await == crate::crdt::operations::MemberRole::Admin).await,
+        "the admin sees its role",
+    );
+    relay.set_online(&o.device_id, false);
+    assert!(wait_until(15, async || !a.sees_peer(&o.device_id).await).await, "the admin saw the owner leave");
+    let mut j = spawn_node_with_friends(&relay, 219, 220, &[]).await;
+    relay.start_wiretap();
+    join_and_wait(&mut j, &sid).await;
+    expect_mls_leaf(&a, &sid, &j.device_id, 60).await;
+    expect_mls_leaf(&j, &sid, &j.device_id, 30).await;
+    assert!(
+        !relay.wiretap().frames.iter().any(|f| matches!(f.kind().as_str(), "mls_kp" | "mls_kp_forward" | "mls_kp_ack")),
+        "a KeyPackage frame in the clear",
+    );
+}
+
+/// A server whose every leaf predates the tally (its members went from 0.12.2 straight
+/// to 0.14) seats a stranger whose fresh leaf declares it. That one leaf must not make
+/// the stranger the only candidate for every leadership role: the owner, online, still
+/// commits the next join.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2b_the_first_declaring_leaf_never_makes_a_stranger_the_only_leader() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let (mut nodes, sid) = g13w3_server(&relay, &mut knobs, &[171, 172, 173, 174], "Old leaves", 2, &[0, 1], &[]).await;
+    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    // Both seated members update to 0.14; their leaves still predate the tally.
+    knobs.clear(G13w3Knob::OldLeaf, &ids[0]);
+    knobs.clear(G13w3Knob::OldLeaf, &ids[1]);
+    join_and_wait(&mut nodes[2], &sid).await;
+    expect_mls_leaf(&nodes[0], &sid, &ids[2], 40).await;
+    expect_mls_leaf(&nodes[1], &sid, &ids[2], 30).await;
+
+    relay.start_wiretap();
+    join_and_wait(&mut nodes[3], &sid).await;
+    expect_mls_leaf(&nodes[0], &sid, &ids[3], 40).await;
+    let (by_owner, by_stranger) = (mls_commits_from(&relay, &ids[0]), mls_commits_from(&relay, &ids[2]));
+    assert!(
+        by_owner >= 1 && by_stranger == 0,
+        "the newest stranger, not the online owner, committed the next join: owner {by_owner}, stranger {by_stranger}",
+    );
+    drop(nodes);
+}
+
+/// Same server; the stranger whose leaf alone declares the tally goes away. Somebody
+/// online must still seat the next joiner: a group with no leader takes no join, no
+/// removal and no refresh, and nothing ever removes the absent leaf.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2b_an_absent_only_declaring_leaf_never_leaves_the_group_without_a_leader() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let (mut nodes, sid) = g13w3_server(&relay, &mut knobs, &[175, 176, 177, 178], "Leaderless", 2, &[0, 1], &[]).await;
+    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    knobs.clear(G13w3Knob::OldLeaf, &ids[0]);
+    knobs.clear(G13w3Knob::OldLeaf, &ids[1]);
+    join_and_wait(&mut nodes[2], &sid).await;
+    expect_mls_leaf(&nodes[0], &sid, &ids[2], 40).await;
+    expect_mls_leaf(&nodes[1], &sid, &ids[2], 30).await;
+    relay.set_online(&ids[2], false);
+    for n in [&nodes[0], &nodes[1]] {
+        assert!(wait_until(15, async || !n.sees_peer(&ids[2]).await).await, "{} saw the stranger leave", n.device_id);
+    }
+    join_and_wait(&mut nodes[3], &sid).await;
+    expect_mls_leaf(&nodes[0], &sid, &ids[3], 60).await;
+    drop(nodes);
+}
+
+/// Members that went from 0.12.2 straight to 0.14 hold leaves from before the tally.
+/// With nobody joining, the committer refreshes its own leaf at once and the other
+/// member asks for its repair once, so both stand under standing again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2b_leaves_from_before_the_tally_refresh_without_a_join() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let (nodes, sid) = g13w3_server(&relay, &mut knobs, &[179, 180, 181], "Stale leaves", 3, &[0, 1, 2], &[]).await;
+    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    assert_eq!(nodes[0].mls_undeclared(&sid).await.map(|v| v.len()), Some(3), "precondition: no leaf declares");
+    for id in &ids {
+        knobs.clear(G13w3Knob::OldLeaf, id);
+    }
+    for n in &nodes {
+        assert!(
+            wait_until(40, async || n.mls_undeclared(&sid).await.is_some_and(|v| v.is_empty())).await,
+            "{} still holds a leaf from before the tally: {:?}",
+            n.device_id,
+            n.mls_undeclared(&sid).await,
+        );
+    }
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &sid, 30).await.is_some(), "one group");
+    drop(nodes);
+}
+
+/// Each half alone: an owner alone in its server refreshes its own leaf from before the
+/// tally (nobody could repair it), and a member under a fresh owner asks its repair.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2b_a_leaf_from_before_the_tally_refreshes_by_itself_or_by_its_repair() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let (alone, alone_sid) = g13w3_server(&relay, &mut knobs, &[182], "Alone", 1, &[0], &[]).await;
+    let (pair, pair_sid) = g13w3_server(&relay, &mut knobs, &[183, 184], "Pair", 2, &[1], &[]).await;
+    assert_eq!(alone[0].mls_undeclared(&alone_sid).await.map(|v| v.len()), Some(1), "precondition: the owner's leaf is old");
+    assert_eq!(pair[0].mls_undeclared(&pair_sid).await, Some(vec![pair[1].device_id.clone()]), "precondition: the member's leaf is old");
+    knobs.clear(G13w3Knob::OldLeaf, &alone[0].device_id);
+    knobs.clear(G13w3Knob::OldLeaf, &pair[1].device_id);
+    assert!(
+        wait_until(30, async || alone[0].mls_undeclared(&alone_sid).await.is_some_and(|v| v.is_empty())).await,
+        "the owner alone never refreshed its own leaf",
+    );
+    assert!(
+        wait_until(40, async || pair[0].mls_undeclared(&pair_sid).await.is_some_and(|v| v.is_empty())).await,
+        "the member never asked for its repair",
+    );
+    assert!(quiet_agreed_group(&[&pair[0], &pair[1]], &pair_sid, 30).await.is_some(), "one group");
+    drop((alone, pair));
+}
+
+/// A member whose leaf predates the tally asks the authority for its repair; when that
+/// ask goes unanswered (here the relay drops it, as a 0.12.2 authority drops a carried
+/// KeyPackage) it asks the next member by standing after the bootstrap timeout, whose
+/// forward reaches the committer, and its leaf declares the tally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2b_a_stale_leaf_whose_authority_never_answers_asks_the_next_member() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let (nodes, sid) = g13w3_server(&relay, &mut knobs, &[185, 186, 187], "Silent authority", 3, &[1], &[]).await;
+    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    assert_eq!(nodes[0].mls_undeclared(&sid).await, Some(vec![ids[1].clone()]), "precondition: the member's leaf is old");
+    relay.start_wiretap();
+    relay.swallow_direct(&ids[1], &ids[0]);
+    knobs.clear(G13w3Knob::OldLeaf, &ids[1]);
+    assert!(
+        wait_until(110, async || nodes[0].mls_undeclared(&sid).await.is_some_and(|v| v.is_empty())).await,
+        "the member never asked past its silent authority: undeclared {:?}",
+        nodes[0].mls_undeclared(&sid).await,
+    );
+    assert!(g13w3_sent(&relay, &ids[1], &ids[2], "mls_kp") >= 1, "the member asked the next member by standing");
+    relay.release_direct(&ids[1], &ids[0]);
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2]], &sid, 30).await.is_some(), "one group");
+    drop(nodes);
 }

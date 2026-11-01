@@ -140,6 +140,12 @@ pub(crate) fn tally_capabilities() -> Capabilities {
     Capabilities::builder().extensions(vec![tally_extension_type()]).build()
 }
 
+/// The group context of every group we found: OpenMLS itself then refuses to add, or
+/// to update into, a leaf without the tally capability (option B, 0.14).
+pub(crate) fn tally_required() -> Result<Extensions<GroupContext>, InvalidExtensionError> {
+    Extensions::single(Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&[tally_extension_type()], &[], &[])))
+}
+
 /// `extensions` with the tally set to `tally`, every other extension kept.
 pub(crate) fn with_tally(extensions: &Extensions<LeafNode>, tally: &Tally) -> Extensions<LeafNode> {
     let mut out: Vec<Extension> = extensions

@@ -52,37 +52,42 @@ pub(crate) fn charges(input: &RateInput) -> Charges {
     Charges { committer, repaired }
 }
 
-/// G(M): every bound leaf of every other master is capable, so every member outside
-/// M's identity judges by these rules. An unbound leaf counts as not capable.
+/// G(M): every bound leaf of every other master that declares the tally carries one
+/// that parses, so every member outside M's identity judges by these rules. A leaf
+/// without the capability (0.12.2) never turns them off: its device cannot judge, and
+/// kept as a squatter it would spare every other master the cap. An unbound leaf
+/// counts as not capable.
 pub(crate) fn others_all_capable(leaves: &[LeafRecord], master: &str) -> bool {
     leaves.iter().all(|l| match &l.identity {
         None => false,
-        Some(i) => i.master == master || l.capable(),
+        Some(i) => i.master == master || l.capable() || !l.declares,
     })
 }
 
 /// Masters the tree shows unfit to act for the group (design `g13-s3` 2.5, 7 B), in
 /// one pass: at the cap by their OWN history ([`mls_tally::own_tallies`]; what others
-/// carried for them only caps repairs), or (`as_committer` false) holding a leaf
-/// without a tally while every other master's leaves carry one. As committer only a
-/// master whose every leaf carries a tally can be unfit, so a pre-0.13 device never
-/// sees a second committer elected.
+/// carried for them only caps repairs), or (`as_committer` false) holding no leaf that
+/// declares the tally. As committer only a master whose every leaf carries a tally can
+/// be unfit, so a pre-0.13 device never sees a second committer elected.
 pub(crate) fn unfit_masters(leaves: &[LeafRecord], epoch: u64, as_committer: bool, is_owner: impl Fn(&str) -> bool) -> HashSet<String> {
     if leaves.iter().any(|l| l.identity.is_none()) {
         return HashSet::new();
     }
     let incapable: HashSet<&str> = leaves.iter().filter(|l| !l.capable()).filter_map(LeafRecord::master).collect();
+    let unreadable: HashSet<&str> = leaves.iter().filter(|l| l.declares && !l.capable()).filter_map(LeafRecord::master).collect();
+    // A 0.14 device whose leaf predates the tally still serves: it refreshes into one.
+    let declaring: HashSet<&str> = leaves.iter().filter(|l| l.declares).filter_map(LeafRecord::master).collect();
     mls_tally::own_tallies(leaves, epoch)
         .into_iter()
         .filter(|(master, tally)| {
-            // G(M): no other master keeps a leaf without a tally.
-            let others_capable = incapable.iter().all(|m| *m == master.as_str());
+            // G(M), as in `others_all_capable`.
+            let others_capable = unreadable.iter().all(|m| *m == master.as_str());
             if is_owner(master) || !others_capable {
                 return false;
             }
             let all_capable = !incapable.contains(master.as_str());
             let at_cap = capped(tally, epoch);
-            if as_committer { all_capable && at_cap } else { at_cap || !all_capable }
+            if as_committer { all_capable && at_cap } else { at_cap || !declaring.contains(master.as_str()) }
         })
         .map(|(master, _)| master)
         .collect()
@@ -323,14 +328,20 @@ mod tests {
         assert!(charges(&own).committer);
     }
 
+    /// A leaf kept from 0.12.2 (no tally capability) never spares the other masters the
+    /// rule; one that declares the tally but carries none readable still does.
     #[test]
-    fn nothing_new_is_refused_while_another_masters_leaf_is_pre_0_13() {
+    fn a_pre_0_13_leaf_of_another_master_never_turns_the_rule_off() {
         let mut leaves = tree();
         leaves[2].tally = None;
         leaves[2].declares = false;
         let m = id("m1", "m");
         let input = RateInput { epoch: 10, leaves: &leaves, committer: &m, adds: &[], removes: &[], no_proposals: true };
-        assert_eq!(rate_refusal(&input, None, owner), None);
+        assert!(rate_refusal(&input, None, owner).is_some(), "a squatted 0.12.2 leaf turned the rule off");
+        let mut unreadable = tree();
+        unreadable[2].tally = None;
+        let input = RateInput { leaves: &unreadable, ..input };
+        assert_eq!(rate_refusal(&input, None, owner), None, "a declared tally that does not decode");
         let mut with_unbound = tree();
         with_unbound[2].identity = None;
         let input = RateInput { leaves: &with_unbound, ..input };
@@ -486,10 +497,16 @@ mod tests {
         }
         assert!(unfit_masters(&leaves, 19, false, owner).is_empty(), "the window passed");
         let mut legacy = leaves.clone();
-        legacy.push(LeafRecord { tally: None, declares: false, commit_written: false, ..leaf(3, "n2", "n", vec![], vec![]) });
-        assert_eq!(unfit_masters(&legacy, 19, false, owner), HashSet::from(["n".to_string()]), "a pre-0.13 leaf, as responder");
+        let stale = |index: u32, device: &str, master: &str| LeafRecord { tally: None, declares: false, commit_written: false, ..leaf(index, device, master, vec![], vec![]) };
+        legacy.push(stale(3, "n2", "n"));
+        legacy.push(stale(5, "p1", "p"));
+        assert_eq!(
+            unfit_masters(&legacy, 19, false, owner),
+            HashSet::from(["p".to_string()]),
+            "as responder: a master none of whose leaves declares, never one beside its declaring leaf",
+        );
         assert!(unfit_masters(&legacy, 19, true, owner).is_empty(), "never as committer");
-        assert!(!unfit_masters(&legacy, 10, false, owner).contains("m"), "G(m) is false while another master keeps a pre-0.13 leaf");
+        assert!(unfit_masters(&legacy, 10, false, owner).contains("m"), "another master's pre-0.13 leaf spared m its cap");
         let mut unbound = leaves.clone();
         unbound.push(LeafRecord { identity: None, ..leaf(4, "x", "x", vec![], vec![]) });
         assert!(unfit_masters(&unbound, 10, false, owner).is_empty(), "nobody while an unbound leaf sits in the tree");

@@ -1,10 +1,10 @@
 //! Who leads a server's MLS groups while the owner is away (design g13w2-f, "standing").
 //!
 //! Candidates rank by role tier, then by the position of their current membership in
-//! the signed fold, then by id, so a master id anyone can grind buys no precedence. A
-//! 0.12.2 replica still picks the lowest id, so standing applies only where every leaf
-//! of the tree declares the tally capability (the gate) and a ratchet keeps it so.
-//! Remove the gate, the old rule and the walk's old-rule last resort in 0.14.
+//! the signed fold, then by id, so a master id anyone can grind buys no precedence.
+//! Every anchored server leads by standing, and its groups take no leaf without the
+//! tally capability (the ratchet). A Legacy server has no provable fold to rank by:
+//! it keeps the lowest-id rule until the owner's checkpoint anchors it.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -110,14 +110,16 @@ pub(crate) fn first_by_standing(state: &ServerState, masters: impl IntoIterator<
 /// How a replica picks who leads one group.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Rule {
-    /// The gate is off: the 0.12.2 rule, byte for byte.
+    /// A Legacy server whose tree still holds a leaf without the tally: the lowest
+    /// online master id, as every replica of it agrees.
     #[default]
     Old,
-    /// The gate is on. Candidates are the masters with an online device holding a bound
-    /// leaf in our tree of the group (by device, master), or the CRDT's qualifiers
-    /// (`None`) when founding a subgroup nobody holds.
-    Standing(Option<HashMap<String, String>>),
-    /// A Legacy view of a tree that would be on: elects by the old rule but never acts.
+    /// An anchored server. Candidates are the masters with an online device holding a
+    /// bound leaf in our tree of the group ([`Holders`]), or the CRDT's qualifiers
+    /// (`None`) where we hold no copy of the group.
+    Standing(Option<Holders>),
+    /// A Legacy view of an all-declaring tree, whose anchored replicas lead by
+    /// standing: elects by the old rule but never acts.
     Abstain,
 }
 
@@ -132,51 +134,79 @@ impl Rule {
     }
 
     /// Whether `master` may stand for election: under standing, one of its online
-    /// devices (or we ourselves) holds a bound leaf in our tree, when we hold one. An
-    /// owner whose only online device is leafless answers nothing for the group.
-    pub(crate) fn admits(&self, master: &str, local_master: &str, peers: &Peers) -> bool {
-        match self {
-            Rule::Standing(Some(leaves)) => leaves.iter().any(|(device, m)| {
-                m == master && (master == local_master || peers.values().any(|room| room.contains(device)))
-            }),
-            _ => true,
-        }
+    /// devices holds a bound leaf in our tree, when we hold one, and that leaf declares
+    /// the tally unless no online leaf does. This device counts as online, never our
+    /// other devices: every replica must reach the same verdict from the same presence.
+    /// An owner whose only online device is leafless answers nothing for the group.
+    pub(crate) fn admits(&self, master: &str, _local_master: &str, peers: &Peers) -> bool {
+        let Rule::Standing(Some(Holders { leaves, us })) = self else { return true };
+        let online = |device: &str| device == us || peers.values().any(|room| room.contains(device));
+        // A 0.12.2 device neither follows standing nor hears a carried KeyPackage, but one
+        // fresh leaf alone must neither capture leadership nor, gone, freeze the group.
+        let declaring_online = leaves.iter().any(|(device, (_, declares))| *declares && online(device));
+        leaves.iter().any(|(device, (m, declares))| m == master && (*declares || !declaring_online) && online(device))
+    }
+}
+
+/// The bound leaves of our tree of a group, by device: (master, declares the tally),
+/// and this device's id (`us`), the one device presence lists never show us.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Holders {
+    pub(crate) leaves: HashMap<String, (String, bool)>,
+    pub(crate) us: String,
+}
+
+impl From<HashMap<String, String>> for Holders {
+    /// Every leaf declaring the tally.
+    fn from(leaves: HashMap<String, String>) -> Self {
+        Holders { leaves: leaves.into_iter().map(|(device, master)| (device, (master, true))).collect(), us: String::new() }
     }
 }
 
 /// Every leaf bound and declaring the tally capability. `declares`, never `capable`, so
-/// a later tally layout cannot flip the gate on older 0.13 replicas.
+/// a later tally layout cannot change what older replicas read.
 pub(crate) fn tree_declares(records: &[LeafRecord]) -> bool {
     !records.is_empty() && records.iter().all(|r| r.identity.is_some() && r.declares)
 }
 
-fn holders(records: &[LeafRecord]) -> HashMap<String, String> {
-    records.iter().filter_map(|r| r.identity.as_ref().map(|i| (i.device.clone(), i.master.clone()))).collect()
+fn holders(records: &[LeafRecord]) -> Holders {
+    let leaves = records.iter().filter_map(|r| r.identity.as_ref().map(|i| (i.device.clone(), (i.master.clone(), r.declares))));
+    Holders { leaves: leaves.collect(), us: String::new() }
+}
+
+/// Whether every leaf a commit writes into the group must declare the tally (the
+/// ratchet): always in an anchored server, in a Legacy one once its tree declares.
+pub(crate) fn ratchet_on(state: &ServerState, tree: &[LeafRecord]) -> bool {
+    state.anchor() != Anchor::Legacy || tree_declares(tree)
+}
+
+/// Whether the ratchet takes `master`'s leaf without the tally: only the owner of a
+/// Legacy server, whose old device keeps that server on the old rule by choice.
+pub(crate) fn ratchet_exempts(state: &ServerState, master: &str) -> bool {
+    state.anchor() == Anchor::Legacy && super::crypto_handler::is_anchor_owner(state, master)
 }
 
 /// The rule for `group_key` (the server group or a restricted channel's subgroup).
 pub(crate) fn rule(mls: &MlsManager, state: &ServerState, group_key: &str) -> Rule {
     let (server_id, channel) = crate::crypto::split_group_key(group_key);
     let subgroup = channel.map(|_| mls.has_group(group_key).then(|| mls.leaf_records(group_key)));
-    rule_from(&mls.leaf_records(&server_id), state.anchor() == Anchor::Legacy, subgroup.as_ref().map(Option::as_deref))
+    let mut rule = rule_from(&mls.leaf_records(&server_id), state.anchor() == Anchor::Legacy, subgroup.as_ref().map(Option::as_deref));
+    if let Rule::Standing(Some(holders)) = &mut rule {
+        holders.us = mls.credential_identity();
+    }
+    rule
 }
 
-/// The gate matrix over our trees: the server group's records (empty when we hold no
-/// copy), whether our anchor is Legacy, and for a subgroup key its records when we hold it.
+/// The rule over our trees: the server group's records (empty when we hold no copy),
+/// whether our anchor is Legacy, and for a subgroup key its records when we hold it.
 fn rule_from(server_records: &[LeafRecord], legacy: bool, subgroup: Option<Option<&[LeafRecord]>>) -> Rule {
-    let server = if !tree_declares(server_records) {
-        Rule::Old
-    } else if legacy {
-        Rule::Abstain
-    } else {
-        Rule::Standing(Some(holders(server_records)))
-    };
+    if legacy {
+        return if tree_declares(server_records) { Rule::Abstain } else { Rule::Old };
+    }
+    let held = |records: &[LeafRecord]| (!records.is_empty()).then(|| holders(records));
     match subgroup {
-        Some(_) if !server.on() => server,
-        None => server,
-        Some(None) => Rule::Standing(None),
-        Some(Some(records)) if tree_declares(records) => Rule::Standing(Some(holders(records))),
-        Some(Some(_)) => Rule::Old,
+        None => Rule::Standing(held(server_records)),
+        Some(records) => Rule::Standing(records.and_then(held)),
     }
 }
 
@@ -437,23 +467,14 @@ impl LeadBook {
 }
 
 /// Online CRDT members a leafless asker of a non-Legacy server tries, in order: by
-/// standing (the owner first), with the old-rule target moved last unless it is the
-/// owner.
-pub(crate) fn walk_order(state: &ServerState, local_master: &str, peers: &Peers, old_target: Option<&str>) -> Vec<String> {
+/// standing, the owner first.
+pub(crate) fn walk_order(state: &ServerState, local_master: &str, peers: &Peers) -> Vec<String> {
     let online = state
         .members
         .keys()
         .filter(|m| !super::resolver::same_identity(m, local_master) && super::crypto_handler::peer_is_reachable(peers, m))
         .cloned();
-    let mut order = rank_masters(state, online);
-    if let Some(old) = old_target
-        && state.get_role(old) != MemberRole::Owner
-        && let Some(at) = order.iter().position(|m| m == old)
-    {
-        let old = order.remove(at);
-        order.push(old);
-    }
-    order
+    rank_masters(state, online)
 }
 
 /// The next master a leafless walk asks, and whether that starts a new pass.
@@ -496,13 +517,14 @@ pub(crate) fn ack_key_package(
         outcome,
         via: via.map(str::to_string),
     };
-    super::crypto_handler::send_raw_to_peer(ws_cmd_tx, peers, device, serde_json::to_vec(&msg).unwrap_or_default());
+    super::crypto_handler::carry_key_package(ws_cmd_tx, peers, device, &msg);
 }
 
 /// Test-only switches, by device id. `OldLeaf`: the device mints leaves without the
 /// tally and, like 0.12.2, never acks or forwards a KeyPackage. `NoRatchet`: its
-/// committer skips the ratchet. `WelcomeOnReceipt`: a hostile committer that queues
-/// every KeyPackage it receives, elected or not.
+/// committer skips the ratchet, and a group it founds requires no tally (one founded
+/// before 0.14). `WelcomeOnReceipt`: a hostile committer that queues every KeyPackage
+/// it receives, elected or not.
 pub(crate) mod knobs {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub(crate) enum Knob {
@@ -617,10 +639,11 @@ mod tests {
         assert_eq!(ranked(&s2, &["a_early", "b_late"]), vec!["b_late", "a_early"]);
     }
 
-    /// Unit 2: the gate matrix (server, subgroup held / not held, Legacy, leafless, a
-    /// leaf that declares but carries an unreadable tally).
+    /// Unit 2: the rule matrix. An anchored server leads by standing whatever its tree
+    /// holds, over its bound leaves; a Legacy server keeps the old rule, or abstains once
+    /// its tree declares.
     #[test]
-    fn the_gate_matrix() {
+    fn the_rule_matrix() {
         let rec = |dev: &str, master: &str, declares: bool| LeafRecord {
             index: 0,
             identity: Some(crate::crypto::LeafIdentity { device: dev.into(), master: master.into() }),
@@ -632,35 +655,74 @@ mod tests {
         let on = vec![rec("o-d", "o", true), rec("a-d", "a", true)];
         let mixed = vec![rec("o-d", "o", true), rec("a-d", "a", false)];
         let unbound = vec![rec("o-d", "o", true), LeafRecord { identity: None, ..rec("x", "x", true) }];
-        let holders = |r: &[LeafRecord]| Rule::Standing(Some(r.iter().filter_map(|l| l.identity.as_ref().map(|i| (i.device.clone(), i.master.clone()))).collect()));
-        assert_eq!(rule_from(&on, false, None), holders(&on), "all declare: on, candidates are the holders");
-        assert_eq!(rule_from(&mixed, false, None), Rule::Old, "one stale leaf: off");
-        assert_eq!(rule_from(&unbound, false, None), Rule::Old, "an unbound leaf: off");
-        assert_eq!(rule_from(&[], false, None), Rule::Old, "a leafless replica leads by the old rule");
-        assert_eq!(rule_from(&on, true, None), Rule::Abstain, "a Legacy view of an on tree abstains");
+        let led_by = |leaves: &[(&str, &str, bool)]| {
+            Rule::Standing(Some(Holders { leaves: leaves.iter().map(|(d, m, decl)| (d.to_string(), (m.to_string(), *decl))).collect(), us: String::new() }))
+        };
+        assert_eq!(rule_from(&on, false, None), led_by(&[("o-d", "o", true), ("a-d", "a", true)]), "all declare");
+        assert_eq!(rule_from(&mixed, false, None), led_by(&[("o-d", "o", true), ("a-d", "a", false)]), "a stale leaf never turns standing off");
+        assert_eq!(rule_from(&unbound, false, None), led_by(&[("o-d", "o", true)]), "an unbound leaf never leads");
+        assert_eq!(rule_from(&[], false, None), Rule::Standing(None), "no copy here: the CRDT's members by standing");
+        // A Legacy server has no provable fold to rank by.
+        assert_eq!(rule_from(&mixed, true, None), Rule::Old);
+        assert_eq!(rule_from(&[], true, None), Rule::Old);
+        assert_eq!(rule_from(&on, true, None), Rule::Abstain, "a Legacy view of an all-declaring tree abstains");
         assert!(!Rule::Abstain.may_lead() && !Rule::Abstain.on());
-        // `declares` decides, never whether the tally decodes (tally: None above).
-        assert!(tree_declares(&on));
+        assert!(tree_declares(&on), "`declares` decides, never whether the tally decodes (tally: None above)");
         let sub_on = vec![rec("a-d", "a", true)];
-        let sub_mixed = vec![rec("a-d", "a", false)];
-        assert_eq!(rule_from(&on, false, Some(Some(&sub_on))), holders(&sub_on), "subgroup on: its own holders");
-        assert_eq!(rule_from(&on, false, Some(Some(&sub_mixed))), Rule::Old, "the subgroup's own tree must declare");
-        assert_eq!(rule_from(&mixed, false, Some(Some(&sub_on))), Rule::Old, "and the server gate must be on");
-        assert_eq!(rule_from(&on, false, Some(None)), Rule::Standing(None), "founding a subgroup: CRDT qualifiers");
-        assert_eq!(rule_from(&mixed, false, Some(None)), Rule::Old);
+        assert_eq!(rule_from(&on, false, Some(Some(&sub_on))), led_by(&[("a-d", "a", true)]), "a subgroup: its own holders");
+        assert_eq!(rule_from(&mixed, false, Some(None)), Rule::Standing(None), "founding a subgroup: CRDT qualifiers");
+        assert_eq!(rule_from(&mixed, true, Some(Some(&sub_on))), Rule::Old);
         assert_eq!(rule_from(&on, true, Some(Some(&sub_on))), Rule::Abstain);
         // A candidate needs an ONLINE device holding a leaf: a leafless owner phone is none.
         let peers: Peers = [("room".to_string(), ["o-phone".to_string(), "a-d".to_string()].into())].into();
         let rule = rule_from(&on, false, None);
         assert!(!rule.admits("o", "me", &peers), "the owner's only online device holds no leaf");
         assert!(rule.admits("a", "me", &peers));
-        assert!(rule.admits("o", "o", &peers), "we count as online");
+        let as_owner_device = |rule: Rule| match rule {
+            Rule::Standing(Some(h)) => Rule::Standing(Some(Holders { us: "o-d".into(), ..h })),
+            other => other,
+        };
+        assert!(as_owner_device(rule.clone()).admits("o", "o", &peers), "this device counts as online");
+        let o_master_only = Rule::Standing(Some(Holders { us: "o-phone".into(), ..match rule.clone() { Rule::Standing(Some(h)) => h, _ => unreachable!() } }));
+        assert!(!o_master_only.admits("o", "o", &peers), "our other device that nobody sees online does not");
         assert!(!rule.admits("zz", "me", &peers), "no leaf at all");
         assert!(Rule::Old.admits("zz", "me", &peers));
+        // A leaf without the tally stands only while no online leaf declares it, so one
+        // fresh leaf never captures leadership and, gone, never freezes the group.
+        let both: Peers = [("room".to_string(), ["o-d".to_string(), "a-d".to_string()].into())].into();
+        let mixed = rule_from(&mixed, false, None);
+        assert!(!mixed.admits("a", "me", &both), "beside an online declaring leaf");
+        assert!(!mixed.admits("a", "a", &both), "beside an online declaring leaf, as ourselves");
+        assert!(mixed.admits("o", "me", &both));
+        let a_only: Peers = [("room".to_string(), ["a-d".to_string()].into())].into();
+        assert!(mixed.admits("a", "me", &a_only), "no declaring leaf online: every bound leaf stands");
+        assert!(!mixed.admits("o", "me", &a_only), "and the absent one does not");
     }
 
-    /// Unit 6: the walk orders by standing with the owner first and the old-rule target
-    /// last, cycles through a pass, and the H1b gate answers only at or above it.
+    /// The ratchet holds in every anchored server and in a Legacy one once its tree
+    /// declares; only a Legacy owner's leaf may lack the tally.
+    #[test]
+    fn the_ratchet_holds_in_every_anchored_server() {
+        let rec = |declares: bool| LeafRecord {
+            index: 0,
+            identity: Some(crate::crypto::LeafIdentity { device: "a-d".into(), master: "a".into() }),
+            declares,
+            tally: None,
+            commit_written: false,
+            fresh_day: 0,
+        };
+        let anchored = state(&[("own", 10, &[]), ("a", 20, &[("own", 20)])]);
+        let mut legacy = anchored.clone();
+        legacy.server_id = "5e1f".repeat(8);
+        assert_eq!(legacy.anchor(), Anchor::Legacy, "precondition");
+        assert!(ratchet_on(&anchored, &[rec(false)]) && ratchet_on(&anchored, &[]), "anchored: always");
+        assert!(!ratchet_on(&legacy, &[rec(false)]) && ratchet_on(&legacy, &[rec(true)]), "Legacy: once its tree declares");
+        assert!(!ratchet_exempts(&anchored, "own"), "an anchored owner's leaf needs the tally too");
+        assert!(ratchet_exempts(&legacy, "own") && !ratchet_exempts(&legacy, "a"));
+    }
+
+    /// Unit 6: the walk orders by standing with the owner first, cycles through a pass,
+    /// and the H1b gate answers only at or above it.
     #[test]
     fn the_walk_order_its_cursor_and_the_h1b_gate() {
         let mut s = state(&[
@@ -672,11 +734,11 @@ mod tests {
         ]);
         set_role(&mut s, "adm", MemberRole::Admin);
         let peers: Peers = [("room".to_string(), ["own", "adm", "mem", "000x", "me"].iter().map(|p| p.to_string()).collect())].into();
-        let order = walk_order(&s, "me", &peers, Some("000x"));
+        let order = walk_order(&s, "me", &peers);
         assert_eq!(order, vec!["own", "adm", "mem", "000x"]);
         let away: Peers = [("room".to_string(), ["adm", "mem", "000x", "me"].iter().map(|p| p.to_string()).collect())].into();
-        let order = walk_order(&s, "me", &away, Some("000x"));
-        assert_eq!(order, vec!["adm", "mem", "000x"], "the owner away; the old target last");
+        let order = walk_order(&s, "me", &away);
+        assert_eq!(order, vec!["adm", "mem", "000x"], "the owner away");
         let mut asked = Vec::new();
         for want in ["adm", "mem", "000x"] {
             let (next, restart) = next_walk_target(&order, &asked).unwrap();
@@ -685,9 +747,6 @@ mod tests {
         }
         assert_eq!(next_walk_target(&order, &asked), Some(("adm".to_string(), true)), "a full pass restarts");
         assert_eq!(next_walk_target(&[], &asked), None);
-        // The old rule's target goes last even when it stands early.
-        let order = walk_order(&s, "me", &away, Some("mem"));
-        assert_eq!(order, vec!["adm", "000x", "mem"]);
 
         assert!(leafless_may_answer(&s, "own", None), "the owner always");
         assert!(!leafless_may_answer(&s, "adm", None), "nobody else without a walk target");
@@ -869,5 +928,28 @@ mod tests {
             now += Duration::from_secs(21);
         }
         assert!(worst <= 1, "our responder fell to {}", standing[worst]);
+    }
+
+    /// Two replicas with the same tree and the same view of who is online admit the same
+    /// candidates. B's phone holds the only declaring leaf and is offline (or hidden);
+    /// B's desktop and A's device hold leaves from before the tally. Only this device
+    /// counts as online by exception, never our other devices.
+    #[test]
+    fn w2b_replicas_with_one_tree_and_one_presence_admit_the_same_masters() {
+        let leaves: HashMap<String, (String, bool)> = [
+            ("a-d".to_string(), ("a".to_string(), false)),
+            ("b-desk".to_string(), ("b".to_string(), false)),
+            ("b-phone".to_string(), ("b".to_string(), true)),
+        ]
+        .into();
+        let at = |us: &str| Rule::Standing(Some(Holders { leaves: leaves.clone(), us: us.to_string() }));
+        // A's node sees B's desktop; B's desktop sees A. B's phone is in no room.
+        let seen_by_a: Peers = [("room".to_string(), ["b-desk".to_string()].into())].into();
+        let seen_by_b: Peers = [("room".to_string(), ["a-d".to_string()].into())].into();
+        let admitted = |rule: Rule, local: &str, peers: &Peers| ["a", "b"].into_iter().filter(|m| rule.admits(m, local, peers)).collect::<Vec<_>>();
+        assert_eq!(admitted(at("a-d"), "a", &seen_by_a), vec!["a", "b"], "no declaring leaf online: every bound leaf stands");
+        assert_eq!(admitted(at("b-desk"), "b", &seen_by_b), vec!["a", "b"], "A's and B's replicas disagree on who may lead");
+        // Our own declaring leaf counts the moment it is this device's.
+        assert_eq!(admitted(at("b-phone"), "b", &seen_by_b), vec!["b"], "this device declares and is online");
     }
 }

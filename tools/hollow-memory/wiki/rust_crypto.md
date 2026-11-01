@@ -190,9 +190,10 @@ every device of an identity hears what is sent to it, so two online owner device
 joiner's KeyPackage at one epoch (a fork), and two upgrading 0.11 devices both rebound in place.
 `crypto_handler::we_commit_for_our_identity(mls, group_key, master, device, rooms, skip)`: true when
 no LOWER-id online device of ours holds a leaf in this group as we see it (roster member, not
-revoked; `skip` = devices being re-added). It gates the batch commit (Phase 2), the in-place rebind
-(`rebind_unbound_leaves`: a device that deferred and is still unbound after `MLS_BOOTSTRAP_TIMEOUT`
-rebinds itself) and the sibling re-add. Leaf-aware on purpose: a presence-only choice deferred to a
+revoked; `skip` = devices being re-added). It gates the batch commit (Phase 2), the repair ask of an
+unbound own leaf (`repair_unbound_leaves`; 0.14 has no in-place rebind and keeps no pre-0.12 signer:
+a device that deferred to a sibling and is still unbound asks its catch-up responder) and the
+sibling re-add. Leaf-aware on purpose: a presence-only choice deferred to a
 sibling with no copy of the group, which never acts. Every KeyPackage goes to every online device
 of the target's identity (`send_key_package_to_identity_of`), so the committing one holds it.
 Fork heal: `epoch_catchup_responder` falls back to the lowest online master OTHER than the one
@@ -211,7 +212,7 @@ the committer beside the device the others now count. The elections are left as 
 they queue is kept); the gate sits where an election turns into a commit: `crypto_handler::MlsTurn`,
 asked once per batch tick, says no while the app is away or the socket is down (`Suspended`,
 `SessionLost`), and after either says no until the session has been live for `MLS_TURN_SETTLE`
-(2 s) so the commits replayed on resume are merged first. Off the turn, Phase 1 (rebind) and
+(2 s) so the commits replayed on resume are merged first. Off the turn, Phase 1 (repair asks) and
 Phase 2 (both queues) wait untouched. Group creation (KeyPackage handler, parked admission,
 subgroup reconcile) is skipped while away: nobody else would see the group. The vault coordinator
 is never an away device (`is_vault_coordinator`; `elect_vault_coordinator` counts our identity only

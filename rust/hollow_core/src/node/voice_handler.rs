@@ -1213,13 +1213,12 @@ pub(crate) async fn handle_voice_sframe_heal(
         }
         match super::crypto_handler::mint_group_key_package(mls_mgr, crypto_store, &group_key, false) {
             Ok(kp_bytes) => {
-                let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+                let msg = HavenMessage::MlsKeyPackage {
                     server_id: server_id.clone(),
-                    key_package: kp_b64,
+                    key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
                     channel_id: emit_cid,
-                }).unwrap_or_default();
-                let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &authority, data);
+                };
+                let sent = super::crypto_handler::carry_key_package_to_identity(ws_cmd_tx, ws_room_peers, &authority, &msg);
                 if sent > 0 {
                     mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
                     hollow_log!("[HOLLOW-VC-SFRAME] HEAL: asked {authority} to repair our leaf in {group_key}");
