@@ -494,10 +494,9 @@ packages:
   flutter_local_notifications_windows:
     dependency: "direct main"
     description:
-      name: flutter_local_notifications_windows
-      sha256: "8d658f0d367c48bd420e7cf2d26655e2d1130147bca1eea917e576ca76668aaf"
-      url: "https://pub.dev"
-    source: hosted
+      path: "packages/flutter_local_notifications_windows"
+      relative: true
+    source: path
     version: "1.0.3"
   flutter_markdown_plus:
     dependency: "direct main"

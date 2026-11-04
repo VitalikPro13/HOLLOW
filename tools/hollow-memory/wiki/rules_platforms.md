@@ -45,6 +45,11 @@ release pipeline is the `release` skill.
   follows would nudge twice). `NotifyIpInterfaceChange` fires without a real change (at start,
   under heavy build load; VirtualBox and Tailscale adapters), so the runner keeps at most ONE
   queued network message; each extra costs one heartbeat at most.
+- `flutter_local_notifications_windows` is a VENDORED fork (`packages/`, `dependency_overrides`): every FFI
+  entry point catches everything, because a WinRT throw (WPN_E_PLATFORM_UNAVAILABLE when the notification
+  platform is down, or in an ssh logon session) crosses the Dart FFI boundary and terminates the app.
+  `test/windows_toast_plugin_guard_test.dart` guards it; an upstream bump must re-apply the catches.
+  Other WinRT/COM plugins (local_auth_windows, audioplayers_windows) carry the same exposure, not audited yet.
 
 ## Linux
 

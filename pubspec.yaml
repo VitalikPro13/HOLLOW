@@ -124,6 +124,13 @@ dev_dependencies:
   build_runner: ^2.11.1
   flutter_launcher_icons: ^0.14.4
 
+dependency_overrides:
+  # Fork of 1.0.3 whose FFI entry points catch every C++ exception: upstream
+  # (3.1.1 too) lets a WinRT error from an unavailable notification platform
+  # end the process at startup. test/windows_toast_plugin_guard_test.dart.
+  flutter_local_notifications_windows:
+    path: packages/flutter_local_notifications_windows
+
 # Android launcher icons. Run scripts/make_app_icons.py first (it renders these
 # sources from assets/branding/hollow_mark.svg), then:
 #   dart run flutter_launcher_icons

@@ -137,7 +137,7 @@ class DesktopNotificationService {
     try {
       if (Platform.isWindows) {
         _brandIconPath = await _writeBrandIcon();
-        await _win.initialize(
+        final ready = await _win.initialize(
           WindowsInitializationSettings(
             appName: 'Hollow',
             // Must match the AppUserModelID on the installed Start-menu
@@ -149,6 +149,11 @@ class DesktopNotificationService {
           ),
           onNotificationReceived: _onWindowsResponse,
         );
+        // False when Windows refused the toast notifier, e.g. the notification
+        // platform is unavailable (no desktop session, a stopped service).
+        if (!ready) {
+          throw StateError('the Windows notification platform is unavailable');
+        }
       } else if (Platform.isMacOS) {
         // `initialize` IS the permission request, so the prompt shows at
         // startup (the shell bootstrap awaits this), not at the first message.
