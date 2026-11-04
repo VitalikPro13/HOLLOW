@@ -387,6 +387,168 @@ fn vouch_closure(mut seed: BTreeSet<String>, vouches: &[&Vouch]) -> BTreeSet<Str
     }
 }
 
+/// What counted removals void: a removed voucher's vouches count only for the vouchees
+/// EVERY counted removal of it keeps (HOL-SEC-080).
+#[derive(Default)]
+struct Voids {
+    kept_by: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Voids {
+    fn of<'a>(counted: impl IntoIterator<Item = &'a Removal>) -> Self {
+        let mut kept_by: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for r in counted {
+            let keep: BTreeSet<String> = r.keep_vouched.iter().cloned().collect();
+            kept_by
+                .entry(r.device.clone())
+                .and_modify(|k| k.retain(|d| keep.contains(d)))
+                .or_insert(keep);
+        }
+        Voids { kept_by }
+    }
+
+    fn allows(&self, v: &Vouch) -> bool {
+        self.kept_by.get(&v.by).is_none_or(|k| k.contains(&v.device))
+    }
+}
+
+/// Rank by (tier, depth, id) over `edges` (voucher, vouchee): tier 0 grows from the
+/// first seed set, tier 1 from the second among what tier 0 did not reach.
+fn rank_over<'a>(seeds: [BTreeSet<&'a str>; 2], edges: impl Iterator<Item = (&'a str, &'a str)>) -> BTreeMap<String, Rank> {
+    let mut vouchees: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (by, device) in edges {
+        vouchees.entry(by).or_default().insert(device);
+    }
+    let mut rank: BTreeMap<&str, (u8, u32)> = BTreeMap::new();
+    for (tier, seed) in (0u8..).zip(seeds) {
+        let mut frontier: BTreeSet<&str> = seed.into_iter().filter(|d| !rank.contains_key(d)).collect();
+        let mut depth = 0u32;
+        while !frontier.is_empty() {
+            for d in &frontier {
+                rank.insert(*d, (tier, depth));
+            }
+            let next: BTreeSet<&str> = frontier
+                .iter()
+                .filter_map(|by| vouchees.get(by))
+                .flatten()
+                .copied()
+                .filter(|d| !rank.contains_key(d))
+                .collect();
+            frontier = next;
+            depth += 1;
+        }
+    }
+    rank.into_iter().map(|(d, (tier, depth))| (d.to_string(), (tier, depth, d.to_string()))).collect()
+}
+
+/// What the removal walk counted, and its support: for each alive signer, the vouches
+/// of the path that made it valid at its turn.
+struct Walk<'a> {
+    counted: Vec<&'a Removal>,
+    support: BTreeSet<Vouch>,
+}
+
+/// The removal walk (DEVICE_PROOF_DESIGN section 4): signers in rank order, and a
+/// signer is alive at its turn unless a removal counted for an earlier signer removed
+/// it, or it is outside its tier's valid closure as it stands then (a tier-0 signer's
+/// grows from `roots` alone). Every removal of a standing target by an alive signer
+/// counts, its own included. Ranks never tie, so the result is the same everywhere.
+fn removal_walk<'a>(
+    removals: &[&'a Removal],
+    rank: &BTreeMap<String, Rank>,
+    roots: &BTreeSet<String>,
+    pending: &BTreeSet<String>,
+    vouches: &[&Vouch],
+) -> Walk<'a> {
+    let mut cands: Vec<(&Rank, &'a Removal)> = removals
+        .iter()
+        .filter(|r| rank.contains_key(&r.device))
+        .filter_map(|r| rank.get(&r.by).map(|k| (k, *r)))
+        .collect();
+    cands.sort();
+    cands.dedup();
+    let seeds = [roots.clone(), roots.union(pending).cloned().collect::<BTreeSet<String>>()];
+    let mut walk = Walk { counted: Vec::new(), support: BTreeSet::new() };
+    let mut closure: Option<(usize, u8, BTreeMap<String, Option<Vouch>>)> = None;
+    let mut i = 0;
+    while i < cands.len() {
+        let (signer_rank, first) = cands[i];
+        let by = first.by.as_str();
+        let j = i + cands[i..].iter().take_while(|(_, r)| r.by == by).count();
+        let tier = signer_rank.0.min(1);
+        let removed_earlier = walk.counted.iter().any(|r| r.device == by && r.by != by);
+        let n = walk.counted.len();
+        if closure.as_ref().is_none_or(|(m, t, _)| *m != n || *t != tier) {
+            let voids = Voids::of(walk.counted.iter().copied());
+            closure = Some((n, tier, valid_closure(&seeds[tier as usize], vouches, &voids)));
+        }
+        let parents = closure.as_ref().map(|(_, _, p)| p);
+        if !removed_earlier && parents.is_some_and(|p| p.contains_key(by)) {
+            let mut at = by;
+            while let Some(Some(v)) = parents.and_then(|p| p.get(at)) {
+                walk.support.insert(v.clone());
+                at = v.by.as_str();
+            }
+            walk.counted.extend(cands[i..j].iter().map(|(_, r)| *r));
+        }
+        i = j;
+    }
+    walk
+}
+
+/// `seed` and every device a member of the result vouched for where `voids` allows it,
+/// each mapped to the vouch that reached it first in a breadth-first pass (seeds: None).
+fn valid_closure(seed: &BTreeSet<String>, vouches: &[&Vouch], voids: &Voids) -> BTreeMap<String, Option<Vouch>> {
+    let mut next: BTreeMap<&str, Vec<&Vouch>> = BTreeMap::new();
+    for v in vouches.iter().filter(|v| voids.allows(v)) {
+        next.entry(v.by.as_str()).or_default().push(v);
+    }
+    for list in next.values_mut() {
+        list.sort();
+    }
+    let mut reached: BTreeMap<String, Option<Vouch>> = seed.iter().map(|d| (d.clone(), None)).collect();
+    let mut queue: std::collections::VecDeque<String> = seed.iter().cloned().collect();
+    while let Some(d) = queue.pop_front() {
+        for v in next.get(d.as_str()).into_iter().flatten() {
+            if !reached.contains_key(&v.device) {
+                reached.insert(v.device.clone(), Some((*v).clone()));
+                queue.push_back(v.device.clone());
+            }
+        }
+    }
+    reached
+}
+
+/// Which vouches the vouch cap ranks first (HOL-SEC-189): a vouch is VALID when its
+/// signer is in the valid closure the walk leaves and no counted removal of the signer
+/// voids it; `valid_rank` ranks the valid devices through valid vouches only;
+/// `support` holds what the walk needs to come out the same once compacted (RC32-10).
+struct VouchJudge {
+    valid_rank: BTreeMap<String, Rank>,
+    voids: Voids,
+    support: BTreeSet<Vouch>,
+}
+
+impl VouchJudge {
+    fn counts(&self, v: &Vouch) -> bool {
+        self.valid_rank.contains_key(&v.by) && self.voids.allows(v)
+    }
+}
+
+/// Each standing device's first vouch by (`key` of its signer, the vouch).
+fn first_per_device<'v>(
+    mut order: Vec<&'v Vouch>,
+    standing: &BTreeMap<String, Rank>,
+    key: impl Fn(&Vouch) -> Option<Rank>,
+) -> BTreeSet<&'v Vouch> {
+    order.sort_by_cached_key(|v| (key(v), (*v).clone()));
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    order
+        .into_iter()
+        .filter(|v| standing.contains_key(&v.device) && seen.insert(v.device.as_str()))
+        .collect()
+}
+
 fn push_unique<T: Ord + Clone>(into: &mut Vec<T>, from: &[T]) {
     into.extend_from_slice(from);
     into.sort();
@@ -662,47 +824,81 @@ impl Roster {
         self.ranked(true)
     }
 
+    /// [`Self::standing`] over the consents the cap keeps: past `MAX_CONSENTS` standing
+    /// devices only the best ranked keep theirs, and the rest rank again without the
+    /// others, so a merge of two shows judges what its compacted self judges.
+    fn capped_standing(&self) -> BTreeMap<String, Rank> {
+        let all = self.standing();
+        if all.len() <= MAX_CONSENTS {
+            return all;
+        }
+        let mut best: Vec<(&Rank, &String)> = all.iter().map(|(d, k)| (k, d)).collect();
+        best.sort();
+        let kept: BTreeSet<&str> = best.into_iter().take(MAX_CONSENTS).map(|(_, d)| d.as_str()).collect();
+        let mut view = self.clone();
+        view.consents.retain(|c| kept.contains(c.device.as_str()) || !all.contains_key(&c.device));
+        view.standing()
+    }
+
     /// [`Self::standing`]; without `with_pending`, nothing a pending join seeds ranks.
     fn ranked(&self, with_pending: bool) -> BTreeMap<String, Rank> {
         let consented: BTreeSet<&str> = self.consents.iter().map(|c| c.device.as_str()).collect();
         let (_, roots) = self.base_roots();
-        let mut vouchees: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        for v in self.vouches.iter().filter(|v| consented.contains(v.device.as_str())) {
-            vouchees.entry(v.by.as_str()).or_default().insert(v.device.as_str());
-        }
-        let seeds: [(u8, BTreeSet<&str>); 2] = [
-            (0, roots.iter().map(String::as_str).filter(|d| consented.contains(d)).collect()),
-            (1, self.pendings.iter().map(|p| p.device.as_str()).filter(|d| with_pending && consented.contains(d)).collect()),
+        let seeds = [
+            roots.iter().map(String::as_str).filter(|d| consented.contains(d)).collect(),
+            self.pendings.iter().map(|p| p.device.as_str()).filter(|d| with_pending && consented.contains(d)).collect(),
         ];
-        let mut rank: BTreeMap<&str, (u8, u32)> = BTreeMap::new();
-        for (tier, seed) in seeds {
-            let mut frontier: BTreeSet<&str> = seed.into_iter().filter(|d| !rank.contains_key(d)).collect();
-            let mut depth = 0u32;
-            while !frontier.is_empty() {
-                for d in &frontier {
-                    rank.insert(*d, (tier, depth));
-                }
-                let next: BTreeSet<&str> = frontier
-                    .iter()
-                    .filter_map(|by| vouchees.get(by))
-                    .flatten()
-                    .copied()
-                    .filter(|d| !rank.contains_key(d))
-                    .collect();
-                frontier = next;
-                depth += 1;
-            }
-        }
-        let mut ranked: Vec<Rank> = rank.into_iter().map(|(d, (tier, depth))| (tier, depth, d.to_string())).collect();
-        ranked.sort();
-        ranked.into_iter().map(|r| (r.2.clone(), r)).collect()
+        let edges = self
+            .vouches
+            .iter()
+            .filter(|v| consented.contains(v.device.as_str()))
+            .map(|v| (v.by.as_str(), v.device.as_str()));
+        rank_over(seeds, edges)
+    }
+
+    /// The vouch cap's judge over every held statement of the current base: the walk
+    /// over removals of standing targets by tier-0 signers only, the removals every view
+    /// counts (a pending join may be one only the master key made, and never demotes a
+    /// vouch), then the valid closure of the roots plus the consented pending joins, so
+    /// nothing standing is judged from a narrower seed than its own tier.
+    fn vouch_judge(&self, standing: &BTreeMap<String, Rank>) -> VouchJudge {
+        let consented: BTreeSet<&str> = self.consents.iter().map(|c| c.device.as_str()).collect();
+        let (current, roots) = self.base_roots();
+        let base = current.map_or_else(|| LEGACY_BASE.to_string(), |c| c.base);
+        let roots: BTreeSet<String> = roots.into_iter().filter(|d| consented.contains(d.as_str())).collect();
+        let pending: BTreeSet<String> = self
+            .pendings
+            .iter()
+            .filter(|p| p.base == base && consented.contains(p.device.as_str()))
+            .map(|p| p.device.clone())
+            .collect();
+        let vouches: Vec<&Vouch> = self
+            .vouches
+            .iter()
+            .filter(|v| v.base == base && consented.contains(v.device.as_str()))
+            .collect();
+        let removals: Vec<&Removal> = self
+            .removals
+            .iter()
+            .filter(|r| r.base == base && standing.get(&r.by).is_some_and(|k| k.0 == 0))
+            .collect();
+        let walk = removal_walk(&removals, standing, &roots, &pending, &vouches);
+        let voids = Voids::of(walk.counted);
+        let seeds = [
+            roots.iter().map(String::as_str).collect(),
+            pending.iter().map(String::as_str).collect(),
+        ];
+        let edges = vouches.iter().filter(|v| voids.allows(v)).map(|v| (v.by.as_str(), v.device.as_str()));
+        let valid_rank = rank_over(seeds, edges);
+        VouchJudge { valid_rank, voids, support: walk.support }
     }
 
     /// Everything superseded by the current base dropped, statements sorted, and the
     /// ceilings applied. A vouch or removal stays only when its signer stands, ordered
     /// by its signer's rank, whatever it names: a vouch may precede its device's
-    /// consent, and a removal may precede the device's claim. Each standing device's
-    /// best vouch stays first, so a compacted roster ranks the same when compacted again.
+    /// consent, and a removal may precede the device's claim. A vouch the removal walk
+    /// leaves valid outranks every other (HOL-SEC-189), and each standing device's tree
+    /// vouch stays first, so compacting a compacted roster keeps the same statements.
     fn compacted(mut self) -> Roster {
         if let Some(at) = self.recoveries.iter().map(|r| r.at_ms).max() {
             self.recoveries.retain(|r| r.at_ms == at);
@@ -728,8 +924,10 @@ impl Roster {
         self.consents.sort();
         self.consents.dedup_by(|a, b| a.device == b.device);
 
-        let standing = self.standing();
+        let standing = self.capped_standing();
         let rank = |d: &str| standing.get(d).cloned();
+        let judge = self.vouch_judge(&standing);
+        let ok = |v: &Vouch| judge.counts(v);
 
         let mut vouches: Vec<Vouch> = std::mem::take(&mut self.vouches)
             .into_iter()
@@ -737,12 +935,26 @@ impl Roster {
             .collect();
         vouches.sort();
         vouches.dedup();
-        vouches.sort_by_cached_key(|v| (rank(&v.by), v.clone()));
-        let mut best: BTreeSet<&str> = BTreeSet::new();
-        let (tree, rest): (Vec<&Vouch>, Vec<&Vouch>) = vouches
-            .iter()
-            .partition(|v| standing.contains_key(&v.device) && best.insert(v.device.as_str()));
-        let mut kept: Vec<Vouch> = tree.into_iter().chain(rest).take(MAX_VOUCHES).cloned().collect();
+        // Kept first, so a compacted roster folds, ranks and walks as the whole set did:
+        // each standing device's vouch from its nearest VALID voucher (a tree rooted in
+        // the phrase, HOL-SEC-189), the walk's support, and each standing device's vouch
+        // from its best-ranked voucher. The rest give way by validity, then signer rank.
+        let valid_tree = first_per_device(vouches.iter().filter(|v| ok(v)).collect(), &standing, |v| judge.valid_rank.get(&v.by).cloned());
+        let rank_tree = first_per_device(vouches.iter().collect(), &standing, |v| rank(&v.by));
+        let class = |v: &Vouch| {
+            if valid_tree.contains(v) {
+                0u8
+            } else if judge.support.contains(v) {
+                1
+            } else if rank_tree.contains(v) {
+                2
+            } else {
+                3
+            }
+        };
+        let mut order: Vec<&Vouch> = vouches.iter().collect();
+        order.sort_by_cached_key(|v| (class(v), !ok(v), rank(&v.by), (*v).clone()));
+        let mut kept: Vec<Vouch> = order.into_iter().take(MAX_VOUCHES).cloned().collect();
         kept.sort();
         self.vouches = kept;
 
@@ -914,6 +1126,13 @@ impl Roster {
             .collect()
     }
 
+    /// What the removal walk leaves removed (device -> the vouchees every counted removal
+    /// of it keeps), over the statements as held, compacted or not.
+    #[cfg(test)]
+    pub(crate) fn walk_view(&self) -> BTreeMap<String, BTreeSet<String>> {
+        self.vouch_judge(&self.capped_standing()).voids.kept_by
+    }
+
     pub(crate) fn has_consent(&self, device: &str) -> bool {
         self.consents.iter().any(|c| c.device == device)
     }
@@ -1029,7 +1248,7 @@ impl Roster {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn kp(tag: u8) -> NativeKeypair {
@@ -1491,6 +1710,230 @@ mod tests {
         assert!(v.pendings.len() <= MAX_PENDING);
     }
 
+    /// The same flood, each pending join also removing every phrase device: what only
+    /// the master key made never demotes a vouch of the phrase's devices.
+    #[test]
+    fn authz_pending_joins_removing_the_phrases_devices_never_displace_them() {
+        let id = Id::new();
+        let legit: Vec<NativeKeypair> = (0..6u8).map(|t| kp(20 + t)).collect();
+        let mut r = Roster::genesis(&id.m, &id.r, &legit[0], NOW);
+        let base = r.base();
+        for w in legit.windows(2) {
+            with_consent(&mut r, &w[1]);
+            r.add_vouch(sign_vouch(&w[0], &id.master(), &base, &w[1].peer_id()));
+        }
+        for i in 0..40u32 {
+            let p = junk_kp(i);
+            r.consents.push(sign_consent(&p, &id.master()));
+            r.pendings.push(sign_pending(&id.m, &base, &p.peer_id()));
+            for d in &legit {
+                r.removals.push(sign_removal(&p, &id.master(), &base, &d.peer_id(), &[]));
+            }
+            for k in 0..8u32 {
+                let q = junk_kp(1_000 + i * 100 + k);
+                r.consents.push(sign_consent(&q, &id.master()));
+                r.vouches.push(sign_vouch(&p, &id.master(), &base, &q.peer_id()));
+            }
+        }
+        let v = r.verified(NOW);
+        let state = v.fold(|_| None, NOW);
+        for d in &legit {
+            assert!(state.is_member(&d.peer_id()), "pending joins pushed out {}", d.peer_id());
+        }
+        for w in legit.windows(2) {
+            assert!(v.vouches.iter().any(|x| x.by == w[0].peer_id() && x.device == w[1].peer_id()), "a phrase vouch fell out");
+        }
+    }
+
+    /// A master-key pending join that removes the root and floods vouched junk in two
+    /// shows (review of HOL-SEC-189, F1). `with_removal` false is the control.
+    fn master_key_pending_flood(with_removal: bool) -> (Roster, Roster, String, Vouch) {
+        let id = Id::new();
+        let master = id.master();
+        let (root, h, p) = (kp(10), kp(11), kp(200));
+        let mut held = Roster::genesis(&id.m, &id.r, &root, NOW - 10);
+        let base = held.base();
+        with_consent(&mut held, &h);
+        let tree = sign_vouch(&root, &master, &base, &h.peer_id());
+        held.add_vouch(tree.clone());
+        let held = held.verified(NOW);
+        let show = |from: u32| {
+            let mut f = held.clone();
+            f.add_consent(sign_consent(&p, &master));
+            f.add_pending(sign_pending(&id.m, &base, &p.peer_id()));
+            if with_removal {
+                f.add_removal(sign_removal(&p, &master, &base, &root.peer_id(), &[]));
+            }
+            for i in from..from + 95 {
+                let j = junk_kp(70_000 + i);
+                f.add_consent(sign_consent(&j, &master));
+                f.add_vouch(sign_vouch(&p, &master, &base, &j.peer_id()));
+            }
+            f.verified(NOW)
+        };
+        let after = held.merged(&show(0)).merged(&show(1000));
+        (held, after, h.peer_id(), tree)
+    }
+
+    /// [`master_key_pending_flood`] with its removal for the relay's vectors: (the
+    /// roster held after the first show, the second show, the linked device).
+    pub(crate) fn master_key_pending_flood_vector() -> (Roster, Roster, String) {
+        let id = Id::new();
+        let master = id.master();
+        let (root, h, p) = (kp(10), kp(11), kp(200));
+        let mut held = Roster::genesis(&id.m, &id.r, &root, NOW - 10);
+        let base = held.base();
+        with_consent(&mut held, &h);
+        held.add_vouch(sign_vouch(&root, &master, &base, &h.peer_id()));
+        let held = held.verified(NOW);
+        let show = |from: u32| {
+            let mut f = held.clone();
+            f.add_consent(sign_consent(&p, &master));
+            f.add_pending(sign_pending(&id.m, &base, &p.peer_id()));
+            f.add_removal(sign_removal(&p, &master, &base, &root.peer_id(), &[]));
+            for i in from..from + 95 {
+                let j = junk_kp(70_000 + i);
+                f.add_consent(sign_consent(&j, &master));
+                f.add_vouch(sign_vouch(&p, &master, &base, &j.peer_id()));
+            }
+            f.verified(NOW)
+        };
+        (held.merged(&show(0)), show(1000), h.peer_id())
+    }
+
+    /// A master-key pending join removes the root and floods junk vouches inside the
+    /// consent cap, valid junk-to-junk ones past the vouch cap: the honest backup vouch
+    /// a -> b (b's tree vouch is the root's) stays, valid, ahead of every junk one.
+    /// (held after the first show, the second show, the backup vouch.)
+    pub(crate) fn pending_backup_flood() -> (Roster, Roster, Vouch) {
+        let id = Id::new();
+        let master = id.master();
+        let (root, a, b, p) = (kp(10), kp(11), kp(12), kp(200));
+        let mut held = Roster::genesis(&id.m, &id.r, &root, NOW - 10);
+        let base = held.base();
+        for d in [&a, &b] {
+            with_consent(&mut held, d);
+            held.add_vouch(sign_vouch(&root, &master, &base, &d.peer_id()));
+        }
+        let backup = sign_vouch(&a, &master, &base, &b.peer_id());
+        held.add_vouch(backup.clone());
+        let held = held.verified(NOW);
+        let junk: Vec<NativeKeypair> = (0..88u32).map(|i| junk_kp(50_000 + i)).collect();
+        let show = |half: usize| {
+            let mut f = held.clone();
+            f.add_consent(sign_consent(&p, &master));
+            f.add_pending(sign_pending(&id.m, &base, &p.peer_id()));
+            f.add_removal(sign_removal(&p, &master, &base, &root.peer_id(), &[]));
+            for j in &junk {
+                f.add_consent(sign_consent(j, &master));
+            }
+            let part = if half == 0 { &junk[..44] } else { &junk[44..] };
+            for j in part {
+                f.add_vouch(sign_vouch(&p, &master, &base, &j.peer_id()));
+            }
+            for w in part.windows(2) {
+                f.add_vouch(sign_vouch(&w[0], &master, &base, &w[1].peer_id()));
+            }
+            f.verified(NOW)
+        };
+        (held.merged(&show(0)), show(1), backup)
+    }
+
+    /// The first vouch-cap case, then a pending join shows vouched junk twice, past the
+    /// consent cap (F2): (held after the first show, the second show, the case's device).
+    pub(crate) fn pending_junk_over_the_consent_cap() -> (Roster, Roster, String) {
+        let id = Id::new();
+        let m = id.master();
+        let c = vouch_cap_cases().remove(0);
+        let held = c.held.verified(NOW).merged(&c.flood.verified(NOW));
+        let base = held.base();
+        let p = kp(201);
+        let show = |from: u32| {
+            let mut f = held.clone();
+            f.add_consent(sign_consent(&p, &m));
+            f.add_pending(sign_pending(&id.m, &base, &p.peer_id()));
+            for i in from..from + 95 {
+                let j = junk_kp(60_000 + i);
+                f.add_consent(sign_consent(&j, &m));
+                f.add_vouch(sign_vouch(&p, &m, &base, &j.peer_id()));
+            }
+            f.verified(NOW)
+        };
+        (held.merged(&show(0)), show(1000), c.device)
+    }
+
+    /// F1 on its own: only removals every view counts demote a vouch.
+    #[test]
+    fn review189_a_master_key_pending_join_never_demotes_a_backup_vouch() {
+        let (held, shown, backup) = pending_backup_flood();
+        let after = held.merged(&shown);
+        assert!(after.vouches.len() == MAX_VOUCHES, "setup: the flood fills the vouch cap");
+        assert!(after.vouches.contains(&backup), "the honest backup vouch fell out");
+    }
+
+    #[test]
+    fn review189_without_a_pending_removal_the_tree_vouch_stays() {
+        let (held, after, h, tree) = master_key_pending_flood(false);
+        assert!(held.fold(|_| None, NOW).is_member(&h));
+        assert!(after.vouches.contains(&tree), "the root's vouch fell out without any removal");
+        assert!(after.fold(|_| None, NOW).is_member(&h));
+        assert_eq!(after.clone().compacted(), after, "compacting a merge twice changed it");
+    }
+
+    #[test]
+    fn review189_a_master_key_pending_join_uncounts_a_linked_device() {
+        let (held, after, h, tree) = master_key_pending_flood(true);
+        assert!(held.fold(|_| None, NOW).is_member(&h), "h counts before the flood");
+        assert!(after.fold(|_| None, NOW).is_member(&kp(10).peer_id()), "the root still counts");
+        assert!(after.vouches.contains(&tree), "the root's vouch of h fell out of the cap");
+        assert!(after.fold(|_| None, NOW).is_member(&h), "h stopped counting");
+        assert_eq!(after.clone().compacted(), after, "compacting a merge twice changed it");
+    }
+
+    /// Every HOL-SEC-189 case, then a master-key pending join (no removal) shows vouched
+    /// junk twice: the union holds more standing devices than the consent cap (F2).
+    #[test]
+    fn review189_b_a_pending_junk_flood_keeps_every_case() {
+        let id = Id::new();
+        let m = id.master();
+        let mut bad = Vec::new();
+        for c in vouch_cap_cases() {
+            let held = c.held.verified(NOW).merged(&c.flood.verified(NOW));
+            let base = held.base();
+            let p = kp(201);
+            let show = |from: u32| {
+                let mut f = held.clone();
+                f.add_consent(sign_consent(&p, &m));
+                f.add_pending(sign_pending(&id.m, &base, &p.peer_id()));
+                for i in from..from + 95 {
+                    let j = junk_kp(60_000 + i);
+                    f.add_consent(sign_consent(&j, &m));
+                    f.add_vouch(sign_vouch(&p, &m, &base, &j.peer_id()));
+                }
+                f.verified(NOW)
+            };
+            let (s1, s2) = (show(0), show(1000));
+            let after = held.merged(&s1).merged(&s2);
+            if !after.vouches.contains(&c.kept) {
+                bad.push(format!("{}: kept vouch fell out", c.name));
+            }
+            let mut all = c.held.clone();
+            for r in [&c.flood, &s1, &s2] {
+                all.vouches.extend(r.vouches.iter().cloned());
+                all.removals.extend(r.removals.iter().cloned());
+                all.consents.extend(r.consents.iter().cloned());
+                all.pendings.extend(r.pendings.iter().cloned());
+            }
+            if after.walk_view() != all.walk_view() {
+                bad.push(format!("{}: walk differs from every statement", c.name));
+            }
+            if after.clone().compacted() != after {
+                bad.push(format!("{}: not idempotent", c.name));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:?}");
+    }
+
     /// HOL-SEC-079. A device the removed one vouched cannot keep itself by removing it
     /// too: a removed device keeps only the vouchees that every removal of it keeps.
     #[test]
@@ -1760,5 +2203,388 @@ mod tests {
         let b2 = b.merged_by_first_sight(&a, &sb);
         assert_eq!(a2.merged_by_first_sight(&b2, &sa), a2, "precondition: A's view is settled");
         assert_eq!(a2.digest(), b2.digest(), "two holders of one identity's roster never agree on its digest");
+    }
+
+    // t14-ident HOL-SEC-189
+
+    /// One vouch-cap case: `held` is the honest roster, `flood` what a removed (or busy)
+    /// device shows, `kept` the vouch the merge must keep, `member` whether `device`
+    /// belongs in ID-1's fold afterwards (None: the fold decides it on other grounds).
+    pub(crate) struct VouchCapCase {
+        pub name: &'static str,
+        pub held: Roster,
+        pub flood: Roster,
+        pub device: String,
+        pub kept: Vouch,
+        pub member: Option<bool>,
+    }
+
+    /// The honest roster with its removals left out, plus `extra` and a flood of vouches
+    /// for keys nobody consented under: what a device that never saw its removal shows.
+    fn shown_flood(held: &Roster, by: &NativeKeypair, extra: Vec<Vouch>, extra_rm: Vec<Removal>, extra_consent: &[&NativeKeypair]) -> Roster {
+        let mut f = held.clone();
+        f.removals.clear();
+        f.vouches.extend(extra);
+        f.removals.extend(extra_rm);
+        for d in extra_consent {
+            with_consent(&mut f, d);
+        }
+        let base = held.base();
+        for i in 0..(MAX_VOUCHES as u32 + 4) {
+            f.vouches.push(sign_vouch(by, &f.master.clone(), &base, &junk_kp(70_000 + i).peer_id()));
+        }
+        f
+    }
+
+    pub(crate) fn vouch_cap_cases() -> Vec<VouchCapCase> {
+        let id = Id::new();
+        let m = id.master();
+        let ks = by_id();
+        let (root, k1, k2, k3, k4, k5) = (&ks[0], &ks[1], &ks[2], &ks[3], &ks[4], &ks[5]);
+        let linked = |devs: &[&NativeKeypair]| {
+            let mut r = Roster::genesis(&id.m, &id.r, root, NOW - 10);
+            let base = r.base();
+            for d in devs {
+                with_consent(&mut r, d);
+                r.add_vouch(sign_vouch(root, &m, &base, &d.peer_id()));
+            }
+            r
+        };
+        let vouch = |by: &NativeKeypair, d: &NativeKeypair, base: &str| sign_vouch(by, &m, base, &d.peer_id());
+        let removal = |by: &NativeKeypair, d: &NativeKeypair, base: &str, keep: &[&NativeKeypair]| {
+            let keep: Vec<String> = keep.iter().map(|k| k.peer_id()).collect();
+            sign_removal(by, &m, base, &d.peer_id(), &keep)
+        };
+        let mut out = Vec::new();
+
+        // The root removes t; t, ranked before the honest voucher a, vouches a's vouchee h
+        // and floods. The cap must keep a's vouch, or h is valid only through void t.
+        let (t, a, h) = (k1, k2, k3);
+        let mut held = linked(&[t, a]);
+        let base = held.base();
+        with_consent(&mut held, h);
+        held.add_vouch(vouch(a, h, &base));
+        held.add_removal(removal(root, t, &base, &[]));
+        let flood = shown_flood(&held, t, vec![vouch(t, h, &base)], vec![], &[]);
+        out.push(VouchCapCase { name: "removed-voucher-floods", held: held.clone(), flood, device: h.peer_id(), kept: vouch(a, h, &base), member: Some(true) });
+        let s1 = held;
+
+        // A removed voucher's vouch that its removal KEEPS stays valid: q (removed, keeps
+        // nothing) vouches h and floods; t's vouch of h, kept by t's removal, must stay.
+        let (q, t, h) = (k1, k2, k3);
+        let mut held = linked(&[q, t]);
+        let base = held.base();
+        with_consent(&mut held, h);
+        held.add_vouch(vouch(t, h, &base));
+        held.add_removal(removal(root, t, &base, &[h]));
+        held.add_removal(removal(root, q, &base, &[]));
+        let flood = shown_flood(&held, q, vec![vouch(q, h, &base)], vec![], &[]);
+        out.push(VouchCapCase { name: "a-kept-vouchee-keeps-its-vouch", held, flood, device: h.peer_id(), kept: vouch(t, h, &base), member: Some(true) });
+
+        // Walk clause 1: removed t's own removal of a counts for nothing.
+        let (t, a, h) = (k1, k2, k3);
+        let base = s1.base();
+        let flood = shown_flood(&s1, t, vec![vouch(t, h, &base)], vec![removal(t, a, &base, &[])], &[]);
+        out.push(VouchCapCase { name: "a-removed-signers-removal-is-void", held: s1.clone(), flood, device: h.peer_id(), kept: vouch(a, h, &base), member: None });
+
+        // Walk clause 2: t's puppet p, which nobody removed, removes a.
+        let p = k4;
+        let flood = shown_flood(&s1, t, vec![vouch(t, h, &base), vouch(t, p, &base)], vec![removal(p, a, &base, &[])], &[p]);
+        out.push(VouchCapCase { name: "a-removed-devices-puppet-removes-nothing", held: s1.clone(), flood, device: h.peer_id(), kept: vouch(a, h, &base), member: None });
+
+        // Clause 2 per tier: s ranks in tier 0 (through t), so it is judged from the roots
+        // alone, though the pending join j vouches it too.
+        let (s, j) = (k4, k5);
+        let mut held = s1.clone();
+        for d in [j, s] {
+            with_consent(&mut held, d);
+        }
+        held.add_pending(sign_pending(&id.m, &base, &j.peer_id()));
+        held.add_vouch(vouch(j, s, &base));
+        let flood = shown_flood(&held, t, vec![vouch(t, h, &base), vouch(t, s, &base)], vec![removal(s, a, &base, &[])], &[]);
+        out.push(VouchCapCase { name: "a-root-tier-signer-is-judged-from-the-roots", held, flood, device: h.peer_id(), kept: vouch(a, h, &base), member: None });
+
+        // A pending join's vouch is valid (it seeds the pending tier), so a removed
+        // device's flood never outranks it.
+        let (t, h, j) = (k1, k3, k5);
+        let mut held = linked(&[t]);
+        let base = held.base();
+        for d in [h, j] {
+            with_consent(&mut held, d);
+        }
+        held.add_pending(sign_pending(&id.m, &base, &j.peer_id()));
+        held.add_vouch(vouch(j, h, &base));
+        held.add_removal(removal(root, t, &base, &[]));
+        let flood = shown_flood(&held, t, vec![vouch(t, h, &base)], vec![], &[]);
+        out.push(VouchCapCase { name: "a-pending-joins-vouch-outranks-a-removed-device", held, flood, device: h.peer_id(), kept: vouch(j, h, &base), member: Some(false) });
+
+        // Each tree vouch comes from the NEAREST valid voucher. u (under removed t) and v
+        // vouch each other and w2 vouches v; picking v's tree vouch by plain rank takes u's
+        // (u sorts before w2), the tree loops u <-> v, and a busy w1's flood leaves both
+        // with no path to the phrase.
+        let (t, w1, u, w2, v) = (k1, k2, k3, k4, k5);
+        let mut held = linked(&[t, w1]);
+        let base = held.base();
+        for d in [u, w2, v] {
+            with_consent(&mut held, d);
+        }
+        for (by, d) in [(t, u), (w1, w2), (w2, v), (u, v), (v, u)] {
+            held.add_vouch(vouch(by, d, &base));
+        }
+        held.add_removal(removal(root, t, &base, &[]));
+        let flood = shown_flood(&held, w1, vec![], vec![], &[]);
+        out.push(VouchCapCase { name: "the-vouch-tree-stays-rooted", held, flood, device: u.peer_id(), kept: vouch(w2, v, &base), member: Some(true) });
+
+        // Past the tree, valid vouches still outrank a removed device's: b's second vouch
+        // of h stays though removed t ranks before b.
+        let (t, a, b, h) = (k1, k2, k3, k4);
+        let mut held = linked(&[t, a, b]);
+        let base = held.base();
+        with_consent(&mut held, h);
+        held.add_vouch(vouch(a, h, &base));
+        held.add_vouch(vouch(b, h, &base));
+        held.add_removal(removal(root, t, &base, &[]));
+        let flood = shown_flood(&held, t, vec![], vec![], &[]);
+        out.push(VouchCapCase { name: "a-second-valid-vouch-outranks-a-removed-device", held, flood, device: h.peer_id(), kept: vouch(b, h, &base), member: Some(true) });
+
+        // A puppet of removed t that nobody removed is still not valid: p ranks before the
+        // honest voucher a (both at depth 2), vouches h and floods.
+        let (t, x, p, a, h) = (k1, k2, k3, k4, k5);
+        let mut held = linked(&[t, x]);
+        let base = held.base();
+        for d in [a, h] {
+            with_consent(&mut held, d);
+        }
+        held.add_vouch(vouch(x, a, &base));
+        held.add_vouch(vouch(a, h, &base));
+        held.add_removal(removal(root, t, &base, &[]));
+        let flood = shown_flood(&held, p, vec![vouch(t, p, &base), vouch(p, h, &base)], vec![], &[p]);
+        out.push(VouchCapCase { name: "a-removed-devices-puppet-is-never-a-valid-voucher", held, flood, device: h.peer_id(), kept: vouch(a, h, &base), member: Some(true) });
+
+        // RC32-10: v's vouch made s valid at s's turn (s then removes x); w, ranked after
+        // s, removes v keeping nothing, so the vouch ends invalid. Removed t floods. The
+        // cap must keep v's vouch, or a compacted roster walks s dead and x stays.
+        let (t, v, x, y, s, w) = (k1, k2, k3, k4, k5, &ks[6]);
+        let mut held = linked(&[t, v, x, y]);
+        let base = held.base();
+        for d in [s, w] {
+            with_consent(&mut held, d);
+        }
+        for (by, d) in [(v, s), (t, s), (y, w)] {
+            held.add_vouch(vouch(by, d, &base));
+        }
+        held.add_removal(removal(root, t, &base, &[]));
+        held.add_removal(removal(s, x, &base, &[]));
+        held.add_removal(removal(w, v, &base, &[]));
+        let flood = shown_flood(&held, t, vec![], vec![], &[]);
+        out.push(VouchCapCase { name: "the-walks-support-stays", held, flood, device: x.peer_id(), kept: vouch(v, s, &base), member: None });
+
+        // A removed device's vouch that sets a device's RANK stays too: through removed t,
+        // s ranks before w, so s's removal of w counts first. Cut t's vouch and s sinks to
+        // w's depth, w (lower id) walks first and removes s.
+        let (q, t, a, b, c, w, s) = (k1, k2, k3, k4, k5, &ks[6], &ks[7]);
+        let mut held = linked(&[q, t, a]);
+        let base = held.base();
+        for d in [b, c, w, s] {
+            with_consent(&mut held, d);
+        }
+        for (by, d) in [(a, b), (b, s), (t, s), (a, c), (c, w)] {
+            held.add_vouch(vouch(by, d, &base));
+        }
+        held.add_removal(removal(root, q, &base, &[]));
+        held.add_removal(removal(root, t, &base, &[]));
+        held.add_removal(removal(s, w, &base, &[]));
+        held.add_removal(removal(w, s, &base, &[]));
+        let flood = shown_flood(&held, q, vec![], vec![], &[]);
+        out.push(VouchCapCase { name: "the-rank-tree-stays", held, flood, device: s.peer_id(), kept: vouch(t, s, &base), member: None });
+
+        // The support is the WHOLE path: s is valid at its turn through x -> v -> s, w
+        // (after s) removes x keeping nothing, and v's best-ranked voucher is removed q.
+        // Keep only v's vouch of s and x's vouch of v falls to q's flood.
+        let (q, x, y, z, v, z2, s, w) = (k1, k2, k3, k4, k5, &ks[6], &ks[7], &ks[8]);
+        let mut held = linked(&[q, x, y, z]);
+        let base = held.base();
+        for d in [v, z2, s, w] {
+            with_consent(&mut held, d);
+        }
+        for (by, d) in [(x, v), (q, v), (v, s), (z, z2), (z2, w)] {
+            held.add_vouch(vouch(by, d, &base));
+        }
+        held.add_removal(removal(root, q, &base, &[]));
+        held.add_removal(removal(s, y, &base, &[]));
+        held.add_removal(removal(w, x, &base, &[]));
+        let flood = shown_flood(&held, q, vec![], vec![], &[]);
+        out.push(VouchCapCase { name: "the-whole-support-path-stays", held, flood, device: y.peer_id(), kept: vouch(x, v, &base), member: None });
+        out
+    }
+
+    fn run_vouch_cap_case(name: &str) {
+        let c = vouch_cap_cases().into_iter().find(|c| c.name == name).unwrap();
+        let held = c.held.verified(NOW);
+        let merged = held.merged(&c.flood.verified(NOW));
+        assert!(merged.vouches.contains(&c.kept), "{name}: the vouch {} -> {} fell out of the cap", c.kept.by, c.kept.device);
+        assert_eq!(merged.verified(NOW), merged, "{name}: compaction is not stable");
+        if let Some(member) = c.member {
+            assert_eq!(fold_now(&merged).is_member(&c.device), member, "{name}: membership in ID-1's fold");
+        }
+        let uncapped = { let mut u = c.held.clone(); u.vouches.extend(c.flood.vouches.iter().cloned()); u.removals.extend(c.flood.removals.iter().cloned()); u.consents.extend(c.flood.consents.iter().cloned()); u };
+        assert!(uncapped.verified(NOW).vouches.contains(&c.kept), "{name}: one roster holding every statement drops the vouch");
+        assert_eq!(merged.walk_view(), uncapped.walk_view(), "{name}: the compacted roster walks differently");
+    }
+
+    /// HOL-SEC-189. A removed device that ranks before an honest voucher vouches the
+    /// honest vouchee and floods: the vouch cap must rank by validity, or the vouchee is
+    /// valid only through the removed device.
+    #[test]
+    fn hol_sec_189_a_removed_devices_vouch_flood_never_uncounts_a_device_another_voucher_holds() {
+        run_vouch_cap_case("removed-voucher-floods");
+    }
+
+    #[test]
+    fn hol_sec_189_a_vouch_the_removal_keeps_outranks_a_removed_devices_flood() {
+        run_vouch_cap_case("a-kept-vouchee-keeps-its-vouch");
+    }
+
+    #[test]
+    fn hol_sec_189_a_removed_signers_own_removals_never_void_a_voucher() {
+        run_vouch_cap_case("a-removed-signers-removal-is-void");
+    }
+
+    #[test]
+    fn hol_sec_189_a_removed_devices_puppet_never_voids_a_voucher() {
+        run_vouch_cap_case("a-removed-devices-puppet-removes-nothing");
+    }
+
+    #[test]
+    fn hol_sec_189_a_root_tier_signer_is_judged_from_the_roots_alone() {
+        run_vouch_cap_case("a-root-tier-signer-is-judged-from-the-roots");
+    }
+
+    #[test]
+    fn hol_sec_189_a_pending_joins_vouch_outranks_a_removed_devices_flood() {
+        run_vouch_cap_case("a-pending-joins-vouch-outranks-a-removed-device");
+    }
+
+    #[test]
+    fn hol_sec_189_each_tree_vouch_comes_from_the_nearest_valid_voucher() {
+        run_vouch_cap_case("the-vouch-tree-stays-rooted");
+    }
+
+    #[test]
+    fn hol_sec_189_a_second_valid_vouch_outranks_a_removed_devices_flood() {
+        run_vouch_cap_case("a-second-valid-vouch-outranks-a-removed-device");
+    }
+
+    #[test]
+    fn hol_sec_189_a_removed_devices_puppet_is_never_a_valid_voucher() {
+        run_vouch_cap_case("a-removed-devices-puppet-is-never-a-valid-voucher");
+    }
+
+    #[test]
+    fn hol_sec_189_the_cap_keeps_what_made_a_walk_signer_valid() {
+        run_vouch_cap_case("the-walks-support-stays");
+    }
+
+    #[test]
+    fn hol_sec_189_the_cap_keeps_the_whole_path_that_made_a_walk_signer_valid() {
+        run_vouch_cap_case("the-whole-support-path-stays");
+    }
+
+    #[test]
+    fn hol_sec_189_the_cap_keeps_each_devices_best_ranked_vouch() {
+        run_vouch_cap_case("the-rank-tree-stays");
+    }
+
+    /// RC32-10 as a property: random identities with vouch loops, removals and pending
+    /// joins, flooded past the vouch cap by a random device. Compacting twice changes
+    /// nothing, and the compacted roster walks as every statement did.
+    #[test]
+    fn compaction_is_idempotent_under_a_vouch_flood() {
+        let id = Id::new();
+        let m = id.master();
+        let mut seed = 0x0189_2026_1104u64;
+        let mut next = |n: u64| {
+            seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            (z ^ (z >> 31)) % n
+        };
+        let pool: Vec<NativeKeypair> = (0..14u8).map(|i| kp(20 + i)).collect();
+        let junk: Vec<String> = (0..(MAX_VOUCHES as u32 + 4)).map(|i| junk_kp(80_000 + i).peer_id()).collect();
+        let mut floods: BTreeMap<(String, String), Vec<Vouch>> = BTreeMap::new();
+        for round in 0..300 {
+            let n = 3 + next(10) as usize;
+            let devs = &pool[..n];
+            let mut r = Roster::genesis(&id.m, &id.r, &devs[0], NOW - 10);
+            let base = r.base();
+            for d in &devs[1..] {
+                if next(10) < 9 {
+                    with_consent(&mut r, d);
+                }
+            }
+            for i in 1..n {
+                r.add_vouch(sign_vouch(&devs[next(i as u64) as usize], &m, &base, &devs[i].peer_id()));
+                if next(10) < 4 {
+                    let by = next(n as u64) as usize;
+                    if by != i {
+                        r.add_vouch(sign_vouch(&devs[by], &m, &base, &devs[i].peer_id()));
+                    }
+                }
+            }
+            for _ in 0..next(3) {
+                r.add_pending(sign_pending(&id.m, &base, &devs[1 + next(n as u64 - 1) as usize].peer_id()));
+            }
+            for _ in 0..next(8) {
+                let (by, d) = (next(n as u64) as usize, next(n as u64) as usize);
+                let keep: Vec<String> = (0..next(3)).map(|_| devs[next(n as u64) as usize].peer_id()).collect();
+                let mut keep = keep;
+                keep.sort();
+                keep.dedup();
+                r.add_removal(sign_removal(&devs[by], &m, &base, &devs[d].peer_id(), &keep));
+            }
+            let flooder = &devs[next(n as u64) as usize];
+            let mut flood = r.clone();
+            for _ in 0..next(4) {
+                let d = &devs[next(n as u64) as usize];
+                if d.peer_id() != flooder.peer_id() {
+                    flood.vouches.push(sign_vouch(flooder, &m, &base, &d.peer_id()));
+                }
+            }
+            // Signatures are checked elsewhere; compaction alone keeps this fast.
+            let junk_vouches = floods
+                .entry((flooder.peer_id(), base.clone()))
+                .or_insert_with(|| junk.iter().map(|j| sign_vouch(flooder, &m, &base, j)).collect());
+            flood.vouches.extend(junk_vouches.iter().cloned());
+            let once = flood.clone().compacted();
+            assert_eq!(once.clone().compacted(), once, "round {round}: compacting twice changed the roster");
+            assert_eq!(once.walk_view(), flood.walk_view(), "round {round}: the compacted roster walks differently");
+            let merged = r.clone().compacted().merged(&once);
+            assert_eq!(merged.clone().compacted(), merged, "round {round}: a merge is not stable");
+            if round % 30 == 0 {
+                // Past the consent cap: a pending join shows vouched junk twice (F2).
+                let p = &devs[1 + next(n as u64 - 1) as usize];
+                let show = |from: u32| {
+                    let mut f = once.clone();
+                    f.add_pending(sign_pending(&id.m, &base, &p.peer_id()));
+                    for i in from..from + 95 {
+                        let j = junk_kp(90_000 + i);
+                        f.consents.push(sign_consent(&j, &m));
+                        f.vouches.push(sign_vouch(p, &m, &base, &j.peer_id()));
+                    }
+                    f
+                };
+                let (s1, s2) = (show(0), show(1000));
+                let over = once.merged(&s1.clone().compacted()).merged(&s2.clone().compacted());
+                assert_eq!(over.clone().compacted(), over, "round {round}: a merge past the consent cap is not stable");
+                let mut all = flood.clone();
+                for x in [&s1, &s2] {
+                    all.vouches.extend(x.vouches.iter().cloned());
+                    all.consents.extend(x.consents.iter().cloned());
+                    all.pendings.extend(x.pendings.iter().cloned());
+                }
+                assert_eq!(over.walk_view(), all.walk_view(), "round {round}: past the consent cap the walk differs");
+            }
+        }
     }
 }

@@ -216,6 +216,25 @@ int main() {
               ok == total && total > 0);
         check("the cached fold follows a pending join as it matures (" + std::to_string(maturing_cases) + ")",
               maturing_cases > 0);
+        // HOL-SEC-189: a removed device's vouch flood keeps the honest voucher's vouch.
+        // Compacting what the relay holds again changes nothing (RC32-10).
+        size_t vouch_cap = 0, stable = 0;
+        bool honest_kept = false;
+        for (const auto& c : v["cases"]) {
+            const std::string name = c["name"];
+            if (name.rfind("hol-sec-189-", 0) != 0) continue;
+            vouch_cap++;
+            if (name == "hol-sec-189-removed-voucher-floods") honest_kept = c["member"].get<bool>();
+            RosterBook book;
+            book.restore(c["master"], *roster::from_json(c["held"]), {}, 1);
+            book.show(c["master"], *roster::from_json(c["shown"]), c["device"], 2, c["now_ms"], crypto);
+            const RosterBook::Held* held = book.get(c["master"]);
+            if (held && held->roster.compacted(crypto) == held->roster) stable++;
+            else printf("  FAIL vector %s: compacting the held roster again changes it\n", name.c_str());
+        }
+        check("the vouch cap vectors are present (" + std::to_string(vouch_cap) + ")", vouch_cap >= 12);
+        check("a removed device's vouch flood leaves the honest vouchee a member", honest_kept);
+        check("every vouch cap vector compacts to itself", stable == vouch_cap);
     }
 
     // A roster's JSON is read as strictly as serde reads it.

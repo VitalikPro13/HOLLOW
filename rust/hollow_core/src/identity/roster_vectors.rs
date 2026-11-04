@@ -425,6 +425,22 @@ fn cases() -> Vec<Case> {
     }
     let waited = BTreeMap::from([(seen_key(&base, &real), NOW - 8 * DAY)]);
     out.push(relay_case("a-later-flood-keeps-the-real-ask", NOW, &m, &real, Some((asking.clone().verified(NOW), waited)), flood_asks));
+    // HOL-SEC-189: the vouch cap ranks by validity under the removal walk.
+    for c in super::roster::tests::vouch_cap_cases() {
+        let name = format!("hol-sec-189-{}", c.name);
+        out.push(relay_case(&name, NOW, &m, &c.device, Some((c.held.verified(NOW), BTreeMap::new())), c.flood.verified(NOW)));
+    }
+    // Its review (F1): a pending join only the master key made removes the root and
+    // floods vouched junk; the root's vouch of the linked device stays.
+    let (held, shown, h) = super::roster::tests::master_key_pending_flood_vector();
+    let fm = held.master.clone();
+    out.push(relay_case("review189-master-key-pending-flood", NOW, &fm, &h, Some((held, BTreeMap::new())), shown));
+    let (held, shown, backup) = super::roster::tests::pending_backup_flood();
+    let fm = held.master.clone();
+    out.push(relay_case("review189-master-key-pending-backup-vouch", NOW, &fm, &backup.device, Some((held, BTreeMap::new())), shown));
+    let (held, shown, device) = super::roster::tests::pending_junk_over_the_consent_cap();
+    let fm = held.master.clone();
+    out.push(relay_case("review189-pending-junk-over-the-consent-cap", NOW, &fm, &device, Some((held, BTreeMap::new())), shown));
     out
 }
 
@@ -461,4 +477,11 @@ fn roster_vectors_are_current() {
     assert!(refused.member && refused.removed.len() == 1, "a refused join gained removals by waiting");
     let flooded = named("a-later-flood-keeps-the-real-ask");
     assert!(flooded.member && flooded.merged_counts[4] == MAX_PENDING, "a later flood pushed out the real ask");
+    for c in super::roster::tests::vouch_cap_cases() {
+        let v = named(&format!("hol-sec-189-{}", c.name));
+        assert!(v.accepted && v.merged_counts[3] == MAX_VOUCHES, "{}: the case must fill the vouch cap", v.name);
+        if let Some(member) = c.member {
+            assert_eq!(v.member, member, "{}: membership at the relay", v.name);
+        }
+    }
 }
