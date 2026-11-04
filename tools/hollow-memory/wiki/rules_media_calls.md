@@ -122,11 +122,18 @@ whitelist) stay in CLAUDE.md.
   before answering an offer, else that leg has no audio sender. Muting with peers present keeps
   the track (disabled) and Windows releases the device ~3 s later on its own.
 - The meter loopback's received copy would carry our MIC's track id (libwebrtc names a received
-  track after the sender's), and native `setVolume` resolves local tracks first, so volume 0 hit
+  track after the sender's), and native `setVolume` resolved local tracks first, so volume 0 hit
   the mic and people heard themselves (#97, 0.12.1): the receiver reads a renamed id
   (`meterReceiverSdp`), volume waits for `onTrack`, any doubt closes the pair. NEVER call into a
   PeerConnection from the native `MediaTrackForId` (it walks every observer; a closed PC crashes).
   `feedback_remote_track_volume_not_found`.
+- A received voice's volume is set ONLY by (connection, receiver) via `setRemoteReceiverVolume` /
+  `Helper.setReceiverVolume`, NEVER by track id: any peer writes its own track id (HOL-SEC-190).
+  Native looks only among that connection's receivers (Android: the transceivers `onTrack` stored
+  by mid; a `getReceivers()`/`getTransceivers()` list is DISPOSED by the next such call, so never
+  hand one to the audio op queue), nothing matched = error, never a local track. Slider and deafen
+  cover every audio receiver of a leg; a receiver opened later takes the wanted volume in onTrack.
+  `remote_receiver_volume_test` guards all three native lookups.
 
 ## Linux audio and calls
 

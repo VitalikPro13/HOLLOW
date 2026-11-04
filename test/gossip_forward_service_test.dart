@@ -61,6 +61,9 @@ class _Native {
   final sinks = <String, MockStreamHandlerEventSink>{};
   final received = <String, List<String>>{};
   final volumes = <(String, double)>[];
+
+  /// Every volume call as the native side receives it: connection, receiver.
+  final volumeCalls = <(String?, String?, double)>[];
   final sent = <String, List<(String track, String stream)>>{};
 
   /// The sender id each sent track's m-section carries in the SDP.
@@ -140,7 +143,16 @@ class _Native {
             ]
           };
         case 'setVolume':
-          volumes.add((args['trackId'] as String, (args['volume'] as num).toDouble()));
+          // What the native side may resolve: the named receiver on the named
+          // connection, never a track id (HOL-SEC-190).
+          final receiverId = args['receiverId'] as String?;
+          final volume = (args['volume'] as num).toDouble();
+          volumeCalls.add((pc, receiverId, volume));
+          for (final t in received[pc] ?? const <String>[]) {
+            if (receiverId != null && 'r-$t' == receiverId) {
+              volumes.add((t, volume));
+            }
+          }
           return null;
         case 'getCaptureLevel':
           return {'levelDb': -100.0};
@@ -753,5 +765,106 @@ void main() {
     expect(native.volumes, contains(('t-mic-of-a', 0.0)),
         reason: "A's SDP named its own voice a forward and it escaped the "
             'volume');
+  });
+
+  // HOL-SEC-190: volume is keyed by (connection, receiver), never a track id.
+  group('receiver-keyed volume', () {
+    setUp(() => gossipForwardingEnabled = false);
+
+    test('a member volume names that leg and its receiver, never a track id',
+        () async {
+      svc = await join(_b);
+      svc.channelMembers = () => {_a};
+      final toA = await leg(_a);
+      native.voiceArrives(toA, 'mic-track', 's-a');
+      await settle();
+      native.volumeCalls.clear();
+      await svc.setRemoteVolume(_a, 0.0);
+      expect(native.volumeCalls, [(toA, 'r-mic-track', 0.0)],
+          reason: "A's voice was named by its track id, which A chose: here "
+              'it is our own microphone id');
+    });
+
+    test('a member volume covers every voice on that leg', () async {
+      svc = await join(_b);
+      svc.channelMembers = () => {_a};
+      final toA = await leg(_a);
+      native.voiceArrives(toA, 't-a1', 's-a');
+      native.voiceArrives(toA, 't-a2', 's-a2');
+      await settle();
+      native.volumes.clear();
+      await svc.setRemoteVolume(_a, 0.0);
+      expect(native.volumes, containsAll([('t-a1', 0.0), ('t-a2', 0.0)]),
+          reason: "A's second audio section escaped A's volume");
+    });
+
+    test('deafen reaches every leg even when two legs carry the same track id',
+        () async {
+      svc = await join(_b);
+      svc.channelMembers = () => {_a, _c};
+      final toA = await leg(_a);
+      final toC = await leg(_c);
+      native.voiceArrives(toA, 't-same', 's-a');
+      native.voiceArrives(toA, 't-a2', 's-a2');
+      native.voiceArrives(toC, 't-same', 's-c');
+      await settle();
+      native.volumeCalls.clear();
+      await svc.setDeafened(true);
+      expect(
+          native.volumeCalls,
+          containsAll([
+            (toA, 'r-t-same', 0.0),
+            (toA, 'r-t-a2', 0.0),
+            (toC, 'r-t-same', 0.0),
+          ]),
+          reason: 'a voice kept playing after deafen');
+      expect(native.volumeCalls.every((c) => c.$2 != null), isTrue,
+          reason: 'a volume call named no receiver');
+    });
+
+    test('a voice that arrives while deafened starts silent', () async {
+      svc = await join(_b);
+      svc.channelMembers = () => {_a};
+      final toA = await leg(_a);
+      native.voiceArrives(toA, 't-a', 's-a');
+      await settle();
+      await svc.setDeafened(true);
+      native.volumes.clear();
+      native.voiceArrives(toA, 't-a-new', 's-a-new');
+      await settle();
+      expect(native.volumes, contains(('t-a-new', 0.0)),
+          reason: 'a new audio section from A played through deafen');
+    });
+
+    test('a voice that arrives after a member was turned down takes that volume',
+        () async {
+      svc = await join(_b);
+      svc.channelMembers = () => {_a};
+      final toA = await leg(_a);
+      native.voiceArrives(toA, 't-a', 's-a');
+      await settle();
+      await svc.setRemoteVolume(_a, 0.25);
+      native.volumes.clear();
+      native.voiceArrives(toA, 't-a-new', 's-a-new');
+      await settle();
+      expect(native.volumes, contains(('t-a-new', 0.25)),
+          reason: "A's new audio section played at full volume");
+    });
+
+    test('moving a member slider while deafened keeps them silent', () async {
+      svc = await join(_b);
+      svc.channelMembers = () => {_a};
+      final toA = await leg(_a);
+      native.voiceArrives(toA, 't-a', 's-a');
+      await settle();
+      await svc.setDeafened(true);
+      native.volumes.clear();
+      await svc.setRemoteVolume(_a, 0.5);
+      expect(native.volumes.where((v) => v.$2 != 0.0), isEmpty,
+          reason: 'the slider undid deafen for that member');
+      await svc.setDeafened(false);
+      expect(native.volumes.last, ('t-a', 0.5),
+          reason: 'un-deafen forgot the volume chosen while deafened');
+    });
   });
 }

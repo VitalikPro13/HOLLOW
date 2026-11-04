@@ -184,6 +184,11 @@ static void HollowRunAudioTrackOp(NSString* opName, dispatch_block_t block) {
   });
 }
 
+// A method-call argument as a string: a Dart null arrives as NSNull.
+static NSString* HollowStringArg(id value) {
+  return [value isKindOfClass:[NSString class]] ? (NSString*)value : nil;
+}
+
 @implementation FlutterWebRTCPlugin {
 #pragma clang diagnostic pop
   FlutterMethodChannel* _methodChannel;
@@ -1590,23 +1595,19 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     }
   } else if ([@"setVolume" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
-    NSString* trackId = argsMap[@"trackId"];
-    NSNumber* volume = argsMap[@"volume"];
-    NSString* peerConnectionId = argsMap[@"peerConnectionId"];
-
-    RTCMediaStreamTrack* track = [self trackForId:trackId peerConnectionId:peerConnectionId];
-    if (track != nil && [track isKindOfClass:[RTCAudioTrack class]]) {
-      RTCAudioTrack* audioTrack = (RTCAudioTrack*)track;
-      double value = [volume doubleValue];
-      // Off the UI thread — the .source getter and the volume setter are
-      // BOTH signaling-thread hops; during mute churn they queue behind
-      // the mic teardown (see HollowAudioTrackOpQueue).
-      HollowRunAudioTrackOp(@"setVolume", ^{
-        RTCAudioSource* audioSource = audioTrack.source;
-        audioSource.volume = value;
-      });
+    id volume = argsMap[@"volume"];
+    if (![volume isKindOfClass:[NSNumber class]] || [volume doubleValue] < 0) {
+      result([FlutterError errorWithCode:@"setVolume" message:@"no valid volume" details:nil]);
+      return;
     }
-    result(nil);
+    if ([self receiverSetVolume:[volume doubleValue]
+               peerConnectionId:HollowStringArg(argsMap[@"peerConnectionId"])
+                     receiverId:HollowStringArg(argsMap[@"receiverId"])
+                        trackId:HollowStringArg(argsMap[@"trackId"])]) {
+      result(nil);
+    } else {
+      result([FlutterError errorWithCode:@"setVolume" message:@"receiver not found" details:nil]);
+    }
   } else if ([@"setCaptureGain" isEqualToString:call.method]) {
     // Hollow fork: live makeup gain for the post-APM capture processor.
     NSDictionary* argsMap = call.arguments;
@@ -2501,6 +2502,44 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     }
 
     return audioTrackId;
+}
+
+// Sets the volume of the named connection's received audio by receiver id
+// (or track id without one). A track id is whatever the sending peer wrote,
+// so the lookup never leaves that connection and never reaches a local
+// track (HOL-SEC-190). NO when nothing matched.
+- (BOOL)receiverSetVolume:(double)value
+         peerConnectionId:(NSString*)peerConnectionId
+               receiverId:(NSString*)receiverId
+                  trackId:(NSString*)trackId {
+  if (peerConnectionId == nil || (receiverId == nil && trackId == nil)) {
+    return NO;
+  }
+  RTCPeerConnection* peerConnection = _peerConnections[peerConnectionId];
+  if (peerConnection == nil) {
+    return NO;
+  }
+  NSMutableArray<RTCAudioTrack*>* tracks = [NSMutableArray array];
+  for (RTCRtpReceiver* receiver in peerConnection.receivers) {
+    RTCMediaStreamTrack* track = receiver.track;
+    BOOL named = receiverId != nil ? [receiver.receiverId isEqualToString:receiverId]
+                                   : [track.trackId isEqualToString:trackId];
+    if (named && [track isKindOfClass:[RTCAudioTrack class]]) {
+      [tracks addObject:(RTCAudioTrack*)track];
+    }
+  }
+  if (tracks.count == 0) {
+    return NO;
+  }
+  // Off the UI thread: the .source getter and the volume setter are BOTH
+  // signaling-thread hops; during mute churn they queue behind the mic
+  // teardown (see HollowAudioTrackOpQueue).
+  HollowRunAudioTrackOp(@"setVolume", ^{
+    for (RTCAudioTrack* audioTrack in tracks) {
+      audioTrack.source.volume = value;
+    }
+  });
+  return YES;
 }
 
 - (RTCMediaStreamTrack*)trackForId:(NSString*)trackId peerConnectionId:(NSString*)peerConnectionId {

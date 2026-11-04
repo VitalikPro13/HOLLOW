@@ -63,10 +63,10 @@ class LocalMeterLoopback {
     _receiver.onIceCandidate = toSender.add;
     // The native side registers a received track before it sends onTrack;
     // a receiver read straight after setRemoteDescription can beat that.
-    final received = Completer<MediaStreamTrack>();
+    final received = Completer<RTCTrackEvent>();
     _receiver.onTrack = (event) {
       if (event.track.kind == 'audio' && !received.isCompleted) {
-        received.complete(event.track);
+        received.complete(event);
       }
     };
     _sender.onConnectionState = (state) {
@@ -93,10 +93,11 @@ class LocalMeterLoopback {
     // packet can flow before that, so not one frame of our voice is played.
     // Any doubt closes the pair: a dark self ring beats hearing ourselves.
     final copy = await received.future.timeout(const Duration(seconds: 3));
-    if (copy.id == track.id) {
-      throw StateError('meter receiver shares the mic track id');
+    final receiver = copy.receiver;
+    if (copy.track.id == track.id || receiver == null) {
+      throw StateError('meter receiver shares the mic track id or has none');
     }
-    await Helper.setVolume(0.0, copy);
+    await Helper.setReceiverVolume(0.0, receiver);
 
     final answer = await _receiver.createAnswer();
     await _receiver.setLocalDescription(answer);

@@ -873,11 +873,18 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         break;
       }
       case "setVolume": {
-        String trackId = call.argument("trackId");
-        double volume = call.argument("volume");
-        String peerConnectionId = call.argument("peerConnectionId");
-        mediaStreamTrackSetVolume(trackId, volume, peerConnectionId);
-        result.success(null);
+        Number volume = call.argument("volume");
+        if (volume == null || volume.doubleValue() < 0) {
+          resultError("setVolume", "no valid volume", result);
+          break;
+        }
+        if (receiverSetVolume(call.argument("peerConnectionId"),
+            call.argument("receiverId"), call.argument("trackId"),
+            volume.doubleValue())) {
+          result.success(null);
+        } else {
+          resultError("setVolume", "receiver not found", result);
+        }
         break;
       }
       case "setCaptureGain": {
@@ -2059,23 +2066,36 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     track.setEnabled(enabled);
   }
 
-  public void mediaStreamTrackSetVolume(final String id, final double volume, String peerConnectionId) {
-    MediaStreamTrack track = getTrackForId(id, null);
-    if (track instanceof AudioTrack) {
-      Log.d(TAG, "setVolume(): " + id + "," + volume);
-      // Same serial executor as setEnabled: the volume set is a signaling
-      // -thread hop too, and during the mute churn it queued behind the
-      // mic teardown and froze the UI (deafen at 16:28:20, trace_42).
-      runAudioTrackOp("setVolume", () -> {
+  /** Sets the volume of the named connection's received audio, by receiver
+   *  id (or track id without one). A track id is whatever the sending peer
+   *  wrote, so the lookup never leaves that connection and never reaches a
+   *  local track (HOL-SEC-190). False when nothing matched. */
+  boolean receiverSetVolume(@Nullable String peerConnectionId, @Nullable String receiverId,
+      @Nullable String trackId, final double volume) {
+    if (peerConnectionId == null || peerConnectionId.isEmpty()) {
+      return false;
+    }
+    PeerConnectionObserver pco = mPeerConnectionObservers.get(peerConnectionId);
+    if (pco == null) {
+      return false;
+    }
+    final List<AudioTrack> tracks = pco.receivedAudioTracks(receiverId, trackId);
+    if (tracks.isEmpty()) {
+      return false;
+    }
+    // Same serial executor as setEnabled: the volume set is a signaling
+    // -thread hop too, and during the mute churn it queued behind the
+    // mic teardown and froze the UI (deafen at 16:28:20, trace_42).
+    runAudioTrackOp("setVolume", () -> {
+      for (AudioTrack track : tracks) {
         try {
-          ((AudioTrack) track).setVolume(volume);
+          track.setVolume(volume);
         } catch (Exception e) {
           Log.e(TAG, "setVolume(): error", e);
         }
-      });
-    } else {
-      Log.w(TAG, "setVolume(): track not found: " + id);
-    }
+      }
+    });
+    return true;
   }
 
   public void mediaStreamAddTrack(final String streamId, final String trackId, Result result) {

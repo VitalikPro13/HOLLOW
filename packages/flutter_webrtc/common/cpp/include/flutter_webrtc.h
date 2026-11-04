@@ -43,6 +43,10 @@ class FlutterWebRTC : public FlutterWebRTCBase,
                         std::unique_ptr<MethodResultProxy> result);
 
  private:
+  bool ReceiverSetVolume(const std::string& pc_id,
+                         const std::string& receiver_id,
+                         const std::string& track_id,
+                         double volume);
   void initLoggerCallback(RTCLoggingSeverity severity);
   RTCLoggingSeverity str2LogSeverity(std::string str);
 };

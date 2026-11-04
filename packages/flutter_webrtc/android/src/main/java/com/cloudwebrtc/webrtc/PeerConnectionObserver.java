@@ -56,6 +56,11 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
   final Map<String, MediaStream> remoteStreams = new HashMap<>();
   final Map<String, MediaStreamTrack> remoteTracks = new HashMap<>();
   final Map<String, RtpTransceiver> transceivers = new HashMap<>();
+  /** Transceivers libwebrtc handed onTrack, by mid: unlike the lists
+   *  getReceivers()/getTransceivers() return, the next such call never
+   *  disposes them, so a volume set queued on another thread still holds a
+   *  live track. */
+  private final Map<String, RtpTransceiver> receivingTransceivers = new HashMap<>();
   private final StateProvider stateProvider;
   private final EventChannel eventChannel;
   private EventChannel.EventSink eventSink;
@@ -103,6 +108,9 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     remoteStreams.clear();
     remoteTracks.clear();
     dataChannels.clear();
+    synchronized (receivingTransceivers) {
+      receivingTransceivers.clear();
+    }
   }
 
   void dispose() {
@@ -474,6 +482,39 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
   @Override
   public void onTrack(RtpTransceiver transceiver) {
+    String mid = transceiver.getMid();
+    RtpReceiver receiver = transceiver.getReceiver();
+    String key = mid != null ? "mid:" + mid : "receiver:" + receiver.id();
+    synchronized (receivingTransceivers) {
+      receivingTransceivers.put(key, transceiver);
+    }
+  }
+
+  /** The audio tracks of THIS connection's receivers named [receiverId], or,
+   *  without one, whose track is named [trackId]; never a local track and
+   *  never another connection's (HOL-SEC-190). */
+  List<AudioTrack> receivedAudioTracks(@Nullable String receiverId, @Nullable String trackId) {
+    List<AudioTrack> tracks = new ArrayList<>();
+    if (receiverId == null && trackId == null) {
+      return tracks;
+    }
+    synchronized (receivingTransceivers) {
+      for (RtpTransceiver transceiver : receivingTransceivers.values()) {
+        try {
+          RtpReceiver receiver = transceiver.getReceiver();
+          MediaStreamTrack track = receiver.track();
+          boolean named = receiverId != null
+              ? receiverId.equals(receiver.id())
+              : track != null && trackId.equals(track.id());
+          if (named && track instanceof AudioTrack) {
+            tracks.add((AudioTrack) track);
+          }
+        } catch (IllegalStateException e) {
+          Log.w(TAG, "receivedAudioTracks: disposed transceiver skipped");
+        }
+      }
+    }
+    return tracks;
   }
 
   @Override

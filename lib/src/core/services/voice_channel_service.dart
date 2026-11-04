@@ -1050,25 +1050,30 @@ class VoiceChannelService {
   /// Mutes or unmutes all incoming remote audio (deafen).
   ///
   /// Every peer is handled independently: in a mesh, one connection that
-  /// cannot be silenced (a closing PC, a receiver whose track never carried
-  /// media and so is not in the native registry) must not abandon the peers
-  /// after it, leaving some voices playing while others go quiet.
+  /// cannot be silenced (a closing PC) must not abandon the peers after it,
+  /// leaving some voices playing while others go quiet.
   Future<void> setDeafened(bool deafened) async {
     _isDeafened = deafened;
-    for (final entry in _peerConnections.entries) {
+    for (final entry in _peerConnections.entries.toList()) {
       // Un-deafening restores the volume the user chose for THAT member, not
       // a flat 1.0: a peer they had turned down would come back at full
       // volume, which reads as the slider forgetting itself.
       final volume = deafened ? 0.0 : (_peerVolumes[entry.key] ?? 1.0);
       try {
         final receivers = await entry.value.getReceivers();
+        var found = 0, applied = 0;
         for (final r in receivers) {
           if (r.track?.kind == 'audio') {
             final silent =
                 _fwdSilent[entry.key]?.contains(r.track!.id) ?? false;
-            await setRemoteTrackVolume(silent ? 0.0 : volume, r.track!);
+            found++;
+            if (await setRemoteReceiverVolume(silent ? 0.0 : volume, r)) {
+              applied++;
+            }
           }
         }
+        _vcLog('[HOLLOW-VC] Volume ${volume.toStringAsFixed(2)} (deafen '
+            '$deafened) on $applied/$found receiver(s) of ${entry.key}');
       } catch (e) {
         _vcLog('[HOLLOW-VC] Deafen skipped for ${entry.key}: $e');
       }
@@ -1175,24 +1180,35 @@ class VoiceChannelService {
     }
   }
 
+  /// Records how loud [peerId] is heard; while deafened it is only recorded,
+  /// and un-deafening applies it.
   Future<void> setRemoteVolume(String peerId, double volume) async {
     _peerVolumes[peerId] = volume;
+    if (_isDeafened) return;
     await _applyRemoteVolume(peerId, volume);
   }
 
+  /// The volume [peerId]'s own voices play at right now.
+  double _wantedVolume(String peerId) =>
+      _isDeafened ? 0.0 : (_peerVolumes[peerId] ?? 1.0);
+
   /// Applies a playback volume WITHOUT recording it as the user's choice:
   /// the deafen restore passes 0.0 through here, and remembering that would
-  /// erase the per-peer volume it is meant to protect.
+  /// erase the per-peer volume it is meant to protect. Covers EVERY audio
+  /// receiver of the leg but forwards: the peer decides how many it opens.
   Future<void> _applyRemoteVolume(String peerId, double volume) async {
     final pc = _peerConnections[peerId];
     if (pc == null) return;
     final receivers = await pc.getReceivers();
+    var found = 0, applied = 0;
     for (final r in receivers) {
       if (r.track?.kind == 'audio' && !_isFwdReceiver(peerId, r)) {
-        await setRemoteTrackVolume(volume, r.track!);
-        break;
+        found++;
+        if (await setRemoteReceiverVolume(volume, r)) applied++;
       }
     }
+    _vcLog('[HOLLOW-VC] Volume ${volume.toStringAsFixed(2)} on '
+        '$applied/$found receiver(s) of $peerId');
   }
 
   /// Track ids of every connected peer's inbound audio, used by the Windows
@@ -2312,15 +2328,14 @@ class VoiceChannelService {
   /// rebuild replaced: without this, un-deafening was the only way to get a
   /// rebuilt leg back to the volume the user had chosen.
   Future<void> _restorePeerAudioState(String peerId) async {
-    double wanted() => _isDeafened ? 0.0 : (_peerVolumes[peerId] ?? 1.0);
+    double wanted() => _wantedVolume(peerId);
     if (wanted() == 1.0) return;
     _vcLog('[HOLLOW-VC] Restoring playback volume ${wanted()} for $peerId');
     await _applyRemoteVolume(peerId, wanted());
-    // Re-assert once the track has actually carried a packet: a receiver
-    // whose track has never delivered media is not in the platform's
-    // registry yet, and `setVolume` on it is a TOLERATED no-op, so the first
-    // attempt can vanish without a sound. Silently leaving a deafened member
-    // audible is the failure worth the second call.
+    // Re-assert a moment later: Android knows a receiver only once its track
+    // event fired, and `setVolume` before that is a TOLERATED no-op, so the
+    // first attempt can vanish without a sound. Silently leaving a deafened
+    // member audible is the failure worth the second call.
     await Future<void>.delayed(const Duration(milliseconds: 800));
     if (!_peerConnections.containsKey(peerId)) return;
     if (wanted() == 1.0) return;
@@ -2470,6 +2485,13 @@ class VoiceChannelService {
       // (peer, kind), so it would silently keep the cryptor on the dead
       // receiver and the fresh track would play as ciphertext.
       unawaited(_rebindSframeReceiver(peerId, pc, event.receiver));
+      // A receiver starts at full volume: one the peer opens while we are
+      // deafened or have turned it down must not play through.
+      final receiver = event.receiver;
+      final volume = _wantedVolume(peerId);
+      if (receiver != null && volume != 1.0) {
+        unawaited(setRemoteReceiverVolume(volume, receiver));
+      }
     } else if (event.track.kind == 'video') {
       _handleRemoteVideoTrack(peerId, event, pc);
     }
@@ -2705,8 +2727,8 @@ class VoiceChannelService {
                 !(_fwdSilent[e.key]?.contains(t.key) ?? false)));
     if (trackId != null && (heardElsewhere || _isDeafened)) {
       if (heardElsewhere) (_fwdSilent[forwarder] ??= {}).add(trackId);
-      // Again once media flows: before its first packet a track is not in the
-      // platform's registry and the volume call is a tolerated no-op.
+      // Again a moment later: a receiver the platform has not reported yet
+      // takes the volume call as a tolerated no-op.
       for (final wait in const [Duration.zero, Duration(milliseconds: 800), Duration(seconds: 3)]) {
         await Future<void>.delayed(wait);
         if (!_peerConnections.containsKey(forwarder)) return;
@@ -2714,7 +2736,7 @@ class VoiceChannelService {
             !_isDeafened) {
           break;
         }
-        await setRemoteTrackVolume(0.0, event.track);
+        if (receiver != null) await setRemoteReceiverVolume(0.0, receiver);
       }
     }
     _vcLog('[HOLLOW-VC] Gossip: $forwarder forwards $origin'

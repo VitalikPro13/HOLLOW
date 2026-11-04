@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:webrtc_interface/webrtc_interface.dart';
 
 import 'media_stream_track_impl.dart';
+import 'rtc_rtp_receiver_impl.dart';
 import 'utils.dart';
 
 class NativeAudioManagement {
@@ -68,6 +69,26 @@ class NativeAudioManagement {
     }
 
     return Future.value();
+  }
+
+  /// Sets the playback volume of ONE received stream, named by its connection
+  /// and receiver (Hollow fork addition). The native side looks only among
+  /// that connection's receivers and does nothing when it finds none: a track
+  /// id is whatever the sending peer wrote, so it never picks what this
+  /// changes (HOL-SEC-190).
+  static Future<void> setReceiverVolume(
+      double volume, RTCRtpReceiver receiver) async {
+    if (receiver.track?.kind != 'audio') return;
+    if (kIsWeb) {
+      await setVolume(volume, receiver.track!);
+      return;
+    }
+    if (receiver is! RTCRtpReceiverNative) return;
+    await WebRTC.invokeMethod('setVolume', <String, dynamic>{
+      'peerConnectionId': receiver.peerConnectionId,
+      'receiverId': receiver.receiverId,
+      'volume': volume,
+    });
   }
 
   /// Set the post-APM capture makeup gain (Hollow fork addition).

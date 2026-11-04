@@ -614,13 +614,7 @@ void FlutterWebRTC::HandleMethodCall(
     }
 
     const EncodableMap params = GetValue<EncodableMap>(*args);
-    const std::string trackId = findString(params, "trackId");
     const std::optional<double> volume = maybeFindDouble(params, "volume");
-
-    if (trackId.empty()) {
-      result->Error("Bad Arguments", "setVolume() Empty track provided");
-      return;
-    }
 
     if (!volume.has_value()) {
       result->Error("Bad Arguments", "setVolume() No volume provided");
@@ -632,35 +626,12 @@ void FlutterWebRTC::HandleMethodCall(
       return;
     }
 
-    // The receiver's own connection first: a received track can carry the
-    // same id as a local one (libwebrtc names it after the sender's track).
-    scoped_refptr<RTCMediaTrack> track;
-    const std::string pcId = findString(params, "peerConnectionId");
-    if (!pcId.empty()) {
-      auto observer = PeerConnectionObserversForId(pcId);
-      if (observer) track = observer->MediaTrackForId(trackId);
-    }
-    if (nullptr == track.get()) track = MediaTrackForId(trackId);
-    if (nullptr == track.get()) {
-      result->Error("setVolume", "setVolume() Unable to find provided track");
+    if (!ReceiverSetVolume(findString(params, "peerConnectionId"),
+                           findString(params, "receiverId"),
+                           findString(params, "trackId"), volume.value())) {
+      result->Error("setVolume", "setVolume() receiver not found");
       return;
     }
-
-    std::string kind = track->kind().std_string();
-    if (0 != kind.compare("audio")) {
-      result->Error("setVolume",
-                    "setVolume() Only audio tracks can have volume set");
-      return;
-    }
-
-    // Off the platform thread — SetVolume is a signaling-thread hop that
-    // queues behind mic teardown during mute churn (see HollowAudioOpQueue).
-    auto audioTrack =
-        scoped_refptr<RTCAudioTrack>(static_cast<RTCAudioTrack*>(track.get()));
-    const double vol = volume.value();
-    audio_op_queue().Post("setVolume",
-                          [audioTrack, vol]() { audioTrack->SetVolume(vol); });
-
     result->Success();
   } else if (method_call.method_name().compare("setCaptureGain") == 0) {
     // Hollow fork: live makeup gain for the post-APM capture processor.
@@ -1753,6 +1724,46 @@ void FlutterWebRTC::HandleMethodCall(
       result->NotImplemented();
     }
   }
+}
+
+// Sets the volume of the named connection's received audio by receiver id
+// (or track id without one). A track id is whatever the sending peer wrote,
+// so the lookup never leaves that connection and never reaches a local
+// track (HOL-SEC-190). Runs on the platform thread, where close unmaps a
+// connection, so it never calls into a closed one. False when nothing matched.
+bool FlutterWebRTC::ReceiverSetVolume(const std::string& pc_id,
+                                      const std::string& receiver_id,
+                                      const std::string& track_id,
+                                      double volume) {
+  if (pc_id.empty() || (receiver_id.empty() && track_id.empty())) {
+    return false;
+  }
+  RTCPeerConnection* pc = PeerConnectionForId(pc_id);
+  if (pc == nullptr) {
+    return false;
+  }
+  std::vector<scoped_refptr<RTCAudioTrack>> tracks;
+  auto receivers = pc->receivers();
+  for (scoped_refptr<RTCRtpReceiver> receiver : receivers.std_vector()) {
+    scoped_refptr<RTCMediaTrack> track = receiver->track();
+    if (nullptr == track.get()) continue;
+    const bool named = !receiver_id.empty()
+                           ? receiver->id().std_string() == receiver_id
+                           : track->id().std_string() == track_id;
+    if (named && track->kind().std_string() == "audio") {
+      tracks.push_back(scoped_refptr<RTCAudioTrack>(
+          static_cast<RTCAudioTrack*>(track.get())));
+    }
+  }
+  if (tracks.empty()) {
+    return false;
+  }
+  // Off the platform thread: SetVolume is a signaling-thread hop that
+  // queues behind mic teardown during mute churn (see HollowAudioOpQueue).
+  audio_op_queue().Post("setVolume", [tracks, volume]() {
+    for (const auto& track : tracks) track->SetVolume(volume);
+  });
+  return true;
 }
 
 void FlutterWebRTC::initLoggerCallback(RTCLoggingSeverity severity) {

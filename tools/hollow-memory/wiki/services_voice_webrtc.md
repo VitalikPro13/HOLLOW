@@ -154,8 +154,8 @@ Four methods manage per-peer, per-kind SFrame encryption:
 
 - `setMuted(bool)`: Toggles `track.enabled` on local audio tracks
 - `setDeafened(bool)`: Sets volume 0.0 or 1.0 on all remote audio receiver tracks, per peer
-- `setRemoteVolume(peerId, volume)`: Per-peer volume control
-- **Both go through `setRemoteTrackVolume()`** (`core/services/remote_track_volume.dart`), never `Helper.setVolume` directly, and each peer's block is individually try/caught. A receiver whose track never carried media isn't in the native registry, so `setVolume` throws `Unable to find provided track` — unguarded, that threw out of the whole loop and left every peer after it audible while the user believed they were deafened. `voice_service.setRemoteAudioVolume` (DM calls) uses the same helper. See memory `feedback_remote_track_volume_not_found`.
+- `setRemoteVolume(peerId, volume)`: Per-peer volume control; while deafened it only records the value, un-deafen applies it
+- **Both go through `setRemoteReceiverVolume()`** (`core/services/remote_track_volume.dart`), keyed by (connection, receiver), never a track id (HOL-SEC-190: the sender writes the track id, and the old native lookup checked local tracks first, then every connection). Both cover EVERY audio receiver of the leg but accepted forwards, and `_onPeerTrack` puts the wanted volume on a receiver opened later. Each peer's block is individually try/caught: an unknown receiver comes back as an error, and unguarded that threw out of the whole loop and left every peer after it audible while the user believed they were deafened. `voice_service.setRemoteAudioVolume` (DM calls) uses the same helper. See memory `feedback_remote_track_volume_not_found`.
 - **Native threading (2026-07-18, dispose path 2026-07-19):** audio-track `setEnabled`/`setVolume`/dispose-path `RemoveTrack` are SYNCHRONOUS WebRTC signaling-thread hops, and the LiveKit core releases the microphone while all audio tracks are disabled/removed (mic indicator off on mute = full audio-HAL teardown/open per toggle; 662 ms `trackDispose` hangup stall on Windows). On the merged UI/platform thread that froze the UI 2+ s (Pixel). The fork runs these ops on serial background workers — `audioTrackOpExecutor` (Android MethodCallHandlerImpl) / `HollowAudioTrackOpQueue` (darwin) / `HollowAudioOpQueue` (desktop C++, flutter_webrtc_base) — order preserved, camera-track paths stay synchronous. Desktop lesson: even the track-vector GETTERS (`audio_tracks()`/`video_tracks()`) hop — the platform thread does map-only work and the entire stream walk runs on the worker. NEVER call audio track proxy methods on the platform thread. Known open cost: camera-OFF `trackDispose` ~633 ms (sync video path). See memory `feedback_android_audio_track_proxy_ui_freeze`.
 
 ### Live Device Switching (2026-07-10)
@@ -296,7 +296,7 @@ Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set 
 
 `toggleMute()`: Toggles `track.enabled` on first audio track. Returns void.
 
-`setRemoteAudioVolume(volume)`: Sets volume on remote audio receiver track via `Helper.setVolume()`. Range: 0.0 (silent) to 2.0 (2x).
+`setRemoteAudioVolume(volume)`: Sets the volume of every remote audio receiver via `setRemoteReceiverVolume()` (connection + receiver id, HOL-SEC-190) and remembers it for receivers the far side opens later in the same call. Range: 0.0 (silent) to 2.0 (2x).
 
 `toggleVideo()`: SERIALIZED via a chained-future `_videoToggleLock` (each toggle awaits the prior one's full completion) so rapid on/off can't overlap. Delegates to `_toggleVideoInner()`. On **non-Linux** (Windows/macOS) uses the addTrack/removeTrack pattern (NEVER replaceTrack):
 - **Disable**: Gets senders, finds video sender, `pc.removeTrack(sender)`. Stops tracks, disposes `_localVideoStream`. Disposes `_localRenderer`. Sets `_isVideoEnabled = false`.

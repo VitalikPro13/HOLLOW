@@ -40,6 +40,9 @@ class VoiceService {
   String? _activeCallId;
   bool _isMuted = false;
 
+  /// How loud the far side plays this call (deafen = 0.0).
+  double _remoteVolume = 1.0;
+
   /// ICE candidates received before setRemoteDescription is called, keyed by
   /// the call they belong to. See [PendingIceQueue] for why the key matters.
   late final PendingIceQueue _pendingCandidates = PendingIceQueue(log: _log);
@@ -547,17 +550,23 @@ class VoiceService {
 
   /// Sets how loud the remote peer is heard: 0.0 silent, 1.0 normal, 2.0
   /// double.
+  ///
+  /// Covers EVERY audio receiver (the peer decides how many it opens), and
+  /// one it opens later starts at this volume too.
   Future<void> setRemoteAudioVolume(double volume) async {
-    if (_pc == null) return;
-    final receivers = await _pc!.getReceivers();
+    _remoteVolume = volume;
+    final pc = _pc;
+    if (pc == null) return;
+    final receivers = await pc.getReceivers();
+    var found = 0, applied = 0;
     for (final r in receivers) {
       if (r.track?.kind == 'audio') {
-        await setRemoteTrackVolume(volume, r.track!);
-        _log('[HOLLOW-VOICE] Remote audio volume set to '
-            '${volume.toStringAsFixed(2)}');
-        break;
+        found++;
+        if (await setRemoteReceiverVolume(volume, r)) applied++;
       }
     }
+    _log('[HOLLOW-VOICE] Remote audio volume set to '
+        '${volume.toStringAsFixed(2)} on $applied/$found receiver(s)');
   }
 
   /// Track ids of the remote peer's inbound audio, used by the Windows
@@ -1328,6 +1337,7 @@ class VoiceService {
     _activePeerId = null;
     _activeCallId = null;
     _isMuted = false;
+    _remoteVolume = 1.0;
     Helper.setCaptureMuted(false).catchError((_) {});
     _useFrontCamera = true;
   }
@@ -1686,6 +1696,12 @@ class VoiceService {
       // rebind the fresh track plays as ciphertext. No-op before the key
       // exchange.
       unawaited(_rebindSframeAudioReceiver(event.receiver));
+      // A receiver starts at full volume: one the far side opens while we
+      // are deafened or have turned it down must not play through.
+      final receiver = event.receiver;
+      if (receiver != null && _remoteVolume != 1.0) {
+        unawaited(setRemoteReceiverVolume(_remoteVolume, receiver));
+      }
     }
   }
 

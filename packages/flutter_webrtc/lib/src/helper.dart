@@ -176,6 +176,13 @@ class Helper {
   static Future<void> setVolume(double volume, MediaStreamTrack track) =>
       NativeAudioManagement.setVolume(volume, track);
 
+  /// Sets the playback volume of one received stream by its connection and
+  /// receiver (Hollow fork addition); see
+  /// [NativeAudioManagement.setReceiverVolume].
+  static Future<void> setReceiverVolume(
+          double volume, RTCRtpReceiver receiver) =>
+      NativeAudioManagement.setReceiverVolume(volume, receiver);
+
   /// Set the post-APM capture makeup gain (Hollow fork addition).
   ///
   /// Boosts the LOCAL microphone after WebRTC's AGC/NS/EC, with a soft
