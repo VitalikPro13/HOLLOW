@@ -45,6 +45,29 @@ static std::unordered_map<std::string, int64_t> seen_of(const json& j) {
     return out;
 }
 
+// Vectors whose fold changes as a pending join matures.
+static size_t maturing_cases = 0;
+
+// The book's cached fold against a fresh one, at the show and as pending joins mature.
+static bool cache_follows(const RosterBook& book, const RosterBook::Held& held, int64_t now, const RosterCrypto& crypto) {
+    const auto same = [](const roster::State& a, const roster::State& b) {
+        return a.members == b.members && a.pending == b.pending && a.removed == b.removed && a.base == b.base;
+    };
+    std::set<std::string> first;
+    for (int64_t at : {now, now + 1, now + roster::PENDING_MATURITY_MS - 1, now + roster::PENDING_MATURITY_MS + 1,
+                       now + 3 * roster::PENDING_MATURITY_MS, now}) {
+        const roster::State& cached = book.counted_fold(held, at, crypto, [] {});
+        if (at == now && first.empty()) {
+            first = cached.members;
+        } else if (cached.members != first) {
+            maturing_cases++;
+            first = cached.members;
+        }
+        if (!same(cached, book.fold(held, at, crypto))) return false;
+    }
+    return true;
+}
+
 // One vector: hold what the case holds, show what it shows, compare everything.
 static bool run_case(const json& c, const RosterCrypto& crypto, std::string& why) {
     const std::string master = c["master"];
@@ -103,6 +126,10 @@ static bool run_case(const json& c, const RosterCrypto& crypto, std::string& why
     }
     if (out.member != c["member"].get<bool>()) {
         why = "membership of the shown device differs";
+        return false;
+    }
+    if (held && !cache_follows(book, *held, now, crypto)) {
+        why = "the cached fold differs from a fresh one";
         return false;
     }
     return true;
@@ -187,6 +214,8 @@ int main() {
         }
         check("every vector lands where the Rust code does (" + std::to_string(ok) + "/" + std::to_string(total) + ")",
               ok == total && total > 0);
+        check("the cached fold follows a pending join as it matures (" + std::to_string(maturing_cases) + ")",
+              maturing_cases > 0);
     }
 
     // A roster's JSON is read as strictly as serde reads it.
@@ -225,8 +254,13 @@ int main() {
         roster::Roster removing = base;
         removing.removals.push_back({roster::LEGACY_BASE, other.id, owner.id, {},
                                      owner.sign(roster::removal_payload(m.id, roster::LEGACY_BASE, other.id, {}))});
+        bool folded = false;
+        book.counted_fold(*book.get(m.id), now, crypto, [&folded] { folded = true; });
+        check("a show leaves its fold for the lock puts after it", !folded);
         auto by_stranger = book.show(m.id, removing, "12D3KooWStranger", 9, now, crypto);
         check("a removal shown by a stranger changes the held roster", by_stranger.changed && !by_stranger.member);
+        check("and the cached fold drops the device at once",
+              !book.counted_fold(*book.get(m.id), now, crypto, [] {}).is_member(other.id));
         check("and the record stays with the member's share", book.ledger.share_of(m.id) == uint64_t{7});
         check("the removed device is out", !book.show(m.id, base, other.id, 7, now, crypto).member);
         check("the remover is still in", book.show(m.id, base, owner.id, 7, now, crypto).member);

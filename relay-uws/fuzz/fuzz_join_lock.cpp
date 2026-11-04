@@ -33,6 +33,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     const nlohmann::json frames = client_json::parse(fuzz::as_text(data, size));
     if (!frames.is_array()) return 0;
     static const LockCrypto crypto = fuzz::lock_crypto();
+    // Half the devices count, picked by the id itself, so both verdicts are reached.
+    static const LockCounted counted = [](const std::string&, const std::string& device) {
+        return !device.empty() && (static_cast<unsigned char>(device.back()) & 1) != 0;
+    };
     JoinLocks locks;
     // Small enough that a handful of chains already evicts.
     locks.budget = 16 * 1024;
@@ -53,7 +57,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         FUZZ_CHECK(back && same_links(*back, *links));
 
         std::vector<LockLink> current;
-        const bool accepted = locks.put(server, owner, *links, crypto, current, share++ % 3);
+        const bool accepted = locks.put(server, owner, *links, crypto, counted, current, share++ % 3);
         FUZZ_CHECK(current.size() <= join_lock::MAX_CHAIN);
         if (accepted) FUZZ_CHECK(!current.empty() && current.back().same_lock(links->back()));
         if (!current.empty()) {

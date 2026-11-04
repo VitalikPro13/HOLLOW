@@ -358,8 +358,13 @@ struct RelayInner {
     /// Join lock chains by record key (`join_lock::record_key`), held by the rule the
     /// real relay applies (`join_lock::relay_put`).
     locks: HashMap<String, Vec<super::join_lock::LockLink>>,
+    /// device -> each lock record's newest number when the relay's fold first stopped
+    /// counting that device: what a remover put ahead of its own removal.
+    tips_at_drop: HashMap<String, HashMap<String, u64>>,
     /// device -> the lock reads it asked for, not yet answered ([`MockRelay::hold_lock_reads`]).
     held_lock_reads: HashMap<String, Vec<WsEvent>>,
+    /// devices whose lock puts the relay never receives ([`MockRelay::lose_lock_puts`]).
+    lost_lock_puts: std::collections::HashSet<String>,
     /// device -> server room -> the public half of the door its socket proves
     /// (`WsCommand::SetDoor`); the mock compares it where the relay checks a proof.
     doors_held: HashMap<String, HashMap<String, String>>,
@@ -531,6 +536,7 @@ impl Wiretap {
 /// afterwards, and whether the submitted newest lock is now its own.
 fn relay_lock_put(
     locks: &mut HashMap<String, Vec<super::join_lock::LockLink>>,
+    rosters: &HashMap<String, InboxRoster>,
     server: &str,
     owner: &str,
     links: &[super::join_lock::LockLink],
@@ -542,7 +548,8 @@ fn relay_lock_put(
             || crate::crdt::anchor::is_genesis_id(server)
             || super::join_lock::base_owner(server, first).as_deref() == Some(owner)
     });
-    let Some(next) = names_owner.then(|| super::join_lock::relay_put(server, &stored, links)).flatten() else {
+    let counted = |master: &str, device: &str| roster_counts(rosters, master, device);
+    let Some(next) = names_owner.then(|| super::join_lock::relay_put(server, &stored, links, &counted)).flatten() else {
         return (stored, false);
     };
     locks.insert(key, next.clone());
@@ -551,6 +558,14 @@ fn relay_lock_put(
         _ => false,
     };
     (next, accepted)
+}
+
+/// Whether the relay's fold of every roster shown for `master` counts `device`
+/// (`RosterBook::fold` on the relay).
+fn roster_counts(rosters: &HashMap<String, InboxRoster>, master: &str, device: &str) -> bool {
+    let Some(held) = rosters.get(master) else { return false };
+    let base = held.roster.base();
+    held.roster.fold(|d| held.seen.get(&format!("{base}|{d}")).copied(), super::roster_book::now_ms()).is_member(device)
 }
 
 /// The relay's door grace (`door_room::GRACE_MS`, 60 s), short enough for a test to
@@ -666,6 +681,21 @@ impl MockRelay {
     }
 
     /// Remember a device's keypair, so injected frames can be sealed as that device.
+    /// The newest lock number of a (genesis) server when the relay's fold dropped `device`.
+    pub(crate) fn tip_when_dropped(&self, device: &str, server: &str) -> Option<u64> {
+        self.inner.lock().unwrap().tips_at_drop.get(device)?.get(server).copied()
+    }
+
+    /// Whether the relay's fold of `master`'s shown rosters counts `device`.
+    pub(crate) fn counts(&self, master: &str, device: &str) -> bool {
+        roster_counts(&self.inner.lock().unwrap().inbox_rosters, master, device)
+    }
+
+    /// The key a device authenticated with, for a test playing that device.
+    pub(crate) fn device_kp(&self, device: &str) -> NativeKeypair {
+        self.inner.lock().unwrap().keys.get(device).cloned().expect("a registered device")
+    }
+
     pub(crate) fn register_key(&self, device: &NativeKeypair) {
         self.inner.lock().unwrap().keys.insert(device.peer_id(), device.clone());
     }
@@ -733,7 +763,8 @@ impl MockRelay {
     pub(crate) fn put_lock(&self, server: &str, owner: &str, links: &[super::join_lock::LockLink]) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let before = inner.room_door(server);
-        let took = relay_lock_put(&mut inner.locks, server, owner, links).1;
+        let inner = &mut *inner;
+        let took = relay_lock_put(&mut inner.locks, &inner.inbox_rosters, server, owner, links).1;
         if inner.room_door(server).is_some() && inner.room_door(server) != before {
             inner.relock(server, before.is_some());
         }
@@ -1171,6 +1202,11 @@ impl MockRelay {
     /// a relay slow to answer.
     pub(crate) fn hold_lock_reads(&self, device: &str) {
         self.inner.lock().unwrap().held_lock_reads.entry(device.to_string()).or_default();
+    }
+
+    /// Lose every lock put `device` sends: a socket that drops them on the way.
+    pub(crate) fn lose_lock_puts(&self, device: &str) {
+        self.inner.lock().unwrap().lost_lock_puts.insert(device.to_string());
     }
 
     /// How many lock reads from `device` wait unanswered.
@@ -1695,9 +1731,10 @@ impl RelayInner {
                     }
                 }
             }
+            WsCommand::LockPut { .. } if inner.lost_lock_puts.contains(from) => {}
             WsCommand::LockPut { server, owner, links } => {
                 let before = inner.room_door(&server);
-                let (current, accepted) = relay_lock_put(&mut inner.locks, &server, &owner, &links);
+                let (current, accepted) = relay_lock_put(&mut inner.locks, &inner.inbox_rosters, &server, &owner, &links);
                 let after = inner.room_door(&server);
                 if after.is_some() && after != before {
                     inner.relock(&server, before.is_some());
@@ -1788,6 +1825,10 @@ impl RelayInner {
             roster: crate::identity::roster::Roster::new(&master),
             seen: HashMap::new(),
         });
+        let was = {
+            let base = held.roster.base();
+            held.roster.fold(|d| held.seen.get(&format!("{base}|{d}")).copied(), now).members
+        };
         let merged = held
             .roster
             .merged_by_first_sight(&shown.verified(now), |b, d| held.seen.get(&format!("{b}|{d}")).copied());
@@ -1808,6 +1849,11 @@ impl RelayInner {
         let state = held.roster.fold(|d| held.seen.get(&format!("{base}|{d}")).copied(), now);
         if changed {
             self.drop_inbox_owners(room, &state.members);
+            for gone in was.difference(&state.members) {
+                let tips: HashMap<String, u64> =
+                    self.locks.iter().filter_map(|(k, c)| Some((k.clone(), c.last()?.n))).collect();
+                self.tips_at_drop.entry(gone.clone()).or_insert(tips);
+            }
         }
         state.is_member(from)
     }
@@ -4026,6 +4072,31 @@ static SERVER_OWNERS: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
 
 fn owner_of(server_id: &str) -> String {
     SERVER_OWNERS.lock().unwrap().get(server_id).cloned().unwrap_or_default()
+}
+
+/// The change key of `link` a node's grants hold for it: its device's grant, or a
+/// grant sealed to its master the 0.13 way.
+fn change_key_for(
+    server_id: &str,
+    state: &ServerState,
+    link: &super::join_lock::LockLink,
+    master: &NativeKeypair,
+    device: &NativeKeypair,
+) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+    let ours = super::join_lock::grant_key(&master.peer_id(), &device.peer_id());
+    state.join_lock.grants_for(&link.change, &ours).iter()
+        .find_map(|g| super::join_lock::open_grant(server_id, &link.change, &ours, device, g))
+        .or_else(|| {
+            state.join_lock.grants_for(&link.change, &master.peer_id()).iter()
+                .find_map(|g| super::join_lock::open_grant(server_id, &link.change, &master.peer_id(), master, g))
+        })
+}
+
+/// Whether `state` holds any grant of `change` for the identity `master`: filed for
+/// one of its devices or for the master itself.
+fn holds_any_grant(state: &ServerState, change: &str, master: &str, devices: &[&str]) -> bool {
+    !state.join_lock.grants_for(change, master).is_empty()
+        || devices.iter().any(|d| !state.join_lock.grants_for(change, &super::join_lock::grant_key(master, d)).is_empty())
 }
 
 /// The newest join lock the relay shows for a harness-created server.
@@ -15533,7 +15604,7 @@ async fn authz_only_the_servers_authority_changes_its_rings() {
         })
         .unwrap();
     let junk = vec!["junk".to_string()];
-    let forged_link = super::join_lock::mint_base(&server_id, 99, &stranger_kp, Some("00")).unwrap();
+    let forged_link = super::join_lock::mint_owner_base(&server_id, 99, &stranger_kp, Some("00"), &stranger_kp).unwrap();
     let forged = super::ring_auth::sign(super::ws_client::HARNESS_RELAY_DOMAIN, &server_id, "", 604800, false, &junk, &forged_link.link, &forged_link.change)
         .expect("a key it holds signs");
     stranger
@@ -15621,7 +15692,16 @@ async fn authz_a_legacy_servers_rings_follow_its_owner_not_the_first_signer() {
     let mut stranger = raw_socket(&relay, &s_id);
     stranger.cmd_tx.send(WsCommand::JoinRoom { room_code: server_id.clone() }).unwrap();
     assert!(wait_until(5, async || relay.room_devices(&server_id).contains(&s_id)).await);
-    let lock = super::join_lock::mint_base(&server_id, 1, &s_kp, None).unwrap();
+    // Its own roster counts its device, so the relay takes its own base.
+    stranger
+        .cmd_tx
+        .send(WsCommand::JoinInbox {
+            room_code: format!("inbox:{s_id}"),
+            roster: crate::identity::roster::Roster::legacy_for_test(&s_kp, &[&s_kp]),
+        })
+        .unwrap();
+    assert!(wait_until(5, async || relay.counts(&s_id, &s_id)).await);
+    let lock = super::join_lock::mint_owner_base(&server_id, 1, &s_kp, None, &s_kp).unwrap();
     stranger
         .cmd_tx
         .send(WsCommand::LockPut { server: server_id.clone(), owner: s_id.clone(), links: vec![lock.link.clone()] })
@@ -27487,7 +27567,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-11-04: w2-e's cut and session-blip tests added absences no event can show (no
     // re-ask, no drop, past the return window and its retry tick) and two short settles
     // (20.1 s, total 1074.8 s on top of w2-d and w2-c, slack 1.2 s).
-    const BUDGET_MS: u64 = 1_076_000;
+    // 2026-11-02: t14-lock's fix round added one absence, no lock move while a removed
+    // device's leaf is still in the group (3.0 s, total 1077.8 s on the merged branch, slack 1.2 s).
+    const BUDGET_MS: u64 = 1_079_000;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -32480,12 +32562,9 @@ async fn join_lock_a_demoted_mod_loses_the_change_key() {
         .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: m.master_id.clone(), new_role: "moderator".into() })
         .await
         .unwrap();
+    let m_device = relay.device_kp(&m.device_id);
     let open_mine = |state: &ServerState, link: &super::join_lock::LockLink| {
-        state
-            .join_lock
-            .grants_for(&link.change, &m.master_id)
-            .iter()
-            .find_map(|g| super::join_lock::open_grant(&server_id, &link.change, &m.master_kp, g))
+        change_key_for(&server_id, state, link, &m.master_kp, &m_device)
     };
     assert!(
         wait_until(15, async || {
@@ -32504,15 +32583,15 @@ async fn join_lock_a_demoted_mod_loses_the_change_key() {
         .unwrap();
     assert!(wait_until(15, async || relay_tip(&relay, &server_id).n > held.n).await, "the demotion moves the lock");
     let tip = relay_tip(&relay, &server_id);
-    let own_next = super::join_lock::mint_next(&server_id, &held, &change).unwrap();
+    let own_next = super::join_lock::mint_successor(&server_id, &held, &change, &m.master_id, &m_device).unwrap();
     assert!(!relay.put_lock(&server_id, &o.master_id, &[own_next.link]), "the old change key moves nothing");
     assert!(
         wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.join_lock.find(&tip).is_some())).await,
         "the owner holds the new lock",
     );
     let state = o.live_server_state(&server_id).await.unwrap();
-    assert!(state.join_lock.grants_for(&tip.change, &m.master_id).is_empty(), "and never sealed its change key to the demoted mod");
-    assert!(!state.join_lock.grants_for(&tip.change, &o.master_id).is_empty(), "only to the owner");
+    assert!(!holds_any_grant(&state, &tip.change, &m.master_id, &[&m.device_id]), "and never sealed its change key to the demoted mod");
+    assert!(holds_any_grant(&state, &tip.change, &o.master_id, &[&o.device_id]), "only to the owner");
 }
 
 /// A relay that restarted without its snapshot holds no lock at all: the first member
@@ -32555,16 +32634,15 @@ async fn join_lock_the_owner_resets_a_rogue_mods_fork() {
         .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: r.master_id.clone(), new_role: "moderator".into() })
         .await
         .unwrap();
+    let r_device = relay.device_kp(&r.device_id);
     let granted = async || {
         let tip = relay_tip(&relay, &server_id);
         let state = r.live_server_state(&server_id).await?;
-        state.join_lock.grants_for(&tip.change, &r.master_id).iter()
-            .find_map(|g| super::join_lock::open_grant(&server_id, &tip.change, &r.master_kp, g))
-            .map(|c| (tip, c))
+        change_key_for(&server_id, &state, &tip, &r.master_kp, &r_device).map(|c| (tip, c))
     };
     assert!(wait_until(15, async || granted().await.is_some()).await, "R is handed the change key");
     let (tip, change) = granted().await.unwrap();
-    let fork = super::join_lock::mint_next(&server_id, &tip, &change).unwrap();
+    let fork = super::join_lock::mint_successor(&server_id, &tip, &change, &r.master_id, &r_device).unwrap();
     assert!(relay.put_lock(&server_id, &o.master_id, std::slice::from_ref(&fork.link)), "the relay takes R's lock first");
 
     // The owner reads the relay again (a reconnect) and cannot move what it finds.
@@ -32776,7 +32854,7 @@ async fn join_lock_a_joiner_seals_only_to_a_chain_its_owner_signed() {
     let mut j = spawn_node_with_friends(&relay, 213, 213, &[]).await;
     let server_id = create_server_and_wait(&mut o, "Signed Doors").await;
     let impostor = keys(214);
-    let planted = super::join_lock::mint_base(&server_id, 7, &impostor, Some("00")).unwrap();
+    let planted = super::join_lock::mint_owner_base(&server_id, 7, &impostor, Some("00"), &impostor).unwrap();
     relay.plant_lock(&server_id, &o.master_id, vec![planted.link.clone()]);
 
     relay.set_recording(&j.device_id, true);
@@ -60540,4 +60618,342 @@ async fn a_cancelled_ask_is_not_asked_again_when_its_stream_dies() {
         opened_before + 1,
         "B asked again for a file it stopped waiting for",
     );
+}
+
+// t14-lock
+
+/// Two devices of one owner on a server: each shows the relay a roster counting both.
+async fn t14l_owner_with_two_devices(relay: &MockRelay, master: u8, first: u8, second: u8) -> (TestNode, TestNode, String) {
+    let mut b = spawn_node_full(relay, master, first, &[], Some(&[first, second])).await;
+    let c = spawn_node_full(relay, master, second, &[], Some(&[first, second])).await;
+    expect_siblings_ready(relay, &b, &c, 15).await;
+    let server_id = create_server_and_wait(&mut b, "Device Locks").await;
+    assert!(
+        wait_until(20, async || !relay.lock_chain(&server_id, &b.master_id).is_empty()).await,
+        "the owner's first lock reaches the relay",
+    );
+    (b, c, server_id)
+}
+
+/// C4: the relay takes an owner base only from an owner device its fold of the
+/// owner's rosters counts. Once one device removes the other, the removed one still
+/// holds the master key and every secret it had, and moves nothing on the relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14l_a_removed_owner_device_cannot_reset_the_relay_lock() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (b, c, server_id) = t14l_owner_with_two_devices(&relay, 141, 142, 143).await;
+    let chain = relay.lock_chain(&server_id, &b.master_id);
+    assert_eq!(
+        super::join_lock::link_device(&server_id, &chain[0]),
+        Some((b.master_id.clone(), b.device_id.clone())),
+        "the owner's device proved its base",
+    );
+    let nonce = b.live_server_state(&server_id).await.and_then(|s| s.founding_nonce());
+    let thief = relay.device_kp(&c.device_id);
+    let held_change = {
+        let state = c.live_server_state(&server_id).await.unwrap();
+        change_key_for(&server_id, &state, chain.last().unwrap(), &b.master_kp, &thief)
+    };
+
+    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone() }).await.unwrap();
+    assert!(wait_until(20, async || !relay.counts(&b.master_id, &c.device_id)).await, "the relay's fold drops the device");
+    assert!(
+        wait_until(20, async || relay_tip(&relay, &server_id).n > chain.last().unwrap().n).await,
+        "and the remover moved the lock first",
+    );
+    drop(c);
+
+    let tip = relay_tip(&relay, &server_id);
+    let mint = |n: u64, device: &NativeKeypair| {
+        super::join_lock::mint_owner_base(&server_id, n, &b.master_kp, nonce.as_deref(), device).unwrap().link
+    };
+    assert!(!relay.put_lock(&server_id, &b.master_id, &[mint(tip.n + 1, &thief)]), "the removed device resets nothing");
+    let mut bare = mint(tip.n + 1, &thief);
+    bare.dev = None;
+    assert!(!relay.put_lock(&server_id, &b.master_id, &[bare]), "nor does the master key alone");
+    assert!(
+        !relay.put_lock(&server_id, &b.master_id, &[mint(super::join_lock::MAX_N, &thief)]),
+        "nor freezes the lock at the ceiling",
+    );
+    if let Some(change) = held_change {
+        let old = chain.last().unwrap();
+        let next = super::join_lock::mint_successor(&server_id, old, &change, &b.master_id, &thief).unwrap();
+        assert!(!relay.put_lock(&server_id, &b.master_id, &[next.link]), "nor extends the lock it held the key of");
+    }
+    assert_eq!(relay_tip(&relay, &server_id), tip, "the relay's newest lock is still the remover's");
+    let honest = relay.device_kp(&b.device_id);
+    assert!(relay.put_lock(&server_id, &b.master_id, &[mint(tip.n + 1, &honest)]), "the counted device still resets it");
+}
+
+/// M5: removing one device of a member identity moves the server's lock once no MLS
+/// group of the server lists the device's leaf, so the door that ends up newest never
+/// reaches it: every MLS send of that door went under a tree without its leaf, and no
+/// Olm copy went to it. Read from the sends themselves, since an honest removed node
+/// stops reading once it learns its removal and a stolen one would not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14l_a_removed_device_loses_the_door() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (b, c, server_id) = t14l_owner_with_two_devices(&relay, 144, 145, 146).await;
+    let before = relay_tip(&relay, &server_id);
+    assert!(
+        wait_until(15, async || c.live_server_state(&server_id).await.is_some_and(|s| s.join_lock.holds_door(&before.door))).await,
+        "the second device holds the door before",
+    );
+    assert!(
+        wait_until(20, async || b.mls_members(&server_id).await.contains(&c.device_id)).await,
+        "and a leaf in the server's group",
+    );
+    // Away, the remover takes no MLS turn, so the leaf stays in the group for a while.
+    relay.set_background(&b, true);
+    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone() }).await.unwrap();
+    assert!(wait_until(20, async || !relay.counts(&b.master_id, &c.device_id)).await, "the relay's fold drops the device");
+    relay.start_wiretap();
+    assert!(
+        relay.tip_when_dropped(&c.device_id, &server_id).is_some_and(|n| n > before.n),
+        "the remover moved the lock before the relay heard of the removal",
+    );
+    sleep_ms(3000).await; // an ABSENCE: no lock move for a lock tick or two while the leaf is still in the group
+    assert!(b.mls_members(&server_id).await.contains(&c.device_id), "the leaf is still in the group");
+    relay.set_background(&b, false);
+
+    // Converged: the leaf is out, the newest lock is the remover's, and every send of its
+    // door missed the leaf.
+    let settled = async || {
+        let tip = relay_tip(&relay, &server_id);
+        let sends = super::lock_keeper::door_sends(&server_id, &tip.door);
+        !b.mls_members(&server_id).await.contains(&c.device_id)
+            && b.live_server_state(&server_id).await.is_some_and(|s| s.join_lock.holds_door(&tip.door))
+            && !sends.is_empty()
+            && sends.iter().all(|leaves| !leaves.contains(&c.device_id))
+    };
+    assert!(
+        wait_until(40, settled).await,
+        "a lock moved after the leaf left, got sends {:?} of {:?}",
+        super::lock_keeper::door_sends(&server_id, &relay_tip(&relay, &server_id).door),
+        relay.lock_chain(&server_id, &b.master_id).iter().map(|l| l.n).collect::<Vec<_>>(),
+    );
+    let after = relay_tip(&relay, &server_id);
+    assert_eq!(super::join_lock::link_device(&server_id, &after).map(|(_, d)| d), Some(b.device_id.clone()), "made by the remover");
+    for leaves in super::lock_keeper::door_sends(&server_id, &after.door) {
+        assert!(!leaves.contains(&c.device_id), "the newest door went under a tree with the removed leaf: {leaves:?}");
+    }
+    let olm_to_c = relay
+        .wiretap()
+        .frames
+        .iter()
+        .filter(|f| f.from == b.device_id && f.to.as_deref() == Some(c.device_id.as_str()) && f.kind() == "encrypted")
+        .count();
+    assert_eq!(olm_to_c, 0, "no Olm copy reaches the removed device");
+    let c_state = c.live_server_state(&server_id).await.unwrap();
+    assert!(!c_state.join_lock.holds_door(&after.door), "the removed device never holds it");
+}
+
+/// N11: a stolen mod device moves the lock while it still counts and keeps the new
+/// keys to itself, so no member holds the newest door. Once the roster removes it, a
+/// counted device that holds the lock before extends past the dark link, with the
+/// owner away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14l_a_dark_link_of_a_removed_mod_device_gives_way() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 147;
+    const M: u8 = 148;
+    const MB: u8 = 149;
+    const MC: u8 = 150;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O)).peer_id();
+    let mut o = spawn_node_with_friends(&relay, O, O, &[&m_master]).await;
+    let mut mb = spawn_node_full(&relay, M, MB, &[&o_master], Some(&[MB, MC])).await;
+    let mc = spawn_node_full(&relay, M, MC, &[&o_master], Some(&[MB, MC])).await;
+    expect_siblings_ready(&relay, &mb, &mc, 15).await;
+    expect_dm_pair_ready(&relay, &o, &mb, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Dark Links").await;
+    mb.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut mb, &server_id, 20).await, "M joins");
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: m_master.clone(), new_role: "moderator".into() })
+        .await
+        .unwrap();
+    let mb_kp = relay.device_kp(&mb.device_id);
+    let thief = relay.device_kp(&mc.device_id);
+    let held = async || {
+        let tip = relay_tip(&relay, &server_id);
+        let state = mb.live_server_state(&server_id).await?;
+        change_key_for(&server_id, &state, &tip, &mb.master_kp, &mb_kp).map(|c| (tip, c))
+    };
+    assert!(wait_until(20, async || held().await.is_some()).await, "M is handed the change key");
+    let (tip, change) = held().await.unwrap();
+    let dark = super::join_lock::mint_successor(&server_id, &tip, &change, &m_master, &thief).unwrap();
+    assert!(relay.put_lock(&server_id, &o.master_id, std::slice::from_ref(&dark.link)), "the stolen device moves it while it counts");
+    go_offline(&relay, &o, &server_id).await;
+
+    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: mc.device_id.clone() }).await.unwrap();
+    assert!(wait_until(20, async || !relay.counts(&m_master, &mc.device_id)).await, "the relay's fold drops the stolen device");
+    // Its move ahead of the removal met the dark link, so it forks at once, not after a grace.
+    let forked = || {
+        relay.lock_chain(&server_id, &o.master_id).into_iter().find(|l| {
+            l.n == dark.link.n && super::join_lock::link_device(&server_id, l).is_some_and(|(_, d)| d == mb.device_id)
+        })
+    };
+    assert!(
+        wait_until(3, async || forked().is_some()).await,
+        "the remaining mod device extends past the dark link, got {:?}",
+        relay.lock_chain(&server_id, &o.master_id),
+    );
+    let fork = forked().unwrap();
+    assert_eq!(super::join_lock::link_device(&server_id, &fork).map(|(_, d)| d), Some(mb.device_id.clone()));
+    assert!(
+        wait_until(15, async || mb.live_server_state(&server_id).await.is_some_and(|s| s.join_lock.holds_door(&fork.door))).await,
+        "and every member gets its door",
+    );
+    drop(mc);
+}
+
+/// N12b: a member removing devices one after another moves each server's lock at
+/// most once per `REMOVAL_GAP`; the removals coalesce into the next move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14l_device_removals_move_the_lock_at_most_once_per_gap() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 151;
+    const M: u8 = 152;
+    const MB: u8 = 153;
+    const MC: u8 = 154;
+    const MD: u8 = 155;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O)).peer_id();
+    let mut o = spawn_node_with_friends(&relay, O, O, &[&m_master]).await;
+    let mut mb = spawn_node_full(&relay, M, MB, &[&o_master], Some(&[MB, MC, MD])).await;
+    let mc = spawn_node_full(&relay, M, MC, &[&o_master], Some(&[MB, MC, MD])).await;
+    let md = spawn_node_full(&relay, M, MD, &[&o_master], Some(&[MB, MC, MD])).await;
+    expect_siblings_ready(&relay, &mb, &mc, 15).await;
+    expect_siblings_ready(&relay, &mb, &md, 15).await;
+    expect_dm_pair_ready(&relay, &o, &mb, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Removal Gap").await;
+    mb.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut mb, &server_id, 20).await, "M joins, a plain member");
+    let start = relay_tip(&relay, &server_id).n;
+
+    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: mc.device_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(30, async || relay_tip(&relay, &server_id).n > start).await,
+        "the owner moves the lock for a member's device removal",
+    );
+    let first = relay_tip(&relay, &server_id).n;
+    let first_at = std::time::Instant::now();
+    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: md.device_id.clone() }).await.unwrap();
+    assert!(wait_until(20, async || !relay.counts(&m_master, &md.device_id)).await);
+    assert!(
+        wait_until(40, async || relay_tip(&relay, &server_id).n > first).await,
+        "the second removal moves it too",
+    );
+    let waited = first_at.elapsed();
+    assert!(
+        waited + std::time::Duration::from_millis(1500) >= super::lock_keeper::REMOVAL_GAP,
+        "but not before the gap since the first: {waited:?}",
+    );
+    assert_eq!(relay_tip(&relay, &server_id).n, first + 1, "one move for it");
+    drop((mc, md));
+}
+
+/// C4 grants: a moved lock's change key is sealed to each counted device of each
+/// owner, admin and mod, never to a master, so a removed device opens none. Needs the
+/// fold to take grants filed by device (REQUESTS R1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+#[ignore = "needs the fold to take device grants (t14-lock REQUESTS R1)"]
+async fn t14l_a_removed_device_gets_no_change_key() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (b, c, server_id) = t14l_owner_with_two_devices(&relay, 156, 157, 158).await;
+    let b_kp = relay.device_kp(&b.device_id);
+    let c_kp = relay.device_kp(&c.device_id);
+    let before = relay_tip(&relay, &server_id);
+    let state = b.live_server_state(&server_id).await.unwrap();
+    assert!(state.join_lock.grants_for(&before.change, &b.master_id).is_empty(), "nothing sealed to the master");
+    assert!(change_key_for(&server_id, &state, &before, &b.master_kp, &c_kp).is_some(), "the sibling opens its own grant");
+    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone() }).await.unwrap();
+    assert!(wait_until(20, async || relay_tip(&relay, &server_id).n > before.n).await);
+    let after = relay_tip(&relay, &server_id);
+    assert!(
+        wait_until(15, async || b.live_server_state(&server_id).await.is_some_and(|s| change_key_for(&server_id, &s, &after, &b.master_kp, &b_kp).is_some())).await,
+        "the remover holds the new change key",
+    );
+    let state = b.live_server_state(&server_id).await.unwrap();
+    assert!(change_key_for(&server_id, &state, &after, &b.master_kp, &c_kp).is_none(), "the removed device opens nothing");
+    assert!(state.join_lock.grants_for(&after.change, &b.master_id).is_empty());
+}
+
+/// H1: a link a removed device made gives way only to the owner or to that device's
+/// own identity. Another identity's counted device holding the older change key (an
+/// ex-mod's) forks nothing past it; the removed device's sibling does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14l_a_dead_link_gives_way_only_to_its_own_identity() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 159;
+    const M: u8 = 160;
+    const MB: u8 = 161;
+    const MC: u8 = 162;
+    const E: u8 = 163;
+    const ED: u8 = 164;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O)).peer_id();
+    let mut o = spawn_node_with_friends(&relay, O, O, &[&m_master]).await;
+    let mut mb = spawn_node_full(&relay, M, MB, &[&o_master], Some(&[MB, MC])).await;
+    let mc = spawn_node_full(&relay, M, MC, &[&o_master], Some(&[MB, MC])).await;
+    let e = spawn_node_full(&relay, E, ED, &[], Some(&[ED])).await;
+    expect_siblings_ready(&relay, &mb, &mc, 15).await;
+    expect_dm_pair_ready(&relay, &o, &mb, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Dead Links").await;
+    mb.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut mb, &server_id, 20).await, "M joins");
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: m_master.clone(), new_role: "moderator".into() })
+        .await
+        .unwrap();
+    let mb_kp = relay.device_kp(&mb.device_id);
+    let thief = relay.device_kp(&mc.device_id);
+    let held = async || {
+        let tip = relay_tip(&relay, &server_id);
+        let state = mb.live_server_state(&server_id).await?;
+        change_key_for(&server_id, &state, &tip, &mb.master_kp, &mb_kp).map(|c| (tip, c))
+    };
+    assert!(wait_until(20, async || held().await.is_some()).await, "M is handed the change key");
+    let (tip, change) = held().await.unwrap();
+    let dark = super::join_lock::mint_successor(&server_id, &tip, &change, &m_master, &thief).unwrap();
+    assert!(relay.put_lock(&server_id, &o.master_id, std::slice::from_ref(&dark.link)), "the stolen device moves it while it counts");
+    go_offline(&relay, &o, &server_id).await;
+    // M's own recovery would land first; the relay judges the others' offers alone.
+    relay.lose_lock_puts(&mb.device_id);
+
+    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: mc.device_id.clone() }).await.unwrap();
+    assert!(wait_until(20, async || !relay.counts(&m_master, &mc.device_id)).await, "the relay's fold drops the stolen device");
+    assert!(relay.counts(&e.master_id, &e.device_id), "E's device counts");
+    let e_kp = relay.device_kp(&e.device_id);
+    let by_e = super::join_lock::mint_successor(&server_id, &tip, &change, &e.master_id, &e_kp).unwrap().link;
+    assert!(!relay.put_lock(&server_id, &o.master_id, &[by_e]), "another identity holding the older change key forks nothing");
+    assert_eq!(relay_tip(&relay, &server_id), dark.link, "the dead link is still the newest");
+    let by_sibling = super::join_lock::mint_successor(&server_id, &tip, &change, &m_master, &mb_kp).unwrap().link;
+    assert!(relay.put_lock(&server_id, &o.master_id, std::slice::from_ref(&by_sibling)), "the removed device's sibling does");
+    drop((mc, e));
 }

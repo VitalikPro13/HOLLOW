@@ -147,7 +147,7 @@ mod tests {
     fn a_ring_control_counts_only_at_the_relay_it_names() {
         let server = "0123456789abcdef0123456789abcdef01234567";
         let owner = NativeKeypair::from_secret_bytes(&[7; 32]);
-        let lock = super::super::join_lock::mint_base(server, 1, &owner, Some("00")).unwrap();
+        let lock = super::super::join_lock::mint_owner_base(server, 1, &owner, Some("00"), &owner).unwrap();
         let chain = vec![lock.link.clone()];
         let channels = vec!["general".to_string()];
         let auth = sign(RELAY, server, "", 3600, false, &channels, &lock.link, &lock.change).unwrap();
@@ -160,8 +160,8 @@ mod tests {
     fn only_the_newest_locks_change_key_signs_ring_control() {
         let server = "0123456789abcdef0123456789abcdef01234567";
         let owner = NativeKeypair::from_secret_bytes(&[7; 32]);
-        let first = super::super::join_lock::mint_base(server, 1, &owner, Some("00")).unwrap();
-        let second = super::super::join_lock::mint_next(server, &first.link, &first.change).unwrap();
+        let first = super::super::join_lock::mint_owner_base(server, 1, &owner, Some("00"), &owner).unwrap();
+        let second = super::super::join_lock::mint_successor(server, &first.link, &first.change, &owner.peer_id(), &owner).unwrap();
         let chain = vec![first.link.clone(), second.link.clone()];
         let channels = vec!["general".to_string(), "~join".to_string()];
 
@@ -194,7 +194,7 @@ mod tests {
         let server = "0123456789abcdef0123456789abcdef";
         let owner = NativeKeypair::from_secret_bytes(&[8; 32]);
         let owner_id = owner.peer_id();
-        let lock = super::super::join_lock::mint_base(server, 1, &owner, None).unwrap();
+        let lock = super::super::join_lock::mint_owner_base(server, 1, &owner, None, &owner).unwrap();
         let chain = vec![lock.link.clone()];
         let own = vec![ring_topic(server, Some(&owner_id), "general")];
         let auth = sign(RELAY, server, &owner_id, 3600, false, &own, &lock.link, &lock.change).unwrap();
@@ -215,7 +215,7 @@ mod tests {
     fn ring_control_carries_the_relays_time() {
         let server = "0123456789abcdef0123456789abcdef01234567";
         let owner = NativeKeypair::from_secret_bytes(&[7; 32]);
-        let lock = super::super::join_lock::mint_base(server, 1, &owner, Some("00")).unwrap();
+        let lock = super::super::join_lock::mint_owner_base(server, 1, &owner, Some("00"), &owner).unwrap();
         let chain = vec![lock.link.clone()];
         let channels = vec!["general".to_string()];
         let _clock = super::super::relay_clock::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

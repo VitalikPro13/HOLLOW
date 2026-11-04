@@ -655,11 +655,12 @@ pub(crate) async fn spawn_node(
         hex::encode(&proto[..32.min(proto.len())])
     };
 
-    let handle = tokio::spawn(super::ws_client::with_relay_domain(ring_domain, super::olm_lane::with_carry_book(super::door_room::with_heard_routes(Box::pin(run_event_loop(
+    let loop_device = device_keypair.clone();
+    let handle = tokio::spawn(super::ws_client::with_relay_domain(ring_domain, super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::lock_keeper::with_loop_device(loop_device, Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    ))))));
+    )))))));
 
     // The app's "my peer id" (friendships, display) is the MASTER id.
     Ok((master_peer_id, handle))
@@ -706,11 +707,12 @@ pub(crate) async fn spawn_node_mock(
     // This node's own `relay_set_background` flag, which the test sets.
     let away = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let metered = db_path.clone();
-    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::ws_client::with_relay_domain(super::ws_client::HARNESS_RELAY_DOMAIN.to_string(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(crate::storage::store_pool::meter::OnLoop::new(Box::pin(run_event_loop(
+    let loop_device = device_keypair.clone();
+    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::ws_client::with_relay_domain(super::ws_client::HARNESS_RELAY_DOMAIN.to_string(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::lock_keeper::with_loop_device(loop_device, crate::storage::store_pool::meter::OnLoop::new(Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    )), &metered))))));
+    )), &metered)))))));
 
     Ok((master_peer_id, handle, ws_cmd_rx, ws_event_tx, away))
 }
@@ -1812,6 +1814,8 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::RevokeDevice { device_peer_id: target } => {
+                        let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
+                        lock_keeper.move_before_removal(&server_states, keys, &ws_cmd_tx);
                         if let Some(revoked) = Box::pin(sync_handler::handle_revoke_device(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
                             &device_keypair, &master_peer_str, &local_peer_str, &device_peer_id,
@@ -1907,6 +1911,8 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::ResetDeviceLists => {
+                        let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
+                        lock_keeper.move_before_removal(&server_states, keys, &ws_cmd_tx);
                         if let Some(revoked) = Box::pin(sync_handler::handle_reset_device_lists(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
                             &device_keypair, &master_peer_str, &local_peer_str, &device_peer_id,
@@ -5227,7 +5233,11 @@ async fn run_event_loop(
                             }
                             let next = server_states
                                 .get(&server)
-                                .and_then(|state| lock_keeper.tick_one(&server, state, &master_keypair, &ws_room_peers, &ws_cmd_tx));
+                                .and_then(|state| {
+                                    let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
+                                    let leaves = |s: &str| super::lock_keeper::server_leaves(mls.as_ref(), s);
+                                    lock_keeper.tick_one(&server, state, keys, &ws_room_peers, &ws_cmd_tx, &leaves)
+                                });
                             if let Some(payload) = next {
                                 sync_handler::author_join_lock_op(
                                     &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays,
@@ -5917,7 +5927,10 @@ async fn run_event_loop(
                     &mut gossip_overlays, &event_tx, &local_peer_str, &crypto_store, &crdt_store,
                 );
                 // The join lock: made, moved, put back, compacted and granted where due.
-                for (server_id, payload) in lock_keeper.tick(&server_states, &master_keypair, &ws_room_peers, &ws_cmd_tx) {
+                let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
+                let leaves = |s: &str| super::lock_keeper::server_leaves(mls.as_ref(), s);
+                let due_ops = lock_keeper.tick(&server_states, keys, &ws_room_peers, &ws_cmd_tx, &leaves);
+                for (server_id, payload) in due_ops {
                     sync_handler::author_join_lock_op(
                         &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays,
                         &event_tx, &local_peer_str, &device_peer_id, &crypto_store, &crdt_store, &server_id, payload,
@@ -7416,6 +7429,8 @@ fn enforce_device_revocations(
     if newly_revoked.is_empty() {
         return;
     }
+    // Each member identity's servers move their lock, so the device keeps no door.
+    super::lock_keeper::note_removed_devices(newly_revoked);
     for id in newly_revoked {
         // Olm — drop + erase. Never drop a session to OURSELVES (defensive).
         if id != local_peer_str {

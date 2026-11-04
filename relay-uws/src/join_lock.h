@@ -10,6 +10,7 @@
 
 #include "fair_share.h"
 #include "json.hpp"
+#include "validate.h"
 
 // The join lock chains: a notice board, nothing more. Each server's members keep a
 // door key joiners seal requests to and a change key only its owner, admins and mods
@@ -19,9 +20,16 @@
 // every link is checked again by whoever reads it.
 //
 // Mirrors rust/hollow_core/src/node/join_lock.rs byte for byte (payload, shapes,
-// chain rules, the put rule); test/test_join_lock.cpp pins the same vector as the
+// chain rules, the put rule); test/test_join_lock.cpp pins the same vectors as the
 // Rust test. Header-only and free of uWebSockets and libsodium: the three crypto
-// operations come in through LockCrypto, so the rules are unit tested with stubs.
+// operations come in through LockCrypto, and the relay's fold of an identity's
+// rosters through LockCounted, so the rules are unit tested with stubs.
+//
+// Every 0.14 link names the device that made it (`dev`), signed by that device. The
+// master key alone proves nothing here: an owner-signed link the relay does not hold
+// is taken only from an owner device its fold counts, and a link whose proof names a
+// device it no longer counts is DEAD: a counted device of the owner, or of the dead
+// link's own identity, holding the change key before it may extend past it.
 
 struct LockLink {
     uint64_t n = 0;
@@ -30,15 +38,21 @@ struct LockLink {
     std::string sig;
     std::string owner;
     std::string nonce;
+    // The device that made the link: its key, the identity it names, its signature.
+    std::string dev_device;
+    std::string dev_master;
+    std::string dev_sig;
     // Presence, not emptiness, is what the client's shape rule reads.
     bool has_owner = false;
     bool has_nonce = false;
+    bool has_dev = false;
 
     bool is_base() const { return has_owner; }
     bool same_lock(const LockLink& o) const { return n == o.n && door == o.door && change == o.change; }
     bool operator==(const LockLink& o) const {
         return n == o.n && door == o.door && change == o.change && sig == o.sig && owner == o.owner &&
-               nonce == o.nonce && has_owner == o.has_owner && has_nonce == o.has_nonce;
+               nonce == o.nonce && has_owner == o.has_owner && has_nonce == o.has_nonce && has_dev == o.has_dev &&
+               dev_device == o.dev_device && dev_master == o.dev_master && dev_sig == o.dev_sig;
     }
 };
 
@@ -51,10 +65,19 @@ struct LockCrypto {
     std::function<std::string(const std::string& owner, const std::string& nonce)> genesis_id;
 };
 
+// Whether the relay's fold of `master`'s rosters counts `device` a member of it.
+using LockCounted = std::function<bool(const std::string& master, const std::string& device)>;
+
 namespace join_lock {
 
 static constexpr size_t MAX_CHAIN = 256;
 static constexpr uint64_t MAX_N = (uint64_t{1} << 53) - 1;
+// The furthest an owner-signed link may jump past the newest lock: 2^33 resets from
+// the ceiling, so no master-key holder freezes a lock there.
+static constexpr uint64_t RESET_STEP = uint64_t{1} << 20;
+// A newest lock above this is frozen (no honest chain gets there): a counted owner
+// device starts over.
+static constexpr uint64_t FROZEN_FROM = MAX_N - RESET_STEP;
 
 inline bool is_genesis_id(std::string_view id) {
     if (id.size() != 40) return false;
@@ -95,6 +118,10 @@ inline bool well_formed(const LockLink& l) {
     if (!key_shape(l.change)) return false;
     if (l.sig.size() != 88 || !b64_chars(l.sig, false)) return false;
     if (l.has_owner && !key_shape(l.owner)) return false;
+    if (l.has_dev && (!key_shape(l.dev_device) || !is_peer_id_shape(l.dev_master) || l.dev_sig.size() != 88 ||
+                      !b64_chars(l.dev_sig, false))) {
+        return false;
+    }
     if (l.has_nonce) {
         if (l.nonce.size() > 64) return false;
         for (char c : l.nonce) {
@@ -110,17 +137,41 @@ inline std::string payload(const std::string& server, const LockLink& l) {
     return head + "next";
 }
 
+inline std::string dev_payload(const std::string& server, const LockLink& l) {
+    return "hollow-lock-dev1\n" + l.dev_master + "\n" + payload(server, l);
+}
+
+struct LinkDevice {
+    std::string master;
+    std::string device;
+    bool empty() const { return device.empty(); }
+};
+
+// The device that made `l` and the identity it names, when its proof verifies. An
+// owner-signed link's device must name the owner.
+inline LinkDevice link_device(const std::string& server, const LockLink& l, const LockCrypto& c) {
+    if (!l.has_dev || !well_formed(l)) return {};
+    std::string device = c.peer_id(l.dev_device);
+    if (device.empty()) return {};
+    if (l.has_owner && c.peer_id(l.owner) != l.dev_master) return {};
+    if (!c.verify(l.dev_device, l.dev_sig, dev_payload(server, l))) return {};
+    return {l.dev_master, device};
+}
+
 // The owner an owner-signed link speaks for, or "".
 inline std::string base_owner(const std::string& server, const LockLink& l, const LockCrypto& c) {
     if (!l.has_owner || !well_formed(l)) return "";
     std::string owner = c.peer_id(l.owner);
     if (owner.empty()) return "";
     if (is_genesis_id(server) && (!l.has_nonce || c.genesis_id(owner, l.nonce) != server)) return "";
+    // A device proof that does not verify makes the link a forgery, never a 0.13 one.
+    if (l.has_dev && link_device(server, l, c).empty()) return "";
     return c.verify(l.owner, l.sig, payload(server, l)) ? owner : "";
 }
 
 inline bool extends(const std::string& server, const LockLink& prev, const LockLink& next, const LockCrypto& c) {
     return !next.is_base() && well_formed(next) && prev.n < MAX_N && next.n == prev.n + 1 &&
+           (!next.has_dev || !link_device(server, next, c).empty()) &&
            c.verify(prev.change, next.sig, payload(server, next));
 }
 
@@ -144,27 +195,75 @@ inline std::string record_key(const std::string& server, const std::string& owne
 }
 
 // The chain held after `submitted` is offered against `stored`, or nullopt when
-// refused: the first valid extension wins, an owner-signed link past the newest
-// resets a fork, a shorter chain ending in the same lock compacts it.
+// refused (the Rust mirror's doc names each rule):
+// - the first valid extension of the newest lock wins; a link a counted device made
+//   may extend an older held lock when every link after it is dead (its proof names a
+//   device the fold no longer counts) and of the forker's identity, unless the forker
+//   is the owner; a link without a proof is never dead;
+// - an owner-signed link the relay does not hold needs a counted owner device, and
+//   resets a fork by at most RESET_STEP past the newest;
+// - a new link after one with a device proof, or with one, needs a counted device;
+// - a shorter chain ending in the same lock compacts it; a frozen newest lock gives
+//   way to a counted owner device's new start.
 inline std::optional<std::vector<LockLink>> relay_put(const std::string& server,
-                                                      const std::vector<LockLink>& stored,
+                                                      const std::vector<LockLink>& held,
                                                       const std::vector<LockLink>& submitted,
-                                                      const LockCrypto& c) {
+                                                      const LockCrypto& c, const LockCounted& counted) {
+    auto made_counted = [&](const LockLink& l) {
+        LinkDevice d = link_device(server, l, c);
+        return !d.empty() && counted(d.master, d.device);
+    };
     if (submitted.empty()) return std::nullopt;
     if (!submitted[0].is_base()) {
-        if (stored.empty()) return std::nullopt;
-        const LockLink* prev = &stored.back();
+        if (held.empty()) return std::nullopt;
+        size_t at = held.size() - 1;
+        if (!extends(server, held[at], submitted[0], c)) {
+            bool found = false;
+            for (size_t i = held.size() - 1; i-- > 0;) {
+                if (extends(server, held[i], submitted[0], c)) {
+                    at = i;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return std::nullopt;
+            const LinkDevice forker = link_device(server, submitted[0], c);
+            if (forker.empty() || !counted(forker.master, forker.device)) return std::nullopt;
+            const std::string owner = base_owner(server, held.front(), c);
+            for (size_t i = at + 1; i < held.size(); i++) {
+                const LinkDevice dead = link_device(server, held[i], c);
+                if (dead.empty() || counted(dead.master, dead.device) ||
+                    (forker.master != owner && dead.master != forker.master)) {
+                    return std::nullopt;
+                }
+            }
+        }
+        const LockLink* prev = &held[at];
         for (const auto& l : submitted) {
             if (!extends(server, *prev, l, c)) return std::nullopt;
+            if ((prev->has_dev || l.has_dev) && !made_counted(l)) return std::nullopt;
             prev = &l;
         }
-        if (stored.size() + submitted.size() > MAX_CHAIN) return std::nullopt;
-        std::vector<LockLink> out = stored;
+        if (at + 1 + submitted.size() > MAX_CHAIN) return std::nullopt;
+        std::vector<LockLink> out(held.begin(), held.begin() + static_cast<std::ptrdiff_t>(at + 1));
         out.insert(out.end(), submitted.begin(), submitted.end());
         return out;
     }
     std::string owner = verify_chain(server, submitted, c);
     if (owner.empty()) return std::nullopt;
+    static const std::vector<LockLink> none;
+    const std::vector<LockLink>& stored = !held.empty() && held.back().n > FROZEN_FROM ? none : held;
+    const uint64_t held_n = stored.empty() ? 0 : stored.back().n;
+    for (size_t i = 0; i < submitted.size(); i++) {
+        const LockLink& l = submitted[i];
+        bool new_base = false;
+        if (l.is_base()) {
+            new_base = true;
+            for (const auto& h : stored) new_base = new_base && !(h == l);
+        }
+        bool new_next = !l.is_base() && l.n > held_n && (l.has_dev || (i > 0 && submitted[i - 1].has_dev));
+        if ((new_base || new_next) && !made_counted(l)) return std::nullopt;
+    }
     if (stored.empty()) return submitted;
     if (base_owner(server, stored.front(), c) != owner) return std::nullopt;
     const LockLink& tip = stored.back();
@@ -179,7 +278,7 @@ inline std::optional<std::vector<LockLink>> relay_put(const std::string& server,
                 break;
             }
         }
-        if (continues || reset) return submitted;
+        if ((continues || reset) && newest.n - tip.n <= RESET_STEP) return submitted;
         return std::nullopt;
     }
     if (newest.same_lock(tip)) return submitted.size() < stored.size() ? submitted : stored;
@@ -209,6 +308,19 @@ inline std::optional<LockLink> link_from_json(const nlohmann::json& j) {
         l.nonce = it->get<std::string>();
         l.has_nonce = true;
     }
+    if (auto it = j.find("dev"); it != j.end()) {
+        if (!it->is_object()) return std::nullopt;
+        auto field = [&it](const char* name, std::string& out) {
+            auto f = it->find(name);
+            if (f == it->end() || !f->is_string()) return false;
+            out = f->get<std::string>();
+            return true;
+        };
+        if (!field("device", l.dev_device) || !field("master", l.dev_master) || !field("sig", l.dev_sig)) {
+            return std::nullopt;
+        }
+        l.has_dev = true;
+    }
     return l;
 }
 
@@ -230,6 +342,7 @@ inline nlohmann::json links_to_json(const std::vector<LockLink>& links) {
         nlohmann::json o = {{"n", l.n}, {"door", l.door}, {"change", l.change}, {"sig", l.sig}};
         if (l.has_owner) o["owner"] = l.owner;
         if (l.has_nonce) o["nonce"] = l.nonce;
+        if (l.has_dev) o["dev"] = {{"device", l.dev_device}, {"master", l.dev_master}, {"sig", l.dev_sig}};
         arr.push_back(std::move(o));
     }
     return arr;
@@ -257,7 +370,7 @@ struct JoinLocks {
         size_t n = 256 + key.size();
         for (const auto& l : links) {
             n += sizeof(LockLink) + 64 + l.door.size() + l.change.size() + l.sig.size() + l.owner.size() +
-                 l.nonce.size();
+                 l.nonce.size() + l.dev_device.size() + l.dev_master.size() + l.dev_sig.size();
         }
         return n;
     }
@@ -273,7 +386,7 @@ struct JoinLocks {
     // owner-signed link must name it; a self-certifying id names its owner itself.
     // Returns whether the submitted newest lock is now the relay's, and fills `current`.
     bool put(const std::string& server, const std::string& owner, const std::vector<LockLink>& submitted,
-             const LockCrypto& c, std::vector<LockLink>& current, uint64_t share) {
+             const LockCrypto& c, const LockCounted& counted, std::vector<LockLink>& current, uint64_t share) {
         std::string key = join_lock::record_key(server, owner);
         auto it = records.find(key);
         std::vector<LockLink> stored = it == records.end() ? std::vector<LockLink>{} : it->second;
@@ -283,7 +396,7 @@ struct JoinLocks {
             join_lock::base_owner(server, submitted[0], c) != owner) {
             return false;
         }
-        auto next = join_lock::relay_put(server, stored, submitted, c);
+        auto next = join_lock::relay_put(server, stored, submitted, c, counted);
         if (!next) return false;
         if (it != records.end() && *next == stored) {
             ledger.touch(key);

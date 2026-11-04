@@ -1,6 +1,10 @@
 #pragma once
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <limits>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -24,6 +28,11 @@ struct RosterBook {
     struct Held {
         roster::Roster roster;
         std::unordered_map<std::string, int64_t> seen_ms;  // seen_key(base, device) -> first seen
+        // The fold, good from `folded_from_ms` until the next pending join matures; a
+        // changed roster is a new Held.
+        mutable std::optional<roster::State> folded;
+        mutable int64_t folded_from_ms = 0;
+        mutable int64_t folded_until_ms = 0;
     };
 
     static std::string seen_key(const std::string& base, const std::string& device) { return base + "|" + device; }
@@ -62,6 +71,17 @@ struct RosterBook {
             now_ms, c);
     }
 
+    // The fold of a held roster, from the cache while nothing it reads changed, so the
+    // lock puts that name an identity fold its roster once. `charge` runs before a fold.
+    const roster::State& counted_fold(const Held& h, int64_t now_ms, const RosterCrypto& c,
+                                      const std::function<void()>& charge) const {
+        if (!h.folded || now_ms < h.folded_from_ms || now_ms >= h.folded_until_ms) {
+            charge();
+            keep_fold(h, fold(h, now_ms, c), now_ms);
+        }
+        return *h.folded;
+    }
+
     // Fold `shown` (as parsed, unverified) into the record for `master` and judge
     // `device`. A roster for another master, or one past any ceiling, changes nothing
     // and counts nobody. The record is charged to `share` when `device` turns out a
@@ -96,6 +116,7 @@ struct RosterBook {
         held.seen_ms = std::move(seen);
         out.state = fold(held, now_ms, c);
         out.member = out.state.is_member(device);
+        keep_fold(held, out.state, now_ms);
 
         const size_t weight = record_bytes(master, held);
         records[master] = std::move(held);
@@ -116,7 +137,9 @@ struct RosterBook {
     void restore(const std::string& master, roster::Roster r, std::unordered_map<std::string, int64_t> seen_ms,
                  uint64_t share) {
         if (r.master != master) return;
-        Held h{std::move(r), std::move(seen_ms)};
+        Held h;
+        h.roster = std::move(r);
+        h.seen_ms = std::move(seen_ms);
         const size_t weight = record_bytes(master, h);
         records[master] = std::move(h);
         ledger.put(master, share, weight);
@@ -124,6 +147,19 @@ struct RosterBook {
     }
 
    private:
+    // A fold reads the clock only where a pending join's first sight matures.
+    static void keep_fold(const Held& h, roster::State st, int64_t now_ms) {
+        int64_t until = std::numeric_limits<int64_t>::max();
+        for (const auto& [key, seen] : h.seen_ms) {
+            if (seen > std::numeric_limits<int64_t>::max() - roster::PENDING_MATURITY_MS) continue;
+            const int64_t matures = seen + roster::PENDING_MATURITY_MS;
+            if (matures > now_ms) until = std::min(until, matures);
+        }
+        h.folded = std::move(st);
+        h.folded_from_ms = now_ms;
+        h.folded_until_ms = until;
+    }
+
     void enforce_budget() {
         while (ledger.total() > budget) {
             auto victim = ledger.victim();

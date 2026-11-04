@@ -1827,7 +1827,37 @@ static void handle_lock_put(SSLWebSocket* ws, PerSocketData* data, const json& j
     const LockLink* before = room_lock(state, server);
     const std::string old_door = before ? before->door : std::string();
     std::vector<LockLink> current;
-    bool accepted = state.join_locks.put(server, owner, *links, lock_crypto(), current, socket_share(state, data));
+    // The relay's fold of the identity's rosters (ID-1R) judges each device a link
+    // names, cached in the book until that roster changes; with none held it counts nobody.
+    const int64_t now_ms = wall_now_ms();
+    const LockCounted counted = [&state, now_ms](const std::string& master, const std::string& device) {
+        const auto* held = state.roster_book.get(master);
+        if (!held) return false;
+        // A fold verifies every statement; the plan priced only the links.
+        auto charge = [held] {
+            const roster::Roster& r = held->roster;
+            const size_t sigs = 1 + r.recoveries.size() + r.phrase_admits.size() + r.consents.size() +
+                                r.vouches.size() + r.pendings.size() + 2 * r.legacy.size() + r.removals.size();
+            breaker::bump(breaker::SIG_W * static_cast<int64_t>(sigs));
+        };
+        return state.roster_book.counted_fold(*held, now_ms, relay_roster_crypto(), charge).is_member(device);
+    };
+    // The rules read a link's device proof more than once; each signature is checked once.
+    std::unordered_map<std::string, bool> verified;
+    const LockCrypto& wired = lock_crypto();
+    const LockCrypto once{
+        [&verified, &wired](const std::string& key, const std::string& sig, const std::string& msg) {
+            std::string k = std::to_string(key.size()) + ":" + key + std::to_string(sig.size()) + ":" + sig + msg;
+            auto it = verified.find(k);
+            if (it != verified.end()) return it->second;
+            const bool ok = wired.verify(key, sig, msg);
+            verified.emplace(std::move(k), ok);
+            return ok;
+        },
+        wired.peer_id,
+        wired.genesis_id,
+    };
+    bool accepted = state.join_locks.put(server, owner, *links, once, counted, current, socket_share(state, data));
     const LockLink* after = room_lock(state, server);
     if (after && (!before || after->door != old_door)) relock_room(state, server, before != nullptr);
     send_json(ws, {{"type", "lock_chain"},

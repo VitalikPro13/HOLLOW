@@ -695,11 +695,40 @@ static std::string door_proof(const Peer& p, const std::string& room, const Door
     return door_proof_for(p, p.nonce, room, door);
 }
 
-// A one-link chain signed by its owner: a legacy (32-hex) server's carries no nonce.
-static json base_link(const std::string& server, const Door& door, const Ident& change, const Ident& owner,
-                      const std::string& nonce, bool genesis) {
+static json legacy_roster(const Ident& master, const std::vector<const Ident*>& devices);
+
+// The owner device each test owner signs its bases with (join_lock.h: the relay takes
+// an owner base only from a device its fold of the owner's rosters counts).
+static const Ident& owner_device(const Ident& owner) {
+    static std::map<std::string, std::unique_ptr<Ident>> devices;
+    auto& d = devices[owner.peer];
+    if (!d) d = std::make_unique<Ident>();
+    return *d;
+}
+
+// Show the relay `owner`'s roster counting `device`, from a socket of its own.
+static void show_roster(const Ident& owner, const Ident& device) {
+    auto shower = login(Ident(), "full");
+    shower->send({{"type", "join"}, {"room", "inbox:" + owner.peer}, {"inbox_roster", legacy_roster(owner, {&device})}});
+    next_json(*shower, typed("members", "inbox:" + owner.peer));
+}
+
+static LockLink proved(const std::string& server, LockLink l, const std::string& master, const Ident& device) {
+    l.dev_device = device.pub_b64;
+    l.dev_master = master;
+    l.has_dev = true;
+    l.dev_sig = device.sign(join_lock::dev_payload(server, l));
+    return l;
+}
+
+// A chain's first link, signed by its owner and proved by an owner device the relay
+// now counts (shown first). A legacy (32-hex) server's carries no nonce. `n`, the
+// device and showing the roster can be set for the refusal cases.
+static LockLink base_lock(const std::string& server, const Door& door, const Ident& change, const Ident& owner,
+                          const std::string& nonce, bool genesis, uint64_t n = 1, const Ident* device = nullptr,
+                          bool show = true) {
     LockLink l;
-    l.n = 1;
+    l.n = n;
     l.door = door.text;
     l.change = change.pub_b64;
     l.owner = owner.pub_b64;
@@ -707,7 +736,14 @@ static json base_link(const std::string& server, const Door& door, const Ident& 
     l.nonce = nonce;
     l.has_nonce = genesis;
     l.sig = owner.sign(join_lock::payload(server, l));
-    return join_lock::links_to_json({l});
+    const Ident& dev = device ? *device : owner_device(owner);
+    if (show) show_roster(owner, dev);
+    return proved(server, l, owner.peer, dev);
+}
+
+static json base_link(const std::string& server, const Door& door, const Ident& change, const Ident& owner,
+                      const std::string& nonce, bool genesis) {
+    return join_lock::links_to_json({base_lock(server, door, change, owner, nonce, genesis)});
 }
 
 // A ring control signed as ring2 for `domain` (this relay's when empty), or as ring1.
@@ -3081,7 +3117,7 @@ static void test_hidden_big_pass() {
 }
 
 static json successor_link(const std::string& server, uint64_t n, const Door& door, const Ident& change,
-                           const Ident& signer);
+                           const Ident& signer, const Ident& owner);
 
 // `through_grace` waits out the 60 s door grace too (RELAY_LIVE_ONLY=door_grace).
 static void test_hidden_door_rooms(bool through_grace) {
@@ -3110,7 +3146,7 @@ static void test_hidden_door_rooms(bool through_grace) {
     check("(two hold the next door before the lock does)",
           md && !md->value("proved", true) && mc && !mc->value("proved", true));
     json links = base;
-    links.push_back(successor_link(room, 2, door2, change2, change));
+    links.push_back(successor_link(room, 2, door2, change2, change, owner));
     b->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", links}});
     auto put = next_json(*b, typed("lock_chain"));
     check("(the lock moves to it)", put && put->value("put", false));
@@ -3812,14 +3848,16 @@ static void hs_fetch_reads_grace_once() {
 }
 
 // Link `n` of a lock, signed by the change key of the link before it.
+// The lock after a base, signed by `signer` and proved by `owner`'s device, which the
+// base already showed the relay.
 static json successor_link(const std::string& server, uint64_t n, const Door& door, const Ident& change,
-                           const Ident& signer) {
+                           const Ident& signer, const Ident& owner) {
     LockLink l;
     l.n = n;
     l.door = door.text;
     l.change = change.pub_b64;
     l.sig = signer.sign(join_lock::payload(server, l));
-    return join_lock::links_to_json({l})[0];
+    return join_lock::links_to_json({proved(server, l, owner.peer, owner_device(owner))})[0];
 }
 
 // The door grace is 60 s and has no test override, so this needs a relay whose session
@@ -3848,7 +3886,7 @@ static void hs_door_moved_in_grace() {
     a->ws.abort();
     check("the device is in grace", next(*b, about("peer_left", room, ida.peer)).has_value());
     json links = base;
-    links.push_back(successor_link(room, 2, door2, change2, change));
+    links.push_back(successor_link(room, 2, door2, change2, change, owner));
     b->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", links}});
     auto put = next_json(*b, typed("lock_chain"));
     check("the lock moves (a kick)", put && put->value("put", false));
@@ -4296,7 +4334,7 @@ static void test_presence_digest_door(bool through_grace) {
     auto c = login(Ident());
     join(*c, room, {{"door_proof", door_proof(*c, room, door2)}});
     json links = base;
-    links.push_back(successor_link(room, 2, door2, change2, change));
+    links.push_back(successor_link(room, 2, door2, change2, change, owner));
     b->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", links}});
     next(*b, typed("lock_chain"));
     check("after a relock the prover's digest matches", audit(*o, told, room) == Audit::Same && told.rooms[room].count(c->id.peer));
@@ -5258,7 +5296,7 @@ static int64_t breaker_move_cost(size_t junk, size_t members = 0, int64_t* judge
     settle({m.get()});
     const int64_t before = spent_of(m->id.peer);
     json links = base;
-    links.push_back(successor_link(room, 2, door2, change2, change));
+    links.push_back(successor_link(room, 2, door2, change2, change, owner));
     m->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", links}});
     next_json(*m, typed("lock_chain"));
     if (judged) *judged = plan_w_of(m->id.peer);
@@ -6065,6 +6103,64 @@ static void oom_ping_flood_counted() {
     check("a ping flooder that never reads is closed by the stall sweep", closed_by_relay(*p));
 }
 
+// C4 on the wire: an owner base the relay takes needs a counted owner device, a
+// reset jumps at most RESET_STEP, and a device the roster removed extends nothing.
+static void test_lock_needs_a_counted_device() {
+    printf("join lock: an owner base needs a counted device (C4)\n");
+    Ident owner, change, change2, change3, thief;
+    Door door, door2, door3;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    auto a = login(Ident());
+    auto put = [&](const std::vector<LockLink>& links) {
+        a->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", join_lock::links_to_json(links)}});
+        auto r = next_json(*a, json_where([&room](const json& j) {
+            return j.value("type", "") == "lock_chain" && j.value("server", "") == room;
+        }));
+        return r && r->value("put", false);
+    };
+    LockLink bare = base_lock(room, door, change, owner, nonce, true, 1, nullptr, false);
+    bare.has_dev = false;
+    check("the master key alone starts no chain", !put({bare}));
+    Ident stranger_device;
+    check("nor a device no roster held here counts",
+          !put({base_lock(room, door, change, owner, nonce, true, 1, &stranger_device, false)}));
+    const LockLink first = base_lock(room, door, change, owner, nonce, true);
+    check("a counted owner device's first lock is taken", put({first}));
+    check("a reset past the step is refused",
+          !put({base_lock(room, door2, change2, owner, nonce, true, 2 + join_lock::RESET_STEP)}));
+    const LockLink reset = base_lock(room, door2, change2, owner, nonce, true, 2);
+    check("a reset within it is taken", put({reset}));
+
+    LockLink next;
+    next.n = 3;
+    next.door = door3.text;
+    next.change = change3.pub_b64;
+    next.sig = change2.sign(join_lock::payload(room, next));
+    check("a link with no device after one that names one is refused", !put({next}));
+    check("so is one a device no roster counts made", !put({proved(room, next, owner.peer, thief)}));
+    check("one a counted device made is taken", put({proved(room, next, owner.peer, owner_device(owner))}));
+
+    // The owner's second device removes the first: that one moves and resets nothing more.
+    const Ident& gone = owner_device(owner);
+    Ident second, change4;
+    Door door4;
+    auto shower = login(Ident(), "full");
+    const std::string inbox = "inbox:" + owner.peer;
+    shower->send({{"type", "join"}, {"room", inbox}, {"inbox_roster", legacy_roster(owner, {&gone, &second})}});
+    next_json(*shower, typed("members", inbox));
+    shower->send({{"type", "join"}, {"room", inbox}, {"inbox_roster", roster_removing(owner, {&gone, &second}, gone, second)}});
+    next_json(*shower, typed("members", inbox));
+    LockLink fourth;
+    fourth.n = 4;
+    fourth.door = door4.text;
+    fourth.change = change4.pub_b64;
+    fourth.sig = change3.sign(join_lock::payload(room, fourth));
+    check("a removed device extends nothing", !put({proved(room, fourth, owner.peer, gone)}));
+    check("nor resets the lock", !put({base_lock(room, door4, change4, owner, nonce, true, 4, &gone, false)}));
+    check("the device left resets it", put({base_lock(room, door4, change4, owner, nonce, true, 4, &second, false)}));
+}
+
 int main(int argc, char** argv) {
     if (argc != 4 || (std::string(argv[3]) != "on" && std::string(argv[3]) != "off")) {
         fprintf(stderr, "usage: test_relay_live <port> <auth domain> <on|off>\n");
@@ -6243,6 +6339,7 @@ int main(int argc, char** argv) {
         test_nicknames();
         test_rings();
         test_catchup_end_mark();
+        test_lock_needs_a_counted_device();
         test_inbox_proof();
         test_inbox_audience();
         test_forwarder_rooms();

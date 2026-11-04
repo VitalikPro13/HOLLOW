@@ -145,6 +145,8 @@ fn broadcast_op_mls_first(
 ) {
     let Ok(op_json) = serde_json::to_string(op) else { return };
     if mls.as_ref().is_some_and(|m| m.has_group(server_id)) {
+        #[cfg(test)]
+        super::lock_keeper::note_door_send(server_id, &op.payload, mls.as_ref().map(|m| m.group_members(server_id)).unwrap_or_default());
         let envelope = MessageEnvelope::CrdtOp { sid: server_id.to_string(), op_json: op_json.clone() };
         if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, &envelope, crypto_store, Some(state)) {
             hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed, the Olm twin still goes: {e}");

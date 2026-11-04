@@ -258,6 +258,24 @@ pub(crate) fn is_revoked(device_peer_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The identities whose rosters removed this device id, sorted.
+pub(crate) fn revokers_of(device_peer_id: &str) -> Vec<String> {
+    let mut masters: Vec<String> = revoked()
+        .read()
+        .map(|m| m.get(device_peer_id).map(|s| s.iter().cloned().collect()).unwrap_or_default())
+        .unwrap_or_default();
+    masters.sort();
+    masters
+}
+
+/// Every device id `master`'s roster removed.
+pub(crate) fn revoked_by(master: &str) -> Vec<String> {
+    revoked()
+        .read()
+        .map(|m| m.iter().filter(|(_, masters)| masters.contains(master)).map(|(d, _)| d.clone()).collect())
+        .unwrap_or_default()
+}
+
 /// True iff `master`'s roster is one that removed this device id.
 pub(crate) fn is_revoked_by(master: &str, device_peer_id: &str) -> bool {
     revoked()
