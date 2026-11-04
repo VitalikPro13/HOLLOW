@@ -1,0 +1,49 @@
+{
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "b",
+   "op": "log",
+   "message": "w2-e part 2: a was killed mid-stream and is back; b must end with the fixture's exact bytes"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendChip > semantics:probe-a",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:cut file w2e",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 90000,
+   "why": "a is back on a fresh session: b drops what the cut left, asks a again, and the whole file streams under the new ask's key (the relay lane is paced)."
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "w2e-cut-02-after"
+  },
+  {
+   "peer": "b",
+   "op": "export_attachment",
+   "file": "cut30",
+   "dest": "D:/dev/wt/w2-e/build/fleet_out/w2e_cut/b_cut30.bin"
+  }
+ ]
+}

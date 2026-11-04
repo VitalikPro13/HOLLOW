@@ -54,7 +54,7 @@ pub fn read_at_rest(path: String) -> Result<Vec<u8>, String> {
 }
 
 #[frb(ignore)]
-const IMAGE_REFUSED: &str = "Hollow can't show this image";
+pub(crate) const IMAGE_REFUSED: &str = "Hollow can't show this image";
 /// What [`read_at_rest_image`] fails with while the check waits for a slot; Dart
 /// matches it (`AtRest.readImage`) and tries again instead of showing a refusal.
 #[frb(ignore)]
@@ -65,8 +65,13 @@ pub(crate) const IMAGE_NOT_YET: &str = "Hollow is still checking this image";
 /// native codecs paint it with no tap. Errs with [`IMAGE_REFUSED`] otherwise.
 #[frb]
 pub fn read_at_rest_image(path: String) -> Result<Vec<u8>, String> {
+    image_shown(at_rest::read_all(std::path::Path::new(&path))?)
+}
+
+/// `bytes` once the image check passed them, else the error Dart shows or waits on.
+#[frb(ignore)]
+pub(crate) fn image_shown(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     use crate::node::image_gate::{judge_for_ffi, Verdict};
-    let bytes = at_rest::read_all(std::path::Path::new(&path))?;
     match judge_for_ffi(&bytes) {
         Verdict::Pass => Ok(bytes),
         Verdict::Refused => Err(IMAGE_REFUSED.to_string()),

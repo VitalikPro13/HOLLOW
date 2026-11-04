@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `under_data_root`
+// These functions are ignored because they are not marked as `pub`: `image_shown`, `under_data_root`
 
 Future<Uint8List> readAtRest({required String path}) =>
     RustLib.instance.api.crateApiAtRestReadAtRest(path: path);

@@ -205,19 +205,10 @@ async fn dispatch_one(
     pending: &mut HashMap<String, PendingFileAsk>,
     requested_file_receipts: &mut HashMap<String, Instant>,
     declined_file_ids: &mut HashSet<String>,
-    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     file_id: &str,
     device: &str,
     room: &str,
-    local_device: &str,
 ) {
-    // Only the device already streaming it can resume: another stream is its own.
-    let offset = pending_ws_transfers
-        .get(&super::file_handler::file_stream_id(file_id, device, local_device))
-        .filter(|s| s.sender == device)
-        .map(|s| s.bytes_received)
-        .unwrap_or(0);
-
     // CRITICAL, and the load-bearing line of this module: the explicit-pull receipt
     // is CLEARED on `WsEvent::SessionLost` and CONSUMED at header time, so a retry
     // that does not re-stamp it has its own answer refused by the auto-download
@@ -232,11 +223,11 @@ async fn dispatch_one(
         &HavenMessage::FileRequest {
             file_id: file_id.to_string(),
             chunks: Vec::new(),
-            offset,
+            offset: 0,
         },
         super::olm_lane::NoSession::Queue,
     );
-    hollow_log!("[HOLLOW-FILE] Asking {device} for {file_id} in {room} (offset {offset})");
+    hollow_log!("[HOLLOW-FILE] Asking {device} for {file_id} in {room}");
 
     let now = Instant::now();
     if let Some(ask) = pending.get_mut(file_id) {
@@ -265,7 +256,6 @@ async fn advance(
     pending: &mut HashMap<String, PendingFileAsk>,
     requested_file_receipts: &mut HashMap<String, Instant>,
     declined_file_ids: &mut HashSet<String>,
-    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     file_id: &str,
     prefer: Option<&str>,
     local_master: &str,
@@ -297,11 +287,9 @@ async fn advance(
                 pending,
                 requested_file_receipts,
                 declined_file_ids,
-                pending_ws_transfers,
                 file_id,
                 &device,
                 &room,
-                local_device,
             )
             .await;
         }
@@ -331,7 +319,6 @@ pub(crate) async fn upsert_and_advance(
     pending: &mut HashMap<String, PendingFileAsk>,
     requested_file_receipts: &mut HashMap<String, Instant>,
     declined_file_ids: &mut HashSet<String>,
-    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     file_id: &str,
     context: FileAskContext,
     sender: String,
@@ -384,7 +371,6 @@ pub(crate) async fn upsert_and_advance(
         pending,
         requested_file_receipts,
         declined_file_ids,
-        pending_ws_transfers,
         file_id,
         prefer,
         local_master,
@@ -457,7 +443,6 @@ pub(crate) async fn handle_file_unavailable(
     pending: &mut HashMap<String, PendingFileAsk>,
     requested_file_receipts: &mut HashMap<String, Instant>,
     declined_file_ids: &mut HashSet<String>,
-    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     peer_str: &str,
     file_id: String,
     reason: String,
@@ -514,7 +499,6 @@ pub(crate) async fn handle_file_unavailable(
         pending,
         requested_file_receipts,
         declined_file_ids,
-        pending_ws_transfers,
         &file_id,
         None,
         local_master,
@@ -535,7 +519,6 @@ pub(crate) async fn retry_asks_for_peer(
     pending: &mut HashMap<String, PendingFileAsk>,
     requested_file_receipts: &mut HashMap<String, Instant>,
     declined_file_ids: &mut HashSet<String>,
-    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     room: &str,
     peer_id: &str,
     local_master: &str,
@@ -573,7 +556,6 @@ pub(crate) async fn retry_asks_for_peer(
             pending,
             requested_file_receipts,
             declined_file_ids,
-            pending_ws_transfers,
             &file_id,
             Some(peer_id),
             local_master,
@@ -597,7 +579,6 @@ pub(crate) async fn retry_asks_in_room(
     pending: &mut HashMap<String, PendingFileAsk>,
     requested_file_receipts: &mut HashMap<String, Instant>,
     declined_file_ids: &mut HashSet<String>,
-    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     room: &str,
     local_master: &str,
     local_device: &str,
@@ -629,7 +610,6 @@ pub(crate) async fn retry_asks_in_room(
             pending,
             requested_file_receipts,
             declined_file_ids,
-            pending_ws_transfers,
             &file_id,
             None,
             local_master,
@@ -653,7 +633,6 @@ pub(crate) async fn retry_stale_asks(
     pending: &mut HashMap<String, PendingFileAsk>,
     requested_file_receipts: &mut HashMap<String, Instant>,
     declined_file_ids: &mut HashSet<String>,
-    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     local_master: &str,
     local_device: &str,
     db_path: &str,
@@ -707,7 +686,6 @@ pub(crate) async fn retry_stale_asks(
             pending,
             requested_file_receipts,
             declined_file_ids,
-            pending_ws_transfers,
             &file_id,
             None,
             local_master,

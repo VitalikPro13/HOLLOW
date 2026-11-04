@@ -1,0 +1,170 @@
+{
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_A"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Friends",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_A}"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:${PEER_A}",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:Needs Attention",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Accept",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:probe-a",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:probe-b",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:probe-b"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "w2-e: desktop a starts a VIDEO call to the phone b, which answers without a camera: the phone receives a's camera through its SFrame decryptor (logs: [HOLLOW-SFRAME] Receiver ... :video Ok, [HOLLOW-VIDEO-STATS])"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Start video call",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Accept",
+   "timeout_ms": 45000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Accept",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "active",
+   "timeout_ms": 45000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "active",
+   "timeout_ms": 45000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 15000,
+   "why": "Soak: keys, cryptors and the camera stats probes land in the logs."
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "w2e-camios-01"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Turn off camera",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Turn on camera",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 12000,
+   "why": "a's camera back on a NEW sender: its cryptor must follow, the phone's decryptor too."
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "w2e-camios-02-again"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Leave the call",
+   "index": 0
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 2500
+  }
+ ]
+}

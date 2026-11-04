@@ -26,11 +26,15 @@ pub const GOSSIP_ACTIVATION_THRESHOLD: usize = 6;
 /// Default broadcast TTL (max hops).
 pub const DEFAULT_BROADCAST_TTL: u8 = 4;
 
-/// Voice channel: switch to gossip mode at this participant count.
-pub const VOICE_GOSSIP_THRESHOLD_UP: usize = 6;
+/// Voice channel: switch to gossip mode at this participant count (us included).
+/// Gossip forwards no voices yet, so a member there hears only its overlay
+/// neighbours: everyone stays a full mesh while each fits the app's voice leg cap
+/// (`maxVoicePcs` 15 legs, 16 people).
+pub const VOICE_GOSSIP_THRESHOLD_UP: usize = 17;
 
-/// Voice channel: switch back to mesh mode at this participant count (hysteresis).
-pub const VOICE_GOSSIP_THRESHOLD_DOWN: usize = 4;
+/// Voice channel: stay in gossip mode down to this participant count. Equal to
+/// the switch point: a channel that fits a full mesh again goes back to one.
+pub const VOICE_GOSSIP_THRESHOLD_DOWN: usize = 17;
 
 /// Adaptive gossip exchange interval based on max server member count.
 pub fn gossip_exchange_interval_secs(max_member_count: usize) -> u64 {

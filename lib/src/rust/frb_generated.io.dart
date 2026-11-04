@@ -5,6 +5,7 @@
 
 import 'api/archive.dart';
 import 'api/at_rest.dart';
+import 'api/catalog.dart';
 import 'api/conference.dart';
 import 'api/crdt.dart';
 import 'api/emotes.dart';

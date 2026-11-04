@@ -10,6 +10,9 @@ class FakeFrameCryptorFactory implements FrameCryptorFactory {
   KeyProviderOptions? options;
   int _made = 0;
 
+  /// Sender cryptors fail to create, as a stopped sender's do.
+  bool failSenders = false;
+
   @override
   Future<KeyProvider> createDefaultKeyProvider(KeyProviderOptions options) async {
     this.options = options;
@@ -23,8 +26,10 @@ class FakeFrameCryptorFactory implements FrameCryptorFactory {
     required RTCRtpSender sender,
     required Algorithm algorithm,
     required KeyProvider keyProvider,
-  }) async =>
-      FakeFrameCryptor('tx${_made++}', participantId, calls);
+  }) async {
+    if (failSenders) throw StateError('no sender cryptor');
+    return FakeFrameCryptor('tx${_made++}', participantId, calls);
+  }
 
   @override
   Future<FrameCryptor> createFrameCryptorForRtpReceiver({
@@ -90,6 +95,14 @@ class FakeFrameCryptor extends FrameCryptor {
   Future<void> dispose() async => calls.add('$name.dispose');
 }
 
-class FakeRtpSender extends Fake implements RTCRtpSender {}
+class FakeRtpSender extends Fake implements RTCRtpSender {
+  FakeRtpSender([this.senderId = 'tx']);
+  @override
+  final String senderId;
+}
 
-class FakeRtpReceiver extends Fake implements RTCRtpReceiver {}
+class FakeRtpReceiver extends Fake implements RTCRtpReceiver {
+  FakeRtpReceiver([this.receiverId = 'rx']);
+  @override
+  final String receiverId;
+}

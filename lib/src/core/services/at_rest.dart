@@ -7,6 +7,22 @@ import 'package:hollow/src/rust/api/at_rest.dart' as ffi;
 /// not a refusal.
 const String kImageNotYet = 'Hollow is still checking this image';
 
+/// Runs [read] again while Rust is still checking the image it returns, one
+/// second apart and at most [attempts] times ([waitFirst]: a second before the
+/// first too); a refusal or any other failure is rethrown at once.
+Future<T> whileImageChecked<T>(Future<T> Function() read,
+    {int attempts = 60, bool waitFirst = false}) async {
+  if (waitFirst) await Future<void>.delayed(AtRest.debugImageRetryDelay);
+  for (var attempt = 1;; attempt++) {
+    try {
+      return await read();
+    } catch (e) {
+      if (attempt >= attempts || !e.toString().contains(kImageNotYet)) rethrow;
+      await Future<void>.delayed(AtRest.debugImageRetryDelay);
+    }
+  }
+}
+
 /// Progress of the one-per-boot sweep over files an older version left in the clear.
 typedef AtRestStatus = ffi.AtRestStatus;
 
@@ -35,19 +51,12 @@ class AtRest {
   /// The bytes of an image file for Flutter's decoder, only once Rust has decoded
   /// them whole; throws for a file it refused, so the caller shows its fallback.
   /// While Rust is still waiting to check the file it asks again, up to a minute.
-  static Future<Uint8List> readImage(String path) async {
-    for (var attempt = 0;; attempt++) {
-      try {
+  static Future<Uint8List> readImage(String path) => whileImageChecked(() {
         final override = debugReadImage;
         return override != null
-            ? await override(path)
-            : await ffi.readAtRestImage(path: path);
-      } catch (e) {
-        if (attempt >= 60 || !e.toString().contains(kImageNotYet)) rethrow;
-        await Future<void>.delayed(debugImageRetryDelay);
-      }
-    }
-  }
+            ? override(path)
+            : ffi.readAtRestImage(path: path);
+      }, attempts: 61);
 
   /// The wait between two asks while Rust is still checking an image.
   @visibleForTesting

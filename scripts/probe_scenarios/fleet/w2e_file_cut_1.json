@@ -1,0 +1,137 @@
+{
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_A"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendsManager > text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_A}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:Needs Attention",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Accept",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:probe-a",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendsManager > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "type:_FriendsManager",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:_FriendChip > semantics:probe-b",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:_FriendChip > semantics:probe-b",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendChip > semantics:probe-a",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:ChatComposerRow > type:EditableText",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "w2-e: a sends a 30 MB file to b; the runner kills a BY PID while the stream is mid-way, restarts it, and part 2 checks b ends with the right bytes"
+  },
+  {
+   "peer": "a",
+   "op": "attach_file",
+   "path": "D:/dev/wt/w2-e/build/w2e_fixtures/cut30.bin"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:ChatComposerRow > type:EditableText"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "type:ChatComposerRow > type:EditableText",
+   "value": "cut file w2e"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:cut file w2e",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "w2e-cut-01-sending"
+  }
+ ]
+}

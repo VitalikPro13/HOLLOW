@@ -5,6 +5,7 @@ import 'package:hollow/src/rust/api/showcase.dart' as showcase_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/catalog_preview_image.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
@@ -272,12 +273,12 @@ class _Thumb extends StatelessWidget {
       borderRadius: BorderRadius.circular(hollow.radiusXs),
       child: url == null
           ? fallback
-          : Image.network(
-              url!,
+          : CatalogPreviewImage(
+              url: url!,
               width: 32,
               height: 43,
               fit: BoxFit.cover,
-              errorBuilder: (_, _, _) => fallback,
+              fallback: fallback,
             ),
     );
   }

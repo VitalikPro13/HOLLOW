@@ -639,18 +639,30 @@ pub(crate) fn check_art_bytes(hash: &str, bytes: &[u8]) -> Result<(), String> {
 /// licence or provenance, and the rail is for things this install actually has.
 #[frb]
 pub fn fetch_shop_art(hash: String) -> Result<Vec<u8>, String> {
+    shop_art_from(hash, |url| {
+        get_http_runtime().block_on(async move {
+            let client = shop_client()?;
+            fetch_bounded(&client, &url, 20, MAX_FILE_BYTES, None).await
+        })
+    })
+}
+
+#[frb(ignore)]
+fn shop_art_from(hash: String, fetch: impl FnOnce(String) -> Result<Vec<u8>, String>) -> Result<Vec<u8>, String> {
     if !valid_emote_hash(&hash) {
         return Err("That is not a shop art address".into());
     }
-    let origin = shop_origin();
-    let url = format!("{origin}/art/{hash}");
-    let rt = get_http_runtime();
-    let bytes = rt.block_on(async move {
-        let client = shop_client()?;
-        fetch_bounded(&client, &url, 20, MAX_FILE_BYTES, None).await
-    })?;
-    check_art_bytes(&hash, &bytes)?;
-    Ok(bytes)
+    let key = format!("shop:{hash}");
+    let bytes = match super::catalog::take_held(&key) {
+        Some(bytes) => bytes,
+        None => {
+            let bytes = fetch(format!("{}/art/{hash}", shop_origin()))?;
+            check_art_bytes(&hash, &bytes)?;
+            bytes
+        }
+    };
+    // The hash proves the shop sent this art, never that a decoder may take it.
+    super::catalog::shown_or_held(&key, bytes, crate::node::image_gate::judge_for_ffi)
 }
 
 // ── Kept redeem codes ─────────────────────────────────────────────────
@@ -2123,6 +2135,21 @@ mod tests {
         let hash = sha_hex(&bytes);
         assert!(valid_emote_hash(&hash));
         check_art_bytes(&hash, &bytes).expect("matching bytes must pass");
+    }
+
+    /// Shop art reaches Dart only once it decodes whole: art whose hash and container
+    /// check out but no decoder can read is refused like a peer's picture.
+    #[test]
+    fn shop_art_reaches_dart_only_after_the_image_check() {
+        let mut real = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(4, 4)
+            .write_with_encoder(image::codecs::webp::WebPEncoder::new_lossless(&mut real))
+            .expect("encode");
+        let real = real.into_inner();
+        assert_eq!(shop_art_from(sha_hex(&real), |_| Ok(real.clone())), Ok(real.clone()));
+        let junk = webp_bytes(b"a container with no picture in it");
+        let err = shop_art_from(sha_hex(&junk), |_| Ok(junk.clone())).expect_err("art that does not decode reached Dart");
+        assert!(!err.contains("does not match"), "refused for the wrong reason: {err}");
     }
 
     #[test]

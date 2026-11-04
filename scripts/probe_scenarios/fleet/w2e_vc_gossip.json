@@ -1,0 +1,269 @@
+{
+ "peers": [
+  "a",
+  "b",
+  "c"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "fleet-vc"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:fleet-vc",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "fleet-vc"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "a new server has only #general, so the voice channel is created first and rides the join snapshot to b"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create channel",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Voice",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "value": "vc-test"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:vc-test",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:fleet-vc"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "server:fleet-vc",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "fleet-vc"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "channel:vc-test",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "c",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "server:fleet-vc",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "c",
+   "op": "open_server",
+   "name": "fleet-vc"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "channel:vc-test",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:probe-c",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "w2-e: three in the voice channel with debug_voice_gossip_at = '3 chain' in each data dir: gossip at 3, neighbours = the ids beside ours in sorted order, so the two ends hear each other only through the middle, forwarded under SFrame after one renegotiation"
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "vc-test"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "vc-test"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "c",
+   "op": "open_channel",
+   "name": "vc-test"
+  },
+  {
+   "peer": "c",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 15000,
+   "why": "Soak: keys, mode change to gossip, non-neighbour legs closed, wants sent."
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 20000,
+   "why": "No camera: the chain ends ask the middle for each other's voice, the middle renegotiates once per leg, the forwarded bytes lines print at 2 s and 6 s."
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "w2e-gossip-01"
+  },
+  {
+   "peer": "all",
+   "op": "dump",
+   "name": "w2e-gossip-01"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0
+  },
+  {
+   "peer": "c",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 3000
+  }
+ ]
+}

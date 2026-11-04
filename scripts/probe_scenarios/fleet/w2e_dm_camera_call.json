@@ -1,0 +1,224 @@
+{
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_A"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendsManager > text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_A}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:Needs Attention",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Accept",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:probe-a",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendsManager > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "type:_FriendsManager",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:probe-a"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "field",
+   "value": "got a minute to go over the mix? ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:probe-b",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:probe-b"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:got a minute to go over the mix? ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Home",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "w2-e: a 1:1 VIDEO call; both cameras SFrame-encrypted (logs: [HOLLOW-SFRAME] ... :video, [HOLLOW-VOICE] SFrame on the camera sender/receiver)"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Start video call",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:Accept",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Accept",
+   "index": 0
+  },
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "target": "semantics:Leave the call",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 15000,
+   "why": "Soak: keys, cryptors and the camera stats probes land in the logs."
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "w2e-cam-01-both"
+  },
+  {
+   "peer": "b",
+   "op": "log",
+   "message": "b turns its camera on mid-call (a new sender, a new receiver at a): the cryptors must move with it"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Turn on camera",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 12000,
+   "why": "Renegotiation and the new transceiver's first frames."
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "w2e-cam-02-b-on"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Turn off camera",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Turn on camera",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 12000,
+   "why": "a's camera back on a NEW sender: its cryptor must follow."
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "w2e-cam-03-a-again"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Leave the call",
+   "index": 0
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 2500
+  }
+ ]
+}

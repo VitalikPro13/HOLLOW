@@ -1,0 +1,157 @@
+{
+  "_": [
+    "w2-e fix round F5, part 2: KLIPY stickers and the Shop art (bottom bar entry).",
+    "run: FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario w2e_pickers2 -Peers a=windows:i"
+  ],
+  "peers": [
+    "a"
+  ],
+  "steps": [
+    {
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 2000,
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "semantics:Create a server",
+      "peer": "a"
+    },
+    {
+      "op": "enter_text",
+      "target": "hint:My Awesome Server",
+      "value": "pickers",
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "text:Create",
+      "index": 0,
+      "peer": "a"
+    },
+    {
+      "op": "wait_for",
+      "target": "server:pickers",
+      "timeout_ms": 30000,
+      "peer": "a"
+    },
+    {
+      "op": "open_server",
+      "name": "pickers",
+      "peer": "a"
+    },
+    {
+      "op": "wait_for",
+      "target": "channel:general",
+      "timeout_ms": 30000,
+      "peer": "a"
+    },
+    {
+      "op": "open_channel",
+      "name": "general",
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 1500,
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "semantics:Emoji, GIFs and stickers",
+      "index": 0,
+      "peer": "a"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Stickers",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:KLIPY",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 9000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "pk2-01-klipy-stickers"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "dump",
+      "name": "pk2-02-before-shop",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Hollow Shop",
+      "index": 1,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "pk2-03-shop-i1"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "type:HollowChip > text:Frames",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 6000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "pk2-04-shop-frames"
+    }
+  ]
+}

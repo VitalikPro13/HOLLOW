@@ -16,7 +16,7 @@ use super::storage::get_store;
 /// Base URL of the Hollow website's cached IGDB endpoint.
 const ENDPOINT_BASE: &str = "https://hollow.anonlisten.com/igdb";
 /// Covers must come from here and nowhere else.
-const COVER_BASE: &str = "https://hollow.anonlisten.com/igdb/covers/";
+pub(crate) const COVER_BASE: &str = "https://hollow.anonlisten.com/igdb/covers/";
 /// Endpoint response-schema version. Params ride the POST body so the search text
 /// never appears in a request URL or a web-server access log; POST also bypasses the
 /// edge cache, so `v` is now only there for the endpoint to branch on someday.
@@ -65,7 +65,7 @@ pub fn showcase_game_search(query: String) -> Result<Vec<GameSearchResult>, Stri
     }
     let rt = get_http_runtime();
     rt.block_on(async move {
-        let client = reqwest::Client::new();
+        let client = super::catalog::catalog_client()?;
         let resp = client
             .post(format!("{ENDPOINT_BASE}/search.php"))
             .form(&[("q", q.as_str()), ("v", ENDPOINT_SCHEMA_VER)])
@@ -94,7 +94,7 @@ pub fn showcase_game_search(query: String) -> Result<Vec<GameSearchResult>, Stri
                     cover_url: v
                         .get("cover")
                         .and_then(|c| c.as_str())
-                        .filter(|c| c.starts_with(COVER_BASE))
+                        .filter(|c| super::catalog::url_under(c, COVER_BASE))
                         .map(String::from),
                 })
             })
@@ -111,7 +111,7 @@ pub fn showcase_game_details(game_id: i64) -> Result<Option<GameCardDetails>, St
     }
     let rt = get_http_runtime();
     rt.block_on(async move {
-        let client = reqwest::Client::new();
+        let client = super::catalog::catalog_client()?;
         let resp = client
             .post(format!("{ENDPOINT_BASE}/search.php"))
             .form(&[
@@ -140,7 +140,7 @@ pub fn showcase_game_details(game_id: i64) -> Result<Option<GameCardDetails>, St
             .map(|cos| {
                 cos.iter()
                     .filter_map(|co| co.get("logo").and_then(|l| l.as_str()))
-                    .filter(|u| u.starts_with(COVER_BASE))
+                    .filter(|u| super::catalog::url_under(u, COVER_BASE))
                     .map(String::from)
                     .collect()
             })
@@ -148,7 +148,7 @@ pub fn showcase_game_details(game_id: i64) -> Result<Option<GameCardDetails>, St
         let artwork_url = details
             .get("artwork")
             .and_then(|a| a.as_str())
-            .filter(|u| u.starts_with(COVER_BASE))
+            .filter(|u| super::catalog::url_under(u, COVER_BASE))
             .map(String::from);
         Ok(Some(GameCardDetails {
             details_json: serde_json::to_string(details)
@@ -162,12 +162,12 @@ pub fn showcase_game_details(game_id: i64) -> Result<Option<GameCardDetails>, St
 /// Download an image FROM OUR CDN (authoring-time only). The allowlist is the
 /// privacy boundary — this can never be abused as a generic fetcher.
 fn fetch_cdn_image(url: String) -> Result<Vec<u8>, String> {
-    if !url.starts_with(COVER_BASE) {
+    if !super::catalog::url_under(&url, COVER_BASE) {
         return Err("Image URL is not on the Hollow CDN".into());
     }
     let rt = get_http_runtime();
     rt.block_on(async move {
-        let client = reqwest::Client::new();
+        let client = super::catalog::catalog_client()?;
         let resp = client
             .get(&url)
             .timeout(std::time::Duration::from_secs(20))

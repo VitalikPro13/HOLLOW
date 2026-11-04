@@ -773,6 +773,20 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       iceServers: iceConfig,
     );
     _service = svc;
+    final ownMaster = ref.read(identityProvider).peerId ?? '';
+    svc.channelMembers = () {
+      final sid = state.currentServerId, cid = state.currentChannelId;
+      if (sid == null || cid == null) return const <String>{};
+      return {
+        for (final p in state.getParticipants(sid, cid))
+          if (p != localPeerId && p != ownMaster) p,
+      };
+    };
+    // A joiner's own node can turn gossip before this service exists.
+    if (state.voiceMode == 'gossip') {
+      svc.gossipNeighbors = state.gossipNeighbors;
+      svc.gossipMode = true;
+    }
 
     svc.preferredAudioInputDeviceId =
         await ref.read(audioInputDeviceProvider.future);

@@ -313,6 +313,7 @@ class VoiceService {
       }
     }
 
+    await _offerVideoAsVp8Only(_pc!);
     final offer = await _pc!.createOffer();
     await _pc!.setLocalDescription(offer);
 
@@ -442,6 +443,7 @@ class VoiceService {
     _remoteRenderer = newRenderer;
     _remoteStream = newStream;
     _remoteStreamIsSynthetic = true;
+    await _bindSframeVideoReceiver(receiver);
 
     await _disposeStaleRemoteMedia(oldRenderer, oldStream, oldWasSynthetic);
 
@@ -635,6 +637,10 @@ class VoiceService {
           break;
         }
       }
+      final peerId = _activePeerId;
+      if (peerId != null) {
+        await _frameCryptor?.disableSender(peerId, kind: 'video');
+      }
     } catch (e) {
       _log('[HOLLOW-VOICE] toggleVideo: removeTrack failed: $e');
     }
@@ -682,6 +688,8 @@ class VoiceService {
 
       await _pc!.addTrack(videoTrack, _localVideoStream!);
       _log('[HOLLOW-VOICE] toggleVideo: added new video track via addTrack');
+      // Before the renegotiation that lets its first frame out.
+      await _bindSframeVideoSender();
 
       // Constrain the offer to universal codecs (VP8 first): desktop builds
       // otherwise advertise H.265/AV1 payload types that break the iOS
@@ -762,6 +770,7 @@ class VoiceService {
       final videoTrack = videoTracks.first;
       await _pc!.addTrack(videoTrack, _localVideoStream!);
       _log('[HOLLOW-VOICE] toggleVideo: opened camera + added track (Linux)');
+      await _bindSframeVideoSender();
       if (videoTrack.id != null) {
         await _constrainCameraCodecs(videoTrack.id!);
       }
@@ -1037,6 +1046,7 @@ class VoiceService {
       if (newTrack.id != null) {
         await _constrainCameraCodecs(newTrack.id!);
       }
+      await _bindSframeVideoSender();
       return true;
     } catch (e) {
       _log('[HOLLOW-VOICE] Camera switch: sender swap failed: $e');
@@ -1331,7 +1341,10 @@ class VoiceService {
 
   /// Public rebind for the heal path: re-binds the receiver cryptor to the
   /// newest inbound audio receiver.
-  Future<void> rebindSframeReceivers() => _rebindSframeAudioReceiver(null);
+  Future<void> rebindSframeReceivers() async {
+    await _rebindSframeAudioReceiver(null);
+    await _bindSframeVideoReceiver(null, fresh: true);
+  }
 
   /// Sets the SFrame encryption key for this DM call, called by CallNotifier
   /// after key exchange via signaling.
@@ -1384,6 +1397,8 @@ class VoiceService {
     } catch (e) {
       _log('[HOLLOW-VOICE] Failed to enable SFrame receiver: $e');
     }
+    await _bindSframeVideoSender();
+    await _bindSframeVideoReceiver(null);
 
     _log('[HOLLOW-VOICE] SFrame E2EE enabled for DM call with $peerId');
   }
@@ -1477,9 +1492,68 @@ class VoiceService {
       // One atomic ladder, not five separate mutations: the heal ping and a
       // device switch can both be touching these cryptors at the same moment.
       await fc.reassert(peerId: peerId, sender: outbound, receiver: inbound);
+      RTCRtpSender? camOut;
+      for (final sender in senders) {
+        if (sender.track?.kind == 'video') camOut = sender;
+      }
+      RTCRtpReceiver? camIn;
+      for (final r in receivers) {
+        if (r.track?.kind == 'video') camIn = r;
+      }
+      if (camOut != null || camIn != null) {
+        await fc.reassert(
+            peerId: peerId, sender: camOut, receiver: camIn, kind: 'video');
+      }
       _log('[HOLLOW-VOICE] SFrame re-asserted after transport rebuild');
     } catch (e) {
       _log('[HOLLOW-VOICE] SFrame re-assert failed: $e');
+    }
+  }
+
+  /// Puts the camera's SFrame cryptor on its CURRENT sender (each enable or
+  /// device switch adds a new one), or drops it when the camera is off.
+  Future<void> _bindSframeVideoSender() async {
+    final peerId = _activePeerId;
+    final fc = _frameCryptor;
+    final pc = _pc;
+    if (peerId == null || fc == null || pc == null || !fc.isEnabled) return;
+    try {
+      RTCRtpSender? live;
+      for (final s in await pc.getSenders()) {
+        if (s.track?.kind == 'video') live = s;
+      }
+      if (live == null) {
+        await fc.disableSender(peerId, kind: 'video');
+        return;
+      }
+      await fc.rebindSender(peerId, live, kind: 'video');
+      _log('[HOLLOW-VOICE] SFrame on the camera sender ${live.senderId}');
+    } catch (e) {
+      _log('[HOLLOW-VOICE] SFrame camera sender bind failed: $e');
+    }
+  }
+
+  /// Puts the camera decryptor on [receiver], else on the NEWEST video
+  /// receiver; [fresh] re-creates it on a binding that may be wedged.
+  Future<void> _bindSframeVideoReceiver(RTCRtpReceiver? receiver,
+      {bool fresh = false}) async {
+    final peerId = _activePeerId;
+    final fc = _frameCryptor;
+    final pc = _pc;
+    if (peerId == null || fc == null || pc == null || !fc.isEnabled) return;
+    try {
+      var target = receiver;
+      if (target == null) {
+        for (final r in await pc.getReceivers()) {
+          if (r.track?.kind == 'video') target = r;
+        }
+      }
+      if (target == null) return;
+      if (fresh) await fc.disableReceiver(peerId, kind: 'video');
+      await fc.rebindReceiver(peerId, target, kind: 'video');
+      _log('[HOLLOW-VOICE] SFrame on the camera receiver ${target.receiverId}');
+    } catch (e) {
+      _log('[HOLLOW-VOICE] SFrame camera receiver bind failed: $e');
     }
   }
 
@@ -1603,6 +1677,8 @@ class VoiceService {
         'id=${event.track.id} streams=${event.streams.length}');
 
     if (event.track.kind == 'video') {
+      // Every camera enable on the far side is a new transceiver.
+      unawaited(_bindSframeVideoReceiver(event.receiver));
       _handleRemoteVideoTrack(peerId, event);
     } else if (event.track.kind == 'audio') {
       // A remote mid-call mic switch lands as a NEW transceiver while the
@@ -1885,6 +1961,7 @@ class VoiceService {
         await _constrainCameraCodecs(track.id!);
       }
     }
+    await _bindSframeVideoSender();
     _log('[HOLLOW-VOICE] Added video track via addTrack');
   }
 
@@ -2251,15 +2328,7 @@ class VoiceService {
   Future<void> _constrainCameraCodecs(String trackId) async {
     if (_pc == null) return;
     try {
-      final caps = await getRtpSenderCapabilities('video');
-      final all = caps.codecs ?? const <RTCRtpCodecCapability>[];
-      bool mimeIs(RTCRtpCodecCapability c, String name) =>
-          c.mimeType.toLowerCase() == 'video/$name';
-      final safe = [
-        ...all.where((c) => mimeIs(c, 'vp8')),
-        ...all.where(
-            (c) => mimeIs(c, 'rtx') || mimeIs(c, 'red') || mimeIs(c, 'ulpfec')),
-      ];
+      final (safe, all) = await _vp8VideoCodecs();
       if (safe.isEmpty) return;
       final transceivers = await _pc!.getTransceivers();
       for (final t in transceivers) {
@@ -2272,6 +2341,52 @@ class VoiceService {
       }
     } catch (e) {
       _log('[HOLLOW-VOICE] _constrainCameraCodecs failed: $e');
+    }
+  }
+
+  /// VP8 plus rtx/red/ulpfec, and every video codec we could send.
+  Future<(List<RTCRtpCodecCapability>, List<RTCRtpCodecCapability>)>
+      _vp8VideoCodecs() async {
+    final caps = await getRtpSenderCapabilities('video');
+    final all = caps.codecs ?? const <RTCRtpCodecCapability>[];
+    bool mimeIs(RTCRtpCodecCapability c, String name) =>
+        c.mimeType.toLowerCase() == 'video/$name';
+    return (
+      [
+        ...all.where((c) => mimeIs(c, 'vp8')),
+        ...all.where(
+            (c) => mimeIs(c, 'rtx') || mimeIs(c, 'red') || mimeIs(c, 'ulpfec')),
+      ],
+      all,
+    );
+  }
+
+  /// Every video section of a re-offer, VP8 only. A section the far side's
+  /// camera created never passed [_constrainCameraCodecs] here, so a re-offer
+  /// would put our whole codec list on it, H.265 and AV1 included, which an
+  /// iOS answerer fails to apply.
+  Future<void> _offerVideoAsVp8Only(RTCPeerConnection pc) async {
+    final List<RTCRtpCodecCapability> safe;
+    final List<RTCRtpTransceiver> transceivers;
+    try {
+      (safe, _) = await _vp8VideoCodecs();
+      if (safe.isEmpty) return;
+      transceivers = await pc.getTransceivers();
+    } catch (e) {
+      _log('[HOLLOW-VOICE] Video codec narrowing before a re-offer failed: $e');
+      return;
+    }
+    // One transceiver at a time: a stopped one throws, and the rest must
+    // still leave VP8-only.
+    for (final t in transceivers) {
+      try {
+        if (t.receiver.track?.kind == 'video' ||
+            t.sender.track?.kind == 'video') {
+          await t.setCodecPreferences(safe);
+        }
+      } catch (e) {
+        _log('[HOLLOW-VOICE] Video codec narrowing skipped a transceiver: $e');
+      }
     }
   }
 }

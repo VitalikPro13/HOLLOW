@@ -21,6 +21,7 @@ import '../../theme/hollow_shadows.dart';
 import '../../theme/hollow_spacing.dart';
 import '../../theme/hollow_theme.dart';
 import '../../theme/hollow_typography.dart';
+import '../components/catalog_preview_image.dart';
 import '../components/hollow_button.dart';
 import '../components/hollow_chip.dart';
 import '../components/hollow_dialog.dart';
@@ -707,16 +708,12 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: HollowTooltip(
                   message: '${e.name} · by ${e.owner}',
-                  child: Image.network(
-                    e.imageUrl,
+                  child: CatalogPreviewImage(
+                    url: e.imageUrl,
                     width: 28,
                     height: 28,
-                    fit: BoxFit.contain,
-                    filterQuality: FilterQuality.medium,
-                    errorBuilder: (context, error, stackTrace) => Icon(
-                        LucideIcons.imageOff,
-                        size: 16,
-                        color: hollow.textTertiary),
+                    fallback: Icon(LucideIcons.imageOff,
+                        size: 16, color: hollow.textTertiary),
                   ),
                 ),
               );

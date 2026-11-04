@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../../rust/api/catalog.dart' as catalog_api;
 import '../../rust/api/network.dart' as network_api;
+import 'at_rest.dart';
 
 void _dbg(String msg) {
   try {
@@ -14,21 +16,20 @@ void _dbg(String msg) {
   } catch (_) {}
 }
 
-/// RAM cache for GIF and sticker picker thumbnails, for this session only.
+/// RAM cache for catalog previews (GIF, sticker, FFZ and IGDB pickers), for
+/// this session only.
 ///
 /// Never on disk: search results change on every search, and what a person
 /// keeps is saved (and counted) as an asset, so a disk tier only ever held
 /// stale previews. Bounded by entries AND bytes, since an animated preview can
-/// be megabytes. Only ever fed URLs from [gifs_api.GifItem], which Rust
-/// already origin-checked against the proxy.
+/// be megabytes. Rust fetches each one, from the catalog addresses alone, and
+/// hands it over only once its image check decoded it whole (AR-28).
 class GifThumbCache {
   GifThumbCache._();
   static final GifThumbCache instance = GifThumbCache._();
 
   static const _maxRamEntries = 200;
   static const _maxRamBytes = 48 * 1024 * 1024;
-  // The proxy caps cached media at 6 MB — anything bigger is not ours.
-  static const _maxItemBytes = 6 * 1024 * 1024 + 65536;
   // Cold thumbnails burst 30+ at once when a grid page lands. Unbounded
   // parallel downloads each open their own TLS handshake and saturate both
   // the user's connection and the shared host's PHP workers, and the search
@@ -40,13 +41,10 @@ class GifThumbCache {
   final _inflight = <String, Future<Uint8List?>>{};
   int _activeDownloads = 0;
   final _downloadWaiters = <Completer<void>>[];
-  HttpClient? _sharedClient;
 
-  /// One shared keep-alive client: connection reuse instead of a fresh TLS
-  /// handshake per thumbnail.
-  HttpClient get _http => _sharedClient ??= HttpClient()
-    ..maxConnectionsPerHost = _maxConcurrentDownloads
-    ..idleTimeout = const Duration(seconds: 15);
+  /// Replaces the Rust fetch in tests, where there is no FFI binding.
+  @visibleForTesting
+  static Future<Uint8List> Function(String url)? debugFetch;
 
   Future<void> _acquireDownloadSlot() {
     if (_activeDownloads < _maxConcurrentDownloads) {
@@ -94,46 +92,40 @@ class GifThumbCache {
   int _dlFail = 0;
 
   Future<Uint8List?> _download(String url) async {
-    await _acquireDownloadSlot();
     final t0 = DateTime.now();
     try {
-      final request = await _http
-          .getUrl(Uri.parse(url))
-          .timeout(const Duration(seconds: 20));
-      final response =
-          await request.close().timeout(const Duration(seconds: 20));
-      if (response.statusCode != 200) {
-        // Drain so the keep-alive connection can be reused.
-        await response.drain<void>().catchError((_) {});
-        _dlFail++;
-        _dbg('download HTTP ${response.statusCode} in '
-            '${DateTime.now().difference(t0).inMilliseconds}ms '
-            '(ok=$_dlOk fail=$_dlFail)');
-        return null;
-      }
-      final builder = BytesBuilder(copy: false);
-      await response
-          .forEach(builder.add)
-          .timeout(const Duration(seconds: 30));
-      if (builder.length == 0 || builder.length > _maxItemBytes) return null;
+      final fetch = debugFetch ??
+          (String u) => catalog_api.fetchCatalogPreview(url: u);
+      final bytes = await _firstAsk(() => fetch(url)) ??
+          // Rust kept what it fetched: later asks judge those bytes again and
+          // download nothing, so they wait without a download slot.
+          await whileImageChecked<Uint8List>(() => fetch(url),
+              attempts: 9, waitFirst: true);
       _dlOk++;
       if (_dlOk % 15 == 0) {
         _dbg('downloads ok=$_dlOk fail=$_dlFail (last '
-            '${builder.length}b in '
+            '${bytes.length}b in '
             '${DateTime.now().difference(t0).inMilliseconds}ms)');
       }
-      return builder.takeBytes();
+      return bytes;
     } catch (e) {
       _dlFail++;
       _dbg('download ${e.runtimeType} in '
           '${DateTime.now().difference(t0).inMilliseconds}ms '
           '(ok=$_dlOk fail=$_dlFail)');
-      // A response abandoned mid-body can wedge one of the shared client's
-      // keep-alive connections, so recreate the client rather than let four
-      // wedged sockets brick all future thumbnail downloads.
-      _sharedClient?.close(force: true);
-      _sharedClient = null;
       return null;
+    }
+  }
+
+  /// The one ask that may download, under a download slot: its bytes, or null
+  /// while the image check is still on them.
+  Future<Uint8List?> _firstAsk(Future<Uint8List> Function() fetch) async {
+    await _acquireDownloadSlot();
+    try {
+      return await fetch();
+    } catch (e) {
+      if (e.toString().contains(kImageNotYet)) return null;
+      rethrow;
     } finally {
       _releaseDownloadSlot();
     }

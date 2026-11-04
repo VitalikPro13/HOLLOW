@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
+import 'package:hollow/src/core/services/gossip_forward.dart';
 import 'package:hollow/src/core/services/ice_repair.dart';
 import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
@@ -117,12 +118,99 @@ class VoiceChannelService {
   Duration pollInterval = kVoicePollNormal;
 
   /// Gossip mode: if true, only connect to gossipNeighbors (not all participants).
-  bool gossipMode = false;
+  bool get gossipMode => _gossipMode;
+  set gossipMode(bool on) {
+    _gossipMode = on;
+    _scheduleWants();
+    unawaited(_forwardGossipSources());
+  }
 
-  Set<String> gossipNeighbors = {};
+  bool _gossipMode = false;
 
-  /// Track dedup: peer IDs whose audio we've already forwarded (prevent loops).
-  final Set<String> _forwardedSources = {};
+  Set<String> get gossipNeighbors => _gossipNeighbors;
+  set gossipNeighbors(Set<String> ids) {
+    _gossipNeighbors = ids;
+    _scheduleWants();
+  }
+
+  Set<String> _gossipNeighbors = {};
+
+  /// Everyone in our voice channel, ourselves excluded; the provider owns it.
+  Set<String> Function()? channelMembers;
+
+  /// Gossip: the origins each leg asked us to forward to it.
+  final Map<String, Set<String>> _fwdWanted = {};
+
+  /// Gossip: the origins we last asked each leg to forward to us.
+  final Map<String, Set<String>> _wantSent = {};
+
+  Timer? _wantsTimer;
+
+  /// Gossip: each neighbour we hold no live leg to, since when, and when we
+  /// next reach for its leg.
+  final Map<String, ({DateTime since, DateTime reachAt, int reaches})>
+      _legAwaited = {};
+  Timer? _legGraceTimer;
+
+  late final ForwardRenegBatcher _fwdReneg =
+      ForwardRenegBatcher(_renegotiateForwards);
+
+  /// Serialises forward changes: two at once would add one track twice.
+  Future<void> _fwdSync = Future<void>.value();
+
+  /// Gossip: the voices we hear straight from their speaker, by origin; each
+  /// goes, under SFrame only, to the legs that asked for it.
+  final Map<String, (MediaStreamTrack, MediaStream)> _gossipSources = {};
+
+  /// Gossip: the forwarded senders on each neighbour's leg, by track id.
+  final Map<String, Map<String, ({String origin, RTCRtpSender sender})>>
+      _fwdOut = {};
+
+  /// Gossip: the forwarded voices on each forwarder's leg, track id to
+  /// origin, as its SDP declares them.
+  final Map<String, Map<String, String>> _fwdIn = {};
+
+  /// Forwarded copies kept silent, by forwarder: their origin is heard
+  /// directly or through an earlier copy. Keyed per leg, since a track id is
+  /// whatever the sending peer writes and another leg may carry the same one.
+  final Map<String, Set<String>> _fwdSilent = {};
+
+  /// Whether [sender] carries a voice we forward for someone else.
+  bool _isFwdSender(String peerId, RTCRtpSender sender) =>
+      _fwdOut[peerId]?.containsKey(sender.track?.id) ?? false;
+
+  /// Whether [receiver] carries a voice [peerId] forwards for someone else.
+  bool _isFwdReceiver(String peerId, RTCRtpReceiver receiver) =>
+      _fwdIn[peerId]?.containsKey(receiver.track?.id) ?? false;
+
+  /// Whether a voice [forwarder] names a forward of [origin] is taken as one:
+  /// only with forwarding on, for a member we asked THAT leg for and still
+  /// hear on no leg of our own. Anything else is the forwarder's own voice, so
+  /// a peer cannot slip its microphone past our volume, the speaking light or
+  /// the silence we keep for a member heard directly.
+  bool _acceptsForward(String forwarder, String origin) =>
+      gossipForwardingEnabled &&
+      origin != localPeerId &&
+      origin != forwarder &&
+      (_wantSent[forwarder]?.contains(origin) ?? false) &&
+      !_linkWatch.containsKey(origin);
+
+  /// The forwards [sdp] from [peerId] declares that we take as forwards.
+  Map<String, String> _forwardsIn(String peerId, String sdp) => {
+        for (final e in forwardedTracksIn(sdp).entries)
+          if (_acceptsForward(peerId, e.value)) e.key: e.value,
+      };
+
+  /// What [sdp] must say before it goes to [peerId]: forwarded tracks under
+  /// their origin's stream id. The SDP names a sender by its sender id, which
+  /// is the track id only for a fresh transceiver: a forwarder without a mic
+  /// sends on its leg's audio section, which keeps its own id.
+  String _forPeer(String peerId, String sdp) => markForwardedTracks(sdp, {
+        for (final e in (_fwdOut[peerId] ?? const {}).entries) ...{
+          e.key: e.value.origin,
+          e.value.sender.senderId: e.value.origin,
+        },
+      });
 
   FrameCryptorService? frameCryptor;
 
@@ -182,6 +270,11 @@ class VoiceChannelService {
   /// How long one rebuild owns the recovery of a leg. Comfortably longer than
   /// a PC bring-up, which is what a rebuild is.
   static const _legRebuildWindow = Duration(seconds: 10);
+
+  /// How long a gossip neighbour's leg may take to come up before we ask a
+  /// forwarder for its voice and reach for the leg again.
+  @visibleForTesting
+  Duration legSetupGrace = const Duration(seconds: 10);
 
   /// Slow retries for legs whose whole hold-open window was spent.
   ///
@@ -374,7 +467,7 @@ class VoiceChannelService {
       await pc.setLocalDescription(
           RTCSessionDescription(mungedSdp, offer.type));
 
-      final payload = jsonEncode({'sdp': mungedSdp});
+      final payload = jsonEncode({'sdp': _forPeer(peerId, mungedSdp)});
       await network_api.voiceChannelSendSignal(
         serverId: _serverId!,
         channelId: _channelId!,
@@ -413,6 +506,8 @@ class VoiceChannelService {
         await _handleRenegAnswer(peerId, payload);
       case 'leg_restart':
         await _handleLegRestart(peerId);
+      case 'fwd_want':
+        _onForwardWant(peerId, payload);
     }
   }
 
@@ -446,6 +541,7 @@ class VoiceChannelService {
 
       await _enableSframeSender(peerId, pc);
 
+      _fwdIn[peerId] = _forwardsIn(peerId, sdp);
       await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
       _remoteDescSet[peerId] = true;
       await _flushPendingCandidates(peerId);
@@ -455,7 +551,7 @@ class VoiceChannelService {
       await pc.setLocalDescription(
           RTCSessionDescription(mungedSdp, answer.type));
 
-      final answerPayload = jsonEncode({'sdp': mungedSdp});
+      final answerPayload = jsonEncode({'sdp': _forPeer(peerId, mungedSdp)});
       await network_api.voiceChannelSendSignal(
         serverId: serverId,
         channelId: channelId,
@@ -499,6 +595,7 @@ class VoiceChannelService {
     }
 
     _vcLog('[HOLLOW-VC] Received SDP answer from $peerId');
+    _fwdIn[peerId] = _forwardsIn(peerId, sdp);
     await pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
     _remoteDescSet[peerId] = true;
     await _flushPendingCandidates(peerId);
@@ -553,6 +650,7 @@ class VoiceChannelService {
       _vcLog('[HOLLOW-VC] Ignoring self id in participant dial: $peerId');
       return;
     }
+    _scheduleWants();
     // In gossip mode, only connect to gossip neighbors.
     if (gossipMode && !gossipNeighbors.contains(peerId)) {
       return; // Not a gossip neighbor — skip (audio forwarded via neighbors).
@@ -618,9 +716,17 @@ class VoiceChannelService {
       }
     }
 
-    _forwardedSources.remove(peerId);
     _prevEnergy.remove('in-$peerId');
+    _fwdOut.remove(peerId);
+    _fwdIn.remove(peerId);
+    _fwdSilent.remove(peerId);
+    _fwdWanted.remove(peerId);
+    _wantSent.remove(peerId);
+    _fwdReneg.cancel(peerId);
     await frameCryptor?.disableForPeer(peerId);
+    _gossipSources.remove(peerId);
+    await _forwardGossipSources();
+    _scheduleWants();
   }
 
   /// Enable SFrame sender encryption on outgoing audio tracks for a peer.
@@ -631,7 +737,7 @@ class VoiceChannelService {
     try {
       final senders = await pc.getSenders();
       for (final sender in senders) {
-        if (sender.track?.kind == 'audio') {
+        if (sender.track?.kind == 'audio' && !_isFwdSender(peerId, sender)) {
           await frameCryptor!.enableForSender(peerId, sender);
           break;
         }
@@ -657,7 +763,9 @@ class VoiceChannelService {
         // Fallback: the NEWEST audio receiver (dead ones come first).
         final receivers = await pc.getReceivers();
         for (final r in receivers) {
-          if (r.track?.kind == 'audio') target = r;
+          if (r.track?.kind == 'audio' && !_isFwdReceiver(peerId, r)) {
+            target = r;
+          }
         }
       }
       if (target == null) return;
@@ -679,7 +787,10 @@ class VoiceChannelService {
       // transceivers earlier in the list.
       RTCRtpReceiver? target;
       for (final receiver in receivers) {
-        if (receiver.track?.kind == 'audio') target = receiver;
+        if (receiver.track?.kind == 'audio' &&
+            !_isFwdReceiver(peerId, receiver)) {
+          target = receiver;
+        }
       }
       if (target != null) {
         await frameCryptor!.enableForReceiver(peerId, target);
@@ -806,7 +917,9 @@ class VoiceChannelService {
       if (_remoteVideoRenderers.containsKey(peerId)) {
         await _enableSframeReceiverVideo(peerId, pc);
       }
+      await _bindForwardedReceivers(peerId, pc);
     }
+    await _forwardGossipSources();
     _vcLog('[HOLLOW-VC] SFrame key set for epoch $epoch, enabled on ${_peerConnections.length} PCs');
   }
 
@@ -817,6 +930,7 @@ class VoiceChannelService {
     final pc = _peerConnections[peerId];
     if (pc == null || frameCryptor == null) return;
     await _rebindSframeReceiver(peerId, pc, null);
+    await _bindForwardedReceivers(peerId, pc, fresh: true);
     if (_remoteVideoRenderers.containsKey(peerId)) {
       try {
         await frameCryptor!.disableReceiver(peerId, kind: 'video');
@@ -892,10 +1006,19 @@ class VoiceChannelService {
     _speakingPeers.clear();
     _prevEnergy.clear();
     _localSpeakingDetector.reset();
-    _forwardedSources.clear();
+    _gossipSources.clear();
+    _fwdOut.clear();
+    _fwdIn.clear();
+    _fwdSilent.clear();
+    _fwdWanted.clear();
+    _wantSent.clear();
+    _wantsTimer?.cancel();
+    _legGraceTimer?.cancel();
+    _legAwaited.clear();
+    _fwdReneg.cancelAll();
     _pendingCameraReneg.clear();
-    gossipMode = false;
-    gossipNeighbors = {};
+    _gossipMode = false;
+    _gossipNeighbors = {};
     await frameCryptor?.dispose();
     frameCryptor = null;
   }
@@ -941,7 +1064,9 @@ class VoiceChannelService {
         final receivers = await entry.value.getReceivers();
         for (final r in receivers) {
           if (r.track?.kind == 'audio') {
-            await setRemoteTrackVolume(volume, r.track!);
+            final silent =
+                _fwdSilent[entry.key]?.contains(r.track!.id) ?? false;
+            await setRemoteTrackVolume(silent ? 0.0 : volume, r.track!);
           }
         }
       } catch (e) {
@@ -1063,7 +1188,7 @@ class VoiceChannelService {
     if (pc == null) return;
     final receivers = await pc.getReceivers();
     for (final r in receivers) {
-      if (r.track?.kind == 'audio') {
+      if (r.track?.kind == 'audio' && !_isFwdReceiver(peerId, r)) {
         await setRemoteTrackVolume(volume, r.track!);
         break;
       }
@@ -1401,7 +1526,7 @@ class VoiceChannelService {
       try {
         final senders = await pc.getSenders();
         for (final s in senders) {
-          if (s.track?.kind == 'audio') {
+          if (s.track?.kind == 'audio' && !_isFwdSender(peerId, s)) {
             await pc.removeTrack(s);
             break;
           }
@@ -1568,6 +1693,7 @@ class VoiceChannelService {
     if (pc == null || _serverId == null || _channelId == null) return;
 
     try {
+      await _offerVideoAsVp8Only(pc);
       final offer = await pc.createOffer();
       final mungedSdp = _mungeOpusParams(offer.sdp!);
       await pc.setLocalDescription(RTCSessionDescription(mungedSdp, offer.type));
@@ -1575,7 +1701,8 @@ class VoiceChannelService {
       // `ice_restart` tells the answerer this re-offer carries no media
       // change, so it must not run its camera-track safety net, which would
       // otherwise invent a camera tile for us.
-      final payload = jsonEncode({'sdp': mungedSdp, 'ice_restart': iceRestart});
+      final payload = jsonEncode(
+          {'sdp': _forPeer(peerId, mungedSdp), 'ice_restart': iceRestart});
       await network_api.voiceChannelSendSignal(
         serverId: _serverId!,
         channelId: _channelId!,
@@ -1620,13 +1747,14 @@ class VoiceChannelService {
     }
 
     _vcLog('[HOLLOW-VC] Received renegotiation offer from $peerId');
+    _fwdIn[peerId] = _forwardsIn(peerId, sdp);
     await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
 
     final answer = await pc.createAnswer();
     final mungedSdp = _mungeOpusParams(answer.sdp!);
     await pc.setLocalDescription(RTCSessionDescription(mungedSdp, answer.type));
 
-    final answerPayload = jsonEncode({'sdp': mungedSdp});
+    final answerPayload = jsonEncode({'sdp': _forPeer(peerId, mungedSdp)});
     await network_api.voiceChannelSendSignal(
       serverId: serverId,
       channelId: channelId,
@@ -1692,6 +1820,7 @@ class VoiceChannelService {
     if (sdp.isEmpty) return;
 
     _vcLog('[HOLLOW-VC] Received renegotiation answer from $peerId');
+    _fwdIn[peerId] = _forwardsIn(peerId, sdp);
     await pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
 
     await _checkPendingCameraReneg(peerId);
@@ -1876,8 +2005,21 @@ class VoiceChannelService {
     try {
       final stats = await pc.getStats();
       _logVadStatsOnce(stats);
+      final fwdIn = _fwdIn[peerId] ?? const {};
+      final fwdOut = _fwdOut[peerId] ?? const {};
+      final fwdSources = {
+        for (final r in stats)
+          if (r.type == 'media-source' &&
+              fwdOut.containsKey(r.values['trackIdentifier']))
+            r.id,
+      };
       for (final report in stats) {
         if (report.values['kind'] != 'audio') continue;
+        if (fwdIn.containsKey(report.values['trackIdentifier']) ||
+            fwdSources.contains(report.id) ||
+            fwdSources.contains(report.values['mediaSourceId'])) {
+          continue;
+        }
         switch (report.type) {
           case 'inbound-rtp':
             remote = _detectSpeech(report.values, 'in-$peerId');
@@ -1982,6 +2124,10 @@ class VoiceChannelService {
       // state the fresh receiver does not carry (deafen, per-peer volume).
       _legRedial.remove(peerId)?.cancel();
       unawaited(_restorePeerAudioState(peerId));
+      unawaited(_forwardGossipSources());
+      // Asked again: a want that beat the far side's leg was dropped there.
+      _wantSent.remove(peerId);
+      _scheduleWants();
     }
     // Our own teardown reports `closed` right back here; that is not the
     // remote end going away.
@@ -2311,6 +2457,13 @@ class VoiceChannelService {
   /// onTrack handler: bind SFrame receivers for the new audio/video track,
   /// then (gossip mode only) forward received audio to other neighbors.
   void _onPeerTrack(String peerId, RTCPeerConnection pc, RTCTrackEvent event) {
+    final fwdOrigin = event.track.kind == 'audio' && event.streams.isNotEmpty
+        ? forwardOriginOfStream(event.streams.first.id)
+        : null;
+    if (fwdOrigin != null && _acceptsForward(peerId, fwdOrigin)) {
+      unawaited(_receiveForwarded(peerId, fwdOrigin, event));
+      return;
+    }
     if (event.track.kind == 'audio') {
       // REBIND, not just enable: a remote mid-call mic switch lands as a NEW
       // transceiver, and _enableSframeReceiver is idempotent per
@@ -2324,31 +2477,270 @@ class VoiceChannelService {
     _forwardGossipAudio(peerId, event);
   }
 
-  /// Gossip forwarding (audio only for now): re-add a neighbor's inbound
-  /// audio track to every other gossip neighbor PC, deduped per source.
+  /// Gossip: a voice heard straight from its speaker, kept so it can go on to
+  /// a leg that asks for it, one hop only.
   void _forwardGossipAudio(String peerId, RTCTrackEvent event) {
-    if (!gossipMode) return;
-    if (event.track.kind != 'audio') return;
+    if (event.track.kind != 'audio' || event.streams.isEmpty) return;
+    _gossipSources[peerId] = (event.track, event.streams.first);
+    unawaited(_forwardGossipSources());
+  }
 
-    _vcLog('[HOLLOW-VC] Gossip: received audio track from $peerId — forwarding to ${gossipNeighbors.length - 1} neighbors');
+  /// Puts on each leg exactly the voices it asked for and we hear straight,
+  /// each sender under its own SFrame cryptor BEFORE the renegotiation that
+  /// carries it: with no key yet nothing is forwarded, and [setSframeKey]
+  /// runs this again.
+  Future<void> _forwardGossipSources() =>
+      _fwdSync = _fwdSync.then((_) => _syncForwards()).catchError((_) {});
 
-    // Track dedup against the original speaker, keyed by peerId for now; a
-    // multi-hop version would have to signal the originator's id separately.
-    if (_forwardedSources.contains(peerId)) return;
-    _forwardedSources.add(peerId);
-
-    final stream = event.streams.isNotEmpty
-        ? event.streams.first
-        : null;
-    if (stream == null) return;
-
-    for (final neighborId in gossipNeighbors) {
-      if (neighborId == localPeerId || neighborId == peerId) continue;
-      final neighborPc = _peerConnections[neighborId];
-      if (neighborPc != null) {
-        neighborPc.addTrack(event.track, stream);
-        _vcLog('[HOLLOW-VC] Gossip: forwarded audio from $peerId to $neighborId');
+  Future<void> _syncForwards() async {
+    final fc = frameCryptor;
+    // A want proves the asker is in gossip, whatever this side was last told.
+    final keyed = gossipForwardingEnabled && fc != null && fc.isEnabled;
+    for (final leg in _peerConnections.keys.toList()) {
+      final pc = _peerConnections[leg];
+      if (pc == null) continue;
+      final want = keyed
+          ? forwardsFor(
+              leg: leg,
+              self: localPeerId,
+              wanted: _fwdWanted[leg] ?? const {},
+              heard: _gossipSources.keys.toSet())
+          : const <String>{};
+      final out = _fwdOut[leg] ??= {};
+      final asked = _fwdWanted[leg] ?? const <String>{};
+      if (asked.isNotEmpty &&
+          !_setEquals(want, {for (final v in out.values) v.origin})) {
+        _vcLog('[HOLLOW-VC] Gossip: want from $leg: asked=$asked '
+            'heard=${_gossipSources.keys.toSet()} forwards=$want keyed=$keyed');
       }
+      var changed = false;
+      for (final e in out.entries.toList()) {
+        final origin = e.value.origin;
+        if (want.contains(origin) && _gossipSources[origin]?.$1.id == e.key) {
+          continue;
+        }
+        out.remove(e.key);
+        changed = true;
+        try {
+          await pc.removeTrack(e.value.sender);
+        } catch (_) {}
+        if (!out.values.any((v) => v.origin == origin)) {
+          await fc?.disableKind(leg, forwardCryptorKind(origin));
+        }
+      }
+      for (final origin in want) {
+        final (track, stream) = _gossipSources[origin]!;
+        final trackId = track.id;
+        if (trackId == null || out.containsKey(trackId)) continue;
+        RTCRtpSender? sender;
+        try {
+          sender = await pc.addTrack(track, stream);
+          final kind = forwardCryptorKind(origin);
+          await fc!.rebindSender(leg, sender, kind: kind);
+          if (!fc.encrypts(leg, sender, kind: kind)) {
+            throw StateError('no SFrame cryptor bound');
+          }
+          out[trackId] = (origin: origin, sender: sender);
+          changed = true;
+          _vcLog('[HOLLOW-VC] Gossip: forwarding $origin to $leg under SFrame');
+        } catch (e) {
+          if (sender != null) {
+            try {
+              await pc.removeTrack(sender);
+            } catch (_) {}
+          }
+          _vcLog('[HOLLOW-VC] Gossip: forward of $origin to $leg failed: $e');
+        }
+      }
+      if (changed) _fwdReneg.touch(leg);
+    }
+  }
+
+  /// Binds a decryptor to each voice [peerId] forwards to us, for a key that
+  /// landed after the track did; [fresh] re-creates a binding that may be wedged.
+  Future<void> _bindForwardedReceivers(String peerId, RTCPeerConnection pc,
+      {bool fresh = false}) async {
+    final fc = frameCryptor;
+    final forwarded = _fwdIn[peerId];
+    if (fc == null || !fc.isEnabled || forwarded == null || forwarded.isEmpty) {
+      return;
+    }
+    try {
+      for (final r in await pc.getReceivers()) {
+        final origin = forwarded[r.track?.id];
+        if (origin == null) continue;
+        final kind = forwardCryptorKind(origin);
+        if (fresh) await fc.disableReceiver(peerId, kind: kind);
+        await fc.rebindReceiver(peerId, r, kind: kind);
+      }
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] Gossip: forwarded decryptor bind failed for $peerId: $e');
+    }
+  }
+
+  /// One renegotiation carries a burst of forward changes to [peerId].
+  Future<void> _renegotiateForwards(String peerId) async {
+    final pc = _peerConnections[peerId];
+    if (pc == null) return;
+    if (pc.signalingState != RTCSignalingState.RTCSignalingStateStable) {
+      _fwdReneg.touch(peerId);
+      return;
+    }
+    _vcLog('[HOLLOW-VC] Gossip: renegotiating $peerId for its forwards');
+    // A forward changes no camera, so the far side's camera net must not run.
+    await _sendRenegotiationOffer(peerId, iceRestart: true);
+  }
+
+  /// [peerId] asked us for the voices it hears from no leg of its own.
+  void _onForwardWant(String peerId, String payload) {
+    if (!_peerConnections.containsKey(peerId)) return;
+    final origins = <String>{};
+    try {
+      final list = (jsonDecode(payload) as Map)['origins'];
+      if (list is List) origins.addAll(list.whereType<String>());
+    } catch (_) {
+      return;
+    }
+    _fwdWanted[peerId] = origins;
+    _vcLog('[HOLLOW-VC] Gossip: $peerId asks for ${origins.length} forwarded voices');
+    unawaited(_forwardGossipSources());
+  }
+
+  void _scheduleWants() {
+    _wantsTimer?.cancel();
+    _wantsTimer = Timer(const Duration(milliseconds: 400), _sendWants);
+  }
+
+  /// Tells each leg whom we hear from no leg at all, when that changed.
+  void _sendWants() {
+    final sid = _serverId, cid = _channelId;
+    if (sid == null || cid == null) return;
+    final members = channelMembers?.call() ?? const <String>{};
+    final settling = _awaitNeighbourLegs(members);
+    if (!gossipForwardingEnabled) return;
+    final want = forwardWants(
+      gossip: gossipMode,
+      self: localPeerId,
+      members: members,
+      live: _linkWatch.keys.toSet(),
+      settling: settling,
+    );
+    for (final leg in _peerConnections.keys) {
+      if (_setEquals(_wantSent[leg] ?? const {}, want)) continue;
+      _wantSent[leg] = want;
+      network_api
+          .voiceChannelSendSignal(
+            serverId: sid,
+            channelId: cid,
+            peerId: leg,
+            signalType: 'fwd_want',
+            payload: jsonEncode({'origins': want.toList()..sort()}),
+          )
+          .catchError((_) {});
+    }
+  }
+
+  /// The neighbours whose leg is still inside its setup grace. A leg past it
+  /// never formed (an offer can land before the far side's voice channel
+  /// exists, and nothing else retries a leg that never connected), so we reach
+  /// for it again, more slowly each time, until it comes up.
+  Set<String> _awaitNeighbourLegs(Set<String> members) {
+    final expected = gossipMode
+        ? {
+            for (final n in gossipNeighbors)
+              if (n != localPeerId && members.contains(n)) n,
+          }
+        : const <String>{};
+    _legAwaited.removeWhere(
+        (p, _) => !expected.contains(p) || _linkWatch.containsKey(p));
+    final now = DateTime.now();
+    final settling = <String>{};
+    DateTime? next;
+    for (final p in expected) {
+      if (_linkWatch.containsKey(p)) continue;
+      var w = _legAwaited[p] ??=
+          (since: now, reachAt: now.add(legSetupGrace), reaches: 0);
+      if (!now.isBefore(w.reachAt)) {
+        final reaches = w.reaches + 1;
+        final backoff = Duration(
+            milliseconds:
+                (legSetupGrace.inMilliseconds * reaches).clamp(0, 60000));
+        w = _legAwaited[p] =
+            (since: w.since, reachAt: now.add(backoff), reaches: reaches);
+        _vcLog('[HOLLOW-VC] Gossip: no leg to neighbour $p after '
+            '${now.difference(w.since).inSeconds} s, reaching for it '
+            '(attempt $reaches)');
+        unawaited(_rebuildLeg(p));
+      }
+      if (w.reaches == 0) settling.add(p);
+      if (next == null || w.reachAt.isBefore(next)) next = w.reachAt;
+    }
+    _legGraceTimer?.cancel();
+    _legGraceTimer = next == null
+        ? null
+        : Timer(next.difference(now) + const Duration(milliseconds: 20),
+            _sendWants);
+    return settling;
+  }
+
+  /// A voice [forwarder] forwards for [origin]: decrypted under its own
+  /// cryptor, never taken for the forwarder's microphone, never forwarded
+  /// again, and silent while [origin] is heard another way.
+  Future<void> _receiveForwarded(
+      String forwarder, String origin, RTCTrackEvent event) async {
+    final trackId = event.track.id;
+    if (trackId != null) (_fwdIn[forwarder] ??= {})[trackId] = origin;
+    final fc = frameCryptor;
+    final receiver = event.receiver;
+    if (fc != null && receiver != null) {
+      await fc.rebindReceiver(forwarder, receiver,
+          kind: forwardCryptorKind(origin));
+    }
+    final heardElsewhere = origin == localPeerId ||
+        _peerConnections.containsKey(origin) ||
+        _fwdIn.entries.any((e) =>
+            e.key != forwarder &&
+            e.value.entries.any((t) =>
+                t.value == origin &&
+                !(_fwdSilent[e.key]?.contains(t.key) ?? false)));
+    if (trackId != null && (heardElsewhere || _isDeafened)) {
+      if (heardElsewhere) (_fwdSilent[forwarder] ??= {}).add(trackId);
+      // Again once media flows: before its first packet a track is not in the
+      // platform's registry and the volume call is a tolerated no-op.
+      for (final wait in const [Duration.zero, Duration(milliseconds: 800), Duration(seconds: 3)]) {
+        await Future<void>.delayed(wait);
+        if (!_peerConnections.containsKey(forwarder)) return;
+        if (!(_fwdSilent[forwarder]?.contains(trackId) ?? false) &&
+            !_isDeafened) {
+          break;
+        }
+        await setRemoteTrackVolume(0.0, event.track);
+      }
+    }
+    _vcLog('[HOLLOW-VC] Gossip: $forwarder forwards $origin'
+        '${heardElsewhere ? ' (heard directly, kept silent)' : ''}');
+    if (trackId != null) unawaited(_logForwardedBytes(forwarder, origin, trackId));
+  }
+
+  /// Once per forwarded track: its received bytes 2 s and 6 s after it
+  /// landed, so a run can tell a forward that flows from one that does not.
+  Future<void> _logForwardedBytes(
+      String forwarder, String origin, String trackId) async {
+    var at = 0;
+    for (final second in const [2, 6]) {
+      await Future<void>.delayed(Duration(seconds: second - at));
+      at = second;
+      final pc = _peerConnections[forwarder];
+      if (pc == null) return;
+      try {
+        for (final r in await pc.getStats()) {
+          if (r.type == 'inbound-rtp' &&
+              r.values['trackIdentifier'] == trackId) {
+            _vcLog('[HOLLOW-VC] Gossip: forwarded $origin via $forwarder '
+                'bytesReceived=${r.values['bytesReceived']} at ${second}s');
+          }
+        }
+      } catch (_) {}
     }
   }
 
@@ -2450,15 +2842,7 @@ class VoiceChannelService {
   Future<void> _preferVp8ForVideoTrackOnPc(
       RTCPeerConnection pc, String trackId) async {
     try {
-      final caps = await getRtpSenderCapabilities('video');
-      final all = caps.codecs ?? const <RTCRtpCodecCapability>[];
-      bool mimeIs(RTCRtpCodecCapability c, String name) =>
-          c.mimeType.toLowerCase() == 'video/$name';
-      final safe = [
-        ...all.where((c) => mimeIs(c, 'vp8')),
-        ...all.where(
-            (c) => mimeIs(c, 'rtx') || mimeIs(c, 'red') || mimeIs(c, 'ulpfec')),
-      ];
+      final (safe, all) = await _vp8VideoCodecs();
       if (safe.isEmpty) return;
       final transceivers = await pc.getTransceivers();
       for (final t in transceivers) {
@@ -2471,6 +2855,51 @@ class VoiceChannelService {
       }
     } catch (e) {
       _vcLog('[HOLLOW-VC] _preferVp8ForVideoTrackOnPc failed: $e');
+    }
+  }
+
+  /// VP8 plus rtx/red/ulpfec, and every video codec we could send.
+  Future<(List<RTCRtpCodecCapability>, List<RTCRtpCodecCapability>)>
+      _vp8VideoCodecs() async {
+    final caps = await getRtpSenderCapabilities('video');
+    final all = caps.codecs ?? const <RTCRtpCodecCapability>[];
+    bool mimeIs(RTCRtpCodecCapability c, String name) =>
+        c.mimeType.toLowerCase() == 'video/$name';
+    return (
+      [
+        ...all.where((c) => mimeIs(c, 'vp8')),
+        ...all.where(
+            (c) => mimeIs(c, 'rtx') || mimeIs(c, 'red') || mimeIs(c, 'ulpfec')),
+      ],
+      all,
+    );
+  }
+
+  /// Every video section of a re-offer, VP8 only. Each leg's first offer asks
+  /// to receive video, so a leg we answered keeps the offerer's codec list,
+  /// and an iOS re-offer carrying its H.264/H.265/AV1 entries fails to apply.
+  Future<void> _offerVideoAsVp8Only(RTCPeerConnection pc) async {
+    final List<RTCRtpCodecCapability> safe;
+    final List<RTCRtpTransceiver> transceivers;
+    try {
+      (safe, _) = await _vp8VideoCodecs();
+      if (safe.isEmpty) return;
+      transceivers = await pc.getTransceivers();
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] Video codec narrowing before a re-offer failed: $e');
+      return;
+    }
+    // One transceiver at a time: a stopped one throws, and the rest must
+    // still leave VP8-only.
+    for (final t in transceivers) {
+      try {
+        if (t.receiver.track?.kind == 'video' ||
+            t.sender.track?.kind == 'video') {
+          await t.setCodecPreferences(safe);
+        }
+      } catch (e) {
+        _vcLog('[HOLLOW-VC] Video codec narrowing skipped a transceiver: $e');
+      }
     }
   }
 }

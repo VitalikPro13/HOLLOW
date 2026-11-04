@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod at_rest;
+pub mod catalog;
 pub mod conference;
 pub mod crdt;
 pub mod emotes;

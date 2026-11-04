@@ -39,6 +39,9 @@ class FrameCryptorService {
 
   final Map<String, FrameCryptor> _receiverCryptors = {};
 
+  /// The native sender or receiver id each cryptor is bound to, by the same keys.
+  final Map<String, String> _bound = {};
+
   /// Serializes every mutation of the cryptor maps.
   ///
   /// [enableForReceiver] and [enableForSender] check their map, then `await`
@@ -162,6 +165,7 @@ class FrameCryptorService {
       await cryptor.setKeyIndex(currentKeyIndex);
       await cryptor.setEnabled(true);
       _senderCryptors[key] = cryptor;
+      _bound['tx:$key'] = sender.senderId;
       _enabled = true;
       _fcLog('[HOLLOW-SFRAME] Sender encryption enabled for $key');
     } catch (e) {
@@ -196,6 +200,7 @@ class FrameCryptorService {
       await cryptor.setKeyIndex(currentKeyIndex);
       await cryptor.setEnabled(true);
       _receiverCryptors[key] = cryptor;
+      _bound['rx:$key'] = receiver.receiverId;
       _fcLog('[HOLLOW-SFRAME] Receiver decryption enabled for $key');
     } catch (e) {
       _fcLog('[HOLLOW-SFRAME] Failed to enable receiver decryption for $key: $e');
@@ -262,6 +267,7 @@ class FrameCryptorService {
       {String kind = 'audio'}) async {
     final key = '$peerId:$kind';
     final sender = _senderCryptors.remove(key);
+    _bound.remove('tx:$key');
     if (sender == null) return;
     try {
       await sender.setEnabled(false);
@@ -283,6 +289,7 @@ class FrameCryptorService {
       {String kind = 'audio'}) async {
     final key = '$peerId:$kind';
     final receiver = _receiverCryptors.remove(key);
+    _bound.remove('rx:$key');
     if (receiver == null) return;
     try {
       await receiver.setEnabled(false);
@@ -344,22 +351,58 @@ class FrameCryptorService {
             '(sender=${sender != null} receiver=${receiver != null})');
       });
 
-  /// Disables and cleans up cryptors for one peer: audio, video, screen share.
-  Future<void> disableForPeer(String peerId) async {
-    for (final kind in ['audio', 'video', 'screen_audio', 'screen_video']) {
-      final key = '$peerId:$kind';
-      final sender = _senderCryptors.remove(key);
-      if (sender != null) {
-        await sender.setEnabled(false);
-        await sender.dispose();
-      }
-      final receiver = _receiverCryptors.remove(key);
-      if (receiver != null) {
-        await receiver.setEnabled(false);
-        await receiver.dispose();
-      }
-    }
-  }
+  /// Moves the (peerId, kind) sender cryptor onto [sender], a track's NEW sender
+  /// (every camera enable and device switch adds one), on the current slot. One
+  /// ladder under one lock; nothing is created before a key exists.
+  Future<void> rebindSender(String peerId, RTCRtpSender sender,
+          {required String kind}) =>
+      _serialize(() async {
+        if (!_enabled) return;
+        final key = '$peerId:$kind';
+        if (_senderCryptors.containsKey(key) &&
+            _bound['tx:$key'] == sender.senderId) {
+          return;
+        }
+        await _disableSenderUnlocked(peerId, kind: kind);
+        await _enableForSenderUnlocked(peerId, sender, kind: kind);
+      });
+
+  /// Whether [sender] carries [peerId]'s [kind] under a cryptor of ours now.
+  bool encrypts(String peerId, RTCRtpSender sender, {required String kind}) =>
+      _senderCryptors.containsKey('$peerId:$kind') &&
+      _bound['tx:$peerId:$kind'] == sender.senderId;
+
+  /// The receiving mirror of [rebindSender], for a NEW inbound transceiver.
+  Future<void> rebindReceiver(String peerId, RTCRtpReceiver receiver,
+          {required String kind}) =>
+      _serialize(() async {
+        if (!_enabled) return;
+        final key = '$peerId:$kind';
+        if (_receiverCryptors.containsKey(key) &&
+            _bound['rx:$key'] == receiver.receiverId) {
+          return;
+        }
+        await _disableReceiverUnlocked(peerId, kind: kind);
+        await _enableForReceiverUnlocked(peerId, receiver, kind: kind);
+      });
+
+  /// Disables and cleans up every cryptor for one peer: audio, video, screen
+  /// share and the audio it forwards for others.
+  Future<void> disableForPeer(String peerId) => _serialize(() async {
+        bool mine(String key) => key.startsWith('$peerId:');
+        for (final key in _senderCryptors.keys.where(mine).toList()) {
+          await _disableSenderUnlocked(peerId, kind: key.substring(peerId.length + 1));
+        }
+        for (final key in _receiverCryptors.keys.where(mine).toList()) {
+          await _disableReceiverUnlocked(peerId, kind: key.substring(peerId.length + 1));
+        }
+      });
+
+  /// Drops the (peerId, kind) cryptors in both directions.
+  Future<void> disableKind(String peerId, String kind) => _serialize(() async {
+        await _disableSenderUnlocked(peerId, kind: kind);
+        await _disableReceiverUnlocked(peerId, kind: kind);
+      });
 
   bool get isEnabled => _enabled;
 
@@ -379,6 +422,7 @@ class FrameCryptorService {
       try { await cryptor.dispose(); } catch (_) {}
     }
     _receiverCryptors.clear();
+    _bound.clear();
     try { await _keyProvider?.dispose(); } catch (_) {}
     _keyProvider = null;
     _enabled = false;

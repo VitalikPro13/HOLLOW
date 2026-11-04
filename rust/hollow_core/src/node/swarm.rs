@@ -572,7 +572,7 @@ use super::crypto_handler::{
     KeyExchangeAuth, REQUIRE_SIGNED_KEY_EXCHANGE,
     check_backfill_signature, BackfillSig, PkCache,
     persist_mls_state, persist_crypto_state, persist_olm_read,
-    peer_is_reachable, is_mls_coordinator, is_vault_coordinator, ws_room_for_peer,
+    peer_is_reachable, is_mls_coordinator, is_vault_coordinator,
     send_mls_broadcast, send_encrypted_message,
     send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer,
 };
@@ -872,7 +872,7 @@ async fn run_event_loop(
     let mut webrtc_share_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Pending WebRTC sends — stored so we can retry via WSS on failure.
     // Key: transfer_id (one per transfer), Value: (peer_id, kind, id, own temp, total_size)
-    let mut pending_webrtc_sends: HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)> = HashMap::new();
+    let mut pending_webrtc_sends: super::file_handler::WebrtcSends = HashMap::new();
 
     // At-rest file protection (issue 78): the key ring has to be live before any
     // handler writes content, and the sweep converts what older versions left in
@@ -948,6 +948,9 @@ async fn run_event_loop(
 
     // -- WS stream transfer reassembly state --
     let mut pending_ws_transfers: HashMap<String, super::ws_stream_transfer::WsTransferState> = HashMap::new();
+    // Senders back from a gap in their relay session, with when: their streams to us
+    // are judged by the frames that follow (`file_stream_return_window`).
+    let mut file_senders_back: HashMap<String, std::time::Instant> = HashMap::new();
 
     // -- Recovery pool state (Evidence Recovery) --
     let mut recovery_pool_state: Option<crate::node::recovery_pool::RecoveryPoolState> = None;
@@ -1606,7 +1609,6 @@ async fn run_event_loop(
                     &mut pending_asset_asks,
                     &mut overlay_book,
                     &mut pending_file_asks,
-                    &pending_ws_transfers,
                     &mut pending_public_file_requests,
                     &mut requested_file_receipts,
                     &mut declined_file_ids,
@@ -2970,7 +2972,6 @@ async fn run_event_loop(
                         file_handler::handle_request_file(
                             file_id, peer_id_str, chunks,
                             &ws_cmd_tx, &ws_room_peers,
-                            &pending_ws_transfers,
                             &server_states, &event_tx,
                             &mut pending_file_asks,
                             &mut requested_file_receipts,
@@ -3512,7 +3513,6 @@ async fn run_event_loop(
                                 &mut pending_asset_asks,
                                 &mut overlay_book,
                                 &mut pending_file_asks,
-                                &pending_ws_transfers,
                                 &mut pending_public_file_requests,
                                 &mut requested_file_receipts,
                                 &mut declined_file_ids,
@@ -3990,9 +3990,7 @@ async fn run_event_loop(
                         if !pending_messages.is_empty() {
                             hollow_log!("[HOLLOW-WS] Keeping {} pending message queues for delivery after reconnect", pending_messages.len());
                         }
-                        // Clean up in-progress WS stream transfers. Resumption infrastructure exists
-                        // (the FileRequest offset, seek support in ws_stream_send) but transfer state
-                        // is in-memory only, so cross-restart resumption would need persistence.
+                        // A stream never resumes: the next ask is answered under a new key.
                         if !pending_ws_transfers.is_empty() {
                             hollow_log!("[HOLLOW-WS] Cleaning up {} in-progress WS transfers", pending_ws_transfers.len());
                             for (id, state) in pending_ws_transfers.drain() {
@@ -4026,11 +4024,20 @@ async fn run_event_loop(
                             hollow_log!("[HOLLOW-SECURITY] {peer_id} joined {room} as a master id its roster does not count: not a device");
                             continue;
                         }
+                        let was_away = !ws_room_peers.values().any(|ps| ps.contains(&peer_id));
                         let arrived_here = ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
                         // Joining a room we already list it in = a fresh session of its,
                         // whose receive state for our streams is gone.
                         if !arrived_here {
                             end_relay_streams_to(&device_peer_id, &peer_id);
+                        }
+                        // Its streams to us live on if its session only resumed: the frames
+                        // after its return decide (the asset_retry tick).
+                        if (was_away || !arrived_here)
+                            && (pending_ws_transfers.values().any(|s| s.sender == peer_id)
+                                || pending_file_streams.values().any(|p| p.sender == peer_id))
+                        {
+                            file_senders_back.insert(peer_id.clone(), std::time::Instant::now());
                         }
                         carry_unseen_ops(&mut crdt_resync, &server_states, &ws_cmd_tx, &ws_room_peers, &local_peer_str, &room);
 
@@ -4046,7 +4053,6 @@ async fn run_event_loop(
                             &ws_cmd_tx, &ws_room_peers, &server_states, &event_tx,
                             &mut pending_file_asks,
                             &mut requested_file_receipts, &mut declined_file_ids,
-                            &pending_ws_transfers,
                             &room, &peer_id, &local_peer_str, &device_peer_id,
                         ).await;
 
@@ -4697,7 +4703,6 @@ async fn run_event_loop(
                             &ws_cmd_tx, &ws_room_peers, &server_states, &event_tx,
                             &mut pending_file_asks,
                             &mut requested_file_receipts, &mut declined_file_ids,
-                            &pending_ws_transfers,
                             &room, &local_peer_str, &device_peer_id,
                         ).await;
 
@@ -5313,7 +5318,6 @@ async fn run_event_loop(
                                 &mut pending_asset_asks,
                                 &mut overlay_book,
                                 &mut pending_file_asks,
-                                &pending_ws_transfers,
                                 &mut pending_public_file_requests,
                                 &mut requested_file_receipts,
                                 &mut declined_file_ids,
@@ -5873,7 +5877,6 @@ async fn run_event_loop(
                                             &mut pending_asset_asks,
                                             &mut overlay_book,
                                             &mut pending_file_asks,
-                                            &pending_ws_transfers,
                                             &mut pending_public_file_requests,
                                             &mut requested_file_receipts,
                                             &mut declined_file_ids,
@@ -7089,11 +7092,33 @@ async fn run_event_loop(
                 // The file-ask twin: a holder that never answered (an old
                 // client, a dropped frame) is a silent miss, so rotate it and,
                 // when nobody is left, say which dead end it is.
+                let window = super::ws_stream_transfer::file_stream_return_window();
+                let judged: Vec<(String, std::time::Instant)> = file_senders_back
+                    .iter()
+                    .filter(|(_, back)| back.elapsed() >= window)
+                    .map(|(sender, back)| (sender.clone(), *back))
+                    .collect();
+                for (sender, back) in judged {
+                    file_senders_back.remove(&sender);
+                    file_handler::reask_dead_file_streams(
+                        |s| s.sender == sender && s.last_frame_at < back, Some(&sender), &webrtc_peers,
+                        &mut pending_ws_transfers, &pending_file_streams, &pending_public_file_requests,
+                        &ws_cmd_tx, &ws_room_peers, &server_states, &event_tx,
+                        &mut pending_file_asks, &mut requested_file_receipts, &mut declined_file_ids,
+                        &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
+                    ).await;
+                }
+                file_handler::reask_dead_file_streams(
+                            |s| s.last_frame_at.elapsed() >= super::ws_stream_transfer::dead_file_stream_idle(), None, &webrtc_peers,
+                            &mut pending_ws_transfers, &pending_file_streams, &pending_public_file_requests,
+                            &ws_cmd_tx, &ws_room_peers, &server_states, &event_tx,
+                            &mut pending_file_asks, &mut requested_file_receipts, &mut declined_file_ids,
+                            &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
+                        ).await;
                 file_asks::retry_stale_asks(
                     &ws_cmd_tx, &ws_room_peers, &server_states, &event_tx,
                     &mut pending_file_asks,
                     &mut requested_file_receipts, &mut declined_file_ids,
-                    &pending_ws_transfers,
                     &local_peer_str, &device_peer_id,
                     &db_path, &db_passphrase,
                 ).await;
@@ -8194,7 +8219,7 @@ async fn handle_incoming_request(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
     share_registry: &super::share_handler::ShareRegistry,
-    pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
+    pending_webrtc_sends: &mut super::file_handler::WebrtcSends,
     channel_sync_sent: &mut HashMap<String, std::time::Instant>,
     channel_asks: &mut super::channel_asks::ChannelAsks,
     slow_mode_clock: &mut message_ops::SlowModeClock,
@@ -8219,7 +8244,6 @@ async fn handle_incoming_request(
     pending_asset_asks: &mut HashMap<String, emotes::PendingAsk>,
     overlay_book: &mut super::overlay::OverlayBook,
     pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
-    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     pending_public_file_requests: &mut HashMap<String, (String, String, std::time::Instant)>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
     declined_file_ids: &mut std::collections::HashSet<String>,
@@ -8244,7 +8268,7 @@ async fn handle_incoming_request(
         voice_channel_gossip_mode, call_book, conference_host, vc_signal_rate_tokens, mls_dirty, guest_rooms,
         subscribed_channels, db_path, db_passphrase, local_peer_str, peer_str, is_invisible,
         pending_friend_accepts, pending_friend_requests, pending_friend_removals, answer_resent,
-        pending_asset_asks, overlay_book, pending_file_asks, pending_ws_transfers,
+        pending_asset_asks, overlay_book, pending_file_asks,
         pending_public_file_requests, requested_file_receipts, declined_file_ids, peer_auto_dl, fwd_bridge,
         request, frame_ts_ms, carried_out,
     ))
@@ -8294,7 +8318,7 @@ async fn handle_incoming_request_inner(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
     share_registry: &super::share_handler::ShareRegistry,
-    pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
+    pending_webrtc_sends: &mut super::file_handler::WebrtcSends,
     channel_sync_sent: &mut HashMap<String, std::time::Instant>,
     channel_asks: &mut super::channel_asks::ChannelAsks,
     slow_mode_clock: &mut message_ops::SlowModeClock,
@@ -8319,7 +8343,6 @@ async fn handle_incoming_request_inner(
     pending_asset_asks: &mut HashMap<String, emotes::PendingAsk>,
     overlay_book: &mut super::overlay::OverlayBook,
     pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
-    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     pending_public_file_requests: &mut HashMap<String, (String, String, std::time::Instant)>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
     declined_file_ids: &mut std::collections::HashSet<String>,
@@ -9901,6 +9924,7 @@ async fn handle_incoming_request_inner(
                         let carried_retry = pending_file_streams.get(&fid)
                             .map(|p| p.retry_count)
                             .unwrap_or(0);
+                        let pushed = file_handler::header_is_push(explicitly_requested, pending_file_streams.get(&fid));
                         pending_file_streams.insert(fid.clone(), PendingFileStream {
                             aes_key: ak,
                             aes_nonce: an,
@@ -9915,6 +9939,7 @@ async fn handle_incoming_request_inner(
                             height: h,
                             retry_count: carried_retry,
                             size,
+                            pushed,
                         });
                         hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (streamed transfer)");
 
@@ -10383,6 +10408,12 @@ async fn handle_incoming_request_inner(
                     voice_handler::handle_envelope_voice_channel_leg_restart(
                         voice_channel_participants, event_tx,
                         peer_str.to_string(), sid, cid,
+                    ).await;
+                }
+                Ok(MessageEnvelope::VoiceChannelFwdWant { sid, cid, origins, .. }) => {
+                    voice_handler::handle_envelope_voice_channel_fwd_want(
+                        voice_channel_participants, event_tx,
+                        peer_str.to_string(), sid, cid, origins,
                     ).await;
                 }
 
@@ -12416,6 +12447,7 @@ async fn handle_incoming_request_inner(
                             | MessageEnvelope::VoiceChannelRenegOffer { .. }
                             | MessageEnvelope::VoiceChannelRenegAnswer { .. }
                             | MessageEnvelope::VoiceChannelLegRestart { .. }
+                            | MessageEnvelope::VoiceChannelFwdWant { .. }
                             | MessageEnvelope::VoiceChannelCameraState { .. }
                             | MessageEnvelope::VoiceChannelRecordingState { .. }
                             if sender_peer_id != peer_str => {
@@ -12527,6 +12559,12 @@ async fn handle_incoming_request_inner(
                                 voice_handler::handle_envelope_voice_channel_leg_restart(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid,
+                                ).await;
+                            }
+                            MessageEnvelope::VoiceChannelFwdWant { sid, cid, origins, .. } => {
+                                voice_handler::handle_envelope_voice_channel_fwd_want(
+                                    voice_channel_participants, event_tx,
+                                    peer_str.to_string(), sid, cid, origins,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelCameraState { sid, cid, enabled, .. } => {
@@ -14741,7 +14779,7 @@ async fn handle_incoming_request_inner(
             }).await;
         }
 
-        HavenMessage::FileRequest { file_id, chunks, offset } => {
+        HavenMessage::FileRequest { file_id, chunks, offset: _ } => {
 
             use crate::node::file_transfer;
             hollow_log!("[HOLLOW-FILE] FileRequest from {peer_str} for {file_id}");
@@ -14805,7 +14843,7 @@ async fn handle_incoming_request_inner(
                         } else {
                             super::ws_stream_transfer::RelayRank::Guest
                         };
-                        if offset > 0 || file_handler::rides_relay(webrtc_peers, pending_webrtc_sends, peer_str, &stream_id) {
+                        if file_handler::rides_relay(webrtc_peers, pending_webrtc_sends, peer_str, &stream_id) {
                             let admit = super::ws_stream_transfer::relay_stream_admits(
                                 device_peer_id, peer_str, &stream_id, relay_rank, file_meta.size_bytes.saturating_add(16),
                             );
@@ -14938,27 +14976,15 @@ async fn handle_incoming_request_inner(
                                     );
                                 }
 
-                                    if offset > 0 {
-                                        // Resumed transfer: skip FileHeader, stream from offset via WS.
-                                        if let Some(room) = ws_room_for_peer(ws_room_peers, &peer_str) {
-                                            super::ws_stream_transfer::ws_stream_send(
-                                                ws_cmd_tx, device_peer_id, &room, &peer_str,
-                                                &super::ws_stream_transfer::StreamKind::File,
-                                                &stream_id, &temp_path, enc.ciphertext.len() as u64,
-                                                offset, relay_rank,
-                                            ).await;
-                                        }
-                                        hollow_log!("[HOLLOW-FILE] Resumed file {} to {peer_str} from offset {offset}", file_id);
-                                    } else {
-                                        // Fresh transfer: stream via WebRTC or WS relay.
-                                        file_handler::stream_to_peer(
-                                            ws_cmd_tx, device_peer_id, ws_room_peers,
-                                            webrtc_peers, pending_webrtc_sends, event_tx,
-                                            &peer_str, &super::ws_stream_transfer::StreamKind::File,
-                                            &stream_id, &temp_path, enc.ciphertext.len() as u64, relay_rank,
-                                        ).await;
-                                        hollow_log!("[HOLLOW-FILE] Streamed file {} to {peer_str}", file_id);
-                                    }
+                                    // Always the whole file: this ask's key is new, so a
+                                    // suffix would decrypt against nothing the asker holds.
+                                    file_handler::stream_to_peer(
+                                        ws_cmd_tx, device_peer_id, ws_room_peers,
+                                        webrtc_peers, pending_webrtc_sends, event_tx,
+                                        &peer_str, &super::ws_stream_transfer::StreamKind::File,
+                                        &stream_id, &temp_path, enc.ciphertext.len() as u64, relay_rank,
+                                    ).await;
+                                    hollow_log!("[HOLLOW-FILE] Streamed file {} to {peer_str}", file_id);
                                     let _ = tokio::fs::remove_file(&temp_path).await;
                             }
                         }
@@ -14973,7 +14999,6 @@ async fn handle_incoming_request_inner(
             file_asks::handle_file_unavailable(
                 ws_cmd_tx, ws_room_peers, server_states, event_tx,
                 pending_file_asks, requested_file_receipts, declined_file_ids,
-                pending_ws_transfers,
                 &peer_str, file_id, reason,
                 local_peer_str, device_peer_id,
                 db_path, db_passphrase,

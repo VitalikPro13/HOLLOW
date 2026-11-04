@@ -330,7 +330,7 @@ pub(crate) async fn handle_send_file(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
     peer_auto_dl: &HashMap<String, u32>,
     gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
     db_path: &str,
@@ -870,7 +870,7 @@ pub(crate) async fn finish_send_file(
     cmd_tx: &mpsc::Sender<super::types::NodeCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
     peer_auto_dl: &HashMap<String, u32>,
     gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
     db_path: &str,
@@ -1309,7 +1309,7 @@ pub(crate) async fn release_held_file(
     cmd_tx: &mpsc::Sender<super::types::NodeCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
     peer_auto_dl: &HashMap<String, u32>,
     db_path: &str,
     db_passphrase: &str,
@@ -1384,7 +1384,7 @@ async fn send_dm_file_fanout(
     cmd_tx: &mpsc::Sender<super::types::NodeCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
     peer_auto_dl: &HashMap<String, u32>,
     db_path: &str,
     db_passphrase: &str,
@@ -1521,7 +1521,7 @@ async fn send_dm_file_to_device(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
     peer_auto_dl: &HashMap<String, u32>,
 ) {
     // Per-device companion DM envelope: a sibling self-echo carries `convo`
@@ -1667,7 +1667,7 @@ async fn stream_dm_file_live(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
 ) {
     let encrypted = crate::vault::pipeline::aes_encrypt(msg.final_data);
     if let Ok(enc) = encrypted {
@@ -1849,7 +1849,7 @@ async fn send_channel_file(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
     gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
     db_path: &str,
     db_passphrase: &str,
@@ -2164,7 +2164,7 @@ async fn replicate_channel_file_full(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
     event_tx: &mpsc::Sender<NetworkEvent>,
     local_peer: &str,
     device_peer_id: &str,
@@ -2191,6 +2191,80 @@ async fn replicate_channel_file_full(
         }
     }
     let _ = tokio::fs::remove_file(temp_path).await;
+}
+
+/// File streams that can no longer finish (no frame since their sender came back from
+/// a gap in its session, or quiet past its stall cutoff): the partial bytes go and each
+/// file is asked for again, as a Download press would, so it completes once a holder
+/// answers. With `returned`, so is every file whose header that device sent and whose
+/// bytes have not begun, unless they ride its live data channel. Only a file still
+/// wanted is asked for: one with a live ask, or a push the auto-download gate let in
+/// ("Stop waiting" and a declined push stay so). A file we hold no row for, or hold
+/// whole, is left alone.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reask_dead_file_streams(
+    dead: impl Fn(&ws_stream_transfer::WsTransferState) -> bool,
+    returned: Option<&str>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_ws_transfers: &mut HashMap<String, ws_stream_transfer::WsTransferState>,
+    pending_file_streams: &HashMap<String, PendingFileStream>,
+    pending_public_file_requests: &HashMap<String, (String, String, std::time::Instant)>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    event_tx: &tokio::sync::mpsc::Sender<crate::node::NetworkEvent>,
+    pending_file_asks: &mut HashMap<String, super::file_asks::PendingFileAsk>,
+    requested_file_receipts: &mut HashMap<String, std::time::Instant>,
+    declined_file_ids: &mut std::collections::HashSet<String>,
+    local_peer: &str,
+    device_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let dropped = ws_stream_transfer::drop_file_streams(pending_ws_transfers, dead);
+    let mut again: Vec<(String, String)> = Vec::new();
+    if let Some(device) = returned.filter(|d| !webrtc_peers.contains(*d)) {
+        for (fid, _) in pending_file_streams.iter().filter(|(_, p)| p.sender == device) {
+            if !pending_ws_transfers.contains_key(&file_stream_id(fid, device, device_peer_id)) {
+                again.push((fid.clone(), device.to_string()));
+            }
+        }
+    }
+    for (id, from) in dropped {
+        let Some(fid) = stream_file_label(
+            &id, &from, device_peer_id, pending_file_streams, pending_file_asks, pending_public_file_requests,
+        ) else {
+            continue;
+        };
+        if !again.iter().any(|(f, _)| *f == fid) {
+            again.push((fid, from));
+        }
+    }
+    again.retain(|(fid, _)| {
+        pending_file_asks.contains_key(fid)
+            || pending_public_file_requests.contains_key(fid)
+            || pending_file_streams.get(fid).is_some_and(|p| p.pushed)
+    });
+    if again.is_empty() {
+        return;
+    }
+    let held: Vec<(String, String)> = match crate::storage::MessageStore::lease(db_path, db_passphrase) {
+        Ok(store) => again
+            .into_iter()
+            .filter(|(fid, _)| store.get_file_metadata(fid).ok().flatten().is_some_and(|m| m.completed_at.is_none()))
+            .collect(),
+        Err(_) => return,
+    };
+    for (fid, from) in held {
+        hollow_log!("[HOLLOW-FILE] The stream of {fid} from {from} was cut; asking for it again");
+        Box::pin(handle_request_file(
+            fid, from, Vec::new(),
+            ws_cmd_tx, ws_room_peers, server_states, event_tx,
+            pending_file_asks, requested_file_receipts, declined_file_ids,
+            local_peer, device_peer_id, db_path, db_passphrase,
+        ))
+        .await;
+    }
 }
 
 /// Every online DEVICE that may LEGITIMATELY hold a channel file's bytes, in
@@ -2242,7 +2316,6 @@ pub(crate) async fn handle_request_file(
     chunks: Vec<u32>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     server_states: &HashMap<String, ServerState>,
     event_tx: &tokio::sync::mpsc::Sender<crate::node::NetworkEvent>,
     pending_file_asks: &mut HashMap<String, super::file_asks::PendingFileAsk>,
@@ -2300,7 +2373,6 @@ pub(crate) async fn handle_request_file(
             pending_file_asks,
             requested_file_receipts,
             declined_file_ids,
-            pending_ws_transfers,
             &file_id,
             context,
             sender,
@@ -2327,17 +2399,12 @@ pub(crate) async fn handle_request_file(
     };
     match target {
         Some(t) => {
-            let offset = pending_ws_transfers
-                .get(&file_stream_id(&file_id, &t, device_peer_id))
-                .filter(|s| s.sender == t)
-                .map(|s| s.bytes_received)
-                .unwrap_or(0);
-            hollow_log!("[HOLLOW-FILE] Requesting rowless file {file_id} from {t} (offset {offset})");
+            hollow_log!("[HOLLOW-FILE] Requesting rowless file {file_id} from {t}");
             super::olm_lane::carry(
                 ws_cmd_tx,
                 &t,
                 None,
-                &HavenMessage::FileRequest { file_id, chunks, offset },
+                &HavenMessage::FileRequest { file_id, chunks, offset: 0 },
                 super::olm_lane::NoSession::Queue,
             );
         }
@@ -2409,10 +2476,10 @@ fn is_shard_send_temp(path: &std::path::Path) -> bool {
 /// Handle NodeCommand::WebRtcSendComplete — completed send.
 pub(crate) fn handle_webrtc_send_complete(
     transfer_id: String,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
 ) {
     hollow_log!("[HOLLOW-WEBRTC] Send complete: {transfer_id}");
-    if let Some((_, _, _, path, _)) = pending_webrtc_sends.remove(&transfer_id) {
+    if let Some(WebrtcSend { path, .. }) = pending_webrtc_sends.remove(&transfer_id) {
         if is_shard_send_temp(&path) || path.file_name().map(|n| n.to_string_lossy().starts_with(".stream_send_")).unwrap_or(false) {
             let _ = std::fs::remove_file(&path);
         }
@@ -2437,7 +2504,7 @@ pub(crate) async fn handle_webrtc_transfer_failed(
     error: String,
     us: &str,
     webrtc_peers: &mut std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
     pending_file_streams: &HashMap<String, PendingFileStream>,
     early_file_streams: &mut HashMap<String, EarlyStream>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -2447,17 +2514,15 @@ pub(crate) async fn handle_webrtc_transfer_failed(
     hollow_log!("[HOLLOW-WEBRTC] Transfer failed: {transfer_id} to/from {peer_id}: {error}");
     webrtc_peers.remove(&peer_id);
     // Sender-side retry: the same transfer over the relay, from its own temp.
-    if let Some((target, kind, id, source_path, total_size)) = pending_webrtc_sends.remove(&transfer_id) {
-        hollow_log!("[HOLLOW-WEBRTC] Sender fallback: retrying {id} via WSS relay");
+    if let Some(WebrtcSend { target, kind, path, total_size, rank }) = pending_webrtc_sends.remove(&transfer_id) {
+        hollow_log!("[HOLLOW-WEBRTC] Sender fallback: retrying {transfer_id} via WSS relay");
         webrtc_peers.remove(&target);
         stream_to_peer(
             ws_cmd_tx, us, ws_room_peers,
             webrtc_peers, pending_webrtc_sends, event_tx,
-            &target, &kind, &id, &source_path, total_size,
-            // The send may have answered anyone's ask, so it takes the caps an ask does.
-            ws_stream_transfer::RelayRank::Member,
+            &target, &kind, &transfer_id, &path, total_size, rank,
         ).await;
-        let _ = tokio::fs::remove_file(&source_path).await;
+        let _ = tokio::fs::remove_file(&path).await;
     }
     // Receiver-side retry: ask the sender again for the file its header named.
     if let Some(early) = early_file_streams.remove(&transfer_id) {
@@ -3252,14 +3317,39 @@ async fn stage_send_temp(source: &std::path::Path, id: &str) -> Option<PathBuf> 
     None
 }
 
+/// A send handed to a data channel, kept until it ends so a failure retries it over the
+/// relay from its own temp and at the rank it was admitted at.
+pub(crate) struct WebrtcSend {
+    pub(crate) target: String,
+    pub(crate) kind: ws_stream_transfer::StreamKind,
+    pub(crate) path: PathBuf,
+    pub(crate) total_size: u64,
+    pub(crate) rank: ws_stream_transfer::RelayRank,
+}
+
+/// Data-channel sends in flight, by transfer id.
+pub(crate) type WebrtcSends = HashMap<String, WebrtcSend>;
+
 /// Whether a send of transfer `id` to `peer` rides the relay rather than its data channel.
 pub(crate) fn rides_relay(
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &WebrtcSends,
     peer: &str,
     id: &str,
 ) -> bool {
-    !webrtc_peers.contains(peer) || pending_webrtc_sends.contains_key(id)
+    debug_files_relay_only() || !webrtc_peers.contains(peer) || pending_webrtc_sends.contains_key(id)
+}
+
+/// Debug builds only: `<data dir>/debug_files_relay_only` sends every file over the
+/// relay, so a fleet run on one LAN can exercise that lane.
+#[cfg(debug_assertions)]
+fn debug_files_relay_only() -> bool {
+    crate::identity::data_dir().is_ok_and(|d| d.join("debug_files_relay_only").exists())
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_files_relay_only() -> bool {
+    false
 }
 
 /// Stream file or shard data from `us` to a peer under the transfer's wire id. Prefers
@@ -3272,7 +3362,7 @@ pub(crate) async fn stream_to_peer(
     us: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
     event_tx: &mpsc::Sender<NetworkEvent>,
     peer_str: &str,
     kind: &ws_stream_transfer::StreamKind,
@@ -3299,11 +3389,9 @@ pub(crate) async fn stream_to_peer(
             ws_stream_transfer::StreamKind::Shard { shard_index } => *shard_index,
             _ => 0,
         };
-        // Store for fallback on failure.
-        pending_webrtc_sends.insert(id.to_string(), (
-            peer_str.to_string(), kind.clone(), id.to_string(),
-            staged.clone(), total_size,
-        ));
+        pending_webrtc_sends.insert(id.to_string(), WebrtcSend {
+            target: peer_str.to_string(), kind: kind.clone(), path: staged.clone(), total_size, rank,
+        });
         let _ = event_tx.send(NetworkEvent::WebRtcSendFile {
             peer_id: peer_str.to_string(),
             transfer_id: id.to_string(),
@@ -3319,7 +3407,7 @@ pub(crate) async fn stream_to_peer(
     // Fallback: WSS relay binary streaming.
     if let Some(room) = super::crypto_handler::send_room_for_peer(ws_room_peers, peer_str) {
         ws_stream_transfer::ws_stream_send(
-            ws_cmd_tx, us, &room, peer_str, kind, id, source_path, total_size, 0, rank,
+            ws_cmd_tx, us, &room, peer_str, kind, id, source_path, total_size, rank,
         ).await;
     } else {
         hollow_log!("[HOLLOW-STREAM] Peer {peer_str} unreachable via WS — cannot stream {id}");
@@ -3335,7 +3423,7 @@ pub(crate) async fn stream_to_peer_bytes(
     us: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    pending_webrtc_sends: &mut WebrtcSends,
     event_tx: &mpsc::Sender<NetworkEvent>,
     peer_str: &str,
     kind: &ws_stream_transfer::StreamKind,
@@ -3345,7 +3433,7 @@ pub(crate) async fn stream_to_peer_bytes(
 ) {
     // A data-channel send owns its temp until it ends, so a repeat of a transfer still
     // running there rides the relay.
-    if webrtc_peers.contains(peer_str) && !pending_webrtc_sends.contains_key(id) {
+    if !rides_relay(webrtc_peers, pending_webrtc_sends, peer_str, id) {
         // WebRTC: Dart reads from file path — must write temp file.
         // Vault shard bytes are already AES ciphertext and the WS fallback streams
         // this file raw, so it is staged as-is.
@@ -3362,10 +3450,9 @@ pub(crate) async fn stream_to_peer_bytes(
             ws_stream_transfer::StreamKind::Shard { shard_index } => *shard_index,
             _ => 0,
         };
-        pending_webrtc_sends.insert(id.to_string(), (
-            peer_str.to_string(), kind.clone(), id.to_string(),
-            temp_path.to_path_buf(), total_size,
-        ));
+        pending_webrtc_sends.insert(id.to_string(), WebrtcSend {
+            target: peer_str.to_string(), kind: kind.clone(), path: temp_path.to_path_buf(), total_size, rank,
+        });
         let _ = event_tx.send(NetworkEvent::WebRtcSendFile {
             peer_id: peer_str.to_string(),
             transfer_id: id.to_string(),
@@ -3542,9 +3629,10 @@ pub(crate) async fn handle_envelope_file_header(
     // Register pending stream so binary file bytes can be decrypted on arrival.
     // Skip for share-backed files — no binary data arrives via P2P, Share handles delivery.
     if !complete && auto_ok && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
+        let pushed = header_is_push(explicitly_requested, pending_file_streams.get(&fid));
         register_pending_file_stream_and_reprocess(
             &fid, ak, an, &name, &ext, &sender_peer_id, server_id,
-            &sid, &cid, &mid, img, w, h, size,
+            &sid, &cid, &mid, img, w, h, size, pushed,
             pending_file_streams, pending_shard_streams, early_file_streams,
             bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
             local_device, stream_id, db_path, db_passphrase,
@@ -3649,6 +3737,12 @@ fn mls_file_header_dropped(
     false
 }
 
+/// Whether a header registers as a push: not the answer to an ask of ours, and not
+/// a re-send of a header that was one.
+pub(crate) fn header_is_push(explicitly_requested: bool, earlier: Option<&PendingFileStream>) -> bool {
+    !explicitly_requested && earlier.is_none_or(|p| p.pushed)
+}
+
 /// Register the pending stream keyed by the FileHeader's AES material, then
 /// reprocess any WebRTC bytes that arrived before this header.
 #[allow(clippy::too_many_arguments)]
@@ -3667,6 +3761,7 @@ async fn register_pending_file_stream_and_reprocess(
     w: Option<u32>,
     h: Option<u32>,
     size: u64,
+    pushed: bool,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     early_file_streams: &mut HashMap<String, EarlyStream>,
@@ -3693,6 +3788,7 @@ async fn register_pending_file_stream_and_reprocess(
         height: h,
         retry_count: 0,
         size,
+        pushed,
     });
     hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (MLS streamed transfer)");
 
@@ -3841,8 +3937,21 @@ mod tests {
         PendingFileStream {
             aes_key: String::new(), aes_nonce: String::new(), file_name: "a.bin".into(), ext: "bin".into(),
             sender: sender.into(), server_id: String::new(), channel_id: String::new(), message_id: String::new(),
-            is_image: false, width: None, height: None, retry_count: 0, size,
+            is_image: false, width: None, height: None, retry_count: 0, size, pushed: true,
         }
+    }
+
+    /// A header answering our ask is no push, and neither is a later copy of it; a
+    /// push stays one until an ask of ours is answered.
+    #[test]
+    fn a_header_is_a_push_only_when_nobody_asked() {
+        let mut earlier = pending_header("alice", 1);
+        assert!(header_is_push(false, None));
+        assert!(!header_is_push(true, None));
+        assert!(header_is_push(false, Some(&earlier)));
+        assert!(!header_is_push(true, Some(&earlier)));
+        earlier.pushed = false;
+        assert!(!header_is_push(false, Some(&earlier)), "a re-sent answer turned into a push");
     }
 
     /// Each transfer of a file streams under its own id: another file, sender or receiver
@@ -3926,10 +4035,40 @@ mod tests {
         assert_eq!(std::fs::read(&file_path).ok().as_deref(), Some(&b"first ciphertext"[..]), "the running send's temp was rewritten");
         let relayed = tokio::time::timeout(std::time::Duration::from_secs(5), ws_rx.recv()).await;
         assert!(matches!(relayed, Ok(Some(super::super::ws_client::WsCommand::SendBinaryDirect { .. }))), "the repeat never rode the relay");
-        assert_eq!(sends.get(&id).map(|s| s.3.clone()), Some(PathBuf::from(&file_path)));
+        assert_eq!(sends.get(&id).map(|s| s.path.clone()), Some(PathBuf::from(&file_path)));
 
         handle_webrtc_send_complete(id.clone(), &mut sends);
         assert!(!std::path::Path::new(&file_path).exists(), "a finished send left its temp");
+    }
+
+    /// A send whose data channel failed rides the relay at the rank it was admitted
+    /// at: a guest's ask stays below a member's, our own send stays outside the caps.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // HOLLOW_DATA_DIR is process-global
+    async fn a_data_channel_send_falls_back_to_the_relay_at_its_own_rank() {
+        use ws_stream_transfer::{RelayRank, StreamKind};
+        let _g = super::super::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+        let (event_tx, _events) = mpsc::channel(8);
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let rooms = HashMap::from([("room".to_string(), std::collections::HashSet::from(["bob".to_string()]))]);
+        let us = "fallback_rank_us";
+        for rank in [RelayRank::Guest, RelayRank::Own] {
+            let mut webrtc = std::collections::HashSet::from(["bob".to_string()]);
+            let mut sends = HashMap::new();
+            let id = file_stream_id(&format!("{rank:?}").repeat(16), us, "bob");
+            let src = tmp.path().join("fallback.tmp");
+            std::fs::write(&src, b"ciphertext").unwrap();
+            stream_to_peer(&ws_tx, us, &rooms, &webrtc, &mut sends, &event_tx, "bob", &StreamKind::File, &id, &src, 10, rank).await;
+            assert!(sends.contains_key(&id), "the send never went to the data channel");
+            handle_webrtc_transfer_failed(
+                id.clone(), "bob".to_string(), "closed".to_string(), us, &mut webrtc, &mut sends,
+                &HashMap::new(), &mut HashMap::new(), &ws_tx, &rooms, &event_tx,
+            ).await;
+            assert_eq!(ws_stream_transfer::relay_stream_rank(us, &id), Some(rank), "the fallback changed the send's rank");
+            ws_stream_transfer::end_relay_streams_to(us, "bob");
+        }
     }
 
     /// A-F7: what a stream may declare follows what we expect of it: its own header's

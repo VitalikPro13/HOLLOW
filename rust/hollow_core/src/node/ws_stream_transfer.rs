@@ -203,6 +203,12 @@ fn relay_senders() -> std::sync::MutexGuard<'static, HashMap<String, RelaySender
     SENDERS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The rank a running relay stream of `us` was admitted at.
+#[cfg(test)]
+pub(crate) fn relay_stream_rank(us: &str, id: &str) -> Option<RelayRank> {
+    relay_senders().get(us)?.streams.iter().find(|s| s.id == id).map(|s| s.rank)
+}
+
 /// What a peer's ask for a relay stream gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RelayAdmit {
@@ -410,7 +416,6 @@ fn relay_stage_path(id: &str, seq: u64) -> PathBuf {
 /// Send a file or shard from `us` to a peer via chunked WS binary frames, from disk in
 /// WS_CHUNK_SIZE pieces at the socket's pace. Returns once the stream has its own link
 /// (else copy) of `source_path`; a stream of `id` still running is not started again.
-/// If `start_offset > 0`, seeks past already-sent bytes (for transfer resumption).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ws_stream_send(
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
@@ -421,7 +426,6 @@ pub(crate) async fn ws_stream_send(
     id: &str,
     source_path: &std::path::Path,
     total_size: u64,
-    start_offset: u64,
     rank: RelayRank,
 ) {
     let mut start = match start_relay_stream(us, target_peer, id, rank, total_size) {
@@ -438,7 +442,7 @@ pub(crate) async fn ws_stream_send(
         return;
     }
     start.place.staged = Some(staged);
-    spawn_relay_stream(ws_cmd_tx, start, room_code, target_peer, kind, id, total_size, start_offset);
+    spawn_relay_stream(ws_cmd_tx, start, room_code, target_peer, kind, id, total_size);
 }
 
 /// Send bytes held in memory from `us` to a peer: staged to disk and streamed as
@@ -468,7 +472,7 @@ pub(crate) async fn ws_stream_send_bytes(
         hollow_log!("[HOLLOW-WS-STREAM] Could not stage the relay send of {id}: {e}");
         return;
     }
-    spawn_relay_stream(ws_cmd_tx, start, room_code, target_peer, kind, id, total_size, 0);
+    spawn_relay_stream(ws_cmd_tx, start, room_code, target_peer, kind, id, total_size);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -480,14 +484,13 @@ fn spawn_relay_stream(
     kind: &StreamKind,
     id: &str,
     total_size: u64,
-    start_offset: u64,
 ) {
     let (tx, room, target, kind, id) = (ws_cmd_tx.clone(), room_code.to_string(), target_peer.to_string(), kind.clone(), id.to_string());
     tokio::spawn(async move {
         let RelayStart { place, credit, written, mut ended } = start;
         let Some(source) = place.staged.clone() else { return };
         let stream = RelaySend { us: &place.us, seq: place.seq, credit: &credit, written: &written };
-        send_relay_chunks(&tx, stream, &mut ended, &room, &target, &kind, &id, &source, total_size, start_offset).await;
+        send_relay_chunks(&tx, stream, &mut ended, &room, &target, &kind, &id, &source, total_size).await;
         drop(place);
     });
 }
@@ -541,9 +544,8 @@ async fn send_relay_chunks(
     id: &str,
     source_path: &std::path::Path,
     total_size: u64,
-    start_offset: u64,
 ) {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    use tokio::io::AsyncReadExt;
 
     let mut file = match tokio::fs::File::open(source_path).await {
         Ok(f) => tokio::io::BufReader::new(f),
@@ -552,14 +554,6 @@ async fn send_relay_chunks(
             return;
         }
     };
-    if start_offset > 0 {
-        if let Err(e) = file.seek(std::io::SeekFrom::Start(start_offset)).await {
-            hollow_log!("[HOLLOW-WS-STREAM] Failed to seek to offset {start_offset}: {e}");
-            return;
-        }
-        hollow_log!("[HOLLOW-WS-STREAM] Resuming {id} from offset {start_offset}/{total_size}");
-    }
-
     // First chunk: [type:1][id:64][size:8][extra...][data]
     //   File:       extra = (none)
     //   Shard:      extra = shard_index:u16 LE (2 bytes)
@@ -580,7 +574,7 @@ async fn send_relay_chunks(
         StreamKind::File | StreamKind::LinkSnapshot => {}
     }
 
-    let mut bytes_sent = start_offset;
+    let mut bytes_sent = 0u64;
     let mut chunk_count: u64 = 0;
     loop {
         let first = chunk_count == 0;
@@ -661,6 +655,46 @@ fn append_frame(
     None
 }
 
+/// A file stream quiet this long can no longer finish: past the sender's own stall
+/// cutoff, its side has already given up on it.
+pub(crate) fn dead_file_stream_idle() -> std::time::Duration {
+    #[cfg(test)]
+    return std::time::Duration::from_millis(DEAD_FILE_STREAM_IDLE_MS.load(Ordering::Relaxed));
+    #[cfg(not(test))]
+    return RELAY_STREAM_STALL + std::time::Duration::from_secs(30);
+}
+
+/// Lets one harness test shorten [`dead_file_stream_idle`]; the others keep it long so
+/// it never stands in for the presence paths they prove.
+#[cfg(test)]
+pub(crate) static DEAD_FILE_STREAM_IDLE_MS: AtomicU64 = AtomicU64::new(150_000);
+
+/// How long a sender back from a gap in its relay session has to show its streams to
+/// us are alive. The relay announces a sender gone while its session only waits in
+/// grace or hides, and a resumed session carries its streams on, so presence alone
+/// never ends one.
+pub(crate) fn file_stream_return_window() -> std::time::Duration {
+    if cfg!(test) { std::time::Duration::from_millis(1_500) } else { std::time::Duration::from_secs(15) }
+}
+
+/// Drops every file stream `dead` picks, partial bytes and all, returning each
+/// one's (stream id, sender device).
+pub(crate) fn drop_file_streams(
+    pending: &mut HashMap<String, WsTransferState>,
+    dead: impl Fn(&WsTransferState) -> bool,
+) -> Vec<(String, String)> {
+    let ids: Vec<(String, String)> = pending
+        .values()
+        .filter(|s| matches!(s.kind, StreamKind::File) && dead(s))
+        .map(|s| (s.id.clone(), s.sender.clone()))
+        .collect();
+    for (id, from) in &ids {
+        abandon(pending, id);
+        hollow_log!("[HOLLOW-WS-STREAM] {id} from {from} can no longer finish; dropped its partial bytes");
+    }
+    ids
+}
+
 fn abandon(pending: &mut HashMap<String, WsTransferState>, id: &str) {
     if let Some(state) = pending.remove(id) {
         drop(state.temp_file);
@@ -739,12 +773,10 @@ pub fn ws_stream_receive(
 
         let payload = &data[payload_start..];
 
-        // Check if this is a resumed transfer (partial temp file exists from before disconnect).
+        // A first chunk opens a new encryption of the whole file, so its own sender's
+        // partial bytes (another key) are dropped, never extended.
         if let Some(state) = pending.get(&id) {
-            if state.sender == from {
-                return append_frame(pending, &id, payload);
-            }
-            if state.last_frame_at.elapsed() < STREAM_TAKEOVER_IDLE {
+            if state.sender != from && state.last_frame_at.elapsed() < STREAM_TAKEOVER_IDLE {
                 hollow_log!("[HOLLOW-SECURITY] Dropped a new stream for {id} from {from}: {} holds it", state.sender);
                 return None;
             }
@@ -1053,6 +1085,25 @@ mod tests {
         assert_eq!(held, MAX_RECV_STREAMS_PER_SENDER);
     }
 
+    /// Every first chunk is a new encryption of the whole file, so one from the
+    /// stream's own sender starts the stream over: old bytes under another key
+    /// never prefix the new ones.
+    #[test]
+    fn a_new_first_chunk_from_its_sender_starts_the_stream_over() {
+        let _g = super::super::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+        let id = &sid("restart_after_a_stall");
+        let mut pending = HashMap::new();
+        assert!(ws_stream_receive(&mut pending, "bob", &first_frame(id, 8, b"OLD1"), open).is_none());
+        let old_temp = pending.get(id).expect("the first stream opened").temp_path.clone();
+        assert!(ws_stream_receive(&mut pending, "bob", &first_frame(id, 8, b"NEW1"), open).is_none(), "the new chunk extended the old bytes");
+        let done = ws_stream_receive(&mut pending, "bob", &continuation(id, b"NEW2"), open).expect("the new stream completes");
+        assert_eq!(std::fs::read(&done.temp_path).unwrap(), b"NEW1NEW2");
+        assert!(!old_temp.exists(), "the old stream's temp was left behind");
+        let _ = std::fs::remove_file(&done.temp_path);
+    }
+
     #[test]
     fn test_single_chunk_file_roundtrip() {
         let id = &sid("test_file_001");
@@ -1209,10 +1260,10 @@ mod tests {
         let others: Vec<String> = (0..2).map(|i| super::super::file_handler::file_stream_id(&format!("{i}").repeat(64), us, "asker")).collect();
 
         for _ in 0..4 {
-            ws_stream_send(&ws_tx, us, "room", "asker", &StreamKind::File, &asked, &source, SIZE, 0, RelayRank::Member).await;
+            ws_stream_send(&ws_tx, us, "room", "asker", &StreamKind::File, &asked, &source, SIZE, RelayRank::Member).await;
         }
         for id in &others {
-            ws_stream_send(&ws_tx, us, "room", "asker", &StreamKind::File, id, &source, SIZE, 0, RelayRank::Member).await;
+            ws_stream_send(&ws_tx, us, "room", "asker", &StreamKind::File, id, &source, SIZE, RelayRank::Member).await;
         }
         let (most, opened) = watch_queue(&mut ws_rx).await;
         assert!(most <= RELAY_STREAM_QUEUE_BYTES, "{most} bytes queued for a socket that takes nothing");

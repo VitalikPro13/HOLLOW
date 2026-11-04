@@ -1,0 +1,274 @@
+{
+  "_": [
+    "w2-e fix round F5: the catalog previews (FFZ, GIFs, stickers, shop art, IGDB covers) paint",
+    "through Rust fetch + image check, with the kept-bytes re-judge. One fresh throwaway peer.",
+    "run: FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario w2e_pickers -Peers a=windows:i"
+  ],
+  "peers": [
+    "a"
+  ],
+  "steps": [
+    {
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 2000,
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "semantics:Create a server",
+      "peer": "a"
+    },
+    {
+      "op": "enter_text",
+      "target": "hint:My Awesome Server",
+      "value": "pickers",
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "text:Create",
+      "index": 0,
+      "peer": "a"
+    },
+    {
+      "op": "wait_for",
+      "target": "server:pickers",
+      "timeout_ms": 30000,
+      "peer": "a"
+    },
+    {
+      "op": "open_server",
+      "name": "pickers",
+      "peer": "a"
+    },
+    {
+      "op": "wait_for",
+      "target": "channel:general",
+      "timeout_ms": 30000,
+      "peer": "a"
+    },
+    {
+      "op": "open_channel",
+      "name": "general",
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 1500,
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "semantics:Emoji, GIFs and stickers",
+      "index": 0,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 1500,
+      "peer": "a"
+    },
+    {
+      "op": "shot",
+      "name": "pk-01-emoji",
+      "peer": "a"
+    },
+    {
+      "op": "dump",
+      "name": "pk-01-emoji",
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "text:FFZ",
+      "index": 0,
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 7000,
+      "peer": "a"
+    },
+    {
+      "op": "shot",
+      "name": "pk-02-ffz",
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "text:GIFs",
+      "index": 0,
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 8000,
+      "peer": "a"
+    },
+    {
+      "op": "shot",
+      "name": "pk-03-gifs",
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "text:Stickers",
+      "index": 0,
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 8000,
+      "peer": "a"
+    },
+    {
+      "op": "shot",
+      "name": "pk-04-stickers",
+      "peer": "a"
+    },
+    {
+      "op": "key",
+      "value": "escape",
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 800,
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "semantics:Hollow Shop",
+      "index": 0,
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 9000,
+      "peer": "a"
+    },
+    {
+      "op": "shot",
+      "name": "pk-05-shop",
+      "peer": "a"
+    },
+    {
+      "op": "key",
+      "value": "escape",
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 800,
+      "peer": "a"
+    },
+    {
+      "op": "open_server",
+      "name": "pickers",
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 1000,
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "text:probe-a",
+      "index": 0,
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 1500,
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "text:Edit showcase",
+      "index": 0,
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 1500,
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "text:Add block",
+      "index": 0,
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 800,
+      "peer": "a"
+    },
+    {
+      "op": "dump",
+      "name": "pk-06-addblock",
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "tap",
+      "target": "text:Favourite game",
+      "index": 0,
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 1500,
+      "peer": "a"
+    },
+    {
+      "op": "shot",
+      "name": "pk-06-search-open",
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "dump",
+      "name": "pk-06-search-open",
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "enter_text",
+      "target": "hint:Find a game",
+      "value": "zelda",
+      "soft": true,
+      "peer": "a"
+    },
+    {
+      "op": "wait",
+      "ms": 8000,
+      "peer": "a"
+    },
+    {
+      "op": "shot",
+      "name": "pk-07-igdb",
+      "soft": true,
+      "peer": "a"
+    }
+  ]
+}

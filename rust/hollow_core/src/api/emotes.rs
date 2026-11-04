@@ -17,7 +17,7 @@ use crate::node;
 /// Base URL of the Hollow website's cached FFZ endpoint.
 const FFZ_ENDPOINT: &str = "https://hollow.anonlisten.com/ffz/search.php";
 /// FFZ emote images must come from here and nowhere else.
-const FFZ_IMAGE_BASE: &str = "https://hollow.anonlisten.com/ffz/emotes/";
+pub(crate) const FFZ_IMAGE_BASE: &str = "https://hollow.anonlisten.com/ffz/emotes/";
 /// Endpoint response-schema version (keep in sync with SEARCH_VER in ffz/search.php).
 const FFZ_SCHEMA_VER: &str = "2";
 
@@ -302,7 +302,7 @@ fn parse_ffz_rows(items: &[serde_json::Value]) -> Vec<FfzEmote> {
                 image_url: v
                     .get("url")
                     .and_then(|u| u.as_str())
-                    .filter(|u| u.starts_with(FFZ_IMAGE_BASE))?
+                    .filter(|u| super::catalog::url_under(u, FFZ_IMAGE_BASE))?
                     .to_string(),
                 usage_count: v.get("usage").and_then(|u| u.as_i64()).unwrap_or(0),
             })
@@ -313,7 +313,7 @@ fn parse_ffz_rows(items: &[serde_json::Value]) -> Vec<FfzEmote> {
 fn ffz_query(params: Vec<(&'static str, String)>) -> Result<Vec<FfzEmote>, String> {
     let rt = get_http_runtime();
     rt.block_on(async move {
-        let client = reqwest::Client::new();
+        let client = super::catalog::catalog_client()?;
         let resp = client
             .post(FFZ_ENDPOINT)
             .form(&params)
@@ -361,12 +361,12 @@ pub fn ffz_curated() -> Result<Vec<FfzEmote>, String> {
 /// boundary — this can never be abused as a generic fetcher.
 #[frb]
 pub fn ffz_import_emote(image_url: String) -> Result<ProcessedEmote, String> {
-    if !image_url.starts_with(FFZ_IMAGE_BASE) {
+    if !super::catalog::url_under(&image_url, FFZ_IMAGE_BASE) {
         return Err("Emote URL is not on the Hollow CDN".into());
     }
     let rt = get_http_runtime();
     let raw = rt.block_on(async move {
-        let client = reqwest::Client::new();
+        let client = super::catalog::catalog_client()?;
         let resp = client
             .get(&image_url)
             .timeout(std::time::Duration::from_secs(20))

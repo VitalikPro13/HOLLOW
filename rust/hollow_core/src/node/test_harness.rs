@@ -8762,6 +8762,7 @@ async fn authz_a_vc_signal_from_outside_the_call_is_refused() {
             ("ice", serde_json::json!({ "candidate": "candidate:1 1 udp 1 10.0.0.1 4000 typ host", "sdpMid": "0", "sdpMLineIndex": 0 })),
             ("reneg_offer", serde_json::json!({ "sdp": "v=0", "ice_restart": false })),
             ("reneg_answer", serde_json::json!({ "sdp": "v=0" })),
+            ("fwd_want", serde_json::json!({ "origins": [] })),
         ] {
             j.cmd_tx
                 .send(NodeCommand::VoiceChannelSendSignal {
@@ -8825,7 +8826,7 @@ async fn authz_a_vc_signal_from_outside_the_call_is_refused() {
     inside.sort();
     assert_eq!(
         inside,
-        ["audio_state", "camera_state", "ice", "recording_start", "reneg_answer", "reneg_offer", "screen_state", "sdp_answer", "sdp_offer"],
+        ["audio_state", "camera_state", "fwd_want", "ice", "recording_start", "reneg_answer", "reneg_offer", "screen_state", "sdp_answer", "sdp_offer"],
         "every signal from a participant reaches the app",
     );
 }
@@ -27483,7 +27484,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 3.0 s) (17.0 s, total 1064.7 s, slack 1.3 s).
     // 2026-11-01: w2-d's fix round waits for the end of M's join hold before the first
     // absence (12.0 s -> 2.0 s; total 1054.7 s, slack 1.3 s).
-    const BUDGET_MS: u64 = 1_056_000;
+    // 2026-11-04: w2-e's cut and session-blip tests added absences no event can show (no
+    // re-ask, no drop, past the return window and its retry tick) and two short settles
+    // (20.1 s, total 1074.8 s on top of w2-d and w2-c, slack 1.2 s).
+    const BUDGET_MS: u64 = 1_076_000;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -60057,4 +60061,483 @@ async fn w2c_a_cleared_member_never_shows_a_guest_the_channels_start() {
     })
     .await;
     assert_eq!(page, Some((vec!["after the clear".to_string()], true)), "a cleared member showed the guest the channel's start");
+}
+
+// w2-e
+
+impl MockRelay {
+    /// Deliver the first `n` stream frames held from `from` to `target`, lose the
+    /// rest, and stop holding: a stream cut off part way.
+    pub(crate) fn release_streams_part(&self, from: &str, target: &str, n: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        let held = inner.held_streams.remove(&(from.to_string(), target.to_string())).unwrap_or_default();
+        for m in held.into_iter().take(n) {
+            inner.write(target, WsEvent::BinaryDirect { room: m.room, from: m.from, data: m.data });
+        }
+    }
+}
+
+/// A stream cut off part way is asked for again and the holder answers under a new
+/// key: the asker starts that file over, ONE more stream delivers it whole, and the
+/// bytes it ends with hash to the file's id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_stream_asked_again_after_a_cut_delivers_the_file_whole() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 211;
+    const B_MASTER: u8 = 212;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // B's auto-download advert is out, so A sends B the card alone.
+    assert!(wait_until(10, async || !b.carried_of_type("auto_dl_pref").await.is_empty()).await, "B never advertised its auto-download choice");
+    drain_events(&mut a);
+    drain_events(&mut b);
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+
+    let contents: Vec<u8> = (0..(8 * 1024 * 1024) as u32).map(|i| (i % 249) as u8).collect();
+    let src = global_tmp.path().join("cut_stream.bin");
+    std::fs::write(&src, &contents).expect("write src file");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "cut-stream-file".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let mut got_fid = None;
+    let got = wait_event(&mut b, std::time::Duration::from_secs(30), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("cut_stream")
+        {
+            got_fid = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the card");
+    let fid = got_fid.expect("file id from header");
+    let stream_id = super::file_handler::file_stream_id(&fid, &a.device_id, &b.device_id);
+    assert!(wait_until(20, async || super::ws_stream_transfer::relay_streams_running(&a.device_id) == 0).await, "A's push never ended");
+
+    // The first answer's stream reaches B only part way.
+    relay.hold_streams(&a.device_id, &b.device_id);
+    b.cmd_tx
+        .send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: a_master.clone(), chunks: Vec::new() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || relay.held_stream_count(&a.device_id, &b.device_id) > 4
+            && super::ws_stream_transfer::relay_streams_running(&a.device_id) == 0).await,
+        "A streams the file B asked for",
+    );
+    relay.release_streams_part(&a.device_id, &b.device_id, 4);
+    let partial = || super::ws_stream_transfer::stream_progress()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&stream_id).map(|p| p.bytes_received.load(std::sync::atomic::Ordering::Relaxed)))
+        .unwrap_or(0);
+    assert!(wait_until(10, async || partial() > 0).await, "precondition: B holds part of the stream");
+    assert!(partial() < contents.len() as u64, "precondition: the cut left the file short");
+
+    let opened_before = relay.stream_opens(&a.device_id, &b.device_id).len();
+    b.cmd_tx
+        .send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: a_master.clone(), chunks: Vec::new() })
+        .await
+        .unwrap();
+    let done = wait_event(&mut b, std::time::Duration::from_secs(60), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+    let opened: Vec<String> = relay.stream_opens(&a.device_id, &b.device_id).split_off(opened_before);
+    assert!(done, "the ask after the cut never completed the file");
+    assert_eq!(opened, vec![stream_id.clone()], "the ask after the cut took {} streams", opened.len());
+    wait_until(10, async || b.file_meta(&fid).is_some_and(|m| m.disk_path.is_some())).await;
+    let disk = b.file_meta(&fid).and_then(|m| m.disk_path).expect("B's completed file has a disk path");
+    assert!(super::at_rest::read_all(std::path::Path::new(&disk)).unwrap() == contents, "B holds the original bytes");
+    drop(a);
+    drop(b);
+}
+
+/// How a sender's push to B is cut off part way.
+#[derive(Clone, Copy, PartialEq)]
+enum PushCut {
+    /// Its process dies unannounced and comes back on a fresh session.
+    Killed,
+    /// The same, before any of the file's bytes reached B.
+    KilledBeforeBytes,
+    /// Its socket leaves cleanly and the process comes back.
+    LeftAndBack,
+    /// It dies unannounced, B's next room snapshots show it gone, and it comes back.
+    PurgedAndBack,
+    /// It stays online and its stream simply stops.
+    Stalled,
+}
+
+/// A pushed file whose stream is cut part way completes once its sender can serve
+/// again: B drops the partial bytes, asks for the file again, and ends with bytes
+/// that hash to the file's id.
+async fn a_cut_push_completes(cut: PushCut) {
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 213;
+    const B_MASTER: u8 = 214;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    assert!(wait_until(10, async || !b.carried_of_type("auto_dl_pref").await.is_empty()).await, "B never advertised its auto-download choice");
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let contents: Vec<u8> = (0..(8 * 1024 * 1024) as u32).map(|i| (i % 251) as u8).collect();
+    let src = global_tmp.path().join("cut_push.bin");
+    std::fs::write(&src, &contents).expect("write src file");
+    relay.hold_streams(&a.device_id, &b.device_id);
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "cut-push-file".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let mut got_fid = None;
+    let got = wait_event(&mut b, std::time::Duration::from_secs(30), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("cut_push")
+        {
+            got_fid = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the card");
+    let fid = got_fid.expect("file id from header");
+    let stream_id = super::file_handler::file_stream_id(&fid, &a.device_id, &b.device_id);
+    assert!(
+        wait_until(20, async || relay.held_stream_count(&a.device_id, &b.device_id) > 4
+            && super::ws_stream_transfer::relay_streams_running(&a.device_id) == 0).await,
+        "A pushes the file to B",
+    );
+    let partial = || super::ws_stream_transfer::stream_progress()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&stream_id).map(|p| p.bytes_received.load(std::sync::atomic::Ordering::Relaxed)))
+        .unwrap_or(0);
+    if cut == PushCut::KilledBeforeBytes {
+        relay.release_streams_part(&a.device_id, &b.device_id, 0);
+    } else {
+        relay.release_streams_part(&a.device_id, &b.device_id, 4);
+        assert!(wait_until(10, async || partial() > 0).await, "precondition: B holds part of the push");
+        assert!(partial() < contents.len() as u64, "precondition: the cut left the file short");
+    }
+
+    match cut {
+        PushCut::Killed | PushCut::KilledBeforeBytes => {
+            relay.drop_socket_silently(&a.device_id);
+            a = restart_node(&relay, a, A_MASTER, A_MASTER).await;
+        }
+        PushCut::LeftAndBack => {
+            a = restart_node(&relay, a, A_MASTER, A_MASTER).await;
+        }
+        PushCut::PurgedAndBack => {
+            relay.drop_socket_silently(&a.device_id);
+            relay.inject_room_members_everywhere(&b.device_id);
+            // The purge has no event to wait on (counted in BUDGET_MS).
+            sleep_ms(2_500).await;
+            assert!(partial() > 0, "B dropped the stream on presence alone");
+            a = restart_node(&relay, a, A_MASTER, A_MASTER).await;
+        }
+        PushCut::Stalled => {
+            super::ws_stream_transfer::DEAD_FILE_STREAM_IDLE_MS.store(2_000, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let done = wait_event(&mut b, std::time::Duration::from_secs(60), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    super::ws_stream_transfer::DEAD_FILE_STREAM_IDLE_MS.store(150_000, std::sync::atomic::Ordering::Relaxed);
+    assert!(done, "the cut push never completed after its sender could serve again");
+    wait_until(10, async || b.file_meta(&fid).is_some_and(|m| m.disk_path.is_some())).await;
+    let disk = b.file_meta(&fid).and_then(|m| m.disk_path).expect("B's completed file has a disk path");
+    let bytes = super::at_rest::read_all(std::path::Path::new(&disk)).unwrap();
+    assert!(bytes == contents, "B holds the original bytes");
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_push_cut_by_a_killed_sender_completes_when_it_returns() {
+    let _g = test_guard();
+    a_cut_push_completes(PushCut::Killed).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_push_cut_by_a_sender_that_left_completes_when_it_returns() {
+    let _g = test_guard();
+    a_cut_push_completes(PushCut::LeftAndBack).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_push_that_stalls_is_asked_for_again() {
+    let _g = test_guard();
+    a_cut_push_completes(PushCut::Stalled).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_push_whose_sender_died_before_its_bytes_completes_when_it_returns() {
+    let _g = test_guard();
+    a_cut_push_completes(PushCut::KilledBeforeBytes).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_push_cut_by_a_sender_the_snapshots_purge_completes_when_it_returns() {
+    let _g = test_guard();
+    a_cut_push_completes(PushCut::PurgedAndBack).await;
+}
+
+impl MockRelay {
+    /// Tell `target` that `peer` left every room they share and then came back, as the
+    /// relay does when `peer`'s session drops into grace or hides and then resumes.
+    pub(crate) fn blip_presence(&self, target: &str, peer: &str) {
+        let inner = self.inner.lock().unwrap();
+        let Some(conn) = inner.conns.get(target) else { return };
+        let rooms: Vec<String> = inner
+            .rooms
+            .iter()
+            .filter(|(_, peers)| peers.contains(target) && peers.contains(peer))
+            .map(|(room, _)| room.clone())
+            .collect();
+        for room in &rooms {
+            conn.deliver(target, WsEvent::PeerLeft { room: room.clone(), peer_id: peer.to_string() });
+        }
+        for room in &rooms {
+            conn.deliver(target, WsEvent::PeerJoined { room: room.clone(), peer_id: peer.to_string() });
+        }
+    }
+}
+
+/// Two friends, B with A's auto-download advert in hand, for the session-blip tests.
+async fn blip_pair(relay: &MockRelay, a_seed: u8, b_seed: u8) -> (TestNode, TestNode) {
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(a_seed)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(b_seed)).peer_id();
+    let mut a = spawn_node_with_friends(relay, a_seed, a_seed, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(relay, b_seed, b_seed, &[&a_master]).await;
+    expect_dm_pair_ready(relay, &a, &b, 15).await;
+    assert!(wait_until(10, async || !b.carried_of_type("auto_dl_pref").await.is_empty()).await, "B never advertised its auto-download choice");
+    drain_events(&mut a);
+    drain_events(&mut b);
+    (a, b)
+}
+
+/// A sends B `name` (8 MiB) and returns its file id once B holds the card.
+async fn blip_send(a: &TestNode, b: &mut TestNode, dir: &std::path::Path, name: &str) -> (String, Vec<u8>) {
+    let contents: Vec<u8> = (0..(8 * 1024 * 1024) as u32).map(|i| (i % 247) as u8).collect();
+    let src = dir.join(format!("{name}.bin"));
+    std::fs::write(&src, &contents).expect("write src file");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: format!("{name}-msg"),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let mut got_fid = None;
+    let got = wait_event(b, std::time::Duration::from_secs(30), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with(name)
+        {
+            got_fid = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the card");
+    (got_fid.expect("file id from header"), contents)
+}
+
+fn stream_bytes_received(stream_id: &str) -> u64 {
+    super::ws_stream_transfer::stream_progress()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(stream_id).map(|p| p.bytes_received.load(std::sync::atomic::Ordering::Relaxed)))
+        .unwrap_or(0)
+}
+
+/// The relay announces a sender gone when its session merely drops into grace or
+/// hides, and back when it resumes. The stream it was sending carries on, so B keeps
+/// the partial bytes, the frames after the return complete the file, and nobody asks
+/// for it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_relay_stream_survives_its_senders_session_blip() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = blip_pair(&relay, 215, 216).await;
+    relay.hold_streams(&a.device_id, &b.device_id);
+    let (fid, contents) = blip_send(&a, &mut b, global_tmp.path(), "blip_push").await;
+    let stream_id = super::file_handler::file_stream_id(&fid, &a.device_id, &b.device_id);
+    assert!(
+        wait_until(20, async || relay.held_stream_count(&a.device_id, &b.device_id) > 4
+            && super::ws_stream_transfer::relay_streams_running(&a.device_id) == 0).await,
+        "A pushes the file to B",
+    );
+    relay.release_streams_first(&a.device_id, &b.device_id, 4);
+    assert!(wait_until(10, async || stream_bytes_received(&stream_id) > 0).await, "precondition: B holds part of the push");
+
+    relay.blip_presence(&b.device_id, &a.device_id);
+    // A drop has no event to wait on (counted in BUDGET_MS).
+    sleep_ms(500).await;
+    assert!(stream_bytes_received(&stream_id) > 0, "B dropped the stream because the relay said its sender left");
+    // Frames after the return, then a quiet spell past the return window: the
+    // stream showed it lives, so it stays (an absence, counted in BUDGET_MS).
+    relay.release_streams_first(&a.device_id, &b.device_id, 4);
+    let after_return = stream_bytes_received(&stream_id);
+    sleep_ms(3_500).await;
+    assert!(
+        stream_bytes_received(&stream_id) >= after_return && stream_bytes_received(&stream_id) > 0,
+        "B dropped a stream whose frames came after its sender's return",
+    );
+    relay.release_streams(&a.device_id, &b.device_id, true);
+    let done = wait_event(&mut b, std::time::Duration::from_secs(30), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(done, "the stream never completed after its sender's session came back");
+    // No re-ask is an absence (counted in BUDGET_MS).
+    sleep_ms(4_000).await;
+    assert_eq!(relay.stream_opens(&a.device_id, &b.device_id), vec![stream_id], "B asked again for a file whose stream carried on");
+    wait_until(10, async || b.file_meta(&fid).is_some_and(|m| m.disk_path.is_some())).await;
+    let disk = b.file_meta(&fid).and_then(|m| m.disk_path).expect("B's completed file has a disk path");
+    assert!(super::at_rest::read_all(std::path::Path::new(&disk)).unwrap() == contents, "B holds the original bytes");
+}
+
+/// A pushed file whose bytes ride a live data channel is never asked for again over
+/// the relay because the sender's relay session blipped: the answer would come under
+/// a new key and fail the data channel copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_file_on_a_live_data_channel_is_not_asked_again_after_a_session_blip() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = blip_pair(&relay, 217, 218).await;
+    a.cmd_tx.send(NodeCommand::WebRtcPeerConnected { peer_id: b.device_id.clone() }).await.unwrap();
+    b.cmd_tx.send(NodeCommand::WebRtcPeerConnected { peer_id: a.device_id.clone() }).await.unwrap();
+    // The data channel marks and the relay-free push have no signal (counted in BUDGET_MS).
+    sleep_ms(300).await;
+    let (_fid, _) = blip_send(&a, &mut b, global_tmp.path(), "blip_dc").await;
+    sleep_ms(1_000).await;
+    assert!(relay.stream_opens(&a.device_id, &b.device_id).is_empty(), "precondition: the push rode the data channel");
+
+    relay.blip_presence(&b.device_id, &a.device_id);
+    // No re-ask past the return window is an absence (counted in BUDGET_MS).
+    sleep_ms(4_000).await;
+    assert!(
+        relay.stream_opens(&a.device_id, &b.device_id).is_empty(),
+        "B asked again for a file whose bytes ride a live data channel",
+    );
+}
+
+/// "Stop waiting" holds: a stream of a file B stopped waiting for is not asked for
+/// again when it dies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_cancelled_ask_is_not_asked_again_when_its_stream_dies() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(219)).peer_id();
+    let (a, mut b) = blip_pair(&relay, 219, 220).await;
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+    let (fid, _) = blip_send(&a, &mut b, global_tmp.path(), "blip_stop").await;
+    assert!(wait_until(20, async || super::ws_stream_transfer::relay_streams_running(&a.device_id) == 0).await, "A's push never ended");
+    let stream_id = super::file_handler::file_stream_id(&fid, &a.device_id, &b.device_id);
+    let opened_before = relay.stream_opens(&a.device_id, &b.device_id).len();
+
+    relay.hold_streams(&a.device_id, &b.device_id);
+    b.cmd_tx
+        .send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: a_master.clone(), chunks: Vec::new() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || relay.held_stream_count(&a.device_id, &b.device_id) > 4
+            && super::ws_stream_transfer::relay_streams_running(&a.device_id) == 0).await,
+        "A streams the file B asked for",
+    );
+    relay.release_streams_part(&a.device_id, &b.device_id, 4);
+    assert!(wait_until(10, async || stream_bytes_received(&stream_id) > 0).await, "precondition: B holds part of the stream");
+    b.cmd_tx.send(NodeCommand::CancelFileRequest { file_id: fid.clone() }).await.unwrap();
+    // The cancel has no event, and no re-ask is an absence (counted in BUDGET_MS).
+    sleep_ms(300).await;
+
+    relay.blip_presence(&b.device_id, &a.device_id);
+    sleep_ms(4_000).await;
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+    assert_eq!(
+        relay.stream_opens(&a.device_id, &b.device_id).len(),
+        opened_before + 1,
+        "B asked again for a file it stopped waiting for",
+    );
 }

@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/rust/api/shop.dart' as shop_api;
 
 /// The one place that touches the generated shop FFI, so the catalog, the art
@@ -52,7 +53,9 @@ final shopArtProvider =
     FutureProvider.family<Uint8List, String>((ref, hash) async {
   final cached = _artCache[hash];
   if (cached != null) return cached;
-  final bytes = await shop_api.fetchShopArt(hash: hash);
+  final bytes = await whileImageChecked(
+      () => shop_api.fetchShopArt(hash: hash),
+      attempts: 10);
   _artCache[hash] = bytes;
   // Insertion-ordered map: the first key is the oldest fetch.
   while (_artCache.length > _kArtCacheMax) {

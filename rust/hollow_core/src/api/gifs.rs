@@ -306,11 +306,13 @@ pub fn gif_blocked_media_hosts() -> Vec<String> {
 /// mode would defeat the point of proxy mode, and a stale favourite is no licence.
 #[frb]
 pub fn gif_media_urls_permitted(urls: Vec<String>) -> Vec<bool> {
-    let base = gif_proxy_base();
-    let direct = gif_api_key().is_some();
-    urls.iter()
-        .map(|u| u.starts_with(&base) || (direct && media_url_allowed(u)))
-        .collect()
+    urls.iter().map(|u| media_url_permitted(u)).collect()
+}
+
+/// One URL's verdict for [gif_media_urls_permitted].
+#[frb(ignore)]
+pub(crate) fn media_url_permitted(url: &str) -> bool {
+    super::catalog::url_under(url, &gif_proxy_base()) || (gif_api_key().is_some() && media_url_allowed(url))
 }
 
 /// The default content rating. Dart owns rating POLICY and passes the result per call,
@@ -343,22 +345,16 @@ pub(crate) fn normalized_rating_for(raw: &str) -> String {
 
 // ─── URL guards ─────────────────────────────────────────────────────────────
 
-/// Host of an https URL, lowercased. None for anything else — plaintext http
-/// and non-URLs are refused outright rather than parsed leniently.
+/// Host of an https URL on the default port, lowercased, as reqwest will connect to
+/// it. None for anything else: plaintext http, userinfo and non-URLs are refused
+/// outright rather than parsed leniently.
 fn url_host(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("https://")?;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    // Everything after the LAST '@': a first-match parse would send
-    // "https://static.klipy.com@evil.example/" to evil.example.
-    let host_port = authority.rsplit('@').next()?;
-    let host = if let Some(v6) = host_port.strip_prefix('[') {
-        v6.split(']').next()?.to_string()
-    } else {
-        host_port.split(':').next()?.to_string()
-    };
-    if host.is_empty() {
+    let u = super::catalog::https_url(url)?;
+    if u.port_or_known_default() != Some(443) {
         return None;
     }
+    let host = u.host_str()?;
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
     Some(host.to_ascii_lowercase())
 }
 
@@ -530,12 +526,12 @@ fn parse_gif_page(v: &serde_json::Value, base: &str) -> Result<GifPage, String> 
                         still_url: it
                             .get("still")
                             .and_then(|u| u.as_str())
-                            .filter(|u| u.starts_with(base))?
+                            .filter(|u| super::catalog::url_under(u, base))?
                             .to_string(),
                         sm_url: it
                             .get("sm")
                             .and_then(|u| u.as_str())
-                            .filter(|u| u.starts_with(base))?
+                            .filter(|u| super::catalog::url_under(u, base))?
                             .to_string(),
                         // The endpoint shape is ours (gifs/.htaccess), so a
                         // proxy that omits "full" is derived from rather than
@@ -543,7 +539,7 @@ fn parse_gif_page(v: &serde_json::Value, base: &str) -> Result<GifPage, String> 
                         full_url: it
                             .get("full")
                             .and_then(|u| u.as_str())
-                            .filter(|u| u.starts_with(base))
+                            .filter(|u| super::catalog::url_under(u, base))
                             .map(|u| u.to_string())
                             .unwrap_or_else(|| format!("{base}f/{id}")),
                     })
@@ -567,7 +563,7 @@ fn proxy_query(params: Vec<(&'static str, String)>) -> Result<serde_json::Value,
     let rt = get_http_runtime();
     rt.block_on(async move {
         let base = gif_proxy_base();
-        let client = reqwest::Client::new();
+        let client = super::catalog::catalog_client()?;
         let resp = client
             .post(format!("{base}search.php"))
             .form(&params)
@@ -615,7 +611,7 @@ fn direct_query(
     let url = format!("{KLIPY_API_ROOT}{key}/{}/{path}", kind.upstream_segment());
     let rt = get_http_runtime();
     rt.block_on(async move {
-        let client = reqwest::Client::new();
+        let client = super::catalog::catalog_client()?;
         let resp = client
             .get(url)
             .query(&params)
@@ -988,7 +984,7 @@ fn proxy_pick_bytes(id: &str) -> Result<Vec<u8>, String> {
     let url = format!("{}f/{id}", gif_proxy_base());
     let rt = get_http_runtime();
     rt.block_on(async move {
-        let client = reqwest::Client::new();
+        let client = super::catalog::catalog_client()?;
         let resp = client
             .get(url)
             // full.php walks hd→xs upstream with a 30s curl budget — give it
@@ -1063,7 +1059,7 @@ fn direct_pick_bytes(
 
     let rt = get_http_runtime();
     rt.block_on(async move {
-        let client = reqwest::Client::new();
+        let client = super::catalog::catalog_client()?;
         let mut last_err = String::from("GIF download failed");
         for url in candidates {
             let resp = match client
@@ -1159,11 +1155,12 @@ mod tests {
     fn url_host_parses_and_refuses_tricks() {
         assert_eq!(url_host("https://static.klipy.com/a.gif").as_deref(), Some("static.klipy.com"));
         assert_eq!(url_host("https://STATIC.Klipy.com:443/a").as_deref(), Some("static.klipy.com"));
-        // Userinfo must not win: this URL goes to evil.example.
-        assert_eq!(
-            url_host("https://static.klipy.com@evil.example/a.gif").as_deref(),
-            Some("evil.example")
-        );
+        // Userinfo is refused outright, and a backslash ends the authority as it
+        // does for reqwest: both of these go to evil.example.
+        assert!(url_host("https://static.klipy.com@evil.example/a.gif").is_none());
+        assert_eq!(url_host("https://evil.example\\@static.klipy.com/x.webp").as_deref(), Some("evil.example"));
+        assert!(!media_url_allowed("https://evil.example\\@static.klipy.com/x.webp"));
+        assert!(url_host("https://static.klipy.com:8443/a.gif").is_none());
         assert_eq!(url_host("https://[2001:db8::1]/a").as_deref(), Some("2001:db8::1"));
         // Plaintext and junk are refused rather than leniently parsed.
         assert!(url_host("http://static.klipy.com/a.gif").is_none());

@@ -4202,6 +4202,18 @@ pub(crate) enum MessageEnvelope {
         target: Option<String>,
     },
 
+    /// Targeted, gossip mode: the members the sender hears from no leg of its own,
+    /// for the receiving leg to forward if it hears them straight.
+    #[serde(rename = "vc_fwd_want")]
+    VoiceChannelFwdWant {
+        sid: String,
+        cid: String,
+        #[serde(default)]
+        origins: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
     /// Broadcast: camera state (on/off) in a voice channel.
     #[serde(rename = "vc_camera_state")]
     VoiceChannelCameraState {
@@ -4682,6 +4694,7 @@ impl MessageEnvelope {
             | Self::VoiceChannelRenegOffer { target, .. }
             | Self::VoiceChannelRenegAnswer { target, .. }
             | Self::VoiceChannelLegRestart { target, .. }
+            | Self::VoiceChannelFwdWant { target, .. }
             | Self::VoiceChannelCameraState { target, .. }
             | Self::VoiceChannelRecordingState { target, .. } => target.as_deref(),
             Self::FileHeader { inner } => inner.target.as_deref(),
@@ -4753,6 +4766,7 @@ impl MessageEnvelope {
             | Self::VoiceChannelRenegOffer { sid, cid, .. }
             | Self::VoiceChannelRenegAnswer { sid, cid, .. }
             | Self::VoiceChannelLegRestart { sid, cid, .. }
+            | Self::VoiceChannelFwdWant { sid, cid, .. }
             | Self::VoiceChannelCameraState { sid, cid, .. }
             | Self::VoiceChannelRecordingState { sid, cid, .. } => Server { sid, cid: Some(cid) },
         }
@@ -4805,6 +4819,7 @@ impl MessageEnvelope {
             | Self::VoiceChannelRenegOffer { .. }
             | Self::VoiceChannelRenegAnswer { .. }
             | Self::VoiceChannelLegRestart { .. }
+            | Self::VoiceChannelFwdWant { .. }
             | Self::VoiceChannelCameraState { .. }
             | Self::VoiceChannelRecordingState { .. }
             | Self::FwdStreamRegister { .. }
@@ -4867,6 +4882,9 @@ pub(crate) struct PendingFileStream {
     pub retry_count: u32,
     /// The plaintext size the header declared: its stream may carry this plus the GCM tag.
     pub size: u64,
+    /// The header came as a push the auto-download gate let in, not as the answer to an
+    /// ask of ours: a cut stream of it is asked for again even with no ask left.
+    pub pushed: bool,
 }
 
 /// A completed file stream whose FileHeader has not landed yet, held under its stream id.

@@ -1586,6 +1586,11 @@ fn build_vc_signal_envelope(
         "leg_restart" => Some(MessageEnvelope::VoiceChannelLegRestart {
             sid, cid, target: None,
         }),
+        "fwd_want" => parsed.map(|v| MessageEnvelope::VoiceChannelFwdWant {
+            sid, cid,
+            origins: fwd_want_origins(&v["origins"]),
+            target: None,
+        }),
         "camera_state" => parsed.map(|v| MessageEnvelope::VoiceChannelCameraState {
             sid, cid,
             enabled: v["enabled"].as_bool().unwrap_or(false),
@@ -1746,8 +1751,43 @@ pub(crate) fn handle_webrtc_route_report(
 
 // ── check_voice_mode_transition ──────────────────────────────────────
 
+/// A debug build's gossip override, for fleets too small to reach gossip.
+#[derive(Clone, Copy)]
+struct GossipKnob {
+    at: usize,
+    chain: bool,
+}
+
+/// Debug builds only: `<data dir>/debug_voice_gossip_at` holds the participant count
+/// gossip starts at, optionally followed by `chain` (each device's neighbours are
+/// the ids beside it in sorted order, so the ends hear each other only forwarded).
+#[cfg(debug_assertions)]
+fn debug_gossip_knob() -> Option<GossipKnob> {
+    let text = std::fs::read_to_string(crate::identity::data_dir().ok()?.join("debug_voice_gossip_at")).ok()?;
+    let mut words = text.split_whitespace();
+    let at = words.next()?.parse::<usize>().ok()?.max(2);
+    Some(GossipKnob { at, chain: words.next() == Some("chain") })
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_gossip_knob() -> Option<GossipKnob> {
+    None
+}
+
+/// The ids beside ours in the sorted participant list.
+fn chain_neighbors(participants: &std::collections::HashSet<String>, us: &str) -> Vec<String> {
+    let mut sorted: Vec<&String> = participants.iter().collect();
+    sorted.sort();
+    let Some(at) = sorted.iter().position(|p| p.as_str() == us) else { return Vec::new() };
+    [at.checked_sub(1), Some(at + 1)]
+        .into_iter()
+        .flatten()
+        .filter_map(|i| sorted.get(i).map(|p| p.to_string()))
+        .collect()
+}
+
 /// Check if a voice channel should transition between mesh and gossip mode.
-/// Uses hysteresis: mesh→gossip at 6 participants, gossip→mesh at 4.
+/// Mesh up to 16 participants, gossip from 17 (see `VOICE_GOSSIP_THRESHOLD_UP`).
 pub(crate) async fn check_voice_mode_transition(
     vc_key: &str,
     server_id: &str,
@@ -1765,13 +1805,15 @@ pub(crate) async fn check_voice_mode_transition(
         .map(|p| p.len())
         .unwrap_or(0);
     let currently_gossip = *voice_channel_gossip_mode.get(vc_key).unwrap_or(&false);
+    let knob = debug_gossip_knob();
+    let up = knob.map_or(super::gossip::VOICE_GOSSIP_THRESHOLD_UP, |k| k.at);
+    let down = super::gossip::VOICE_GOSSIP_THRESHOLD_DOWN.min(up);
 
     let should_gossip = if currently_gossip {
         // Hysteresis: stay in gossip until below threshold_down.
-        count >= super::gossip::VOICE_GOSSIP_THRESHOLD_DOWN
+        count >= down
     } else {
-        // Switch to gossip at threshold_up.
-        count >= super::gossip::VOICE_GOSSIP_THRESHOLD_UP
+        count >= up
     };
 
     if should_gossip != currently_gossip {
@@ -1783,7 +1825,9 @@ pub(crate) async fn check_voice_mode_transition(
                 .get(vc_key)
                 .cloned()
                 .unwrap_or_default();
-            let gossip_neighbors = if let Some(overlay) = gossip_overlays.get(server_id) {
+            let gossip_neighbors = if knob.is_some_and(|k| k.chain) {
+                chain_neighbors(&participants, local_device_str)
+            } else if let Some(overlay) = gossip_overlays.get(server_id) {
                 overlay.get_voice_gossip_neighbors(&participants, local_device_str)
             } else {
                 // No gossip overlay — fall back to first 12 participants.
@@ -1836,6 +1880,7 @@ pub(crate) fn is_vc_signal(envelope: &MessageEnvelope) -> bool {
             | MessageEnvelope::VoiceChannelRenegOffer { .. }
             | MessageEnvelope::VoiceChannelRenegAnswer { .. }
             | MessageEnvelope::VoiceChannelLegRestart { .. }
+            | MessageEnvelope::VoiceChannelFwdWant { .. }
             | MessageEnvelope::VoiceChannelCameraState { .. }
             | MessageEnvelope::VoiceChannelRecordingState { .. }
     )
@@ -2170,6 +2215,50 @@ pub(crate) async fn handle_envelope_voice_channel_leg_restart(
     let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
         server_id: sid, channel_id: cid, peer_id: sender_peer_id,
         signal_type: "leg_restart".to_string(), payload: "{}".to_string(),
+    }).await;
+}
+
+/// The most origins one want names: a leg forwards at most what it hears.
+const MAX_FWD_WANT_ORIGINS: usize = 64;
+
+/// A want's origins as the wire gives them: strings of a peer id's length, at most
+/// [`MAX_FWD_WANT_ORIGINS`].
+fn fwd_want_origins(v: &serde_json::Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| o.as_str())
+                .filter(|o| !o.is_empty() && o.len() <= 64 && o.bytes().all(|b| b.is_ascii_alphanumeric()))
+                .take(MAX_FWD_WANT_ORIGINS)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A participant's want reaches the app naming only other participants of that
+/// call: a leg is never asked to forward a stranger, or the asker to itself.
+pub(crate) async fn handle_envelope_voice_channel_fwd_want(
+    voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sender_peer_id: String, sid: String, cid: String, origins: Vec<String>,
+) {
+    let vc_key = format!("{sid}:{cid}");
+    if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC forward want from non-participant {sender_peer_id} in {cid}");
+        return;
+    }
+    let mut origins: Vec<String> = origins
+        .into_iter()
+        .filter(|o| *o != sender_peer_id && is_vc_participant(voice_channel_participants, &vc_key, o))
+        .take(MAX_FWD_WANT_ORIGINS)
+        .collect();
+    origins.sort();
+    origins.dedup();
+    let payload = serde_json::json!({ "origins": origins }).to_string();
+    let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+        server_id: sid, channel_id: cid, peer_id: sender_peer_id,
+        signal_type: "fwd_want".to_string(), payload,
     }).await;
 }
 
@@ -2738,6 +2827,8 @@ mod tests {
             let (s, i, c) = at();
             handle_envelope_voice_channel_leg_restart(p, &tx, s, i, c).await;
             let (s, i, c) = at();
+            handle_envelope_voice_channel_fwd_want(p, &tx, s, i, c, vec![]).await;
+            let (s, i, c) = at();
             handle_envelope_voice_channel_audio_state(p, &tx, s, i, c, true, false).await;
             let (s, i, c) = at();
             handle_envelope_voice_channel_screen_state(p, &tx, s, i, c, true, None).await;
@@ -2753,6 +2844,60 @@ mod tests {
         }
         let outside: Vec<&String> = heard.iter().filter(|(p, _)| p != "inside-dev").map(|(_, t)| t).collect();
         assert!(outside.is_empty(), "signals from outside the call reached the app: {outside:?}");
-        assert_eq!(heard.len(), 14, "every signal from the participant arrives: {heard:?}");
+        assert_eq!(heard.len(), 15, "every signal from the participant arrives: {heard:?}");
+    }
+
+    /// A forward want names only other participants of that call: a leg is never
+    /// asked to forward a stranger's voice, or the asker's own back to it.
+    #[tokio::test]
+    async fn a_forward_want_names_only_other_participants() {
+        let participants = HashMap::from([(
+            "srv:vc".to_string(),
+            std::collections::HashSet::from(["asker".to_string(), "carol".to_string(), "dave".to_string()]),
+        )]);
+        let wire = serde_json::json!(["dave", "carol", "asker", "stranger", "a b", 7, "carol"]);
+        let origins = fwd_want_origins(&wire);
+        assert!(!origins.iter().any(|o| o == "a b"), "an origin that is no peer id survived the wire: {origins:?}");
+        let (tx, mut rx) = mpsc::channel::<NetworkEvent>(4);
+        handle_envelope_voice_channel_fwd_want(&participants, &tx, "asker".into(), "srv".into(), "vc".into(), origins).await;
+        let Ok(NetworkEvent::VoiceChannelSignal { payload, signal_type, .. }) = rx.try_recv() else {
+            panic!("the want never reached the app");
+        };
+        assert_eq!(signal_type, "fwd_want");
+        assert_eq!(payload, serde_json::json!({ "origins": ["carol", "dave"] }).to_string());
+        let many = serde_json::Value::Array((0..200).map(|i| serde_json::json!(format!("p{i}"))).collect());
+        assert_eq!(fwd_want_origins(&many).len(), MAX_FWD_WANT_ORIGINS);
+    }
+
+    /// 0.14: gossip mode forwards nothing, so a member hears only its overlay
+    /// neighbours there. A channel stays a full mesh while everyone fits the
+    /// app's voice leg cap (us plus 15 legs), a late joiner included.
+    #[tokio::test]
+    async fn a_voice_channel_stays_a_full_mesh_up_to_sixteen_people() {
+        let key = "srv:vc";
+        let ids: Vec<String> = (0..17).map(|i| format!("p{i:02}")).collect();
+        let overlays: HashMap<String, super::super::gossip::GossipOverlay> = HashMap::new();
+        let (tx, mut rx) = mpsc::channel::<NetworkEvent>(8);
+        let mut mode = HashMap::new();
+        for n in 1..=16 {
+            let p = HashMap::from([(key.to_string(), ids[..n].iter().cloned().collect())]);
+            check_voice_mode_transition(key, "srv", "vc", &p, &mut mode, &overlays, "p00", &tx).await;
+            assert!(rx.try_recv().is_err(), "{n} people left the full mesh");
+        }
+        let mut late = HashMap::new();
+        let p = HashMap::from([(key.to_string(), ids[..16].iter().cloned().collect())]);
+        check_voice_mode_transition(key, "srv", "vc", &p, &mut late, &overlays, "p15", &tx).await;
+        assert!(rx.try_recv().is_err(), "the 16th joiner's own node turned gossip");
+        let all = HashMap::from([(key.to_string(), ids.iter().cloned().collect())]);
+        check_voice_mode_transition(key, "srv", "vc", &all, &mut mode, &overlays, "p00", &tx).await;
+        let Ok(NetworkEvent::VoiceChannelModeChanged { mode: m, .. }) = rx.try_recv() else {
+            panic!("a 17th person never turned gossip");
+        };
+        assert_eq!(m, "gossip");
+        check_voice_mode_transition(key, "srv", "vc", &p, &mut mode, &overlays, "p00", &tx).await;
+        let Ok(NetworkEvent::VoiceChannelModeChanged { mode: m, .. }) = rx.try_recv() else {
+            panic!("back at 16 people the channel stayed in gossip");
+        };
+        assert_eq!(m, "mesh");
     }
 }

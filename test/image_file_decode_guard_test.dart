@@ -25,9 +25,10 @@ final _rawDecode = RegExp(
 );
 
 /// Gated = the bytes passed `image_gate` (`shown`, `rail_blob_shown`,
-/// `read_at_rest_image`, `judge_for_ffi`, `guest_event_checked`) or Rust's own
-/// re-encode (`peer_thumb_for_display`). Own = bytes this device picked, captured
-/// or encoded. Catalog = a server our own search asked, never a peer.
+/// `read_at_rest_image`, `judge_for_ffi`, `guest_event_checked`, the catalog and
+/// shop fetches) or Rust's own re-encode (`peer_thumb_for_display`). Own = bytes
+/// this device picked, captured or encoded. A catalog our own search asked is
+/// gated too: its art comes from strangers upstream.
 const _allowed = <String, (int, String)>{
   'lib/src/core/providers/event_provider.dart': (3,
       'gated: guest server icon, banner and sender avatars (guest_event_checked)'),
@@ -40,25 +41,27 @@ const _allowed = <String, (int, String)>{
   'lib/src/ui/chat/dm_profile_panel.dart':
       (1, 'gated: banner via get_banner, its animation via rail_blob_shown'),
   'lib/src/ui/chat/emoji_picker.dart':
-      (2, 'catalog: FFZ search thumbs; own: the picked file before processing'),
+      (1, 'own: the picked file before processing'),
   'lib/src/ui/chat/emote_image.dart':
       (2, 'gated: rail blobs via get_emote_bytes (rail_blob_shown)'),
   'lib/src/ui/chat/file_attachment_widget.dart':
       (1, 'gated: the blur thumb is re-encoded by peer_thumb_for_display'),
   'lib/src/ui/chat/gif_picker.dart':
-      (2, 'catalog: GIF search previews (Klipy via proxy, host-checked)'),
+      (2, 'gated: GIF previews via fetch_catalog_preview (image_shown)'),
   'lib/src/ui/chat/link_preview_card.dart':
       (2, 'gated: the card thumb is re-encoded by peer_thumb_for_display'),
   'lib/src/ui/chat/staged_link_preview_card.dart':
       (1, 'own: our fetcher built the card with our encoder'),
   'lib/src/ui/chat/sticker_picker.dart':
-      (2, 'catalog: sticker search previews (Klipy via proxy, host-checked)'),
+      (2, 'gated: sticker previews via fetch_catalog_preview (image_shown)'),
   'lib/src/ui/chat/video_message_bubble.dart':
       (2, 'gated: the poster is re-encoded by peer_thumb_for_display'),
   'lib/src/ui/components/animated_gif_image.dart':
       (2, 'the widget itself; every caller is counted here'),
   'lib/src/ui/components/attachment_image.dart':
       (2, 'gated: AtRestImageProvider reads via read_at_rest_image'),
+  'lib/src/ui/components/catalog_preview_image.dart':
+      (1, 'gated: FFZ and IGDB previews via fetch_catalog_preview (image_shown)'),
   'lib/src/ui/components/avatar_frame.dart':
       (2, 'gated: frame art via get_emote_bytes; seeded from the callers listed'),
   'lib/src/ui/components/hollow_avatar.dart':
@@ -87,8 +90,6 @@ const _allowed = <String, (int, String)>{
       (3, 'own: the editor draft (own assets and own processed picks)'),
   'lib/src/ui/dialogs/showcase_editor_phone.dart':
       (2, 'own: the editor draft (own assets and own processed picks)'),
-  'lib/src/ui/dialogs/showcase_editor_search.dart':
-      (1, 'catalog: IGDB covers in the editor search'),
   'lib/src/ui/guest/guest_server_sidebar.dart':
       (2, 'gated: guest_event_checked, else the member caches above'),
   'lib/src/ui/media/media_strip.dart':
@@ -120,7 +121,7 @@ const _allowed = <String, (int, String)>{
   'lib/src/ui/shop/owned_art_panel.dart':
       (3, 'gated: owned art and seeded frames via get_emote_bytes'),
   'lib/src/ui/shop/shop_art.dart':
-      (5, 'catalog: shop art and its seeded frame (check_art_bytes); gated: our banner'),
+      (5, 'gated: shop art and its seeded frame via fetch_shop_art (image_shown) and our banner'),
 };
 
 /// Raw-decode sites in [source], comment lines left out; a call may span lines.
@@ -147,6 +148,27 @@ void main() {
       }
     }
     expect(offenders, isEmpty);
+  });
+
+  test('catalog previews reach Skia only through Rust\'s checked fetch', () {
+    final offenders = <String>[];
+    for (final f in Directory('lib').listSync(recursive: true).whereType<File>()) {
+      final path = f.path.replaceAll(r'\', '/');
+      if (!path.endsWith('.dart') || path.startsWith('lib/src/rust/')) continue;
+      final lines = f.readAsLinesSync();
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i].trimLeft().startsWith('//')) continue;
+        if (RegExp(r'\bImage\s*\.\s*network\b|\bNetworkImage\b').hasMatch(lines[i])) {
+          offenders.add('$path:${i + 1}');
+        }
+      }
+    }
+    expect(offenders, isEmpty,
+        reason: 'a network image decodes whatever the host sends, unchecked');
+    final cache = File('lib/src/core/services/gif_thumb_cache.dart').readAsStringSync();
+    expect(cache, isNot(contains('HttpClient')),
+        reason: 'picker previews must come from fetch_catalog_preview');
+    expect(cache, contains('fetchCatalogPreview('));
   });
 
   test('the scan sees every raw decode form and skips comments', () {
