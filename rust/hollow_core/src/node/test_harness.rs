@@ -26102,7 +26102,7 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
         "and the owner admits the joiner's MASTER, got {:?}",
         o.raw_crdt_member_keys(&server_id),
     );
-    assert!(b.pending_joins().is_empty(), "a completed join leaves no row");
+    assert!(wait_until(10, async || b.pending_joins().is_empty()).await, "a completed join leaves no row");
 
     drop(o);
     drop(b);
@@ -35020,7 +35020,9 @@ async fn a_meeting_card_claiming_another_master_is_not_stored() {
 }
 
 // A joiner shows its card to the members of the server it asks to join, so the one
-// deciding sees who is asking, and nothing else of its profile.
+// deciding sees who is asking. An ask still waiting for the joiner's consent keeps nothing
+// (HOL-SEC-192: anyone holding the invite could send those);
+// `join_lock_the_card_rides_inside_the_request` covers the card being all that lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn a_joiner_shows_its_card_to_the_members_it_asks() {
@@ -35033,7 +35035,6 @@ async fn a_joiner_shows_its_card_to_the_members_it_asks() {
     j.cmd_tx.send(profile_named("Joiner Name", "joiner private")).await.unwrap();
     assert!(wait_until(10, async || j.store().load_profile(&j.master_id).ok().flatten().is_some()).await);
 
-    // An NSFW server refuses the first ask, so the card is all the owner ever gets.
     let server_id = create_server_and_wait(&mut o, "Adult Server").await;
     o.cmd_tx
         .send(NodeCommand::UpdateServerSetting {
@@ -35056,11 +35057,15 @@ async fn a_joiner_shows_its_card_to_the_members_it_asks() {
         .await,
         "the first ask is refused"
     );
+    assert!(o.store().load_profile(&j.master_id).unwrap().is_none(), "an ask waiting for consent keeps no card");
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: true, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
     assert!(
         wait_until(10, async || o.store().load_profile(&j.master_id).ok().flatten().is_some_and(|p| p.display_name == "Joiner Name")).await,
         "the owner deciding must see who is asking"
     );
-    assert_eq!(o.store().load_profile(&j.master_id).unwrap().unwrap().status, "", "the card only, no status");
     drop(o);
 }
 
@@ -60957,4 +60962,396 @@ async fn t14l_a_dead_link_gives_way_only_to_its_own_identity() {
     let by_sibling = super::join_lock::mint_successor(&server_id, &tip, &change, &m_master, &mb_kp).unwrap().link;
     assert!(relay.put_lock(&server_id, &o.master_id, std::slice::from_ref(&by_sibling)), "the removed device's sibling does");
     drop((mc, e));
+}
+
+// t14-flood
+/// A minted identity key: identities are free.
+fn t14f_minted(i: u32, salt: u8) -> NativeKeypair {
+    let mut s = [salt; 32];
+    s[..4].copy_from_slice(&i.to_le_bytes());
+    NativeKeypair::from_secret_bytes(&s)
+}
+
+/// Minted identity `i`'s master and device, the device in a legacy roster of the master.
+fn t14f_identity(i: u32) -> (NativeKeypair, NativeKeypair, crate::identity::roster::Roster) {
+    let (m, d) = (t14f_minted(i, 0x5a), t14f_minted(i, 0x5b));
+    let roster = crate::identity::roster::Roster::legacy_for_test(&m, &[&d]);
+    (m, d, roster)
+}
+
+/// `msg` from `device` into `node`'s inbox, sealed by that device as the relay hands it on.
+fn t14f_into_inbox(relay: &MockRelay, node: &TestNode, device: &NativeKeypair, msg: &super::types::HavenMessage) {
+    let inbox = format!("inbox:{}", node.master_id);
+    let sealed = super::frame_auth::seal(device, &inbox, &node.device_id, &serde_json::to_vec(msg).unwrap());
+    relay.inject_raw_direct(&inbox, &device.peer_id(), &node.device_id, sealed);
+}
+
+fn t14f_friend_request(requested_at: i64, roster: &crate::identity::roster::Roster) -> super::types::HavenMessage {
+    super::types::HavenMessage::FriendRequest {
+        requested_at,
+        carried_bundle: None,
+        device_list: Some(roster.clone()),
+        sealed_card: None,
+    }
+}
+
+fn t14f_pending_incoming(node: &TestNode) -> Vec<String> {
+    node.store()
+        .load_friends(Some("pending"))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, _, direction, _, _)| direction == "incoming")
+        .map(|(peer, ..)| peer)
+        .collect()
+}
+
+/// Minted identity `i` asks a re-request newer than its first and waits until `node`
+/// holds it: every frame injected before it has been judged by then.
+async fn t14f_barrier(relay: &MockRelay, node: &TestNode, i: u32) {
+    let (m, d, roster) = t14f_identity(i);
+    let row = || node.store().get_friend_row(&m.peer_id()).ok().flatten();
+    assert!(wait_until(20, async || row().is_some()).await, "the barrier identity's first request lands");
+    let first = row().unwrap().2;
+    sleep_ms(5).await;
+    let again = super::frame_auth::now_ms();
+    assert!(again > first);
+    t14f_into_inbox(relay, node, &d, &t14f_friend_request(again, &roster));
+    assert!(
+        wait_until(20, async || node.store().get_friend_row(&m.peer_id()).ok().flatten().is_some_and(|r| r.2 == again)).await,
+        "a requester already shown asks again and its request refreshes, whatever the share",
+    );
+}
+
+/// The reviewer's probe (HOL-SEC-192): a stranger mints identities and sends one friend
+/// request from each into B's inbox. Strangers fill only their share of the pending
+/// requests, and a refused one leaves no row and no roster in the book.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn review_ab_incoming_friend_requests_from_minted_identities_stay_bounded() {
+    let _g = test_guard();
+    crate::node::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let b = spawn_node_on(&relay, 241, 242).await;
+    const FLOOD: u32 = 48;
+    let mut masters = Vec::new();
+    for i in 0..FLOOD {
+        let (m, d, roster) = t14f_identity(i);
+        t14f_into_inbox(&relay, &b, &d, &t14f_friend_request(super::frame_auth::now_ms(), &roster));
+        masters.push(m.peer_id());
+    }
+    t14f_barrier(&relay, &b, 0).await;
+    let pending = t14f_pending_incoming(&b);
+    let books = masters.iter().filter(|m| b.store().roster_updated_at(m) > 0).count();
+    let cap = crate::node::social::MAX_STRANGER_FRIEND_REQUESTS;
+    assert!(
+        pending.len() <= cap && books <= cap,
+        "{FLOOD} minted strangers left {} pending friend rows and {books} rosters in B's book", pending.len(),
+    );
+    assert_eq!(pending.len(), cap, "strangers fill their share, first come");
+    let refused = &masters[cap..];
+    assert!(
+        refused.iter().all(|m| b.store().get_friend_row(m).ok().flatten().is_none() && b.store().roster_updated_at(m) == 0),
+        "a refused request leaves neither a row nor a roster",
+    );
+    drop(b);
+}
+
+/// A co-member's request lands past a flood of minted strangers: their share is full,
+/// the co-member's is not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t14f_a_co_members_request_lands_past_a_stranger_flood() {
+    let _g = test_guard();
+    crate::node::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut b = spawn_node_on(&relay, 243, 244).await;
+    let mut c = spawn_node_on(&relay, 245, 246).await;
+    let server_id = create_server_and_wait(&mut b, "t14f co-members").await;
+    join_and_wait(&mut c, &server_id).await;
+    assert!(
+        wait_until(15, async || b.raw_crdt_member_keys(&server_id).contains(&c.master_id)).await,
+        "B counts C a member",
+    );
+    for i in 100..148 {
+        let (_, d, roster) = t14f_identity(i);
+        t14f_into_inbox(&relay, &b, &d, &t14f_friend_request(super::frame_auth::now_ms(), &roster));
+    }
+    t14f_barrier(&relay, &b, 100).await;
+    assert_eq!(t14f_pending_incoming(&b).len(), crate::node::social::MAX_STRANGER_FRIEND_REQUESTS, "the strangers' share is full");
+    drain_events(&mut b);
+    c.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || {
+            let pending = t14f_pending_incoming(&b);
+            pending.contains(&c.master_id) || pending.contains(&c.device_id)
+        })
+        .await,
+        "a co-member's request lands while strangers fill their share, got {:?}",
+        t14f_pending_incoming(&b),
+    );
+    drop((b, c));
+}
+
+/// An accept or a decline that meets no request of ours and no friendship leaves
+/// nothing behind, its roster included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t14f_a_strangers_accept_or_decline_keeps_no_roster() {
+    let _g = test_guard();
+    crate::node::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let b = spawn_node_on(&relay, 247, 248).await;
+    let mut masters = Vec::new();
+    for i in 200..208 {
+        let (m, d, roster) = t14f_identity(i);
+        let msg = if i % 2 == 0 {
+            super::types::HavenMessage::FriendAccept { requested_at: Some(super::frame_auth::now_ms()), device_list: Some(roster) }
+        } else {
+            super::types::HavenMessage::FriendReject { requested_at: super::frame_auth::now_ms(), device_list: Some(roster) }
+        };
+        t14f_into_inbox(&relay, &b, &d, &msg);
+        masters.push(m.peer_id());
+    }
+    // A request after them, from an identity with room: once it shows, the rest were judged.
+    let (z, zd, z_roster) = t14f_identity(208);
+    t14f_into_inbox(&relay, &b, &zd, &t14f_friend_request(super::frame_auth::now_ms(), &z_roster));
+    assert!(
+        wait_until(20, async || t14f_pending_incoming(&b).contains(&z.peer_id())).await,
+        "an ordinary stranger's request still lands",
+    );
+    let kept: Vec<&String> = masters.iter().filter(|m| b.store().roster_updated_at(m) > 0).collect();
+    assert!(kept.is_empty(), "answers to nothing of ours kept rosters for {kept:?}");
+    drop(b);
+}
+
+/// A signed card naming `kp` as its master.
+fn t14f_card(kp: &NativeKeypair, name: &str) -> super::types::SignedCard {
+    use base64::Engine as _;
+    let master = kp.peer_id();
+    let at = super::frame_auth::now_ms();
+    let payload = super::crypto_handler::card_signing_payload(&master, at, name, "");
+    let pk = base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf());
+    let (Some(sig), Some(pk)) = super::crypto_handler::sign_message(kp, &pk, &payload) else { panic!("signs") };
+    super::types::SignedCard { master, display_name: name.into(), avatar_hash: String::new(), updated_at: at, sig, pk, stream_overlay: None }
+}
+
+/// Minted identity `i`'s parked join ask, its roster and card carried, sealed by its
+/// device to `member` in the server's room as an invite holder can; `signed` carries the
+/// master's own ask.
+fn t14f_join_ask(relay: &MockRelay, member: &TestNode, server_id: &str, i: u32, signed: bool) -> String {
+    let (m, d, roster) = t14f_identity(i);
+    t14f_join_ask_from(relay, member, server_id, &m, &d, roster, signed);
+    m.peer_id()
+}
+
+/// A parked join ask in `master`'s name sent by `device` carrying `roster`.
+fn t14f_join_ask_from(
+    relay: &MockRelay,
+    member: &TestNode,
+    server_id: &str,
+    master: &NativeKeypair,
+    device: &NativeKeypair,
+    roster: crate::identity::roster::Roster,
+    signed: bool,
+) {
+    let now = super::frame_auth::now_ms();
+    let ask = super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.to_string(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        requested_at: now,
+        device_list: Some(roster),
+        parked: true,
+        key_package: None,
+        reply_key: fresh_reply_key(),
+        card: Some(t14f_card(master, "minted")),
+        avatar_b64: String::new(),
+        ask: join_ask(server_id, now, master).filter(|_| signed),
+        follows_leave: None,
+    };
+    let boxed = sealed_to_members(relay, server_id, &device.peer_id(), &ask);
+    let sealed = super::frame_auth::seal(device, server_id, super::frame_auth::ROUTE_ROOM, &boxed);
+    relay.inject(server_id, &device.peer_id(), &member.device_id, sealed);
+}
+
+/// Waits until `member` has written its verdict on minted identity `master`'s ask to
+/// the join ring: every ask injected before it was judged by then.
+async fn t14f_ring_verdict(relay: &MockRelay, server_id: &str, member: &TestNode, master: &str) -> bool {
+    wait_until(30, async || {
+        join_ring(relay, server_id).iter().any(|(from, msg)| {
+            *from == member.device_id
+                && matches!(msg, super::types::HavenMessage::ServerJoinResolved { joiner_master, .. } if joiner_master == master)
+        })
+    })
+    .await
+}
+
+/// HOL-SEC-192: anyone holding an invite link can seal a join ask, and identities are
+/// free. A member that refuses an ask (here: a private server) keeps neither the asker's
+/// roster nor its card.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_join_ask_flood_keeps_no_roster_rows() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_on(&relay, 249, 250).await;
+    let mut m = spawn_node_on(&relay, 251, 252).await;
+    let server_id = create_server_and_wait(&mut o, "t14f private").await;
+    join_and_wait(&mut m, &server_id).await;
+    assert!(wait_until(15, async || relay.sees_room(&server_id, &m.device_id)).await, "the relay shows M the room");
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "is_private".into(), value: "true".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(15, async || m.server_setting(&server_id, "is_private").as_deref() == Some("true")).await);
+    let mut masters: Vec<String> = (300..316).map(|i| t14f_join_ask(&relay, &m, &server_id, i, true)).collect();
+    // A roster that does not make its sender one of its devices names no one: no verdict
+    // on the ring speaks for the identity it claims.
+    let (claimed, listed, _) = t14f_identity(316);
+    let forger = t14f_minted(317, 0x5c);
+    let forged = crate::identity::roster::Roster::legacy_for_test(&claimed, &[&listed]);
+    t14f_join_ask_from(&relay, &m, &server_id, &claimed, &forger, forged, true);
+    masters.push(t14f_join_ask(&relay, &m, &server_id, 318, true));
+    assert!(
+        t14f_ring_verdict(&relay, &server_id, &m, masters.last().unwrap()).await,
+        "M refuses the last ask on the ring",
+    );
+    let store = m.store();
+    let rosters: Vec<&String> = masters.iter().filter(|id| store.roster_updated_at(id) > 0).collect();
+    let cards: Vec<&String> = masters.iter().filter(|id| store.load_signed_card(id).is_some()).collect();
+    assert!(rosters.is_empty() && cards.is_empty(), "refused asks kept rosters {rosters:?} and cards {cards:?}");
+    let named = join_ring(&relay, &server_id).into_iter().any(|(_, msg)| {
+        matches!(msg, super::types::HavenMessage::ServerJoinResolved { joiner_master, .. } if joiner_master == claimed.peer_id())
+    });
+    assert!(!named, "an ask whose roster does not place its sender is answered in nobody's name");
+    drop((o, m));
+}
+
+/// On a public server the bound is the member cap: an ask the server admits keeps its
+/// roster and card, and every ask past the cap, or not signed by its asker, keeps nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t14f_a_public_server_keeps_rosters_only_for_the_joiners_it_admits() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_on(&relay, 253, 254).await;
+    let mut m = spawn_node_on(&relay, 255, 1).await;
+    let server_id = create_server_and_wait(&mut o, "t14f public").await;
+    join_and_wait(&mut m, &server_id).await;
+    assert!(wait_until(15, async || relay.sees_room(&server_id, &m.device_id)).await, "the relay shows M the room");
+    super::member_cap::set_cap_for_test(Some(3));
+    let unsigned = t14f_join_ask(&relay, &m, &server_id, 399, false);
+    let masters: Vec<String> = (400..406).map(|i| t14f_join_ask(&relay, &m, &server_id, i, true)).collect();
+    assert!(
+        t14f_ring_verdict(&relay, &server_id, &m, masters.last().unwrap()).await,
+        "M answers the last ask on the ring",
+    );
+    let store = m.store();
+    let admitted: Vec<&String> = masters.iter().filter(|id| m.raw_crdt_member_keys(&server_id).contains(*id)).collect();
+    let rosters: Vec<&String> = masters.iter().filter(|id| store.roster_updated_at(id) > 0).collect();
+    let cards: Vec<&String> = masters.iter().filter(|id| store.load_signed_card(id).is_some()).collect();
+    assert_eq!(admitted.len(), 1, "the cap admits one more identity, got {admitted:?}");
+    assert_eq!(rosters, admitted, "only the admitted joiner's roster is kept");
+    assert_eq!(cards, admitted, "only the admitted joiner's card is kept");
+    assert!(
+        store.roster_updated_at(&unsigned) == 0 && store.load_signed_card(&unsigned).is_none(),
+        "an ask its asker did not sign keeps nothing",
+    );
+    super::member_cap::set_cap_for_test(None);
+    drop((o, m));
+}
+
+/// A member that leaves a live join to the coordinator still keeps the joiner's roster
+/// from its ask, so the joiner's MLS add never waits on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t14f_a_member_who_did_not_answer_still_places_the_joiner() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_on(&relay, 2, 3).await;
+    let mut m = spawn_node_on(&relay, 5, 6).await;
+    let mut j = spawn_node_on(&relay, 7, 8).await;
+    let server_id = create_server_and_wait(&mut o, "t14f placed").await;
+    join_and_wait(&mut m, &server_id).await;
+    join_and_wait(&mut j, &server_id).await;
+    assert!(
+        wait_until(20, async || m.store().roster_updated_at(&j.master_id) > 0).await,
+        "M holds the joiner's roster",
+    );
+    drop((o, m, j));
+}
+
+/// A live ask, its roster and card carried, sealed by minted identity `i`'s device in
+/// the server's room and handed to each of `to`. Returns the asker's master id.
+fn t14f_live_ask(relay: &MockRelay, to: &[&TestNode], server_id: &str, i: u32) -> String {
+    let (mk, d, roster) = t14f_identity(i);
+    let now = super::frame_auth::now_ms();
+    let ask = super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.to_string(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        requested_at: now,
+        device_list: Some(roster),
+        parked: false,
+        key_package: None,
+        reply_key: fresh_reply_key(),
+        card: Some(t14f_card(&mk, "minted")),
+        avatar_b64: String::new(),
+        ask: join_ask(server_id, now, &mk),
+        follows_leave: None,
+    };
+    let boxed = sealed_to_members(relay, server_id, &d.peer_id(), &ask);
+    let sealed = super::frame_auth::seal(&d, server_id, super::frame_auth::ROUTE_ROOM, &boxed);
+    for node in to {
+        relay.inject(server_id, &d.peer_id(), &node.device_id, sealed.clone());
+    }
+    mk.peer_id()
+}
+
+/// HOL-SEC-192 (review): a member that leaves a live ask to the coordinator keeps
+/// nothing the ask carries until the asker is admitted, so asks addressed to it alone,
+/// which nobody admits, leave nothing; an ask the coordinator admits still lands there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t14f_review_live_asks_a_member_steps_aside_from_keep_nothing_until_admitted() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_on(&relay, 253, 254).await;
+    let mut m = spawn_node_on(&relay, 255, 1).await;
+    let server_id = create_server_and_wait(&mut o, "t14f stepped aside").await;
+    join_and_wait(&mut m, &server_id).await;
+    assert!(wait_until(15, async || relay.sees_room(&server_id, &m.device_id)).await, "the relay shows M the room");
+    assert!(wait_until(15, async || relay.sees_room(&server_id, &o.device_id)).await, "the relay shows O the room");
+    super::member_cap::set_cap_for_test(Some(3));
+    let masters: Vec<String> = (500..512).map(|i| t14f_live_ask(&relay, &[&m], &server_id, i)).collect();
+    let admitted = t14f_live_ask(&relay, &[&m, &o], &server_id, 512);
+    let placed = wait_until(30, async || {
+        m.store().roster_updated_at(&admitted) > 0 && m.store().load_signed_card(&admitted).is_some()
+    })
+    .await;
+    let store = m.store();
+    let kept = masters.iter().filter(|id| store.roster_updated_at(id) > 0).count();
+    let cards = masters.iter().filter(|id| store.load_signed_card(id).is_some()).count();
+    let members = m.raw_crdt_member_keys(&server_id);
+    let nobody_admitted = masters.iter().all(|id| !members.contains(id) && !o.raw_crdt_member_keys(&server_id).contains(id));
+    super::member_cap::set_cap_for_test(None);
+    assert!(nobody_admitted, "asks M stepped aside from were admitted by nobody");
+    assert_eq!((kept, cards), (0, 0), "M kept {kept} rosters and {cards} cards from {} asks nobody admitted", masters.len());
+    assert!(members.contains(&admitted), "O admitted the ask both members heard");
+    assert!(placed, "M places the joiner O admitted, its roster and card landing from the ask it stepped aside from");
+    drop((o, m));
 }

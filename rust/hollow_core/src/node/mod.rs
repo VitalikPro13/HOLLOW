@@ -33,6 +33,8 @@ pub(crate) mod image_convert;
 pub(crate) mod image_gate;
 pub(crate) mod join_hold;
 pub(crate) mod join_lane;
+pub(crate) mod join_stash;
+pub(crate) mod join_verdict;
 pub(crate) mod join_lock;
 pub(crate) mod leave_book;
 pub(crate) mod lock_keeper;

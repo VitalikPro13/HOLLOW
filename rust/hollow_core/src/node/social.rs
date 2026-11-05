@@ -30,6 +30,85 @@ pub(crate) const FRIEND_HANDSHAKE_SENTINEL: &str = "\u{0}hollow-friend-handshake
 /// requester could not decrypt. Refusing at the cap is the honest failure.
 pub(crate) const MAX_OUTSTANDING_FRIEND_REQUESTS: usize = 32;
 
+/// Incoming friend requests awaiting an answer, every requester together (HOL-SEC-192).
+pub(crate) const MAX_INCOMING_FRIEND_REQUESTS: usize = 64;
+
+/// The share of [`MAX_INCOMING_FRIEND_REQUESTS`] that requesters sharing no server with
+/// us may hold: identities are free, so a flood of minted strangers never crowds out a
+/// co-member's request.
+pub(crate) const MAX_STRANGER_FRIEND_REQUESTS: usize = 32;
+
+/// Whether a friend request from `master`, sent by `device` and made at `requested_at`,
+/// may leave anything behind: its roster, bundle, card or row. A requester we already
+/// hold a row for (our own request to them included) always may, but asking again past
+/// our decline is a new request; a new one only while its share of the pending incoming
+/// requests has room. A full share refuses the newcomer: every requester weighs one row,
+/// and the relay's mailbox hands the request back on our next inbox join.
+pub(crate) fn incoming_request_has_room(
+    store: &crate::storage::MessageStore,
+    server_states: &HashMap<String, ServerState>,
+    local_master: &str,
+    master: &str,
+    device: &str,
+    requested_at: i64,
+) -> bool {
+    for id in [master, device] {
+        match store.get_friend_row(id) {
+            Ok(Some((status, _, stored))) if status != "declined" || requested_at <= stored => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    let Ok(pending) = store.load_friends(Some("pending")) else { return false };
+    let incoming: Vec<&str> = pending
+        .iter()
+        .filter(|(_, _, direction, _, _)| direction == "incoming")
+        .map(|(peer, ..)| peer.as_str())
+        .collect();
+    if incoming.len() >= MAX_INCOMING_FRIEND_REQUESTS {
+        return false;
+    }
+    let shares = |id: &str| shares_a_server(server_states, local_master, id);
+    shares(master) || incoming.iter().filter(|id| !shares(id)).count() < MAX_STRANGER_FRIEND_REQUESTS
+}
+
+/// Whether `master` is a member of a server we are a member of, unbanned there.
+fn shares_a_server(server_states: &HashMap<String, ServerState>, local_master: &str, master: &str) -> bool {
+    server_states.iter().any(|(sid, s)| {
+        !super::conference::is_conference_sid(sid)
+            && !s.is_deleted()
+            && s.members.contains_key(local_master)
+            && s.members.contains_key(master)
+            && !s.is_banned(master)
+    })
+}
+
+/// Whether a friend's answer (accept or decline), sent by `device` with its identity's
+/// `roster`, meets a request of ours or a friendship. One that meets neither leaves
+/// nothing behind, its roster included. A request sent while our resolver was cold is
+/// filed under the device we asked, so a device whose own consent the roster carries
+/// is looked up too; the roster's ingest after this judges it whole.
+pub(crate) fn answer_meets_our_row(
+    store: &crate::storage::MessageStore,
+    roster: &crate::identity::roster::Roster,
+    device: &str,
+) -> bool {
+    let meets = |id: &str| {
+        store.get_friend_row(id).ok().flatten().is_some_and(|(status, direction, _)| {
+            (status == "pending" && direction == "outgoing") || status == "accepted"
+        })
+    };
+    if meets(&roster.master) || meets(device) {
+        return true;
+    }
+    let consents = |c: &crate::identity::roster::Consent| {
+        let mut one = crate::identity::roster::Roster::new(&roster.master);
+        one.add_consent(c.clone());
+        !one.verified(super::roster_book::now_ms()).consents.is_empty()
+    };
+    roster.consents.iter().take(crate::identity::roster::MAX_KEEP).any(|c| c.device != device && meets(&c.device) && consents(c))
+}
+
 /// The carried bundle plus the roster that authenticates it, persisted
 /// between "the request arrived" and "the human clicked Accept" (which may be a
 /// reboot apart), and between "we sent a request" and the next re-deposit.
@@ -4135,5 +4214,66 @@ mod tests {
         let lift_then_block = replica("b.db", &[vec![entry(false)], vec![entry(true)]]);
         let one_list = replica("c.db", &[vec![entry(false), entry(true)]]);
         assert_eq!((block_then_lift, lift_then_block, one_list), (true, true, true), "the block must win a tie on every device");
+    }
+
+    /// HOL-SEC-192: the pending incoming requests hold a total, strangers only their share
+    /// of it, and a requester already shown asks again whatever the share; asking again
+    /// past our decline is a new request.
+    #[test]
+    fn t14f_incoming_requests_hold_a_total_and_a_stranger_share() {
+        use super::{incoming_request_has_room, MAX_INCOMING_FRIEND_REQUESTS, MAX_STRANGER_FRIEND_REQUESTS};
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let pass = "ab".repeat(32);
+        let db = tmp.path().join("budget.db").to_str().unwrap().to_string();
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let me = "t14f-me";
+        let mut server = crate::crdt::server_state::ServerState::new("t14f-server".into(), "s".into(), me.into());
+        let co = |i: usize| format!("t14f-co-{i}");
+        for id in std::iter::once(me.to_string()).chain((0..MAX_INCOMING_FRIEND_REQUESTS + 1).map(co)) {
+            server.members.insert(id.clone(), crate::crdt::server_state::MemberInfo { peer_id: id, display_name: String::new() });
+        }
+        let states = std::collections::HashMap::from([("t14f-server".to_string(), server)]);
+        let room = |id: &str, at: i64| incoming_request_has_room(&store, &states, me, id, "t14f-device", at);
+        for i in 0..MAX_STRANGER_FRIEND_REQUESTS {
+            assert!(room(&format!("t14f-stranger-{i}"), 1), "a stranger within the share");
+            store.save_friend(&format!("t14f-stranger-{i}"), "pending", "incoming", 1).unwrap();
+        }
+        assert!(!room("t14f-stranger-new", 1), "a stranger past the share");
+        assert!(room("t14f-stranger-0", 2), "a stranger already shown asks again");
+        let co_share = MAX_INCOMING_FRIEND_REQUESTS - MAX_STRANGER_FRIEND_REQUESTS;
+        for i in 0..co_share {
+            assert!(room(&co(i), 1), "a co-member past the strangers' share");
+            store.save_friend(&co(i), "pending", "incoming", 1).unwrap();
+        }
+        assert!(!room(&co(co_share), 1), "a co-member past the total");
+        store.save_friend("t14f-declined", "declined", "incoming", 100).unwrap();
+        assert!(room("t14f-declined", 100), "a replay of the request we declined is answered again");
+        assert!(!room("t14f-declined", 101), "a new request past our decline needs room");
+        store.save_friend("t14f-ours", "pending", "outgoing", 5).unwrap();
+        assert!(room("t14f-ours", 6), "a request crossing ours");
+    }
+
+    /// HOL-SEC-192: an answer from a friend's other device meets the request we filed
+    /// under the device we asked while our resolver was cold, but only through that
+    /// device's own consent: a roster merely naming it meets nothing.
+    #[test]
+    fn t14f_an_answer_from_another_device_meets_a_request_filed_under_the_first() {
+        use crate::identity::native_identity::NativeKeypair;
+        use crate::identity::roster::{sign_consent, Roster};
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let pass = "ab".repeat(32);
+        let db = tmp.path().join("answer.db").to_str().unwrap().to_string();
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let kp = |seed: u8| NativeKeypair::from_secret_bytes(&[seed; 32]);
+        let (m, d1, d2, stranger) = (kp(0x61), kp(0x62), kp(0x63), kp(0x64));
+        store.save_friend(&d1.peer_id(), "pending", "outgoing", 5).unwrap();
+        let roster = Roster::legacy_for_test(&m, &[&d1, &d2]);
+        assert!(super::answer_meets_our_row(&store, &roster, &d2.peer_id()), "the friend's other device answers");
+        // A stranger's roster carrying the consent d1 gave our friend's identity.
+        let mut forged = Roster::legacy_for_test(&stranger, &[&d2]);
+        forged.add_consent(sign_consent(&d1, &m.peer_id()));
+        assert!(!super::answer_meets_our_row(&store, &forged, &d2.peer_id()), "a consent the device never gave this identity");
     }
 }

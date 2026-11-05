@@ -656,11 +656,11 @@ pub(crate) async fn spawn_node(
     };
 
     let loop_device = device_keypair.clone();
-    let handle = tokio::spawn(super::ws_client::with_relay_domain(ring_domain, super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::lock_keeper::with_loop_device(loop_device, Box::pin(run_event_loop(
+    let handle = tokio::spawn(super::ws_client::with_relay_domain(ring_domain, super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::join_stash::with_join_stash(super::lock_keeper::with_loop_device(loop_device, Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    )))))));
+    ))))))));
 
     // The app's "my peer id" (friendships, display) is the MASTER id.
     Ok((master_peer_id, handle))
@@ -708,11 +708,11 @@ pub(crate) async fn spawn_node_mock(
     let away = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let metered = db_path.clone();
     let loop_device = device_keypair.clone();
-    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::ws_client::with_relay_domain(super::ws_client::HARNESS_RELAY_DOMAIN.to_string(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::lock_keeper::with_loop_device(loop_device, crate::storage::store_pool::meter::OnLoop::new(Box::pin(run_event_loop(
+    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::ws_client::with_relay_domain(super::ws_client::HARNESS_RELAY_DOMAIN.to_string(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::join_stash::with_join_stash(super::lock_keeper::with_loop_device(loop_device, crate::storage::store_pool::meter::OnLoop::new(Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    )), &metered)))))));
+    )), &metered))))))));
 
     Ok((master_peer_id, handle, ws_cmd_rx, ws_event_tx, away))
 }
@@ -5937,6 +5937,11 @@ async fn run_event_loop(
                     );
                 }
                 sync_handler::reask_join_locks(&mut pending_server_joins, &ws_cmd_tx);
+                // Before phase 3 below re-judges the commits held on a device we could not place.
+                Box::pin(land_admitted_join_asks(
+                    &event_tx, &ws_cmd_tx, &mut olm, &crypto_store, mls.as_ref(), &server_states, &ws_room_peers,
+                    &mut pending_mls_removals, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
+                )).await;
                 if let Some(ref mut mls_mgr) = mls {
                     // Phase 0: the Welcome grace. A commit that evicted our own leaf while we
                     // are still a member is half of a remove + re-add, and the Welcome half is
@@ -7406,6 +7411,49 @@ async fn follow_reconciled(
     enforce_device_revocations(&reconciled.removed, olm, crypto_store, mls, server_states, local_peer_str, ws_room_peers, pending_mls_removals);
     for master in &reconciled.masters {
         let _ = event_tx.send(NetworkEvent::DeviceListUpdated { master_peer_id: master.clone() }).await;
+    }
+}
+
+/// Land the rosters and cards of the join asks we left to another member, once their
+/// askers' admissions folded in here (HOL-SEC-192, `join_stash`).
+#[allow(clippy::too_many_arguments)]
+async fn land_admitted_join_asks(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    mls: Option<&MlsManager>,
+    server_states: &HashMap<String, ServerState>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    use super::join_stash::Standing;
+    let landed = super::join_stash::take_admitted(|sid, master| match server_states.get(sid) {
+        Some(s) if s.is_deleted() => Standing::Gone,
+        Some(s) if s.members.contains_key(master) && !s.is_banned(master) => Standing::Admitted,
+        Some(_) => Standing::Waiting,
+        None => Standing::Gone,
+    });
+    for held in landed {
+        let roster = held.roster.clone();
+        let outcome = super::roster_book::ingest(
+            event_tx, ws_cmd_tx, local_peer_str, device_peer_id, &held.sender, Some(held.roster), db_path, db_passphrase,
+        ).await;
+        enforce_device_revocations(
+            &outcome.newly_revoked, olm, crypto_store, mls, server_states, local_peer_str, ws_room_peers, pending_mls_removals,
+        );
+        if super::roster_book::carried_master(&roster, &held.sender).is_none() {
+            continue;
+        }
+        if let Some(c) = held.card
+            && super::profile_card::store_card(&c.card, c.avatar.as_deref(), c.ceiling, db_path, db_passphrase)
+        {
+            let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: c.card.master.clone() }).await;
+        }
     }
 }
 
@@ -11172,24 +11220,17 @@ async fn handle_incoming_request_inner(
             //
             // So the request CARRIES the joiner's roster and attribution becomes
             // cryptographic: the sender device must be a member of it (design ID-1).
-            // `if list.is_some()` must not be the bypass.
+            // `if list.is_some()` must not be the bypass. Judged here without a write:
+            // what the ask may keep is decided below.
             let member_master = match device_list.as_ref() {
                 Some(list) => {
-                    // Ingest through the SAME path every other carried roster uses,
-                    // so the resolver, the device store and every later send agree.
-                    let outcome = super::roster_book::ingest(
-                        event_tx, ws_cmd_tx, master_peer_str, device_peer_id,
-                        peer_str, device_list.clone(), db_path, db_passphrase,
-                    ).await;
-                    enforce_device_revocations(
-                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
-                        local_peer_str, ws_room_peers, pending_mls_removals,
-                    );
-                    let Some(master) = super::roster_book::carried_master(list, peer_str) else {
+                    if super::resolver::is_revoked(peer_str)
+                        || !super::roster_book::carried_member(list, peer_str, db_path, db_passphrase)
+                    {
                         hollow_log!("[HOLLOW-CRDT] Dropping ServerJoinRequest from {peer_str} for {server_id}: its roster does not make the sender one of its devices");
                         return;
-                    };
-                    master
+                    }
+                    list.master.clone()
                 }
                 // A pre-parked-joins client: all we have is the resolver, which
                 // works whenever the two have actually met. Byte-for-byte the
@@ -11216,17 +11257,159 @@ async fn handle_incoming_request_inner(
                 return;
             }
 
+            let Some(state) = server_states.get(&server_id) else { return };
+            // Multi-device: a SAME-IDENTITY requester is one of OUR OWN devices,
+            // a sibling co-owning this server. It skips the ban, Twitch and
+            // owner-verify gates, which are for strangers, and is still added.
+            let is_sibling = super::resolver::same_identity(peer_str, local_peer_str)
+                && peer_str != local_peer_str;
+            let already_member = state.members_list().iter()
+                .any(|m| super::resolver::same_identity(&m.peer_id, &member_master));
+
+            // The ask keeps its roster and card only when the server would admit it or has
+            // banned the asker (HOL-SEC-192): anyone with an invite link can seal one, and
+            // identities are free.
+            // Scoped: nothing of the verdict may live across the awaits below (the arm's
+            // locals size every swarm future's frame).
+            let (keeps, owners_call) = {
+                let early = super::join_verdict::verdict(
+                    state, &member_master, member_master == master_peer_str, already_member,
+                    twitch_proof_json.as_deref(), nsfw_confirmed, local_peer_str, |id| peer_is_reachable(ws_room_peers, id),
+                );
+                let keeps = super::join_verdict::may_keep(
+                    &early, &server_id, &member_master, already_member, state.is_banned(&member_master), ask.as_ref(),
+                );
+                (keeps, early == super::join_verdict::Verdict::OwnersCall)
+            };
+
+            // Who answers: every member that reads a parked ask, one member per live ask.
+            // Nothing the ask carries is kept before this is known: a member that steps
+            // aside holds it in RAM until the asker's admission folds in here (HOL-SEC-192).
+            let answers = if parked {
+                // A PARKED copy is held to stricter rules than a live one. It
+                // was written into a shared ring, possibly days ago, and is read
+                // by whoever comes back, so it must never bypass a gate.
+
+                // Already a member: a copy from before its admission is history we
+                // are reading back. One sealed since is a member asking again because
+                // our answer came from a door that moved before it arrived: it gets
+                // its state again, and no second admission.
+                if already_member
+                    && state.member_since(&member_master).is_none_or(|since| requested_at <= since as i64)
+                {
+                    false
+                // Somebody already answered this exact ask (or a newer one).
+                // The resolution rides the same ring, so every member that
+                // catches up learns this before it reaches the request.
+                } else if join_resolutions.get(&resolution_key).is_some_and(|t| *t >= requested_at) {
+                    hollow_log!("[HOLLOW-CRDT] Parked join for {member_master} on {server_id} is already resolved, skipping");
+                    false
+                } else {
+                    // TWITCH-GATED SERVERS used to wait here for co-presence,
+                    // because the parked copy carried no proof: the old JSON named
+                    // a Twitch account and a ring frame is readable by anyone with
+                    // the invite. A follow CREDENTIAL names a channel, an age
+                    // bucket and a tier, so it can ride the ring like the rest.
+                    true
+                }
+            } else {
+                // COORDINATOR GATE. This handler is the expensive half of a join: a
+                // MemberAdded op, a full ServerStateSnapshot and the ENTIRE op log,
+                // all aimed at one joiner. Ungated, every online member ran the
+                // whole thing, which measured super-linear (~48 SendDirect per join
+                // at 5 members, ~342 at 13). The MLS half was already election-gated
+                // to one committer; this puts the CRDT half on the SAME election.
+                //
+                // A repeat request inside the window means the joiner's retry fired,
+                // so everyone serves and the cost degrades to the old fan-out rather
+                // than a failed join. Siblings are never gated. A PARKED copy never
+                // touches this map: writing here would hand the next live ask a bypass.
+                let seen_key = format!("{server_id}|{peer_str}");
+                let repeat_ask = join_request_seen
+                    .get(&seen_key)
+                    .is_some_and(|t: &std::time::Instant| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
+                // Entries are only meaningful for one window; drop the expired ones
+                // rather than letting a long-lived node accumulate one per join.
+                if join_request_seen.len() > 256 {
+                    join_request_seen.retain(|_, t| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
+                }
+                join_request_seen.insert(seen_key, std::time::Instant::now());
+                // A joiner the relay hides reached only the few members its frame
+                // picked, maybe not the coordinator: one of those answers.
+                let hidden_asker = !ws_room_peers.get(&server_id).is_some_and(|p| p.contains(peer_str));
+                let picked_view;
+                let mut election_view = ws_room_peers;
+                let mut ours = true;
+                if !is_sibling && !repeat_ask && hidden_asker {
+                    if super::door_room::reached(&server_id, peer_str, frame_ts_ms, ws_room_peers, device_peer_id) {
+                        picked_view = super::door_room::reached_view(&server_id, peer_str, frame_ts_ms, ws_room_peers, device_peer_id);
+                        election_view = &picked_view;
+                    } else {
+                        hollow_log!("[HOLLOW-CRDT] A hidden join ask for {server_id} reached other members first, leaving it to them");
+                        ours = false;
+                    }
+                }
+                if ours && !is_sibling && !repeat_ask {
+                    // Candidates are the CRDT members, minus the joiner itself: a
+                    // REJOINING member is already in `members`, and electing them
+                    // would leave nobody serving.
+                    let candidates: Vec<String> = state.members.keys()
+                        .filter(|m| !super::resolver::same_identity(&member_master, m))
+                        .cloned()
+                        .collect();
+                    let rule = mls.as_ref().map(|m| super::standing::rule(m, state, &server_id)).unwrap_or_default();
+                    let coordinator = crate::node::crypto_handler::elect_server_coordinator(
+                        state, &candidates, local_peer_str, election_view, &rule,
+                    );
+                    if coordinator.as_deref()
+                        .is_some_and(|c| !super::resolver::same_identity(c, local_peer_str))
+                    {
+                        hollow_log!("[HOLLOW-CRDT] Not the join coordinator for {server_id} (it is {coordinator:?}), leaving the join to them");
+                        ours = false;
+                    }
+                }
+                ours
+            // Only the owner admits here; it is online and answers itself.
+            } && !owners_call;
+
             // Who is asking: the card the request carries, when it is the joiner's own.
-            if let Some(card) = card.filter(|c| c.master == member_master && super::profile_card::card_holds(c)) {
+            let card = card.filter(|c| keeps && c.master == member_master && super::profile_card::card_holds(c)).map(|card| {
                 use base64::Engine;
                 let avatar = (!avatar_b64.is_empty())
                     .then(|| base64::engine::general_purpose::STANDARD.decode(&avatar_b64).ok())
                     .flatten()
                     .filter(|b| b.len() <= super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES);
-                let ceiling = super::frame_auth::stamp_ceiling(frame_ts_ms);
-                if super::profile_card::store_card(&card, avatar.as_deref(), ceiling, db_path, db_passphrase) {
-                    let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: card.master.clone() }).await;
+                super::join_stash::HeldCard { card, avatar, ceiling: super::frame_auth::stamp_ceiling(frame_ts_ms) }
+            });
+            if !keeps {
+                hollow_log!("[HOLLOW-CRDT] A join ask from {peer_str} for {server_id} keeps nothing: the server would not admit {member_master}");
+            } else if answers || already_member {
+                if let Some(list) = device_list.as_ref() {
+                    // Ingest through the SAME path every other carried roster uses, so the
+                    // resolver, the device store and every later send agree.
+                    let outcome = super::roster_book::ingest(
+                        event_tx, ws_cmd_tx, master_peer_str, device_peer_id,
+                        peer_str, device_list.clone(), db_path, db_passphrase,
+                    ).await;
+                    enforce_device_revocations(
+                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
+                        local_peer_str, ws_room_peers, pending_mls_removals,
+                    );
+                    if super::roster_book::carried_master(list, peer_str).is_none() {
+                        hollow_log!("[HOLLOW-CRDT] Dropping ServerJoinRequest from {peer_str} for {server_id}: its roster does not make the sender one of its devices");
+                        return;
+                    }
                 }
+                if let Some(held) = card
+                    && super::profile_card::store_card(&held.card, held.avatar.as_deref(), held.ceiling, db_path, db_passphrase)
+                {
+                    let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: held.card.master.clone() }).await;
+                }
+            } else if let Some(list) = device_list {
+                super::join_stash::hold(&server_id, &member_master, peer_str, list, card);
+            }
+            if !answers {
+                return;
             }
 
             if let Some(state) = server_states.get_mut(&server_id) {
@@ -11244,203 +11427,27 @@ async fn handle_incoming_request_inner(
                     join_ring: super::ring_auth::topic(state, super::types::JOIN_TOPIC),
                 };
 
-                // Multi-device: a SAME-IDENTITY requester is one of OUR OWN devices,
-                // a sibling co-owning this server. It skips the ban, Twitch and
-                // owner-verify gates, which are for strangers, and is still added.
-                let is_sibling = super::resolver::same_identity(peer_str, local_peer_str)
-                    && peer_str != local_peer_str;
-
-                let already_member = state.members_list().iter()
-                    .any(|m| super::resolver::same_identity(&m.peer_id, &member_master));
-
                 let catchup_secs = state.relay_catchup_secs();
 
-                if parked {
-                    // A PARKED copy is held to stricter rules than a live one. It
-                    // was written into a shared ring, possibly days ago, and is read
-                    // by whoever comes back, so it must never bypass a gate.
-
-                    // Already a member: a copy from before its admission is history we
-                    // are reading back. One sealed since is a member asking again because
-                    // our answer came from a door that moved before it arrived: it gets
-                    // its state again, and no second admission.
-                    if already_member
-                        && state.member_since(&member_master).is_none_or(|since| requested_at <= since as i64)
-                    {
-                        return;
-                    }
-
-                    // Somebody already answered this exact ask (or a newer one).
-                    // The resolution rides the same ring, so every member that
-                    // catches up learns this before it reaches the request.
-                    if join_resolutions.get(&resolution_key).is_some_and(|t| *t >= requested_at) {
-                        hollow_log!("[HOLLOW-CRDT] Parked join for {member_master} on {server_id} is already resolved, skipping");
-                        return;
-                    }
-
-                    // TWITCH-GATED SERVERS used to wait here for co-presence,
-                    // because the parked copy carried no proof: the old JSON named
-                    // a Twitch account and a ring frame is readable by anyone with
-                    // the invite. A follow CREDENTIAL names a channel, an age
-                    // bucket and a tier, so it can ride the ring like the rest.
-                } else {
-                    // COORDINATOR GATE. This handler is the expensive half of a join: a
-                    // MemberAdded op, a full ServerStateSnapshot and the ENTIRE op log,
-                    // all aimed at one joiner. Ungated, every online member ran the
-                    // whole thing, which measured super-linear (~48 SendDirect per join
-                    // at 5 members, ~342 at 13). The MLS half was already election-gated
-                    // to one committer; this puts the CRDT half on the SAME election.
-                    //
-                    // A repeat request inside the window means the joiner's retry fired,
-                    // so everyone serves and the cost degrades to the old fan-out rather
-                    // than a failed join. Siblings are never gated. A PARKED copy never
-                    // touches this map: writing here would hand the next live ask a bypass.
-                    let seen_key = format!("{server_id}|{peer_str}");
-                    let repeat_ask = join_request_seen
-                        .get(&seen_key)
-                        .is_some_and(|t: &std::time::Instant| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
-                    // Entries are only meaningful for one window; drop the expired ones
-                    // rather than letting a long-lived node accumulate one per join.
-                    if join_request_seen.len() > 256 {
-                        join_request_seen.retain(|_, t| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
-                    }
-                    join_request_seen.insert(seen_key, std::time::Instant::now());
-                    // A joiner the relay hides reached only the few members its frame
-                    // picked, maybe not the coordinator: one of those answers.
-                    let hidden_asker = !ws_room_peers.get(&server_id).is_some_and(|p| p.contains(peer_str));
-                    let picked_view;
-                    let mut election_view = ws_room_peers;
-                    if !is_sibling && !repeat_ask && hidden_asker {
-                        if !super::door_room::reached(&server_id, peer_str, frame_ts_ms, ws_room_peers, device_peer_id) {
-                            hollow_log!("[HOLLOW-CRDT] A hidden join ask for {server_id} reached other members first, leaving it to them");
-                            return;
-                        }
-                        picked_view = super::door_room::reached_view(&server_id, peer_str, frame_ts_ms, ws_room_peers, device_peer_id);
-                        election_view = &picked_view;
-                    }
-                    if !is_sibling && !repeat_ask {
-                        // Candidates are the CRDT members, minus the joiner itself: a
-                        // REJOINING member is already in `members`, and electing them
-                        // would leave nobody serving.
-                        let candidates: Vec<String> = state.members.keys()
-                            .filter(|m| !super::resolver::same_identity(&member_master, m))
-                            .cloned()
-                            .collect();
-                        let rule = mls.as_ref().map(|m| super::standing::rule(m, state, &server_id)).unwrap_or_default();
-                        let coordinator = crate::node::crypto_handler::elect_server_coordinator(
-                            state, &candidates, local_peer_str, election_view, &rule,
-                        );
-                        if coordinator.as_deref()
-                            .is_some_and(|c| !super::resolver::same_identity(c, local_peer_str))
-                        {
-                            hollow_log!("[HOLLOW-CRDT] Not the join coordinator for {server_id} (it is {coordinator:?}), leaving the join to them");
-                            return;
-                        }
-                    }
-                }
-
-                // Ban check, before any other verification. Keyed by the joiner's
-                // MASTER, which is what the ban list holds: a parked request's raw
-                // device id resolves to itself and would sail straight past it.
-                if !is_sibling && state.is_banned(&member_master) {
-                    hollow_log!("[HOLLOW-CRDT] Rejecting join from banned peer {peer_str} (master {member_master}) for server {server_id}");
-                    if requested_at != 0 {
-                        join_resolutions.insert(resolution_key, requested_at);
-                    }
-                    sync_handler::send_join_rejection(ws_cmd_tx, &answer, "banned", catchup_secs);
-                    return;
-                }
-
-                // Private, then full: final answers, given before anyone is asked for a
-                // Twitch proof or adult-content consent. Returning members and our own
-                // devices are never refused.
-                if !is_sibling && !already_member && state.is_private() {
-                    hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is private");
-                    let reason = format!("server_private:{}", state.name());
-                    if requested_at != 0 {
-                        join_resolutions.insert(resolution_key, requested_at);
-                    }
-                    sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
-                    return;
-                }
-                if !is_sibling && !already_member && super::member_cap::is_full(state) {
-                    let cap = super::member_cap::effective_cap(state);
-                    hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is full ({cap} max)");
-                    let reason = format!("server_full:{}:{}", state.name(), cap);
-                    if requested_at != 0 {
-                        join_resolutions.insert(resolution_key, requested_at);
-                    }
-                    sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
-                    return;
-                }
-
-                // Twitch verification gate, offline against the root pinned in
-                // `support_creds.rs`. The joiner ships a blind-signed follow
-                // credential bound to its own MASTER; we contact nobody and learn
-                // nothing beyond the channel, bucket and tier this server gates on.
-                if !is_sibling { if let Some(twitch_settings) = twitch::TwitchServerSettings::from_server_state(state) {
-                    let reject_reason = match &twitch_proof_json {
-                        None => Some("twitch_required".to_string()),
-                        Some(entry_json) => twitch::validate_follow_credential(
-                            entry_json, &member_master, &twitch_settings,
-                        )
-                        .err(),
-                    };
-                    if let Some(reason) = reject_reason {
-                        // Include full info so the joiner's client can display requirements and auto-retry.
-                        // Format: "twitch_required:{channel_id}:{channel_name}:{server_name}:{min_follow_days}:{require_sub}"
-                        let server_name = state.name().to_string();
-                        let enriched_reason = if reason == "twitch_required" {
-                            format!("twitch_required:{}:{}:{}:{}:{}",
-                                twitch_settings.channel_id,
-                                twitch_settings.channel_name,
-                                server_name,
-                                twitch_settings.min_follow_days,
-                                twitch_settings.require_sub,
-                            )
-                        } else {
-                            format!("twitch_failed:{}:{}:{}",
-                                twitch_settings.channel_name,
-                                server_name,
-                                reason,
-                            )
-                        };
-                        hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: {reason}");
-                        if requested_at != 0 && !enriched_reason.starts_with("twitch_required:") {
+                // Every gate a joiner meets, in one verdict shared with what the ask may
+                // keep above. Keyed by the joiner's MASTER, which is what the ban list
+                // holds: a parked request's raw device id resolves to itself.
+                match super::join_verdict::verdict(
+                    state, &member_master, is_sibling, already_member, twitch_proof_json.as_deref(), nsfw_confirmed,
+                    local_peer_str, |id| peer_is_reachable(ws_room_peers, id),
+                ) {
+                    super::join_verdict::Verdict::Admit => {}
+                    // Only the owner admits here; it is online and answers itself.
+                    super::join_verdict::Verdict::OwnersCall => return,
+                    super::join_verdict::Verdict::Refuse { reason, settles } => {
+                        hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str} (master {member_master}) for server {server_id}: {reason}");
+                        if settles && requested_at != 0 {
                             join_resolutions.insert(resolution_key, requested_at);
                         }
-                        sync_handler::send_join_rejection(ws_cmd_tx, &answer, &enriched_reason, catchup_secs);
+                        sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
                         return;
                     }
-                } } // close Twitch gate + `if !is_sibling`
-
-                // Owner-online verification: if enabled, only the owner accepts joins.
-                if !is_sibling { if let Some(ref twitch_settings) = twitch::TwitchServerSettings::from_server_state(state) {
-                    if twitch_settings.owner_verify {
-                        let owner_id = state.roles.iter()
-                            .find(|(_, reg)| *reg.read() == crate::crdt::operations::MemberRole::Owner)
-                            .map(|(pid, _)| pid.clone());
-
-                        if let Some(ref oid) = owner_id {
-                            if oid != local_peer_str {
-                                // We're not the owner — only the owner should accept.
-                                // Check if the owner is online; if not, reject so the joiner isn't stuck waiting.
-                                let owner_online = peer_is_reachable(ws_room_peers, oid);
-                                if !owner_online {
-                                    let server_name = state.name().to_string();
-                                    let reason = format!("twitch_owner_offline:{server_name}");
-                                    if requested_at != 0 {
-                                        join_resolutions.insert(resolution_key, requested_at);
-                                    }
-                                    sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
-                                }
-                                // Either way, non-owner does not process the join.
-                                return;
-                            }
-                            // We ARE the owner — proceed to accept below.
-                        }
-                    }
-                } } // close owner-verify gate + `if !is_sibling`
+                }
 
                 // The MemberAdded op we authored, for the ring resolution: it is
                 // the SAME op the broadcast below carries, so a member reading
@@ -11448,18 +11455,6 @@ async fn handle_incoming_request_inner(
                 let mut admitted_op_json: Option<String> = None;
 
                 if !already_member {
-                    // NSFW consent gate. Unlike private or full this is not a hard
-                    // rejection: we reject ONCE with an `nsfw_confirm:` reason carrying
-                    // the server name, the joiner's client shows the consent dialog, and
-                    // it re-sends with `nsfw_confirmed=true`. Ordered after private and
-                    // full so we never ask consent for a server they cannot enter.
-                    if !is_sibling && state.is_nsfw() && !nsfw_confirmed {
-                        hollow_log!("[HOLLOW-CRDT] NSFW consent required for {peer_str} joining {server_id}");
-                        let reason = format!("nsfw_confirm:{}", state.name());
-                        sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
-                        return;
-                    }
-
                     // Add the new member via CRDT op, keyed by the MASTER identity.
                     // The short display label is derived from the master id.
                     let display_name = format!("{}...{}", &member_master[..4.min(member_master.len())], &member_master[member_master.len().saturating_sub(4)..]);
@@ -13193,6 +13188,17 @@ async fn handle_incoming_request_inner(
             // postdate a removal.
             let requested_at = requested_at.min(super::frame_auth::stamp_ceiling(frame_ts_ms));
 
+            // The bound comes before anything is written, the roster first: the master the
+            // roster claims is only a lookup here, and a false one fails its ingest below.
+            let claimed = device_list.as_ref().map_or_else(|| super::resolver::resolve(peer_str), |l| l.master.clone());
+            let has_room = crate::storage::MessageStore::lease(db_path, db_passphrase).is_ok_and(|store| {
+                social::incoming_request_has_room(&store, server_states, local_peer_str, &claimed, peer_str, requested_at)
+            });
+            if !has_room {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a friend request from {peer_str}: no room for another incoming request");
+                return;
+            }
+
             hollow_log!("[HOLLOW-FRIENDS] Friend request from {peer_str}");
 
             // ASYNC FRIENDING: the request may carry the sender's roster. Ingest it
@@ -13443,6 +13449,12 @@ async fn handle_incoming_request_inner(
             // so a cold resolver cannot file the accept under a bare device id.
             let master = match device_list.as_ref() {
                 Some(list) => {
+                    if !crate::storage::MessageStore::lease(db_path, db_passphrase)
+                        .is_ok_and(|store| social::answer_meets_our_row(&store, list, peer_str))
+                    {
+                        hollow_log!("[HOLLOW-FRIENDS] Ignoring FriendAccept from {peer_str}: no request of ours for {}", list.master);
+                        return;
+                    }
                     let outcome = super::roster_book::ingest(
                         event_tx, ws_cmd_tx, master_peer_str, device_peer_id,
                         peer_str, device_list.clone(), db_path, db_passphrase,
@@ -13554,6 +13566,12 @@ async fn handle_incoming_request_inner(
             // message, never a downgrade: `list.is_some()` is not a bypass.
             let master = match device_list.as_ref() {
                 Some(list) => {
+                    if !crate::storage::MessageStore::lease(db_path, db_passphrase)
+                        .is_ok_and(|store| social::answer_meets_our_row(&store, list, peer_str))
+                    {
+                        hollow_log!("[HOLLOW-FRIENDS] FriendReject from {peer_str} answers no request of ours for {}; nothing to do", list.master);
+                        return;
+                    }
                     // Ingest through the SAME path the FriendRequest arm uses, so the
                     // resolver, the device store and the DM room key all agree afterwards:
                     // an accept or DM that follows must not compute a different room.

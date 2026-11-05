@@ -58,9 +58,10 @@ pub struct LockLink {
     /// with the owner's id hashes to the server id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
-    /// The device that made this link (0.14); a 0.13 link has none.
+    /// The device that made this link (0.14); a 0.13 link has none. Boxed: a link rides
+    /// `CrdtPayload` by value, so its size lands in every swarm future's stack frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dev: Option<LockDev>,
+    pub dev: Option<Box<LockDev>>,
 }
 
 impl std::fmt::Debug for LockLink {
@@ -142,7 +143,7 @@ pub fn link_device(server_id: &str, link: &LockLink) -> Option<(String, String)>
 fn device_signed(server_id: &str, mut link: LockLink, master: &str, device: &NativeKeypair) -> LockLink {
     link.dev = None;
     let sig = base64::engine::general_purpose::STANDARD.encode(device.sign(link.dev_payload(server_id, master).as_bytes()));
-    link.dev = Some(LockDev { device: key_text(device), master: master.to_string(), sig });
+    link.dev = Some(Box::new(LockDev { device: key_text(device), master: master.to_string(), sig }));
     link
 }
 
