@@ -141,16 +141,19 @@ class SecureAppLockStore implements AppLockStore {
   }
 
   /// Deletes in both groups, each named: an unnamed delete matches every group.
+  /// A staged copy goes first, else the next start would make it the entry again.
   @override
   Future<void> delete(String key) async {
     final g = await _known();
-    if (g == null) return _storage.delete(key: key);
     Object? failed;
-    for (final group in [g.keys, g.appId]) {
-      try {
-        await _storage.delete(key: key, iOptions: _in(group));
-      } catch (e) {
-        failed = e;
+    for (final name in [_staged(key), key]) {
+      for (final group in g == null ? [null] : [g.keys, g.appId]) {
+        try {
+          await _storage.delete(
+              key: name, iOptions: group == null ? null : _in(group));
+        } catch (e) {
+          failed = e;
+        }
       }
     }
     if (failed != null) throw failed;
@@ -203,40 +206,64 @@ class SecureAppLockStore implements AppLockStore {
     return true;
   }
 
+  /// Where a re-classed entry waits while its old item is replaced.
+  static String _staged(String key) => 'hollow_app_lock_reclass.$key';
+
   /// Items written before the class changed carry the migrating `unlocked`
   /// class, which the new query no longer matches. Where the keys group works
   /// they move there with the group move (copy, read back, delete). Elsewhere each
-  /// is re-saved under the this-device class; deleting first is what lets the add
-  /// through, since the class is not part of an item's identity.
+  /// is re-saved under the this-device class. The class is not part of an item's
+  /// identity, so the old item must go before the new one can be added: a copy
+  /// under a staging name, read back first, keeps the entry through any stop.
   Future<void> migrateAccessibility(Iterable<String> keys) async {
     if (defaultTargetPlatform != TargetPlatform.iOS &&
         defaultTargetPlatform != TargetPlatform.macOS) {
       return;
     }
-    if (await _moveToKeysGroup()) return;
+    final moved = await _moveToKeysGroup();
     final group = await _writeGroup();
     final legacyI =
         group == null ? _legacyI : _in(group, legacyClass: true);
     final currentI = group == null ? _iOptions : _in(group);
     for (final key in keys) {
-      String? old;
       try {
-        old = await _storage.read(
-            key: key, iOptions: legacyI, mOptions: _legacyM);
-        if (old == null) continue;
-        await _storage.delete(key: key, iOptions: currentI);
-        await _storage.write(key: key, value: old, iOptions: currentI);
+        await _finishStaged(key, legacyI, currentI);
+        if (!moved) await _reclass(key, legacyI, currentI);
       } catch (e) {
-        debugPrint('[HOLLOW-APPLOCK] keychain class migration skipped: $e');
-        // A failed re-save must not cost the person their stored secret.
-        if (old != null) {
-          try {
-            await _storage.write(
-                key: key, value: old, iOptions: legacyI, mOptions: _legacyM);
-          } catch (_) {}
-        }
+        debugPrint('[HOLLOW-APPLOCK] keychain class migration waits: $e');
       }
     }
+  }
+
+  Future<void> _reclass(
+      String key, IOSOptions legacyI, IOSOptions currentI) async {
+    final old =
+        await _storage.read(key: key, iOptions: legacyI, mOptions: _legacyM);
+    if (old == null) return;
+    final stage = _staged(key);
+    await _storage.write(key: stage, value: old, iOptions: currentI);
+    if (await _storage.read(key: stage, iOptions: currentI) != old) return;
+    // Another process may have finished this entry meanwhile: its item stays.
+    if (await _storage.read(key: key, iOptions: currentI) == null) {
+      await _storage.delete(key: key, iOptions: currentI);
+    }
+    await _finishStaged(key, legacyI, currentI);
+  }
+
+  /// A staged copy becomes the entry when the entry is gone, and is deleted only
+  /// once an entry under either class reads back.
+  Future<void> _finishStaged(
+      String key, IOSOptions legacyI, IOSOptions currentI) async {
+    final stage = _staged(key);
+    final staged = await _storage.read(key: stage, iOptions: currentI);
+    if (staged == null) return;
+    var held = await _storage.read(key: key, iOptions: currentI) ??
+        await _storage.read(key: key, iOptions: legacyI, mOptions: _legacyM);
+    if (held == null) {
+      await _storage.write(key: key, value: staged, iOptions: currentI);
+      held = await _storage.read(key: key, iOptions: currentI);
+    }
+    if (held != null) await _storage.delete(key: stage, iOptions: currentI);
   }
 }
 
@@ -357,9 +384,9 @@ class AppLockService {
     _kDuressTransferAsked,
   ];
 
-  /// `<base>.<16 hex>`: an entry some profile's id names.
-  static final _scopedEntry =
-      RegExp(r'^hollow_app_lock_[a-z_]+\.([0-9a-f]{16})$');
+  /// `<base>.<16 hex>`, or its staged copy: an entry some profile's id names.
+  static final _scopedEntry = RegExp(
+      r'^(?:hollow_app_lock_reclass\.)?hollow_app_lock_[a-z_]+\.([0-9a-f]{16})$');
   static const _secrets = {_kBiometricSecret, _kLaunchSecret};
 
   final AppLockStore _store;
@@ -389,6 +416,14 @@ class AppLockService {
 
   Future<void> _ready() => _legacy ??= _settleLegacy();
 
+  /// A migration already under way finishes before a clear, which it would
+  /// otherwise write back over.
+  Future<void> _settled() async {
+    try {
+      await _legacy;
+    } catch (_) {}
+  }
+
   /// Entries from before 0.12.2 are global. They move ONCE into the profile they
   /// belong to: the one whose identity a stored secret actually opens. On a
   /// desktop a profile they do not open leaves them for another, and none is ever
@@ -397,7 +432,12 @@ class AppLockService {
   Future<void> _settleLegacy() async {
     final store = _store;
     if (store is SecureAppLockStore) {
-      await store.migrateAccessibility(_entries);
+      final id = _profileId();
+      await store.migrateAccessibility([
+        ..._entries,
+        if (id != null)
+          for (final base in _profileEntries) _scoped(base, id),
+      ]);
     }
     final legacy = <String, String>{};
     for (final base in _entries) {
@@ -675,6 +715,7 @@ class AppLockService {
   /// could read it, and its PIN must not outlive it in secure storage.
   Future<void> clearAll() async {
     sessionSecret = null;
+    await _settled();
     final id = _profileId();
     if (id != null) await clearProfile(id);
     if (_oneProfile) await _clearOtherProfiles(id);
@@ -700,6 +741,7 @@ class AppLockService {
   /// Clear the entries of the profile named [id], such as one about to be erased
   /// from the profile list.
   Future<void> clearProfile(String id) async {
+    await _settled();
     for (final base in _profileEntries) {
       try {
         await _store.delete(_scoped(base, id));
