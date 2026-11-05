@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 /// Which desktop capture source types the CURRENT session can actually produce.
@@ -53,5 +54,99 @@ class DesktopCaptureSupport {
   static void bumpPortalGeneration() {
     _portalGeneration++;
     portalGrantLikely = false;
+  }
+}
+
+/// Our own share's capture and self-preview, shared by voice channels and
+/// DM calls.
+class ShareCapture {
+  /// Test seams: stand-ins for the platform picker and the preview renderer.
+  @visibleForTesting
+  static Future<MediaStream> Function()? debugOpen;
+  @visibleForTesting
+  static RTCVideoRenderer Function()? debugRenderer;
+
+  /// Opens the platform capture. The picker (Android consent, the iOS
+  /// broadcast sheet, the Wayland portal) is up for as long as this waits,
+  /// and the app stays usable meanwhile.
+  static Future<MediaStream> open({
+    required String sourceId,
+    required int width,
+    required int height,
+    required int fps,
+    required bool shareAudio,
+  }) async {
+    final seam = debugOpen;
+    if (seam != null) return seam();
+    // Capture screen ONCE. Source enumeration is desktop-only; mobile
+    // captures THE screen (MediaProjection / ReplayKit broadcast).
+    if (Platform.isAndroid) {
+      // Constraints are ignored by the Android plugin (MediaProjection captures
+      // at native display size); the per-peer encoder cap does the downscaling.
+      return navigator.mediaDevices.getDisplayMedia({
+        'video': true,
+        'audio': false,
+      });
+    } else if (Platform.isIOS) {
+      // 'broadcast' selects the ReplayKit Broadcast Upload Extension path.
+      return navigator.mediaDevices.getDisplayMedia({
+        'video': {'deviceId': 'broadcast'},
+        'audio': false,
+      });
+    } else {
+      // A Wayland portal-first share MUST NOT re-enumerate: enumerating here
+      // would pop an extra xdg-desktop-portal dialog.
+      if (!DesktopCaptureSupport.isPortalSourceId(sourceId)) {
+        await desktopCapturer.getSources(
+          types: DesktopCaptureSupport.sourceTypes,
+        );
+      }
+      // Windows and Linux carry share audio over a data channel, so never ask
+      // getDisplayMedia for audio: the WASAPI path crashes Windows.
+      final getDisplayAudio =
+          shareAudio && !Platform.isWindows && !Platform.isLinux;
+
+      final stream = await navigator.mediaDevices.getDisplayMedia({
+        'video': {
+          'deviceId': {'exact': sourceId},
+          'mandatory': {
+            'frameRate': fps.toDouble(),
+            'width': width,
+            'height': height,
+          },
+        },
+        'audio': getDisplayAudio,
+      });
+      // The portal grant now exists: the next share can reuse it promptless.
+      if (DesktopCaptureSupport.isPortalSourceId(sourceId)) {
+        DesktopCaptureSupport.portalGrantLikely = true;
+      }
+      return stream;
+    }
+  }
+
+  static RTCVideoRenderer newPreview() =>
+      debugRenderer?.call() ?? RTCVideoRenderer();
+
+  /// Closes a capture and preview no share owns; either may be null.
+  static Future<void> close(
+    MediaStream? capture,
+    RTCVideoRenderer? preview,
+  ) async {
+    if (preview != null) {
+      try {
+        preview.srcObject = null;
+        await preview.dispose();
+      } catch (_) {}
+    }
+    if (capture == null) return;
+    for (final t in capture.getTracks()) {
+      try {
+        await t.stop();
+      } catch (_) {}
+    }
+    try {
+      await capture.dispose();
+    } catch (_) {}
   }
 }

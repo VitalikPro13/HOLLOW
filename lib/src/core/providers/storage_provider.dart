@@ -62,6 +62,13 @@ final atRestStatusProvider = StreamProvider.autoDispose<AtRestStatus>((ref) {
   return controller.stream;
 });
 
+/// Whether this device cleared a channel's history (server, channel).
+final channelHistoryClearedProvider =
+    FutureProvider.autoDispose.family<bool, (String, String)>(
+  (ref, key) => storage_api.channelHistoryCleared(
+      serverId: key.$1, channelId: key.$2),
+);
+
 /// Actions for the Storage Manager: clear cached file bytes, enforce the files
 /// cap, and clear/evict the vault cache. Each refreshes the breakdown. The
 /// FFIs keep the signed FileHeader rows, so only the heavy bytes go.
@@ -129,6 +136,7 @@ class StorageActions {
       );
     } finally {
       _refresh();
+      _ref.invalidate(channelHistoryClearedProvider);
       final chats = _ref.read(channelChatProvider.notifier);
       final servers = serverId == null
           ? _ref.read(serverListProvider).keys.toList()

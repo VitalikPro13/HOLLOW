@@ -65,11 +65,18 @@ void main() {
       windowCalls.add(call.method);
       return true;
     });
+    // On Windows init() sets the tray icon; an unmocked channel's reply comes
+    // from the engine outside the fake clock, so the test waited 10 minutes.
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+            const MethodChannel('tray_manager'), (call) async => null);
   });
 
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel('window_manager'), null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('tray_manager'), null);
   });
 
   Future<ProviderContainer> pump(

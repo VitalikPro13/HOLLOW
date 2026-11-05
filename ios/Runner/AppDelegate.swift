@@ -128,7 +128,7 @@ final class RelayBackgroundTask {
   private let channel: FlutterMethodChannel
   private let name: String
   private let counted: Bool
-  private var holders = 0
+  private var holds = TaskHolds()
   private var task: UIBackgroundTaskIdentifier = .invalid
 
   init(channel: FlutterMethodChannel, name: String = "hollow.relay.suspend", counted: Bool = false) {
@@ -151,7 +151,7 @@ final class RelayBackgroundTask {
   /// The seconds iOS still grants, or nil when it sets no limit (the foreground
   /// reports the largest double).
   private func begin() -> Double? {
-    holders += 1
+    holds.take()
     if task == .invalid {
       task = UIApplication.shared.beginBackgroundTask(withName: name) {
         [weak self] in self?.expire()
@@ -164,23 +164,52 @@ final class RelayBackgroundTask {
   /// Dart suspends at once; iOS ends an app whose task outlives this handler.
   private func expire() {
     channel.invokeMethod("expiring", arguments: nil)
+    holds.expire()
     end()
   }
 
   private func release() {
-    holders = max(holders - 1, 0)
-    if !counted || holders == 0 {
+    let last = holds.release()
+    if !counted {
+      holds = TaskHolds()
+      end()
+    } else if last {
       end()
     }
   }
 
   private func end() {
-    holders = 0
     guard task != .invalid else { return }
     UIApplication.shared.endBackgroundTask(task)
     task = .invalid
   }
 }
+
+// TASK-HOLDS-BEGIN
+/// The holders of a counted task. A hold an expiry ended still sends its end
+/// later; that end is spent on it, so it never ends a task taken since.
+struct TaskHolds {
+  private(set) var live = 0
+  private var ended = 0
+
+  mutating func take() { live += 1 }
+
+  /// True when no hold is left, so the task ends.
+  mutating func release() -> Bool {
+    if ended > 0 {
+      ended -= 1
+      return false
+    }
+    live = max(live - 1, 0)
+    return live == 0
+  }
+
+  mutating func expire() {
+    ended += live
+    live = 0
+  }
+}
+// TASK-HOLDS-END
 
 // CLASSIC FlutterAppDelegate lifecycle (NOT the UIScene / FlutterImplicitEngineDelegate
 // template). Plugins register against the AppDelegate via register(with: self), which is

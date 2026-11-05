@@ -20614,7 +20614,9 @@ async fn sibling_fills_a_dm_gap_behind_its_newest_message() {
     let reply_ts = now - 60 * 60 * 1000;
     let gap_a_ts = now - 3 * 60 * 60 * 1000;
     let gap_b_ts = now - 2 * 60 * 60 * 1000;
-    for (node, mine) in [(&n1, false), (&n2, false), (&f, true)] {
+    // D2 first: a plant is a raw insert beside the running node, so a startup
+    // backfill that copied D1's row in between left the reply twice under load.
+    for (node, mine) in [(&n2, false), (&n1, false), (&f, true)] {
         let convo = if mine { &m_master } else { &f_master };
         plant_signed_dm(node, F, &m_master, convo, mine, reply_ts, "gap-reply", "the reply");
     }

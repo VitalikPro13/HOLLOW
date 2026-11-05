@@ -218,6 +218,10 @@ printf 'NAME=x\nTOKEN=a1b2c3d4-0000-1111-2222-333344445555\n' >"$TMP/tok"
 ui_secret duckdns_token t x >"$TMP/secret.out"
 eq "token from file" "$UI_REPLY" a1b2c3d4-0000-1111-2222-333344445555
 lacks "token never printed" "$(cat "$TMP/secret.out")" a1b2c3d4
+printf 'DUCKDNS_TOKEN=b1b2c3d4-0000-1111-2222-333344445555\nRELAY_HOST=x.duckdns.org\n' >"$TMP/tok"
+ui_secret duckdns_token t x >"$TMP/secret.out"
+eq "token from a DUCKDNS_TOKEN= line" "$UI_REPLY" b1b2c3d4-0000-1111-2222-333344445555
+lacks "that token never printed" "$(cat "$TMP/secret.out")" b1b2c3d4
 
 echo "firewall"
 r=$(hollow_fw_rules no no no 22 | tr '\n' ' ')
@@ -1574,8 +1578,121 @@ t_rebuild() {
     REPO=$TMP/no-sources
     update_check
     has "the installed copy says where to rebuild from" "$UPDATE_TEXT" "run sudo bash relay-uws/install.sh from it"
+    # Programs from a signed release: a clone with sources offers the rebuild too.
+    local P=$TMP/p
+    mkdir -p "$P/relay-uws/src"
+    cp "$RELAY/src/version.h" "$P/relay-uws/src/"
+    : >"$P/relay-uws/src/main.cpp"
+    feed_lib_present() { return 0; }
+    prebuilt_available() { PREBUILT_RC=1 PREBUILT_WHY=offline; return 1; }
+    echo prebuilt >"$BUILT_FROM_FILE"
+    printf 'version=0.0.1\nbuild=0\n' >"$VERSION_FILE"
+    REPO=$P DRY_RUN=0
+    update_check 2>/dev/null
+    eq "a release's programs offer a rebuild from a clone" "$REBUILD_AVAILABLE" 1
+    has "the menu names it" "$(HERE="$P/relay-uws" UI_MODE=whiptail CFG_MEMBERS_ONLY=no; conf_load() { :; }; setup_clone_gate() { :; }
+        update_check() { REBUILD_AVAILABLE=1 SOURCE_LABEL=x; }; ui_menu() { printf '%s\n' "$@"; UI_REPLY=exit; }
+        ui_msg() { :; }; local_ipv4() { :; }; status_text() { :; }; ssh_passwords_on() { return 1; }; manage_main 2>&1)" "Rebuild from this copy"
+    REPO=$TMP/no-sources
+    update_check 2>/dev/null
+    eq "the installed copy offers no rebuild over a release" "$REBUILD_AVAILABLE" 0
+    # The switch sticks only once the new build answers; a later settings
+    # change would otherwise put the release's programs back.
+    ui_yesno() { printf '%s' "$3" >"$TMP/rb.txt"; return 0; }
+    install_installer_copy() { :; }
+    programs_source() { :; }
+    restart_relay_pair() { :; }
+    restore_previous_programs() { echo RESTORED; }
+    local_get() { :; }
+    conf_save() { echo "SAVED binaries=$CFG_BINARIES"; }
+    wait_for_relay() { return 0; }
+    CFG_BINARIES=prebuilt CFG_FORWARDER=no
+    out=$(manage_rebuild 2>&1)
+    has "a rebuild over a release's programs saves the switch" "$out" "SAVED binaries=source"
+    has "and says signed updates stop" "$(cat "$TMP/rb.txt")" "signed"
+    rm -f "$TMP/rb.wait"
+    wait_for_relay() { [ -e "$TMP/rb.wait" ] && return 0; : >"$TMP/rb.wait"; return 1; }
+    CFG_BINARIES=prebuilt
+    out=$(ui_msg() { :; }; manage_rebuild 2>&1)
+    has "a build that never answers is undone" "$out" "RESTORED"
+    lacks "and the release's programs stay the setting" "$out" "SAVED"
+    # A clone older than the running relay asks first, naming both versions.
+    REPO=$P CFG_BINARIES=prebuilt
+    printf 'version=9.9.9\nbuild=0\n' >"$VERSION_FILE"
+    wait_for_relay() { return 0; }
+    : >"$TMP/rb.keys"
+    out=$(ui_yesno() { printf '%s %s %s\n' "$1" "$4" "$3" >>"$TMP/rb.keys"; [ "$1" != confirm_older ]; }; manage_rebuild 2>&1)
+    has "an older clone asks before the rebuild" "$(cat "$TMP/rb.keys")" "confirm_older no"
+    has "and names both versions" "$(cat "$TMP/rb.keys")" "version $(relay_source_version "$P"), which is older than the version 9.9.9"
+    lacks "a refused downgrade builds nothing" "$out" "SAVED"
+    out=$(ui_yesno() { return 0; }; manage_rebuild 2>&1)
+    has "a confirmed downgrade builds" "$out" "SAVED binaries=source"
+    printf 'version=0.0.1\nbuild=0\n' >"$VERSION_FILE"
+    : >"$TMP/rb.keys"
+    out=$(ui_yesno() { printf '%s\n' "$1" >>"$TMP/rb.keys"; return 0; }; manage_rebuild 2>&1)
+    lacks "a newer clone asks no downgrade question" "$(cat "$TMP/rb.keys")" "confirm_older"
 }
 in_sub t_rebuild
+
+echo "leaving the staging certificate"
+t_leave_staging() {
+    UI_MODE=whiptail CFG_TURN=yes CFG_MODE=native CFG_PUSH=yes CFG_FORWARDER=no CFG_MEMBERS_ONLY=no
+    CFG_GRACE_SECS=120 CFG_HOST=relay.example.org
+    update_pending() { return 1; }
+    ssh_firewall_guard() { :; }
+    summary_screen() { :; }
+    ui_yesno() { return 0; }
+    apply_all() { echo "APPLIED staging=$CFG_STAGING"; }
+    ui_menu() { if [ "$1" = change ]; then printf '%s\n' "$@" >"$TMP/chg"; UI_REPLY=certificate; fi; }
+    CFG_STAGING=yes
+    out=$(manage_change 2>&1)
+    has "the change menu offers a trusted certificate" "$(cat "$TMP/chg")" "certificate"
+    has "and the change applies it" "$out" "APPLIED staging=no"
+    CFG_STAGING=no
+    out=$(ui_menu() { printf '%s\n' "$@" >"$TMP/chg"; UI_REPLY=grace; }; ask_grace() { :; }; manage_change 2>&1)
+    lacks "a trusted certificate offers no switch" "$(cat "$TMP/chg")" "certificate"
+    UI_MODE=answers
+    declare -gA ANS=([change]=certificate)
+    CFG_STAGING=yes
+    out=$(ui_yesno() { return 1; }; manage_change 2>&1)
+    lacks "a switch nobody confirmed applies nothing" "$out" "APPLIED"
+}
+in_sub t_leave_staging
+
+echo "going back to signed releases"
+t_signed_again() {
+    UI_MODE=whiptail CFG_TURN=yes CFG_MODE=native CFG_PUSH=yes CFG_FORWARDER=no CFG_MEMBERS_ONLY=no
+    CFG_GRACE_SECS=120 CFG_HOST=relay.example.org CFG_STAGING=no
+    update_pending() { return 1; }
+    ssh_firewall_guard() { :; }
+    summary_screen() { :; }
+    feed_lib_present() { return 0; }
+    installed_version() { echo 0.14.0; }
+    prebuilt_available() { FEED_VERSION=0.14.1; return 0; }
+    apply_all() { echo "APPLIED binaries=$CFG_BINARIES force=${FORCE_PROGRAMS:-0}"; }
+    ui_yesno() { printf '%s|%s\n' "$4" "$3" >"$TMP/sg.txt"; return 0; }
+    ui_menu() { if [ "$1" = change ]; then printf '%s\n' "$@" >"$TMP/chg"; UI_REPLY=signed; fi; }
+    CFG_BINARIES=source
+    out=$(manage_change 2>&1)
+    has "a build from source offers the signed releases" "$(cat "$TMP/chg")" "Go back to signed releases"
+    has "and the switch installs them" "$out" "APPLIED binaries=prebuilt force=1"
+    has "a newer release is the default yes" "$(cat "$TMP/sg.txt")" "yes|"
+    out=$(prebuilt_available() { FEED_VERSION=0.13.0; return 0; }; manage_change 2>&1)
+    has "an older release names both versions" "$(cat "$TMP/sg.txt")" "Version 0.13.0 is older than the version 0.14.0 built here"
+    has "and is the default no" "$(cat "$TMP/sg.txt")" "no|"
+    out=$(ui_yesno() { return 1; }; manage_change 2>&1)
+    lacks "a switch nobody confirmed applies nothing" "$out" "APPLIED"
+    out=$(prebuilt_available() { PREBUILT_WHY="the release list could not be checked"; return 1; }; ui_msg() { echo "MSG $2"; }; manage_change 2>&1)
+    lacks "no release for this machine applies nothing" "$out" "APPLIED"
+    has "and says why" "$out" "the release list could not be checked"
+    CFG_BINARIES=prebuilt
+    out=$(ui_menu() { printf '%s\n' "$@" >"$TMP/chg"; UI_REPLY=grace; }; ask_grace() { :; }; manage_change 2>&1)
+    lacks "a signed release offers no switch" "$(cat "$TMP/chg")" "signed releases"
+    CFG_BINARIES=source CFG_MODE=docker
+    out=$(ui_menu() { printf '%s\n' "$@" >"$TMP/chg"; UI_REPLY=grace; }; ask_grace() { :; }; manage_change 2>&1)
+    lacks "docker offers no switch" "$(cat "$TMP/chg")" "signed releases"
+}
+in_sub t_signed_again
 
 echo "downgrade copy"
 t_downgrade() {

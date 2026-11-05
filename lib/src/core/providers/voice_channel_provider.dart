@@ -495,6 +495,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   int _screenShareExcludePid = 0;
   bool _voiceRedirectActive = false;
 
+  /// Test seam: arms the redirect for every share, as a Windows entire-screen
+  /// share with audio does.
+  @visibleForTesting
+  bool debugArmEveryShare = false;
+  @visibleForTesting
+  bool get debugVoiceRedirectArmed => _voiceRedirectActive;
+
   Timer? _screenTrackPoller;
 
   bool _leaving = false;
@@ -707,6 +714,21 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
+  /// A share never follows us into another room: whatever is left of one, or
+  /// a start still at its picker, ends before the new room hears of us.
+  Future<void> _dropShareFromElsewhere() async {
+    _shareSessionId = null;
+    if (state.isScreenSharing) {
+      await stopScreenShare();
+      return;
+    }
+    final capture = _screenCaptureStream;
+    final preview = _localScreenPreviewRenderer;
+    _screenCaptureStream = null;
+    _localScreenPreviewRenderer = null;
+    await ShareCapture.close(capture, preview);
+  }
+
   /// True once this join has been superseded (left, forced out, or joined
   /// elsewhere) while this bring-up was still walking its awaits.
   ///
@@ -730,6 +752,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // A join this device did not start through joinChannel holds it too.
     RealtimeSessionFlag.acquire('voice-channel');
     final gen = ++_joinGen;
+    if (state.currentServerId != serverId ||
+        state.currentChannelId != channelId) {
+      await _dropShareFromElsewhere();
+    }
 
     String? channelName = ref.read(channelListProvider)[channelId]?.name;
     if (channelName == null) {
@@ -1628,7 +1654,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     ScreenContentProfile profile = ScreenContentProfile.motion,
   }) async {
     if (!state.isInVoiceChannel || _leaving) return;
-    if (state.isScreenSharing) return;
+    if (state.isScreenSharing || _shareStarting) return;
 
     final callState = ref.read(callProvider);
     if (callState.isScreenSharing) {
@@ -1647,58 +1673,18 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     // Mint this share session's identity; a restart mints a new stream id.
     final rng = Random.secure();
-    _shareSessionId =
+    final session = _shareSessionId =
         List.generate(8, (_) => rng.nextInt(16).toRadixString(16)).join();
-    _shareOriginPeer = await network_api.getLocalDevicePeerId() ??
-        (ref.read(identityProvider).peerId ?? '');
-
-    // Capture screen ONCE. Source enumeration is desktop-only; mobile
-    // captures THE screen (MediaProjection / ReplayKit broadcast).
-    if (Platform.isAndroid) {
-      // Constraints are ignored by the Android plugin (MediaProjection captures
-      // at native display size); the per-peer encoder cap does the downscaling.
-      _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
-        'video': true,
-        'audio': false,
-      });
-    } else if (Platform.isIOS) {
-      // 'broadcast' selects the ReplayKit Broadcast Upload Extension path.
-      _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
-        'video': {'deviceId': 'broadcast'},
-        'audio': false,
-      });
-    } else {
-      // A Wayland portal-first share MUST NOT re-enumerate: enumerating here
-      // would pop an extra xdg-desktop-portal dialog.
-      if (!DesktopCaptureSupport.isPortalSourceId(sourceId)) {
-        await desktopCapturer.getSources(
-            types: DesktopCaptureSupport.sourceTypes);
-      }
-      // Windows and Linux carry share audio over a data channel, so never ask
-      // getDisplayMedia for audio: the WASAPI path crashes Windows.
-      final getDisplayAudio =
-          shareAudio && !Platform.isWindows && !Platform.isLinux;
-
-      _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
-        'video': {
-          'deviceId': {'exact': sourceId},
-          'mandatory': {
-            'frameRate': fps.toDouble(),
-            'width': width,
-            'height': height,
-          },
-        },
-        'audio': getDisplayAudio,
-      });
-      // The portal grant now exists: the next share can reuse it promptless.
-      if (DesktopCaptureSupport.isPortalSourceId(sourceId)) {
-        DesktopCaptureSupport.portalGrantLikely = true;
-      }
-    }
-
-    _localScreenPreviewRenderer = RTCVideoRenderer();
-    await _localScreenPreviewRenderer!.initialize();
-    _localScreenPreviewRenderer!.srcObject = _screenCaptureStream;
+    final opened = await _openShare(session,
+        sourceId: sourceId,
+        width: width,
+        height: height,
+        fps: fps,
+        shareAudio: shareAudio);
+    if (opened == null) return;
+    _shareOriginPeer = opened.origin;
+    _screenCaptureStream = opened.capture;
+    _localScreenPreviewRenderer = opened.preview;
 
     // Use the SHORT side so a portrait capture (1080x1920) reads "1080p".
     const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
@@ -1725,11 +1711,83 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // ENTIRE-SCREEN anti-echo (Windows): a whole-system capture would re-capture
     // the peers' voices, so redirect all inbound audio to an out-of-process
     // renderer and exclude THAT pid. Armed once here, covering every peer.
+    final isEntireScreen = pid == 0 && windowHwnd == 0;
+    await _finishShareStart(
+      session: session,
+      shareAudio: shareAudio,
+      armRedirect: debugArmEveryShare ||
+          (Platform.isWindows && shareAudio && isEntireScreen),
+    );
+  }
+
+  /// Set from the mint of a share session until its capture is ours or lost:
+  /// the picker is up meanwhile, and a second start would race it.
+  bool _shareStarting = false;
+
+  /// A stop, a leave, a kick or a newer start took [session] while it opened.
+  bool _shareStartLost(String session) =>
+      _shareSessionId != session || !state.isInVoiceChannel || _leaving;
+
+  /// [_shareStartLost], or the share already ended after it went live.
+  bool _shareSuperseded(String session) =>
+      _shareStartLost(session) ||
+      !state.isScreenSharing ||
+      _stoppingScreenShare;
+
+  /// Opens the capture and self-preview for [session]; null, with both
+  /// closed, once the session was lost on the way. Nothing reaches the share
+  /// fields before the last await, so no teardown can miss what this opened.
+  Future<({MediaStream capture, RTCVideoRenderer preview, String origin})?>
+      _openShare(
+    String session, {
+    required String sourceId,
+    required int width,
+    required int height,
+    required int fps,
+    required bool shareAudio,
+  }) async {
+    _shareStarting = true;
+    MediaStream? capture;
+    RTCVideoRenderer? preview;
+    var kept = false;
+    try {
+      final origin = await network_api.getLocalDevicePeerId() ??
+          (ref.read(identityProvider).peerId ?? '');
+      if (_shareStartLost(session)) return null;
+      capture = await ShareCapture.open(
+          sourceId: sourceId,
+          width: width,
+          height: height,
+          fps: fps,
+          shareAudio: shareAudio);
+      if (_shareStartLost(session)) return null;
+      preview = ShareCapture.newPreview();
+      await preview.initialize();
+      preview.srcObject = capture;
+      if (_shareStartLost(session)) return null;
+      kept = true;
+      return (capture: capture, preview: preview, origin: origin);
+    } finally {
+      _shareStarting = false;
+      if (!kept) {
+        if (_shareSessionId == session) _shareSessionId = null;
+        await ShareCapture.close(capture, preview);
+      }
+    }
+  }
+
+  Future<void> _finishShareStart({
+    required String session,
+    required bool shareAudio,
+    required bool armRedirect,
+  }) async {
     _screenShareExcludePid = 0;
     _voiceRedirectActive = false;
-    final isEntireScreen = pid == 0 && windowHwnd == 0;
-    if (Platform.isWindows && shareAudio && isEntireScreen) {
-      await _armVoiceRedirect();
+    // A stop, leave or newer start that landed during an await owns the
+    // share now: announcing it would tell the room about a share nothing captures.
+    if (armRedirect) {
+      await _armVoiceRedirect(session);
+      if (_shareSuperseded(session)) return;
     }
 
     // Opt-in watching (issue #38): no fan-out here. Peers learn from the
@@ -1739,8 +1797,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // _outgoingScreenShares.keys picks up late joiners automatically.
     if (shareAudio && (Platform.isAndroid || Platform.isIOS)) {
       final webrtc = ref.read(webRtcProvider.notifier).service;
-      _mobileShareAudioCapturer = MobileScreenAudioCapturer();
-      final ok = await _mobileShareAudioCapturer!.start(onPacket: (packet) {
+      final capturer = _mobileShareAudioCapturer = MobileScreenAudioCapturer();
+      final ok = await capturer.start(onPacket: (packet) {
         for (final sharePeerId in _outgoingScreenShares.keys) {
           webrtc.sendScreenAudio(sharePeerId, packet);
         }
@@ -1749,11 +1807,24 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         debugPrint('[HOLLOW-AU-SCREEN] VC mobile audio capture unavailable');
         _mobileShareAudioCapturer = null;
       }
+      if (_shareSuperseded(session)) {
+        if (identical(_mobileShareAudioCapturer, capturer)) {
+          await _stopMobileShareAudio();
+        }
+        return;
+      }
     }
 
     _broadcastScreenState(true);
 
     _startScreenTrackPoller();
+  }
+
+  @visibleForTesting
+  Future<void> debugFinishShareStart({required bool armRedirect}) {
+    _shareSessionId = 'debug-share';
+    return _finishShareStart(
+        session: 'debug-share', shareAudio: false, armRedirect: armRedirect);
   }
 
   /// Stop the central mobile share-audio capture (no-op on desktop / when
@@ -1772,6 +1843,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Stop sharing our screen.
   Future<void> stopScreenShare() async {
+    if (_shareStarting && !state.isScreenSharing) {
+      // The picker is still up: losing its session makes the start close
+      // what it opens.
+      _shareSessionId = null;
+      return;
+    }
     if (!state.isScreenSharing || _stoppingScreenShare) return;
     _stoppingScreenShare = true;
     debugPrint('[HOLLOW-VC] Stopping screen share');
@@ -1846,26 +1923,39 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Arms the entire-screen anti-echo voice redirect for the share being
-  /// started.
-  Future<void> _armVoiceRedirect() async {
+  /// The redirect arm in flight; arms run one at a time, as native holds one
+  /// redirect for the process.
+  Future<void>? _armInFlight;
+
+  /// Arms the entire-screen anti-echo voice redirect for [session]. An arm
+  /// whose share ended meanwhile takes its own redirect back.
+  Future<void> _armVoiceRedirect(String session) async {
+    final previous = _armInFlight;
+    final done = Completer<void>();
+    _armInFlight = done.future;
     try {
-      _screenShareExcludePid = await _service?.startVoiceRedirect() ?? 0;
-      _voiceRedirectActive = _screenShareExcludePid != 0;
-      _vcLog('[HOLLOW-AU-SCREEN] VC voice redirect '
-          '${_voiceRedirectActive ? "armed (pid=$_screenShareExcludePid)" : "not armed"}');
-    } catch (e) {
-      _vcLog('[HOLLOW-AU-SCREEN] VC voice redirect failed to arm: $e');
-    }
-    // A stop that landed during the arm found nothing to disarm.
-    if (_voiceRedirectActive &&
-        (!state.isScreenSharing || _stoppingScreenShare)) {
-      await _disarmVoiceRedirect();
+      if (previous != null) await previous;
+      if (_shareSuperseded(session)) return;
+      try {
+        _screenShareExcludePid = await _service?.startVoiceRedirect() ?? 0;
+        _voiceRedirectActive = _screenShareExcludePid != 0;
+        _vcLog('[HOLLOW-AU-SCREEN] VC voice redirect '
+            '${_voiceRedirectActive ? "armed (pid=$_screenShareExcludePid)" : "not armed"}');
+      } catch (e) {
+        _vcLog('[HOLLOW-AU-SCREEN] VC voice redirect failed to arm: $e');
+      }
+      if (_voiceRedirectActive && _shareSuperseded(session)) {
+        await _disarmVoiceRedirect();
+      }
+    } finally {
+      if (identical(_armInFlight, done.future)) _armInFlight = null;
+      done.complete();
     }
   }
 
   @visibleForTesting
-  Future<void> debugArmVoiceRedirect() => _armVoiceRedirect();
+  Future<void> debugArmVoiceRedirect() =>
+      _armVoiceRedirect(_shareSessionId ??= 'debug-share');
 
   /// Disarm the entire-screen anti-echo voice redirect: restores in-process
   /// playout and shuts the renderer child down. No-op when not armed.

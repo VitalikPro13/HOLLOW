@@ -13,6 +13,7 @@ import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/storage_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -1239,12 +1240,48 @@ Widget dmConversationStart({
 }
 
 /// The start of a channel with no messages.
-Widget channelConversationStart(String channelName, {bool isVoice = false}) =>
-    HollowEmptyState(
+Widget channelConversationStart(
+  String channelName, {
+  required String serverId,
+  required String channelId,
+  bool isVoice = false,
+}) =>
+    _ChannelConversationStart(
+      channelName: channelName,
+      serverId: serverId,
+      channelId: channelId,
+      isVoice: isVoice,
+    );
+
+class _ChannelConversationStart extends ConsumerWidget {
+  final String channelName;
+  final String serverId;
+  final String channelId;
+  final bool isVoice;
+  const _ChannelConversationStart({
+    required this.channelName,
+    required this.serverId,
+    required this.channelId,
+    required this.isVoice,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Until the floor is read (or when it cannot be), claim nothing about
+    // where the channel starts: after a clear, other members hold more.
+    final cleared =
+        ref.watch(channelHistoryClearedProvider((serverId, channelId))).valueOrNull;
+    return HollowEmptyState(
       glyph: isVoice ? LucideIcons.volume2 : LucideIcons.hash,
       title: isVoice ? 'Welcome to $channelName' : 'Welcome to #$channelName',
-      description: 'This is the beginning of the channel.',
+      description: switch (cleared) {
+        true => 'Older messages were cleared from this device.',
+        false => 'This is the beginning of the channel.',
+        null => null,
+      },
     );
+  }
+}
 
 /// Message rows at their final geometry, bottom-pinned like the list they
 /// stand in for. Empty for the first second: a Timer, never a Ticker.

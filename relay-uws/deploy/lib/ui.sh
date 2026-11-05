@@ -384,15 +384,17 @@ ui_secret() {
     esac
 }
 
-# ui_secret_file <path>: a secret from a file (a TOKEN= line, or the value alone
-# on its first line) into UI_REPLY, never shown. Returns 1 when the file cannot
-# be read, and warns when every account on this machine can read it.
+# ui_secret_file <path>: a secret from a file (a TOKEN= or DUCKDNS_TOKEN= line,
+# or the value alone on its first line) into UI_REPLY, never shown. Returns 1
+# when the file cannot be read, and warns when every account on this machine
+# can read it.
 UI_SECRET_FILE_OPEN=0
 ui_secret_file() {
     local f=$1
     UI_REPLY="" UI_SECRET_FILE_OPEN=0
     [ -f "$f" ] && [ -r "$f" ] || return 1
     UI_REPLY=$(kv_get "$f" TOKEN)
+    [ -n "$UI_REPLY" ] || UI_REPLY=$(kv_get "$f" DUCKDNS_TOKEN)
     [ -n "$UI_REPLY" ] || UI_REPLY=$(head -n 1 "$f" | tr -d '[:space:]')
     if [ -n "$(find "$f" -maxdepth 0 -perm -o=r 2>/dev/null)" ]; then
         UI_SECRET_FILE_OPEN=1

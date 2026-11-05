@@ -308,6 +308,16 @@ pub fn count_channel_messages_ffi(server_id: String, channel_id: String) -> Resu
     Ok(ms.count_channel_messages(&server_id, &channel_id))
 }
 
+/// Whether this device cleared the channel's history, so its empty state never
+/// says the channel starts there.
+#[frb]
+pub fn channel_history_cleared(server_id: String, channel_id: String) -> Result<bool, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms.channel_floor(&server_id, &channel_id).is_some())
+}
+
 /// A peer's still as Dart may paint it: through the image check, or nothing (AR-28).
 fn shown(bytes: Option<Vec<u8>>) -> Option<Vec<u8>> {
     crate::node::image_gate::shown(bytes)

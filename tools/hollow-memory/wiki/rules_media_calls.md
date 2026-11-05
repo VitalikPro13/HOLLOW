@@ -181,6 +181,10 @@ whitelist) stay in CLAUDE.md.
   realtime Rust crates REQUIRE `[profile.dev.package.*] opt-level=3` (else fake
   "jitter"); iOS: NEVER add message types to the `rtc_SSFD` socket.
   `project_mobile_screen_share_send`.
+- A share start awaits the capture picker (Android consent, the iOS broadcast sheet, the Wayland
+  portal) while the app stays usable: what it opens stays in locals until its last await and is
+  closed when a leave, kick, stop or hang-up took its session meanwhile; a join into another room
+  drops any share left over. HOL-SEC-195, `vc_leave_teardown_test`, `dm_share_start_test`.
 - `HotkeyController` = in-call only. `project_issue38_watch_gate_ptt_grid`.
 
 ## Media tooling

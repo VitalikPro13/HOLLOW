@@ -49,7 +49,16 @@ release pipeline is the `release` skill.
   entry point catches everything, because a WinRT throw (WPN_E_PLATFORM_UNAVAILABLE when the notification
   platform is down, or in an ssh logon session) crosses the Dart FFI boundary and terminates the app.
   `test/windows_toast_plugin_guard_test.dart` guards it; an upstream bump must re-apply the catches.
-  Other WinRT/COM plugins (local_auth_windows, audioplayers_windows) carry the same exposure, not audited yet.
+- `audioplayers_windows` is vendored the same way (`packages/audioplayers_windows`, 4.3.0): both
+  method-channel handlers catch everything (a C++ throw through the embedder's C callback ends the
+  process), and `RunSyncInMTA` rethrows a work item's failure on the caller, because the throw
+  skipped `SetEvent` and left the platform thread waiting forever (a frozen window when Media
+  Foundation fails). `local_auth_windows` awaits Windows Hello outside any try in a
+  `fire_and_forget` coroutine (a WinRT failure = terminate), so App Lock calls it on phones only;
+  a desktop biometric feature must fork it first. Both guarded by
+  `test/windows_audio_plugin_guard_test.dart`.
+- Known, not fixed: the vendored `setSourceUrl`/`setSourceBytes` threads hold a raw `AudioPlayer*`,
+  so a dispose landing mid-set is a use-after-free (mostly unreachable: `SoundService` awaits play).
 
 ## Linux
 

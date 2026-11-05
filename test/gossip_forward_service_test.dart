@@ -304,6 +304,8 @@ class _Native {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUpAll(() => RustLib.initMock(api: _Api()));
+  // The shipping value, read before setUp forces forwarding on.
+  final shipsForwarding = gossipForwardingEnabled;
 
   late _Native native;
   late VoiceChannelService svc;
@@ -746,6 +748,29 @@ void main() {
         reason: "A's own voice stayed at 0: C's silent copy was keyed by a "
             'track id that A also carries');
   });
+
+  // AR-40 (1): a forward is recognised by the track id its forwarder wrote.
+  // This runs once forwarding ships on and fails until forwards are keyed by
+  // transceiver mid on both ends.
+  test(
+    'a forwarder naming its own voice like an asked forward keeps its slider',
+    () async {
+      final (toA, _) = await askForD();
+      native.voiceArrives(toA, 't-a', '$kForwardStreamPrefix$_d');
+      await settle();
+      native.volumeCalls.clear();
+      native.volumes.clear();
+      await svc.setRemoteVolume(_a, 0.0);
+      expect(
+        native.volumeCalls,
+        isNotEmpty,
+        reason:
+            "A's own voice escaped A's slider: the forward test keys by "
+            'the track id A chose',
+      );
+    },
+    skip: shipsForwarding ? false : 'AR-40 (1): gossip forwarding ships off',
+  );
   test('a forward whose SFrame cryptor never bound is taken back off its leg',
       () async {
     svc = await join(_b);

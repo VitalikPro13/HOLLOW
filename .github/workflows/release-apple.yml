@@ -454,6 +454,9 @@ jobs:
           sudo xcode-select -s "$XCODE_APP"
           xcodebuild -version
 
+      - name: Background task holds tests
+        run: bash scripts/ios_task_holds_test.sh
+
       - name: Install Flutter
         run: |
           set -euo pipefail

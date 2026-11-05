@@ -130,6 +130,12 @@ dependency_overrides:
   # end the process at startup. test/windows_toast_plugin_guard_test.dart.
   flutter_local_notifications_windows:
     path: packages/flutter_local_notifications_windows
+  # Fork of 4.3.0 whose method-channel handlers catch every C++ exception and
+  # whose MTA hop rethrows instead of waiting forever: upstream (4.4.1 too)
+  # ends the process or freezes the window when Media Foundation fails.
+  # test/windows_audio_plugin_guard_test.dart.
+  audioplayers_windows:
+    path: packages/audioplayers_windows
 
 # Android launcher icons. Run scripts/make_app_icons.py first (it renders these
 # sources from assets/branding/hollow_mark.svg), then:

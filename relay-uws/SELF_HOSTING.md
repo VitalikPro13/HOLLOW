@@ -322,8 +322,8 @@ whether an update is out), then **What next?**:
 | Choice | What it does |
 |---|---|
 | **Update to version …** | Shown when a newer signed release is out. Downloads it, checks it, installs it and restarts the relay and the forwarder. If the new version doesn't start, the previous one goes back on by itself. |
-| **Rebuild from this copy** / **Rebuild the containers from this copy** | For a build from source or Docker. Shown when you run the setup from your clone of the repository. For a build from source, only when the clone holds other code than the build running now. |
-| **Change a setting** | TURN, push, the forwarder, members-only, adding or removing a members-only key, the wait for dropped connections, or the address. It shows that option's screen again, then applies the change. |
+| **Rebuild from this copy** / **Rebuild the containers from this copy** | Shown when you run the setup from your clone of the repository. For a build from source, only when the clone holds other code than the build running now. On a relay that runs programs from a signed release, it builds them from the clone instead, and the menu stops offering signed updates. If the clone holds an older version than the one running, it asks you first. |
+| **Change a setting** | TURN, push, the forwarder, members-only, adding or removing a members-only key, the wait for dropped connections, or the address. On a relay with a certificate from the Let's Encrypt staging service, it also offers a trusted one, and on a relay built from source it offers to go back to signed releases. It shows that option's screen again, then applies the change. |
 | **Show the members-only keys** | Lists the keys to hand out. |
 | **Turn SSH password logins off** | Shown while passwords are still on. The same guided flow as above. |
 | **Add another computer's SSH key** | Lets one more computer log in, with the same confirmed key login. It never turns passwords back on and never removes a key. |
@@ -337,7 +337,8 @@ whether an update is out), then **What next?**:
 for example from cloud-init. `relay-uws/test/installer/answers.example` lists
 every key. A key you leave out takes the recommended choice, and an unknown key
 stops the run, so a typo never passes silently. The DuckDNS token can come from
-a file (`duckdns_token_file=`). The SSH switch needs the fingerprint of your key
+a file (`duckdns_token_file=`) that holds the token alone on its first line, or
+on a `TOKEN=` or `DUCKDNS_TOKEN=` line. The SSH switch needs the fingerprint of your key
 (`ssh_key_fingerprint=`, as `ssh-keygen -lf ~/.ssh/id_ed25519.pub` prints it),
 so a login by any other key never turns passwords off. In this mode the
 members-only keys go to `/root/hollow-relay-member-keys.txt`, which only root can
@@ -1011,7 +1012,10 @@ often you may ask for the same certificate. While you work out a problem, use it
 staging service: `staging=yes` in an [answer file](#without-anyone-at-the-keyboard),
 or under Docker `CERTBOT_STAGING=1` in `.env` and
 `docker compose up -d --force-recreate certbot-init`. The app doesn't trust
-staging certificates, so clear the setting once the rest works. Under Docker,
+staging certificates, so switch back once the rest works. If the setup installed
+the relay, run it again and choose **Change a setting**, then the certificate. If
+you run Docker by hand, remove `CERTBOT_STAGING` from `.env` and run
+`docker compose up -d --force-recreate certbot-init`. Under Docker,
 `docker compose logs certbot-init` shows what went wrong.
 
 **The relay doesn't start or says unhealthy.** Read its log. The full setup:

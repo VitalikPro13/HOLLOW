@@ -332,6 +332,16 @@
   },
   {
    "peer": "a",
+   "op": "expect_text",
+   "value": "Older messages were cleared from this device."
+  },
+  {
+   "peer": "a",
+   "op": "expect_no_text",
+   "value": "This is the beginning of the channel."
+  },
+  {
+   "peer": "a",
    "op": "shot",
    "name": "w2cm-06-channel-after-clear"
   },

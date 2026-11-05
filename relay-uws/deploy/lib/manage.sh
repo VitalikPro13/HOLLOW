@@ -182,6 +182,11 @@ update_check() {
         fi
         return 0
     fi
+    # Programs from a signed release can be swapped for a build of this clone.
+    if [ -f "$REPO/relay-uws/src/main.cpp" ]; then
+        source_differs || true
+        REBUILD_AVAILABLE=1
+    fi
     if ! feed_lib_present; then
         UPDATE_TEXT="cannot check, this copy of the installer has no release feed helper."
         return 0
@@ -357,6 +362,15 @@ setup_change_text() {
 
 # A build from the copy of the repository this run comes from.
 manage_rebuild() {
+    local sv iv
+    sv=$(relay_source_version "$REPO")
+    iv=$(installed_version)
+    if [ -n "$sv" ] && [ -n "$iv" ] && version_older "$sv" "$iv"; then
+        ui_yesno confirm_older "Build an older version" \
+"This copy of the repository holds version $sv, which is older than the version $iv running here. A rebuild from it puts the older relay in place.
+
+We recommend no unless you know why you want the older one. $SNAPSHOT_LOSS" no || return 0
+    fi
     if [ "$CFG_MODE" = docker ]; then
         ui_yesno confirm "Rebuild the containers" \
 "I will copy this repository's relay sources to $DOCKER_DIR, build the containers again and restart them. $( [ "$CFG_FORWARDER" = yes ] && echo "The forwarder is part of it, which takes up to an hour or two on a small machine. ")The relay is down only for the restart at the end, and every restart of the relay container drops what is in its memory." yes || return 0
@@ -364,10 +378,14 @@ manage_rebuild() {
         summary_screen
         return 0
     fi
+    local from_release="" was=$CFG_BINARIES
+    [ "$(installed_source)" = source ] || from_release="
+
+The relay here now runs the programs of a signed release. After the rebuild it runs the ones built here, and the menu no longer offers signed updates. To update it later, pull this copy and rebuild."
     ui_yesno confirm "Rebuild the relay" \
 "I will build $SOURCE_LABEL from this copy of the repository, install it and restart the relay$( [ "$CFG_FORWARDER" = yes ] && echo " and the forwarder. Building the forwarder takes up to an hour or two on a small machine"). The relay keeps running during the build.
 
-Offline messages and dropped connections carry across the restart when the version goes up. $SNAPSHOT_LOSS" yes || return 0
+Offline messages and dropped connections carry across the restart when the version goes up. $SNAPSHOT_LOSS$from_release" yes || return 0
     APPLY_STARTED=1
     FORCE_PROGRAMS=1
     RESTART_UNITS=()
@@ -384,6 +402,9 @@ Offline messages and dropped connections carry across the restart when the versi
         ui_msg "Rebuild undone" "The new build did not start, so the previous one runs again. $SNAPSHOT_LOSS The relay's journal says why: journalctl -u hollow-relay -e"
         return 0
     fi
+    # Saved only once the build answers, so the next settings change keeps it
+    # rather than putting a release's programs back.
+    [ "$was" = source ] || conf_save
     say "  the relay answers: $(local_get /relay-status)"
 }
 
@@ -405,6 +426,9 @@ manage_change() {
         grace "Wait for dropped connections: ${CFG_GRACE_SECS:-120} seconds"
         cake "Fair share of the upload: $(cake_text)"
         address "The relay's address: $CFG_HOST")
+    [ "${CFG_STAGING:-no}" = yes ] && items+=(certificate "Certificate: Let's Encrypt staging, which the app does not trust")
+    [ "$CFG_MODE" = native ] && [ "${CFG_BINARIES:-}" = source ] && feed_lib_present &&
+        items+=(signed "Go back to signed releases")
     ui_menu change "Change a setting" "Which setting? I show its screen again, then apply the change. Everything else stays as it is." turn "${items[@]}"
     case "$UI_REPLY" in
     turn) ask_turn ;;
@@ -431,10 +455,35 @@ manage_change() {
     grace) ask_grace ;;
     cake) ask_cake ;;
     address) preflight_run; ask_address; address_prepare ;;
+    certificate)
+        ui_yesno confirm "Get a trusted certificate" \
+"I will ask Let's Encrypt for a certificate from its live service in place of the staging one, which the app refuses. The relay keeps its address. This takes about a minute, and the relay restarts with the new certificate." yes || return 0
+        CFG_STAGING=no ;;
+    signed) manage_signed_again || return 0 ;;
     esac
     ssh_firewall_guard
     apply_all
     summary_screen
+}
+
+# Puts the signed release's programs back in place of a build from source.
+manage_signed_again() {
+    if ! prebuilt_available; then
+        ui_msg "No signed release" "There are no ready-made programs for this machine, because $PREBUILT_WHY. The relay keeps the programs built here."
+        return 1
+    fi
+    local iv older="" def=yes
+    iv=$(installed_version)
+    if [ -n "$iv" ] && [ -n "${FEED_VERSION:-}" ] && version_older "$FEED_VERSION" "$iv"; then
+        older="
+
+Version $FEED_VERSION is older than the version $iv built here, so we recommend no unless you know why you want it. $SNAPSHOT_LOSS"
+        def=no
+    fi
+    ui_yesno confirm "Go back to signed releases" \
+"I will download version ${FEED_VERSION:-the newest} from the signed release list, check it and install it in place of the programs built here, then restart the relay$( [ "$CFG_FORWARDER" = yes ] && echo " and the forwarder"). Updates then come from the status screen again.$older" "$def" || return 1
+    CFG_BINARIES=prebuilt
+    FORCE_PROGRAMS=1
 }
 
 manage_keys() {

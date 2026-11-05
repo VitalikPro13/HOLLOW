@@ -2415,8 +2415,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       markerKey: channelMarkerKey(widget.serverId!, widget.channelId!),
       isMine: (m) => m.isMe,
       rowBuilder: _buildChannelRow,
-      conversationStart: () =>
-          channelConversationStart(widget.channelName ?? 'channel'),
+      conversationStart: () => channelConversationStart(
+          widget.channelName ?? 'channel',
+          serverId: widget.serverId!,
+          channelId: widget.channelId!),
     );
   }
 

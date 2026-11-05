@@ -284,6 +284,11 @@ class CallNotifier extends Notifier<CallState> {
   /// the call voice renders out-of-process so the capture can exclude its pid.
   bool _voiceRedirectActive = false;
 
+  /// Bumped by every share teardown, so a start still at its picker knows it
+  /// lost the share; [_dmShareStarting] refuses a second picker meanwhile.
+  int _dmShareGen = 0;
+  bool _dmShareStarting = false;
+
   RTCVideoRenderer? get screenShareRenderer =>
       _incomingScreenShare?.remoteRenderer;
 
@@ -1328,7 +1333,11 @@ class CallNotifier extends Notifier<CallState> {
     int windowHwnd = 0,
     ScreenContentProfile profile = ScreenContentProfile.motion,
   }) async {
-    if (state.status != CallStatus.active) return;
+    if (state.status != CallStatus.active ||
+        state.isScreenSharing ||
+        _dmShareStarting) {
+      return;
+    }
 
     final peerId = state.peerId!;
     final callId = state.callId!;
@@ -1343,46 +1352,33 @@ class CallNotifier extends Notifier<CallState> {
     _dmShareHwnd = windowHwnd;
     _dmShareProfile = profile;
 
+    // The picker is up across these awaits: a hang-up or stop meanwhile owns
+    // the share, and the capture opened for it is closed, never kept.
+    final gen = ++_dmShareGen;
+    bool lost() =>
+        gen != _dmShareGen ||
+        state.callId != callId ||
+        state.status != CallStatus.active;
+    _dmShareStarting = true;
+    MediaStream? capture;
+    RTCVideoRenderer? preview;
     try {
-      // Capture screen ONCE (same platform branches as the VC path).
-      if (Platform.isAndroid) {
-        _dmScreenStream = await navigator.mediaDevices.getDisplayMedia({
-          'video': true,
-          'audio': false,
-        });
-      } else if (Platform.isIOS) {
-        _dmScreenStream = await navigator.mediaDevices.getDisplayMedia({
-          'video': {'deviceId': 'broadcast'},
-          'audio': false,
-        });
-      } else {
-        // A Wayland portal-first share MUST NOT re-enumerate (extra portal dialog);
-        // Windows/Linux audio rides the data channel, never getDisplayMedia.
-        if (!DesktopCaptureSupport.isPortalSourceId(sourceId)) {
-          await desktopCapturer.getSources(
-              types: DesktopCaptureSupport.sourceTypes);
-        }
-        final getDisplayAudio =
-            shareAudio && !Platform.isWindows && !Platform.isLinux;
-        _dmScreenStream = await navigator.mediaDevices.getDisplayMedia({
-          'video': {
-            'deviceId': {'exact': sourceId},
-            'mandatory': {
-              'frameRate': fps.toDouble(),
-              'width': width,
-              'height': height,
-            },
-          },
-          'audio': getDisplayAudio,
-        });
-        if (DesktopCaptureSupport.isPortalSourceId(sourceId)) {
-          DesktopCaptureSupport.portalGrantLikely = true;
-        }
-      }
-
-      _dmScreenPreviewRenderer = RTCVideoRenderer();
-      await _dmScreenPreviewRenderer!.initialize();
-      _dmScreenPreviewRenderer!.srcObject = _dmScreenStream;
+      capture = await ShareCapture.open(
+          sourceId: sourceId,
+          width: width,
+          height: height,
+          fps: fps,
+          shareAudio: shareAudio);
+      if (lost()) return;
+      preview = ShareCapture.newPreview();
+      await preview.initialize();
+      preview.srcObject = capture;
+      if (lost()) return;
+      _dmScreenStream = capture;
+      _dmScreenPreviewRenderer = preview;
+      capture = null;
+      preview = null;
+      _dmShareStarting = false;
 
       // Use the SHORT side so a portrait capture (1080x1920) reads "1080p".
       const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
@@ -1416,6 +1412,9 @@ class CallNotifier extends Notifier<CallState> {
       await _teardownDmShareCapture();
       state = state.copyWith(
           isScreenSharing: false, clearScreenShareLabel: true);
+    } finally {
+      _dmShareStarting = false;
+      await ShareCapture.close(capture, preview);
     }
   }
 
@@ -1528,6 +1527,7 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Dispose the provider-owned DM capture stream + preview + poller.
   Future<void> _teardownDmShareCapture() async {
+    _dmShareGen++;
     _dmScreenTrackPoller?.cancel();
     _dmScreenTrackPoller = null;
     if (_dmScreenPreviewRenderer != null) {

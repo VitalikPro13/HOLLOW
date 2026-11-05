@@ -1737,6 +1737,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
                       _loadHistory();
                     },
                     start: () => channelConversationStart(widget.channelName,
+                        serverId: widget.serverId,
+                        channelId: widget.channelId,
                         isVoice: widget.isVoice),
                   )
                 : _buildMessageList(hollow, messages),

@@ -72,6 +72,16 @@ Future<int> countChannelMessagesFfi({
   channelId: channelId,
 );
 
+/// Whether this device cleared the channel's history, so its empty state never
+/// says the channel starts there.
+Future<bool> channelHistoryCleared({
+  required String serverId,
+  required String channelId,
+}) => RustLib.instance.api.crateApiStorageChannelHistoryCleared(
+  serverId: serverId,
+  channelId: channelId,
+);
+
 /// Get a profile for a specific peer (or ourselves). Returns None if no profile stored.
 Future<UserProfile?> getProfile({required String peerId}) =>
     RustLib.instance.api.crateApiStorageGetProfile(peerId: peerId);

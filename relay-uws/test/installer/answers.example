@@ -8,8 +8,8 @@ mode=native              # native (recommended) | docker
 binaries=prebuilt        # prebuilt (recommended) | source   (native only)
 address=duckdns          # duckdns (recommended) | ip | domain
 duckdns_name=myrelay     # for address=duckdns: myrelay or myrelay.duckdns.org
-# The token itself, or a file that holds it (a TOKEN= line, or the token alone
-# on its first line), so it need not sit in this file.
+# The token itself, or a file that holds it (a TOKEN= or DUCKDNS_TOKEN= line,
+# or the token alone on its first line), so it need not sit in this file.
 duckdns_token_file=/root/duckdns.token
 #duckdns_token=a1b2c3d4-0000-1111-2222-333344445555
 #ip=203.0.113.7          # for address=ip; default: the address the internet sees
