@@ -243,13 +243,10 @@ async fn resend_on_new_session_inner(
 async fn on_session_ready(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
-    crdt_store: &super::crdt_store::CrdtStore,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
-    pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     master_peer_str: &str,
     peer_str: &str,
@@ -282,10 +279,6 @@ async fn on_session_ready(
             peer_str, master_peer_str, ws_cmd_tx, ws_room_peers, db_path, db_passphrase,
         );
     }
-    sync_handler::flush_pending_sync_requests(
-        pending_sync_requests, peer_str, olm, crypto_store, bundle_keypair, event_tx,
-        ws_cmd_tx, ws_room_peers, crdt_store, db_path, db_passphrase,
-    ).await;
 }
 
 /// Push our WHOLE personal emote set (tombstones included) to a verified sibling.
@@ -1325,7 +1318,6 @@ async fn run_event_loop(
 
     // Track failed sync requests per peer — retried after session re-establishment.
     // Maps peer_id_str → Vec<(server_id, channel_id, since_timestamp)>
-    let mut pending_sync_requests: HashMap<String, Vec<(String, String, i64)>> = HashMap::new();
 
     // server_ids we already requested MLS bootstrap for, so an MlsChannelMessage
     // for an unknown group cannot spam the owner. The value is when the request
@@ -1535,7 +1527,7 @@ async fn run_event_loop(
                     &mut join_resolutions,
                     &mut awaiting_mls_after_parked_join,
                     &crdt_store,
-                    &mut pending_sync_requests, &mut mls,
+                    &mut mls,
                     &mut mls_bootstrap_requested,
                     &mut mls_welcome_grace,
                     &mut relay_catchup_done,
@@ -3445,7 +3437,7 @@ async fn run_event_loop(
                                                                 &mut join_resolutions,
                                                                 &mut awaiting_mls_after_parked_join,
                                                                 &crdt_store,
-                                &mut pending_sync_requests, &mut mls,
+                                &mut mls,
                                 &mut mls_bootstrap_requested,
                                 &mut mls_welcome_grace,
                                 &mut relay_catchup_done,
@@ -4288,21 +4280,12 @@ async fn run_event_loop(
                                     // Olm session + queued-message drain. Shared verbatim with
                                     // the forwarder-room minimal path so the two can never
                                     // diverge on the signed-key-exchange rules.
-                                    if ensure_olm_session_and_drain(
+                                    ensure_olm_session_and_drain(
                                         &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
                                         &ws_room_peers, &mut pending_messages,
                                         &mut key_request_in_flight, &device_keypair,
                                         &device_peer_id, &peer_id, "PeerJoined", Some(&mut frame_budget),
-                                    ).await {
-                                        sync_handler::flush_pending_sync_requests(
-                                            &mut pending_sync_requests, &peer_id,
-                                            &mut olm, &crypto_store,
-                                            &bundle_keypair, &event_tx,
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            &crdt_store,
-                                            &db_path, &db_passphrase,
-                                        ).await;
-                                    }
+                                    ).await;
 
                                     // CRDT sync and message sync for shared servers. Members are master-keyed and
                                     // `peer_id` is a DEVICE, so match by identity: a multi-device member's device
@@ -4956,21 +4939,12 @@ async fn run_event_loop(
                                     // Olm key exchange, pending_messages drain and DM sync. RoomMembers fires
                                     // on the JOINING peer (us) while PeerJoined fires on the EXISTING peer
                                     // (them); without this, DM sync is one-directional.
-                                    if ensure_olm_session_and_drain(
+                                    ensure_olm_session_and_drain(
                                         &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
                                         &ws_room_peers, &mut pending_messages,
                                         &mut key_request_in_flight, &device_keypair,
                                         &device_peer_id, pid_str, "RoomMembers", Some(&mut frame_budget),
-                                    ).await {
-                                        sync_handler::flush_pending_sync_requests(
-                                            &mut pending_sync_requests, pid_str,
-                                            &mut olm, &crypto_store,
-                                            &bundle_keypair, &event_tx,
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            &crdt_store,
-                                            &db_path, &db_passphrase,
-                                        ).await;
-                                    }
+                                    ).await;
 
                                     // DM sync: ask this peer for messages we missed.
                                     // High-water keyed by the peer's MASTER (conversation
@@ -5254,7 +5228,7 @@ async fn run_event_loop(
                                 &mut join_resolutions,
                                 &mut awaiting_mls_after_parked_join,
                                 &crdt_store,
-                                &mut pending_sync_requests, &mut mls,
+                                &mut mls,
                                 &mut mls_bootstrap_requested,
                                 &mut mls_welcome_grace,
                                 &mut relay_catchup_done,
@@ -5813,7 +5787,7 @@ async fn run_event_loop(
                                                                                     &mut join_resolutions,
                                                                                     &mut awaiting_mls_after_parked_join,
                                                                                     &crdt_store,
-                                            &mut pending_sync_requests, &mut mls,
+                                            &mut mls,
                                             &mut mls_bootstrap_requested,
                                             &mut mls_welcome_grace,
                                             &mut relay_catchup_done,
@@ -8393,7 +8367,6 @@ async fn handle_incoming_request(
     join_resolutions: &mut HashMap<String, i64>,
     awaiting_mls_after_parked_join: &mut std::collections::HashSet<String>,
     crdt_store_actor: &super::crdt_store::CrdtStore,
-    pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     mls: &mut Option<MlsManager>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
     mls_welcome_grace: &mut HashMap<String, std::time::Instant>,
@@ -8453,7 +8426,7 @@ async fn handle_incoming_request(
         olm, crypto_store, crdt_store, crdt_resync, event_tx, pending_messages, frame_budget, key_request_in_flight,
         server_states, bundle_keypair, master_keypair, device_keypair, master_peer_str, device_peer_id,
         pending_server_joins, leave_book, join_request_seen, join_resolutions, awaiting_mls_after_parked_join,
-        crdt_store_actor, pending_sync_requests, mls, mls_bootstrap_requested, mls_welcome_grace,
+        crdt_store_actor, mls, mls_bootstrap_requested, mls_welcome_grace,
         relay_catchup_done, pending_file_streams, pending_shard_streams, early_file_streams,
         pending_link_snapshots, vault_shard_asks, link, decrypt_fail_cooldown, pending_mls_key_packages,
         pending_mls_removals, mls_epoch_hint_cooldown, ws_cmd_tx, ws_room_peers, webrtc_peers, share_registry,
@@ -8492,7 +8465,6 @@ async fn handle_incoming_request_inner(
     join_resolutions: &mut HashMap<String, i64>,
     awaiting_mls_after_parked_join: &mut std::collections::HashSet<String>,
     crdt_store_actor: &super::crdt_store::CrdtStore,
-    pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     mls: &mut Option<MlsManager>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
     mls_welcome_grace: &mut HashMap<String, std::time::Instant>,
@@ -8711,14 +8683,6 @@ async fn handle_incoming_request_inner(
                             master_peer_str, peer_str,
                         )
                         .await;
-
-                        sync_handler::flush_pending_sync_requests(
-                            pending_sync_requests, peer_str,
-                            olm, crypto_store, bundle_keypair, event_tx,
-                            ws_cmd_tx, ws_room_peers,
-                            crdt_store,
-                            db_path, db_passphrase,
-                        ).await;
                     }
                     Err(e) => {
                         hollow_log!("[HOLLOW-CRYPTO] Failed to create outbound session with {peer_str}: {e}");
@@ -8791,8 +8755,8 @@ async fn handle_incoming_request_inner(
                         }
                         if opened.created || opened.switched {
                             on_session_ready(
-                                olm, crypto_store, crdt_store, bundle_keypair, event_tx,
-                                ws_cmd_tx, ws_room_peers, pending_messages, pending_sync_requests,
+                                olm, crypto_store, event_tx,
+                                ws_cmd_tx, ws_room_peers, pending_messages,
                                 key_request_in_flight, master_peer_str, peer_str, had_session,
                                 true, frame_budget, db_path, db_passphrase,
                             ).await;
@@ -8840,8 +8804,8 @@ async fn handle_incoming_request_inner(
                         }
                         if !had_session {
                             on_session_ready(
-                                olm, crypto_store, crdt_store, bundle_keypair, event_tx,
-                                ws_cmd_tx, ws_room_peers, pending_messages, pending_sync_requests,
+                                olm, crypto_store, event_tx,
+                                ws_cmd_tx, ws_room_peers, pending_messages,
                                 key_request_in_flight, master_peer_str, peer_str, had_session,
                                 false, frame_budget, db_path, db_passphrase,
                             ).await;
@@ -11893,17 +11857,11 @@ async fn handle_incoming_request_inner(
         HavenMessage::ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps, gap } => {
             
 
-            // Room gating: only respond for servers we are a member of, and only
-            // for a channel this requester may SEE. The per-channel MLS subgroup
-            // keeps a non-qualifier out of live traffic, and backfill was the way
-            // straight around it, because this responder used to serve any
-            // channel's stored rows, file headers and AES keys included.
-            let visible = match server_states.get(&server_id) {
-                Some(state) => super::crypto_handler::channel_readable_by(state, peer_str, &channel_id),
-                None => return,
-            };
-            if !visible {
-                hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelSyncRequest from {peer_str} for {channel_id}: not visible to that member");
+            // A current member who may see the channel, and nobody else: the page carries
+            // deleted rows with their text, which members keep as evidence. A public
+            // channel's readers use the guest page (HOL-SEC-194).
+            if !super::crypto_handler::sync_partner(server_states.get(&server_id), peer_str, Some(&channel_id)) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelSyncRequest from {peer_str} for {channel_id}: not a member who can read it");
                 return;
             }
 
@@ -14975,6 +14933,13 @@ async fn handle_incoming_request_inner(
                         };
                         if !requester_is_member && !public_ok {
                             hollow_log!("[HOLLOW-SECURITY] REJECTED FileRequest from {peer_str} for {file_id} — not entitled ({} file)", file_meta.context_type);
+                            return;
+                        }
+                        // A deleted public post's file stays with members as evidence (HOL-SEC-194).
+                        if !requester_is_member
+                            && file_meta.message_id.as_deref().is_some_and(|mid| store.get_channel_message_hidden_at(mid).is_some())
+                        {
+                            hollow_log!("[HOLLOW-SECURITY] REJECTED FileRequest from {peer_str} for {file_id}: its post was deleted");
                             return;
                         }
                         // One relay stream per asker and file at a time, and a bounded

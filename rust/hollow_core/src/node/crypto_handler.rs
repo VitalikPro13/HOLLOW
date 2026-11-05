@@ -1723,8 +1723,9 @@ pub(crate) fn channel_backfill_allowed_from(
 }
 
 /// Whether `peer` may be asked to sync what we hold of a server, one channel of it or
-/// its op log: a device of a current member who can read that channel. Our request
-/// names what we hold, and a frame that fails to decrypt can come from anyone in the room.
+/// its op log, or be served a channel's sync page: a device of a current member who can
+/// read that channel. Our request names what we hold, and a frame that fails to decrypt
+/// can come from anyone in the room; a page carries deleted rows' text.
 pub(crate) fn sync_partner(
     state: Option<&crate::crdt::server_state::ServerState>,
     peer: &str,

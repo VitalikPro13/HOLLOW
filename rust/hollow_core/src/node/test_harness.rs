@@ -456,6 +456,7 @@ static CARRIED_LABELS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, supe
 /// Note the message inside an Olm frame that carries a KeyPackage message, so harness
 /// tests keep naming, reading and re-sending those frames after they moved inside Olm.
 pub(crate) fn label_carried_frame(frame: &[u8], plaintext: &str) {
+    note_sealed_channel_batch(frame, plaintext);
     let Ok(super::types::MessageEnvelope::Carried { msg, .. }) = serde_json::from_str(plaintext) else { return };
     if !matches!(msg.wire_kind().as_str(), "mls_kp" | "mls_kp_forward" | "mls_kp_ack") {
         return;
@@ -61811,4 +61812,182 @@ async fn t14c_the_f1_cascade_heals_by_silent_re_asks() {
         wait_until(20, async || c.live_server_state(&sid).await.is_some_and(|s| s.checkpoint_hlc.is_some() && s.is_member(&c_master))).await,
         "C lost its membership or its base over a restart",
     );
+}
+
+// w3-gp1
+
+/// The rows inside the channel sync batches the nodes sealed into Olm, by ciphertext (test only).
+static SEALED_CHANNEL_BATCHES: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<super::types::SyncMessageItem>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn note_sealed_channel_batch(frame: &[u8], plaintext: &str) {
+    let Ok(super::types::MessageEnvelope::ChannelSyncBatch { messages, .. }) = serde_json::from_str(plaintext) else { return };
+    if let Ok(super::types::HavenMessage::Encrypted { body, .. }) = serde_json::from_slice(super::frame_auth::unchecked_body(frame)) {
+        SEALED_CHANNEL_BATCHES.lock().unwrap_or_else(|p| p.into_inner()).insert(body, messages);
+    }
+}
+
+/// The channel sync rows `from` sealed to `to`, as the wiretap saw their frames.
+fn channel_batch_rows_sent(relay: &MockRelay, from: &TestNode, to: &TestNode) -> Vec<super::types::SyncMessageItem> {
+    let batches = SEALED_CHANNEL_BATCHES.lock().unwrap_or_else(|p| p.into_inner());
+    relay
+        .wiretap()
+        .frames
+        .iter()
+        .filter(|f| f.from == from.device_id && f.to.as_deref() == Some(to.device_id.as_str()))
+        .filter_map(|f| match serde_json::from_slice::<super::types::HavenMessage>(&f.body) {
+            Ok(super::types::HavenMessage::Encrypted { body, .. }) => batches.get(&body).cloned(),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// A server with a public #general holding one kept post and one the owner deleted,
+/// a stranger `g` in its room as a guest; with `files`, each post is a file and its id
+/// comes back, kept first.
+async fn public_channel_with_a_deleted_post(relay: &MockRelay, o: &mut TestNode, g: &TestNode, files: Option<&std::path::Path>) -> (String, String, Vec<String>) {
+    let server_id = create_server_and_wait(o, "Evidence Server").await;
+    let general = general_channel_of(&server_id);
+    let mut fids = Vec::new();
+    for (mid, text) in [("gp1-keep", "still here"), ("gp1-del", "the words its author took back")] {
+        if let Some(dir) = files {
+            let src = dir.join(format!("{mid}.txt"));
+            std::fs::write(&src, format!("bytes of {mid}")).expect("write src file");
+            fids.push(post_channel_file(o, &server_id, &general, &src, mid).await);
+        } else {
+            o.cmd_tx
+                .send(NodeCommand::SendChannelMessage {
+                    server_id: server_id.clone(),
+                    channel_id: general.clone(),
+                    text: text.to_string(),
+                    message_id: mid.to_string(),
+                    reply_to_mid: None,
+                    link_preview: None,
+                })
+                .await
+                .unwrap();
+        }
+    }
+    assert!(
+        wait_until(10, async || o.store().channel_message_exists("gp1-del")).await,
+        "the owner holds the post it will delete"
+    );
+    o.cmd_tx
+        .send(NodeCommand::DeleteChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), message_id: "gp1-del".to_string() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || o.store().get_channel_message_hidden_at("gp1-del").is_some()).await,
+        "the owner deletes its post"
+    );
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic { server_id: server_id.clone(), channel_id: general.clone(), is_public: true })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_channel_public(&general))).await,
+        "the channel goes public"
+    );
+    g.cmd_tx.send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || relay.room_devices(&server_id).contains(&g.device_id)).await, "the stranger is in the room");
+    (server_id, general, fids)
+}
+
+/// The guest page `g` gets for `general`: what a stranger may read, and proof the holder answers it.
+async fn guest_page(g: &mut TestNode, server_id: &str, general: &str) -> Vec<super::types::GuestSyncMessageFfi> {
+    g.cmd_tx
+        .send(NodeCommand::RequestPublicChannelSync { server_id: server_id.to_string(), channel_id: general.to_string(), before_timestamp: None })
+        .await
+        .unwrap();
+    let mut page = None;
+    wait_event(g, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::PublicChannelSyncReceived { messages, .. } = ev {
+            page = Some(messages.clone());
+        }
+        page.is_some()
+    })
+    .await;
+    page.expect("the stranger gets the guest page")
+}
+
+// HOL-SEC-194: the member channel sync responder answers only a member who may see
+// the channel; its page carries deleted posts' text. A public channel's stranger reads
+// the guest page, which leaves them out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_non_member_channel_sync_ask_gets_no_deleted_text() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let mut o = spawn_node_with_friends(&relay, 230, 230, &[]).await;
+    let mut g = spawn_node_with_friends(&relay, 231, 231, &[]).await; // a stranger: never a member
+    let (server_id, general, _) = public_channel_with_a_deleted_post(&relay, &mut o, &g, None).await;
+
+    for since_timestamp in [0, 1] {
+        let ask = super::types::HavenMessage::ChannelSyncRequest {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            since_timestamp,
+            sender_timestamps: HashMap::new(),
+            gap: None,
+        };
+        carry_as(&g, &o, ask).await;
+    }
+    expect_olm_confirmed(&o, &g, 30).await;
+    let page = guest_page(&mut g, &server_id, &general).await;
+    assert!(page.iter().any(|m| m.text == "still here"), "the holder answers the stranger's guest page");
+    assert!(page.iter().all(|m| m.message_id.as_deref() != Some("gp1-del")), "the guest page leaves the deleted post out");
+    // Absence proof: a member page would be paced out by now.
+    sleep_ms(500).await;
+    let rows = channel_batch_rows_sent(&relay, &o, &g);
+    assert!(
+        rows.is_empty(),
+        "a non-member was served the member sync page: {:?}",
+        rows.iter().map(|m| (m.mid.clone(), m.t.clone(), m.hidden_at)).collect::<Vec<_>>(),
+    );
+}
+
+// HOL-SEC-194: a deleted public post's file stays with members; a stranger who knows
+// its id gets nothing, while the kept post's file still reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_stranger_gets_no_file_of_a_deleted_public_post() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 230, 230, &[]).await;
+    let mut g = spawn_node_with_friends(&relay, 231, 231, &[]).await;
+    let (server_id, general, fids) = public_channel_with_a_deleted_post(&relay, &mut o, &g, Some(global_tmp.path())).await;
+    let (kept, deleted) = (fids[0].clone(), fids[1].clone());
+    assert!(o.file_meta(&deleted).is_some_and(|f| f.disk_path.is_some()), "precondition: the owner still holds the deleted post's file");
+    guest_page(&mut g, &server_id, &general).await;
+
+    // The deleted file is asked first, so its answer would come before the kept one's.
+    for fid in [&deleted, &kept] {
+        g.cmd_tx
+            .send(NodeCommand::RequestPublicFile { server_id: server_id.clone(), file_id: fid.clone(), peer_hint: Some(o.device_id.clone()) })
+            .await
+            .unwrap();
+    }
+    let mut leaked = false;
+    let got_kept = wait_event(&mut g, std::time::Duration::from_secs(15), |ev| {
+        match ev {
+            NetworkEvent::FileHeaderReceived { file_id, .. } | NetworkEvent::FileCompleted { file_id, .. } if *file_id == deleted => leaked = true,
+            _ => {}
+        }
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == kept)
+    })
+    .await;
+    assert!(got_kept, "the stranger still gets the kept public post's file");
+    // Absence proof: the earlier ask's header would have arrived first.
+    sleep_ms(300).await;
+    while let Ok(ev) = g.event_rx.try_recv() {
+        leaked |= matches!(&ev, NetworkEvent::FileHeaderReceived { file_id, .. } | NetworkEvent::FileCompleted { file_id, .. } if *file_id == deleted);
+    }
+    assert!(!leaked, "a stranger was served a deleted post's file");
+    assert!(g.file_meta(&deleted).is_none_or(|f| f.completed_at.is_none()), "no bytes of the deleted post's file on the stranger's disk");
 }

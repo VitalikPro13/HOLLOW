@@ -10,7 +10,7 @@ use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use super::crdt_store::CrdtStore;
 use super::crypto_handler::{
     send_mls_broadcast,
-    persist_mls_state, send_encrypted_message, online_devices_for,
+    persist_mls_state, online_devices_for,
     BackfillSig, PkCache,
 };
 use super::types::*;
@@ -3974,65 +3974,6 @@ pub(crate) async fn handle_discard_pending_join(
     discard_join_key_package(mls, crypto_store, &server_id, spent.as_deref());
 }
 
-// ── 18. flush_pending_sync_requests ───────────────────────────────────
-
-pub(crate) async fn flush_pending_sync_requests(
-    pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
-    peer_str: &str,
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    _crdt_store: &CrdtStore,
-    db_path: &str,
-    db_passphrase: &str,
-) {
-    let Some(entries) = pending_sync_requests.remove(peer_str) else {
-        return;
-    };
-    if entries.is_empty() {
-        return;
-    }
-
-    hollow_log!("[HOLLOW-SYNC] Flushing {} pending sync requests for {peer_str}", entries.len());
-
-    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
-
-    for (server_id, channel_id, since_timestamp) in entries {
-        let _ = event_tx.send(NetworkEvent::MessageSyncStarted {
-            server_id: server_id.clone(),
-            peer_id: peer_str.to_string(),
-        }).await;
-
-        // Re-query per-sender timestamps at flush time (DB may have changed since original request).
-        let sender_ts = store.get_per_sender_timestamps(&server_id, &channel_id).unwrap_or_default();
-        match build_channel_sync_batch(&store, &server_id, &channel_id, since_timestamp, &sender_ts, None) {
-            Ok((envelope, count)) => {
-                hollow_log!("[HOLLOW-SYNC] Retry: sending {count} messages for {channel_id} to {peer_str}");
-                let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-                let ok = send_encrypted_message(
-                    olm, crypto_store,
-                    peer_str, &envelope_json, event_tx,
-                    ws_cmd_tx, ws_room_peers,
-                ).await;
-
-                if !ok {
-                    hollow_log!("[HOLLOW-SYNC] Retry also failed for {server_id} — giving up");
-                    let _ = event_tx.send(NetworkEvent::MessageSyncFailed {
-                        server_id,
-                        error: "Retry after re-key also failed".to_string(),
-                    }).await;
-                }
-            }
-            Err(e) => {
-                hollow_log!("[HOLLOW-SYNC] DB query failed during retry for {server_id}: {e}");
-            }
-        }
-    }
-}
-
 /// Handle `MessageEnvelope::CrdtOp` (MLS path) — permission-checked CRDT op application.
 pub(crate) async fn handle_envelope_crdt_op(
     server_states: &mut ServerStates,
@@ -4696,5 +4637,47 @@ mod w2c_guest_floor {
         assert_eq!(guest_page_more(Some(100), 50, 50, Some(100)), Some(true), "a page reaching the floor");
         assert_eq!(guest_page_more(Some(100), 3, 50, Some(500)), Some(true), "rows ran out at the floor");
         assert_eq!(guest_page_more(Some(100), 0, 50, None), None, "an empty page from a cleared device was sent");
+    }
+}
+
+// w3-gp1
+#[cfg(test)]
+mod w3_gp1 {
+    use super::{build_channel_sync_batch, channel_sync_request};
+    use crate::node::crypto_handler::{channel_readable_by, sync_partner};
+    use crate::node::types::{HavenMessage, MessageEnvelope};
+
+    /// A public channel's sync page goes only to a member who may see the channel; the
+    /// public carve-out of `channel_readable_by` does not reach it (HOL-SEC-194).
+    #[test]
+    fn a_public_channels_sync_page_goes_only_to_a_member() {
+        let _g = crate::node::resolver::test_lock();
+        let mut s = crate::crdt::server_state::ServerState::new("srv".into(), "S".into(), "gp1-owner".into());
+        let general = s.channels.keys().next().cloned().expect("a founding channel");
+        s.channels.get_mut(&general).unwrap().is_public = true;
+        assert!(channel_readable_by(&s, "gp1-stranger", &general), "precondition: a stranger may read a public channel");
+        assert!(!sync_partner(Some(&s), "gp1-stranger", Some(&general)), "a stranger is served the member page");
+        assert!(sync_partner(Some(&s), "gp1-owner", Some(&general)));
+        assert!(!sync_partner(None, "gp1-owner", Some(&general)), "a server we do not hold");
+    }
+
+    /// A member refused before we could place it holds nothing from us, so its next ask
+    /// gets the old deleted row back with its text.
+    #[test]
+    fn a_member_once_refused_gets_its_old_evidence_on_the_retry() {
+        const DAY: i64 = 86_400_000;
+        let open = || crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+        let (holder, asker) = (open(), open());
+        for (mid, ts) in [("old-kept", 10 * DAY), ("old-gone", 10 * DAY + 5), ("new-kept", 100 * DAY)] {
+            holder.insert_channel_message("srv", "ch", "al", &format!("t-{mid}"), false, ts, Some("sig"), Some("pk"), Some(mid), None, None, None, None).unwrap();
+        }
+        holder.set_channel_message_hidden("old-gone", 11 * DAY).unwrap();
+        let HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, .. } = channel_sync_request(&asker, "srv", "ch", true) else { panic!("an ask") };
+        let (env, _) = build_channel_sync_batch(&holder, "srv", "ch", since_timestamp, &sender_timestamps, gap.as_ref()).unwrap();
+        let MessageEnvelope::ChannelSyncBatch { messages, .. } = env else { panic!("a batch") };
+        assert!(
+            messages.iter().any(|m| m.mid.as_deref() == Some("old-gone") && m.t == "t-old-gone" && m.hidden_at.is_some()),
+            "the member's old evidence is missing",
+        );
     }
 }
