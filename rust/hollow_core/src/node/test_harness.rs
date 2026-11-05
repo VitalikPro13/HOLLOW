@@ -365,6 +365,9 @@ struct RelayInner {
     held_lock_reads: HashMap<String, Vec<WsEvent>>,
     /// devices whose lock puts the relay never receives ([`MockRelay::lose_lock_puts`]).
     lost_lock_puts: std::collections::HashSet<String>,
+    /// A 0.13 relay: it keeps lock links without the device proof it cannot read
+    /// ([`MockRelay::drop_lock_proofs`]).
+    drops_lock_proofs: bool,
     /// device -> server room -> the public half of the door its socket proves
     /// (`WsCommand::SetDoor`); the mock compares it where the relay checks a proof.
     doors_held: HashMap<String, HashMap<String, String>>,
@@ -549,7 +552,7 @@ fn relay_lock_put(
             || crate::crdt::anchor::is_genesis_id(server)
             || super::join_lock::base_owner(server, first).as_deref() == Some(owner)
     });
-    let counted = |master: &str, device: &str| roster_counts(rosters, master, device);
+    let counted = |master: &str, device: &str| lock_counts(rosters, master, device);
     let Some(next) = names_owner.then(|| super::join_lock::relay_put(server, &stored, links, &counted)).flatten() else {
         return (stored, false);
     };
@@ -567,6 +570,12 @@ fn roster_counts(rosters: &HashMap<String, InboxRoster>, master: &str, device: &
     let Some(held) = rosters.get(master) else { return false };
     let base = held.roster.base();
     held.roster.fold(|d| held.seen.get(&format!("{base}|{d}")).copied(), super::roster_book::now_ms()).is_member(device)
+}
+
+/// Whether server authority over every roster shown for `master` counts `device`: what
+/// the relay judges a lock link's device by (`RosterBook::counted_authority`).
+fn lock_counts(rosters: &HashMap<String, InboxRoster>, master: &str, device: &str) -> bool {
+    rosters.get(master).is_some_and(|held| held.roster.authority().counts(device))
 }
 
 /// The relay's door grace (`door_room::GRACE_MS`, 60 s), short enough for a test to
@@ -1210,6 +1219,16 @@ impl MockRelay {
         self.inner.lock().unwrap().lost_lock_puts.insert(device.to_string());
     }
 
+    /// From now on keep lock links as a 0.13 relay does, without their device proofs.
+    pub(crate) fn drop_lock_proofs(&self) {
+        self.inner.lock().unwrap().drops_lock_proofs = true;
+    }
+
+    /// `roster` shown on `master`'s inbox by `from` (a stolen device's own statements).
+    pub(crate) fn show_roster(&self, from: &str, master: &str, roster: crate::identity::roster::Roster) {
+        self.inner.lock().unwrap().show_roster(from, &format!("inbox:{master}"), roster);
+    }
+
     /// How many lock reads from `device` wait unanswered.
     pub(crate) fn held_lock_reads(&self, device: &str) -> usize {
         self.inner.lock().unwrap().held_lock_reads.get(device).map_or(0, Vec::len)
@@ -1735,7 +1754,13 @@ impl RelayInner {
             WsCommand::LockPut { .. } if inner.lost_lock_puts.contains(from) => {}
             WsCommand::LockPut { server, owner, links } => {
                 let before = inner.room_door(&server);
-                let (current, accepted) = relay_lock_put(&mut inner.locks, &inner.inbox_rosters, &server, &owner, &links);
+                let (mut current, accepted) = relay_lock_put(&mut inner.locks, &inner.inbox_rosters, &server, &owner, &links);
+                if inner.drops_lock_proofs {
+                    for link in &mut current {
+                        link.dev = None;
+                    }
+                    inner.locks.insert(super::join_lock::record_key(&server, &owner), current.clone());
+                }
                 let after = inner.room_door(&server);
                 if after.is_some() && after != before {
                     inner.relock(&server, before.is_some());
@@ -27570,7 +27595,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // (20.1 s, total 1074.8 s on top of w2-d and w2-c, slack 1.2 s).
     // 2026-11-02: t14-lock's fix round added one absence, no lock move while a removed
     // device's leaf is still in the group (3.0 s, total 1077.8 s on the merged branch, slack 1.2 s).
-    const BUDGET_MS: u64 = 1_079_000;
+    // 2026-11-05: t14-r2 added one absence, no second lock offer to a relay that drops the
+    // device proof before the first miss's wait ends (2.0 s).
+    const BUDGET_MS: u64 = 1_084_000;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -61990,4 +62017,198 @@ async fn a_stranger_gets_no_file_of_a_deleted_public_post() {
     }
     assert!(!leaked, "a stranger was served a deleted post's file");
     assert!(g.file_meta(&deleted).is_none_or(|f| f.completed_at.is_none()), "no bytes of the deleted post's file on the stranger's disk");
+}
+
+// w3-r2
+/// The owner's two devices as legacy roots, the one the removal walk takes first (the
+/// lower id) making the server.
+async fn r2_owner_and_second(relay: &MockRelay, master: u8, a: u8, b: u8) -> (TestNode, TestNode, String) {
+    let id = |t: u8| NativeKeypair::from_secret_bytes(&seed_bytes(t)).peer_id();
+    let (first, second) = if id(a) < id(b) { (a, b) } else { (b, a) };
+    t14l_owner_with_two_devices(relay, master, first, second).await
+}
+
+/// DEVICE_PROOF section 12 item 9: the relay judges lock links by the removal walk.
+/// A stolen owner device answers its removal by removing the honest one: the inbox fold
+/// drops both, but the honest device ranks first, so its next moves still land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14d_after_a_mutual_removal_the_owner_still_moves_the_lock() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const M: u8 = 171;
+    let (b, c, server_id) = r2_owner_and_second(&relay, M, 172, 173).await;
+    assert!(
+        wait_until(20, async || b.mls_members(&server_id).await.contains(&c.device_id)).await,
+        "the second device holds a leaf in the server's group",
+    );
+    // Away, the remover takes no MLS turn, so the leaf stays while the thief answers.
+    relay.set_background(&b, true);
+    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
+    assert!(wait_until(20, async || !relay.counts(&b.master_id, &c.device_id)).await, "the relay's fold drops the stolen device");
+    let ahead = relay_tip(&relay, &server_id);
+
+    let thief = relay.device_kp(&c.device_id);
+    let mut answer = super::roster_book::load(&c.store(), &b.master_id).expect("the thief holds the roster");
+    answer.add_removal(crate::identity::roster::sign_removal(&thief, &b.master_id, &answer.base(), &b.device_id, &[]));
+    relay.show_roster(&c.device_id, &b.master_id, answer);
+    assert!(!relay.counts(&b.master_id, &b.device_id), "setup: the inbox fold removes the honest device too");
+    drop(c);
+    relay.set_background(&b, false);
+
+    assert!(
+        wait_until(40, async || {
+            let tip = relay_tip(&relay, &server_id);
+            tip.n > ahead.n && super::join_lock::link_device(&server_id, &tip).is_some_and(|(_, d)| d == b.device_id)
+        })
+        .await,
+        "the honest device's move after the leaf left lands, got {:?}",
+        relay.lock_chain(&server_id, &b.master_id).iter().map(|l| l.n).collect::<Vec<_>>(),
+    );
+}
+
+/// DEVICE_PROOF section 12 item 9: a member's recovery that keeps one device drops the
+/// other without removing it, and the owner moves the lock as for a removal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14d_a_recovery_that_drops_a_device_moves_the_lock() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 174;
+    const M: u8 = 175;
+    const MB: u8 = 176;
+    const MC: u8 = 177;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O)).peer_id();
+    let mut o = spawn_node_with_friends(&relay, O, O, &[&m_master]).await;
+    let mut mb = spawn_node_full(&relay, M, MB, &[&o_master], Some(&[MB, MC])).await;
+    let mc = spawn_node_full(&relay, M, MC, &[&o_master], Some(&[MB, MC])).await;
+    expect_siblings_ready(&relay, &mb, &mc, 15).await;
+    expect_dm_pair_ready(&relay, &o, &mb, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Recovered").await;
+    mb.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut mb, &server_id, 20).await, "M joins, a plain member");
+    let start = relay_tip(&relay, &server_id).n;
+    drop(mc);
+
+    super::roster_book::recover(&tag_kp(M), &recovery_kp(M), &tag_kp(MB), &[], true, &mb.db_path, &mb.passphrase)
+        .expect("M recovers keeping only this device");
+    let dropped = tag_kp(MC).peer_id();
+    mb.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![dropped.clone()] }).await.unwrap();
+    assert!(
+        wait_until(20, async || {
+            super::roster_book::load(&o.store(), &m_master).is_some_and(|r| !r.authority().counts(&dropped))
+        })
+        .await,
+        "the owner holds M's recovery",
+    );
+    assert!(
+        wait_until(40, async || relay_tip(&relay, &server_id).n > start).await,
+        "the owner moves the lock for the dropped device",
+    );
+}
+
+/// DEVICE_PROOF section 12 item 9, on the recovering device itself: an owner that types
+/// its phrase keeping only this device moves the lock away from the device it dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14d_our_own_recovery_moves_the_lock() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const M: u8 = 179;
+    let (b, c, server_id) = r2_owner_and_second(&relay, M, 180, 181).await;
+    let id = |t: u8| NativeKeypair::from_secret_bytes(&seed_bytes(t)).peer_id();
+    let b_tag = if id(180) == b.device_id { 180 } else { 181 };
+    let start = relay_tip(&relay, &server_id).n;
+    super::roster_book::recover(&tag_kp(M), &recovery_kp(M), &tag_kp(b_tag), &[], true, &b.db_path, &b.passphrase)
+        .expect("the owner recovers keeping only this device");
+    b.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![c.device_id.clone()] }).await.unwrap();
+    assert!(
+        wait_until(40, async || relay_tip(&relay, &server_id).n > start).await,
+        "the recovering owner moves the lock for the device it dropped",
+    );
+    let tip = relay_tip(&relay, &server_id);
+    assert_eq!(super::join_lock::link_device(&server_id, &tip).map(|(_, d)| d), Some(b.device_id.clone()));
+    drop(c);
+}
+
+/// A 0.14 owner on a relay that keeps lock links without their device proofs (0.13)
+/// never holds the lock it made, so it offers less and less often rather than once per
+/// answer (11-05: about 25 locks a second).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14d_an_owner_on_a_relay_that_drops_lock_proofs_backs_off() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.drop_lock_proofs();
+    let mut o = spawn_node_with_friends(&relay, 178, 178, &[]).await;
+    let mark = relay.log_mark();
+    o.cmd_tx.send(NodeCommand::CreateServer { name: "Old Relay".into() }).await.unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::ServerCreated { .. })).await,
+        "the server is made",
+    );
+    sleep_ms(2_000).await; // an ABSENCE: no second offer before the first miss's wait ends
+    let puts = relay.commands_since(&o.device_id, mark).into_iter().filter(|(kind, _, _)| *kind == "lock_put").count();
+    assert_eq!(puts, 1, "an owner the relay never holds a lock for offered {puts} in 2 s");
+}
+
+/// N12b closed (AR-38): a mod removing a second device of its own inside `REMOVAL_GAP`
+/// still moves the lock ahead of the removal, so the removed device never races the
+/// remover for the relay's tip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14d_a_second_removal_inside_the_gap_still_moves_the_lock_first() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const M: u8 = 196;
+    let id = |t: u8| NativeKeypair::from_secret_bytes(&seed_bytes(t)).peer_id();
+    let mut tags = [197u8, 198, 199];
+    tags.sort_by_key(|t| id(*t));
+    let mut b = spawn_node_full(&relay, M, tags[0], &[], Some(&tags)).await;
+    let c = spawn_node_full(&relay, M, tags[1], &[], Some(&tags)).await;
+    let d = spawn_node_full(&relay, M, tags[2], &[], Some(&tags)).await;
+    expect_siblings_ready(&relay, &b, &c, 15).await;
+    expect_siblings_ready(&relay, &b, &d, 15).await;
+    let server_id = create_server_and_wait(&mut b, "Second Removal").await;
+    assert!(
+        wait_until(20, async || !relay.lock_chain(&server_id, &b.master_id).is_empty()).await,
+        "the owner's first lock reaches the relay",
+    );
+    assert!(
+        wait_until(30, async || {
+            let leaves = b.mls_members(&server_id).await;
+            leaves.contains(&c.device_id) && leaves.contains(&d.device_id)
+        })
+        .await,
+        "both siblings hold a leaf in the server's group",
+    );
+
+    let start = relay_tip(&relay, &server_id).n;
+    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
+    assert!(
+        wait_until(40, async || relay_tip(&relay, &server_id).n >= start + 2).await,
+        "the move ahead of the first removal, then the removal's own once the leaf is out",
+    );
+    sleep_ms(3_000).await; // no pollable signal: a keeper tick settles the first removal and opens its gap
+
+    let before = relay_tip(&relay, &server_id).n;
+    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: d.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
+    assert!(
+        wait_until(3, async || relay_tip(&relay, &server_id).n > before).await,
+        "the second removal inside the gap moves the lock ahead of it too",
+    );
+    let tip = relay_tip(&relay, &server_id);
+    assert_eq!(super::join_lock::link_device(&server_id, &tip), Some((b.master_id.clone(), b.device_id.clone())), "the remover's move");
+    drop((c, d));
 }

@@ -1827,20 +1827,19 @@ static void handle_lock_put(SSLWebSocket* ws, PerSocketData* data, const json& j
     const LockLink* before = room_lock(state, server);
     const std::string old_door = before ? before->door : std::string();
     std::vector<LockLink> current;
-    // The relay's fold of the identity's rosters (ID-1R) judges each device a link
-    // names, cached in the book until that roster changes; with none held it counts nobody.
-    const int64_t now_ms = wall_now_ms();
-    const LockCounted counted = [&state, now_ms](const std::string& master, const std::string& device) {
+    // Server authority over the identity's held rosters (the removal walk, not ID-1R's
+    // inbox fold) judges each device a link names; with none held it counts nobody.
+    const LockCounted counted = [&state](const std::string& master, const std::string& device) {
         const auto* held = state.roster_book.get(master);
         if (!held) return false;
-        // A fold verifies every statement; the plan priced only the links.
+        // The walk reads every statement; the plan priced only the links.
         auto charge = [held] {
             const roster::Roster& r = held->roster;
             const size_t sigs = 1 + r.recoveries.size() + r.phrase_admits.size() + r.consents.size() +
                                 r.vouches.size() + r.pendings.size() + 2 * r.legacy.size() + r.removals.size();
             breaker::bump(breaker::SIG_W * static_cast<int64_t>(sigs));
         };
-        return state.roster_book.counted_fold(*held, now_ms, relay_roster_crypto(), charge).is_member(device);
+        return state.roster_book.counted_authority(*held, relay_roster_crypto(), charge).counts(device);
     };
     // The rules read a link's device proof more than once; each signature is checked once.
     std::unordered_map<std::string, bool> verified;
@@ -4084,6 +4083,18 @@ static breaker::Plan plan_text(RelayState& state, const PerSocketData* data, con
         auto rit = state.ws_rooms.find(json_text(j, "server"));
         const door_room::Doors* doors = rit == state.ws_rooms.end() ? nullptr : &rit->second.doors;
         plan.w = breaker::lock_put_w(n, doors ? doors->proofs.size() : 0, doors ? doors->pending.size() : 0);
+        // The held chain's checks the rules make past the links' own (crypto.cpp charges
+        // each as it runs; the plan judges them before).
+        const json* first = n > 0 && (*links)[0].is_object() ? &(*links)[0] : nullptr;
+        const auto held_it = first ? state.join_locks.records.find(join_lock::record_key(json_text(j, "server"), json_text(j, "owner")))
+                                   : state.join_locks.records.end();
+        if (held_it != state.join_locks.records.end() && !held_it->second.empty()) {
+            const std::vector<LockLink>& held = held_it->second;
+            auto num = first->find("n");
+            const bool tip_next = num != first->end() && num->is_number_unsigned() && num->get<uint64_t>() == held.back().n + 1;
+            plan.w += breaker::lock_put_held_w(first->contains("owner"), json_text(*first, "sig") == held.front().sig, tip_next,
+                                               static_cast<int64_t>(held.size()));
+        }
     } else if (type == "lock_get") {
         auto locks = j.find("locks");
         const size_t n = locks != j.end() && locks->is_array() ? std::min<size_t>(locks->size(), 256) : 0;

@@ -1170,6 +1170,7 @@ async fn run_event_loop(
     // Our side of every server's join lock (`lock_keeper`), and joins that just
     // completed, whose later answers still merge (`RecentJoin`).
     let mut lock_keeper = super::lock_keeper::LockKeeper::default();
+    lock_keeper.read_rosters(&db_path, &db_passphrase);
     // The door each server room's join proves to the relay (`door_room`).
     let mut door_rooms = super::door_room::DoorRooms::default();
     // Our leaves still on their way, and our identity's leaves held against a late join.
@@ -1819,6 +1820,8 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::RosterChanged { newly_revoked } => {
+                        // A recovery typed here drops devices without removing them.
+                        super::lock_keeper::note_dropped_devices(&local_peer_str, &newly_revoked);
                         enforce_device_revocations(
                             &newly_revoked, &mut olm, &crypto_store, mls.as_ref(), &server_states,
                             &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
@@ -7345,6 +7348,7 @@ async fn follow_reconciled(
     pending_mls_removals: &mut HashMap<String, Vec<String>>,
 ) {
     enforce_device_revocations(&reconciled.removed, olm, crypto_store, mls, server_states, local_peer_str, ws_room_peers, pending_mls_removals);
+    reconciled.note_drops();
     for master in &reconciled.masters {
         let _ = event_tx.send(NetworkEvent::DeviceListUpdated { master_peer_id: master.clone() }).await;
     }

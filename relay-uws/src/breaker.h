@@ -508,12 +508,22 @@ struct Plan {
     uint64_t frame_bytes = 0;
 };
 
-// A lock_put's W: its links' signature checks, and a door check for each stored proof the
-// move judges again. A proof that opened nothing when shown (`pending`, a subset of
-// `proofs`) is the relay's cost: strangers piling junk into a room must not make a
-// moderator's kick expensive.
+// A lock_put's W: two signature checks per link sent (its key and its device proof), and
+// a door check for each stored proof the move judges again. A proof that
+// opened nothing when shown (`pending`, a subset of `proofs`) is the relay's cost:
+// strangers piling junk into a room must not make a moderator's kick expensive.
 inline int64_t lock_put_w(int64_t links, size_t proofs, size_t pending) {
-    return 2 + SIG_W * links + DH_W * static_cast<int64_t>(proofs - std::min(pending, proofs));
+    return 2 + 2 * SIG_W * links + DH_W * static_cast<int64_t>(proofs - std::min(pending, proofs));
+}
+
+// A lock_put's W past `lock_put_w` for the `held` links of the chain the relay holds,
+// which the rules check again: a new base meets the held base's two signatures; a first
+// link that is not the next lock may be a fork, whose scan checks it against every held
+// lock and each later link's proof, then the base. Extending the newest lock costs nothing.
+inline int64_t lock_put_held_w(bool base_first, bool same_base, bool tip_next, int64_t held) {
+    if (held <= 0) return 0;
+    if (base_first) return same_base ? 0 : 2 * SIG_W;
+    return tip_next ? 0 : SIG_W * (2 * held + 2);
 }
 
 // A leave's W: only a member's leave is announced, so only it pays for the walk.

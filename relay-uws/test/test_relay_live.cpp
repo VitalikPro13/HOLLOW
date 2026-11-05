@@ -5329,6 +5329,45 @@ static void test_breaker_a_move_pays_for_member_proofs() {
     check("twenty junk proofs, none", junk == clean);
 }
 
+// R2 review (4): a lock put is judged at what it then costs, the held chain's checks
+// included: a new base checks the held base's two signatures again, an extension of the
+// newest lock checks no held link.
+static void test_breaker_a_lock_put_pays_for_the_held_chain() {
+    printf("breaker (enforced): a lock put is judged for the held chain it checks again\n");
+    Ident owner, change, change2, change3;
+    Door door, door2, door3;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    auto p = login3(Ident(), "new", 0);
+    auto put = [&](const json& links) {
+        p->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", links}});
+        auto r = next_json(*p, json_where([&room](const json& j) {
+            return j.value("type", "") == "lock_chain" && j.value("server", "") == room;
+        }));
+        return r && r->value("put", false);
+    };
+    // Past the plan: what the put cost beyond the W it was judged at.
+    auto past_plan = [&](const json& links, bool* taken) {
+        const int64_t before = spent_of(p->id.peer);
+        *taken = put(links);
+        p->ws.pump(150);
+        const int64_t spent = spent_of(p->id.peer) - before, plan = plan_w_of(p->id.peer);
+        printf("    spent %lld W, judged at %lld W\n", static_cast<long long>(spent), static_cast<long long>(plan));
+        return spent - plan;
+    };
+    check("setup: the first base is taken", put(join_lock::links_to_json({base_lock(room, door, change, owner, nonce, true)})));
+    bool taken = false;
+    const int64_t reset = past_plan(
+        join_lock::links_to_json({base_lock(room, door2, change2, owner, nonce, true, 2, &owner_device(owner), false)}), &taken);
+    check("setup: a new base is taken", taken);
+    const int64_t extend = past_plan(json::array({successor_link(room, 3, door3, change3, change2, owner)}), &taken);
+    check("setup: an extension is taken", taken);
+    printf("    past the plan: a new base %lld W, an extension %lld W\n", static_cast<long long>(reset),
+           static_cast<long long>(extend));
+    check("a new base is judged at what it costs, the held base's two signatures included", reset == 0);
+    check("so is an extension of the newest lock", extend == 0);
+}
+
 // C9 of the 0.13 mutation pass: only a member's leave is announced, so only it pays for
 // a walk of the room.
 static void test_breaker_a_non_member_leave_costs_one() {
@@ -6161,6 +6200,41 @@ static void test_lock_needs_a_counted_device() {
     check("the device left resets it", put({base_lock(room, door4, change4, owner, nonce, true, 4, &second, false)}));
 }
 
+// Design DEVICE_PROOF section 12 item 9: lock puts are judged by the removal walk, so
+// after a mutual removal of two owner devices the one the walk takes first (the lower id
+// of two legacy roots) still moves the lock, and the other moves nothing. ID-1R's inbox
+// fold removes both.
+static void test_lock_after_a_mutual_removal() {
+    printf("join lock: a mutual removal leaves the walk's first device the lock\n");
+    Ident owner, a, b, change, change2;
+    Door door, door2;
+    const Ident& first = a.peer < b.peer ? a : b;
+    const Ident& second = a.peer < b.peer ? b : a;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    auto p = login(Ident());
+    auto put = [&](const std::vector<LockLink>& links) {
+        p->send({{"type", "lock_put"}, {"server", room}, {"owner", ""}, {"links", join_lock::links_to_json(links)}});
+        auto r = next_json(*p, json_where([&room](const json& j) {
+            return j.value("type", "") == "lock_chain" && j.value("server", "") == room;
+        }));
+        return r && r->value("put", false);
+    };
+    auto shower = login(Ident(), "full");
+    const std::string inbox = "inbox:" + owner.peer;
+    shower->send({{"type", "join"}, {"room", inbox}, {"inbox_roster", legacy_roster(owner, {&a, &b})}});
+    next_json(*shower, typed("members", inbox));
+    check("the owner's first lock is taken", put({base_lock(room, door, change, owner, nonce, true, 1, &second, false)}));
+
+    roster::Roster r = *roster::from_json(roster_removing(owner, {&a, &b}, a, b));
+    r.removals.push_back({roster::LEGACY_BASE, b.peer, a.peer, {},
+                          a.sign(roster::removal_payload(owner.peer, roster::LEGACY_BASE, b.peer, {}))});
+    shower->send({{"type", "join"}, {"room", inbox}, {"inbox_roster", json::parse(roster::to_json(r).dump())}});
+    next_json(*shower, typed("members", inbox));
+    check("the device the walk removed resets nothing", !put({base_lock(room, door2, change2, owner, nonce, true, 2, &second, false)}));
+    check("the walk's first device still resets it", put({base_lock(room, door2, change2, owner, nonce, true, 2, &first, false)}));
+}
+
 int main(int argc, char** argv) {
     if (argc != 4 || (std::string(argv[3]) != "on" && std::string(argv[3]) != "off")) {
         fprintf(stderr, "usage: test_relay_live <port> <auth domain> <on|off>\n");
@@ -6192,6 +6266,14 @@ int main(int argc, char** argv) {
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
     }
+    // =lock_walk: lock puts judged by the removal walk (the mutation pass).
+    if (only && std::string(only) == "lock_walk") {
+        test_lock_needs_a_counted_device();
+        test_lock_after_a_mutual_removal();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
     // =fetch_presence: a fetch socket hears no presence (the mutation pass).
     if (only && std::string(only) == "fetch_presence") {
         test_fetch_hears_no_presence();
@@ -6211,6 +6293,7 @@ int main(int argc, char** argv) {
             test_breaker_junk_proofs_do_not_cost_the_mover();
             test_breaker_hidden_sender_pays_for_three();
             test_breaker_a_move_pays_for_member_proofs();
+            test_breaker_a_lock_put_pays_for_the_held_chain();
             test_breaker_a_non_member_leave_costs_one();
             test_breaker_unlocked_guest();
             test_breaker_fresh_session_counts_strangers_afresh();
@@ -6340,6 +6423,7 @@ int main(int argc, char** argv) {
         test_rings();
         test_catchup_end_mark();
         test_lock_needs_a_counted_device();
+        test_lock_after_a_mutual_removal();
         test_inbox_proof();
         test_inbox_audience();
         test_forwarder_rooms();

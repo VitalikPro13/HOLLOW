@@ -102,6 +102,12 @@ static void test_vectors() {
             relay = 2 + DH_W + (n + IDS_PER_W - 1) / IDS_PER_W + n + SIG_W * 2 * shown;
         }
         if (type == "topic_catchup") relay = 2 + 200;
+        if (type == "lock_put") {
+            const json links = json::parse(text).value("links", json::array());
+            const bool base_first = !links.empty() && links[0].is_object() && links[0].contains("owner");
+            // A new base over a held chain: the relay judges the held base's two checks too.
+            relay = lock_put_w(static_cast<int64_t>(links.size()), 0, 0) + lock_put_held_w(base_first, false, true, 1);
+        }
         if (type == "check_peers") relay = 2 + CHECK_PEERS_SCAN_W;
         if (type == "hb" || type == "ack") relay = 1;
         check("the client's price covers the relay: " + k.value("name", ""), k["w"].get<int64_t>() >= relay);
@@ -453,10 +459,15 @@ static void test_guards() {
 // a move pays for the stored proofs it judges again but never for junk, a leave pays for
 // its announcement only when the room had it.
 static void test_plan_prices() {
-    check("a move pays a signature per link", lock_put_w(3, 0, 0) == 2 + 3 * SIG_W);
-    check("and a door check per proof it judges again", lock_put_w(1, 5, 0) == 2 + SIG_W + 5 * DH_W);
+    check("a move pays two signatures per link", lock_put_w(3, 0, 0) == 2 + 2 * 3 * SIG_W);
+    check("and a door check per proof it judges again", lock_put_w(1, 5, 0) == 2 + 2 * SIG_W + 5 * DH_W);
     check("junk proofs cost the mover nothing", lock_put_w(1, 25, 20) == lock_put_w(1, 5, 0));
     check("a pending count past the proofs saturates", lock_put_w(1, 2, 9) == lock_put_w(1, 0, 0));
+    check("a new base is judged for the held base's two signatures", lock_put_held_w(true, false, false, 3) == 2 * SIG_W);
+    check("the held base again checks nothing new", lock_put_held_w(true, true, false, 3) == 0);
+    check("extending the newest lock checks no held link", lock_put_held_w(false, false, true, 3) == 0);
+    check("a fork's scan is judged at its bound", lock_put_held_w(false, false, false, 3) == SIG_W * (2 * 3 + 2));
+    check("nothing held, nothing to check", lock_put_held_w(true, false, false, 0) == 0 && lock_put_held_w(false, false, false, 0) == 0);
     check("a non-member's leave costs the frame alone", leave_w(false, 500) == 1);
     check("a member's leave pays for its announcement", leave_w(true, 500) == 501);
 }

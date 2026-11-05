@@ -960,6 +960,15 @@ impl Roster {
         self.authority_with_paths().0
     }
 
+    /// [`Self::authority`]'s counted devices, closest to the phrase first: a device a
+    /// thief vouched ranks below the device that vouched the thief.
+    pub(crate) fn counted_by_rank(&self) -> Vec<String> {
+        let rank = self.ranked(false);
+        let mut counted: Vec<String> = self.authority().counted.into_iter().collect();
+        counted.sort_by_key(|d| (!rank.contains_key(d), rank.get(d).cloned(), d.clone()));
+        counted
+    }
+
     /// The statements that make `device` counted under [`Self::authority`], when it is:
     /// the current recovery, the root's own admission, and the vouch chain from that root
     /// with the consents along it. Each verifies alone; it rides a join ask (R31-7),

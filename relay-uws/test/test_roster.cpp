@@ -45,29 +45,6 @@ static std::unordered_map<std::string, int64_t> seen_of(const json& j) {
     return out;
 }
 
-// Vectors whose fold changes as a pending join matures.
-static size_t maturing_cases = 0;
-
-// The book's cached fold against a fresh one, at the show and as pending joins mature.
-static bool cache_follows(const RosterBook& book, const RosterBook::Held& held, int64_t now, const RosterCrypto& crypto) {
-    const auto same = [](const roster::State& a, const roster::State& b) {
-        return a.members == b.members && a.pending == b.pending && a.removed == b.removed && a.base == b.base;
-    };
-    std::set<std::string> first;
-    for (int64_t at : {now, now + 1, now + roster::PENDING_MATURITY_MS - 1, now + roster::PENDING_MATURITY_MS + 1,
-                       now + 3 * roster::PENDING_MATURITY_MS, now}) {
-        const roster::State& cached = book.counted_fold(held, at, crypto, [] {});
-        if (at == now && first.empty()) {
-            first = cached.members;
-        } else if (cached.members != first) {
-            maturing_cases++;
-            first = cached.members;
-        }
-        if (!same(cached, book.fold(held, at, crypto))) return false;
-    }
-    return true;
-}
-
 // One vector: hold what the case holds, show what it shows, compare everything.
 static bool run_case(const json& c, const RosterCrypto& crypto, std::string& why) {
     const std::string master = c["master"];
@@ -128,11 +105,11 @@ static bool run_case(const json& c, const RosterCrypto& crypto, std::string& why
         why = "membership of the shown device differs";
         return false;
     }
-    if (held && !cache_follows(book, *held, now, crypto)) {
-        why = "the cached fold differs from a fresh one";
+    const roster::Authority auth = merged.authority(crypto);
+    if (held && book.counted_authority(*held, crypto, [] {}).counted != auth.counted) {
+        why = "the book's authority differs from a fresh one";
         return false;
     }
-    const roster::Authority auth = merged.authority(crypto);
     std::map<std::string, std::string> auth_removed;
     for (auto it = c["auth_removed"].begin(); it != c["auth_removed"].end(); ++it) auth_removed[it.key()] = it.value();
     if (auth.base != c["auth_base"].get<std::string>() ||
@@ -223,8 +200,6 @@ int main() {
         }
         check("every vector lands where the Rust code does (" + std::to_string(ok) + "/" + std::to_string(total) + ")",
               ok == total && total > 0);
-        check("the cached fold follows a pending join as it matures (" + std::to_string(maturing_cases) + ")",
-              maturing_cases > 0);
         // HOL-SEC-189: a removed device's vouch flood keeps the honest voucher's vouch.
         // Compacting what the relay holds again changes nothing (RC32-10).
         size_t vouch_cap = 0, stable = 0;
@@ -291,13 +266,15 @@ int main() {
         roster::Roster removing = base;
         removing.removals.push_back({roster::LEGACY_BASE, other.id, owner.id, {},
                                      owner.sign(roster::removal_payload(m.id, roster::LEGACY_BASE, other.id, {}))});
-        bool folded = false;
-        book.counted_fold(*book.get(m.id), now, crypto, [&folded] { folded = true; });
-        check("a show leaves its fold for the lock puts after it", !folded);
+        int walks = 0;
+        const auto walked = [&walks] { walks++; };
+        check("the lock puts count a legacy member", book.counted_authority(*book.get(m.id), crypto, walked).counts(other.id));
+        book.counted_authority(*book.get(m.id), crypto, walked);
+        check("and walk the roster once while it stays", walks == 1);
         auto by_stranger = book.show(m.id, removing, "12D3KooWStranger", 9, now, crypto);
         check("a removal shown by a stranger changes the held roster", by_stranger.changed && !by_stranger.member);
-        check("and the cached fold drops the device at once",
-              !book.counted_fold(*book.get(m.id), now, crypto, [] {}).is_member(other.id));
+        check("and the lock puts drop the device at once",
+              !book.counted_authority(*book.get(m.id), crypto, walked).counts(other.id) && walks == 2);
         check("and the record stays with the member's share", book.ledger.share_of(m.id) == uint64_t{7});
         check("the removed device is out", !book.show(m.id, base, other.id, 7, now, crypto).member);
         check("the remover is still in", book.show(m.id, base, owner.id, 7, now, crypto).member);
@@ -330,6 +307,31 @@ int main() {
             big.pendings.resize(roster::MAX_PENDING + 1);
             return !book.show(m.id, big, owner.id, 7, now, crypto).member;
         }());
+    }
+
+    // Design DEVICE_PROOF section 12 item 9: a mutual removal removes both from the inbox
+    // fold, while the lock puts keep the device the walk takes first (the lower id of two
+    // legacy roots) and drop the other.
+    {
+        Key m(1), a(10), b(11);
+        const Key& first = a.id < b.id ? a : b;
+        const Key& second = a.id < b.id ? b : a;
+        const int64_t now = 1800000000000;
+        roster::Roster r = roster::Roster::named(m.id);
+        for (const Key* d : {&a, &b}) {
+            r.consents.push_back({d->id, d->sign(roster::consent_payload(m.id, d->id))});
+            r.legacy.push_back({d->id, m.sign(roster::legacy_payload(m.id, d->id))});
+        }
+        for (auto [gone, by] : {std::pair<const Key*, const Key*>{&a, &b}, {&b, &a}}) {
+            r.removals.push_back({roster::LEGACY_BASE, gone->id, by->id, {},
+                                  by->sign(roster::removal_payload(m.id, roster::LEGACY_BASE, gone->id, {}))});
+        }
+        RosterBook book;
+        auto shown = book.show(m.id, r, first.id, 7, now, crypto);
+        check("a mutual removal leaves neither device the inbox", !shown.member && shown.state.members.empty());
+        const roster::Authority& auth = book.counted_authority(*book.get(m.id), crypto, [] {});
+        check("the lock puts still count the device the walk takes first", auth.counts(first.id));
+        check("and not the one it removed", !auth.counts(second.id));
     }
 
     // Fair share: a flood of records from one address share evicts only that share's.

@@ -178,7 +178,13 @@ fn text_cost(text: &str, rooms: &impl RoomSizes) -> Cost {
         "leave" | "msg" => Cost::w(1 + reach(rooms, field("room"))),
         "direct" => Cost::w(direct_w(field("room"), rooms)),
         "topic_catchup" => Cost::w(TOPIC_CATCHUP_W),
-        "lock_put" => Cost::w(2 + SIG_W * len("links") + DH_W * reach(rooms, field("server"))),
+        // Two signature checks per link sent, and the two of the base the relay holds when
+        // we send a new base (`breaker::lock_put_held_w`; priced even if it holds none). A
+        // fork's scan of the held chain is the relay's to judge: we cannot see its length.
+        "lock_put" => {
+            let base_first = v.get("links").and_then(|l| l.get(0)).is_some_and(|l| l.get("owner").is_some());
+            Cost::w(2 + 2 * SIG_W * len("links") + if base_first { 2 * SIG_W } else { 0 } + DH_W * reach(rooms, field("server")))
+        }
         "lock_get" => Cost::w(1 + 2 * len("locks").min(256)),
         "check_peers" => Cost::w(CHECK_PEERS_W),
         "discover_peers" => Cost::w(2 + ids_w(reach(rooms, field("room")))),

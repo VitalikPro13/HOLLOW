@@ -4,7 +4,7 @@
 //! every member puts the chain back on a relay that forgot it, the owner compacts
 //! it and resets a fork, and whoever holds the change key hands it to every counted
 //! device of every owner, admin and mod that lacks it. Every link we make carries
-//! our device's proof, so the relay judges it against its fold of our rosters.
+//! our device's proof, so the relay judges it by server authority over our rosters.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -44,8 +44,13 @@ const RETRY_CHAIN: Duration = Duration::from_secs(60);
 const RETRY_FORK: Duration = Duration::from_secs(600);
 #[cfg(test)]
 const RETRY_FORK: Duration = Duration::from_secs(3);
+/// The longest wait between offers the relay keeps not holding: each miss in a row
+/// doubles the wait, so a relay that never keeps our lock (a 0.13 relay drops the
+/// device proof) hears one offer per this, not one per answer.
+const RETRY_MAX: Duration = Duration::from_secs(600);
 /// Between two lock moves one identity's device removals cause in one server, so a
-/// member linking and removing its own devices cannot churn the lock.
+/// member linking and removing its own devices cannot churn the lock. A mod's move
+/// ahead of removing its own device never waits for it (N12b).
 #[cfg(not(test))]
 pub(crate) const REMOVAL_GAP: Duration = Duration::from_secs(600);
 #[cfg(test)]
@@ -63,11 +68,15 @@ pub(crate) struct LockKeys<'a> {
     pub device: &'a NativeKeypair,
 }
 
+/// A removed device, and the identity it left when the roster path knows it (a
+/// recovery drops devices without a removal, so no resolver mark names their identity).
+type Noted = (Option<String>, String);
+
 /// Per node loop: our device key for signing outside the keeper, and the device
 /// removals the roster paths noted since the last tick.
 struct LoopLocal {
     device: NativeKeypair,
-    noted: RefCell<Vec<String>>,
+    noted: RefCell<Vec<Noted>>,
 }
 
 tokio::task_local! {
@@ -81,14 +90,31 @@ pub(crate) fn with_loop_device<F: std::future::Future>(device: NativeKeypair, lo
 
 /// Devices a roster fold just removed: each member identity's servers move their lock.
 pub(crate) fn note_removed_devices(devices: &[String]) {
+    note(devices.iter().map(|d| (None, d.clone())));
+}
+
+/// Devices a recovery of `master` stopped counting (DEVICE_PROOF section 12 item 9):
+/// they move the lock as a removal does.
+pub(crate) fn note_dropped_devices(master: &str, devices: &[String]) {
+    note(devices.iter().map(|d| (Some(master.to_string()), d.clone())));
+}
+
+fn note(devices: impl Iterator<Item = Noted>) {
     let _ = LOOP_LOCAL.try_with(|l| {
         let mut noted = l.noted.borrow_mut();
         let room = NOTED_MAX.saturating_sub(noted.len());
-        noted.extend(devices.iter().take(room).cloned());
+        noted.extend(devices.take(room));
     });
 }
 
-fn take_noted() -> Vec<String> {
+/// Run `f` with a loop scope of its own and hand back what it noted. Tests only.
+#[cfg(test)]
+pub(crate) async fn noted_while<F: std::future::Future>(f: F) -> (F::Output, Vec<(Option<String>, String)>) {
+    let device = NativeKeypair::from_secret_bytes(&[0xee; 32]);
+    LOOP_LOCAL.scope(LoopLocal { device, noted: RefCell::new(Vec::new()) }, async { (f.await, take_noted()) }).await
+}
+
+fn take_noted() -> Vec<Noted> {
     LOOP_LOCAL.try_with(|l| std::mem::take(&mut *l.noted.borrow_mut())).unwrap_or_default()
 }
 
@@ -187,6 +213,74 @@ pub(crate) struct LockKeeper {
     resigned_at: HashMap<String, Instant>,
     /// Whether this build's fold takes grants filed by device; only a yes is kept.
     fold_takes_devices: bool,
+    /// Offers in a row the relay did not end up holding, the relay's newest lock number
+    /// at the first of them, and when the last one's wait ends.
+    misses: HashMap<String, (u32, u64, Instant)>,
+    authorities: Authorities,
+}
+
+/// Server authority per identity over its stored roster (`Roster::authority`): who the
+/// relay lets write lock links, and so who gets a change key. Read again only once that
+/// identity's stored roster changed (`roster_book::revision`), so a busy resolver costs
+/// no store reads.
+#[derive(Default)]
+struct Authorities {
+    store: Option<(String, String)>,
+    /// master -> (roster revision, last use, counted devices best rank first);
+    /// `None` = no roster held.
+    held: HashMap<String, (u64, u64, Option<Vec<String>>)>,
+    uses: u64,
+    /// Store reads so far.
+    loads: u64,
+}
+
+/// Identities [`Authorities`] keeps at once; past it the least recently used goes.
+const AUTHORITIES_HELD: usize = 1024;
+
+impl Authorities {
+    fn counted(&mut self, master: &str) -> Option<&[String]> {
+        let revision = super::roster_book::revision(master);
+        self.uses += 1;
+        let uses = self.uses;
+        match self.held.get_mut(master) {
+            Some((at, used, _)) if *at == revision => *used = uses,
+            _ => {
+                self.loads += 1;
+                let stored = self.store.as_ref().and_then(|(db, pass)| {
+                    crate::storage::MessageStore::lease(db, pass).ok()?.load_roster(master).ok().flatten()
+                });
+                let counted = stored.filter(|r| r.master == master).map(|r| r.reverified().counted_by_rank());
+                if self.held.len() >= AUTHORITIES_HELD
+                    && !self.held.contains_key(master)
+                    && let Some(oldest) = self.held.iter().min_by_key(|(_, (_, used, _))| *used).map(|(m, _)| m.clone())
+                {
+                    self.held.remove(&oldest);
+                }
+                self.held.insert(master.to_string(), (revision, uses, counted));
+            }
+        }
+        self.held.get(master).and_then(|(_, _, c)| c.as_deref())
+    }
+
+    /// Whether a lock link `device` made for `master` stopped counting: by the stored
+    /// roster's authority, else by the resolver's removals.
+    fn uncounted(&mut self, master: &str, device: &str) -> bool {
+        match self.counted(master) {
+            Some(counted) => !counted.iter().any(|d| d == device),
+            None => super::resolver::is_revoked_by(master, device),
+        }
+    }
+
+    /// The devices of `master` a change key is sealed to, at most `GRANT_DEVICES`, best
+    /// rank first: those authority counts, else (no roster held) those our resolver
+    /// places, the master's own id only when its roster counts it a device (G1), never a
+    /// removed device.
+    fn grant_devices(&mut self, master: &str) -> Vec<String> {
+        if let Some(counted) = self.counted(master) {
+            return counted.iter().take(join_lock::GRANT_DEVICES).cloned().collect();
+        }
+        grant_devices(master)
+    }
 }
 
 /// The owner id the relay keys a server's chain by.
@@ -195,11 +289,36 @@ fn lookup_owner(state: &ServerState) -> Option<String> {
 }
 
 impl LockKeeper {
+    /// Judge devices by the rosters stored here (a keeper without a store judges by the
+    /// resolver alone).
+    pub(crate) fn read_rosters(&mut self, db_path: &str, db_passphrase: &str) {
+        self.authorities.store = Some((db_path.to_string(), db_passphrase.to_string()));
+    }
+
+    /// The relay did not end up holding what we offered `server_id`: no offer before a
+    /// wait that doubles with each miss in a row, from `base` up to `RETRY_MAX`. A streak
+    /// with no miss for `RETRY_MAX` after its wait ended is forgotten.
+    fn missed(&mut self, server_id: &str, base: Duration) {
+        let now = Instant::now();
+        if self.misses.get(server_id).is_some_and(|(_, _, until)| now >= *until + RETRY_MAX) {
+            self.misses.remove(server_id);
+        }
+        let tip_n = self.relay_tip(server_id).map_or(0, |t| t.n);
+        let (count, _, until) = self.misses.entry(server_id.to_string()).or_insert((0, tip_n, now));
+        let wait = base.saturating_mul(1u32 << (*count).min(16)).min(RETRY_MAX.max(base));
+        *count = count.saturating_add(1);
+        *until = now + wait;
+        self.quiet_until.insert(server_id.to_string(), now + wait);
+    }
+
     /// A new relay connection: it may hold nothing we saw before, so read it afresh.
     pub(crate) fn on_connected(&mut self, server_states: &ServerStates, local_master: &str, ws_cmd_tx: &WsCmdTx) {
         self.views.clear();
         self.in_flight.clear();
         self.asked.clear();
+        // Another relay, or this one restarted: what it refused before says nothing now.
+        self.misses.clear();
+        self.quiet_until.clear();
         let locks: Vec<(String, String)> = server_states
             .iter()
             .filter(|(_, s)| !s.is_deleted() && s.is_member(local_master))
@@ -231,12 +350,14 @@ impl LockKeeper {
         self.due_since.insert(server_id.to_string(), Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or_else(Instant::now));
     }
 
-    /// Devices a roster fold removed: every server of each identity that removed one
-    /// moves its lock, so no removed device keeps the door or a change key.
-    pub(crate) fn note_removals(&mut self, server_states: &ServerStates, devices: &[String]) {
+    /// Devices a roster fold removed or a recovery dropped: every server of each identity
+    /// that lost one moves its lock, so no such device keeps the door or a change key.
+    fn note_removals(&mut self, server_states: &ServerStates, devices: &[Noted]) {
         let now = Instant::now();
-        for device in devices {
-            for master in super::resolver::revokers_of(device) {
+        for (named, device) in devices {
+            let mut masters = super::resolver::revokers_of(device);
+            masters.extend(named.iter().filter(|m| !masters.contains(m)).cloned().collect::<Vec<_>>());
+            for master in masters {
                 for (server_id, state) in server_states {
                     if state.is_deleted() || !state.is_member(&master) {
                         continue;
@@ -262,9 +383,6 @@ impl LockKeeper {
         let mut moved = 0;
         for (server_id, state) in server_states {
             if state.is_deleted() || !state.is_member(&local) || !state.holds_moderation(&local) || self.in_flight.contains_key(server_id) {
-                continue;
-            }
-            if self.removal_moved.get(&(server_id.clone(), local.clone())).is_some_and(|t| t.elapsed() < REMOVAL_GAP) {
                 continue;
             }
             let Some(owner) = lookup_owner(state) else { continue };
@@ -302,11 +420,18 @@ impl LockKeeper {
             return None;
         }
         if let Some((master, device)) = links.iter().rev().find(|l| l.is_base()).and_then(|b| join_lock::link_device(server_id, b))
-            && super::resolver::is_revoked_by(&master, &device)
+            && self.authorities.uncounted(&master, &device)
         {
             hollow_log!("[HOLLOW-SECURITY] The relay's join lock for {server_id} starts at a base a removed owner device made");
         }
         let tip = links.last().cloned();
+        // Someone's newer lock our state holds as the relay does: the relay keeps locks.
+        if let Some(t) = tip.as_ref()
+            && self.misses.get(server_id).is_some_and(|(_, at_n, _)| t.n > *at_n)
+            && state.join_lock.find(t).is_some_and(|held| held == t)
+        {
+            self.misses.remove(server_id);
+        }
         self.views.insert(server_id.to_string(), (links, Instant::now()));
         let flight = self.in_flight.remove(server_id)?;
         let Some(accepted) = put else {
@@ -319,30 +444,37 @@ impl LockKeeper {
         // on the next tick, not after the grace; any other holder's grant is on its way.
         let removed_tip = !accepted
             && pre_removal
-            && tip.as_ref().and_then(|t| join_lock::link_device(server_id, t)).is_some_and(|(m, d)| super::resolver::is_revoked_by(&m, &d));
+            && tip.as_ref().and_then(|t| join_lock::link_device(server_id, t)).is_some_and(|(m, d)| self.authorities.uncounted(&m, &d));
+        let wait = match flight.offer {
+            Offer::Chain => RETRY_CHAIN,
+            Offer::Fork(_) => RETRY_FORK,
+            _ => RETRY_LOCK,
+        };
         if removed_tip {
             self.stuck_since.insert(server_id.to_string(), Instant::now().checked_sub(RESET_GRACE).unwrap_or_else(Instant::now));
         } else if !accepted {
-            let wait = match flight.offer {
-                Offer::Chain => RETRY_CHAIN,
-                Offer::Fork(_) => RETRY_FORK,
-                _ => RETRY_LOCK,
-            };
-            self.quiet_until.insert(server_id.to_string(), Instant::now() + wait);
+            self.missed(server_id, wait);
         }
         match flight.offer {
             Offer::Lock(new) | Offer::Fork(new) if accepted && tip.as_ref().is_some_and(|t| t == &new.link) => {
                 hollow_log!("[HOLLOW-CRDT] The relay took join lock {} of {server_id}", new.link.n);
+                self.misses.remove(server_id);
                 self.due_since.remove(server_id);
                 self.stuck_since.remove(server_id);
                 let by_device = self.fold_takes_device_grants(server_id, state, &new.link);
-                Some(lock_op(server_id, &new, state, by_device))
+                Some(lock_op(server_id, &new, state, by_device, &mut self.authorities))
             }
             Offer::Compact(base) if accepted && tip.as_ref() == Some(&base) => {
+                self.misses.remove(server_id);
                 Some(CrdtPayload::JoinLock { link: base, door: None, grants: BTreeMap::new() })
             }
+            Offer::Chain if accepted => None,
             _ => {
-                if !accepted {
+                if accepted {
+                    // Taken, yet not what we offered: a relay that drops the device proof.
+                    hollow_log!("[HOLLOW-CRDT] The relay answered our join lock of {server_id} with another");
+                    self.missed(server_id, wait);
+                } else {
                     hollow_log!("[HOLLOW-CRDT] The relay kept its own join lock of {server_id} over ours");
                 }
                 None
@@ -365,7 +497,12 @@ impl LockKeeper {
         }
         self.removal_moved.retain(|_, t| t.elapsed() < REMOVAL_GAP);
         let local = keys.master.peer_id();
-        self.in_flight.retain(|_, f| f.at.elapsed() < PUT_TIMEOUT);
+        let unanswered: Vec<String> =
+            self.in_flight.iter().filter(|(_, f)| f.at.elapsed() >= PUT_TIMEOUT).map(|(s, _)| s.clone()).collect();
+        for server_id in unanswered {
+            self.in_flight.remove(&server_id);
+            self.missed(&server_id, RETRY_LOCK);
+        }
         self.pre_removal.retain(|s| self.in_flight.contains_key(s));
         let mut ops = Vec::new();
         for (server_id, state) in server_states {
@@ -542,7 +679,7 @@ impl LockKeeper {
 
         if is_owner && tip_change.is_some() {
             let base_unproved = view.first().is_some_and(|b| {
-                join_lock::link_device(server_id, b).is_none_or(|(m, d)| super::resolver::is_revoked_by(&m, &d))
+                join_lock::link_device(server_id, b).is_none_or(|(m, d)| self.authorities.uncounted(&m, &d))
             });
             let resign = base_unproved && self.resigned_at.get(server_id).is_none_or(|t| t.elapsed() >= RESIGN_GAP);
             if view.len() > 1 || resign {
@@ -575,7 +712,9 @@ impl LockKeeper {
         if self.granted_at.get(server_id).is_some_and(|t| t.elapsed() < GRANT_GAP) {
             return None;
         }
-        let grants = lock_grants(server_id, state, &tip.change, change, by_device, |key| !state.join_lock.grants_for(&tip.change, key).is_empty());
+        let grants = lock_grants(server_id, state, &tip.change, change, by_device, &mut self.authorities, |key| {
+            !state.join_lock.grants_for(&tip.change, key).is_empty()
+        });
         if grants.is_empty() {
             return None;
         }
@@ -611,9 +750,9 @@ fn device_grant_probe(server_id: &str, state: &ServerState, link: &LockLink) -> 
     serde_json::from_value::<CrdtOp>(op).is_ok_and(|op| state.op_allowed(&op))
 }
 
-/// The devices of `master` a change key is sealed to: those our roster view counts,
-/// the master's own id only when its roster counts it a device (G1), never a removed
-/// device, at most `GRANT_DEVICES`.
+/// The devices of `master` our resolver places, for an identity whose roster we do not
+/// hold: the master's own id only when its roster counts it a device (G1), never a
+/// removed device, at most `GRANT_DEVICES`.
 fn grant_devices(master: &str) -> Vec<String> {
     let mut devices: Vec<String> = super::resolver::devices_for(master)
         .into_iter()
@@ -636,6 +775,7 @@ fn lock_grants(
     change: &str,
     secret: &[u8; 32],
     by_device: bool,
+    authorities: &mut Authorities,
     held: impl Fn(&str) -> bool,
 ) -> BTreeMap<String, String> {
     let owner = lookup_owner(state);
@@ -644,7 +784,7 @@ fn lock_grants(
     let mut grants = BTreeMap::new();
     for master in masters {
         let wanted: Vec<(String, Option<String>)> = if by_device {
-            grant_devices(&master).into_iter().map(|d| (join_lock::grant_key(&master, &d), Some(d))).collect()
+            authorities.grant_devices(&master).into_iter().map(|d| (join_lock::grant_key(&master, &d), Some(d))).collect()
         } else {
             vec![(master.clone(), None)]
         };
@@ -752,11 +892,11 @@ pub(crate) fn door_sends(server_id: &str, door: &str) -> Vec<Vec<String>> {
 
 /// The op for a lock the relay took: its door for every member, its change key for
 /// every counted device of every owner, admin and mod.
-fn lock_op(server_id: &str, new: &NewLock, state: &ServerState, by_device: bool) -> CrdtPayload {
+fn lock_op(server_id: &str, new: &NewLock, state: &ServerState, by_device: bool, authorities: &mut Authorities) -> CrdtPayload {
     CrdtPayload::JoinLock {
         link: new.link.clone(),
         door: Some(JoinSecret(hex::encode(new.door.as_slice()))),
-        grants: lock_grants(server_id, state, &new.link.change, &new.change, by_device, |_| false),
+        grants: lock_grants(server_id, state, &new.link.change, &new.change, by_device, authorities, |_| false),
     }
 }
 
@@ -939,5 +1079,262 @@ mod tests {
         }
         assert_eq!(bare, vec![device.clone()], "the bare master is no device");
         assert!(counted.contains(&other) && counted.contains(&device), "a master its roster counts is one");
+    }
+
+    /// An owner's first lock in flight on a fresh server, and the relay's answers to it.
+    fn first_lock_in_flight() -> (LockKeeper, ServerState, NewLock) {
+        let (owner, owner_dev) = (kp(80), kp(81));
+        let nonce = "00112233445566778899aabbccddeef0";
+        let server = crate::crdt::anchor::derive_server_id(&owner.peer_id(), nonce);
+        let state = ServerState::new(server.clone(), "S".into(), owner.peer_id());
+        let first = join_lock::mint_owner_base(&server, 1, &owner, Some(nonce), &owner_dev).unwrap();
+        (LockKeeper::default(), state, first)
+    }
+
+    /// How long the keeper keeps quiet about `server` from now.
+    fn quiet_for(keeper: &LockKeeper, server: &str) -> Duration {
+        keeper.quiet_until.get(server).map_or(Duration::ZERO, |t| t.saturating_duration_since(Instant::now()))
+    }
+
+    fn copy(new: &NewLock) -> NewLock {
+        NewLock { link: new.link.clone(), door: zeroize::Zeroizing::new(*new.door), change: zeroize::Zeroizing::new(*new.change) }
+    }
+
+    fn offer(keeper: &mut LockKeeper, server: &str, new: &NewLock) {
+        keeper.in_flight.insert(server.to_string(), InFlight { offer: Offer::Lock(copy(new)), at: Instant::now() });
+    }
+
+    #[test]
+    fn a_relay_that_drops_the_device_proof_hears_fewer_and_fewer_offers() {
+        let (mut keeper, state, first) = first_lock_in_flight();
+        let server = state.server_id.clone();
+        // A 0.13 relay takes the lock and answers it without the proof it cannot read.
+        let mut stripped = first.link.clone();
+        stripped.dev = None;
+        let mut waits = Vec::new();
+        for _ in 0..10 {
+            offer(&mut keeper, &server, &first);
+            assert!(keeper.on_chain(&server, vec![stripped.clone()], Some(true), &state).is_none());
+            waits.push(quiet_for(&keeper, &server));
+        }
+        assert!(waits[0] + Duration::from_secs(1) >= RETRY_LOCK, "a lock the relay holds otherwise is a miss: {waits:?}");
+        assert!(waits.windows(2).all(|w| w[1] + Duration::from_millis(50) >= w[0]), "the wait never shrinks: {waits:?}");
+        assert!(waits[2] + Duration::from_secs(1) >= RETRY_LOCK * 4, "it doubles: {waits:?}");
+        assert!(waits[9] <= RETRY_MAX && waits[9] + Duration::from_secs(1) >= RETRY_MAX, "up to its bound: {waits:?}");
+
+        // The relay keeps our lock: the next miss starts over.
+        offer(&mut keeper, &server, &first);
+        assert!(keeper.on_chain(&server, vec![first.link.clone()], Some(true), &state).is_some(), "the lock op");
+        offer(&mut keeper, &server, &first);
+        keeper.on_chain(&server, vec![stripped], Some(true), &state);
+        assert!(quiet_for(&keeper, &server) <= RETRY_LOCK, "a held lock resets the wait");
+    }
+
+    #[test]
+    fn a_relay_that_refuses_or_never_answers_hears_fewer_and_fewer_offers() {
+        let (mut keeper, state, first) = first_lock_in_flight();
+        let server = state.server_id.clone();
+        offer(&mut keeper, &server, &first);
+        keeper.on_chain(&server, Vec::new(), Some(false), &state);
+        let once = quiet_for(&keeper, &server);
+        offer(&mut keeper, &server, &first);
+        keeper.on_chain(&server, Vec::new(), Some(false), &state);
+        assert!(quiet_for(&keeper, &server) >= once + RETRY_LOCK / 2, "a refusal in a row waits longer");
+
+        // An offer nobody answers is a miss too.
+        let (mut keeper, state, first) = first_lock_in_flight();
+        offer(&mut keeper, &server, &first);
+        keeper.in_flight.get_mut(&server).unwrap().at = Instant::now().checked_sub(PUT_TIMEOUT + Duration::from_secs(1)).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (master, device) = (kp(82), kp(83));
+        keeper.tick(&ServerStates::new(), LockKeys { master: &master, device: &device }, &WsRoomPeers::new(), &tx, &|_| Vec::new());
+        assert!(quiet_for(&keeper, &server) + Duration::from_secs(1) >= RETRY_LOCK, "an unanswered offer waits");
+        drop(state);
+    }
+
+    #[test]
+    fn a_new_relay_connection_forgets_the_misses() {
+        let (mut keeper, state, first) = first_lock_in_flight();
+        let server = state.server_id.clone();
+        for _ in 0..4 {
+            offer(&mut keeper, &server, &first);
+            keeper.on_chain(&server, Vec::new(), Some(false), &state);
+        }
+        assert!(quiet_for(&keeper, &server) > RETRY_LOCK, "setup: a streak");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        keeper.on_connected(&ServerStates::new(), &kp(84).peer_id(), &tx);
+        assert_eq!(quiet_for(&keeper, &server), Duration::ZERO, "no wait left over");
+        offer(&mut keeper, &server, &first);
+        keeper.on_chain(&server, Vec::new(), Some(false), &state);
+        assert!(quiet_for(&keeper, &server) <= RETRY_LOCK, "the next miss starts over");
+    }
+
+    #[test]
+    fn a_miss_streak_quiet_for_its_bound_is_forgotten() {
+        let (mut keeper, state, first) = first_lock_in_flight();
+        let server = state.server_id.clone();
+        for _ in 0..6 {
+            offer(&mut keeper, &server, &first);
+            keeper.on_chain(&server, Vec::new(), Some(false), &state);
+        }
+        let streak = quiet_for(&keeper, &server);
+        assert!(streak > RETRY_LOCK * 8, "setup: a long streak {streak:?}");
+        // Its wait ended, and no offer missed for RETRY_MAX after that.
+        let past = Instant::now().checked_sub(RETRY_MAX + Duration::from_secs(1)).unwrap();
+        keeper.misses.get_mut(&server).unwrap().2 = past;
+        offer(&mut keeper, &server, &first);
+        keeper.on_chain(&server, Vec::new(), Some(false), &state);
+        assert!(quiet_for(&keeper, &server) <= RETRY_LOCK, "the streak decayed: {:?}", quiet_for(&keeper, &server));
+
+        // A streak whose last wait only just ended keeps doubling.
+        let (mut keeper, state, first) = first_lock_in_flight();
+        for _ in 0..6 {
+            offer(&mut keeper, &server, &first);
+            keeper.on_chain(&server, Vec::new(), Some(false), &state);
+        }
+        keeper.misses.get_mut(&server).unwrap().2 = Instant::now();
+        offer(&mut keeper, &server, &first);
+        keeper.on_chain(&server, Vec::new(), Some(false), &state);
+        assert!(quiet_for(&keeper, &server) > streak, "no decay inside the bound");
+    }
+
+    /// A store holding `roster` for its master, the way a contact's roster is kept.
+    fn store_with(roster: &crate::identity::roster::Roster) -> (crate::test_tmp::TestDir, String, String) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("keeper.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        store.save_device_list(&roster.master, &serde_json::to_string(roster).unwrap(), 0, &[], 0).unwrap();
+        (tmp, db, pass)
+    }
+
+    #[test]
+    fn grants_follow_server_authority_after_a_mutual_removal() {
+        use crate::identity::roster;
+        let _l = resolver::test_lock();
+        let master = kp(90);
+        let (a, b) = (kp(91), kp(92));
+        let (first, second) = if a.peer_id() < b.peer_id() { (&a, &b) } else { (&b, &a) };
+        let m = master.peer_id();
+        let mut r = roster::Roster::legacy_for_test(&master, &[first, second]);
+        r.add_removal(roster::sign_removal(second, &m, roster::LEGACY_BASE, &first.peer_id(), &[]));
+        r.add_removal(roster::sign_removal(first, &m, roster::LEGACY_BASE, &second.peer_id(), &[]));
+        assert!(r.fold(|_| None, 0).members.is_empty(), "setup: the fold removes both");
+        let (_tmp, db, pass) = store_with(&r);
+        // The resolver follows the fold: both devices removed.
+        resolver::mark_revoked_by(&m, &[first.peer_id(), second.peer_id()]);
+        let mut auth = Authorities { store: Some((db, pass)), ..Default::default() };
+        let devices = auth.grant_devices(&m);
+        let first_out = auth.uncounted(&m, &first.peer_id());
+        let second_out = auth.uncounted(&m, &second.peer_id());
+        let resolver_view = grant_devices(&m);
+        resolver::unmark_revoked_by(&m, &[first.peer_id(), second.peer_id()]);
+        for d in [first.peer_id(), second.peer_id()] {
+            resolver::forget_for_test(&d);
+        }
+        assert_eq!(devices, vec![first.peer_id()], "the device the walk keeps gets the change key");
+        assert!(!first_out && second_out, "and only its links still count");
+        assert!(resolver_view.is_empty(), "control: the fold's view grants nobody");
+    }
+
+    /// A keypair per index past the `u8` tags.
+    fn wide_kp(i: u16) -> NativeKeypair {
+        let mut seed = [0x5au8; 32];
+        seed[..2].copy_from_slice(&i.to_be_bytes());
+        NativeKeypair::from_secret_bytes(&seed)
+    }
+
+    /// R2 review (2): 300 identities' rosters past the old cap of 256, read again after
+    /// the resolver moved (it moves on every ingest): the second pass reads no store.
+    #[test]
+    fn review_probe_authorities_past_the_cap() {
+        use crate::identity::roster;
+        let _l = resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("keeper.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let masters: Vec<String> = (0..300u16)
+            .map(|i| {
+                let (master, device) = (wide_kp(i), wide_kp(1000 + i));
+                let r = roster::Roster::legacy_for_test(&master, &[&device]);
+                store.save_device_list(&r.master, &serde_json::to_string(&r).unwrap(), 0, &[], 0).unwrap();
+                r.master
+            })
+            .collect();
+        let mut auth = Authorities { store: Some((db, pass)), ..Default::default() };
+        for m in &masters {
+            assert!(auth.counted(m).is_some_and(|c| c.len() == 1), "setup: each roster counts its device");
+        }
+        let stranger = wide_kp(2000).peer_id();
+        resolver::update_many(&wide_kp(2001).peer_id(), [stranger.as_str()]);
+        for m in &masters {
+            auth.counted(m);
+        }
+        resolver::forget_for_test(&stranger);
+        assert_eq!(auth.loads, 300, "the second pass reads the cache");
+    }
+
+    #[test]
+    fn authorities_past_the_cap_let_only_the_least_recently_used_go() {
+        let mut auth = Authorities::default();
+        for i in 0..AUTHORITIES_HELD {
+            auth.counted(&format!("m{i}"));
+        }
+        auth.counted("m0");
+        auth.counted("one more");
+        assert_eq!(auth.held.len(), AUTHORITIES_HELD);
+        assert!(auth.held.contains_key("m0") && auth.held.contains_key("one more"), "a recent one stays");
+        assert!(!auth.held.contains_key("m1"), "the least recently used goes");
+        assert_eq!(auth.loads, AUTHORITIES_HELD as u64 + 1, "and nothing else was read again");
+    }
+
+    #[test]
+    fn authorities_read_a_roster_again_once_it_is_saved() {
+        use crate::identity::roster;
+        let _l = resolver::test_lock();
+        let (master, a, b) = (kp(95), kp(96), kp(97));
+        let (_tmp, db, pass) = store_with(&roster::Roster::legacy_for_test(&master, &[&a]));
+        let mut auth = Authorities { store: Some((db.clone(), pass.clone())), ..Default::default() };
+        let m = master.peer_id();
+        assert_eq!(auth.counted(&m).map(<[String]>::to_vec), Some(vec![a.peer_id()]));
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        super::super::roster_book::merge_for_test(&store, &roster::Roster::legacy_for_test(&master, &[&a, &b]), &kp(98).peer_id(), &kp(99).peer_id());
+        let after = auth.counted(&m).map(<[String]>::to_vec).unwrap_or_default();
+        for d in [a.peer_id(), b.peer_id()] {
+            resolver::forget_for_test(&d);
+        }
+        assert!(after.contains(&b.peer_id()), "the saved roster is read again: {after:?}");
+        assert_eq!(auth.loads, 2);
+    }
+
+    #[test]
+    fn grants_go_to_the_devices_closest_to_the_phrase() {
+        use crate::identity::roster;
+        let master = kp(93);
+        let m = master.peer_id();
+        let root = kp(94);
+        let mut r = roster::Roster::legacy_for_test(&master, &[&root]);
+        // A counted device vouches a chain, then many devices hang off its far end.
+        let mut voucher = root.clone();
+        let mut chain = Vec::new();
+        for tag in 100..103u8 {
+            let d = kp(tag);
+            r.add_consent(roster::sign_consent(&d, &m));
+            r.add_vouch(roster::sign_vouch(&voucher, &m, roster::LEGACY_BASE, &d.peer_id()));
+            chain.push(d.peer_id());
+            voucher = d;
+        }
+        for tag in 110..122u8 {
+            let d = kp(tag);
+            r.add_consent(roster::sign_consent(&d, &m));
+            r.add_vouch(roster::sign_vouch(&voucher, &m, roster::LEGACY_BASE, &d.peer_id()));
+        }
+        let (_tmp, db, pass) = store_with(&r);
+        let mut auth = Authorities { store: Some((db, pass)), ..Default::default() };
+        let devices = auth.grant_devices(&m);
+        assert_eq!(devices.len(), join_lock::GRANT_DEVICES);
+        assert_eq!(devices[0], root.peer_id(), "the root first");
+        assert_eq!(&devices[1..4], chain.as_slice(), "then by depth");
     }
 }

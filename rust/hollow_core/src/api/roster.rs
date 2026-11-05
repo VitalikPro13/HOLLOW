@@ -120,16 +120,13 @@ pub fn roster_status() -> Result<RosterStatus, String> {
     })
 }
 
-/// Members before `f` that are not members after it: the node drops their sessions.
+/// Devices `f` stopped counting (`roster_book::lost_by_own_change`): the node drops
+/// their sessions and moves the join locks they could extend.
 fn changed(c: &Ctx, f: impl FnOnce(&Ctx) -> Result<(), String>) -> Result<(), String> {
-    let before = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase)
-        .map(|(_, s)| s.members)
-        .unwrap_or_default();
+    let before = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase);
     f(c)?;
-    let after = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase)
-        .map(|(_, s)| s.members)
-        .unwrap_or_default();
-    let newly_revoked: Vec<String> = before.difference(&after).cloned().collect();
+    let after = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase);
+    let newly_revoked = crate::node::roster_book::lost_by_own_change(before.as_ref(), after.as_ref(), &c.device.peer_id());
     erase_stored_phrase(&c.db_path, &c.db_passphrase);
     // A node not started yet reads the roster at its start; nothing is lost.
     let _ = super::network::send_node_command(NodeCommand::RosterChanged { newly_revoked });

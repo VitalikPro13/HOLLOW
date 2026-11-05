@@ -141,8 +141,27 @@ fn revoked_rows(store: &MessageStore, master: &str, state: &RosterState, local_d
     }
 }
 
+/// Per identity, how often its stored roster changed in this process (each commit
+/// this process saved or followed from another's): what a cache of the roster keys on.
+fn revisions() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    static REVISIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+    REVISIONS.get_or_init(Default::default)
+}
+
+/// The revision of `master`'s stored roster, 0 before any change here.
+pub(crate) fn revision(master: &str) -> u64 {
+    revisions().lock().map_or(0, |r| r.get(master).copied().unwrap_or(0))
+}
+
+fn bump_revision(master: &str) {
+    if let Ok(mut r) = revisions().lock() {
+        *r.entry(master.to_string()).or_insert(0) += 1;
+    }
+}
+
 /// Point `master`'s links at the members of `state` and refuse its removed devices.
 fn point_resolver(master: &str, state: &RosterState, local_master: &str, local_device: &str) {
+    bump_revision(master);
     let members: Vec<String> = state.members.iter().cloned().collect();
     let held = super::resolver::devices_for(master).into_iter().chain([master.to_string()]);
     for d in held {
@@ -189,6 +208,17 @@ pub(crate) struct Reconciled {
     /// Every device those rosters removed: drop their sessions and leaves (idempotent,
     /// so a device another path already dropped costs nothing).
     pub removed: Vec<String>,
+    /// Per identity, the devices a recovery the other process stored dropped.
+    pub dropped: Vec<(String, Vec<String>)>,
+}
+
+impl Reconciled {
+    /// The join locks of the identities a stored recovery dropped devices of move.
+    pub(crate) fn note_drops(&self) {
+        for (master, devices) in &self.dropped {
+            super::lock_keeper::note_dropped_devices(master, devices);
+        }
+    }
 }
 
 /// Follow the contact rosters another process (the push fetch, the iOS NSE) changed
@@ -206,6 +236,10 @@ pub(crate) fn reconcile_dirty(
         revoked_rows(store, m, &state, local_device);
         point_resolver(m, &state, local_master, local_device);
         out.removed.extend(removed_ids(&state, local_device));
+        let dropped: Vec<String> = store.take_roster_dropped(m).into_iter().filter(|d| d != local_device).collect();
+        if !dropped.is_empty() {
+            out.dropped.push((m.clone(), dropped));
+        }
         out.masters.push(m.clone());
     }
     out
@@ -1223,7 +1257,12 @@ async fn ingest_inner(
             .ok()
             .flatten()
     };
-    let Some(Folded { prev, now, changed, upgrade_admitted, own_news }) = folded else { return Ingested::default() };
+    let Some(Folded { prev, now, changed, upgrade_admitted, own_news, dropped }) = folded else {
+        return Ingested::default();
+    };
+    if !dropped.is_empty() {
+        super::lock_keeper::note_dropped_devices(&master, &dropped);
+    }
 
     let newly_revoked: Vec<String> = prev
         .members
@@ -1320,7 +1359,7 @@ fn stored_ingest(
     if master.is_empty() || master == local_master {
         return false;
     }
-    let Some(Folded { prev, now, upgrade_admitted, changed, .. }) =
+    let Some(Folded { prev, now, upgrade_admitted, changed, dropped, .. }) =
         fold_in(db_path, db_passphrase, &incoming, sender, local_master, local_device, source)
     else {
         return false;
@@ -1328,6 +1367,9 @@ fn stored_ingest(
     let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return true };
     // The running app holds the resolver this process just moved: it re-reads.
     if changed {
+        if !dropped.is_empty() {
+            let _ = store.add_roster_dropped(&master, &dropped);
+        }
         let _ = store.mark_roster_dirty(&master, now_ms());
     }
     if now.members.difference(&prev.members).next().is_some() {
@@ -1351,6 +1393,44 @@ struct Folded {
     upgrade_admitted: BTreeSet<String>,
     /// Own-device alerts this ingest recorded: (device, voucher, recorded at).
     own_news: Vec<(String, String, i64)>,
+    /// Devices the stored roster counted that a recovery in this one dropped.
+    dropped: Vec<String>,
+}
+
+/// Devices `before` counted, in the fold or in server authority, that `after` counts in
+/// neither, where `after` starts a new base: a recovery drops them without a removal,
+/// so the join lock moves for them as for one (DEVICE_PROOF section 12 item 9).
+fn dropped_by_recovery(before: &Roster, prev: &RosterState, after: &Roster, now: &RosterState, local_device: &str) -> Vec<String> {
+    if prev.base == now.base {
+        return Vec::new();
+    }
+    let still = after.authority().counted;
+    before
+        .authority()
+        .counted
+        .into_iter()
+        .chain(prev.members.iter().cloned())
+        .filter(|d| d != local_device && !now.members.contains(d) && !still.contains(d))
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect()
+}
+
+/// Devices our own roster change stopped counting: fold members it removed, and on a
+/// recovery every device the fold or server authority counted before that it counts in
+/// neither now (a device only authority still counted can win the lock walk).
+pub(crate) fn lost_by_own_change(
+    before: Option<&(Roster, RosterState)>,
+    after: Option<&(Roster, RosterState)>,
+    local_device: &str,
+) -> Vec<String> {
+    let empty = RosterState::default();
+    let after_members = after.map_or(&empty.members, |(_, s)| &s.members);
+    let mut lost: BTreeSet<String> = before.map_or(&empty.members, |(_, s)| &s.members).difference(after_members).cloned().collect();
+    if let (Some((b, prev)), Some((a, now))) = (before, after) {
+        lost.extend(dropped_by_recovery(b, prev, a, now, local_device));
+    }
+    lost.into_iter().collect()
 }
 
 /// Members another of our devices vouched into our identity since `prev`, each with
@@ -1521,7 +1601,11 @@ fn fold_in_store(
     } else {
         Vec::new()
     };
-    Some(Folded { prev, now, changed, upgrade_admitted, own_news })
+    let dropped = match stored.as_ref() {
+        Some(before) if changed => dropped_by_recovery(before, &prev, &merged, &now, local_device),
+        _ => Vec::new(),
+    };
+    Some(Folded { prev, now, changed, upgrade_admitted, own_news, dropped })
 }
 
 /// What a change to our own roster means for this device: removed, back, or asked.
@@ -3957,5 +4041,78 @@ mod tests {
         ];
         add_removals(&mut r, &me, new, &|_| false);
         assert!(r.reverified().authority().counts(&w.peer_id()), "the keep we gave b was narrowed by a's");
+    }
+
+    /// DEVICE_PROOF section 12 item 9: a contact's recovery that keeps one device drops
+    /// the other without removing it; the join lock moves for it as for a removal.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_recovery_that_drops_a_device_moves_the_join_lock() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        me.own();
+        let (bob, kept, dropped) = (kp(0x70), kp(0x71), kp(0x72));
+        me.ingest(&kept.peer_id(), &Roster::legacy_for_test(&bob, &[&kept, &dropped])).await;
+        let mut recovered = Roster::legacy_for_test(&bob, &[&kept, &dropped]);
+        let recovery = kp(0x73);
+        let rec = crate::identity::roster::sign_recovery(&bob, &recovery, now_ms(), &[kept.peer_id()], false);
+        recovered.add_phrase_statement(&crate::identity::roster::r_pub_of(&recovery), Some(rec), None).unwrap();
+        let (out, noted) = super::super::lock_keeper::noted_while(me.ingest(&kept.peer_id(), &recovered)).await;
+        assert!(out.newly_revoked.is_empty(), "setup: a recovery removes nobody");
+        assert_eq!(noted, vec![(Some(bob.peer_id()), dropped.peer_id())]);
+
+        // A roster that keeps its base drops nothing.
+        let (_, again) = super::super::lock_keeper::noted_while(me.ingest(&kept.peer_id(), &recovered)).await;
+        assert!(again.is_empty());
+    }
+
+    /// R2 review (3): our own recovery after a mutual removal of two other devices: the
+    /// fold had dropped both, but authority still counted the walk's first one, which
+    /// the recovery must drop like any device it leaves out.
+    #[test]
+    fn our_own_recovery_drops_the_device_only_authority_still_counted() {
+        use crate::identity::roster::{sign_recovery, r_pub_of};
+        let (master, me, a, b, recovery) = (kp(0x80), kp(0x81), kp(0x82), kp(0x83), kp(0x84));
+        let m = master.peer_id();
+        let mut r = Roster::legacy_for_test(&master, &[&me, &a, &b]);
+        r.add_removal(sign_removal(&a, &m, LEGACY_BASE, &b.peer_id(), &[]));
+        r.add_removal(sign_removal(&b, &m, LEGACY_BASE, &a.peer_id(), &[]));
+        let prev = r.fold(|_| None, now_ms());
+        let walk: Vec<String> = r.authority().counted.into_iter().filter(|d| *d != me.peer_id()).collect();
+        assert!(!prev.is_member(&a.peer_id()) && !prev.is_member(&b.peer_id()), "setup: the fold removes both");
+        assert_eq!(walk.len(), 1, "setup: authority still counts the walk's first one");
+        let mut recovered = r.clone();
+        let rec = sign_recovery(&master, &recovery, now_ms(), &[me.peer_id()], false);
+        recovered.add_phrase_statement(&r_pub_of(&recovery), Some(rec), None).unwrap();
+        let now = recovered.fold(|_| None, now_ms());
+        assert!(now.is_member(&me.peer_id()) && now.base != prev.base, "setup: a recovery keeping this device");
+        let lost = lost_by_own_change(Some(&(r, prev)), Some(&(recovered, now)), &me.peer_id());
+        assert_eq!(lost, walk, "the device the walk took first is dropped");
+    }
+
+    /// R2 review (1): a recovery the push fetch stored moves the join lock once the
+    /// node reads the store's mark, though the base difference is gone by then.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_recovery_the_push_fetch_stored_moves_the_join_lock() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        me.own();
+        let (bob, kept, dropped) = (kp(0x74), kp(0x75), kp(0x76));
+        me.ingest(&kept.peer_id(), &Roster::legacy_for_test(&bob, &[&kept, &dropped])).await;
+        let mut recovered = Roster::legacy_for_test(&bob, &[&kept, &dropped]);
+        let rec = crate::identity::roster::sign_recovery(&bob, &kp(0x77), now_ms(), &[kept.peer_id()], false);
+        recovered.add_phrase_statement(&crate::identity::roster::r_pub_of(&kp(0x77)), Some(rec), None).unwrap();
+        assert!(ingest_stored(&me.db, &me.pass, &me.master.peer_id(), &me.device.peer_id(), &kept.peer_id(), recovered));
+
+        let (out, noted) = super::super::lock_keeper::noted_while(async {
+            let out = reconcile_dirty(&me.store(), None, &me.master.peer_id(), &me.device.peer_id());
+            out.note_drops();
+            out
+        })
+        .await;
+        assert_eq!(out.masters, vec![bob.peer_id()], "setup: the node follows the stored roster");
+        assert_eq!(noted, vec![(Some(bob.peer_id()), dropped.peer_id())], "the dropped device moves the lock");
+        assert!(reconcile_dirty(&me.store(), None, &me.master.peer_id(), &me.device.peer_id()).dropped.is_empty(), "once");
     }
 }

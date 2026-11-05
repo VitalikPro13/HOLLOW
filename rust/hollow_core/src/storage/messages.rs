@@ -1704,6 +1704,14 @@ impl MessageStore {
                 master_peer_id TEXT PRIMARY KEY,
                 at_ms          INTEGER NOT NULL
             )")?;
+        // Devices a recovery in such a roster dropped: the node moves the join locks
+        // they could still extend once it reads the mark.
+        ddl(conn, "roster_dropped table",
+            "CREATE TABLE IF NOT EXISTS roster_dropped (
+                master_peer_id TEXT NOT NULL,
+                device_peer_id TEXT NOT NULL,
+                PRIMARY KEY (master_peer_id, device_peer_id)
+            )")?;
 
         // Local-only, unsigned human labels for devices (Step 8 Devices panel). NOT
         // synced or master-signed — each device names its own view of the device set.
@@ -7976,6 +7984,27 @@ impl MessageStore {
         self.conn
             .query_row("SELECT 1 FROM roster_dirty WHERE master_peer_id = ?1", params![master], |_| Ok(()))
             .is_ok()
+    }
+
+    /// Another process saw a recovery of `master` drop `devices`.
+    pub fn add_roster_dropped(&self, master: &str, devices: &[String]) -> Result<(), String> {
+        for d in devices {
+            self.conn
+                .execute("INSERT OR IGNORE INTO roster_dropped (master_peer_id, device_peer_id) VALUES (?1, ?2)", params![master, d])
+                .map_err(|e| format!("Failed to note roster_dropped: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Take the devices noted for `master` by [`Self::add_roster_dropped`].
+    pub fn take_roster_dropped(&self, master: &str) -> Vec<String> {
+        let taken: Vec<String> = self
+            .conn
+            .prepare("SELECT device_peer_id FROM roster_dropped WHERE master_peer_id = ?1 ORDER BY device_peer_id")
+            .and_then(|mut stmt| stmt.query_map(params![master], |row| row.get(0)).map(|rows| rows.flatten().collect()))
+            .unwrap_or_default();
+        let _ = self.conn.execute("DELETE FROM roster_dropped WHERE master_peer_id = ?1", params![master]);
+        taken
     }
 
     /// Take the dirty marks, of `master` only or of every identity.
