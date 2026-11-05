@@ -2635,14 +2635,20 @@ pub(crate) async fn handle_envelope_profile_update(
     ceiling: i64,
     db_path: &str,
     db_passphrase: &str,
-) -> Vec<String> {
+) -> Option<Vec<String>> {
     // Multi-device: fold the sender's roster into ours for its master (verify,
-    // merge, persist, resolver update, DeviceListUpdated).
+    // merge, persist, resolver update, DeviceListUpdated); `None` drops the profile with
+    // a roster refused.
     //
     // Siblings meet in the inbox room over the Olm path, not this MLS server-member
     // envelope, so the "our roster changed" re-announce is that handler's job, not
     // ours. `newly_revoked` is surfaced so the swarm caller can drop Olm sessions and
     // remove MLS leaves for a device removed this way.
+    if !super::roster_book::admit_profile_roster(
+        &sender_peer_id, device_list.as_ref(), local_master_peer_id, server_states, db_path, db_passphrase,
+    ) {
+        return None;
+    }
     let outcome = super::roster_book::ingest(
         event_tx, ws_cmd_tx, local_master_peer_id, local_device_peer_id,
         &sender_peer_id, device_list, db_path, db_passphrase,
@@ -2650,7 +2656,7 @@ pub(crate) async fn handle_envelope_profile_update(
     let newly_revoked = outcome.newly_revoked;
     if profile_text_oversized(&display_name, &status, &about_me, &twitch_username) {
         hollow_log!("[HOLLOW-SECURITY] REJECTED profile from {sender_peer_id}: a field exceeds its limit");
-        return newly_revoked;
+        return Some(newly_revoked);
     }
 
     // Decode avatar/banner base64 (same logic as HavenMessage::ProfileUpdate handler).
@@ -2740,7 +2746,7 @@ pub(crate) async fn handle_envelope_profile_update(
     let _ = event_tx.send(NetworkEvent::ProfileUpdated {
         peer_id: profile_master,
     }).await;
-    newly_revoked
+    Some(newly_revoked)
 }
 
 /// Handle `ProfileRequestFor`: relay the target's stored profile, with the owner's

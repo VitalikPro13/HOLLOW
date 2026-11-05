@@ -1035,8 +1035,22 @@ pub(crate) fn server_names_master(state: &crate::crdt::server_state::ServerState
         || state.has_op_author(master)
 }
 
-/// [`ingest`] for a `RosterNotice` or `RosterSync`: kept only on [`notice_may_be_kept`]'s
-/// terms, a co-member being a master some server we hold names.
+/// [`notice_may_be_kept`] against our store, a co-member being a master some server we
+/// hold names.
+fn named_here(
+    master: &str,
+    sender: &str,
+    local_master: &str,
+    server_states: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    let co_member = |m: &str| server_states.values().any(|s| server_names_master(s, m));
+    MessageStore::lease(db_path, db_passphrase)
+        .is_ok_and(|store| notice_may_be_kept(&store, master, sender, local_master, co_member))
+}
+
+/// [`ingest`] for a `RosterNotice` or `RosterSync`, kept only when [`named_here`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ingest_notice(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -1050,14 +1064,34 @@ pub(crate) async fn ingest_notice(
     db_passphrase: &str,
 ) -> Ingested {
     let master = roster.master.clone();
-    let co_member = |m: &str| server_states.values().any(|s| server_names_master(s, m));
-    let kept = MessageStore::lease(db_path, db_passphrase)
-        .is_ok_and(|store| notice_may_be_kept(&store, &master, sender, local_master, co_member));
+    let kept = named_here(&master, sender, local_master, server_states, db_path, db_passphrase);
     if !kept {
         hollow_log!("[HOLLOW-SECURITY] Dropped a roster notice for {master} from {sender}: nothing here names it");
         return Ingested::default();
     }
     ingest(event_tx, ws_cmd_tx, local_master, local_device, sender, Some(roster), db_path, db_passphrase).await
+}
+
+/// Whether the roster a `ProfileCard` or `ProfileUpdate` carries may reach [`ingest`]:
+/// none, or one [`named_here`] (HOL-SEC-193). A device consents to any identity its owner
+/// mints, and an MLS leaf's certificate proves only that some group seated it (a
+/// meeting's host seats any leaf), so neither names a master here. On `false` the caller
+/// drops the card or profile it rode with. Sync and borrowing: the swarm handler's debug
+/// frame sits within a few KB of a Windows worker's 2 MB stack.
+pub(crate) fn admit_profile_roster(
+    sender: &str,
+    roster: Option<&Roster>,
+    local_master: &str,
+    server_states: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    let Some(roster) = roster else { return true };
+    let kept = named_here(&roster.master, sender, local_master, server_states, db_path, db_passphrase);
+    if !kept {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a profile from {sender} carrying a roster for {}: nothing here names it", roster.master);
+    }
+    kept
 }
 
 /// Removals a DM carried (F2): `rm` from `sender`, a member of `master` (the DM's
@@ -3460,6 +3494,118 @@ mod tests {
         let body = &rest[..rest.find("\n        HavenMessage::").unwrap_or(rest.len())];
         assert!(body.contains("roster_book::ingest_notice("), "the notice arm skips the book gate");
         assert!(!body.contains("roster_book::ingest("), "the notice arm ingests around the gate");
+    }
+
+    // HOL-SEC-193: the roster a profile card or update carries.
+    async fn profile_roster(
+        me: &Observer,
+        sender: &str,
+        roster: &Roster,
+        servers: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
+    ) -> Option<Ingested> {
+        if !admit_profile_roster(sender, Some(roster), &me.master.peer_id(), servers, &me.db, &me.pass) {
+            return None;
+        }
+        Some(ingest(&me.events, &me.ws, &me.master.peer_id(), &me.device.peer_id(), sender, Some(roster.clone()), &me.db, &me.pass).await)
+    }
+
+    /// A co-member's device consents to an identity its owner minted: the roster its
+    /// profile carries keeps nothing and refuses the profile.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_profile_roster_for_a_minted_master_is_refused() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (owner, member, mdev, minted) = (kp(0x70), kp(0x7b), kp(0x7c), kp(0x80));
+        let mut servers = server_of(&owner);
+        servers.get_mut("s1").unwrap().members.insert(
+            member.peer_id(),
+            crate::crdt::server_state::MemberInfo { peer_id: member.peer_id(), display_name: "m".into() },
+        );
+        let r = Roster::legacy_for_test(&minted, &[&mdev]);
+        let m = mdev.peer_id();
+        assert!(profile_roster(&me, &m, &r, &servers).await.is_none(), "a member's minted roster");
+        assert!(load(&me.store(), &minted.peer_id()).is_none(), "a minted identity filled the book");
+        let own = Roster::legacy_for_test(&mdev, &[&mdev]);
+        assert!(profile_roster(&me, &m, &own, &servers).await.is_none(), "a device named itself its master");
+        assert!(load(&me.store(), &m).is_none());
+        me.ingest(&m, &r).await;
+        assert!(load(&me.store(), &minted.peer_id()).is_some(), "control: the ungated ingest keeps it");
+    }
+
+    /// A stranger's own identity is refused too: an MLS leaf certifying it says only that
+    /// some group seated it, and a meeting's host seats any leaf.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_strangers_own_profile_roster_is_refused() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (peer, pdev) = (kp(0x81), kp(0x82));
+        let r = Roster::legacy_for_test(&peer, &[&pdev]);
+        assert!(profile_roster(&me, &pdev.peer_id(), &r, &Default::default()).await.is_none());
+        assert!(load(&me.store(), &peer.peer_id()).is_none(), "a stranger's identity filled the book");
+    }
+
+    /// Our own siblings, friends of any state (by master or, for a nickname friend, by
+    /// device), co-members and a profile with no roster all pass.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_profile_roster_from_siblings_friends_and_co_members_is_kept() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let none = std::collections::HashMap::new();
+        let sib = kp(0x83);
+        let own = Roster::legacy_for_test(&me.master, &[&sib, &me.device]);
+        assert!(profile_roster(&me, &sib.peer_id(), &own, &none).await.is_some(), "a sibling");
+        let (friend, fdev, nick, ndev) = (kp(0x84), kp(0x85), kp(0x86), kp(0x87));
+        me.store().save_friend(&friend.peer_id(), "pending", "outgoing", 1).unwrap();
+        me.store().save_friend(&ndev.peer_id(), "pending", "outgoing", 1).unwrap();
+        let fr = Roster::legacy_for_test(&friend, &[&fdev]);
+        assert!(profile_roster(&me, &fdev.peer_id(), &fr, &none).await.is_some(), "a friend");
+        let nr = Roster::legacy_for_test(&nick, &[&ndev]);
+        assert!(profile_roster(&me, &ndev.peer_id(), &nr, &none).await.is_some(), "a nickname friend");
+        let (owner, odev) = (kp(0x70), kp(0x73));
+        let or = Roster::legacy_for_test(&owner, &[&odev]);
+        assert!(profile_roster(&me, &odev.peer_id(), &or, &server_of(&owner)).await.is_some(), "a co-member");
+        for (master, dev) in [(&me.master, &sib), (&friend, &fdev), (&nick, &ndev), (&owner, &odev)] {
+            assert!(me.state_of(&master.peer_id()).is_member(&dev.peer_id()), "{} was dropped", master.peer_id());
+        }
+        let no_roster = admit_profile_roster(&fdev.peer_id(), None, &me.master.peer_id(), &none, &me.db, &me.pass);
+        assert!(no_roster, "a profile with no roster was refused");
+    }
+
+    /// Every arm that hears a profile's roster reaches the book only through its gate.
+    #[test]
+    fn the_profile_roster_arms_go_through_the_gate() {
+        let read = |f: &str| {
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f))
+                .expect("read source")
+                .replace("\r\n", "\n")
+        };
+        // The gate runs once, before the one ingest, and the ingest takes what it passed.
+        let gated = |body: &str, what: &str| {
+            let gate = body.find("if !super::roster_book::admit_profile_roster(").unwrap_or_else(|| panic!("{what}: skips the gate"));
+            let ingest = body.find("roster_book::ingest(").unwrap_or_else(|| panic!("{what}: never ingests"));
+            assert!(gate < ingest, "{what}: ingests before the gate");
+            assert_eq!(body.matches("roster_book::ingest(").count(), 1, "{what}: ingests around the gate");
+        };
+        let swarm = read("src/node/swarm.rs");
+        for arm in ["        HavenMessage::ProfileCard {", "        HavenMessage::ProfileUpdate {"] {
+            let start = swarm.find(arm).unwrap_or_else(|| panic!("missing {arm}"));
+            let rest = &swarm[start + arm.len()..];
+            let body = &rest[..rest.find("\n        HavenMessage::").unwrap_or(rest.len())];
+            gated(body, arm.trim());
+        }
+        let social = read("src/node/social.rs");
+        let start = social.find("pub(crate) async fn handle_envelope_profile_update(").expect("the MLS profile handler");
+        let body = &social[start..start + social[start..].find("\n}\n").expect("its end")];
+        gated(body, "the MLS profile");
+        let arm = "                            MessageEnvelope::ProfileUpdate {";
+        let start = swarm.find(arm).expect("the MLS profile arm");
+        let rest = &swarm[start + arm.len()..];
+        let body = &rest[..rest.find("\n                            MessageEnvelope::").expect("the next arm")];
+        let drop = body.find("conference::refuses_profile_update(&server_id,").expect("the MLS profile arm hears a meeting's group");
+        assert!(drop < body.find("handle_envelope_profile_update(").expect("the handler"), "a meeting's profile reaches the handler first");
     }
 
     // t14-ident review_ab fixes

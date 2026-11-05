@@ -3298,6 +3298,7 @@ async fn run_event_loop(
                             &mut voice_channel_participants, &mut voice_channel_gossip_mode,
                             &conf_id,
                         );
+                        super::conference::clear_meeting_cards(&local_peer_str, &conf_id);
                     }
 
                     NodeCommand::ConferenceRequestJoin { conf_id, link_key, display_name, avatar_hash, code_key } => {
@@ -3337,6 +3338,7 @@ async fn run_event_loop(
                             &mut voice_channel_participants, &mut voice_channel_gossip_mode,
                             &conf_id,
                         );
+                        super::conference::clear_meeting_cards(&local_peer_str, &conf_id);
                     }
 
                     NodeCommand::ConferenceSendChat { conf_id, text, timestamp } => {
@@ -12352,14 +12354,16 @@ async fn handle_incoming_request_inner(
                             }
 
                             MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk, card, stream_overlay } => {
+                                if super::conference::refuses_profile_update(&server_id, &sender_peer_id) {
+                                    return;
+                                }
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
                                         status: "invisible".to_string(),
                                     }).await;
                                 }
-                                let card_sender = sender_peer_id.clone();
-                                let envelope_revoked = super::social::handle_envelope_profile_update(
+                                let Some(envelope_revoked) = super::social::handle_envelope_profile_update(
                                     event_tx, server_states, master_peer_str,
                                     device_peer_id, ws_cmd_tx, ws_room_peers,
                                     sender_peer_id, display_name, status, about_me,
@@ -12370,10 +12374,12 @@ async fn handle_incoming_request_inner(
                                     support_creds_sig, profile_sig, profile_pk, stream_overlay,
                                     super::frame_auth::stamp_ceiling(frame_ts_ms),
                                     db_path, db_passphrase,
-                                ).await;
+                                ).await else {
+                                    return;
+                                };
                                 if let Some(card) = card {
                                     super::profile_card::keep_card(
-                                        &card, &super::resolver::resolve(&card_sender),
+                                        &card, &sender_master,
                                         super::frame_auth::stamp_ceiling(frame_ts_ms), db_path, db_passphrase,
                                     );
                                 }
@@ -14610,6 +14616,11 @@ async fn handle_incoming_request_inner(
             // signature needs it: it verifies against `resolve(sender)`, and this ingest
             // is what teaches the resolver device-to-master. The profile FIELDS are
             // still refused without a valid signature, downstream.
+            if !super::roster_book::admit_profile_roster(
+                peer_str, device_list.as_ref(), master_peer_str, server_states, db_path, db_passphrase,
+            ) {
+                return;
+            }
             let ingest_outcome = super::roster_book::ingest(
                 event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
                 device_list, db_path, db_passphrase,
@@ -15300,6 +15311,11 @@ async fn handle_incoming_request_inner(
 
         HavenMessage::ProfileCard { card, avatar_b64, device_list } => {
             // The roster first: it is what binds the sending device to the card's master.
+            if !super::roster_book::admit_profile_roster(
+                peer_str, device_list.as_ref(), master_peer_str, server_states, db_path, db_passphrase,
+            ) {
+                return;
+            }
             let outcome = super::roster_book::ingest(
                 event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
                 device_list, db_path, db_passphrase,

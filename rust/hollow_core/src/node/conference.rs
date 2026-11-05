@@ -50,6 +50,17 @@ pub(crate) fn is_conference_sid(sid: &str) -> bool {
     sid.starts_with(CONF_SID_PREFIX)
 }
 
+/// Whether a `ProfileUpdate` decrypted in `sid`'s group drops (HOL-SEC-193): a meeting's
+/// host seats any leaf, and a meeting shows only the card its group line carries. Out of
+/// the swarm handler so its log adds nothing to that handler's frame.
+pub(crate) fn refuses_profile_update(sid: &str, sender: &str) -> bool {
+    let refused = is_conference_sid(sid);
+    if refused {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a profile update in {sid} from leaf {sender}: a meeting carries none");
+    }
+    refused
+}
+
 pub(crate) fn conf_id_from_sid(sid: &str) -> Option<&str> {
     sid.strip_prefix(CONF_SID_PREFIX)
 }
@@ -1166,6 +1177,53 @@ pub(crate) fn clear_card_audience(conf_id: &str) {
     }
 }
 
+/// Identities per meeting we may keep a card for while we sit in it (HOL-SEC-193): its
+/// host seats any leaf, so a host seating and dropping fresh identities would otherwise
+/// fill the card store. Past it a new identity's card is refused, never another's evicted:
+/// every seat in one meeting is the host's to give.
+const MEETING_CARD_IDENTITIES: usize = 256;
+#[cfg(test)]
+static MEETING_CARD_IDENTITIES_FOR_TEST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(MEETING_CARD_IDENTITIES);
+
+fn meeting_card_identities() -> usize {
+    #[cfg(test)]
+    return MEETING_CARD_IDENTITIES_FOR_TEST.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(test))]
+    MEETING_CARD_IDENTITIES
+}
+
+#[cfg(test)]
+pub(crate) fn set_meeting_card_identities_for_test(n: usize) {
+    MEETING_CARD_IDENTITIES_FOR_TEST.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Per (our master, meeting), the identities whose card the meeting has kept.
+type MeetingCards = HashMap<(String, String), HashSet<String>>;
+static MEETING_CARDS: Mutex<Option<MeetingCards>> = Mutex::new(None);
+
+/// Whether a meeting may keep `master`'s card: one it kept before, or room for one more.
+fn meeting_card_has_room(local_master: &str, conf_id: &str, master: &str) -> bool {
+    let Ok(mut guard) = MEETING_CARDS.lock() else { return false };
+    let kept = guard.get_or_insert_with(HashMap::new).entry((local_master.to_string(), conf_id.to_string())).or_default();
+    if kept.contains(master) {
+        return true;
+    }
+    if kept.len() >= meeting_card_identities() {
+        return false;
+    }
+    kept.insert(master.to_string());
+    true
+}
+
+/// Forget which identities a meeting kept cards for, once we leave or end it.
+pub(crate) fn clear_meeting_cards(local_master: &str, conf_id: &str) {
+    if let Ok(mut guard) = MEETING_CARDS.lock()
+        && let Some(map) = guard.as_mut()
+    {
+        map.remove(&(local_master.to_string(), conf_id.to_string()));
+    }
+}
+
 fn card_seen_by(local_master: &str, conf_id: &str, device: &str) -> bool {
     CARD_AUDIENCE
         .lock()
@@ -1256,6 +1314,10 @@ pub(crate) async fn handle_inbound_chat(
     if let Some(card) = parsed.get("card").and_then(|c| serde_json::from_value::<super::types::SignedCard>(c.clone()).ok()) {
         if card.master != sender.master || !super::profile_card::card_holds(&card) {
             hollow_log!("[HOLLOW-SECURITY] Dropped a meeting card from {} in {conf_id}: not its own, or not signed by it", sender.device);
+            return;
+        }
+        if !meeting_card_has_room(&master_keypair.peer_id(), &conf_id, &card.master) {
+            hollow_log!("[HOLLOW-SECURITY] Dropped a meeting card from {} in {conf_id}: the meeting showed its share of identities", sender.device);
             return;
         }
         let avatar = parsed
@@ -1363,6 +1425,20 @@ mod tests {
 
     fn kp(seed: u8) -> NativeKeypair {
         NativeKeypair::from_secret_bytes(&[seed; 32])
+    }
+
+    /// Leaving or ending a meeting forgets the identities it kept cards for, and only its own.
+    #[test]
+    fn leaving_a_meeting_forgets_its_card_identities() {
+        let kept = |conf: &str| {
+            MEETING_CARDS.lock().unwrap().as_ref().and_then(|m| m.get(&("t14p-me".to_string(), conf.to_string())).map(|k| k.len()))
+        };
+        assert!(meeting_card_has_room("t14p-me", "t14p-c1", "alice"));
+        assert!(meeting_card_has_room("t14p-me", "t14p-c2", "alice"));
+        assert_eq!((kept("t14p-c1"), kept("t14p-c2")), (Some(1), Some(1)));
+        clear_meeting_cards("t14p-me", "t14p-c1");
+        assert_eq!((kept("t14p-c1"), kept("t14p-c2")), (None, Some(1)), "only the meeting left is forgotten");
+        clear_meeting_cards("t14p-me", "t14p-c2");
     }
 
     #[test]

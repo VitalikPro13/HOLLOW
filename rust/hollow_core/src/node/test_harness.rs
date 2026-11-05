@@ -61355,3 +61355,356 @@ async fn t14f_review_live_asks_a_member_steps_aside_from_keep_nothing_until_admi
     assert!(placed, "M places the joiner O admitted, its roster and card landing from the ask it stepped aside from");
     drop((o, m));
 }
+
+// t14-prof
+/// A minted identity's key: what a modified client makes as many of as it likes.
+fn t14p_minted(i: u32, salt: u8) -> NativeKeypair {
+    let mut s = [salt; 32];
+    s[..4].copy_from_slice(&i.to_le_bytes());
+    NativeKeypair::from_secret_bytes(&s)
+}
+
+/// `master`'s own card named `name`, signed by it at `t`.
+fn t14p_card(master: &NativeKeypair, name: &str, t: i64) -> super::types::SignedCard {
+    use base64::Engine as _;
+    let pk = base64::engine::general_purpose::STANDARD.encode(master.public_key_protobuf());
+    let payload = super::crypto_handler::card_signing_payload(&master.peer_id(), t, name, "");
+    super::types::SignedCard {
+        master: master.peer_id(),
+        display_name: name.to_string(),
+        avatar_hash: String::new(),
+        updated_at: t,
+        sig: super::crypto_handler::sign_message(master, &pk, &payload).0.unwrap(),
+        pk,
+        stream_overlay: None,
+    }
+}
+
+/// A profile `master` signed, named `name` at `t`, with `roster` and its card, as the
+/// Olm (`type`) or the MLS (`t`) wire form.
+fn t14p_profile(master: &NativeKeypair, name: &str, t: i64, roster: &crate::identity::roster::Roster, mls: bool) -> serde_json::Value {
+    let fields = super::crypto_handler::ProfileFields { display_name: name, ..Default::default() };
+    let (sig, pk) = super::crypto_handler::sign_profile(master, &master.peer_id(), t, &fields);
+    let mut v = serde_json::json!({
+        "display_name": name, "status": "", "about_me": "", "updated_at": t,
+        "device_list": roster, "profile_sig": sig, "profile_pk": pk, "card": t14p_card(master, name, t),
+    });
+    let (tag, kind) = if mls { ("t", "srv_profile") } else { ("type", "profile_update") };
+    v[tag] = serde_json::json!(kind);
+    v
+}
+
+/// Two rising stamps, the second strictly later.
+async fn t14p_two_stamps() -> (i64, i64) {
+    let first = super::frame_auth::now_ms();
+    sleep_ms(3).await;
+    (first, super::frame_auth::now_ms().max(first + 1))
+}
+
+/// The roster a co-member's device signs for each of `n` identities it minted.
+fn t14p_minted_rosters(n: u32, salt: u8, device: &NativeKeypair) -> Vec<(NativeKeypair, crate::identity::roster::Roster)> {
+    (0..n)
+        .map(|i| {
+            let m = t14p_minted(i, salt);
+            let r = crate::identity::roster::Roster::legacy_for_test(&m, &[device]);
+            (m, r)
+        })
+        .collect()
+}
+
+/// HOL-SEC-193: a co-member with an Olm session hands B profile cards whose rosters name
+/// identities its own device consented to. None is kept, nor is a card of its own whose
+/// roster was refused; its honest card still lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn probe193_a_co_members_cards_fill_the_roster_book_with_minted_identities() {
+    let _g = test_guard();
+    crate::node::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut b = spawn_node_on(&relay, 247, 248).await;
+    let mut c = spawn_node_on(&relay, 249, 250).await;
+    let server_id = create_server_and_wait(&mut b, "probe193").await;
+    join_and_wait(&mut c, &server_id).await;
+    let c_device = NativeKeypair::from_secret_bytes(&seed_bytes(250));
+    assert_eq!(c_device.peer_id(), c.device_id, "precondition: C's device key");
+    assert!(
+        wait_until(20, async || c.olm_status(&b.device_id).await == "confirmed").await,
+        "precondition: C holds a session with B, got {}", c.olm_status(&b.device_id).await,
+    );
+    let own = super::roster_book::own_roster(&c.master_id, &c.db_path, &c.passphrase).expect("C's own roster");
+    let card_name = async || b.store().load_signed_card(&c.master_id).map(|k| k.display_name);
+    let honest = |name: &str| super::types::HavenMessage::ProfileCard {
+        card: t14p_card(&c.master_kp, name, super::frame_auth::now_ms()), avatar_b64: String::new(), device_list: Some(own.clone()),
+    };
+    carry_as(&c, &b, honest("ready")).await;
+    assert!(wait_until(15, async || card_name().await.as_deref() == Some("ready")).await, "precondition: C's card lands");
+
+    const MINTED: u32 = 40;
+    let minted = t14p_minted_rosters(MINTED, 0x6c, &c_device);
+    for (m, roster) in &minted {
+        let card = t14p_card(m, "minted", super::frame_auth::now_ms());
+        carry_as(&c, &b, super::types::HavenMessage::ProfileCard { card, avatar_b64: String::new(), device_list: Some(roster.clone()) }).await;
+    }
+    // The refused one is the newer, so keeping it would hide the honest one.
+    let (kept_at, dropped_at) = t14p_two_stamps().await;
+    let card = t14p_card(&c.master_kp, "dropped", dropped_at);
+    carry_as(&c, &b, super::types::HavenMessage::ProfileCard { card, avatar_b64: String::new(), device_list: Some(minted[0].1.clone()) }).await;
+    let card = t14p_card(&c.master_kp, "kept", kept_at);
+    carry_as(&c, &b, super::types::HavenMessage::ProfileCard { card, avatar_b64: String::new(), device_list: Some(own.clone()) }).await;
+    let settled = async || matches!(card_name().await.as_deref(), Some("kept" | "dropped"));
+    assert!(wait_until(15, settled).await, "C's last cards never landed");
+    assert_eq!(card_name().await.as_deref(), Some("kept"), "a card whose roster was refused was kept");
+
+    let kept = minted.iter().filter(|(m, _)| b.store().roster_updated_at(&m.peer_id()) > 0).count();
+    let cards = minted.iter().filter(|(m, _)| b.store().load_signed_card(&m.peer_id()).is_some()).count();
+    assert_eq!((kept, cards), (0, 0), "one co-member's session left {kept} minted rosters and {cards} cards in B's book");
+    drop((b, c));
+}
+
+/// HOL-SEC-193 over an Olm `ProfileUpdate` (whose card rides along): minted rosters keep
+/// nothing, a profile whose roster was refused is dropped, the honest one lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn probe193_b_a_co_members_profile_updates_over_olm_keep_no_minted_identity() {
+    let _g = test_guard();
+    crate::node::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut b = spawn_node_on(&relay, 251, 252).await;
+    let mut c = spawn_node_on(&relay, 253, 254).await;
+    let server_id = create_server_and_wait(&mut b, "probe193b").await;
+    join_and_wait(&mut c, &server_id).await;
+    let c_device = NativeKeypair::from_secret_bytes(&seed_bytes(254));
+    assert_eq!(c_device.peer_id(), c.device_id, "precondition: C's device key");
+    assert!(
+        wait_until(20, async || c.olm_status(&b.device_id).await == "confirmed").await,
+        "precondition: C holds a session with B, got {}", c.olm_status(&b.device_id).await,
+    );
+    let own = super::roster_book::own_roster(&c.master_id, &c.db_path, &c.passphrase).expect("C's own roster");
+    let send = async |v: serde_json::Value| {
+        carry_as(&c, &b, serde_json::from_value(v).expect("a profile update")).await;
+        sleep_ms(2).await;
+    };
+    let name = async || b.store().load_profile(&c.master_id).ok().flatten().map(|p| p.display_name);
+    send(t14p_profile(&c.master_kp, "ready", super::frame_auth::now_ms(), &own, false)).await;
+    assert!(wait_until(15, async || name().await.as_deref() == Some("ready")).await, "precondition: C's profile lands");
+
+    let minted = t14p_minted_rosters(12, 0x6d, &c_device);
+    for (m, roster) in &minted {
+        send(t14p_profile(m, "minted", super::frame_auth::now_ms(), roster, false)).await;
+    }
+    let (kept_at, dropped_at) = t14p_two_stamps().await;
+    send(t14p_profile(&c.master_kp, "dropped", dropped_at, &minted[0].1, false)).await;
+    send(t14p_profile(&c.master_kp, "kept", kept_at, &own, false)).await;
+    let settled = async || matches!(name().await.as_deref(), Some("kept" | "dropped"));
+    assert!(wait_until(15, settled).await, "C's last profiles never landed");
+    assert_eq!(name().await.as_deref(), Some("kept"), "a profile whose roster was refused was kept");
+    let card = b.store().load_signed_card(&c.master_id).map(|k| k.display_name);
+    assert_eq!(card.as_deref(), Some("kept"), "the card of a profile whose roster was refused was kept");
+
+    let kept = minted.iter().filter(|(m, _)| b.store().roster_updated_at(&m.peer_id()) > 0).count();
+    let cards = minted.iter().filter(|(m, _)| b.store().load_signed_card(&m.peer_id()).is_some()).count();
+    assert_eq!((kept, cards), (0, 0), "C's profile updates left {kept} minted rosters and {cards} cards in B's book");
+    drop((b, c));
+}
+
+/// HOL-SEC-193 over the MLS `ProfileUpdate`: the leaf certifies C's master, so a roster
+/// for any other identity keeps nothing and drops the profile and its card.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn probe193_c_a_co_members_profile_updates_over_mls_keep_no_minted_identity() {
+    let _g = test_guard();
+    crate::node::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut b = spawn_node_on(&relay, 241, 242).await;
+    let mut c = spawn_node_on(&relay, 243, 244).await;
+    let server_id = create_server_and_wait(&mut b, "probe193c").await;
+    join_and_wait(&mut c, &server_id).await;
+    expect_mls_group(&[&b, &c], &server_id, 25).await;
+    let c_device = NativeKeypair::from_secret_bytes(&seed_bytes(244));
+    assert_eq!(c_device.peer_id(), c.device_id, "precondition: C's device key");
+    let own = super::roster_book::own_roster(&c.master_id, &c.db_path, &c.passphrase).expect("C's own roster");
+    let send = async |v: serde_json::Value| {
+        mls_envelope_as(&c, &server_id, serde_json::from_value(v).expect("an MLS profile update")).await;
+        sleep_ms(2).await;
+    };
+    let name = async || b.store().load_profile(&c.master_id).ok().flatten().map(|p| p.display_name);
+    send(t14p_profile(&c.master_kp, "ready", super::frame_auth::now_ms(), &own, true)).await;
+    assert!(wait_until(15, async || name().await.as_deref() == Some("ready")).await, "precondition: C's MLS profile lands");
+
+    let minted = t14p_minted_rosters(12, 0x6e, &c_device);
+    for (m, roster) in &minted {
+        send(t14p_profile(m, "minted", super::frame_auth::now_ms(), roster, true)).await;
+    }
+    let (kept_at, dropped_at) = t14p_two_stamps().await;
+    send(t14p_profile(&c.master_kp, "dropped", dropped_at, &minted[0].1, true)).await;
+    send(t14p_profile(&c.master_kp, "kept", kept_at, &own, true)).await;
+    let settled = async || matches!(name().await.as_deref(), Some("kept" | "dropped"));
+    assert!(wait_until(15, settled).await, "C's last MLS profiles never landed");
+    assert_eq!(name().await.as_deref(), Some("kept"), "a MLS profile whose roster was refused was kept");
+    let card = b.store().load_signed_card(&c.master_id).map(|k| k.display_name);
+    assert_eq!(card.as_deref(), Some("kept"), "the card of a MLS profile whose roster was refused was kept");
+
+    let kept = minted.iter().filter(|(m, _)| b.store().roster_updated_at(&m.peer_id()) > 0).count();
+    let cards = minted.iter().filter(|(m, _)| b.store().load_signed_card(&m.peer_id()).is_some()).count();
+    assert_eq!((kept, cards), (0, 0), "C's MLS profile updates left {kept} minted rosters and {cards} cards in B's book");
+    drop((b, c));
+}
+
+/// HOL-SEC-193 review: a meeting's group certifies whatever leaf its host seats. A host
+/// that seats a fresh identity, lets it send one MLS `ProfileUpdate` and lets it go,
+/// repeats for free: a guest who shares no server or friendship with any of them keeps
+/// no roster and no profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev193_a_meeting_hosts_churned_strangers_fill_a_guests_roster_book() {
+    let _g = test_guard();
+    crate::node::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 221, 222).await;
+    let mut guest = spawn_node_on(&relay, 223, 224).await;
+    expect_on_relay(&relay, &[&host, &guest]).await;
+    let conf_id = start_pinned_meeting(&relay, &mut host, "rev193-n1", None).await;
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+    admit_to_meeting(&mut host, &mut guest, &conf_id, "Gee").await;
+
+    let mut churned = Vec::new();
+    for i in 0..3u8 {
+        let mut s = spawn_node_on(&relay, 225 + 2 * i, 226 + 2 * i).await;
+        expect_on_relay(&relay, &[&s]).await;
+        admit_to_meeting(&mut host, &mut s, &conf_id, "Stranger").await;
+        let epoch = host.mls_epoch(&conf_sid).await.expect("the host holds the meeting");
+        assert!(
+            wait_until(10, async || guest.mls_epoch(&conf_sid).await == Some(epoch) && s.mls_epoch(&conf_sid).await == Some(epoch)).await,
+            "precondition: the guest and stranger {i} reach epoch {epoch}",
+        );
+        let own = super::roster_book::own_roster(&s.master_id, &s.db_path, &s.passphrase).expect("its own roster");
+        assert_eq!(guest.store().roster_updated_at(&s.master_id), 0, "precondition: the guest holds no roster for stranger {i}");
+        // The card line comes after the profile and is older, so it never renames a kept profile.
+        let (t_card, t_profile) = t14p_two_stamps().await;
+        let v = t14p_profile(&s.master_kp, "stranger", t_profile, &own, true);
+        mls_envelope_as(&s, &conf_sid, serde_json::from_value(v).expect("an MLS profile update")).await;
+        let line = serde_json::json!({ "card": t14p_card(&s.master_kp, "card line", t_card), "avatar": "" }).to_string();
+        s.cmd_tx.send(NodeCommand::TestConferenceLine { conf_id: conf_id.clone(), line }).await.unwrap();
+        assert!(
+            wait_until(10, async || guest.store().load_signed_card(&s.master_id).is_some()).await,
+            "control: stranger {i}'s frames after its profile reached the guest",
+        );
+        s.cmd_tx.send(NodeCommand::ConferenceLeave { conf_id: conf_id.clone() }).await.unwrap();
+        churned.push(s);
+    }
+    let kept = churned.iter().filter(|s| guest.store().roster_updated_at(&s.master_id) > 0).count();
+    let profiles = churned.iter().filter(|s| guest.store().load_profile(&s.master_id).ok().flatten().is_some_and(|p| p.display_name == "stranger")).count();
+    assert_eq!(
+        (kept, profiles), (0, 0),
+        "a meeting host's churned strangers left {kept} rosters and {profiles} full profiles in a guest's store",
+    );
+    drop((host, guest, churned));
+}
+
+/// HOL-SEC-193 review: the meeting card line keeps a card for a leaf's certified master,
+/// so a host that seats and lets go fresh identities fills a guest's card store. A
+/// meeting keeps cards for its share of identities; one it already shows still updates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev193_b_a_meeting_hosts_churned_strangers_fill_a_guests_card_store() {
+    let _g = test_guard();
+    crate::node::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 211, 212).await;
+    let mut guest = spawn_node_on(&relay, 213, 214).await;
+    expect_on_relay(&relay, &[&host, &guest]).await;
+    let conf_id = start_pinned_meeting(&relay, &mut host, "rev193-n2", None).await;
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+    admit_to_meeting(&mut host, &mut guest, &conf_id, "Gee").await;
+    let line = serde_json::json!({ "card": t14p_card(&host.master_kp, "Hosty", super::frame_auth::now_ms()), "avatar": "" }).to_string();
+    host.cmd_tx.send(NodeCommand::TestConferenceLine { conf_id: conf_id.clone(), line }).await.unwrap();
+    assert!(
+        wait_until(10, async || guest.store().load_signed_card(&host.master_id).is_some()).await,
+        "precondition: the guest shows the host's card",
+    );
+    struct Share;
+    impl Drop for Share {
+        fn drop(&mut self) {
+            super::conference::set_meeting_card_identities_for_test(256);
+        }
+    }
+    let _share = Share;
+    super::conference::set_meeting_card_identities_for_test(1);
+
+    let mut churned = Vec::new();
+    for i in 0..3u8 {
+        let mut s = spawn_node_on(&relay, 215 + 2 * i, 216 + 2 * i).await;
+        expect_on_relay(&relay, &[&s]).await;
+        admit_to_meeting(&mut host, &mut s, &conf_id, "Stranger").await;
+        let epoch = host.mls_epoch(&conf_sid).await.expect("the host holds the meeting");
+        assert!(
+            wait_until(10, async || guest.mls_epoch(&conf_sid).await == Some(epoch) && s.mls_epoch(&conf_sid).await == Some(epoch)).await,
+            "precondition: the guest and stranger {i} reach epoch {epoch}",
+        );
+        let line = serde_json::json!({ "card": t14p_card(&s.master_kp, "stranger", super::frame_auth::now_ms()), "avatar": "" }).to_string();
+        s.cmd_tx.send(NodeCommand::TestConferenceLine { conf_id: conf_id.clone(), line }).await.unwrap();
+        let _ = wait_until(8, async || guest.store().load_signed_card(&s.master_id).is_some()).await;
+        s.cmd_tx.send(NodeCommand::ConferenceLeave { conf_id: conf_id.clone() }).await.unwrap();
+        churned.push(s);
+    }
+    let cards = churned.iter().filter(|s| guest.store().load_signed_card(&s.master_id).is_some()).count();
+    let rosters = churned.iter().filter(|s| guest.store().roster_updated_at(&s.master_id) > 0).count();
+    assert_eq!((cards, rosters), (0, 0), "a meeting host's churned strangers left {cards} cards and {rosters} rosters in a guest's store");
+    let line = serde_json::json!({ "card": t14p_card(&host.master_kp, "Hosty again", super::frame_auth::now_ms()), "avatar": "" }).to_string();
+    host.cmd_tx.send(NodeCommand::TestConferenceLine { conf_id: conf_id.clone(), line }).await.unwrap();
+    assert!(
+        wait_until(10, async || guest.store().load_signed_card(&host.master_id).is_some_and(|c| c.display_name == "Hosty again")).await,
+        "the host's card no longer updates once the meeting's share is full",
+    );
+    drop((host, guest, churned));
+}
+
+/// HOL-SEC-193 review: a meeting carries no `ProfileUpdate`, even from an identity the
+/// guest knows (a friend row passes the roster gate): the host seats any leaf, and a
+/// meeting shows only the card its group line carries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t14p_a_meeting_carries_no_profile_update_even_from_a_friend() {
+    let _g = test_guard();
+    crate::node::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 201, 202).await;
+    let mut guest = spawn_node_on(&relay, 203, 204).await;
+    let mut pal = spawn_node_on(&relay, 205, 206).await;
+    expect_on_relay(&relay, &[&host, &guest, &pal]).await;
+    guest.store().save_friend(&pal.master_id, "pending", "outgoing", 1).unwrap();
+    let conf_id = start_pinned_meeting(&relay, &mut host, "t14p-n3", None).await;
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+    admit_to_meeting(&mut host, &mut guest, &conf_id, "Gee").await;
+    admit_to_meeting(&mut host, &mut pal, &conf_id, "Pal").await;
+    let epoch = host.mls_epoch(&conf_sid).await.expect("the host holds the meeting");
+    assert!(
+        wait_until(10, async || guest.mls_epoch(&conf_sid).await == Some(epoch) && pal.mls_epoch(&conf_sid).await == Some(epoch)).await,
+        "precondition: the guest and the friend reach epoch {epoch}",
+    );
+    let own = super::roster_book::own_roster(&pal.master_id, &pal.db_path, &pal.passphrase).expect("its own roster");
+    assert_eq!(guest.store().roster_updated_at(&pal.master_id), 0, "precondition: the guest holds no roster for the friend");
+    let (t_profile, t_card) = t14p_two_stamps().await;
+    let v = t14p_profile(&pal.master_kp, "over the meeting", t_profile, &own, true);
+    mls_envelope_as(&pal, &conf_sid, serde_json::from_value(v).expect("an MLS profile update")).await;
+    let line = serde_json::json!({ "card": t14p_card(&pal.master_kp, "card line", t_card), "avatar": "" }).to_string();
+    pal.cmd_tx.send(NodeCommand::TestConferenceLine { conf_id: conf_id.clone(), line }).await.unwrap();
+    assert!(
+        wait_until(10, async || guest.store().load_signed_card(&pal.master_id).is_some_and(|c| c.display_name == "card line")).await,
+        "control: the friend's card line after the profile reached the guest",
+    );
+    assert_eq!(guest.store().roster_updated_at(&pal.master_id), 0, "a meeting's profile update kept the friend's roster");
+    drop((host, guest, pal));
+}
