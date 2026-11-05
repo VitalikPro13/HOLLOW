@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/services.dart';
@@ -64,6 +65,16 @@ class _Native {
 
   /// Every volume call as the native side receives it: connection, receiver.
   final volumeCalls = <(String?, String?, double)>[];
+
+  /// Every receiver a share redirect named: connection, receiver, volume.
+  final redirected = <(String?, String?, double)>[];
+
+  /// Volume calls and redirect stops in the order native receives them.
+  final audioLog = <String>[];
+
+  /// Holds the next voiceRedirectStart in native until completed.
+  Completer<void>? redirectGate;
+  int redirectPid = 4242;
   final sent = <String, List<(String track, String stream)>>{};
 
   /// The sender id each sent track's m-section carries in the SDP.
@@ -148,11 +159,28 @@ class _Native {
           final receiverId = args['receiverId'] as String?;
           final volume = (args['volume'] as num).toDouble();
           volumeCalls.add((pc, receiverId, volume));
+          audioLog.add('vol:$pc:$receiverId:$volume');
           for (final t in received[pc] ?? const <String>[]) {
             if (receiverId != null && 'r-$t' == receiverId) {
               volumes.add((t, volume));
             }
           }
+          return null;
+        case 'voiceRedirectStart':
+          expect(args.containsKey('trackIds'), isFalse);
+          for (final r in (args['receivers'] as List? ?? const [])) {
+            redirected.add((
+              (r as Map)['peerConnectionId'] as String?,
+              r['receiverId'] as String?,
+              (r['volume'] as num).toDouble(),
+            ));
+          }
+          final held = redirectGate;
+          redirectGate = null;
+          if (held != null) await held.future;
+          return {'pid': redirectPid};
+        case 'voiceRedirectStop':
+          audioLog.add('stop');
           return null;
         case 'getCaptureLevel':
           return {'levelDb': -100.0};
@@ -865,6 +893,161 @@ void main() {
       await svc.setDeafened(false);
       expect(native.volumes.last, ('t-a', 0.5),
           reason: 'un-deafen forgot the volume chosen while deafened');
+    });
+  });
+
+  group('share voice redirect', () {
+    setUp(() => gossipForwardingEnabled = false);
+
+    Future<(String, String)> twoMembers() async {
+      svc = await join(_b);
+      svc.channelMembers = () => {_a, _c};
+      final toA = await leg(_a);
+      final toC = await leg(_c);
+      native.voiceArrives(toA, 't-a', 's-a');
+      native.voiceArrives(toA, 't-a2', 's-a2');
+      native.voiceArrives(toC, 'mic-track', 's-c');
+      await settle();
+      return (toA, toC);
+    }
+
+    test('the redirect names each leg and receiver at that member volume',
+        () async {
+      final (toA, toC) = await twoMembers();
+      await svc.setRemoteVolume(_a, 0.5);
+      expect(await svc.startVoiceRedirect(), 4242);
+      expect(
+          native.redirected,
+          unorderedEquals([
+            (toA, 'r-t-a', 0.5),
+            (toA, 'r-t-a2', 0.5),
+            (toC, 'r-mic-track', 1.0),
+          ]),
+          reason: "a voice was named by its sender's track id, escaped the "
+              'redirect, or lost its member volume');
+    });
+
+    test('a deafened listener redirects every voice silent', () async {
+      await twoMembers();
+      await svc.setDeafened(true);
+      await svc.startVoiceRedirect();
+      expect(native.redirected, hasLength(3));
+      expect(native.redirected.every((r) => r.$3 == 0.0), isTrue,
+          reason: 'a redirected voice played through deafen');
+    });
+
+    test('after the share a deafened listener stays deafened', () async {
+      final (toA, toC) = await twoMembers();
+      await svc.setDeafened(true);
+      await svc.startVoiceRedirect();
+      native.audioLog.clear();
+      await svc.stopVoiceRedirect();
+      expect(native.audioLog.first, 'stop');
+      expect(
+          native.audioLog.skip(1),
+          containsAll([
+            'vol:$toA:r-t-a:0.0',
+            'vol:$toA:r-t-a2:0.0',
+            'vol:$toC:r-mic-track:0.0',
+          ]),
+          reason: 'the redirect gave the voices back at full volume while '
+              'the UI says deafened');
+      expect(native.audioLog.where((l) => l.endsWith(':1.0')), isEmpty);
+    });
+
+    test('a voice that arrives during the share joins the redirect at its '
+        'member volume', () async {
+      final (toA, _) = await twoMembers();
+      await svc.setRemoteVolume(_a, 0.25);
+      await svc.startVoiceRedirect();
+      native.redirected.clear();
+      native.voiceArrives(toA, 't-a3', 's-a3');
+      await settle();
+      expect(native.redirected, [(toA, 'r-t-a3', 0.25)],
+          reason: 'a new voice played from hollow.exe into the shared screen');
+    });
+
+    test('a voice that arrives while the redirect arms joins it', () async {
+      final (toA, toC) = await twoMembers();
+      await svc.setRemoteVolume(_c, 0.25);
+      final held = native.redirectGate = Completer<void>();
+      final arming = svc.startVoiceRedirect();
+      await pumpEventQueue();
+      // A leg's new section lands while native is spawning the child.
+      native.voiceArrives(toC, 't-c2', 's-c2');
+      await settle();
+      held.complete();
+      expect(await arming, 4242);
+      await settle();
+      expect(native.redirected, contains((toC, 'r-t-c2', 0.25)),
+          reason: 'a voice that arrived while the redirect armed plays from '
+              'hollow.exe into the shared screen for the whole share');
+      expect(native.redirected.where((r) => r.$2 == 'r-t-a'), hasLength(1),
+          reason: 'a voice already named was attached twice');
+      expect(toA, isNot(toC));
+    });
+
+    test('a voice named in the arm is not sent again when its track event '
+        'lands during the arm', () async {
+      final (_, toC) = await twoMembers();
+      (native.received[toC] ??= []).add('t-c3');
+      final held = native.redirectGate = Completer<void>();
+      final arming = svc.startVoiceRedirect();
+      await pumpEventQueue();
+      native.voiceArrives(toC, 't-c3', 's-c3');
+      await settle();
+      held.complete();
+      await arming;
+      await settle();
+      expect(native.redirected.where((r) => r.$2 == 'r-t-c3'), hasLength(1),
+          reason: 'native re-attached a voice the arm already named');
+    });
+
+    test('an arm that does not start leaves no voice redirected', () async {
+      final (toA, _) = await twoMembers();
+      await svc.setRemoteVolume(_a, 0.5);
+      native.redirectPid = 0;
+      native.audioLog.clear();
+      expect(await svc.startVoiceRedirect(), 0);
+      expect(native.audioLog.first, 'stop',
+          reason: 'native may hold voices silent from a lost child; the '
+              'share falls back to excluding hollow.exe and never stops it');
+      expect(native.audioLog, contains('vol:$toA:r-t-a:0.5'));
+      native.redirected.clear();
+      native.voiceArrives(toA, 't-a5', 's-a5');
+      await settle();
+      expect(native.redirected, isEmpty);
+    });
+
+    test('a session that closes while the redirect arms redirects nothing '
+        'after it', () async {
+      await twoMembers();
+      final held = native.redirectGate = Completer<void>();
+      final arming = svc.startVoiceRedirect();
+      await pumpEventQueue();
+      await svc.closeAll();
+      held.complete();
+      await arming;
+      native.redirected.clear();
+      await svc.startAudio('srv', 'vc');
+      final again = await leg(_a);
+      native.voiceArrives(again, 't-a6', 's-a6');
+      await settle();
+      expect(native.redirected, isEmpty,
+          reason: "the closed session's redirect took the next one's voice");
+    });
+
+    test('no redirect outlives the session', () async {
+      final (toA, _) = await twoMembers();
+      await svc.startVoiceRedirect();
+      await svc.closeAll();
+      native.redirected.clear();
+      await svc.startAudio('srv', 'vc');
+      final again = await leg(_a);
+      native.voiceArrives(again, 't-a4', 's-a4');
+      await settle();
+      expect(native.redirected, isEmpty);
+      expect(toA, isNot(again));
     });
   });
 }

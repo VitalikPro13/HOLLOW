@@ -310,13 +310,12 @@ class Helper {
   static Future<void> stopScreenAudioPlayer() =>
       NativeAudioManagement.stopScreenAudioPlayer();
 
-  /// Begin out-of-process rendering of the given REMOTE audio tracks (Hollow
-  /// fork, Windows only) so the call voices render from a separate pid the
-  /// screen-audio capturer can exclude during an entire-screen share (anti-echo
-  /// without dropping Hollow's own in-app media). Returns the renderer child
-  /// pid (to exclude), or 0 if not started / unsupported.
-  static Future<int> voiceRedirectStart(List<String> trackIds) =>
-      NativeAudioManagement.voiceRedirectStart(trackIds);
+  /// Begin out-of-process rendering of received voices, each named by its
+  /// connection and receiver and played at its wanted volume (Hollow fork,
+  /// Windows only); see [NativeAudioManagement.voiceRedirectStart].
+  static Future<int> voiceRedirectStart(
+          List<({RTCRtpReceiver receiver, double volume})> voices) =>
+      NativeAudioManagement.voiceRedirectStart(voices);
 
   /// Stop the out-of-process voice redirect: restores in-process playout and
   /// shuts the renderer child down.

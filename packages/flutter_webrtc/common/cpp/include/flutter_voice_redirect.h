@@ -13,12 +13,13 @@
 // then EXCLUDES the child's pid (a descendant of hollow.exe), dropping only the
 // voices while keeping hollow.exe's media.
 //
-// This class taps each remote audio track via AudioTrackSink (decoded PCM,
+// This class taps each named receiver's track via AudioTrackSink (decoded PCM,
 // upstream of the output volume so SetVolume(0) doesn't silence the tap), tags
 // each with a stream id, and forwards framed PCM to the child's stdin over a pipe
 // drained by a dedicated writer thread (so the libwebrtc audio thread never
 // blocks). Mixing + resampling happen in the child (screen_audio_test --mode
-// render-pcm). Restored fully on stop (RemoveSink + SetVolume(1.0)).
+// render-pcm). The sink applies each voice's wanted volume itself (it taps
+// PCM upstream of the track volume); stop restores that volume in-process.
 //
 // Lifetime: child pid is published so the screen-audio capturer can exclude it.
 
@@ -30,7 +31,6 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -55,16 +55,34 @@ class FlutterVoiceRedirect {
   FlutterVoiceRedirect(const FlutterVoiceRedirect&) = delete;
   FlutterVoiceRedirect& operator=(const FlutterVoiceRedirect&) = delete;
 
-  // Begin redirecting the given REMOTE audio track ids to the out-of-process
-  // renderer. Spawns the child (if not already running), AddSink + SetVolume(0)
-  // on each resolvable track. Tracks already being redirected are left as-is;
-  // new ones are added. Returns true if the child is running afterwards. On
-  // success, child_pid() is the renderer pid to exclude from screen capture.
-  bool Start(FlutterWebRTCBase* base, const std::vector<std::string>& track_ids);
+  // One received voice, named by its connection and receiver (never by its
+  // track id, which the sender writes: HOL-SEC-191), and its wanted volume.
+  struct Target {
+    std::string pc_id;
+    std::string receiver_id;
+    double volume = 0.0;
+  };
 
-  // Stop redirecting: RemoveSink + SetVolume(1.0) on every tracked track, stop
-  // the writer, and shut the child down. Safe to call when not running.
+  // Begin redirecting the named voices to the out-of-process renderer.
+  // Spawns the child if needed; each voice found among ITS connection's
+  // receivers gets a sink and in-process volume 0, unknown ones are skipped.
+  // Incremental: a name already redirected is re-attached with the new
+  // volume, so a receiver the connection opened under it since is covered,
+  // and voices of closed connections are dropped. A child that died stays
+  // lost until Stop (new voices only go silent in-process). Returns true if
+  // the child is running afterwards.
+  bool Start(FlutterWebRTCBase* base, const std::vector<Target>& targets);
+
+  // Stop redirecting: every voice plays in-process again at its last wanted
+  // volume, then the writer and child shut down. Safe when not running.
   void Stop(FlutterWebRTCBase* base);
+
+  // Records the wanted volume of a redirected voice, so a volume change
+  // during the share never brings back hollow.exe's own playout of it.
+  // False when that receiver is not redirected.
+  bool SetWantedVolume(const std::string& pc_id,
+                       const std::string& receiver_id,
+                       double volume);
 
   bool active() const { return running_.load(); }
 
@@ -73,14 +91,37 @@ class FlutterVoiceRedirect {
   DWORD child_pid() const { return child_pid_.load(); }
 
  private:
-  // One redirected remote track: its sink + a refptr that keeps it alive while
-  // the sink is attached + the stream id it forwards under.
   class Sink;  // defined in the .cc
+  // One redirected receiver. Track ops run on the audio op queue, which
+  // holds the sink alive until its RemoveSink has run.
   struct Entry {
+    std::string pc_id;
+    std::string receiver_id;
     scoped_refptr<RTCAudioTrack> track;
-    std::unique_ptr<Sink> sink;
+    std::shared_ptr<Sink> sink;
+    // False: over a cap, silent in-process with no sink on the track.
+    bool tapped = true;
     uint8_t stream_id = 0;
   };
+
+  // The lowest stream id no tapped receiver holds, or -1 when all 256 are
+  // taken. Each connection taps at most kMaxVoicesPerConnection; a voice
+  // over either cap stays silent in-process (fails closed for its own
+  // connection only).
+  int FreeStreamId() const;
+  size_t TapsOn(const std::string& pc_id) const;
+
+  // Drops (without restoring) voices whose connection is gone.
+  void DropClosedConnections(FlutterWebRTCBase* base);
+
+  // The child exited or its pipe broke since it was spawned.
+  bool ChildLost() const;
+  void StartWriter();
+
+  // Detaches entries [first, end) and erases them; restores in-process
+  // playout at the wanted volume when [restore].
+  void Detach(FlutterWebRTCBase* base, std::vector<Entry>::iterator first,
+              bool restore);
 
   // --- child process / pipe ---
   bool SpawnChild();        // CreateProcess(render-pcm) + stdin pipe
@@ -99,9 +140,8 @@ class FlutterVoiceRedirect {
   HANDLE child_thread_ = nullptr;
   HANDLE child_stdin_wr_ = nullptr;  // our write end of the child's stdin
 
-  // Tracks currently redirected, keyed by track id.
-  std::map<std::string, Entry> entries_;
-  uint8_t next_stream_id_ = 0;
+  // Receivers currently redirected; one connection may repeat a receiver id.
+  std::vector<Entry> entries_;
 
   // PCM packet queue: audio threads push, writer thread pops -> pipe.
   std::mutex queue_mutex_;

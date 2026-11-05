@@ -1486,17 +1486,11 @@ class CallNotifier extends Notifier<CallState> {
         final isEntireScreen = _dmSharePid == 0 && _dmShareHwnd == 0;
         if (Platform.isWindows && isEntireScreen) {
           try {
-            final trackIds = await _service.getRemoteAudioTrackIds();
-            if (trackIds.isNotEmpty) {
-              excludePid = await Helper.voiceRedirectStart(trackIds);
-              _voiceRedirectActive = excludePid != 0;
-              _callLog('[HOLLOW-AU-SCREEN] Voice redirect '
-                  '${_voiceRedirectActive ? "armed (pid=$excludePid, "
-                      "${trackIds.length} track(s))" : "did not start"}');
-            } else {
-              _callLog('[HOLLOW-AU-SCREEN] No remote audio tracks to redirect '
-                  '(voices will be excluded via hollow.exe fallback)');
-            }
+            excludePid = await _service.startVoiceRedirect();
+            _voiceRedirectActive = excludePid != 0;
+            _callLog('[HOLLOW-AU-SCREEN] Voice redirect '
+                '${_voiceRedirectActive ? "armed (pid=$excludePid)" : "not armed "
+                    "(voices will be excluded via hollow.exe fallback)"}');
           } catch (e) {
             _callLog('[HOLLOW-AU-SCREEN] Voice redirect failed to arm: $e');
           }
@@ -1576,7 +1570,7 @@ class CallNotifier extends Notifier<CallState> {
     if (!_voiceRedirectActive) return;
     _voiceRedirectActive = false;
     try {
-      await Helper.voiceRedirectStop();
+      await _service.stopVoiceRedirect();
       _callLog('[HOLLOW-AU-SCREEN] Voice redirect disarmed');
     } catch (e) {
       _callLog('[HOLLOW-AU-SCREEN] Voice redirect disarm failed: $e');

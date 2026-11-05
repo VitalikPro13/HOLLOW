@@ -289,22 +289,32 @@ class NativeAudioManagement {
     }
   }
 
-  /// Begin out-of-process rendering of the given REMOTE audio tracks (Hollow
-  /// fork, Windows only). Each track's decoded PCM is tapped via an
-  /// AudioTrackSink and forwarded to a child `render-pcm` process that plays it,
-  /// while the track's in-process playout is muted (SetVolume(0)). This is used
-  /// during an ENTIRE-SCREEN share with audio so the call voices render from a
-  /// SEPARATE pid that the screen-audio capturer excludes (anti-echo) — while
-  /// Hollow's own in-app media (same hollow.exe) is still captured.
+  /// Begin out-of-process rendering of the given received voices (Hollow
+  /// fork, Windows only), each at its wanted [volume], so they play from a
+  /// child process the entire-screen share capture excludes. Incremental: a
+  /// voice already redirected only takes the new volume.
   ///
-  /// Returns the renderer child's process id (to pass to the capturer's exclude
-  /// list), or 0 if it didn't start / unsupported platform. No-op (returns 0) on
-  /// web and non-Windows.
-  static Future<int> voiceRedirectStart(List<String> trackIds) async {
+  /// Each voice is named by its connection and receiver, never by its track
+  /// id: the sender writes that id (HOL-SEC-191). Returns the child's process
+  /// id, or 0 when nothing is redirected or the platform has no redirect.
+  static Future<int> voiceRedirectStart(
+      List<({RTCRtpReceiver receiver, double volume})> voices) async {
     if (kIsWeb) return 0;
+    final named = [
+      for (final v in voices)
+        if (v.receiver is RTCRtpReceiverNative &&
+            v.receiver.track?.kind == 'audio')
+          <String, dynamic>{
+            'peerConnectionId':
+                (v.receiver as RTCRtpReceiverNative).peerConnectionId,
+            'receiverId': v.receiver.receiverId,
+            'volume': v.volume,
+          },
+    ];
+    if (named.isEmpty) return 0;
     try {
-      final res = await WebRTC.invokeMethod('voiceRedirectStart',
-          <String, dynamic>{'trackIds': trackIds});
+      final res = await WebRTC.invokeMethod(
+          'voiceRedirectStart', <String, dynamic>{'receivers': named});
       if (res is Map) {
         final pid = res['pid'];
         if (pid is int) return pid;
@@ -319,8 +329,8 @@ class NativeAudioManagement {
   }
 
   /// Stop the out-of-process voice redirect started by [voiceRedirectStart]:
-  /// detaches every sink, restores in-process playout volume, and shuts the
-  /// renderer child down. No-op on web / non-Windows.
+  /// each voice plays in-process again at its last wanted volume, and the
+  /// child shuts down. No-op on web / non-Windows.
   static Future<void> voiceRedirectStop() async {
     if (kIsWeb) return;
     try {

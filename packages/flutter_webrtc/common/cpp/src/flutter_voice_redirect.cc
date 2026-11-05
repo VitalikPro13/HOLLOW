@@ -14,13 +14,30 @@ namespace {
 // bytes. The wire length is u16, so a single packet's PCM must stay under
 // ~65500 bytes. OnData frames are always well under this, but clamp defensively.
 constexpr size_t kMaxPcmBytesPerPacket = 60000;
+
+// libwebrtc's own track volume tops out here too.
+constexpr float kMaxGain = 10.0f;
+
+// Taps one connection may hold, so one peer's receivers never take the stream
+// ids every other voice needs: 16 legs x 16 fit the 256 ids.
+constexpr size_t kMaxVoicesPerConnection = 16;
+
+float ClampGain(double volume) {
+  if (!(volume > 0.0)) return 0.0f;  // NaN and negatives are silence
+  return volume > kMaxGain ? kMaxGain : static_cast<float>(volume);
+}
 }  // namespace
 
 // === AudioTrackSink: tag + forward one remote track's decoded PCM ============
 class FlutterVoiceRedirect::Sink : public AudioTrackSink {
  public:
-  Sink(FlutterVoiceRedirect* owner, uint8_t stream_id)
-      : owner_(owner), stream_id_(stream_id) {}
+  Sink(FlutterVoiceRedirect* owner, uint8_t stream_id, double volume)
+      : owner_(owner), stream_id_(stream_id), gain_(ClampGain(volume)) {}
+
+  void SetGain(double volume) { gain_.store(ClampGain(volume)); }
+  float Gain() const { return gain_.load(); }
+  // After this nothing more reaches the child, even before RemoveSink runs.
+  void Detach() { live_.store(false); }
 
   void OnData(const void* audio_data, int bits_per_sample, int sample_rate,
               size_t number_of_channels, size_t number_of_frames) override {
@@ -28,6 +45,10 @@ class FlutterVoiceRedirect::Sink : public AudioTrackSink {
         number_of_frames == 0) {
       return;
     }
+    // The tap sits upstream of the track volume, so the listener's deafen or
+    // slider only holds if it is applied here.
+    const float gain = gain_.load();
+    if (!live_.load() || gain <= 0.0f) return;
     size_t pcm_bytes =
         number_of_frames * number_of_channels * sizeof(int16_t);
     if (pcm_bytes > kMaxPcmBytesPerPacket) pcm_bytes = kMaxPcmBytesPerPacket;
@@ -43,6 +64,15 @@ class FlutterVoiceRedirect::Sink : public AudioTrackSink {
     pkt[4] = static_cast<uint8_t>((sample_rate >> 8) & 0xFF);
     pkt[5] = static_cast<uint8_t>(number_of_channels & 0xFF);
     std::memcpy(pkt.data() + 6, audio_data, pcm_bytes);
+    if (gain != 1.0f) {
+      const int16_t* in = static_cast<const int16_t*>(audio_data);
+      for (size_t i = 0; i < pcm_bytes / sizeof(int16_t); ++i) {
+        const float v = std::clamp(static_cast<float>(in[i]) * gain, -32768.0f,
+                                   32767.0f);
+        const int16_t out = static_cast<int16_t>(v);
+        std::memcpy(pkt.data() + 6 + i * sizeof(int16_t), &out, sizeof(out));
+      }
+    }
 
     owner_->EnqueuePacket(std::move(pkt));
   }
@@ -50,6 +80,8 @@ class FlutterVoiceRedirect::Sink : public AudioTrackSink {
  private:
   FlutterVoiceRedirect* owner_;
   uint8_t stream_id_;
+  std::atomic<float> gain_;
+  std::atomic<bool> live_{true};
 };
 
 // === lifecycle ===============================================================
@@ -93,7 +125,7 @@ std::wstring FlutterVoiceRedirect::FindRenderExe() {
 }
 
 bool FlutterVoiceRedirect::SpawnChild() {
-  if (child_process_ != nullptr) return true;  // already up
+  if (child_process_ != nullptr) return true;
 
   std::wstring exe = FindRenderExe();
   if (exe.empty()) {
@@ -220,64 +252,172 @@ void FlutterVoiceRedirect::WriterLoop() {
   }
 }
 
+bool FlutterVoiceRedirect::ChildLost() const {
+  if (child_process_ == nullptr) return false;
+  return !writer_running_.load() ||
+         WaitForSingleObject(child_process_, 0) == WAIT_OBJECT_0;
+}
+
+void FlutterVoiceRedirect::StartWriter() {
+  if (writer_running_.load()) return;
+  // A writer stopped by a failed write is still joinable; assigning over it
+  // would std::terminate.
+  if (writer_thread_.joinable()) writer_thread_.join();
+  writer_running_.store(true);
+  writer_thread_ = std::thread([this]() { WriterLoop(); });
+}
+
+void FlutterVoiceRedirect::DropClosedConnections(FlutterWebRTCBase* base) {
+  Detach(base,
+         std::stable_partition(entries_.begin(), entries_.end(),
+                               [base](const Entry& e) {
+                                 return base->PeerConnectionForId(e.pc_id) !=
+                                        nullptr;
+                               }),
+         /*restore=*/false);
+}
+
+size_t FlutterVoiceRedirect::TapsOn(const std::string& pc_id) const {
+  return static_cast<size_t>(
+      std::count_if(entries_.begin(), entries_.end(), [&pc_id](const Entry& e) {
+        return e.tapped && e.pc_id == pc_id;
+      }));
+}
+
 bool FlutterVoiceRedirect::Start(FlutterWebRTCBase* base,
-                                 const std::vector<std::string>& track_ids) {
+                                 const std::vector<Target>& targets) {
   if (base == nullptr) return false;
 
-  if (!SpawnChild()) {
-    return false;
+  // A child that died mid-share is not replaced before Stop: the capturer
+  // excludes only its pid, so a new child's voices would reach the share.
+  // Until then every voice stays silent in hollow.exe.
+  const bool fresh = child_process_ == nullptr;
+  const bool lost = ChildLost();
+  if (lost) OutputDebugStringA("[VOICE-REDIRECT] render-pcm child lost\n");
+  if (!lost) {
+    if (!SpawnChild()) return false;
+    StartWriter();
   }
+  DropClosedConnections(base);
 
-  // Start the writer thread once.
-  if (!writer_running_.exchange(true)) {
-    writer_thread_ = std::thread([this]() { WriterLoop(); });
-  }
-
-  for (const std::string& id : track_ids) {
-    if (id.empty()) continue;
-    if (entries_.find(id) != entries_.end()) continue;  // already redirecting
-
-    scoped_refptr<RTCMediaTrack> track = base->MediaTrackForId(id);
-    if (track == nullptr) {
-      OutputDebugStringA("[VOICE-REDIRECT] track id not found\n");
+  for (const Target& t : targets) {
+    if (t.pc_id.empty() || t.receiver_id.empty()) continue;
+    // Only the named connection's receivers: a track id is the sender's
+    // choice and could name our microphone or another member (HOL-SEC-191).
+    RTCPeerConnection* pc = base->PeerConnectionForId(t.pc_id);
+    if (pc == nullptr) {
+      OutputDebugStringA("[VOICE-REDIRECT] connection not found\n");
       continue;
     }
-    if (track->kind().std_string() != "audio") continue;
+    std::vector<scoped_refptr<RTCAudioTrack>> tracks;
+    auto receivers = pc->receivers();
+    for (scoped_refptr<RTCRtpReceiver> receiver : receivers.std_vector()) {
+      scoped_refptr<RTCMediaTrack> track = receiver->track();
+      if (nullptr == track.get()) continue;
+      if (receiver->id().std_string() == t.receiver_id &&
+          track->kind().std_string() == "audio") {
+        tracks.push_back(scoped_refptr<RTCAudioTrack>(
+            static_cast<RTCAudioTrack*>(track.get())));
+      }
+    }
+    if (tracks.empty()) {
+      OutputDebugStringA("[VOICE-REDIRECT] receiver not found\n");
+      continue;
+    }
 
-    auto audio_track =
-        scoped_refptr<RTCAudioTrack>(static_cast<RTCAudioTrack*>(track.get()));
-
-    Entry entry;
-    entry.stream_id = next_stream_id_++;
-    entry.track = audio_track;
-    entry.sink = std::make_unique<Sink>(this, entry.stream_id);
-
-    audio_track->AddSink(entry.sink.get());
-    audio_track->SetVolume(0.0);  // mute hollow.exe's own playout of this track
-    entries_.emplace(id, std::move(entry));
+    // Re-attach every receiver under this name: one the connection opened
+    // since may share it, and a wrapper says nothing of which track is new.
+    // In-process playout stays 0 throughout.
+    Detach(base,
+           std::stable_partition(entries_.begin(), entries_.end(),
+                                 [&t](const Entry& e) {
+                                   return e.pc_id != t.pc_id ||
+                                          e.receiver_id != t.receiver_id;
+                                 }),
+           /*restore=*/false);
+    for (const auto& track : tracks) {
+      // Over a cap the voice gets no tap and stays silent in hollow.exe: the
+      // listener misses it, the share never hears it.
+      const int stream_id =
+          TapsOn(t.pc_id) < kMaxVoicesPerConnection ? FreeStreamId() : -1;
+      const bool tapped = stream_id >= 0;
+      if (!tapped) {
+        OutputDebugStringA("[VOICE-REDIRECT] voice over its cap kept silent\n");
+      }
+      Entry entry;
+      entry.pc_id = t.pc_id;
+      entry.receiver_id = t.receiver_id;
+      entry.track = track;
+      entry.tapped = tapped;
+      entry.stream_id = static_cast<uint8_t>(tapped ? stream_id : 0);
+      entry.sink = std::make_shared<Sink>(this, entry.stream_id, t.volume);
+      base->audio_op_queue().Post(
+          "voiceRedirectAttach", [track, sink = entry.sink, tapped]() {
+            if (tapped) track->AddSink(sink.get());
+            track->SetVolume(0.0);
+          });
+      entries_.push_back(std::move(entry));
+    }
   }
 
-  running_.store(!entries_.empty());
-  if (entries_.empty()) {
-    // Nothing got attached — don't leave a child running for no reason.
+  running_.store(!lost && !entries_.empty());
+  if (entries_.empty() && fresh) {
+    // Nothing got attached, so no share relies on this child yet.
     Stop(base);
     return false;
   }
-  return true;
+  return !lost;
+}
+
+int FlutterVoiceRedirect::FreeStreamId() const {
+  for (int id = 0; id <= 0xFF; ++id) {
+    if (std::none_of(entries_.begin(), entries_.end(), [id](const Entry& e) {
+          return e.tapped && e.stream_id == id;
+        })) {
+      return id;
+    }
+  }
+  return -1;
+}
+
+bool FlutterVoiceRedirect::SetWantedVolume(const std::string& pc_id,
+                                           const std::string& receiver_id,
+                                           double volume) {
+  bool found = false;
+  for (Entry& e : entries_) {
+    if (e.pc_id == pc_id && e.receiver_id == receiver_id) {
+      e.sink->SetGain(volume);
+      found = true;
+    }
+  }
+  return found;
+}
+
+void FlutterVoiceRedirect::Detach(FlutterWebRTCBase* base,
+                                  std::vector<Entry>::iterator first,
+                                  bool restore) {
+  for (auto it = first; it != entries_.end(); ++it) {
+    it->sink->Detach();
+    const double wanted = restore ? it->sink->Gain() : 0.0;
+    auto op = [track = it->track, sink = it->sink, tapped = it->tapped,
+               restore, wanted]() {
+      if (tapped) track->RemoveSink(sink.get());
+      if (restore) track->SetVolume(wanted);
+    };
+    // Through the queue, behind any volume op still waiting on it.
+    if (base != nullptr) {
+      base->audio_op_queue().Post("voiceRedirectDetach", std::move(op));
+    } else {
+      op();
+    }
+  }
+  entries_.erase(first, entries_.end());
 }
 
 void FlutterVoiceRedirect::Stop(FlutterWebRTCBase* base) {
-  // Detach sinks + restore volume on every tracked track. After RemoveSink no
-  // new packets enter the queue (the only producers are these sinks).
-  for (auto& kv : entries_) {
-    Entry& e = kv.second;
-    if (e.track && e.sink) {
-      e.track->RemoveSink(e.sink.get());
-      e.track->SetVolume(1.0);  // restore normal in-process playout
-    }
-  }
-  entries_.clear();
-  next_stream_id_ = 0;
+  // Each voice goes back to hollow.exe at the volume the listener wants, not
+  // full volume: a deafened listener stays deafened after the share.
+  Detach(base, entries_.begin(), /*restore=*/true);
 
   // Stop the writer thread cleanly. It may be parked on the condvar (woken by
   // notify) or, in the worst case, blocked inside WriteFile on a stalled child.
@@ -299,7 +439,6 @@ void FlutterVoiceRedirect::Stop(FlutterWebRTCBase* base) {
     queue_.clear();
   }
   running_.store(false);
-  (void)base;
 }
 
 }  // namespace flutter_webrtc_plugin

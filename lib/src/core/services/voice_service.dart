@@ -15,6 +15,7 @@ import 'local_speaking_detector.dart';
 import 'overlay_mic.dart';
 import 'pending_ice_queue.dart';
 import 'remote_track_volume.dart';
+import 'voice_redirect_arm.dart';
 import 'video_quality_ladder.dart';
 
 /// Log to hollow_debug.log (visible in release builds).
@@ -42,6 +43,9 @@ class VoiceService {
 
   /// How loud the far side plays this call (deafen = 0.0).
   double _remoteVolume = 1.0;
+
+  /// Whether the far side's voices play from the Windows share redirect.
+  final _redirect = VoiceRedirectArm<RTCRtpReceiver>();
 
   /// ICE candidates received before setRemoteDescription is called, keyed by
   /// the call they belong to. See [PendingIceQueue] for why the key matters.
@@ -569,20 +573,50 @@ class VoiceService {
         '${volume.toStringAsFixed(2)} on $applied/$found receiver(s)');
   }
 
-  /// Track ids of the remote peer's inbound audio, used by the Windows
-  /// entire-screen anti-echo path to redirect them to an out-of-process
-  /// renderer. Empty with no PC or no remote audio yet.
-  Future<List<String>> getRemoteAudioTrackIds() async {
-    if (_pc == null) return const [];
-    final ids = <String>[];
-    final receivers = await _pc!.getReceivers();
-    for (final r in receivers) {
-      final t = r.track;
-      if (t != null && t.kind == 'audio' && (t.id?.isNotEmpty ?? false)) {
-        ids.add(t.id!);
-      }
+  /// Moves the far side's voices to the Windows entire-screen share
+  /// redirect (a child process the share capture excludes), each at the call
+  /// volume. Returns the child's pid to exclude, 0 when nothing moved.
+  Future<int> startVoiceRedirect() async {
+    final pc = _pc;
+    if (pc == null) return 0;
+    final arm = _redirect.begin();
+    final receivers = [
+      for (final r in await pc.getReceivers())
+        if (r.track?.kind == 'audio') r,
+    ];
+    // The volume is read after the last await, so a deafen that lands
+    // later is the one native keeps.
+    final pid = await Helper.voiceRedirectStart([
+      for (final r in receivers) (receiver: r, volume: _remoteVolume),
+    ]);
+    final held = _redirect.finish(arm, armed: pid != 0);
+    // A call that ended meanwhile: the share's own disarm takes it back.
+    if (held == null) return pid;
+    if (pid == 0) {
+      // Native may still hold voices silent for a child it lost; the share
+      // falls back to excluding hollow.exe and never stops the redirect.
+      await stopVoiceRedirect();
+      _log('[HOLLOW-VOICE] Voice redirect not armed');
+      return 0;
     }
-    return ids;
+    final named = {for (final r in receivers) r.receiverId};
+    final late = [for (final r in held) if (named.add(r.receiverId)) r];
+    if (late.isNotEmpty) {
+      await Helper.voiceRedirectStart([
+        for (final r in late) (receiver: r, volume: _remoteVolume),
+      ]);
+    }
+    _log('[HOLLOW-VOICE] Voice redirect armed (${named.length} voice(s) at '
+        'volume ${_remoteVolume.toStringAsFixed(2)})');
+    return pid;
+  }
+
+  /// Ends the share redirect and puts the call volume back on every voice:
+  /// the redirect's own restore is not trusted to know deafen.
+  Future<void> stopVoiceRedirect() async {
+    _redirect.reset();
+    await Helper.voiceRedirectStop();
+    if (_pc != null) await setRemoteAudioVolume(_remoteVolume);
   }
 
   /// Toggles the camera and returns the new state.
@@ -1338,6 +1372,7 @@ class VoiceService {
     _activeCallId = null;
     _isMuted = false;
     _remoteVolume = 1.0;
+    _redirect.reset();
     Helper.setCaptureMuted(false).catchError((_) {});
     _useFrontCamera = true;
   }
@@ -1701,6 +1736,12 @@ class VoiceService {
       final receiver = event.receiver;
       if (receiver != null && _remoteVolume != 1.0) {
         unawaited(setRemoteReceiverVolume(_remoteVolume, receiver));
+      }
+      // During an entire-screen share a new voice would otherwise play from
+      // hollow.exe straight into the shared audio.
+      if (receiver != null && _redirect.admit(receiver)) {
+        unawaited(Helper.voiceRedirectStart(
+            [(receiver: receiver, volume: _remoteVolume)]));
       }
     }
   }

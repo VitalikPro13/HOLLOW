@@ -134,6 +134,17 @@ whitelist) stay in CLAUDE.md.
   hand one to the audio op queue), nothing matched = error, never a local track. Slider and deafen
   cover every audio receiver of a leg; a receiver opened later takes the wanted volume in onTrack.
   `remote_receiver_volume_test` guards all three native lookups.
+- The Windows entire-screen share's voice redirect names each voice by (connection, receiver)
+  with its wanted volume (`startVoiceRedirect` in both services, `Helper.voiceRedirectStart`
+  takes receivers), NEVER a track id or `MediaTrackForId` (HOL-SEC-191). Its sink taps PCM
+  BEFORE the track volume, so the redirect applies the volume itself; `setVolume` on a
+  redirected receiver moves only the redirect and keeps hollow.exe's copy at 0; stop restores
+  the wanted volume and the services re-apply it (never 1.0). A voice arriving while it ARMS is
+  held (`VoiceRedirectArm`) and sent once the child is up. A dead render child is NEVER respawned
+  mid-share (the capturer excludes only its pid): voices stay silent in-process until Stop; a
+  voice over the per-connection (16) or global (256) tap cap stays silent too, never playing.
+  `remote_receiver_volume_test` guards `voice_redirect_resolves_only_named_receivers`,
+  `a render child lost mid-share is never replaced or restarted over`.
 
 ## Linux audio and calls
 

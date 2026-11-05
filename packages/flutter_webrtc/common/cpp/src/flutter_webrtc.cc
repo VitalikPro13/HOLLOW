@@ -901,22 +901,28 @@ void FlutterWebRTC::HandleMethodCall(
         EncodableValue(proc ? proc->WorstGapMs() : 0);
     result->Success(EncodableValue(res));
   } else if (method_call.method_name().compare("voiceRedirectStart") == 0) {
-    // Hollow fork (Windows): begin out-of-process rendering of the given REMOTE
-    // audio track ids so the call voices play from a separate pid (excluded from
+    // Hollow fork (Windows): begin out-of-process rendering of the named
+    // received voices so they play from a separate pid (excluded from
     // entire-screen capture for anti-echo) while hollow.exe's media is captured.
-    // Returns {"pid": <renderer pid>} so Dart can pass it to the screen-audio
-    // capturer's --exclude-pid. {"pid": 0} means it didn't start.
+    // Each item is {peerConnectionId, receiverId, volume}; a malformed one is
+    // skipped. Returns {"pid": <renderer pid>} for the capturer's
+    // --exclude-pid; {"pid": 0} means it didn't start.
 #ifdef _WIN32
     const EncodableMap params =
-        method_call.arguments()
+        method_call.arguments() &&
+                TypeIs<EncodableMap>(*method_call.arguments())
             ? GetValue<EncodableMap>(*method_call.arguments())
             : EncodableMap();
-    const EncodableList track_list = findList(params, "trackIds");
-    std::vector<std::string> track_ids;
-    for (const EncodableValue& v : track_list) {
-      track_ids.push_back(GetValue<std::string>(v));
+    std::vector<FlutterVoiceRedirect::Target> targets;
+    for (const EncodableValue& v : findList(params, "receivers")) {
+      if (!TypeIs<EncodableMap>(v)) continue;
+      const EncodableMap& item = GetValue<EncodableMap>(v);
+      const std::optional<double> volume = maybeFindDouble(item, "volume");
+      if (!volume.has_value()) continue;
+      targets.push_back({findString(item, "peerConnectionId"),
+                         findString(item, "receiverId"), volume.value()});
     }
-    bool ok = voice_redirect()->Start(this, track_ids);
+    bool ok = voice_redirect()->Start(this, targets);
     int pid = ok ? static_cast<int>(voice_redirect()->child_pid()) : 0;
     EncodableMap res;
     res[EncodableValue("pid")] = EncodableValue(pid);
@@ -927,8 +933,8 @@ void FlutterWebRTC::HandleMethodCall(
     result->Success(EncodableValue(res));
 #endif
   } else if (method_call.method_name().compare("voiceRedirectStop") == 0) {
-    // Hollow fork (Windows): stop the redirect — RemoveSink + restore volume on
-    // every redirected track, shut the renderer child down.
+    // Hollow fork (Windows): stop the redirect; each voice plays in-process
+    // again at its wanted volume and the renderer child shuts down.
 #ifdef _WIN32
     voice_redirect()->Stop(this);
 #endif
@@ -1743,6 +1749,7 @@ bool FlutterWebRTC::ReceiverSetVolume(const std::string& pc_id,
     return false;
   }
   std::vector<scoped_refptr<RTCAudioTrack>> tracks;
+  std::vector<scoped_refptr<RTCAudioTrack>> redirected;
   auto receivers = pc->receivers();
   for (scoped_refptr<RTCRtpReceiver> receiver : receivers.std_vector()) {
     scoped_refptr<RTCMediaTrack> track = receiver->track();
@@ -1750,18 +1757,29 @@ bool FlutterWebRTC::ReceiverSetVolume(const std::string& pc_id,
     const bool named = !receiver_id.empty()
                            ? receiver->id().std_string() == receiver_id
                            : track->id().std_string() == track_id;
-    if (named && track->kind().std_string() == "audio") {
-      tracks.push_back(scoped_refptr<RTCAudioTrack>(
+    if (!named || track->kind().std_string() != "audio") continue;
+#ifdef _WIN32
+    // A voice the share redirect plays keeps in-process volume 0 and the
+    // redirect applies the wanted volume (HOL-SEC-191).
+    if (voice_redirect_ &&
+        voice_redirect_->SetWantedVolume(pc_id, receiver->id().std_string(),
+                                         volume)) {
+      redirected.push_back(scoped_refptr<RTCAudioTrack>(
           static_cast<RTCAudioTrack*>(track.get())));
+      continue;
     }
+#endif
+    tracks.push_back(scoped_refptr<RTCAudioTrack>(
+        static_cast<RTCAudioTrack*>(track.get())));
   }
-  if (tracks.empty()) {
+  if (tracks.empty() && redirected.empty()) {
     return false;
   }
   // Off the platform thread: SetVolume is a signaling-thread hop that
   // queues behind mic teardown during mute churn (see HollowAudioOpQueue).
-  audio_op_queue().Post("setVolume", [tracks, volume]() {
+  audio_op_queue().Post("setVolume", [tracks, redirected, volume]() {
     for (const auto& track : tracks) track->SetVolume(volume);
+    for (const auto& track : redirected) track->SetVolume(0.0);
   });
   return true;
 }

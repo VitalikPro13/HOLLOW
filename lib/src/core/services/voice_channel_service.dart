@@ -17,6 +17,7 @@ import 'package:hollow/src/core/services/remote_track_volume.dart';
 import 'package:hollow/src/core/services/local_meter_loopback.dart';
 import 'package:hollow/src/core/services/local_speaking_detector.dart';
 import 'package:hollow/src/core/services/overlay_mic.dart';
+import 'package:hollow/src/core/services/voice_redirect_arm.dart';
 import 'package:hollow/src/core/providers/voice_level_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 
@@ -292,6 +293,9 @@ class VoiceChannelService {
   /// [_restorePeerAudioState] can put them back.
   bool _isDeafened = false;
   final Map<String, double> _peerVolumes = {};
+
+  /// Whether received voices play from the Windows share redirect.
+  final _redirect = VoiceRedirectArm<(String, RTCRtpReceiver)>();
 
   /// Publish a peer leg's health for the UI.
   void Function(String peerId, LinkHealthSnapshot snapshot)? onLinkHealth;
@@ -1012,6 +1016,7 @@ class VoiceChannelService {
     _fwdSilent.clear();
     _fwdWanted.clear();
     _wantSent.clear();
+    _redirect.reset();
     _wantsTimer?.cancel();
     _legGraceTimer?.cancel();
     _legAwaited.clear();
@@ -1211,21 +1216,96 @@ class VoiceChannelService {
         '$applied/$found receiver(s) of $peerId');
   }
 
-  /// Track ids of every connected peer's inbound audio, used by the Windows
-  /// entire-screen anti-echo path to redirect them to an out-of-process
-  /// renderer so they are not re-captured.
-  Future<List<String>> getAllRemoteAudioTrackIds() async {
-    final ids = <String>[];
-    for (final pc in _peerConnections.values) {
-      final receivers = await pc.getReceivers();
-      for (final r in receivers) {
-        final t = r.track;
-        if (t != null && t.kind == 'audio' && (t.id?.isNotEmpty ?? false)) {
-          ids.add(t.id!);
+  /// The volume one received voice of [peerId]'s leg plays at right now.
+  /// A forward takes deafen and its silence, never the forwarder's slider.
+  double _receiverVolume(String peerId, RTCRtpReceiver r) {
+    if (!_isFwdReceiver(peerId, r)) return _wantedVolume(peerId);
+    final silent = _fwdSilent[peerId]?.contains(r.track?.id) ?? false;
+    return silent || _isDeafened ? 0.0 : 1.0;
+  }
+
+  /// Moves every received voice to the Windows entire-screen share redirect
+  /// (a child process the share capture excludes), each at the volume it
+  /// plays at now. Incremental. Returns the child's pid to exclude, 0 when
+  /// nothing moved.
+  Future<int> startVoiceRedirect() async {
+    final arm = _redirect.begin();
+    final voices = <(String, RTCRtpReceiver)>[];
+    for (final entry in _peerConnections.entries.toList()) {
+      try {
+        for (final r in await entry.value.getReceivers()) {
+          if (r.track?.kind == 'audio') voices.add((entry.key, r));
         }
+      } catch (e) {
+        _vcLog('[HOLLOW-VC] Voice redirect skipped ${entry.key}: $e');
       }
     }
-    return ids;
+    // Volumes are read after the last await, so a deafen or slider that
+    // lands later is the one native keeps.
+    final pid = await Helper.voiceRedirectStart([
+      for (final (peerId, r) in voices)
+        (receiver: r, volume: _receiverVolume(peerId, r)),
+    ]);
+    final held = _redirect.finish(arm, armed: pid != 0);
+    // A session that closed meanwhile: the share's own disarm takes it back.
+    if (held == null) return pid;
+    if (pid == 0) {
+      // Native may still hold voices silent for a child it lost; the share
+      // falls back to excluding hollow.exe and never stops the redirect.
+      await stopVoiceRedirect();
+      _vcLog('[HOLLOW-VC] Voice redirect not armed');
+      return 0;
+    }
+    final named = {for (final (peerId, r) in voices) (peerId, r.receiverId)};
+    final late = [
+      for (final (peerId, r) in held)
+        if (named.add((peerId, r.receiverId))) (peerId, r),
+    ];
+    if (late.isNotEmpty) {
+      await Helper.voiceRedirectStart([
+        for (final (peerId, r) in late)
+          (receiver: r, volume: _receiverVolume(peerId, r)),
+      ]);
+    }
+    final volumes = [
+      for (final (peerId, r) in [...voices, ...late])
+        _receiverVolume(peerId, r).toStringAsFixed(2),
+    ];
+    _vcLog('[HOLLOW-VC] Voice redirect armed (${volumes.length} voice(s) at '
+        'volumes ${volumes.join(',')})');
+    return pid;
+  }
+
+  /// Ends the share redirect and puts each voice back at the volume it
+  /// should play at: the redirect's own restore is not trusted to know
+  /// deafen or a slider.
+  Future<void> stopVoiceRedirect() async {
+    _redirect.reset();
+    await Helper.voiceRedirectStop();
+    final restored = <String>[];
+    for (final entry in _peerConnections.entries.toList()) {
+      try {
+        for (final r in await entry.value.getReceivers()) {
+          if (r.track?.kind == 'audio') {
+            final volume = _receiverVolume(entry.key, r);
+            await setRemoteReceiverVolume(volume, r);
+            restored.add(volume.toStringAsFixed(2));
+          }
+        }
+      } catch (e) {
+        _vcLog('[HOLLOW-VC] Volume restore skipped for ${entry.key}: $e');
+      }
+    }
+    _vcLog('[HOLLOW-VC] Voice redirect stopped (${restored.length} voice(s) '
+        'back at volumes ${restored.join(',')})');
+  }
+
+  /// A voice that arrives during an entire-screen share would otherwise play
+  /// from hollow.exe straight into the shared audio.
+  void _redirectNewVoice(String peerId, RTCRtpReceiver? receiver) {
+    if (receiver == null || !_redirect.admit((peerId, receiver))) return;
+    unawaited(Helper.voiceRedirectStart(
+        [(receiver: receiver, volume: _receiverVolume(peerId, receiver))]));
   }
 
   // Camera (video) controls
@@ -2492,6 +2572,7 @@ class VoiceChannelService {
       if (receiver != null && volume != 1.0) {
         unawaited(setRemoteReceiverVolume(volume, receiver));
       }
+      _redirectNewVoice(peerId, receiver);
     } else if (event.track.kind == 'video') {
       _handleRemoteVideoTrack(peerId, event, pc);
     }
@@ -2714,6 +2795,7 @@ class VoiceChannelService {
     if (trackId != null) (_fwdIn[forwarder] ??= {})[trackId] = origin;
     final fc = frameCryptor;
     final receiver = event.receiver;
+    _redirectNewVoice(forwarder, receiver);
     if (fc != null && receiver != null) {
       await fc.rebindReceiver(forwarder, receiver,
           kind: forwardCryptorKind(origin));

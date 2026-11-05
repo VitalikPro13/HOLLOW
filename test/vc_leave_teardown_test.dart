@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -180,6 +182,60 @@ void main() {
     expect(mesh.closes, 1);
   });
 
+  test('a share stopped while the voice redirect arms leaves nothing armed',
+      () async {
+    // The stop found nothing to disarm yet, and a redirect left armed keeps
+    // every voice silent in hollow.exe with no share to end it.
+    final c = ProviderContainer(overrides: [
+      voiceChannelProvider.overrideWith(_SharingRoom.new),
+      webRtcProvider.overrideWith(_NoDataChannels.new),
+    ]);
+    addTearDown(c.dispose);
+    final vc = c.read(voiceChannelProvider.notifier);
+    final mesh = _Mesh();
+    vc.debugAdoptCall(mesh);
+    final held = mesh.redirectGate = Completer<void>();
+
+    final arming = vc.debugArmVoiceRedirect();
+    await pumpEventQueue();
+    await vc.stopScreenShare();
+    expect(c.read(voiceChannelProvider).isScreenSharing, isFalse);
+    held.complete();
+    await arming;
+
+    expect(mesh.redirectStops, 1,
+        reason: 'the redirect stayed armed after its share ended');
+  });
+
+  test('an arm that ends while the stop finishes leaves nothing armed',
+      () async {
+    final c = ProviderContainer(overrides: [
+      voiceChannelProvider.overrideWith(_SharingRoom.new),
+      webRtcProvider.overrideWith(_NoDataChannels.new),
+    ]);
+    addTearDown(c.dispose);
+    final vc = c.read(voiceChannelProvider.notifier);
+    final mesh = _Mesh();
+    final capture = _Capture();
+    vc.debugAdoptCall(mesh, captureStream: capture);
+    final armHeld = mesh.redirectGate = Completer<void>();
+    final disposeHeld = capture.gate = Completer<void>();
+
+    final arming = vc.debugArmVoiceRedirect();
+    await pumpEventQueue();
+    // The stop passes its disarm, then waits on the capture's dispose.
+    final stopping = vc.stopScreenShare();
+    await pumpEventQueue(times: 50);
+    expect(c.read(voiceChannelProvider).isScreenSharing, isTrue);
+    armHeld.complete();
+    await arming;
+    disposeHeld.complete();
+    await stopping;
+
+    expect(mesh.redirectStops, 1,
+        reason: 'the redirect stayed armed after its share ended');
+  });
+
   test('a camera self-view that fails to dispose skips no later phase',
       () async {
     final r = room();
@@ -244,6 +300,16 @@ class _Room extends VoiceChannelNotifier {
       );
 }
 
+class _SharingRoom extends VoiceChannelNotifier {
+  @override
+  VoiceChannelState build() => const VoiceChannelState(
+        currentServerId: 'srv',
+        currentChannelId: 'vc',
+        currentChannelName: 'room',
+        isScreenSharing: true,
+      );
+}
+
 class _NoDataChannels extends WebRtcNotifier {
   @override
   WebRtcService get service => throw StateError('no data channels here');
@@ -252,6 +318,17 @@ class _NoDataChannels extends WebRtcNotifier {
 class _Mesh extends VoiceChannelService {
   _Mesh() : super(localPeerId: 'me', iceServers: const {});
   int closes = 0;
+  Completer<void>? redirectGate;
+  int redirectStops = 0;
+
+  @override
+  Future<int> startVoiceRedirect() async {
+    await redirectGate?.future;
+    return 4242;
+  }
+
+  @override
+  Future<void> stopVoiceRedirect() async => redirectStops++;
 
   @override
   Future<void> closeAll() async {
@@ -281,10 +358,12 @@ class _Share extends ScreenShareService {
 class _Capture extends MediaStream {
   _Capture() : super('capture', 'local');
   int disposes = 0;
+  Completer<void>? gate;
 
   @override
   Future<void> dispose() async {
     disposes++;
+    await gate?.future;
     await Future<void>.delayed(Duration.zero);
   }
 

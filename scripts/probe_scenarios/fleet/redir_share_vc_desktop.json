@@ -1,0 +1,434 @@
+{
+ "_": [
+  "HOL-SEC-191: the Windows entire-screen share's voice redirect names voices by connection",
+  "and receiver and keeps the listener's volume. Both peers Windows. a deafens, shares Screen 1",
+  "with audio (redirect arms), b watches (capturer excludes the child), a un-deafens and",
+  "deafens during the share, stops the share while deafened. Proof lines in a's",
+  "hollow_debug.log: '[HOLLOW-VC] Voice redirect armed (N voice(s) at volumes ...)',",
+  "'[HOLLOW-AU-SCREEN] VC voice redirect armed (pid=', the Volume lines during the share",
+  "(on n/n receiver(s)), 'Voice redirect stopped (N voice(s) back at volumes 0.00)' and",
+  "'VC voice redirect disarmed'. Audio itself is not provable by widgets. Needs a 0.14 relay.",
+  "run (mini): bash scripts/pc_sync.sh sec-014; pwsh -NoProfile -File scripts/fleet.ps1 -Onboard -Fresh -Peers windows:<x>,windows:<y> -Relay hollowtest.duckdns.org; pwsh -NoProfile -File scripts/fleet.ps1 -Scenario redir_share_vc_desktop -Peers a=windows:<x>,b=windows:<y>"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "b",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_B"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "redir-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:redir-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "redir-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create channel",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "dialog > text:Create channel",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Voice",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "value": "room-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:room-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:redir-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "server:redir-${RUN}",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "redir-${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "channel:room-${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Mute",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Unmute",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Mute",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Unmute",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "room-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:_VoiceParticipantRow",
+   "count": 2,
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "type:_VoiceParticipantRow",
+   "timeout_ms": 60000,
+   "count": 2
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 8000,
+   "why": "The leg connects and both sides hold their receivers."
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "redir-01-in-room"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "PROOF a deafens, then shares Screen 1 WITH audio: the redirect arms holding b's voice at volume 0"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Deafen",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Undeafen",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Share your screen",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:ScreenShareDialog > text:Screen 1",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:ScreenShareDialog > text:Screen 1",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:ScreenShareDialog > semantics:Share audio",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "redir-02-dialog-audio-on"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:ScreenShareDialog > text:Share",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "type:ScreenShareDialog",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Stop sharing",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "semantics:Watch probe-a's screen",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Watch probe-a's screen",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "type:RTCVideoView",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 4000,
+   "why": "The share audio capturer starts with the child's pid excluded."
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "redir-03-sharing-deafened"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "PROOF un-deafen during the share: the redirect takes volume 1, hollow.exe's copy stays 0"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Undeafen",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Deafen",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "PROOF deafen again during the share"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Deafen",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Undeafen",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "PROOF stop the share while deafened: b's voice comes back at volume 0"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Stop sharing",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Share your screen",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Undeafen",
+   "timeout_ms": 5000
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "redir-04-after-share-still-deafened"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Undeafen",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Deafen",
+   "timeout_ms": 10000
+  }
+ ]
+}

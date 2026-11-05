@@ -1729,21 +1729,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _voiceRedirectActive = false;
     final isEntireScreen = pid == 0 && windowHwnd == 0;
     if (Platform.isWindows && shareAudio && isEntireScreen) {
-      try {
-        final trackIds =
-            await _service?.getAllRemoteAudioTrackIds() ?? const <String>[];
-        if (trackIds.isNotEmpty) {
-          _screenShareExcludePid = await Helper.voiceRedirectStart(trackIds);
-          _voiceRedirectActive = _screenShareExcludePid != 0;
-          debugPrint('[HOLLOW-AU-SCREEN] VC voice redirect '
-              '${_voiceRedirectActive ? "armed (pid=$_screenShareExcludePid, "
-                  "${trackIds.length} track(s))" : "did not start"}');
-        } else {
-          debugPrint('[HOLLOW-AU-SCREEN] VC: no remote audio tracks to redirect');
-        }
-      } catch (e) {
-        debugPrint('[HOLLOW-AU-SCREEN] VC voice redirect failed to arm: $e');
-      }
+      await _armVoiceRedirect();
     }
 
     // Opt-in watching (issue #38): no fan-out here. Peers learn from the
@@ -1860,6 +1846,27 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
+  /// Arms the entire-screen anti-echo voice redirect for the share being
+  /// started.
+  Future<void> _armVoiceRedirect() async {
+    try {
+      _screenShareExcludePid = await _service?.startVoiceRedirect() ?? 0;
+      _voiceRedirectActive = _screenShareExcludePid != 0;
+      _vcLog('[HOLLOW-AU-SCREEN] VC voice redirect '
+          '${_voiceRedirectActive ? "armed (pid=$_screenShareExcludePid)" : "not armed"}');
+    } catch (e) {
+      _vcLog('[HOLLOW-AU-SCREEN] VC voice redirect failed to arm: $e');
+    }
+    // A stop that landed during the arm found nothing to disarm.
+    if (_voiceRedirectActive &&
+        (!state.isScreenSharing || _stoppingScreenShare)) {
+      await _disarmVoiceRedirect();
+    }
+  }
+
+  @visibleForTesting
+  Future<void> debugArmVoiceRedirect() => _armVoiceRedirect();
+
   /// Disarm the entire-screen anti-echo voice redirect: restores in-process
   /// playout and shuts the renderer child down. No-op when not armed.
   Future<void> _disarmVoiceRedirect() async {
@@ -1867,10 +1874,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (!_voiceRedirectActive) return;
     _voiceRedirectActive = false;
     try {
-      await Helper.voiceRedirectStop();
-      debugPrint('[HOLLOW-AU-SCREEN] VC voice redirect disarmed');
+      final service = _service;
+      if (service != null) {
+        await service.stopVoiceRedirect();
+      } else {
+        await Helper.voiceRedirectStop();
+      }
+      _vcLog('[HOLLOW-AU-SCREEN] VC voice redirect disarmed');
     } catch (e) {
-      debugPrint('[HOLLOW-AU-SCREEN] VC voice redirect disarm failed: $e');
+      _vcLog('[HOLLOW-AU-SCREEN] VC voice redirect disarm failed: $e');
     }
   }
 
@@ -2030,22 +2042,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
             webrtc.sendScreenAudio(peerId, packet);
           },
         );
-
-        // Late-joiner anti-echo: redirect THIS peer's voice too. voiceRedirectStart
-        // is incremental, so no capturer restart and a no-op if already redirected.
-        if (_voiceRedirectActive) {
-          try {
-            final ids =
-                await _service?.getAllRemoteAudioTrackIds() ?? const <String>[];
-            if (ids.isNotEmpty) {
-              await Helper.voiceRedirectStart(ids);
-              debugPrint('[HOLLOW-AU-SCREEN] VC redirect refreshed for late peer '
-                  '$peerId (${ids.length} track(s))');
-            }
-          } catch (e) {
-            debugPrint('[HOLLOW-AU-SCREEN] late-peer redirect refresh failed: $e');
-          }
-        }
       }
     } catch (e) {
       // A half-built service left in the map leaks its thread-set.
