@@ -1154,7 +1154,8 @@ pub(crate) enum NodeCommand {
     DeclineLinkPush { target_peer: String },
     /// This device removes one of our devices, or refuses a pending join: its Olm
     /// session is dropped and its MLS leaves go where we coordinate. Manual-only.
-    RevokeDevice { device_peer_id: String },
+    /// `with_dependents`: also the devices only it placed (DEVICE_PROOF_DESIGN 8.6).
+    RevokeDevice { device_peer_id: String, mode: super::roster_book::RemoveMode, with_dependents: bool },
     /// This device removes every other device and pending join.
     ResetDeviceLists,
     /// This device vouches for a device asking to join (a restored backup).

@@ -22,7 +22,9 @@ class _UpgradeApi implements RustLibApi {
 
   @override
   Future<void> crateApiRosterRecoverWithPhrase(
-      {required String phrase, required List<String> keep}) async {
+      {required String phrase,
+      required List<String> keep,
+      required int lostSinceMs}) async {
     recoveries++;
   }
 

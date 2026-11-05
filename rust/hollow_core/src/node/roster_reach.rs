@@ -513,6 +513,12 @@ pub(crate) fn fetch_roster(
 ) {
     let subject = roster.master.clone();
     let own = subject == local_master;
+    let kept = MessageStore::lease(db_path, db_passphrase)
+        .is_ok_and(|store| super::roster_book::notice_may_be_kept(&store, &subject, sender, local_master, |_| false));
+    if !kept {
+        hollow_log!("[HOLLOW-SECURITY] Push fetch dropped a roster for {subject} from {sender}: nothing here names it");
+        return;
+    }
     super::roster_book::ingest_stored(db_path, db_passphrase, local_master, local_device, sender, roster);
     if (own || reply)
         && let Ok(store) = MessageStore::lease(db_path, db_passphrase)

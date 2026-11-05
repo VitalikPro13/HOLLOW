@@ -132,6 +132,15 @@ static bool run_case(const json& c, const RosterCrypto& crypto, std::string& why
         why = "the cached fold differs from a fresh one";
         return false;
     }
+    const roster::Authority auth = merged.authority(crypto);
+    std::map<std::string, std::string> auth_removed;
+    for (auto it = c["auth_removed"].begin(); it != c["auth_removed"].end(); ++it) auth_removed[it.key()] = it.value();
+    if (auth.base != c["auth_base"].get<std::string>() ||
+        std::vector<std::string>(auth.counted.begin(), auth.counted.end()) != strings(c["auth_counted"]) ||
+        auth.removed != auth_removed) {
+        why = "authority differs";
+        return false;
+    }
     return true;
 }
 
@@ -235,6 +244,15 @@ int main() {
         check("the vouch cap vectors are present (" + std::to_string(vouch_cap) + ")", vouch_cap >= 12);
         check("a removed device's vouch flood leaves the honest vouchee a member", honest_kept);
         check("every vouch cap vector compacts to itself", stable == vouch_cap);
+        // The reserved slots and the walk (identity/roster.rs section-4 cases).
+        size_t walk = 0, reserved_in_use = 0;
+        for (const auto& c : v["cases"]) {
+            const std::string name = c["name"];
+            if (name.rfind("reserved-", 0) == 0 || name.rfind("walk-", 0) == 0) walk++;
+            if (c["merged_counts"][6].get<size_t>() > roster::MAX_REMOVALS) reserved_in_use++;
+        }
+        check("the reserved-slot and walk vectors are present (" + std::to_string(walk) + ")", walk >= 4);
+        check("some vectors use the reserved slots (" + std::to_string(reserved_in_use) + ")", reserved_in_use >= 2);
     }
 
     // A roster's JSON is read as strictly as serde reads it.

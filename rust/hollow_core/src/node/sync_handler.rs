@@ -2536,8 +2536,8 @@ pub(crate) async fn handle_kick_member(
 
 /// Revoke one of OUR OWN devices (manual, lost or stolen). Bumps our master-signed
 /// device list with the target tombstoned, re-broadcasts it so friends stop
-/// encrypting to the revoked device, and returns the revoked device id so the
-/// caller drops the Olm session and removes the MLS leaf. `None` when rejected.
+/// encrypting to the revoked device, and returns every removed device id (the target
+/// first) so the caller drops their Olm sessions and MLS leaves. `None` when rejected.
 /// Our roster changed: hand it first to each device in `first` on the relay lane (a
 /// removed device has no session left, and an approved one may have none yet), then
 /// announce it to every peer we share a room with.
@@ -2593,23 +2593,28 @@ pub(crate) async fn handle_revoke_device(
     device_peer_id: &str,
     is_invisible: bool,
     target_device: String,
+    mode: super::roster_book::RemoveMode,
+    with_dependents: bool,
     db_path: &str,
     db_passphrase: &str,
-) -> Option<String> {
-    if let Err(e) = super::roster_book::remove(
-        master_keypair, device_keypair, &target_device, db_path, db_passphrase,
+) -> Option<Vec<String>> {
+    let gone = match super::roster_book::remove(
+        master_keypair, device_keypair, &target_device, mode, with_dependents, db_path, db_passphrase,
     ) {
-        let _ = event_tx.send(NetworkEvent::Error { message: e }).await;
-        return None;
-    }
+        Ok((_, _, gone)) => gone,
+        Err(e) => {
+            let _ = event_tx.send(NetworkEvent::Error { message: e }).await;
+            return None;
+        }
+    };
     announce_roster_change(
         ws_cmd_tx, ws_room_peers, server_states, master_keypair, local_peer_str,
-        device_peer_id, is_invisible, std::slice::from_ref(&target_device), db_path, db_passphrase,
+        device_peer_id, is_invisible, &gone, db_path, db_passphrase,
     );
     let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
         master_peer_id: master_peer_str.to_string(),
     }).await;
-    Some(target_device)
+    Some(gone)
 }
 
 // ── 10a2. ResetDeviceLists (full sibling teardown) ───────────────────

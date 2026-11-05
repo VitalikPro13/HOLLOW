@@ -289,6 +289,43 @@ pub enum Anchor {
     Checkpoint,
 }
 
+/// The (author, clock) of every logged op, by author: whether a master authored an op
+/// here is one lookup (a roster notice asks it of every server on the event loop).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpKeys(HashMap<String, HashSet<HlcTimestamp>>);
+
+impl OpKeys {
+    pub(crate) fn contains(&self, (author, hlc): &(String, HlcTimestamp)) -> bool {
+        self.0.get(author).is_some_and(|clocks| clocks.contains(hlc))
+    }
+
+    pub(crate) fn insert(&mut self, (author, hlc): (String, HlcTimestamp)) -> bool {
+        self.0.entry(author).or_default().insert(hlc)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn has_author(&self, author: &str) -> bool {
+        self.0.contains_key(author)
+    }
+}
+
+impl FromIterator<(String, HlcTimestamp)> for OpKeys {
+    fn from_iter<I: IntoIterator<Item = (String, HlcTimestamp)>>(iter: I) -> Self {
+        let mut keys = OpKeys::default();
+        for key in iter {
+            keys.insert(key);
+        }
+        keys
+    }
+}
+
 /// The full CRDT state of a Hollow server: operation-based, so every mutation goes
 /// through `apply_op()`, which is commutative and idempotent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,7 +407,7 @@ pub struct ServerState {
     #[serde(skip)]
     pub hlc: Option<Hlc>,
     #[serde(skip)]
-    pub(super) op_log_dedup: HashSet<(String, HlcTimestamp)>,
+    pub(super) op_log_dedup: OpKeys,
     /// Signed ops refused only for authority, re-judged at the next rebuild: an op
     /// can race ahead of the role grant or admission it depends on.
     #[serde(skip)]
@@ -438,7 +475,7 @@ impl ServerState {
             standing_folded: *standing_folded,
             op_log: Vec::new(),
             hlc: None,
-            op_log_dedup: HashSet::new(),
+            op_log_dedup: OpKeys::default(),
             held: Vec::new(),
             id_memo: Default::default(),
             late_leaves: Vec::new(),
@@ -478,7 +515,7 @@ impl ServerState {
             standing_folded: false,
             op_log: Vec::new(),
             hlc: None,
-            op_log_dedup: HashSet::new(),
+            op_log_dedup: OpKeys::default(),
             held: Vec::new(),
             id_memo: Default::default(),
             late_leaves: Vec::new(),
@@ -1004,6 +1041,15 @@ impl ServerState {
     pub(super) fn ensure_dedup(&mut self) {
         if self.op_log_dedup.is_empty() && !self.op_log.is_empty() {
             self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+        }
+    }
+
+    /// Whether `master` authored an op this replica keeps.
+    pub(crate) fn has_op_author(&self, master: &str) -> bool {
+        if self.op_log_dedup.is_empty() {
+            self.op_log.iter().any(|op| op.author == master)
+        } else {
+            self.op_log_dedup.has_author(master)
         }
     }
 
@@ -4353,6 +4399,21 @@ mod tests {
         // State should still be correct — settings from early ops are still applied
         assert_eq!(*state.settings["key_0"].read(), "val_0");
         assert_eq!(*state.settings["key_1009"].read(), "val_1009");
+    }
+
+    /// L2 (R31-8): who authored an op is read from the log's index, never a scan of
+    /// the log, and still answers for a log restored before the index is built.
+    #[test]
+    fn an_op_author_is_one_lookup_in_the_log_index() {
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
+        let op = state.create_op(CrdtPayload::ServerRenamed { new_name: "x".into() });
+        state.apply_op(&op).unwrap();
+        assert!(state.has_op_author(&op.author) && !state.has_op_author("someone"));
+        let log = std::mem::take(&mut state.op_log);
+        assert!(state.has_op_author(&op.author), "the author was found by scanning the log");
+        state.op_log_dedup.clear();
+        state.op_log = log;
+        assert!(state.has_op_author(&op.author), "an unindexed log hides its authors");
     }
 
     #[test]

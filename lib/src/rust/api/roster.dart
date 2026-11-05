@@ -14,13 +14,24 @@ Future<RosterStatus> rosterStatus() =>
     RustLib.instance.api.crateApiRosterRosterStatus();
 
 /// Type the phrase to make it the root of the identity: a recovery keeping this
-/// device and `keep`. Every other device stops counting at once.
+/// device and `keep`. Every other device stops counting at once, treated as lost or
+/// stolen since `lost_since_ms` (DEVICE_PROOF_DESIGN 8.1).
 Future<void> recoverWithPhrase({
   required String phrase,
   required List<String> keep,
+  required PlatformInt64 lostSinceMs,
 }) => RustLib.instance.api.crateApiRosterRecoverWithPhrase(
   phrase: phrase,
   keep: keep,
+  lostSinceMs: lostSinceMs,
+);
+
+/// The other devices a recovery keeps unless unticked, for devices last had at
+/// `lost_since_ms`: only those this device counted before then.
+Future<List<String>> recoveryKeptByDefault({
+  required PlatformInt64 lostSinceMs,
+}) => RustLib.instance.api.crateApiRosterRecoveryKeptByDefault(
+  lostSinceMs: lostSinceMs,
 );
 
 /// Type the phrase to choose whether a device restored from a backup may join by
@@ -53,6 +64,16 @@ Future<String?> storedPhraseForUpgrade() =>
 Future<void> confirmStoredPhrase({required String phrase}) =>
     RustLib.instance.api.crateApiRosterConfirmStoredPhrase(phrase: phrase);
 
+/// The plan for removing `device_peer_id`: retiring when `lost_since_ms` is None, else
+/// lost or stolen since then.
+Future<DeviceRemovalPlan> removeDevicePlan({
+  required String devicePeerId,
+  PlatformInt64? lostSinceMs,
+}) => RustLib.instance.api.crateApiRosterRemoveDevicePlan(
+  devicePeerId: devicePeerId,
+  lostSinceMs: lostSinceMs,
+);
+
 /// This device vouches for a device waiting to join.
 Future<void> approveDevice({required String devicePeerId}) => RustLib
     .instance
@@ -62,6 +83,46 @@ Future<void> approveDevice({required String devicePeerId}) => RustLib
 /// This device refuses a device waiting to join.
 Future<void> refuseDevice({required String devicePeerId}) =>
     RustLib.instance.api.crateApiRosterRefuseDevice(devicePeerId: devicePeerId);
+
+/// What removing a device takes with it, for the remove dialog.
+class DeviceRemovalPlan {
+  /// Devices it linked after the chosen time: removed with it, no choice.
+  final List<String> forced;
+
+  /// The other devices only it linked: removed too while the toggle stays on.
+  final List<String> optional;
+
+  /// Where that toggle starts: on for lost or stolen, off for retiring.
+  final bool optionalOn;
+
+  /// False when a device closer to the recovery phrase removed this one first: the
+  /// removal then does not take effect for servers until the phrase is used.
+  final bool takesEffectForServers;
+
+  const DeviceRemovalPlan({
+    required this.forced,
+    required this.optional,
+    required this.optionalOn,
+    required this.takesEffectForServers,
+  });
+
+  @override
+  int get hashCode =>
+      forced.hashCode ^
+      optional.hashCode ^
+      optionalOn.hashCode ^
+      takesEffectForServers.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DeviceRemovalPlan &&
+          runtimeType == other.runtimeType &&
+          forced == other.forced &&
+          optional == other.optional &&
+          optionalOn == other.optionalOn &&
+          takesEffectForServers == other.takesEffectForServers;
+}
 
 /// One device the roster knows about, for the Devices page.
 class RosterDevice {

@@ -32,6 +32,18 @@ class RelayStatus {
   }
 }
 
+/// Whether [status] names a relay older than 0.14, which cannot keep removed
+/// devices out of a server's join lock (DEVICE_PROOF_DESIGN section 12, item
+/// 10). False while the version is unknown.
+bool relayPredatesDeviceLock(RelayStatus? status) {
+  final parts = status?.version?.split('.');
+  if (parts == null || parts.length < 2) return false;
+  final major = int.tryParse(parts[0]);
+  final minor = int.tryParse(parts[1]);
+  if (major == null || minor == null) return false;
+  return major == 0 && minor < 14;
+}
+
 /// What the relay we are on said about itself at startup, or null before the
 /// one fetch lands and on a relay that never answered.
 class RelayStatusNotifier extends Notifier<RelayStatus?> {

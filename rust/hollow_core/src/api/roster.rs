@@ -144,17 +144,32 @@ fn erase_stored_phrase(db_path: &str, db_passphrase: &str) {
 }
 
 /// Type the phrase to make it the root of the identity: a recovery keeping this
-/// device and `keep`. Every other device stops counting at once.
+/// device and `keep`. Every other device stops counting at once, treated as lost or
+/// stolen since `lost_since_ms` (DEVICE_PROOF_DESIGN 8.1).
 #[frb]
-pub fn recover_with_phrase(phrase: String, keep: Vec<String>) -> Result<(), String> {
+pub fn recover_with_phrase(phrase: String, keep: Vec<String>, lost_since_ms: i64) -> Result<(), String> {
     let c = ctx()?;
     let (master, recovery) = crate::identity::recovery::recovery_key_for(&c.master.peer_id(), &phrase)?;
     let no_wait = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase)
         .is_some_and(|(_, s)| s.no_wait);
     changed(&c, |c| {
-        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, &c.db_path, &c.db_passphrase)
-            .map(|_| ())
+        let (_, state) =
+            crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, &c.db_path, &c.db_passphrase)?;
+        let store = MessageStore::open(&c.db_path, &c.db_passphrase)?;
+        crate::node::roster_book::note_recovery_lost_since(&store, &state.base, lost_since_ms)
     })
+}
+
+/// The other devices a recovery keeps unless unticked, for devices last had at
+/// `lost_since_ms`: only those this device counted before then.
+#[frb]
+pub fn recovery_kept_by_default(lost_since_ms: i64) -> Result<Vec<String>, String> {
+    let c = ctx()?;
+    let store = MessageStore::open(&c.db_path, &c.db_passphrase)?;
+    let master = c.master.peer_id();
+    let (_, state) =
+        crate::node::roster_book::own(&master, &c.db_path, &c.db_passphrase).ok_or("Your devices could not be read.")?;
+    Ok(crate::node::roster_book::recovery_kept_by_default(&store, &master, &state, &c.device.peer_id(), lost_since_ms))
 }
 
 /// Type the phrase to choose whether a device restored from a backup may join by
@@ -234,6 +249,37 @@ pub(crate) fn stored_phrase() -> Option<zeroize::Zeroizing<String>> {
     Some(phrase)
 }
 
+/// What removing a device takes with it, for the remove dialog.
+pub struct DeviceRemovalPlan {
+    /// Devices it linked after the chosen time: removed with it, no choice.
+    pub forced: Vec<String>,
+    /// The other devices only it linked: removed too while the toggle stays on.
+    pub optional: Vec<String>,
+    /// Where that toggle starts: on for lost or stolen, off for retiring.
+    pub optional_on: bool,
+    /// False when a device closer to the recovery phrase removed this one first: the
+    /// removal then does not take effect for servers until the phrase is used.
+    pub takes_effect_for_servers: bool,
+}
+
+/// The plan for removing `device_peer_id`: retiring when `lost_since_ms` is None, else
+/// lost or stolen since then.
+#[frb]
+pub fn remove_device_plan(device_peer_id: String, lost_since_ms: Option<i64>) -> Result<DeviceRemovalPlan, String> {
+    let c = ctx()?;
+    let store = MessageStore::open(&c.db_path, &c.db_passphrase)?;
+    let roster = crate::node::roster_book::load(&store, &c.master.peer_id()).ok_or("There is no roster on this device yet.")?;
+    let mode = crate::node::roster_book::RemoveMode::from_lost_since(lost_since_ms);
+    let me = c.device.peer_id();
+    let plan = crate::node::roster_book::removal_plan(&store, &roster, &me, &device_peer_id, mode);
+    Ok(DeviceRemovalPlan {
+        forced: plan.forced,
+        optional: plan.optional,
+        optional_on: plan.optional_on,
+        takes_effect_for_servers: crate::node::roster_book::removal_takes_effect(&roster, &c.device, &device_peer_id),
+    })
+}
+
 /// This device vouches for a device waiting to join.
 #[frb]
 pub fn approve_device(device_peer_id: String) -> Result<(), String> {
@@ -243,7 +289,11 @@ pub fn approve_device(device_peer_id: String) -> Result<(), String> {
 /// This device refuses a device waiting to join.
 #[frb]
 pub fn refuse_device(device_peer_id: String) -> Result<(), String> {
-    super::network::send_node_command(NodeCommand::RevokeDevice { device_peer_id })
+    super::network::send_node_command(NodeCommand::RevokeDevice {
+        device_peer_id,
+        mode: crate::node::roster_book::RemoveMode::Retire,
+        with_dependents: false,
+    })
 }
 
 /// The phrase signs a destruction order for every device of the identity. Without a

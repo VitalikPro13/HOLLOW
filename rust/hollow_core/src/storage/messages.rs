@@ -1631,6 +1631,26 @@ impl MessageStore {
                 PRIMARY KEY (master_peer_id, base, device_peer_id)
             )")?;
 
+        // When THIS node first saw each removal and vouch of our own identity's roster
+        // (DEVICE_PROOF_DESIGN 8.5, 8.6): "lost or stolen" re-signs and keeps only what was
+        // here before the moment the person last had the device. Kept 30 days after the
+        // statement leaves the roster. Not `roster_seen`: that name is dropped above.
+        let seen_is_new = !table_exists(conn, "roster_statement_seen");
+        ddl(conn, "roster_statement_seen table",
+            "CREATE TABLE IF NOT EXISTS roster_statement_seen (
+                master_peer_id TEXT NOT NULL,
+                digest         TEXT NOT NULL,
+                first_seen_ms  INTEGER NOT NULL,
+                dropped_ms     INTEGER,
+                PRIMARY KEY (master_peer_id, digest)
+            )")?;
+        // An install from before this table: what its roster holds now predates any
+        // answer to "when did you last have it" (`seed_roster_statements_once`).
+        // A fresh database's first save holds nothing yet, so the mark dates nothing there.
+        if seen_is_new {
+            migrate(conn, "INSERT OR IGNORE INTO roster_statement_seen (master_peer_id, digest, first_seen_ms) VALUES ('*', '*', 0)");
+        }
+
         // When each device of a contact identity last showed us a roster we hold all of,
         // and when we last asked it for one because it had not (AR-29). Local; never synced.
         ddl(conn, "roster_confirms table",
@@ -4605,6 +4625,130 @@ impl MessageStore {
             .query_map([master_peer_id, base], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
             .map_err(|e| format!("Failed to query roster_pending_seen: {e}"))?;
         Ok(collect_rows(rows, "roster_pending_seen")?.into_iter().collect())
+    }
+
+    /// Whether this database comes from before first sights were kept.
+    pub fn roster_statements_marked(&self) -> Result<bool, String> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM roster_statement_seen WHERE master_peer_id = '*' AND digest = '*'", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|n| n > 0)
+            .map_err(|e| format!("roster_statement_seen: {e}"))
+    }
+
+    /// Date `digests` of `master`'s roster first seen at 0 (held before the upgrade) and
+    /// clear the upgrade mark, as one change: a crash between them would leave the held
+    /// roster dated as news. False, writing nothing, when another process took the mark.
+    pub fn seed_roster_statements_once(&self, master_peer_id: &str, digests: &[String]) -> Result<bool, String> {
+        let err = |e: rusqlite::Error| format!("roster_statement_seen: {e}");
+        self.conn.execute_batch("SAVEPOINT roster_seed").map_err(err)?;
+        let seeded = (|| -> rusqlite::Result<bool> {
+            for d in digests {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO roster_statement_seen (master_peer_id, digest, first_seen_ms) VALUES (?1, ?2, 0)",
+                    rusqlite::params![master_peer_id, d],
+                )?;
+            }
+            Ok(self.conn.execute("DELETE FROM roster_statement_seen WHERE master_peer_id = '*' AND digest = '*'", [])? > 0)
+        })();
+        let end = match seeded {
+            Ok(true) => "RELEASE roster_seed",
+            _ => "ROLLBACK TO roster_seed; RELEASE roster_seed",
+        };
+        self.conn.execute_batch(end).map_err(err)?;
+        seeded.map_err(err)
+    }
+
+    /// Record which statements (`present`, by digest) `master`'s roster holds now: a new one
+    /// is first seen `now_ms`, one that left is marked dropped, and a dropped row older than
+    /// `keep_ms` goes. At most `cap` rows per master, the longest dropped first.
+    pub fn note_roster_statements(&self, master_peer_id: &str, present: &[String], now_ms: i64, keep_ms: i64, cap: usize) -> Result<(), String> {
+        let err = |e: rusqlite::Error| format!("roster_statement_seen: {e}");
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT digest, dropped_ms FROM roster_statement_seen WHERE master_peer_id = ?1")
+            .map_err(err)?;
+        let rows = stmt
+            .query_map([master_peer_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)))
+            .map_err(err)?;
+        let held: std::collections::HashMap<String, Option<i64>> = collect_rows(rows, "roster_statement_seen")?.into_iter().collect();
+        let now: std::collections::HashSet<&str> = present.iter().map(String::as_str).collect();
+        for d in present {
+            match held.get(d) {
+                None => {
+                    self.conn
+                        .execute(
+                            "INSERT OR IGNORE INTO roster_statement_seen (master_peer_id, digest, first_seen_ms) VALUES (?1, ?2, ?3)",
+                            rusqlite::params![master_peer_id, d, now_ms],
+                        )
+                        .map_err(err)?;
+                }
+                Some(Some(_)) => {
+                    self.conn
+                        .execute(
+                            "UPDATE roster_statement_seen SET dropped_ms = NULL WHERE master_peer_id = ?1 AND digest = ?2",
+                            rusqlite::params![master_peer_id, d],
+                        )
+                        .map_err(err)?;
+                }
+                Some(None) => {}
+            }
+        }
+        for (d, dropped) in &held {
+            if dropped.is_none() && !now.contains(d.as_str()) {
+                self.conn
+                    .execute(
+                        "UPDATE roster_statement_seen SET dropped_ms = ?3 WHERE master_peer_id = ?1 AND digest = ?2",
+                        rusqlite::params![master_peer_id, d, now_ms],
+                    )
+                    .map_err(err)?;
+            }
+        }
+        self.conn
+            .execute(
+                "DELETE FROM roster_statement_seen WHERE master_peer_id = ?1 AND dropped_ms IS NOT NULL AND dropped_ms < ?2",
+                rusqlite::params![master_peer_id, now_ms.saturating_sub(keep_ms)],
+            )
+            .map_err(err)?;
+        self.conn
+            .execute(
+                "DELETE FROM roster_statement_seen WHERE master_peer_id = ?1 AND digest IN (
+                     SELECT digest FROM roster_statement_seen WHERE master_peer_id = ?1 AND dropped_ms IS NOT NULL
+                     ORDER BY dropped_ms ASC, digest ASC
+                     LIMIT MAX(0, (SELECT COUNT(*) FROM roster_statement_seen WHERE master_peer_id = ?1) - ?2))",
+                rusqlite::params![master_peer_id, cap as i64],
+            )
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// When this node first saw the statement `digest` of `master`'s roster.
+    pub fn roster_statement_first_seen(&self, master_peer_id: &str, digest: &str) -> Option<i64> {
+        self.conn
+            .prepare_cached("SELECT first_seen_ms FROM roster_statement_seen WHERE master_peer_id = ?1 AND digest = ?2")
+            .and_then(|mut s| s.query_row([master_peer_id, digest], |row| row.get::<_, i64>(0)))
+            .ok()
+    }
+
+    /// Turn this database into one from before first sights were kept and migrate it, as
+    /// the first open of an upgraded app does. Tests only.
+    #[cfg(test)]
+    pub fn upgrade_from_before_first_sights_for_test(&self) {
+        self.conn.execute_batch("DROP TABLE roster_statement_seen").expect("drop roster_statement_seen");
+        Self::init_schema(&self.conn).expect("schema");
+    }
+
+    /// Back-date a statement's first sight. Tests only.
+    #[cfg(test)]
+    pub fn set_roster_statement_first_seen(&self, master_peer_id: &str, digest: &str, at_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO roster_statement_seen (master_peer_id, digest, first_seen_ms) VALUES (?1, ?2, ?3)",
+                rusqlite::params![master_peer_id, digest, at_ms],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("roster_statement_seen: {e}"))
     }
 
     /// Back-date a first-sight stamp. Tests only: seven days do not pass in a test.

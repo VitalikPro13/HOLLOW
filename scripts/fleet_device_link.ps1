@@ -93,7 +93,7 @@ $script:FleetVars = @{ RUN = (Get-Date -Format 'HHmmss') }
 . (Join-Path $PSScriptRoot 'fleet_lib.ps1')
 
 $runTag = $script:FleetVars.RUN
-$runRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'hollow_fleet\run'
+$runRoot = if (Test-MacBackend) { Get-MacRunRoot } else { Join-Path ([System.IO.Path]::GetTempPath()) 'hollow_fleet\run' }
 $server = "fleet-link-$runTag"
 $journeyPeers = if ($EdgeGates) { @('a', 'b') } else { @('a', 'b', 'c') }
 # G8's picked image: a 16x16 PNG carried inline so every backend has it, and
@@ -289,6 +289,38 @@ function Start-SimPeerProcess($peer, $wipeData) {
     Say "launched $peer in simulator hollow-$peer on $what"
 }
 
+# The macOS app as fleet.ps1 starts it: the binary from a launcher that carries
+# the environment, HOME of its own and stdio in files, started over ssh to this
+# Mac so its microphone ask never puts a dialog in front of the person.
+function Start-MacPeerProcess($peer, $dest, $out) {
+    $peerHome = Join-Path (Get-MacHomeRoot) $peer
+    New-Item -ItemType Directory -Path $peerHome -Force | Out-Null
+    $vars = [ordered]@{ HOME = $peerHome }
+    foreach ($item in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'UI_PROBE_*' -or $_.Name -like 'HOLLOW_*' -or $_.Name -like 'RUST_*' })) {
+        $vars[$item.Name] = $item.Value
+    }
+    $launcher = Join-Path $out 'launch.sh'
+    $lines = @('#!/bin/sh')
+    foreach ($name in $vars.Keys) { $lines += ("export {0}='{1}'" -f $name, ("$($vars[$name])" -replace "'", "'\''")) }
+    $lines += ('exec "{0}" -NSAppSleepDisabled YES >"{1}" 2>"{2}" </dev/null' -f (Get-MacPeerBinary $peer),
+        (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
+    [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
+    & chmod +x $launcher
+    if ($env:SSH_CONNECTION -or $env:FLEET_MAC_DIRECT -eq '1') {
+        return Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
+    }
+    $self = if ($env:FLEET_MAC_SELF_SSH) { $env:FLEET_MAC_SELF_SSH } else { 'localhost' }
+    $said = "$(& ssh -o BatchMode=yes -o ConnectTimeout=5 $self "nohup /bin/sh '$launcher' >/dev/null 2>&1 </dev/null &" 2>&1)"
+    if ($LASTEXITCODE -ne 0) { throw "starting $peer over 'ssh $self' failed: $said (see fleet.ps1 Start-Peer)" }
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline) {
+        $proc = @(Get-MacFleetProcesses @($peer)) | ForEach-Object { $_.Process } | Select-Object -First 1
+        if ($proc) { return $proc }
+        Start-Sleep -Milliseconds 200
+    }
+    throw "launching $peer over ssh $self started no process; see $(Join-Path $out 'native-stderr.log')"
+}
+
 function Start-PeerProcess($peer, $wipeData) {
     if (Test-SimBackend) {
         Start-SimPeerProcess $peer $wipeData
@@ -332,6 +364,8 @@ function Start-PeerProcess($peer, $wipeData) {
         [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
         & chmod +x $launcher
         $proc = Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
+    } elseif (Test-MacBackend) {
+        $proc = Start-MacPeerProcess $peer $dest $out
     } else {
         $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
     }

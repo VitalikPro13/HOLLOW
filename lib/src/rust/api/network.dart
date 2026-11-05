@@ -130,14 +130,20 @@ Future<void> resetDeviceLists() =>
 Future<String?> getLocalDevicePeerId() =>
     RustLib.instance.api.crateApiNetworkGetLocalDevicePeerId();
 
-/// Revoke one of OUR OWN devices (lost or stolen): bump our master-signed device
-/// list with the device tombstoned, drop its Olm session and, where we coordinate,
-/// remove its MLS leaf. Rejected for the device we are running on or an id that is
-/// not ours. Friends can never un-revoke it with a stale lower-version list.
-Future<void> revokeDevice({required String devicePeerId}) => RustLib
-    .instance
-    .api
-    .crateApiNetworkRevokeDevice(devicePeerId: devicePeerId);
+/// Remove one of OUR OWN devices: retiring (`lost_since_ms` None) keeps what it did;
+/// lost or stolen keeps only what predates `lost_since_ms`, the earliest moment the
+/// person may no longer have had it. `with_dependents` also removes the devices only it
+/// placed (`remove_device_plan`); those linked after that moment go regardless.
+/// Rejected for the device we are running on or an id that is not ours.
+Future<void> revokeDevice({
+  required String devicePeerId,
+  PlatformInt64? lostSinceMs,
+  required bool withDependents,
+}) => RustLib.instance.api.crateApiNetworkRevokeDevice(
+  devicePeerId: devicePeerId,
+  lostSinceMs: lostSinceMs,
+  withDependents: withDependents,
+);
 
 /// Manual state sync: ask the chosen SOURCE sibling to re-announce all its servers
 /// and re-share its friends to THIS device. The deterministic escape hatch for when

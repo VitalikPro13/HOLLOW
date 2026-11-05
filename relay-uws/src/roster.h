@@ -43,6 +43,9 @@ static constexpr int64_t MAX_FUTURE_SKEW_MS = 10LL * 60 * 1000;
 static constexpr size_t MAX_ROSTER_BYTES = 256 * 1024;
 static constexpr size_t MAX_VOUCHES = 128;
 static constexpr size_t MAX_REMOVALS = 96;
+// Removals kept outside MAX_REMOVALS: per standing target, the removal the walk counted
+// first, the shallowest targets first (identity/roster.rs MAX_RESERVED).
+static constexpr size_t MAX_RESERVED = 32;
 static constexpr size_t MAX_REMOVAL_KEEP = 16;
 static constexpr size_t MAX_KEEP = 64;
 static constexpr size_t MAX_RECOVERY_TIES = 4;
@@ -113,6 +116,15 @@ struct State {
     std::map<std::string, std::string> removed;  // removed device -> the device that removed it
     std::set<std::string> pending;
     bool is_member(const std::string& d) const { return members.count(d) != 0; }
+};
+
+// Which devices write for an identity in server authority (identity/roster.rs
+// `Authority`, without the digest): no clock, no maturity, no first sight.
+struct Authority {
+    std::string key, base;
+    std::set<std::string> counted;
+    std::map<std::string, std::string> removed;  // removed device -> the device whose removal counted first
+    bool counts(const std::string& d) const { return counted.count(d) != 0; }
 };
 
 // A standing device's place: tier, depth, then its id.
@@ -242,19 +254,27 @@ inline std::map<std::string, const Vouch*> valid_closure(const std::set<std::str
 struct Walk {
     std::vector<const Removal*> counted;
     std::set<Vouch> support;
+
+    // Per removed device, the counted removal that removed it first.
+    std::map<std::string, const Removal*> first() const {
+        std::map<std::string, const Removal*> out;
+        for (const Removal* r : counted) out.emplace(r->device, r);
+        return out;
+    }
 };
 
 // The removal walk (DEVICE_PROOF_DESIGN section 4): signers in rank order; a signer is
 // alive at its turn unless a removal counted for an earlier signer removed it, or it is
 // outside its tier's valid closure as it stands then. Every removal of a standing
-// target by an alive signer counts.
+// target `target_ok` takes, by an alive signer, counts.
 inline Walk removal_walk(const std::vector<const Removal*>& removals, const std::map<std::string, Rank>& rank,
+                         const std::function<bool(const std::string&)>& target_ok,
                          const std::set<std::string>& roots, const std::set<std::string>& pending,
                          const std::vector<const Vouch*>& vouches) {
     std::vector<std::pair<const Rank*, const Removal*>> cands;
     for (const Removal* r : removals) {
         auto by = rank.find(r->by);
-        if (by != rank.end() && rank.count(r->device)) cands.emplace_back(&by->second, r);
+        if (by != rank.end() && target_ok(r->device)) cands.emplace_back(&by->second, r);
     }
     auto less = [](const std::pair<const Rank*, const Removal*>& a, const std::pair<const Rank*, const Removal*>& b) {
         return *a.first != *b.first ? *a.first < *b.first : *a.second < *b.second;
@@ -297,10 +317,11 @@ inline Walk removal_walk(const std::vector<const Removal*>& removals, const std:
 
 // Which vouches the vouch cap ranks first: a vouch is VALID when its signer is in the
 // valid closure the walk leaves and no counted removal of the signer voids it.
-struct VouchJudge {
+struct CapJudge {
     std::map<std::string, Rank> valid_rank;
     Voids voids;
-    std::set<Vouch> support;  // what the walk needs to come out the same once compacted
+    std::set<Vouch> support;        // what the walk needs to come out the same once compacted
+    std::vector<Removal> reserved;  // each removed device's first counted removal
     bool counts(const Vouch& v) const { return valid_rank.count(v.by) != 0 && voids.allows(v); }
 };
 
@@ -377,7 +398,7 @@ struct Roster {
     bool within_caps() const {
         return recoveries.size() <= MAX_RECOVERY_TIES && phrase_admits.size() <= MAX_PHRASE_ADMITS &&
                consents.size() <= MAX_CONSENTS && vouches.size() <= MAX_VOUCHES && pendings.size() <= MAX_PENDING &&
-               legacy.size() <= MAX_LEGACY && removals.size() <= MAX_REMOVALS;
+               legacy.size() <= MAX_LEGACY && removals.size() <= MAX_REMOVALS + MAX_RESERVED;
     }
 
     std::string base_id(const Recovery& rec, const RosterCrypto& c) const {
@@ -432,7 +453,10 @@ struct Roster {
 
     // Every device with an admission path in the current base, removals ignored and
     // every pending join counted, ranked by (tier, depth, id).
-    std::map<std::string, Rank> standing(const RosterCrypto& c) const {
+    std::map<std::string, Rank> standing(const RosterCrypto& c) const { return ranked(c, true); }
+
+    // `standing`; without `with_pending`, nothing a pending join seeds ranks.
+    std::map<std::string, Rank> ranked(const RosterCrypto& c, bool with_pending) const {
         const auto cons = consented();
         const auto roots = base_roots(c).second;
         std::vector<std::pair<std::string, std::string>> edges;
@@ -444,9 +468,43 @@ struct Roster {
             if (cons.count(r)) seeds[0].insert(r);
         }
         for (const auto& p : pendings) {
-            if (cons.count(p.device)) seeds[1].insert(p.device);
+            if (with_pending && cons.count(p.device)) seeds[1].insert(p.device);
         }
         return rank_over(seeds, edges);
+    }
+
+    // Server authority's verdict (identity/roster.rs `authority`) over verified statements:
+    // signers are tier 0 of `ranked`, the walk decides which removals count, pending joins
+    // never count but a removal of one does.
+    Authority authority(const RosterCrypto& c) const {
+        const auto cons = consented();
+        auto [cur, all_roots] = base_roots(c);
+        Authority out;
+        out.key = r_pub;
+        out.base = cur ? cur->base : LEGACY_BASE;
+        std::set<std::string> roots, asked;
+        for (const auto& d : all_roots) {
+            if (cons.count(d)) roots.insert(d);
+        }
+        for (const auto& p : pendings) {
+            if (p.base == out.base && cons.count(p.device)) asked.insert(p.device);
+        }
+        std::vector<const Vouch*> vs;
+        for (const auto& v : vouches) {
+            if (v.base == out.base && cons.count(v.device)) vs.push_back(&v);
+        }
+        std::vector<const Removal*> rms;
+        for (const auto& x : removals) {
+            if (x.base == out.base) rms.push_back(&x);
+        }
+        const auto founded = ranked(c, false);
+        auto target_ok = [&](const std::string& t) { return founded.count(t) != 0 || asked.count(t) != 0; };
+        Walk walk = removal_walk(rms, founded, target_ok, roots, {}, vs);
+        for (const auto& [d, r] : walk.first()) out.removed[d] = r->by;
+        for (const auto& [d, via] : valid_closure(roots, vs, Voids::of(walk.counted))) {
+            if (!out.removed.count(d)) out.counted.insert(d);
+        }
+        return out;
     }
 
     // standing() over the consents the cap keeps (identity/roster.rs `capped_standing`):
@@ -467,9 +525,10 @@ struct Roster {
     }
 
     // The vouch cap's judge over every held statement of the current base
-    // (identity/roster.rs `vouch_judge`): the walk over removals by tier-0 signers only,
-    // then the valid closure of the roots plus the consented pending joins.
-    VouchJudge vouch_judge(const std::map<std::string, Rank>& stand, const RosterCrypto& c) const {
+    // (identity/roster.rs `cap_judge`): the walk over removals by tier-0 signers voids
+    // vouches, the walk over every standing signer picks the reserved slots, then the
+    // valid closure of the roots plus the consented pending joins.
+    CapJudge cap_judge(const std::map<std::string, Rank>& stand, const RosterCrypto& c) const {
         const auto cons = consented();
         auto [cur, all_roots] = base_roots(c);
         const std::string base = cur ? cur->base : LEGACY_BASE;
@@ -486,13 +545,21 @@ struct Roster {
         }
         std::vector<const Removal*> rms;
         for (const auto& x : removals) {
-            auto by = stand.find(x.by);
-            if (x.base == base && by != stand.end() && std::get<0>(by->second) == 0) rms.push_back(&x);
+            if (x.base == base) rms.push_back(&x);
         }
-        VouchJudge out;
-        Walk walk = removal_walk(rms, stand, roots, pending, vs);
+        CapJudge out;
+        const auto target_ok = [&](const std::string& t) { return stand.count(t) != 0; };
+        Walk wide = removal_walk(rms, stand, target_ok, roots, pending, vs);
+        for (const auto& [d, r] : wide.first()) out.reserved.push_back(*r);
+        std::vector<const Removal*> tier0;
+        for (const Removal* x : rms) {
+            auto by = stand.find(x->by);
+            if (by != stand.end() && std::get<0>(by->second) == 0) tier0.push_back(x);
+        }
+        Walk walk = removal_walk(tier0, stand, target_ok, roots, pending, vs);
         out.voids = Voids::of(walk.counted);
         out.support = std::move(walk.support);
+        out.support.insert(wide.support.begin(), wide.support.end());
         std::vector<std::pair<std::string, std::string>> edges;
         for (const Vouch* v : vs) {
             if (out.voids.allows(*v)) edges.emplace_back(v->by, v->device);
@@ -552,7 +619,7 @@ struct Roster {
         // each standing device's vouch from its nearest VALID voucher (HOL-SEC-189), the
         // walk's support, and each standing device's vouch from its best-ranked voucher.
         // The rest give way by validity, then signer rank.
-        const VouchJudge judge = r.vouch_judge(stand, c);
+        const CapJudge judge = r.cap_judge(stand, c);
         auto rank_of = [](const std::map<std::string, Rank>& m, const std::string& d) -> std::optional<Rank> {
             auto it = m.find(d);
             return it == m.end() ? std::nullopt : std::optional<Rank>(it->second);
@@ -601,12 +668,26 @@ struct Roster {
         }
         std::sort(removals.begin(), removals.end());
         removals.erase(std::unique(removals.begin(), removals.end()), removals.end());
-        std::stable_sort(removals.begin(), removals.end(), [&](const Removal& a, const Removal& b) {
+        std::vector<Removal> reserved = judge.reserved;
+        std::sort(reserved.begin(), reserved.end(), [&](const Removal& a, const Removal& b) {
+            const Rank& ra = stand.at(a.device);
+            const Rank& rb = stand.at(b.device);
+            return ra != rb ? ra < rb : a < b;
+        });
+        if (reserved.size() > MAX_RESERVED) reserved.resize(MAX_RESERVED);
+        const std::set<Removal> held(reserved.begin(), reserved.end());
+        std::vector<Removal> general;
+        for (auto& x : removals) {
+            if (!held.count(x)) general.push_back(x);
+        }
+        std::sort(general.begin(), general.end(), [&](const Removal& a, const Removal& b) {
             const Rank& ra = stand.at(a.by);
             const Rank& rb = stand.at(b.by);
             return ra != rb ? ra < rb : a < b;
         });
-        if (removals.size() > MAX_REMOVALS) removals.resize(MAX_REMOVALS);
+        if (general.size() > MAX_REMOVALS) general.resize(MAX_REMOVALS);
+        removals = reserved;
+        removals.insert(removals.end(), general.begin(), general.end());
         std::sort(removals.begin(), removals.end());
         r.removals = std::move(removals);
 

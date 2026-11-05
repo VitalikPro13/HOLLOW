@@ -100,12 +100,16 @@ fn save_rows(
 ) -> Result<(), String> {
     let json = serde_json::to_string(roster).map_err(|e| format!("roster json: {e}"))?;
     let members: Vec<String> = state.members.iter().cloned().collect();
+    if roster.master == local_master {
+        date_held_before_upgrade(store, local_master)?;
+    }
     store.save_device_list(&roster.master, &json, 0, &members, now_ms())?;
     super::security_alerts::resolve_departed(store, &roster.master, &state.members, |device| {
         roster.removals.iter().any(|r| r.device == device && r.by == local_device)
     });
     // When we learned each of our own removals: our DMs carry it from then (F2).
     if roster.master == local_master {
+        note_statements(store, roster, state);
         let mut devices: Vec<String> = counting_removals(store, roster).into_iter().map(|r| r.device).collect();
         devices.dedup();
         let _ = store.removal_carried_since(local_master, &state.base, &devices, now_ms());
@@ -475,15 +479,191 @@ pub(crate) fn vouch(
     })
 }
 
-/// This device removes `target`, keeping the members it had vouched for.
+/// How long a first sight of our own statement outlives the statement (8.5, LOW).
+const SEEN_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// First-sight rows kept per identity, the longest dropped going first.
+const SEEN_CAP: usize = 4096;
+
+/// First-sight keys of `roster`'s removals and vouches and of the devices `state` counts.
+fn statement_keys(roster: &Roster, state: &RosterState) -> Vec<String> {
+    roster
+        .removals
+        .iter()
+        .map(roster::removal_seen_key)
+        .chain(roster.vouches.iter().map(roster::vouch_seen_key))
+        .chain(state.members.iter().map(|d| roster::device_seen_key(d)))
+        .collect()
+}
+
+/// Record when this node first saw each removal and vouch of our own roster, and each
+/// device it counts.
+fn note_statements(store: &MessageStore, roster: &Roster, state: &RosterState) {
+    if let Err(e) = store.note_roster_statements(&roster.master, &statement_keys(roster, state), now_ms(), SEEN_KEEP_MS, SEEN_CAP) {
+        crate::hollow_log!("[ROSTER] first sights not noted: {e}");
+    }
+}
+
+/// On a database from before first sights, date at 0 what our roster held before the
+/// first save after the upgrade, never what that save brings (a push fetch may save first).
+fn date_held_before_upgrade(store: &MessageStore, local_master: &str) -> Result<(), String> {
+    if !store.roster_statements_marked()? {
+        return Ok(());
+    }
+    let held = load(store, local_master).map(|held| statement_keys(&held, &fold(store, &held))).unwrap_or_default();
+    store.seed_roster_statements_once(local_master, &held).map(|_| ())
+}
+
+/// The other devices a phrase recovery keeps unless the person unticks them (8.6):
+/// those this node counted strictly before `t_ms`, when the person may no longer have
+/// had the dropped ones. A fresh install counted nothing before, so it keeps none.
+pub(crate) fn recovery_kept_by_default(store: &MessageStore, master: &str, state: &RosterState, me: &str, t_ms: i64) -> Vec<String> {
+    state
+        .members
+        .iter()
+        .filter(|d| d.as_str() != me && seen_before(store, master, &roster::device_seen_key(d), t_ms))
+        .cloned()
+        .collect()
+}
+
+fn recovery_lost_since_key(base: &str) -> String {
+    format!("recovery_lost_since:{base}")
+}
+
+/// Remember, for the base a phrase recovery made, when the person last had the devices
+/// it dropped: the settling of their servers reads it (track C).
+pub(crate) fn note_recovery_lost_since(store: &MessageStore, base: &str, t_ms: i64) -> Result<(), String> {
+    store.save_setting(&recovery_lost_since_key(base), &t_ms.max(0).to_string())
+}
+
+/// [`note_recovery_lost_since`] for `base`, if a recovery recorded one.
+#[allow(dead_code)] // read by the settling, track C (DEVICE_PROOF_DESIGN 8.1)
+pub(crate) fn recovery_lost_since(store: &MessageStore, base: &str) -> Option<i64> {
+    store.load_setting(&recovery_lost_since_key(base)).ok().flatten().and_then(|v| v.parse().ok())
+}
+
+/// How a device leaves (DEVICE_PROOF_DESIGN 8.1): retiring keeps what it did, lost or
+/// stolen keeps only what this device saw from it before `t_ms`, the earliest moment
+/// the person may no longer have had it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoveMode {
+    Retire,
+    Lost { t_ms: i64 },
+}
+
+impl RemoveMode {
+    /// Retiring without a time, else lost or stolen since `t_ms` (never before 0).
+    pub(crate) fn from_lost_since(lost_since_ms: Option<i64>) -> Self {
+        match lost_since_ms {
+            Some(t_ms) => RemoveMode::Lost { t_ms: t_ms.max(0) },
+            None => RemoveMode::Retire,
+        }
+    }
+}
+
+/// What removing a device takes with it (8.6): only devices that the target alone
+/// places in our roster; a device another device also vouches is never touched.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemovalPlan {
+    /// Linked from the target after T (lost or stolen): removed with it, no choice.
+    pub forced: Vec<String>,
+    /// The others: removed too when the person leaves "Remove them too" on.
+    pub optional: Vec<String>,
+    /// Where that toggle starts: on for lost or stolen, off for retiring.
+    pub optional_on: bool,
+}
+
+/// Whether this node first saw the statement under `key` strictly before `t_ms`.
+fn seen_before(store: &MessageStore, master: &str, key: &str, t_ms: i64) -> bool {
+    store.roster_statement_first_seen(master, key).is_some_and(|at| at < t_ms)
+}
+
+/// [`RemovalPlan`] for removing `target` from `roster` (ours, verified) from device `me`.
+/// A dependent counts as linked after T unless a vouch placing it, by the target or by
+/// another dependent, was here before T.
+pub(crate) fn removal_plan(store: &MessageStore, roster: &Roster, me: &str, target: &str, mode: RemoveMode) -> RemovalPlan {
+    let dropped = std::collections::BTreeSet::from([target.to_string()]);
+    let deps: std::collections::BTreeSet<String> =
+        roster.dependents_of(&dropped).into_iter().filter(|d| d != me).collect();
+    let mut plan = RemovalPlan { optional_on: matches!(mode, RemoveMode::Lost { .. }), ..Default::default() };
+    for d in &deps {
+        let after_t = match mode {
+            RemoveMode::Retire => false,
+            RemoveMode::Lost { t_ms } => !roster.vouches.iter().any(|v| {
+                &v.device == d
+                    && (v.by == target || deps.contains(&v.by))
+                    && seen_before(store, &roster.master, &roster::vouch_seen_key(v), t_ms)
+            }),
+        };
+        if after_t { plan.forced.push(d.clone()) } else { plan.optional.push(d.clone()) }
+    }
+    plan
+}
+
+/// Adds `new`, this device's removals, to `r`, then re-signs as this device's own, with
+/// the same keep, what keeps every device the walk removed before still removed (8.5):
+/// each counted removal a dropped device signed, then, until nothing more comes back, a
+/// counted removal of each device that would (a dropped device's removal of an earlier
+/// remover moves that remover's death before its turn). `lapses` names the removals by a
+/// dropped device that are let go: lost or stolen, those first seen from T on.
+fn add_removals(r: &mut Roster, device: &NativeKeypair, new: Vec<Removal>, lapses: &dyn Fn(&Removal) -> bool) {
+    let before = r.authority();
+    let (me, master) = (device.peer_id(), r.master.clone());
+    let dropped: BTreeSet<String> = new.iter().map(|x| x.device.clone()).collect();
+    let lets_go = |x: &Removal| dropped.contains(&x.by) && lapses(x);
+    let re_sign = |r: &mut Roster, x: &Removal| {
+        r.add_removal(roster::sign_removal(device, &master, &x.base, &x.device, &x.keep_vouched));
+    };
+    for x in new {
+        r.add_removal(x);
+    }
+    for x in before.counted_removals.iter().filter(|x| dropped.contains(&x.by)) {
+        if !dropped.contains(&x.device) && x.device != me && !lets_go(x) {
+            re_sign(r, x);
+        }
+    }
+    let mut kept_out: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        let after = r.authority();
+        let mut changed = false;
+        for (d, first_by) in &before.removed {
+            if after.removed.contains_key(d) || dropped.contains(d) || *d == me || !kept_out.insert(d.as_str()) {
+                continue;
+            }
+            let of_d = || before.counted_removals.iter().filter(|x| &x.device == d && !lets_go(x));
+            if let Some(x) = of_d().find(|x| &x.by == first_by).or_else(|| of_d().next()) {
+                re_sign(r, x);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Whether `target` is out of server authority once `device` removes it: not when a
+/// device closer to the phrase removed `device` first (the walk, section 4).
+pub(crate) fn removal_takes_effect(roster: &Roster, device: &NativeKeypair, target: &str) -> bool {
+    let mut after = roster.clone();
+    after.add_removal(roster::sign_removal(device, &roster.master, &roster.base(), target, &[]));
+    !after.reverified().authority().counts(target)
+}
+
+/// This device removes `target`, re-signing what the target removed (8.5) and taking
+/// with it the devices only the target placed: those linked after T always, the others
+/// when `with_dependents`. Returns every device removed, the target first.
 pub(crate) fn remove(
     master: &NativeKeypair,
     device: &NativeKeypair,
     target: &str,
+    mode: RemoveMode,
+    with_dependents: bool,
     db_path: &str,
     db_passphrase: &str,
-) -> Result<(Roster, RosterState), String> {
-    change_own(master, device, db_path, db_passphrase, |r, s| {
+) -> Result<(Roster, RosterState, Vec<String>), String> {
+    let store = MessageStore::lease(db_path, db_passphrase)?;
+    let mut gone: Vec<String> = Vec::new();
+    let (roster, state) = change_own(master, device, db_path, db_passphrase, |r, s| {
         let me = device.peer_id();
         if target == me {
             return Err("You can't remove the device you are using.".into());
@@ -494,10 +674,28 @@ pub(crate) fn remove(
         if !s.is_member(target) && !s.pending.contains(target) {
             return Err("That device is not one of yours.".into());
         }
-        let keep = r.vouched_members_of(target, s);
-        r.add_removal(roster::sign_removal(device, &r.master.clone(), &s.base, target, &keep));
+        let plan = removal_plan(&store, r, &me, target, mode);
+        gone.push(target.to_string());
+        gone.extend(plan.forced);
+        if with_dependents {
+            gone.extend(plan.optional);
+        }
+        let new = gone
+            .iter()
+            .map(|d| {
+                let keep: Vec<String> = r.vouched_members_of(d, s).into_iter().filter(|k| !gone.contains(k)).collect();
+                roster::sign_removal(device, &r.master, &s.base, d, &keep)
+            })
+            .collect();
+        let master_id = r.master.clone();
+        let lapses = |x: &Removal| match mode {
+            RemoveMode::Retire => false,
+            RemoveMode::Lost { t_ms } => !seen_before(&store, &master_id, &roster::removal_seen_key(x), t_ms),
+        };
+        add_removals(r, device, new, &lapses);
         Ok(())
-    })
+    })?;
+    Ok((roster, state, gone))
 }
 
 /// This device removes every other member and every pending join.
@@ -513,14 +711,12 @@ pub(crate) fn remove_all_others(
         if !s.is_member(&me) {
             return Err("Only a device that belongs to your identity can remove one.".into());
         }
-        let master_id = r.master.clone();
-        for target in s.members.iter().chain(s.pending.iter()).filter(|d| **d != me) {
-            r.add_removal(roster::sign_removal(device, &master_id, &s.base, target, std::slice::from_ref(&me)));
-            gone.push(target.clone());
-        }
+        gone.extend(s.members.iter().chain(s.pending.iter()).filter(|d| **d != me).cloned());
         if gone.is_empty() {
             return Err("This is already your only device.".into());
         }
+        let new = gone.iter().map(|d| roster::sign_removal(device, &r.master, &s.base, d, std::slice::from_ref(&me))).collect();
+        add_removals(r, device, new, &|_| false);
         Ok(())
     })?;
     Ok((roster, state, gone))
@@ -806,6 +1002,62 @@ pub(crate) async fn ingest(
         event_tx, ws_cmd_tx, local_master, local_device, sender, incoming, db_path, db_passphrase, Source::Delivered,
     ))
     .await
+}
+
+/// Whether a `RosterNotice` or `RosterSync` for `master` may be kept (R31-8): our own,
+/// a master we already hold a roster for, one with a friend row of any state (keyed by
+/// its master or by the device delivering it), or one `co_member` names. Anyone can mint
+/// identities, so a first sight on any other terms is a book row a stranger chose.
+pub(crate) fn notice_may_be_kept(
+    store: &MessageStore,
+    master: &str,
+    sender: &str,
+    local_master: &str,
+    co_member: impl Fn(&str) -> bool,
+) -> bool {
+    master == local_master
+        || load(store, master).is_some()
+        || store.load_device_list(master).ok().flatten().is_some()
+        || store.get_friend_row(master).ok().flatten().is_some()
+        // A friend added by nickname, keyed by its device until its roster lands: a first
+        // sight needs the deliverer as a member, and that landing re-keys the row to the
+        // master (`fold_in_store`), so the row admits one identity at most.
+        || store.get_friend_row(sender).ok().flatten().is_some()
+        || co_member(master)
+}
+
+/// Whether `state` names `master`: its owner, a member, or the author of an op it keeps
+/// (DEVICE_PROOF_DESIGN section 9's authority set, before parked and held ops exist).
+pub(crate) fn server_names_master(state: &crate::crdt::server_state::ServerState, master: &str) -> bool {
+    state.current_owner().as_deref() == Some(master)
+        || state.anchor_owner().as_deref() == Some(master)
+        || state.members.contains_key(master)
+        || state.has_op_author(master)
+}
+
+/// [`ingest`] for a `RosterNotice` or `RosterSync`: kept only on [`notice_may_be_kept`]'s
+/// terms, a co-member being a master some server we hold names.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ingest_notice(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_master: &str,
+    local_device: &str,
+    sender: &str,
+    roster: Roster,
+    server_states: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Ingested {
+    let master = roster.master.clone();
+    let co_member = |m: &str| server_states.values().any(|s| server_names_master(s, m));
+    let kept = MessageStore::lease(db_path, db_passphrase)
+        .is_ok_and(|store| notice_may_be_kept(&store, &master, sender, local_master, co_member));
+    if !kept {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a roster notice for {master} from {sender}: nothing here names it");
+        return Ingested::default();
+    }
+    ingest(event_tx, ws_cmd_tx, local_master, local_device, sender, Some(roster), db_path, db_passphrase).await
 }
 
 /// Removals a DM carried (F2): `rm` from `sender`, a member of `master` (the DM's
@@ -2528,7 +2780,7 @@ mod tests {
             "a sibling's removal erased, read or left unmarked the alert about the device it removed",
         );
 
-        remove(&me.master, &me.device, &by_me.peer_id(), &me.db, &me.pass).unwrap();
+        remove(&me.master, &me.device, &by_me.peer_id(), RemoveMode::Retire, false, &me.db, &me.pass).unwrap();
         assert_eq!(
             alert_details(&me, &own, KIND_OWN_DEVICE_ADDED),
             BTreeSet::from([(detail(&by_sibling), false, true), (detail(&by_me), true, true)]),
@@ -2699,7 +2951,7 @@ mod tests {
         roster.add_consent(sign_consent(&other, &me.master.peer_id()));
         me.ingest(&other.peer_id(), &roster).await;
         let before = now_ms();
-        let (_, state) = remove(&me.master, &me.device, &other.peer_id(), &me.db, &me.pass).unwrap();
+        let (_, state, _) = remove(&me.master, &me.device, &other.peer_id(), RemoveMode::Retire, false, &me.db, &me.pass).unwrap();
         let later = before + 60_000;
         let since = me
             .store()
@@ -2760,5 +3012,804 @@ mod tests {
         super::super::resolver::clear_all();
         super::super::resolver::warm_from_store(&me.store());
         assert!(super::super::resolver::is_revoked(&gone), "Carol's refusal did not survive a restart");
+    }
+
+    // t14-ident removal modes
+
+    /// Our phone links a laptop; the laptop removes x (seen long ago) and y (seen at T),
+    /// and links tablet (just now) and pad (long ago), which linked watch (long ago);
+    /// phone2 is linked by both and removed z, which our phone linked. T is ten minutes ago.
+    struct Theft {
+        me: Observer,
+        laptop: NativeKeypair,
+        x: NativeKeypair,
+        y: NativeKeypair,
+        tablet: NativeKeypair,
+        pad: NativeKeypair,
+        phone2: NativeKeypair,
+        z: NativeKeypair,
+        watch: NativeKeypair,
+        t_ms: i64,
+    }
+
+    fn theft() -> Theft {
+        let me = Observer::new(0x01, 0x02);
+        write_bootstrap(&me.dir(), &Roster::genesis(&me.master, &kp(0x03), &me.device, now_ms() - 60_000)).unwrap();
+        let (mut r, _) = me.own();
+        let m = me.master.peer_id();
+        let base = r.base();
+        let (laptop, x, y, tablet, pad, phone2) = (kp(0x07), kp(0x08), kp(0x09), kp(0x0a), kp(0x0b), kp(0x0c));
+        let (z, watch) = (kp(0x0d), kp(0x0e));
+        for d in [&laptop, &x, &y, &tablet, &pad, &phone2, &z, &watch] {
+            r.add_consent(sign_consent(d, &m));
+        }
+        for d in [&laptop, &x, &y, &phone2, &z] {
+            r.add_vouch(roster::sign_vouch(&me.device, &m, &base, &d.peer_id()));
+        }
+        for d in [&tablet, &pad, &phone2] {
+            r.add_vouch(roster::sign_vouch(&laptop, &m, &base, &d.peer_id()));
+        }
+        r.add_vouch(roster::sign_vouch(&pad, &m, &base, &watch.peer_id()));
+        r.add_removal(roster::sign_removal(&phone2, &m, &base, &z.peer_id(), &[]));
+        let rx = roster::sign_removal(&laptop, &m, &base, &x.peer_id(), &[]);
+        r.add_removal(rx.clone());
+        r.add_removal(roster::sign_removal(&laptop, &m, &base, &y.peer_id(), &[]));
+        merge_for_test(&me.store(), &r, &m, &me.device.peer_id());
+        let t_ms = now_ms() - 10 * 60_000;
+        let long_ago = t_ms - 60 * 60_000;
+        let store = me.store();
+        store.set_roster_statement_first_seen(&m, &roster::removal_seen_key(&rx), long_ago).unwrap();
+        let ry = r.removals.iter().find(|x| x.device == y.peer_id()).unwrap();
+        // Seen exactly at T: not before it.
+        store.set_roster_statement_first_seen(&m, &roster::removal_seen_key(ry), t_ms).unwrap();
+        for (d, by) in [(&pad, &laptop), (&watch, &pad)] {
+            let v = r.vouches.iter().find(|v| v.device == d.peer_id() && v.by == by.peer_id()).unwrap();
+            store.set_roster_statement_first_seen(&m, &roster::vouch_seen_key(v), long_ago).unwrap();
+        }
+        Theft { me, laptop, x, y, tablet, pad, phone2, z, watch, t_ms }
+    }
+
+    fn re_signed_by(roster: &Roster, by: &NativeKeypair, target: &NativeKeypair) -> bool {
+        roster.removals.iter().any(|r| r.by == by.peer_id() && r.device == target.peer_id())
+    }
+
+    /// I10 (N3): lost or stolen re-signs the laptop's removals seen before T only.
+    #[test]
+    fn lost_or_stolen_re_signs_only_removals_first_seen_before_t() {
+        let _g = guard();
+        let t = theft();
+        let mode = RemoveMode::Lost { t_ms: t.t_ms };
+        let (roster, _, _) = remove(&t.me.master, &t.me.device, &t.laptop.peer_id(), mode, false, &t.me.db, &t.me.pass).unwrap();
+        assert!(re_signed_by(&roster, &t.me.device, &t.x), "x's removal from before T was not re-signed");
+        assert!(!re_signed_by(&roster, &t.me.device, &t.y), "the thief's removal after T was re-signed");
+        let auth = roster.authority();
+        assert!(!auth.counts(&t.x.peer_id()) && auth.counts(&t.y.peer_id()), "x stays out, y comes back");
+    }
+
+    /// I10 (R3-5, R31-3): devices the thief linked after T go with it, named; older ones
+    /// are offered with the toggle on; a device another device also holds is untouched.
+    #[test]
+    fn lost_or_stolen_drops_devices_the_thief_linked_after_t() {
+        let _g = guard();
+        let t = theft();
+        let mode = RemoveMode::Lost { t_ms: t.t_ms };
+        let (held, _) = t.me.own();
+        let plan = removal_plan(&t.me.store(), &held, &t.me.device.peer_id(), &t.laptop.peer_id(), mode);
+        assert_eq!(plan.forced, vec![t.tablet.peer_id()]);
+        assert!(plan.optional_on);
+        assert_eq!(
+            plan.optional.iter().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([t.pad.peer_id(), t.watch.peer_id()]),
+            "watch, linked before T by pad, which the laptop linked before T, is offered, not forced",
+        );
+        let (roster, _, gone) = remove(&t.me.master, &t.me.device, &t.laptop.peer_id(), mode, false, &t.me.db, &t.me.pass).unwrap();
+        assert_eq!(gone, vec![t.laptop.peer_id(), t.tablet.peer_id()]);
+        let laptops = roster.removals.iter().find(|r| r.device == t.laptop.peer_id() && r.by == t.me.device.peer_id()).unwrap();
+        assert!(laptops.keep_vouched.contains(&t.pad.peer_id()) && !laptops.keep_vouched.contains(&t.tablet.peer_id()));
+        let auth = roster.authority();
+        assert!(!auth.counts(&t.tablet.peer_id()) && auth.counts(&t.pad.peer_id()) && auth.counts(&t.phone2.peer_id()));
+    }
+
+    /// I10 (R31-3): phone2, which our phone also vouches, is never a vouchee here, even
+    /// when the thief vouched it after T.
+    #[test]
+    fn lost_or_stolen_never_removes_a_device_the_thief_vouched_after_t_that_another_device_holds() {
+        let _g = guard();
+        let t = theft();
+        let (held, _) = t.me.own();
+        let plan = removal_plan(&t.me.store(), &held, &t.me.device.peer_id(), &t.laptop.peer_id(), RemoveMode::Lost { t_ms: t.t_ms });
+        assert!(!plan.forced.contains(&t.phone2.peer_id()) && !plan.optional.contains(&t.phone2.peer_id()));
+        let (roster, _, gone) =
+            remove(&t.me.master, &t.me.device, &t.laptop.peer_id(), RemoveMode::Lost { t_ms: t.t_ms }, true, &t.me.db, &t.me.pass).unwrap();
+        assert_eq!(
+            gone.iter().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([t.laptop.peer_id(), t.tablet.peer_id(), t.pad.peer_id(), t.watch.peer_id()]),
+            "\"Remove them too\" takes the older ones",
+        );
+        assert_eq!(gone[0], t.laptop.peer_id());
+        assert!(roster.authority().counts(&t.phone2.peer_id()));
+    }
+
+    /// The plan never names the device making it, even one only the target placed.
+    #[test]
+    fn a_removal_plan_never_takes_the_device_making_it() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let m = me.master.peer_id();
+        let (first, laptop) = (kp(0x05), kp(0x07));
+        let mut r = Roster::genesis(&me.master, &kp(0x03), &first, now_ms() - 60_000);
+        let base = r.base();
+        for d in [&laptop, &me.device] {
+            r.add_consent(sign_consent(d, &m));
+        }
+        r.add_vouch(roster::sign_vouch(&first, &m, &base, &laptop.peer_id()));
+        r.add_vouch(roster::sign_vouch(&laptop, &m, &base, &me.device.peer_id()));
+        let r = r.reverified();
+        assert!(r.authority().counts(&me.device.peer_id()), "setup: we count");
+        for mode in [RemoveMode::Retire, RemoveMode::Lost { t_ms: now_ms() }] {
+            let plan = removal_plan(&me.store(), &r, &me.device.peer_id(), &laptop.peer_id(), mode);
+            assert!(plan.forced.is_empty() && plan.optional.is_empty(), "the plan names the device making it");
+        }
+    }
+
+    /// The dialog's "not removed for servers yet": a removal by a device that a device
+    /// closer to the phrase removed counts for nothing until the phrase is used.
+    #[test]
+    fn a_removal_by_a_removed_device_does_not_take_effect_for_servers() {
+        let (master, first, me, target) = (kp(0x01), kp(0x05), kp(0x02), kp(0x07));
+        let m = master.peer_id();
+        let mut r = Roster::genesis(&master, &kp(0x03), &first, now_ms() - 60_000);
+        let base = r.base();
+        for d in [&me, &target] {
+            r.add_consent(sign_consent(d, &m));
+            r.add_vouch(roster::sign_vouch(&first, &m, &base, &d.peer_id()));
+        }
+        assert!(removal_takes_effect(&r.reverified(), &me, &target.peer_id()));
+        r.add_removal(roster::sign_removal(&first, &m, &base, &me.peer_id(), &[]));
+        assert!(!removal_takes_effect(&r.reverified(), &me, &target.peer_id()));
+        r.add_removal(roster::sign_removal(&first, &m, &base, &target.peer_id(), &[]));
+        assert!(removal_takes_effect(&r.reverified(), &me, &target.peer_id()), "already out: nothing waits for the phrase");
+    }
+
+    /// Both FFI calls read the person's answer the same way.
+    #[test]
+    fn the_lost_since_answer_picks_the_mode() {
+        assert_eq!(RemoveMode::from_lost_since(None), RemoveMode::Retire);
+        assert_eq!(RemoveMode::from_lost_since(Some(5)), RemoveMode::Lost { t_ms: 5 });
+        assert_eq!(RemoveMode::from_lost_since(Some(-5)), RemoveMode::Lost { t_ms: 0 });
+    }
+
+    /// I11 (C3): retiring re-signs every removal of the retired device and removes none of
+    /// its vouchees unless asked.
+    #[test]
+    fn retiring_re_signs_every_removal_of_the_retired_device() {
+        let _g = guard();
+        let t = theft();
+        let (held, _) = t.me.own();
+        let plan = removal_plan(&t.me.store(), &held, &t.me.device.peer_id(), &t.laptop.peer_id(), RemoveMode::Retire);
+        assert!(plan.forced.is_empty() && !plan.optional_on && plan.optional.len() == 3);
+        let (roster, _, gone) = remove(&t.me.master, &t.me.device, &t.laptop.peer_id(), RemoveMode::Retire, false, &t.me.db, &t.me.pass).unwrap();
+        assert_eq!(gone, vec![t.laptop.peer_id()]);
+        assert!(re_signed_by(&roster, &t.me.device, &t.x) && re_signed_by(&roster, &t.me.device, &t.y));
+        assert!(!re_signed_by(&roster, &t.me.device, &t.z), "phone2's removal is phone2's, never re-signed here");
+        let auth = roster.authority();
+        assert!(!auth.counts(&t.x.peer_id()) && !auth.counts(&t.y.peer_id()) && auth.counts(&t.tablet.peer_id()));
+    }
+
+    /// I10 (LOW): a first sight outlives its statement for 30 days.
+    #[test]
+    fn a_roster_seen_row_outlives_its_statement_for_30_days() {
+        let me = Observer::new(0x01, 0x02);
+        let store = me.store();
+        let m = me.master.peer_id();
+        let (a, b) = ("aa".to_string(), "bb".to_string());
+        let now = 1_800_000_000_000i64;
+        store.note_roster_statements(&m, std::slice::from_ref(&a), now, SEEN_KEEP_MS, SEEN_CAP).unwrap();
+        assert_eq!(store.roster_statement_first_seen(&m, &a), Some(now));
+        store.note_roster_statements(&m, &[a.clone(), b.clone()], now + 5, SEEN_KEEP_MS, SEEN_CAP).unwrap();
+        assert_eq!(store.roster_statement_first_seen(&m, &b), Some(now + 5));
+        store.note_roster_statements(&m, std::slice::from_ref(&b), now + 10, SEEN_KEEP_MS, SEEN_CAP).unwrap();
+        store.note_roster_statements(&m, std::slice::from_ref(&b), now + 10 + SEEN_KEEP_MS - 1, SEEN_KEEP_MS, SEEN_CAP).unwrap();
+        assert_eq!(store.roster_statement_first_seen(&m, &a), Some(now), "dropped, kept for 30 days");
+        store.note_roster_statements(&m, &[a.clone(), b.clone()], now + 20, SEEN_KEEP_MS, SEEN_CAP).unwrap();
+        assert_eq!(store.roster_statement_first_seen(&m, &a), Some(now), "back in the roster keeps its first sight");
+        store.note_roster_statements(&m, &[a.clone(), b.clone()], now + 20 + SEEN_KEEP_MS, SEEN_KEEP_MS, SEEN_CAP).unwrap();
+        assert_eq!(store.roster_statement_first_seen(&m, &a), Some(now), "a statement back in the roster is no longer dropped");
+        store.note_roster_statements(&m, std::slice::from_ref(&b), now + 30, SEEN_KEEP_MS, SEEN_CAP).unwrap();
+        store.note_roster_statements(&m, std::slice::from_ref(&b), now + 31 + SEEN_KEEP_MS, SEEN_KEEP_MS, SEEN_CAP).unwrap();
+        assert_eq!(store.roster_statement_first_seen(&m, &a), None, "gone 30 days after it dropped");
+    }
+
+    /// First sights per identity stay under the cap, the longest dropped going first.
+    #[test]
+    fn first_sights_stay_under_the_cap_longest_dropped_first() {
+        let me = Observer::new(0x01, 0x02);
+        let store = me.store();
+        let m = me.master.peer_id();
+        let keys: Vec<String> = (0..4).map(|i| format!("k{i}")).collect();
+        store.note_roster_statements(&m, &keys, 100, SEEN_KEEP_MS, 10).unwrap();
+        store.note_roster_statements(&m, &keys[1..], 200, SEEN_KEEP_MS, 10).unwrap();
+        store.note_roster_statements(&m, &keys[2..], 300, SEEN_KEEP_MS, 3).unwrap();
+        assert_eq!(store.roster_statement_first_seen(&m, &keys[0]), None, "the longest dropped goes first");
+        assert_eq!(store.roster_statement_first_seen(&m, &keys[1]), Some(100));
+        assert_eq!(store.roster_statement_first_seen(&m, &keys[3]), Some(100));
+    }
+
+    /// I10 (LOW): a database from before first sights dates at 0 what our roster held
+    /// before the upgrade, and never what the first save after it brings, whatever path
+    /// saves first (a push fetch can).
+    #[test]
+    fn an_upgrade_dates_at_0_only_what_our_roster_held_before_it() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (mut r, _) = me.own();
+        let m = me.master.peer_id();
+        let (old, new) = (kp(0x07), kp(0x08));
+        r.add_consent(sign_consent(&old, &m));
+        r.add_vouch(roster::sign_vouch(&me.device, &m, &r.base(), &old.peer_id()));
+        merge_for_test(&me.store(), &r, &m, &me.device.peer_id());
+        me.store().upgrade_from_before_first_sights_for_test();
+        let before = now_ms();
+        r.add_consent(sign_consent(&new, &m));
+        r.add_vouch(roster::sign_vouch(&me.device, &m, &r.base(), &new.peer_id()));
+        merge_for_test(&me.store(), &r, &m, &me.device.peer_id());
+        let store = me.store();
+        let seen = |d: &NativeKeypair| {
+            let v = r.vouches.iter().find(|v| v.device == d.peer_id()).unwrap();
+            store.roster_statement_first_seen(&m, &roster::vouch_seen_key(v))
+        };
+        assert_eq!(seen(&old), Some(0), "held before the upgrade");
+        assert_eq!(
+            store.roster_statement_first_seen(&m, &roster::device_seen_key(&old.peer_id())),
+            Some(0),
+            "a device counted before the upgrade",
+        );
+        assert!(store
+            .roster_statement_first_seen(&m, &roster::device_seen_key(&new.peer_id()))
+            .is_some_and(|at| at >= before));
+        assert!(seen(&new).is_some_and(|at| at >= before), "the first save's own statement dated 0");
+        merge_for_test(&store, &r, &m, &me.device.peer_id());
+        assert_eq!(seen(&old), Some(0), "the mark is taken once");
+    }
+
+    /// I10 (8.6): the recovery keep list starts with only the devices counted here before
+    /// T ticked; a fresh install keeps none.
+    #[test]
+    fn a_recovery_keeps_by_default_only_devices_counted_before_t() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (mut r, _) = me.own();
+        let m = me.master.peer_id();
+        let (old, new) = (kp(0x07), kp(0x08));
+        for d in [&old, &new] {
+            r.add_consent(sign_consent(d, &m));
+            r.add_vouch(roster::sign_vouch(&me.device, &m, &r.base(), &d.peer_id()));
+        }
+        merge_for_test(&me.store(), &r, &m, &me.device.peer_id());
+        let store = me.store();
+        let t = now_ms() - 60_000;
+        let (_, state) = me.own();
+        assert!(recovery_kept_by_default(&store, &m, &state, &me.device.peer_id(), t).is_empty(), "a fresh install keeps none");
+        store.set_roster_statement_first_seen(&m, &roster::device_seen_key(&old.peer_id()), t - 1).unwrap();
+        store.set_roster_statement_first_seen(&m, &roster::device_seen_key(&new.peer_id()), t).unwrap();
+        store.set_roster_statement_first_seen(&m, &roster::device_seen_key(&me.device.peer_id()), t - 1).unwrap();
+        assert_eq!(recovery_kept_by_default(&store, &m, &state, &me.device.peer_id(), t), vec![old.peer_id()]);
+        assert!(recovery_kept_by_default(&store, &m, &state, &me.device.peer_id(), 0).is_empty(), "\"not sure\" keeps none");
+    }
+
+    /// The moment a recovery's dropped devices were last had stays with its base.
+    #[test]
+    fn a_recovery_remembers_when_the_dropped_devices_were_last_had() {
+        let me = Observer::new(0x01, 0x02);
+        let store = me.store();
+        assert_eq!(recovery_lost_since(&store, "b1"), None);
+        note_recovery_lost_since(&store, "b1", 1234).unwrap();
+        note_recovery_lost_since(&store, "b2", -5).unwrap();
+        assert_eq!(recovery_lost_since(&store, "b1"), Some(1234));
+        assert_eq!(recovery_lost_since(&store, "b2"), Some(0));
+    }
+
+    /// A fresh install has no mark: its first roster is dated when it was seen.
+    #[test]
+    fn a_fresh_install_dates_its_first_roster_now() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let before = now_ms();
+        let (r, _) = me.own();
+        assert!(!me.store().roster_statements_marked().unwrap(), "a fresh database is marked as upgraded");
+        for v in &r.vouches {
+            let at = me.store().roster_statement_first_seen(&me.master.peer_id(), &roster::vouch_seen_key(v));
+            assert!(at.is_some_and(|at| at >= before));
+        }
+    }
+
+    // R31-8: who may fill the book.
+    async fn notice(
+        me: &Observer,
+        sender: &str,
+        roster: &Roster,
+        servers: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
+    ) -> Ingested {
+        ingest_notice(
+            &me.events, &me.ws, &me.master.peer_id(), &me.device.peer_id(), sender, roster.clone(), servers,
+            &me.db, &me.pass,
+        )
+        .await
+    }
+
+    fn server_of(owner: &NativeKeypair) -> std::collections::HashMap<String, crate::crdt::server_state::ServerState> {
+        let state = crate::crdt::server_state::ServerState::new("s1".into(), "S".into(), owner.peer_id());
+        std::collections::HashMap::from([("s1".to_string(), state)])
+    }
+
+    /// I18. A stranger's notice in a server room it is not part of keeps nothing, though
+    /// its deliverer is one of its members (the ungated ingest keeps it).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_strangers_roster_notice_in_a_server_room_stores_nothing() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (owner, stranger, sdev) = (kp(0x70), kp(0x71), kp(0x72));
+        let r = Roster::legacy_for_test(&stranger, &[&sdev]);
+        notice(&me, &sdev.peer_id(), &r, &server_of(&owner)).await;
+        assert!(load(&me.store(), &stranger.peer_id()).is_none(), "a stranger filled the book");
+        me.ingest(&sdev.peer_id(), &r).await;
+        assert!(load(&me.store(), &stranger.peer_id()).is_some(), "control: the ungated ingest keeps it");
+    }
+
+    /// I18. With no server, friend or roster naming it, a notice keeps nothing, in the
+    /// node and in the push fetch.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_roster_notice_from_a_master_we_know_nothing_of_stores_nothing() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (stranger, sdev) = (kp(0x71), kp(0x72));
+        let r = Roster::legacy_for_test(&stranger, &[&sdev]);
+        notice(&me, &sdev.peer_id(), &r, &Default::default()).await;
+        crate::node::roster_reach::fetch_roster(
+            &me.db, &me.pass, &me.master.peer_id(), &me.device.peer_id(), &sdev.peer_id(), r.clone(), true,
+        );
+        assert!(load(&me.store(), &stranger.peer_id()).is_none(), "a stranger filled the book");
+        assert!(me.store().load_device_list(&stranger.peer_id()).unwrap().is_none());
+    }
+
+    /// I18. The owner of a server we hold is in its authority set: its notice is kept.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn the_owners_roster_notice_in_its_room_is_kept() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (owner, odev) = (kp(0x70), kp(0x73));
+        let r = Roster::legacy_for_test(&owner, &[&odev]);
+        notice(&me, &odev.peer_id(), &r, &server_of(&owner)).await;
+        assert!(me.state_of(&owner.peer_id()).is_member(&odev.peer_id()));
+    }
+
+    /// A pending friend's notice is kept in the node and in the push fetch, and so is
+    /// one for a master we already hold.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_pending_friends_and_a_held_masters_notice_is_kept() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (friend, fdev, fetched, xdev) = (kp(0x74), kp(0x75), kp(0x76), kp(0x77));
+        me.store().save_friend(&friend.peer_id(), "pending", "incoming", 1).unwrap();
+        me.store().save_friend(&fetched.peer_id(), "pending", "outgoing", 1).unwrap();
+        notice(&me, &fdev.peer_id(), &Roster::legacy_for_test(&friend, &[&fdev]), &Default::default()).await;
+        assert!(me.state_of(&friend.peer_id()).is_member(&fdev.peer_id()));
+        crate::node::roster_reach::fetch_roster(
+            &me.db, &me.pass, &me.master.peer_id(), &me.device.peer_id(), &xdev.peer_id(),
+            Roster::legacy_for_test(&fetched, &[&xdev]), false,
+        );
+        assert!(load(&me.store(), &fetched.peer_id()).is_some(), "the push fetch dropped a friend's roster");
+        let (held, hdev, newer) = (kp(0x78), kp(0x79), kp(0x7a));
+        me.ingest(&hdev.peer_id(), &Roster::legacy_for_test(&held, &[&hdev])).await;
+        notice(&me, &newer.peer_id(), &Roster::legacy_for_test(&held, &[&hdev, &newer]), &Default::default()).await;
+        assert!(me.state_of(&held.peer_id()).is_member(&newer.peer_id()), "a held master's news was dropped");
+    }
+
+    /// A member that is not the owner, and the author of an op the server keeps, are in
+    /// its authority set: their notices are kept.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_co_members_and_an_op_authors_notice_is_kept() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (owner, member, mdev, author, adev) = (kp(0x70), kp(0x7b), kp(0x7c), kp(0x7d), kp(0x7e));
+        let mut servers = server_of(&owner);
+        let state = servers.get_mut("s1").unwrap();
+        state.members.insert(
+            member.peer_id(),
+            crate::crdt::server_state::MemberInfo { peer_id: member.peer_id(), display_name: "m".into() },
+        );
+        let (signer, _, pk) = crate::crdt::testkeys::keys(9);
+        state.set_signer(signer, pk);
+        let mut op = state.create_op(crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "x".into() });
+        op.author = author.peer_id();
+        state.op_log.push(op);
+        notice(&me, &mdev.peer_id(), &Roster::legacy_for_test(&member, &[&mdev]), &servers).await;
+        notice(&me, &adev.peer_id(), &Roster::legacy_for_test(&author, &[&adev]), &servers).await;
+        assert!(me.state_of(&member.peer_id()).is_member(&mdev.peer_id()), "a co-member's notice was dropped");
+        assert!(me.state_of(&author.peer_id()).is_member(&adev.peer_id()), "an op author's notice was dropped");
+    }
+
+    /// Our own identity's roster is always ours to hear, even before this device saved
+    /// its own.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn our_own_roster_notice_is_kept_before_we_hold_ours() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let sib = kp(0x7f);
+        assert!(load(&me.store(), &me.master.peer_id()).is_none(), "setup: nothing saved yet");
+        let r = Roster::legacy_for_test(&me.master, &[&sib, &me.device]);
+        notice(&me, &sib.peer_id(), &r, &Default::default()).await;
+        assert!(load(&me.store(), &me.master.peer_id()).is_some(), "our own roster was dropped");
+    }
+
+    /// The notice arm reaches the book only through the gate.
+    #[test]
+    fn the_roster_notice_arm_goes_through_the_gate() {
+        let swarm = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs"))
+            .expect("read swarm.rs")
+            .replace("\r\n", "\n");
+        let arm = "        HavenMessage::RosterNotice { roster } | HavenMessage::RosterSync { roster, .. } => {";
+        let start = swarm.find(arm).expect("the notice arm");
+        let rest = &swarm[start + arm.len()..];
+        let body = &rest[..rest.find("\n        HavenMessage::").unwrap_or(rest.len())];
+        assert!(body.contains("roster_book::ingest_notice("), "the notice arm skips the book gate");
+        assert!(!body.contains("roster_book::ingest("), "the notice arm ingests around the gate");
+    }
+
+    // t14-ident review_ab fixes
+
+    fn ordered(a: NativeKeypair, b: NativeKeypair) -> (NativeKeypair, NativeKeypair) {
+        if a.peer_id() < b.peer_id() { (a, b) } else { (b, a) }
+    }
+
+    /// Our phone (root) linked d, a and e at one depth, d ranking before a. Long ago d
+    /// removed e (a stolen phone), then a removed d. Returns the roster held, the one after
+    /// our phone removes a in `mode`, e and d.
+    fn earlier_removal_chain(mode: RemoveMode) -> (Roster, Roster, String, String) {
+        earlier_removal_chain_seen(mode, now_ms() - 3_600_000)
+    }
+
+    /// [`earlier_removal_chain`] with d's removal of e first seen at `d_rm_e_seen`.
+    fn earlier_removal_chain_seen(mode: RemoveMode, d_rm_e_seen: i64) -> (Roster, Roster, String, String) {
+        let me = Observer::new(0x01, 0x02);
+        write_bootstrap(&me.dir(), &Roster::genesis(&me.master, &kp(0x03), &me.device, now_ms() - 60_000)).unwrap();
+        let (mut r, _) = me.own();
+        let m = me.master.peer_id();
+        let base = r.base();
+        let (d, a) = ordered(kp(0x21), kp(0x22));
+        let e = kp(0x23);
+        for x in [&d, &a, &e] {
+            r.add_consent(sign_consent(x, &m));
+            r.add_vouch(sign_vouch(&me.device, &m, &base, &x.peer_id()));
+        }
+        let d_rm_e = sign_removal(&d, &m, &base, &e.peer_id(), &[]);
+        let a_rm_d = sign_removal(&a, &m, &base, &d.peer_id(), &[]);
+        r.add_removal(d_rm_e.clone());
+        r.add_removal(a_rm_d.clone());
+        merge_for_test(&me.store(), &r, &m, &me.device.peer_id());
+        let store = me.store();
+        store.set_roster_statement_first_seen(&m, &roster::removal_seen_key(&a_rm_d), now_ms() - 3_600_000).unwrap();
+        store.set_roster_statement_first_seen(&m, &roster::removal_seen_key(&d_rm_e), d_rm_e_seen).unwrap();
+        let (held, _) = me.own();
+        let before = held.authority();
+        assert!(!before.counts(&e.peer_id()) && !before.counts(&d.peer_id()) && before.counts(&a.peer_id()), "setup {before:?}");
+        let (after, _, _) = remove(&me.master, &me.device, &a.peer_id(), mode, false, &me.db, &me.pass).unwrap();
+        (held, after, e.peer_id(), d.peer_id())
+    }
+
+    /// F1 (8.5): removing a moves d's death before d's turn; what d removed stays removed.
+    #[test]
+    fn review_ab_retiring_a_device_never_brings_back_what_an_earlier_device_removed() {
+        let _g = guard();
+        let (_, after, e, _) = earlier_removal_chain(RemoveMode::Retire);
+        assert!(!after.reverified().fold(|_| None, 0).is_member(&e), "ID-1's fold keeps e out");
+        let auth = after.reverified().authority();
+        assert!(!auth.counts(&e), "retiring a brought e back for servers: {:?}", auth.counted);
+    }
+
+    /// F1: lost or stolen keeps out what a's removals, seen before T, kept out, all the way down.
+    #[test]
+    fn review_ab_lost_or_stolen_never_brings_back_what_an_earlier_device_removed_before_t() {
+        let _g = guard();
+        let (_, after, e, d) = earlier_removal_chain(RemoveMode::Lost { t_ms: now_ms() - 60_000 });
+        let auth = after.reverified().authority();
+        assert!(!auth.counts(&e) && !auth.counts(&d), "lost or stolen brought a device back for servers: {:?}", auth.counted);
+    }
+
+    /// F1: T judges only what a dropped device signed: d's removal of e, first seen after
+    /// T, is d's and stays.
+    #[test]
+    fn review_ab_lost_or_stolen_keeps_out_what_another_device_removed_after_t() {
+        let _g = guard();
+        let t_ms = now_ms() - 60_000;
+        let (_, after, e, _) = earlier_removal_chain_seen(RemoveMode::Lost { t_ms }, now_ms());
+        assert!(!after.reverified().authority().counts(&e), "a removal by a device we kept lapsed at T");
+    }
+
+    /// 8.5: retiring re-signs every counting removal the device signed, even of a device
+    /// an earlier device also removed.
+    #[test]
+    fn retiring_re_signs_a_removal_an_earlier_device_also_made() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        write_bootstrap(&me.dir(), &Roster::genesis(&me.master, &kp(0x03), &me.device, now_ms() - 60_000)).unwrap();
+        let (mut r, _) = me.own();
+        let m = me.master.peer_id();
+        let base = r.base();
+        let (b, a) = ordered(kp(0x24), kp(0x25));
+        let z = kp(0x26);
+        for x in [&b, &a, &z] {
+            r.add_consent(sign_consent(x, &m));
+            r.add_vouch(sign_vouch(&me.device, &m, &base, &x.peer_id()));
+        }
+        r.add_removal(sign_removal(&b, &m, &base, &z.peer_id(), &[]));
+        r.add_removal(sign_removal(&a, &m, &base, &z.peer_id(), &[]));
+        merge_for_test(&me.store(), &r, &m, &me.device.peer_id());
+        let (roster, _, _) = remove(&me.master, &me.device, &a.peer_id(), RemoveMode::Retire, false, &me.db, &me.pass).unwrap();
+        assert!(re_signed_by(&roster, &me.device, &z), "a's removal of z was not re-signed");
+    }
+
+    /// A device that removed us is removed without our re-signing its removal of us.
+    #[test]
+    fn removing_a_device_never_re_signs_its_removal_of_us() {
+        let (master, me, a) = (kp(0x01), kp(0x02), kp(0x27));
+        let m = master.peer_id();
+        let mut r = Roster::genesis(&master, &kp(0x03), &me, now_ms() - 60_000);
+        let base = r.base();
+        r.add_consent(sign_consent(&a, &m));
+        r.add_vouch(sign_vouch(&me, &m, &base, &a.peer_id()));
+        r.add_removal(sign_removal(&a, &m, &base, &me.peer_id(), &[]));
+        let mut r = r.reverified();
+        assert!(r.authority().removed.contains_key(&me.peer_id()), "setup: a removed us");
+        add_removals(&mut r, &me, vec![sign_removal(&me, &m, &base, &a.peer_id(), &[])], &|_| false);
+        assert!(!re_signed_by(&r, &me, &me), "we re-signed a's removal of us");
+    }
+
+    /// Control: a removal of a with nothing re-signed leaves e out (d's removal of e
+    /// still counts at d's turn); only re-signing a's removal of d moves d's death.
+    #[test]
+    fn review_ab_control_a_plain_removal_keeps_e_out() {
+        let _g = guard();
+        let (held, _, e, d) = earlier_removal_chain(RemoveMode::Retire);
+        let mut plain = held.clone();
+        let a = held.authority().removed.get(&d).cloned().unwrap();
+        plain.add_removal(sign_removal(&kp(0x02), &held.master, &held.base(), &a, &[]));
+        assert!(!plain.reverified().authority().counts(&e), "control: a plain removal of a keeps e out");
+    }
+
+    /// F1: our phone linked s and x; s removed x. Removing every other device keeps x out.
+    #[test]
+    fn review_ab_removing_all_other_devices_never_brings_back_a_device_a_sibling_removed() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        write_bootstrap(&me.dir(), &Roster::genesis(&me.master, &kp(0x03), &me.device, now_ms() - 60_000)).unwrap();
+        let (mut r, _) = me.own();
+        let m = me.master.peer_id();
+        let base = r.base();
+        let (s, x) = (kp(0x31), kp(0x32));
+        for d in [&s, &x] {
+            r.add_consent(sign_consent(d, &m));
+            r.add_vouch(sign_vouch(&me.device, &m, &base, &d.peer_id()));
+        }
+        r.add_removal(sign_removal(&s, &m, &base, &x.peer_id(), &[]));
+        merge_for_test(&me.store(), &r, &m, &me.device.peer_id());
+        let (held, _) = me.own();
+        assert!(!held.authority().counts(&x.peer_id()), "setup: x is out");
+        let (after, _, gone) = remove_all_others(&me.master, &me.device, &me.db, &me.pass).unwrap();
+        assert!(gone.contains(&s.peer_id()));
+        assert!(!after.reverified().fold(|_| None, 0).is_member(&x.peer_id()), "ID-1's fold keeps x out");
+        let auth = after.reverified().authority();
+        assert!(!auth.counts(&x.peer_id()), "removing every other device brought x back for servers: {:?}", auth.counted);
+    }
+
+    fn splitmix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn keyed(case: u64, i: u8) -> NativeKeypair {
+        let mut s = [i; 32];
+        s[..8].copy_from_slice(&case.to_le_bytes());
+        NativeKeypair::from_secret_bytes(&s)
+    }
+
+    /// F1 property: across random rosters, a removal by a counted device never takes a
+    /// device out of the walk's `removed`, except one every counted removal of which a
+    /// dropped device signed and lost or stolen lets lapse.
+    #[test]
+    fn removing_a_device_never_brings_back_a_device_the_walk_kept_out() {
+        let (master, recovery) = (kp(0x01), kp(0x03));
+        let m = master.peer_id();
+        let mut checked = 0;
+        for case in 0..400u64 {
+            let mut rng = case.wrapping_mul(0x5851_f42d_4c95_7f2d) ^ 0x1405;
+            let root = keyed(case, 0x40);
+            let mut r = Roster::genesis(&master, &recovery, &root, 1_000);
+            let base = r.base();
+            let n = 4 + (splitmix(&mut rng) % 5) as usize;
+            let mut devs = vec![root];
+            for i in 0..n {
+                let d = keyed(case, 0x41 + i as u8);
+                r.add_consent(sign_consent(&d, &m));
+                let by = (splitmix(&mut rng) as usize) % devs.len();
+                r.add_vouch(sign_vouch(&devs[by], &m, &base, &d.peer_id()));
+                devs.push(d);
+            }
+            for _ in 0..(splitmix(&mut rng) % 3) {
+                let (by, to) = ((splitmix(&mut rng) as usize) % devs.len(), (splitmix(&mut rng) as usize) % devs.len());
+                r.add_vouch(sign_vouch(&devs[by], &m, &base, &devs[to].peer_id()));
+            }
+            for _ in 0..(1 + splitmix(&mut rng) % 6) {
+                let (by, to) = (1 + (splitmix(&mut rng) as usize) % n, (splitmix(&mut rng) as usize) % devs.len());
+                r.add_removal(sign_removal(&devs[by], &m, &base, &devs[to].peer_id(), &[]));
+            }
+            let r = r.reverified();
+            let before = r.authority();
+            let me = &devs[(splitmix(&mut rng) as usize) % devs.len()];
+            if !before.counts(&me.peer_id()) {
+                continue;
+            }
+            let target = devs[1 + (splitmix(&mut rng) as usize) % n].peer_id();
+            if target == me.peer_id() {
+                continue;
+            }
+            let all_others = splitmix(&mut rng).is_multiple_of(4);
+            let dropped: Vec<String> = if all_others {
+                devs.iter().map(|d| d.peer_id()).filter(|d| *d != me.peer_id()).collect()
+            } else {
+                vec![target]
+            };
+            let lost = !all_others && splitmix(&mut rng).is_multiple_of(2);
+            let lapsing: BTreeSet<Removal> =
+                r.removals.iter().filter(|_| lost && splitmix(&mut rng).is_multiple_of(2)).cloned().collect();
+            let new = dropped.iter().map(|d| sign_removal(me, &m, &base, d, &[])).collect();
+            let mut after = r.clone();
+            let gone: BTreeSet<String> = dropped.iter().cloned().collect();
+            add_removals(&mut after, me, new, &|x: &Removal| gone.contains(&x.by) && lapsing.contains(x));
+            let auth = after.reverified().authority();
+            for d in before.removed.keys().filter(|d| !auth.removed.contains_key(*d)) {
+                let may_lapse = before
+                    .counted_removals
+                    .iter()
+                    .filter(|x| &x.device == d)
+                    .all(|x| gone.contains(&x.by) && lapsing.contains(x));
+                assert!(may_lapse, "case {case}: removing {dropped:?} brought {d} back: before {before:?} after {auth:?}");
+            }
+            checked += 1;
+        }
+        assert!(checked > 120, "too few cases ran: {checked}");
+    }
+
+    /// L1: the upgrade mark leaves only together with the first sights it dates.
+    #[test]
+    fn an_upgrade_mark_leaves_only_with_its_seeds() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (mut r, _) = me.own();
+        let m = me.master.peer_id();
+        let old = kp(0x07);
+        r.add_consent(sign_consent(&old, &m));
+        r.add_vouch(sign_vouch(&me.device, &m, &r.base(), &old.peer_id()));
+        merge_for_test(&me.store(), &r, &m, &me.device.peer_id());
+        let store = me.store();
+        store.upgrade_from_before_first_sights_for_test();
+        let marked = |s: &MessageStore| {
+            s.conn_for_test()
+                .query_row("SELECT COUNT(*) FROM roster_statement_seen WHERE master_peer_id = '*' AND digest = '*'", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+                == 1
+        };
+        assert!(marked(&store), "setup: marked");
+        store.conn_execute_for_test(
+            "CREATE TEMP TRIGGER seed_crash BEFORE INSERT ON main.roster_statement_seen
+             WHEN NEW.first_seen_ms = 0 AND NEW.digest <> '*' BEGIN SELECT RAISE(ABORT, 'crash'); END;",
+        );
+        assert!(date_held_before_upgrade(&store, &m).is_err(), "setup: the seeding fails");
+        assert!(marked(&store), "the mark left without its seeds");
+        let v = r.vouches.iter().find(|v| v.device == old.peer_id()).unwrap();
+        store.conn_execute_for_test("DROP TRIGGER seed_crash;");
+        date_held_before_upgrade(&store, &m).unwrap();
+        assert!(!marked(&store));
+        assert_eq!(store.roster_statement_first_seen(&m, &roster::vouch_seen_key(v)), Some(0), "the retry dates what was held");
+        assert!(!store.seed_roster_statements_once(&m, &["late".to_string()]).unwrap(), "a taken mark seeds again");
+        assert_eq!(store.roster_statement_first_seen(&m, "late"), None, "a seed without the mark was kept");
+    }
+
+    /// L3: a friend row under the delivering device (added by nickname) lets in the one
+    /// identity that names that device a member, then moves to its master.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_device_keyed_friend_row_admits_one_identity_at_most() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (first, second, dev) = (kp(0x81), kp(0x82), kp(0x83));
+        me.store().save_friend(&dev.peer_id(), "pending", "outgoing", 1).unwrap();
+        notice(&me, &dev.peer_id(), &Roster::legacy_for_test(&first, &[&dev]), &Default::default()).await;
+        assert!(me.state_of(&first.peer_id()).is_member(&dev.peer_id()), "the nickname friend's roster was dropped");
+        assert!(me.store().get_friend_row(&dev.peer_id()).unwrap().is_none(), "the row stayed under the device");
+        notice(&me, &dev.peer_id(), &Roster::legacy_for_test(&second, &[&dev]), &Default::default()).await;
+        assert!(load(&me.store(), &second.peer_id()).is_none(), "one device row let in a second identity");
+    }
+
+    /// F1: when the first removal of d is the thief's (after T) but a device we keep also
+    /// removed d, d stays out even once our removal of the thief's vouchee f kills that
+    /// device before its turn.
+    #[test]
+    fn lost_or_stolen_keeps_out_what_a_kept_device_also_removed() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        write_bootstrap(&me.dir(), &Roster::genesis(&me.master, &kp(0x03), &me.device, now_ms() - 60_000)).unwrap();
+        let (mut r, _) = me.own();
+        let m = me.master.peer_id();
+        let base = r.base();
+        let (a, c) = ordered(kp(0x28), kp(0x29));
+        let (d, f) = (kp(0x2a), kp(0x2b));
+        for x in [&a, &c, &d] {
+            r.add_consent(sign_consent(x, &m));
+            r.add_vouch(sign_vouch(&me.device, &m, &base, &x.peer_id()));
+        }
+        r.add_consent(sign_consent(&f, &m));
+        let a_vouch_f = sign_vouch(&a, &m, &base, &f.peer_id());
+        r.add_vouch(a_vouch_f.clone());
+        let a_rm_d = sign_removal(&a, &m, &base, &d.peer_id(), &[]);
+        let f_rm_c = sign_removal(&f, &m, &base, &c.peer_id(), &[]);
+        r.add_removal(a_rm_d.clone());
+        r.add_removal(sign_removal(&c, &m, &base, &d.peer_id(), &[]));
+        r.add_removal(f_rm_c.clone());
+        merge_for_test(&me.store(), &r, &m, &me.device.peer_id());
+        let t_ms = now_ms() - 60_000;
+        let store = me.store();
+        store.set_roster_statement_first_seen(&m, &roster::removal_seen_key(&a_rm_d), now_ms()).unwrap();
+        store.set_roster_statement_first_seen(&m, &roster::removal_seen_key(&f_rm_c), t_ms - 3_600_000).unwrap();
+        store.set_roster_statement_first_seen(&m, &roster::vouch_seen_key(&a_vouch_f), t_ms - 3_600_000).unwrap();
+        let (held, _) = me.own();
+        let before = held.authority();
+        assert_eq!(before.removed.get(&d.peer_id()), Some(&a.peer_id()), "setup: the thief removed d first {before:?}");
+        assert!(before.counted_removals.iter().any(|x| x.by == c.peer_id() && x.device == d.peer_id()), "setup: c's removal of d counts");
+        let (after, _, gone) =
+            remove(&me.master, &me.device, &a.peer_id(), RemoveMode::Lost { t_ms }, true, &me.db, &me.pass).unwrap();
+        assert!(gone.contains(&f.peer_id()), "setup: f goes with a");
+        let auth = after.reverified().authority();
+        assert!(!auth.counts(&c.peer_id()), "setup: f's removal of c, seen before T, stays");
+        assert!(!auth.counts(&d.peer_id()), "c's removal of d lapsed with the thief's: {:?}", auth.counted);
+    }
+
+    /// A device this change removes keeps exactly the keep this change gives it, never a
+    /// narrower one re-signed from an earlier removal of it.
+    #[test]
+    fn a_dropped_device_keeps_the_keep_this_removal_gives_it() {
+        let (master, me) = (kp(0x01), kp(0x02));
+        let m = master.peer_id();
+        let mut r = Roster::genesis(&master, &kp(0x03), &me, now_ms() - 60_000);
+        let base = r.base();
+        let (a, b) = ordered(kp(0x2c), kp(0x2d));
+        let w = kp(0x2e);
+        for x in [&a, &b, &w] {
+            r.add_consent(sign_consent(x, &m));
+        }
+        for x in [&a, &b] {
+            r.add_vouch(sign_vouch(&me, &m, &base, &x.peer_id()));
+        }
+        r.add_vouch(sign_vouch(&b, &m, &base, &w.peer_id()));
+        r.add_removal(sign_removal(&a, &m, &base, &b.peer_id(), &[]));
+        let mut r = r.reverified();
+        assert!(!r.authority().counts(&w.peer_id()), "setup: a's removal of b voids b's vouch for w");
+        let new = vec![
+            sign_removal(&me, &m, &base, &a.peer_id(), &[]),
+            sign_removal(&me, &m, &base, &b.peer_id(), &[w.peer_id()]),
+        ];
+        add_removals(&mut r, &me, new, &|_| false);
+        assert!(r.reverified().authority().counts(&w.peer_id()), "the keep we gave b was narrowed by a's");
     }
 }

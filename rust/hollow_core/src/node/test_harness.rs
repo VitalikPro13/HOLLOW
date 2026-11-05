@@ -4962,7 +4962,7 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
     drain_events(&mut b);
     drain_events(&mut c);
     b.cmd_tx
-        .send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone() })
+        .send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false })
         .await
         .unwrap();
 
@@ -37041,7 +37041,7 @@ async fn authz_a_device_its_roster_leaves_out_never_joins_or_speaks_in_a_meeting
     // Removed, it speaks for nobody, even deaf to the commit that takes its seat and
     // still knocking.
     relay.set_broadcast_deaf(&t_dev, true);
-    f.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t_dev.clone() }).await.unwrap();
+    f.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t_dev.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     for node in [&host, &guest] {
         assert!(
             wait_until(20, async || node.revoked_devices(&f_master).contains(&t_dev)).await,
@@ -37152,7 +37152,7 @@ async fn authz_the_host_unseats_a_device_its_roster_drops_mid_meeting() {
         relay.set_recording(device, true);
     }
     drain_events(&mut host);
-    p2.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: p1_dev.clone() }).await.unwrap();
+    p2.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: p1_dev.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
 
     let unseated = wait_until(20, async || {
         host.mls_members_checked(&conf_sid).await.is_some_and(|m| !m.contains(&p1_dev))
@@ -37865,7 +37865,7 @@ async fn authz_a_device_its_roster_drops_loses_its_voice_seat() {
     sit_all_in_voice(&mut [&mut o, &mut p1], &server_id, &cid).await;
 
     ignores_its_loss(&relay, &p1, &[&o, &p2], &server_id);
-    p2.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: p1_dev.clone() }).await.unwrap();
+    p2.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: p1_dev.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     // Nothing a removed device sends counts any more, so there is no watch to probe.
     expect_unseated(&mut [&mut o], &p1, &server_id, &cid, false).await;
 }
@@ -39075,7 +39075,7 @@ async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
         wait_until(20, async || pending_seen(&f.store(), &o_master).contains_key(&t2_dev)).await,
         "the friend saw the second request",
     );
-    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t2_dev.clone() }).await.unwrap();
+    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t2_dev.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_event(&mut t2, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::DeviceRemoved { .. })).await,
         "the refused device learns it was refused",
@@ -39559,7 +39559,7 @@ async fn a_restored_device_with_no_contacts_hears_its_answer() {
         wait_until(10, async || !relay.online_devices().contains(&t2_dev)).await,
         "the second backup goes offline before the answer",
     );
-    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t2_dev.clone() }).await.unwrap();
+    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t2_dev.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     sleep_ms(1000).await;
     drain_events(&mut t2);
     relay.set_online(&t2_dev, true);
@@ -40173,7 +40173,7 @@ async fn authz_a_removed_device_loses_the_inbox_at_once() {
     // The removed device hears nothing of it, so only the remover can tell the relay.
     relay.swallow_direct(&d1.device_id, &d3.device_id);
     relay.set_broadcast_deaf(&d3.device_id, true);
-    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: d3.device_id.clone() }).await.unwrap();
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: d3.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_until(20, async || !relay.inbox_owners(&o_master).contains(&d3.device_id)).await,
         "the removed device kept the inbox until it reconnected",
@@ -40236,7 +40236,7 @@ async fn authz_the_phrase_takes_the_identity_back_from_a_stolen_device() {
     assert!(wait_until(20, async || both(&f)).await, "F holds both of O's devices first");
 
     // The thief removes the owner's device.
-    t.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: o_dev.clone() }).await.unwrap();
+    t.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: o_dev.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
             matches!(ev, NetworkEvent::DeviceRemoved { by, .. } if *by == t_dev)
@@ -45071,7 +45071,7 @@ async fn t1_sibling_removed_device_is_not_announced_a_new_server() {
     expect_siblings_ready(&relay, &d1, &d2, 15).await;
 
     drain_events(&mut d1);
-    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: d2.device_id.clone() }).await.unwrap();
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: d2.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     let updated = wait_event(&mut d1, std::time::Duration::from_secs(20), |ev| {
         matches!(ev, NetworkEvent::DeviceListUpdated { .. })
     })
@@ -50756,7 +50756,7 @@ async fn ar29_remove_behind_fs_back(relay: &MockRelay, d1: &TestNode, s: &TestNo
     assert!(wait_until(10, async || !relay.online_devices().contains(&f.device_id)).await);
     relay.swallow_direct(&d1.device_id, &s.device_id);
     relay.set_broadcast_deaf(&s.device_id, true);
-    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone() }).await.unwrap();
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
         "precondition: D1 removed S",
@@ -51836,7 +51836,7 @@ async fn b3_phone_the_first_dm_after_a_push_wake_skips_a_device_removed_meanwhil
     // S never hears its own removal, so it stays a live device in the DM room.
     relay.swallow_direct(&d1.device_id, &s.device_id);
     relay.set_broadcast_deaf(&s.device_id, true);
-    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone() }).await.unwrap();
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
         "precondition: D1 removed S",
@@ -51959,7 +51959,7 @@ async fn b3_phone_a_dm_written_before_the_relay_session_waits_for_the_roster() {
     assert!(wait_until(10, async || !relay.online_devices().contains(&f.device_id)).await);
     relay.swallow_direct(&d1.device_id, &s.device_id);
     relay.set_broadcast_deaf(&s.device_id, true);
-    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone() }).await.unwrap();
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
         "precondition: D1 removed S",
@@ -52124,7 +52124,7 @@ async fn b3_a_removed_device_serves_no_dm_sync() {
     // D1 removes S while F is away; S hears it, F does not.
     relay.set_online(&f.device_id, false);
     assert!(wait_until(10, async || !relay.online_devices().contains(&f.device_id)).await);
-    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone() }).await.unwrap();
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_until(20, async || super::roster_book::own_removal(&s.store()).is_some()).await,
         "precondition: S learned its own removal",
@@ -55039,7 +55039,7 @@ async fn g13c_a_sibling_echo_with_a_newer_friend_roster_holds_the_next_dm() {
     relay.swallow_direct(&p1.device_id, &p2.device_id);
     relay.set_broadcast_deaf(&s1.device_id, true);
     relay.set_broadcast_deaf(&p2.device_id, true);
-    p1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: p2.device_id.clone() }).await.unwrap();
+    p1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: p2.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_until(20, async || s2.revoked_devices(&p_master).contains(&p2.device_id)).await,
         "precondition: S2 learned P2's removal",
@@ -55189,7 +55189,7 @@ async fn g13c_nse_case(tags: [u8; 4], carried: bool, reconnect: bool) {
     assert!(wait_until(10, async || !relay.online_devices().contains(&f.device_id)).await);
     relay.swallow_direct(&d1.device_id, &s.device_id);
     relay.set_broadcast_deaf(&s.device_id, true);
-    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone() }).await.unwrap();
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
         "precondition: D1 removed S",
@@ -55304,7 +55304,7 @@ async fn g13c_a_carry_goes_on_until_every_contact_device_showed_it() {
     assert!(wait_until(10, async || !relay.online_devices().contains(&p1.device_id) && !relay.online_devices().contains(&p2.device_id)).await);
     relay.swallow_direct(&s1.device_id, &s2.device_id);
     relay.set_broadcast_deaf(&s2.device_id, true);
-    s1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s2.device_id.clone() }).await.unwrap();
+    s1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: s2.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_until(20, async || s1.revoked_devices(&o_master).contains(&s2.device_id)).await,
         "precondition: S1 removed S2",
@@ -55623,7 +55623,7 @@ async fn g13w3_a_removed_device_joining_another_identity_stays_refused_for_its_o
         wait_until(20, async || o.sees_peer(&t_dev).await && t.sees_peer(&o.device_id).await).await,
         "precondition: the siblings share a room",
     );
-    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t_dev.clone() }).await.unwrap();
+    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t_dev.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_event(&mut t, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::DeviceRemoved { .. })).await,
         "the removed device learns it",
@@ -57958,7 +57958,7 @@ async fn g13w3_rmlive_removed_before_it_joined(relay: &MockRelay) -> (TestNode, 
         "precondition: T joined its rooms",
     );
     assert!(!o.sees_peer(&t_dev).await, "precondition: O1 has not seen T");
-    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t_dev.clone() }).await.unwrap();
+    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t_dev.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_until(10, async || o.revoked_devices(&o_master).contains(&t_dev) && !relay.inbox_owners(&o_master).contains(&t_dev)).await,
         "precondition: O1 removed T and the relay took T's inbox",
@@ -58053,7 +58053,8 @@ fn g13w3_the_arrival_notice_alone_skips_a_bare_master() {
     let removed = NativeKeypair::from_secret_bytes(&seed_bytes(r_tag)).peer_id();
     seed_device_list_into_db(&db, &pass, m_tag, &[m_tag, d_tag, r_tag]);
     for target in [&master, &removed] {
-        super::roster_book::remove(&master_kp, &device_kp, target, &db, &pass).expect("remove");
+        super::roster_book::remove(&master_kp, &device_kp, target, super::roster_book::RemoveMode::Retire, false, &db, &pass)
+            .expect("remove");
     }
     super::resolver::seed_self(&master, std::slice::from_ref(&device));
     super::resolver::note_roster(&master);
@@ -60659,7 +60660,7 @@ async fn t14l_a_removed_owner_device_cannot_reset_the_relay_lock() {
         change_key_for(&server_id, &state, chain.last().unwrap(), &b.master_kp, &thief)
     };
 
-    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone() }).await.unwrap();
+    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(wait_until(20, async || !relay.counts(&b.master_id, &c.device_id)).await, "the relay's fold drops the device");
     assert!(
         wait_until(20, async || relay_tip(&relay, &server_id).n > chain.last().unwrap().n).await,
@@ -60713,7 +60714,7 @@ async fn t14l_a_removed_device_loses_the_door() {
     );
     // Away, the remover takes no MLS turn, so the leaf stays in the group for a while.
     relay.set_background(&b, true);
-    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone() }).await.unwrap();
+    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(wait_until(20, async || !relay.counts(&b.master_id, &c.device_id)).await, "the relay's fold drops the device");
     relay.start_wiretap();
     assert!(
@@ -60798,7 +60799,7 @@ async fn t14l_a_dark_link_of_a_removed_mod_device_gives_way() {
     assert!(relay.put_lock(&server_id, &o.master_id, std::slice::from_ref(&dark.link)), "the stolen device moves it while it counts");
     go_offline(&relay, &o, &server_id).await;
 
-    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: mc.device_id.clone() }).await.unwrap();
+    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: mc.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(wait_until(20, async || !relay.counts(&m_master, &mc.device_id)).await, "the relay's fold drops the stolen device");
     // Its move ahead of the removal met the dark link, so it forks at once, not after a grace.
     let forked = || {
@@ -60848,14 +60849,14 @@ async fn t14l_device_removals_move_the_lock_at_most_once_per_gap() {
     assert!(expect_joined(&mut mb, &server_id, 20).await, "M joins, a plain member");
     let start = relay_tip(&relay, &server_id).n;
 
-    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: mc.device_id.clone() }).await.unwrap();
+    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: mc.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(
         wait_until(30, async || relay_tip(&relay, &server_id).n > start).await,
         "the owner moves the lock for a member's device removal",
     );
     let first = relay_tip(&relay, &server_id).n;
     let first_at = std::time::Instant::now();
-    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: md.device_id.clone() }).await.unwrap();
+    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: md.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(wait_until(20, async || !relay.counts(&m_master, &md.device_id)).await);
     assert!(
         wait_until(40, async || relay_tip(&relay, &server_id).n > first).await,
@@ -60888,7 +60889,7 @@ async fn t14l_a_removed_device_gets_no_change_key() {
     let state = b.live_server_state(&server_id).await.unwrap();
     assert!(state.join_lock.grants_for(&before.change, &b.master_id).is_empty(), "nothing sealed to the master");
     assert!(change_key_for(&server_id, &state, &before, &b.master_kp, &c_kp).is_some(), "the sibling opens its own grant");
-    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone() }).await.unwrap();
+    b.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(wait_until(20, async || relay_tip(&relay, &server_id).n > before.n).await);
     let after = relay_tip(&relay, &server_id);
     assert!(
@@ -60946,7 +60947,7 @@ async fn t14l_a_dead_link_gives_way_only_to_its_own_identity() {
     // M's own recovery would land first; the relay judges the others' offers alone.
     relay.lose_lock_puts(&mb.device_id);
 
-    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: mc.device_id.clone() }).await.unwrap();
+    mb.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: mc.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false }).await.unwrap();
     assert!(wait_until(20, async || !relay.counts(&m_master, &mc.device_id)).await, "the relay's fold drops the stolen device");
     assert!(relay.counts(&e.master_id, &e.device_id), "E's device counts");
     let e_kp = relay.device_kp(&e.device_id);

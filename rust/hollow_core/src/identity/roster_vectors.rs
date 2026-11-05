@@ -249,6 +249,70 @@ fn flood(k: &Keys, n: u32) -> Roster {
     r
 }
 
+/// Named cases for the reserved slots and the walk: (name, held, shown, device judged).
+fn walk_cases(k: &Keys) -> Vec<(&'static str, Roster, Roster, String)> {
+    let m = k.master();
+    let mut ds: Vec<&NativeKeypair> = k.devices.iter().collect();
+    ds.sort_by_key(|d| d.peer_id());
+    let (root, x, h, c, thief, a) = (ds[0], ds[1], ds[2], ds[3], ds[4], ds[5]);
+    let linked = |devs: &[&NativeKeypair]| {
+        let mut r = Roster::genesis(&k.m, &k.r, root, NOW - DAY);
+        let base = r.base();
+        for d in devs {
+            r.add_consent(sign_consent(d, &m));
+            r.add_vouch(sign_vouch(root, &m, &base, &d.peer_id()));
+        }
+        r
+    };
+    let flood_of = |held: &Roster, extra: Vec<Removal>, by: &NativeKeypair, from: u32| {
+        let mut f = held.clone();
+        f.removals.clear();
+        f.removals.extend(extra);
+        for i in 0..(MAX_REMOVALS + MAX_RESERVED) as u32 + 4 {
+            f.removals.push(sign_removal(by, &m, &held.base(), &junk_kp(from + i).peer_id(), &[]));
+        }
+        f
+    };
+    let mut out = Vec::new();
+    // The thief floods removals of the root; the root's removal of it keeps its slot.
+    let mut held = linked(&[thief]);
+    let base = held.base();
+    held.add_removal(sign_removal(root, &m, &base, &thief.peer_id(), &[]));
+    let mut shown = held.clone();
+    shown.removals.clear();
+    for i in 0..(MAX_REMOVALS + MAX_RESERVED) as u32 + 4 {
+        shown.removals.push(sign_removal(thief, &m, &base, &root.peer_id(), &[junk_kp(20_000 + i).peer_id()]));
+    }
+    out.push(("reserved-the-roots-removal-outlives-a-thief-flood", held, shown, thief.peer_id()));
+    // Removed x signs a removal of c and floods; h's removal of c holds c's slot.
+    let mut held = linked(&[x, h, c]);
+    let base = held.base();
+    held.add_removal(sign_removal(root, &m, &base, &x.peer_id(), &[]));
+    held.add_removal(sign_removal(h, &m, &base, &c.peer_id(), &[]));
+    let shown = flood_of(&held, vec![sign_removal(x, &m, &base, &c.peer_id(), &[])], x, 40_000);
+    out.push(("reserved-a-voided-signer-holds-no-slot", held, shown, c.peer_id()));
+    // A removed thief's puppet removes h and floods; h's removal of c holds c's slot.
+    let mut held = linked(&[thief, a, c]);
+    let base = held.base();
+    held.add_consent(sign_consent(h, &m));
+    held.add_vouch(sign_vouch(a, &m, &base, &h.peer_id()));
+    held.add_removal(sign_removal(root, &m, &base, &thief.peer_id(), &[]));
+    held.add_removal(sign_removal(h, &m, &base, &c.peer_id(), &[]));
+    let puppet = junk_kp(91_001);
+    let mut shown = flood_of(&held, vec![sign_removal(&puppet, &m, &base, &h.peer_id(), &[])], &puppet, 50_000);
+    shown.add_consent(sign_consent(&puppet, &m));
+    shown.add_vouch(sign_vouch(thief, &m, &base, &puppet.peer_id()));
+    out.push(("walk-a-removed-thiefs-puppet-removes-nobody", held, shown, c.peer_id()));
+    // A mutual removal: the device closer to the phrase wins for authority.
+    let mut held = linked(&[x]);
+    let base = held.base();
+    held.add_removal(sign_removal(x, &m, &base, &root.peer_id(), &[]));
+    let mut shown = held.clone();
+    shown.add_removal(sign_removal(root, &m, &base, &x.peer_id(), &[]));
+    out.push(("walk-a-mutual-removal-goes-to-the-root", held, shown, root.peer_id()));
+    out
+}
+
 #[derive(Serialize)]
 struct Case {
     name: String,
@@ -270,6 +334,10 @@ struct Case {
     removed: BTreeMap<String, String>,
     pending: Vec<String>,
     member: bool,
+    /// `Roster::authority()` over the held roster (`roster.h` `authority`).
+    auth_base: String,
+    auth_counted: Vec<String>,
+    auth_removed: BTreeMap<String, String>,
 }
 
 /// `RosterBook::seen_key`: the relay's clock for a pending join runs per base.
@@ -299,6 +367,7 @@ fn relay_case(name: &str, now: i64, master: &str, device: &str, held: Option<(Ro
     let base = merged.base();
     let state = merged.fold(|d| seen.get(&seen_key(&base, d)).copied(), now);
     let member = accepted && state.is_member(device);
+    let auth = merged.authority();
     let json = serde_json::to_string(&merged).unwrap();
     Case {
         name: name.to_string(),
@@ -328,6 +397,9 @@ fn relay_case(name: &str, now: i64, master: &str, device: &str, held: Option<(Ro
         removed: state.removed,
         pending: state.pending.into_iter().collect(),
         member,
+        auth_base: auth.base,
+        auth_counted: auth.counted.into_iter().collect(),
+        auth_removed: auth.removed,
     }
 }
 
@@ -425,6 +497,15 @@ fn cases() -> Vec<Case> {
     }
     let waited = BTreeMap::from([(seen_key(&base, &real), NOW - 8 * DAY)]);
     out.push(relay_case("a-later-flood-keeps-the-real-ask", NOW, &m, &real, Some((asking.clone().verified(NOW), waited)), flood_asks));
+    // Reserved removal slots and the walk (DEVICE_PROOF_DESIGN section 4, N1, R3-1).
+    for (name, held, shown, device) in walk_cases(&k) {
+        out.push(relay_case(name, NOW, &m, &device, Some((held.verified(NOW), BTreeMap::new())), shown.verified(NOW)));
+    }
+    {
+        let id = super::roster::tests::Id::new();
+        let (held, shown, x) = super::roster::tests::shallowest_targets_case(&id);
+        out.push(relay_case("reserved-the-shallowest-targets-first", NOW, &id.master(), &x, Some((held.verified(NOW), BTreeMap::new())), shown.verified(NOW)));
+    }
     // HOL-SEC-189: the vouch cap ranks by validity under the removal walk.
     for c in super::roster::tests::vouch_cap_cases() {
         let name = format!("hol-sec-189-{}", c.name);
@@ -441,6 +522,15 @@ fn cases() -> Vec<Case> {
     let (held, shown, device) = super::roster::tests::pending_junk_over_the_consent_cap();
     let fm = held.master.clone();
     out.push(relay_case("review189-pending-junk-over-the-consent-cap", NOW, &fm, &device, Some((held, BTreeMap::new())), shown));
+    let (held, flood, kept) = super::roster::tests::pending_reserved_case();
+    let fm = held.master.clone();
+    out.push(relay_case("a-pending-joins-removal-keeps-its-reserved-slot", NOW, &fm, &kept.device, Some((held, BTreeMap::new())), flood));
+    let (held, shown, _, kept) = super::roster::tests::wide_support_case();
+    let fm = held.master.clone();
+    out.push(relay_case("the-wide-walks-support-keeps-a-waiting-signers-path", NOW, &fm, &kept.device, Some((held, BTreeMap::new())), shown));
+    let (r, x) = super::roster::tests::pending_vouchee_removal_case();
+    let fm = r.master.clone();
+    out.push(relay_case("a-device-only-a-pending-join-vouched-is-no-removal-target-yet", NOW, &fm, &x, None, r));
     out
 }
 
@@ -466,7 +556,8 @@ fn roster_vectors_are_current() {
     assert!(n(&|c| !c.removed.is_empty()) >= 10, "too few removals");
     assert!(n(&|c| c.protected) >= 20 && n(&|c| !c.protected) >= 20, "too few of either base");
     assert!(n(&|c| !c.pending.is_empty()) >= 5, "too few pending joins");
-    assert!(n(&|c| c.merged_counts[3] == MAX_VOUCHES) >= 1 && n(&|c| c.merged_counts[6] == MAX_REMOVALS) >= 1);
+    assert!(n(&|c| c.merged_counts[3] == MAX_VOUCHES) >= 1 && n(&|c| c.merged_counts[6] > MAX_REMOVALS) >= 1);
+    assert!(n(&|c| c.auth_removed.len() < c.removed.len()) >= 3, "too few cases where the walk differs from the fold");
     assert!(n(&|c| !c.accepted) >= 2);
     let named = |name: &str| cases.iter().find(|c| c.name == name).unwrap();
     assert!(named("matured-at-the-relay").member, "seven quiet days admit a backup");
@@ -477,6 +568,18 @@ fn roster_vectors_are_current() {
     assert!(refused.member && refused.removed.len() == 1, "a refused join gained removals by waiting");
     let flooded = named("a-later-flood-keeps-the-real-ask");
     assert!(flooded.member && flooded.merged_counts[4] == MAX_PENDING, "a later flood pushed out the real ask");
+    let k = Keys::new();
+    let auth = |name: &str, device: &NativeKeypair| named(name).auth_counted.contains(&device.peer_id());
+    let mut ds: Vec<&NativeKeypair> = k.devices.iter().collect();
+    ds.sort_by_key(|d| d.peer_id());
+    assert!(!auth("reserved-the-roots-removal-outlives-a-thief-flood", ds[4]) && auth("reserved-the-roots-removal-outlives-a-thief-flood", ds[0]));
+    assert!(named("reserved-the-roots-removal-outlives-a-thief-flood").merged_counts[6] > MAX_REMOVALS, "the reserved slots are in use");
+    assert!(!auth("reserved-a-voided-signer-holds-no-slot", ds[3]), "a voided signer's flood gave c back");
+    assert!(!auth("walk-a-removed-thiefs-puppet-removes-nobody", ds[3]), "the puppet's flood gave c back");
+    let shallow = named("reserved-the-shallowest-targets-first");
+    assert!(!shallow.auth_counted.contains(&shallow.device) && shallow.merged_counts[6] > MAX_REMOVALS, "x counts again");
+    let mutual = named("walk-a-mutual-removal-goes-to-the-root");
+    assert!(mutual.auth_counted.contains(&ds[0].peer_id()) && !mutual.members.contains(&ds[0].peer_id()), "the walk differs from the fold");
     for c in super::roster::tests::vouch_cap_cases() {
         let v = named(&format!("hol-sec-189-{}", c.name));
         assert!(v.accepted && v.merged_counts[3] == MAX_VOUCHES, "{}: the case must fill the vouch cap", v.name);

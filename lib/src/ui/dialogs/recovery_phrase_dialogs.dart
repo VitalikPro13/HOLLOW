@@ -5,10 +5,14 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/services/privacy_screen.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
+import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/settings/device_management_shared.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/core/peer_id_label.dart';
 
@@ -63,14 +67,17 @@ Future<bool> showCheckPhraseDialog(BuildContext context) async {
       body: "Type it from the copy you keep. Hollow doesn't store it, so this "
           'is how you know the copy is right.',
       confirmLabel: 'Check',
-      onSubmit: (_, _) async {},
+      onSubmit: (_, _, _) async {},
     ),
   );
   return ok ?? false;
 }
 
 /// Type the phrase and keep this device plus the devices picked: every other
-/// device stops counting at once. [initiallyKept] starts ticked.
+/// device stops counting at once. With other devices it first asks when the
+/// person last had them (DEVICE_PROOF_DESIGN 8.1): the dropped ones are judged
+/// lost or stolen since then, and only devices counted here before then start
+/// ticked.
 Future<bool> showRecoverWithPhraseDialog(
   BuildContext context, {
   required roster_api.RosterStatus status,
@@ -78,7 +85,6 @@ Future<bool> showRecoverWithPhraseDialog(
   required String body,
   required String confirmLabel,
   bool danger = false,
-  Set<String> initiallyKept = const {},
 }) async {
   final others = status.devices.where((d) => !d.thisDevice).toList();
   final ok = await showHollowDialog<bool>(
@@ -89,9 +95,11 @@ Future<bool> showRecoverWithPhraseDialog(
       confirmLabel: confirmLabel,
       danger: danger,
       devices: others.map((d) => d.devicePeerId).toList(),
-      initiallyKept: initiallyKept,
-      onSubmit: (phrase, keep) =>
-          roster_api.recoverWithPhrase(phrase: phrase, keep: keep.toList()),
+      onSubmit: (phrase, keep, lostSinceMs) => roster_api.recoverWithPhrase(
+          phrase: phrase,
+          keep: keep.toList(),
+          // Nothing else to drop: no moment to judge from.
+          lostSinceMs: lostSinceMs ?? DateTime.now().millisecondsSinceEpoch),
     ),
   );
   return ok ?? false;
@@ -115,7 +123,7 @@ Future<bool> showBackupWaitDialog(BuildContext context, {required bool allowed})
               "bring this identity back. A device that's waiting to join right "
               'now has to ask again.',
       confirmLabel: allowed ? 'Turn on' : 'Turn off',
-      onSubmit: (phrase, _) =>
+      onSubmit: (phrase, _, _) =>
           roster_api.setBackupWait(phrase: phrase, allowed: allowed),
     ),
   );
@@ -131,7 +139,7 @@ Future<bool> showJoinWithPhraseDialog(BuildContext context) async {
       body: 'Typing it adds this device to your identity right away, without '
           'waiting for another device.',
       confirmLabel: 'Join',
-      onSubmit: (phrase, _) => roster_api.joinWithPhrase(phrase: phrase),
+      onSubmit: (phrase, _, _) => roster_api.joinWithPhrase(phrase: phrase),
     ),
   );
   return ok ?? false;
@@ -142,9 +150,12 @@ class _PhraseDialog extends ConsumerStatefulWidget {
   final String body;
   final String confirmLabel;
   final bool danger;
+
+  /// The other devices; when there are any, the dialog asks when the person
+  /// last had them and passes that moment on.
   final List<String> devices;
-  final Set<String> initiallyKept;
-  final Future<void> Function(String phrase, Set<String> keep) onSubmit;
+  final Future<void> Function(String phrase, Set<String> keep, int? lostSinceMs)
+      onSubmit;
 
   const _PhraseDialog({
     required this.title,
@@ -153,18 +164,26 @@ class _PhraseDialog extends ConsumerStatefulWidget {
     required this.onSubmit,
     this.danger = false,
     this.devices = const [],
-    this.initiallyKept = const {},
   });
 
   @override
   ConsumerState<_PhraseDialog> createState() => _PhraseDialogState();
 }
 
+/// Shown when the devices counted before the chosen moment could not be read.
+const kKeepUnreadText =
+    "Hollow couldn't tell which devices you had then, so nothing is ticked.";
+
 class _PhraseDialogState extends ConsumerState<_PhraseDialog>
     with HollowDialogAction {
   final _phrase = TextEditingController();
-  late final Set<String> _keep = {...widget.initiallyKept};
+  final Set<String> _keep = {};
   String? _phraseError;
+  LastHadAnswer? _answer;
+  int? _sinceMs;
+  bool _keepLoading = false;
+  String? _keepNote;
+  int _keepAsk = 0;
 
   @override
   void dispose() {
@@ -174,8 +193,39 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
 
   String get _typed => _phrase.text.trim().split(RegExp(r'\s+')).join(' ');
 
+  bool get _asksWhen => widget.devices.isNotEmpty;
+
+  /// A new answer starts the ticks again from what this device counted before it.
+  Future<void> _answered(LastHadAnswer answer, int sinceMs) async {
+    if (!mounted) return;
+    final ask = ++_keepAsk;
+    setState(() {
+      _answer = answer;
+      _sinceMs = sinceMs;
+      _keep.clear();
+      _keepNote = null;
+      _keepLoading = true;
+    });
+    List<String>? kept;
+    try {
+      kept = await roster_api.recoveryKeptByDefault(lostSinceMs: sinceMs);
+    } catch (_) {
+      kept = null;
+    }
+    if (!mounted || ask != _keepAsk) return;
+    setState(() {
+      _keepLoading = false;
+      if (kept == null) {
+        _keepNote = kKeepUnreadText;
+      } else {
+        _keep.addAll(kept.where(widget.devices.contains));
+      }
+    });
+  }
+
   Future<void> _submit() async {
     if (actionRunning || _phrase.text.trim().isEmpty) return;
+    if (_asksWhen && (_sinceMs == null || _keepLoading)) return;
     final phrase = _typed.toLowerCase();
     var wrong = false;
     final ok = await runDialogAction(() async {
@@ -183,7 +233,7 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
         wrong = true;
         return;
       }
-      await widget.onSubmit(phrase, _keep);
+      await widget.onSubmit(phrase, {..._keep}, _asksWhen ? _sinceMs : null);
     });
     if (!mounted) return;
     if (wrong) {
@@ -199,11 +249,15 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
 
   @override
   Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final secondary =
+        HollowTypography.bodySmall.copyWith(color: hollow.textSecondary);
     final labels = ref.watch(deviceLabelProvider);
     final kinds = ref.watch(deviceKindProvider);
     String name(String id) =>
         deviceGivenName(id, labels: labels, kinds: kinds) ?? shortPeerLabel(id);
-    final filled = _phrase.text.trim().isNotEmpty;
+    final ready = _phrase.text.trim().isNotEmpty &&
+        (!_asksWhen || (_sinceMs != null && !_keepLoading));
     return HollowDialog(
       title: widget.title,
       width: 420,
@@ -226,24 +280,58 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
               actionError = null;
             }),
           ),
-          if (widget.devices.isNotEmpty) ...[
+          if (_asksWhen) ...[
             const SizedBox(height: HollowSpacing.lg),
-            const SettingsFieldLabel(label: 'Other devices to keep'),
-            const SizedBox(height: HollowSpacing.sm),
-            Wrap(
-              spacing: HollowSpacing.sm,
-              runSpacing: HollowSpacing.sm,
-              children: [
-                for (final id in widget.devices)
-                  HollowChip(
-                    label: name(id),
-                    selected: _keep.contains(id),
-                    onTap: () => setState(() {
-                      if (!_keep.remove(id)) _keep.add(id);
-                    }),
-                  ),
-              ],
+            const SettingsFieldLabel(
+                label: 'When did you last have your other devices?'),
+            const SizedBox(height: HollowSpacing.xs),
+            Text(
+              "Devices you don't keep are treated as lost or stolen. Changes "
+              'they made in your servers after this time can be undone.',
+              style: secondary,
             ),
+            const SizedBox(height: HollowSpacing.sm),
+            LastHadPicker(
+              answer: _answer,
+              sinceMs: _sinceMs,
+              enabled: !actionRunning,
+              onAnswer: _answered,
+            ),
+          ],
+          if (_asksWhen && _sinceMs != null) ...[
+            const SizedBox(height: HollowSpacing.lg),
+            const SettingsFieldLabel(
+                label: 'Tick the devices that are still yours. The others '
+                    'are treated as lost or stolen.'),
+            const SizedBox(height: HollowSpacing.sm),
+            if (_keepLoading)
+              const Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: HollowSpinner(delayed: true),
+              )
+            else ...[
+              Wrap(
+                spacing: HollowSpacing.sm,
+                runSpacing: HollowSpacing.sm,
+                children: [
+                  for (final id in widget.devices)
+                    HollowChip(
+                      key: ValueKey('keep-$id'),
+                      label: name(id),
+                      selected: _keep.contains(id),
+                      onTap: actionRunning
+                          ? null
+                          : () => setState(() {
+                                if (!_keep.remove(id)) _keep.add(id);
+                              }),
+                    ),
+                ],
+              ),
+              if (_keepNote != null) ...[
+                const SizedBox(height: HollowSpacing.sm),
+                Text(_keepNote!, style: secondary),
+              ],
+            ],
           ],
         ],
       ),
@@ -254,12 +342,12 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
         ),
         widget.danger
             ? HollowButton.danger(
-                onPressed: filled ? _submit : null,
+                onPressed: ready ? _submit : null,
                 loading: actionRunning,
                 child: Text(widget.confirmLabel),
               )
             : HollowButton.filled(
-                onPressed: filled ? _submit : null,
+                onPressed: ready ? _submit : null,
                 loading: actionRunning,
                 child: Text(widget.confirmLabel),
               ),

@@ -1862,13 +1862,15 @@ pub fn get_local_device_peer_id() -> Option<String> {
         .map(|id| id.device_keypair.peer_id())
 }
 
-/// Revoke one of OUR OWN devices (lost or stolen): bump our master-signed device
-/// list with the device tombstoned, drop its Olm session and, where we coordinate,
-/// remove its MLS leaf. Rejected for the device we are running on or an id that is
-/// not ours. Friends can never un-revoke it with a stale lower-version list.
+/// Remove one of OUR OWN devices: retiring (`lost_since_ms` None) keeps what it did;
+/// lost or stolen keeps only what predates `lost_since_ms`, the earliest moment the
+/// person may no longer have had it. `with_dependents` also removes the devices only it
+/// placed (`remove_device_plan`); those linked after that moment go regardless.
+/// Rejected for the device we are running on or an id that is not ours.
 #[frb]
-pub fn revoke_device(device_peer_id: String) -> Result<(), String> {
-    send_node_command(node::NodeCommand::RevokeDevice { device_peer_id })
+pub fn revoke_device(device_peer_id: String, lost_since_ms: Option<i64>, with_dependents: bool) -> Result<(), String> {
+    let mode = crate::node::roster_book::RemoveMode::from_lost_since(lost_since_ms);
+    send_node_command(node::NodeCommand::RevokeDevice { device_peer_id, mode, with_dependents })
 }
 
 /// Manual state sync: ask the chosen SOURCE sibling to re-announce all its servers

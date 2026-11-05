@@ -186,6 +186,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DeviceLink dco_decode_device_link(dynamic raw);
 
   @protected
+  DeviceRemovalPlan dco_decode_device_removal_plan(dynamic raw);
+
+  @protected
   DiscoveredPeer dco_decode_discovered_peer(dynamic raw);
 
   @protected
@@ -923,6 +926,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DeviceLink sse_decode_device_link(SseDeserializer deserializer);
+
+  @protected
+  DeviceRemovalPlan sse_decode_device_removal_plan(
+    SseDeserializer deserializer,
+  );
 
   @protected
   DiscoveredPeer sse_decode_discovered_peer(SseDeserializer deserializer);
@@ -1861,6 +1869,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_device_link(DeviceLink self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_device_removal_plan(
+    DeviceRemovalPlan self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_discovered_peer(

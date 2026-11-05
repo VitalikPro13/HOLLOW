@@ -1813,19 +1813,19 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
-                    NodeCommand::RevokeDevice { device_peer_id: target } => {
+                    NodeCommand::RevokeDevice { device_peer_id: target, mode, with_dependents } => {
                         let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
                         lock_keeper.move_before_removal(&server_states, keys, &ws_cmd_tx);
                         if let Some(revoked) = Box::pin(sync_handler::handle_revoke_device(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
                             &device_keypair, &master_peer_str, &local_peer_str, &device_peer_id,
-                            is_invisible, target, &db_path, &db_passphrase,
+                            is_invisible, target, mode, with_dependents, &db_path, &db_passphrase,
                         )).await {
                             // Drop our Olm session to the removed device + (coordinator)
                             // remove its MLS leaf from shared servers: the same enforcement
                             // a friend runs when it ingests the removal.
                             enforce_device_revocations(
-                                &[revoked], &mut olm, &crypto_store, mls.as_ref(), &server_states,
+                                &revoked, &mut olm, &crypto_store, mls.as_ref(), &server_states,
                                 &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
                             );
                         }
@@ -15313,9 +15313,9 @@ async fn handle_incoming_request_inner(
         }
 
         HavenMessage::RosterNotice { roster } | HavenMessage::RosterSync { roster, .. } => {
-            let outcome = super::roster_book::ingest(
+            let outcome = super::roster_book::ingest_notice(
                 event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
-                Some(roster), db_path, db_passphrase,
+                roster, server_states, db_path, db_passphrase,
             ).await;
             if outcome.asks_again {
                 super::roster_book::ask_again(

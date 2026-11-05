@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_settings_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -171,6 +172,8 @@ class _AccessPageState extends ConsumerState<AccessPage> {
     final hollow = HollowTheme.of(context);
     final draft = ref.read(serverSettingsDraftProvider(_sid).notifier);
     final capacity = ref.watch(serverCapacityProvider(_sid));
+    final oldRelay = ref.watch(myRoleProvider(_sid)).valueOrNull == 'owner' &&
+        relayPredatesDeviceLock(ref.watch(relayStatusProvider));
     final twitchOn = _flag('twitch_verification_enabled');
     final catchup = _catchupDays;
     final channelName = _values['twitch_channel_name'] ?? '';
@@ -232,6 +235,12 @@ class _AccessPageState extends ConsumerState<AccessPage> {
                 ),
               ),
             ),
+            if (oldRelay)
+              const SettingsNote(
+                "This server's relay needs an update before it can keep "
+                'removed devices out of your invite lock. Ask the person who '
+                'runs it to update.',
+              ),
           ],
         ),
         SettingsSection(
