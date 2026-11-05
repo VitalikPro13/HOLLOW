@@ -39,9 +39,13 @@ pub struct OpDigest {
     /// Echoed by the answer: ties a split to the ask it continues.
     pub ask: u64,
     pub salt: String,
-    /// The asker's checkpoint: nothing it would prune is compared or sent.
+    /// The asker's checkpoint `covers`, for a 0.13 answerer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<HlcTimestamp>,
+    /// The asker's base checkpoint by content hash: an answerer holding it leaves out
+    /// what that base decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bref: Option<String>,
     /// Every op at or after this millisecond goes unconditionally: the asker holds none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<u64>,
@@ -112,7 +116,20 @@ struct SetStamp {
     log_len: usize,
     log_sum: u64,
     kept: u128,
-    base: Option<HlcTimestamp>,
+    asker: Option<(Option<String>, Option<HlcTimestamp>)>,
+}
+
+/// Whose view a compared set is built for: `None` = our own.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Asker<'a> {
+    pub bref: Option<&'a str>,
+    pub covers: Option<&'a HlcTimestamp>,
+}
+
+impl<'a> Asker<'a> {
+    pub fn of(d: &'a OpDigest) -> Self {
+        Self { bref: d.bref.as_deref(), covers: d.base.as_ref() }
+    }
 }
 
 impl Clone for IdMemo {
@@ -127,17 +144,43 @@ impl std::fmt::Debug for IdMemo {
     }
 }
 
-/// An op's identity, the dedup key `(author, hlc)`, hashed.
-pub fn id_hash(author: &str, hlc: &HlcTimestamp) -> u128 {
+/// An op's identity: its dedup key `(author, hlc)` and the hash of the bytes its master
+/// signed, so two replicas holding different ops at one key see a differing range (F2).
+pub fn id_hash(author: &str, hlc: &HlcTimestamp, content: &[u8; 32]) -> u128 {
     let mut h = Sha256::new();
-    h.update(b"hollow-opid1\0");
+    h.update(b"hollow-opid2\0");
     h.update(author.as_bytes());
     h.update([0]);
     h.update(hlc.physical_ms.to_be_bytes());
     h.update(hlc.counter.to_be_bytes());
     h.update(hlc.actor.as_bytes());
+    h.update([0]);
+    h.update(content);
     let out = h.finalize();
     u128::from_be_bytes(out[..16].try_into().expect("16 bytes"))
+}
+
+/// The content hash of an op kept as raw JSON: the bytes its author signed.
+fn raw_content_hash(raw: &str) -> Option<[u8; 32]> {
+    #[derive(Deserialize)]
+    struct Shape<'a> {
+        server_id: String,
+        hlc: HlcTimestamp,
+        author: String,
+        #[serde(borrow)]
+        payload: &'a serde_json::value::RawValue,
+    }
+    let shape = serde_json::from_str::<Shape>(raw).ok()?;
+    let signed = super::operations::signing_payload(&shape.server_id, &shape.hlc, &shape.author, shape.payload.get());
+    Some(Sha256::digest(signed.as_bytes()).into())
+}
+
+/// Where an op counts in the compared set: its millisecond, a checkpoint at 0.
+fn fold_ms(op: &CrdtOp) -> u64 {
+    match fold_key(op) {
+        (1, _) => 0,
+        (_, at) => at.physical_ms,
+    }
 }
 
 /// A fresh salt, base64.
@@ -175,28 +218,49 @@ impl Keyed {
     }
 }
 
-/// The compared set of `state` as an asker whose checkpoint is `base` sees it, sorted by
-/// fold millisecond.
-pub fn entries<'a>(state: &'a ServerState, kept: &[KeptRef<'a>], base: Option<&HlcTimestamp>) -> Vec<Entry<'a>> {
+/// The compared set of `state` (its folded log, the base's parent and the dormant rows,
+/// plus `kept`), sorted by fold millisecond. For an asker on another base we hold, what
+/// that base decides is left out; for a 0.13 asker, what its `covers` pruned.
+pub fn entries<'a>(state: &'a ServerState, kept: &[KeptRef<'a>], asker: Option<Asker<'_>>) -> Vec<Entry<'a>> {
     use std::hash::BuildHasher;
     let genesis = super::anchor::is_genesis_id(&state.server_id);
+    let ours = state.base.as_ref().map(|b| b.hash_hex());
+    let other = asker.and_then(|a| a.bref).filter(|r| Some(*r) != ours.as_deref()).and_then(|r| state.base_by_hash(r));
+    let legacy_covers = asker.filter(|a| a.bref.is_none()).and_then(|a| a.covers);
+    let keeps = |op: &CrdtOp| -> bool {
+        if matches!(op.payload, super::operations::CrdtPayload::ServerCheckpoint { .. }) {
+            return true;
+        }
+        if let Some(b) = &other {
+            return !b.judge().dominates(op, genesis);
+        }
+        match legacy_covers {
+            Some(c) => op.hlc > *c || (genesis && matches!(op.payload, super::operations::CrdtPayload::ServerCreated { .. })),
+            None => true,
+        }
+    };
+    let compared: Vec<&'a CrdtOp> = state
+        .op_log
+        .iter()
+        .chain(state.stored.iter().filter(|(_, k)| !matches!(k, super::fold::RowKind::Parked(_))).map(|(o, _)| o))
+        .collect();
     let mut guard = state.id_memo.0.lock().unwrap_or_else(|e| e.into_inner());
     let memo = &mut *guard;
-    let slot = |op: &CrdtOp| memo.keys.hash_one((op.author.as_str(), &op.hlc));
-    let slots: Vec<u64> = state.op_log.iter().map(slot).collect();
+    let content = |op: &CrdtOp| state.content_of(op);
+    let slots: Vec<u64> = compared.iter().map(|op| memo.keys.hash_one((op.author.as_str(), &op.hlc, content(op)))).collect();
     // Order-sensitive: cached rows index into both lists, so a reorder of the same set is a miss.
     let stamp = SetStamp {
         log_len: slots.len(),
         log_sum: slots.iter().fold(0u64, |a, s| a.wrapping_mul(0x100_0000_01b3).wrapping_add(*s)),
-        kept: kept.iter().fold(0u128, |a, k| a.wrapping_mul(0x100_0000_01b3).wrapping_add(id_hash(k.author, k.hlc))),
-        base: base.cloned(),
+        kept: kept.iter().fold(0u128, |a, k| a.wrapping_mul(0x100_0000_01b3).wrapping_add(memo.keys.hash_one(k.raw) as u128)),
+        asker: asker.map(|a| (a.bref.map(str::to_string), a.covers.cloned())),
     };
     let rebuild = |rows: &[Row]| -> Vec<Entry<'a>> {
         rows.iter()
             .map(|&(ms, id, at, is_kept)| Entry {
                 ms,
                 id,
-                item: if is_kept { Item::Raw(kept[at].raw) } else { Item::Op(&state.op_log[at]) },
+                item: if is_kept { Item::Raw(kept[at].raw) } else { Item::Op(compared[at]) },
             })
             .collect()
     };
@@ -210,38 +274,31 @@ pub fn entries<'a>(state: &'a ServerState, kept: &[KeptRef<'a>], base: Option<&H
         memo.ids.retain(|k, _| live.contains(k));
     }
     let mut rows: Vec<Row> = Vec::with_capacity(slots.len() + kept.len());
-    for (at, (op, key)) in state.op_log.iter().zip(&slots).enumerate() {
-        if base.is_none_or(|b| state.retains(op, b, genesis)) {
-            let id = *memo.ids.entry(*key).or_insert_with(|| id_hash(&op.author, &op.hlc));
-            rows.push((fold_key(op).0.physical_ms, id, at, false));
+    for (at, (op, key)) in compared.iter().zip(&slots).enumerate() {
+        if keeps(op) {
+            let id = *memo.ids.entry(*key).or_insert_with(|| id_hash(&op.author, &op.hlc, &content(op)));
+            rows.push((fold_ms(op), id, at, false));
         }
     }
     let held: HashSet<u128> = rows.iter().map(|r| r.1).collect();
     for (at, k) in kept.iter().enumerate() {
-        let id = id_hash(k.author, k.hlc);
+        let Some(content) = raw_content_hash(k.raw) else { continue };
+        let id = id_hash(k.author, k.hlc, &content);
         if held.contains(&id) {
             continue;
         }
-        let covers = kept_checkpoint_covers(k.raw);
-        let retained = match (&covers, base) {
-            (_, None) => true,
-            (Some(c), Some(b)) => c >= b,
-            (None, Some(b)) => k.hlc > b,
+        let retained = match (other.is_some(), legacy_covers) {
+            (false, Some(c)) => k.hlc > c,
+            _ => true,
         };
         if retained {
-            rows.push((covers.as_ref().unwrap_or(k.hlc).physical_ms, id, at, true));
+            rows.push((k.hlc.physical_ms, id, at, true));
         }
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     let out = rebuild(&rows);
     memo.last = Some((stamp, rows));
     out
-}
-
-/// What a kept raw checkpoint covers: where the fold places it.
-fn kept_checkpoint_covers(raw: &str) -> Option<HlcTimestamp> {
-    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    serde_json::from_value(v.get("payload")?.get("ServerCheckpoint")?.get("covers")?.clone()).ok()
 }
 
 /// The entries with `lo <= ms <= hi`.
@@ -252,12 +309,12 @@ fn within<'s, 'a>(entries: &'s [Entry<'a>], lo: u64, hi: u64) -> &'s [Entry<'a>]
 }
 
 /// The first ask: ranges doubling in size back from our newest op, and everything after it.
-pub fn first_ask(entries: &[Entry<'_>], ask: u64, salt: String, base: Option<HlcTimestamp>) -> OpDigest {
+pub fn first_ask(entries: &[Entry<'_>], ask: u64, salt: String, base: Option<HlcTimestamp>, bref: Option<String>) -> OpDigest {
     let Some(keyed) = Keyed::new(&salt) else {
-        return OpDigest { ask, salt, base, from: Some(0), ranges: Vec::new(), round: 0 };
+        return OpDigest { ask, salt, base, bref, from: Some(0), ranges: Vec::new(), round: 0 };
     };
     let Some(top) = entries.last().map(|e| e.ms) else {
-        return OpDigest { ask, salt, base, from: Some(0), ranges: Vec::new(), round: 0 };
+        return OpDigest { ask, salt, base, bref, from: Some(0), ranges: Vec::new(), round: 0 };
     };
     let mut bounds: Vec<u64> = vec![0];
     let mut back = 1usize;
@@ -276,7 +333,7 @@ pub fn first_ask(entries: &[Entry<'_>], ask: u64, salt: String, base: Option<Hlc
             Range(lo, hi, n, fp)
         })
         .collect();
-    OpDigest { ask, salt, base, from: top.checked_add(1), ranges, round: 0 }
+    OpDigest { ask, salt, base, bref, from: top.checked_add(1), ranges, round: 0 }
 }
 
 /// The answer to a digest: what to hand over and the sub-ranges to compare again. `None`

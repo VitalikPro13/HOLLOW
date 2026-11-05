@@ -97,7 +97,7 @@ fn membership_end<'a>(state: &'a ServerState, master: &str) -> Option<&'a CrdtOp
             P::ServerCreated { owner_peer_id, .. } => member = owner_peer_id == master,
             P::ServerCheckpoint { state: base, .. } => member = lists_member(base, master),
             P::MemberAdded { peer_id, .. } if peer_id == master => member = true,
-            P::MemberRemoved { peer_id } | P::MemberBanned { peer_id } if peer_id == master && member => {
+            P::MemberRemoved { peer_id, .. } | P::MemberBanned { peer_id, .. } if peer_id == master && member => {
                 member = false;
                 end = Some(op);
             }
@@ -122,8 +122,8 @@ fn decides_rank(op: &CrdtOp, chain: &HashSet<&str>) -> bool {
     use super::operations::CrdtPayload as P;
     match &op.payload {
         P::MemberAdded { peer_id, .. }
-        | P::MemberRemoved { peer_id }
-        | P::MemberBanned { peer_id }
+        | P::MemberRemoved { peer_id, .. }
+        | P::MemberBanned { peer_id, .. }
         | P::MemberUnbanned { peer_id }
         | P::RoleChanged { peer_id, .. } => chain.contains(peer_id.as_str()),
         P::RolePermissionsChanged { .. } | P::ServerCreated { .. } | P::ServerCheckpoint { .. } => true,
@@ -154,17 +154,15 @@ pub fn merge_ops(state: &mut ServerState, incoming_ops: &[CrdtOp]) -> Result<Mer
     merge_ops_with(state, incoming_ops, |_| {})
 }
 
-/// `merge_ops` with a hook that fires for every op that entered the log, in log order,
-/// so callers persist exactly those.
+/// `merge_ops` with a hook that sees what the ingest did, so callers persist exactly
+/// its rows.
 pub fn merge_ops_with(
     state: &mut ServerState,
     incoming_ops: &[CrdtOp],
-    mut on_admitted: impl FnMut(&CrdtOp),
+    mut on_ingested: impl FnMut(&super::fold::Ingested),
 ) -> Result<MergeReport, String> {
     let ingested = state.ingest_remote(incoming_ops);
-    for op in &ingested.admitted {
-        on_admitted(op);
-    }
+    on_ingested(&ingested);
     Ok(MergeReport {
         applied: ingested.admitted.len(),
         rejected: ingested.rejected,
@@ -457,13 +455,13 @@ mod tests {
         let t = founding.hlc.physical_ms;
         let (b, x) = (2u8, 3u8);
         let before = vec![founding, op_at(1, &sid, t + 1, add(&sid, b, 1)), op_at(1, &sid, t + 2, add(&sid, x, 1))];
-        let kick = op_at(x, &sid, t + 5, CrdtPayload::MemberRemoved { peer_id: id(b) });
+        let kick = op_at(x, &sid, t + 5, CrdtPayload::MemberRemoved { peer_id: id(b), seen: None });
         let after = vec![
             op_at(1, &sid, t + 3, CrdtPayload::RoleChanged { peer_id: id(x), role: MemberRole::Moderator, priority: 3 }),
             op_at(1, &sid, t + 4, CrdtPayload::ServerRenamed { new_name: "while away".into() }),
             kick.clone(),
             op_at(1, &sid, t + 6, CrdtPayload::RoleChanged { peer_id: id(x), role: MemberRole::Member, priority: 3 }),
-            op_at(1, &sid, t + 7, CrdtPayload::MemberBanned { peer_id: id(b) }),
+            op_at(1, &sid, t + 7, CrdtPayload::MemberBanned { peer_id: id(b), seen: None }),
             op_at(1, &sid, t + 8, CrdtPayload::RolePermissionsChanged { role: "member".into(), permissions: 0 }),
         ];
         let mut away = folded(&sid, &before);
@@ -496,12 +494,12 @@ mod tests {
         let s = folded(&sid, &[
             founding,
             op_at(1, &sid, t + 1, add(&sid, 2, 1)),
-            op_at(1, &sid, t + 2, CrdtPayload::MemberBanned { peer_id: id(5) }),
+            op_at(1, &sid, t + 2, CrdtPayload::MemberBanned { peer_id: id(5), seen: None }),
             op_at(1, &sid, t + 3, add(&sid, 3, 1)),
-            op_at(1, &sid, t + 4, CrdtPayload::MemberRemoved { peer_id: id(3) }),
+            op_at(1, &sid, t + 4, CrdtPayload::MemberRemoved { peer_id: id(3), seen: None }),
             op_at(1, &sid, t + 5, add(&sid, 3, 2)),
             op_at(1, &sid, t + 6, add(&sid, 4, 1)),
-            op_at(1, &sid, t + 7, CrdtPayload::MemberBanned { peer_id: id(4) }),
+            op_at(1, &sid, t + 7, CrdtPayload::MemberBanned { peer_id: id(4), seen: None }),
         ]);
         assert!(s.is_member(&id(3)) && s.is_banned(&id(5)) && !s.is_member(&id(4)));
         let none = nothing_held(&sid);
@@ -521,11 +519,11 @@ mod tests {
         let (mut s, _) = ServerState::found("S".into(), owner.clone(), kp, pk);
         let sid = s.server_id.clone();
         let join = s.author_checked(add(&sid, 3, 1)).expect("the owner admits 3");
-        let covers = s.horizon();
+        let covers = s.checkpoint_covers();
         let base = s.checkpoint_json(&owner, &[], crate::crdt::hlc::wall_clock_ms()).expect("a checkpoint");
         s.author_checked(CrdtPayload::ServerCheckpoint { state: base, covers }).expect("the owner checkpoints");
-        assert!(!s.op_log.iter().any(|op| op.hlc == join.hlc), "the checkpoint pruned the admission");
-        let kick = s.author_checked(CrdtPayload::MemberRemoved { peer_id: id(3) }).expect("the owner kicks 3");
+        assert!(!s.op_log.iter().any(|op| op.hlc == join.hlc), "the checkpoint decided the admission");
+        let kick = s.author_checked(CrdtPayload::MemberRemoved { peer_id: id(3), seen: None }).expect("the owner kicks 3");
         let notice = removal_notice(&s, &id(3), &nothing_held(&sid));
         assert!(notice.iter().any(|op| op.hlc == kick.hlc), "a member the checkpoint lists was not told of its kick");
     }

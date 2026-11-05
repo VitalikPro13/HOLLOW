@@ -87,16 +87,17 @@ fn reconcile(r: &mut ServerState, r_kept: &mut Kept, p: &ServerState, p_kept: &K
     let mut stats = Stats::default();
     let salt = new_salt();
     let base = r.checkpoint_hlc.clone();
+    let bref = r.base.as_ref().map(|b| b.hash_hex());
     let mut ask = {
         let kept = refs(r_kept);
-        first_ask(&entries(r, &kept, base.as_ref()), 7, salt.clone(), base.clone())
+        first_ask(&entries(r, &kept, None), 7, salt.clone(), base.clone(), bref.clone())
     };
     loop {
         stats.rounds += 1;
         assert!(stats.rounds <= MAX_ROUNDS as usize + 2, "the ask never ended");
         stats.ask_bytes.push(serde_json::to_string(&ask).unwrap().len());
         let p_refs = refs(p_kept);
-        let p_entries = entries(p, &p_refs, ask.base.as_ref());
+        let p_entries = entries(p, &p_refs, Some(Asker::of(&ask)));
         let asked: Vec<(u64, u64)> = ask.ranges.iter().map(|r| (r.0, r.1)).collect();
         let (items, reply) = answer(&p_entries, &ask).expect("an honest ask is answered");
         stats.sent.push(items.len());
@@ -114,8 +115,8 @@ fn reconcile(r: &mut ServerState, r_kept: &mut Kept, p: &ServerState, p_kept: &K
         }
         stats.splits += 1;
         let kept = refs(r_kept);
-        let ranges = follow_up(&entries(r, &kept, base.as_ref()), &salt, &asked, &reply).expect("an honest reply");
-        ask = OpDigest { ask: 7, salt: salt.clone(), base: base.clone(), from: None, ranges, round: reply.round + 1 };
+        let ranges = follow_up(&entries(r, &kept, None), &salt, &asked, &reply).expect("an honest reply");
+        ask = OpDigest { ask: 7, salt: salt.clone(), base: base.clone(), bref: bref.clone(), from: None, ranges, round: reply.round + 1 };
     }
 }
 
@@ -239,30 +240,84 @@ fn digest_random_sets_converge() {
     }
 }
 
-/// An answerer never hands over what the asker's checkpoint already pruned.
+/// U19: an answerer holding the asker's base never hands over what that base decides;
+/// two replicas on one base with the same ops compare equal, dormant rows included.
 #[test]
-fn digest_never_sends_what_the_requesters_checkpoint_pruned() {
+fn digest_entries_agree_across_bases_and_include_the_dormant_set() {
     let (kp, owner, pk) = keys(1);
     let (mut s, _) = ServerState::found("S".into(), owner.clone(), kp, pk);
     for i in 0..50 {
         s.author_checked(setting(i)).expect("the owner writes");
     }
-    let before_checkpoint = s.clone();
-    let covers = s.horizon();
-    let cp = s.checkpoint_json(&owner, &[], crate::crdt::hlc::wall_clock_ms()).unwrap();
-    s.author_checked(CrdtPayload::ServerCheckpoint { state: cp, covers }).expect("the owner checkpoints");
-    let base = s.checkpoint_hlc.clone().expect("rebased");
-    let ask = first_ask(&entries(&s, &[], Some(&base)), 1, new_salt(), Some(base.clone()));
-    let p_entries = entries(&before_checkpoint, &[], Some(&base));
-    let (items, _) = answer(&p_entries, &ask).unwrap();
+    let history = s.op_log.clone();
+    let checkpoint = |s: &mut ServerState| {
+        let covers = s.checkpoint_covers();
+        let cp = s.checkpoint_json(&owner, &[], crate::crdt::hlc::wall_clock_ms()).unwrap();
+        s.author_checkpoint(CrdtPayload::ServerCheckpoint { state: cp, covers }).expect("the owner checkpoints").0
+    };
+    let c1 = checkpoint(&mut s);
+    let mut asker = s.clone();
+    let mut later = Vec::new();
+    for i in 50..60 {
+        later.push(s.author_checked(setting(i)).expect("the owner writes"));
+    }
+    let c2 = checkpoint(&mut s);
+    assert!(s.stored.iter().any(|(o, _)| o.hlc == c1.hlc), "the parent row is kept");
+    let ask = first_ask(&entries(&asker, &[], None), 1, new_salt(), asker.checkpoint_hlc.clone(), asker.base.as_ref().map(|b| b.hash_hex()));
+    let (items, _) = answer(&entries(&s, &[], Some(Asker::of(&ask))), &ask).unwrap();
+    let judge = asker.base.clone().unwrap();
     for item in items {
         if let Item::Op(op) = item {
             assert!(
-                crate::crdt::server_state::retained_under(op, &base, true),
-                "an op the asker's checkpoint pruned was handed over",
+                matches!(op.payload, CrdtPayload::ServerCheckpoint { .. }) || !judge.judge().dominates(op, true),
+                "an op the asker's base decides was handed over",
             );
         }
     }
+    let mut twin = ServerState::skeleton(s.server_id.clone());
+    twin.ingest_remote(&history);
+    twin.ingest_remote(&later);
+    twin.ingest_remote(&[c1.clone(), c2.clone()]);
+    asker.ingest_remote(&later);
+    asker.ingest_remote(std::slice::from_ref(&c2));
+    let salt = new_salt();
+    let print = |r: &ServerState| first_ask(&entries(r, &[], None), 1, salt.clone(), None, None).ranges;
+    assert_eq!(print(&twin), print(&s), "one base, one set");
+    assert_eq!(print(&asker), print(&s), "a replica that came by the parent agrees");
+}
+
+/// An asker on a rival base the answerer keeps (two owner devices checkpointed from one
+/// parent): what that base decides and the answerer folds on top of its own is never
+/// handed over, so the filter is the asker's base, not the answerer's.
+#[test]
+fn digest_answer_leaves_out_what_a_rival_askers_base_decides() {
+    let (kp, owner, pk) = keys(1);
+    let (mut a, founding) = ServerState::found("S".into(), owner.clone(), kp, pk);
+    let checkpoint = |s: &mut ServerState| {
+        let covers = s.checkpoint_covers();
+        let cp = s.checkpoint_json(&owner, &[], crate::crdt::hlc::wall_clock_ms()).unwrap();
+        s.author_checkpoint(CrdtPayload::ServerCheckpoint { state: cp, covers }).expect("the owner checkpoints").0
+    };
+    for i in 0..5 {
+        a.author_checked(setting(i)).expect("the owner writes");
+    }
+    let c1 = checkpoint(&mut a);
+    let mut b = a.clone();
+    b.set_hlc(crate::crdt::hlc::Hlc::for_device(owner.clone(), "laptop"));
+    let only_b = b.author_checked(setting(100)).expect("the other device writes");
+    let c2b = checkpoint(&mut b);
+    a.set_hlc(crate::crdt::hlc::Hlc::for_device_at(owner.clone(), "phone", c2b.hlc.physical_ms + 5));
+    let c2a = checkpoint(&mut a);
+    a.ingest_remote(&[c2b.clone(), only_b.clone()]);
+    assert_eq!(a.base.as_ref().map(|x| x.hlc.clone()), Some(c2a.hlc.clone()), "control: the later rival is the answerer's base");
+    assert!(a.op_log.iter().any(|o| o.hlc == only_b.hlc), "control: the answerer folds the other device's op on top");
+    let mut asker = ServerState::skeleton(a.server_id.clone());
+    asker.ingest_remote(&[founding, c1, c2b.clone()]);
+    assert_eq!(asker.base.as_ref().map(|x| x.hlc.clone()), Some(c2b.hlc.clone()));
+    let ask = first_ask(&entries(&asker, &[], None), 1, new_salt(), asker.checkpoint_hlc.clone(), asker.base.as_ref().map(|b| b.hash_hex()));
+    let (items, _) = answer(&entries(&a, &[], Some(Asker::of(&ask))), &ask).unwrap();
+    let sent: Vec<&CrdtOp> = items.iter().filter_map(|i| match i { Item::Op(op) => Some(*op), _ => None }).collect();
+    assert!(!sent.iter().any(|op| op.hlc == only_b.hlc), "an op the asker's base decides was handed over");
 }
 
 /// An op both sides keep unread compares equal: nothing moves.
@@ -309,7 +364,7 @@ fn digest_round_cap_forces_a_send() {
     ops.extend((0..200).map(|i| op_at(1, &sid, t + 1 + i as u64, 0, setting(i))));
     let p = folded(&sid, &ops);
     let salt = new_salt();
-    let mut ask = first_ask(&[], 1, salt, None);
+    let mut ask = first_ask(&[], 1, salt, None, None);
     ask.from = None;
     ask.ranges = vec![Range(0, u64::MAX - 1, 0, "AAAAAAAAAAAAAAAAAAAAAA".into())];
     ask.round = MAX_ROUNDS;
@@ -327,7 +382,7 @@ fn digest_forced_range_never_splits() {
     let mut ops = vec![founding];
     ops.extend((0..200).map(|i| op_at(1, &sid, t + 1 + i as u64, 0, setting(i))));
     let p = folded(&sid, &ops);
-    let mut ask = first_ask(&[], 1, new_salt(), None);
+    let mut ask = first_ask(&[], 1, new_salt(), None, None);
     ask.from = None;
     ask.ranges = vec![Range(0, u64::MAX - 1, 0, String::new())];
     let (items, reply) = answer(&entries(&p, &[], None), &ask).unwrap();
@@ -346,7 +401,7 @@ fn digest_split_budget_bounds_both_sides() {
     let ranges: Vec<Range> =
         (0..40u64).map(|k| Range(t + 1 + k * 100, t + 100 + k * 100, 0, "AAAAAAAAAAAAAAAAAAAAAA".into())).collect();
     let salt = new_salt();
-    let ask = OpDigest { ask: 1, salt: salt.clone(), base: None, from: None, ranges, round: 0 };
+    let ask = OpDigest { ask: 1, salt: salt.clone(), base: None, bref: None, from: None, ranges, round: 0 };
     let (_, reply) = answer(&entries(&p, &[], None), &ask).unwrap();
     let subs: usize = reply.groups.iter().map(Vec::len).sum();
     assert!(subs <= SPLIT_BUDGET && !reply.groups.is_empty(), "{subs} sub-ranges");
@@ -368,7 +423,7 @@ fn digest_request_size_is_log_of_the_log() {
         // A different author per op: the vector's worst case.
         ops.extend((0..n).map(|i| op_at(1, &sid, t + 1 + i as u64, 0, setting(i))));
         let s = folded(&sid, &ops);
-        let ask = first_ask(&entries(&s, &[], None), 1, new_salt(), None);
+        let ask = first_ask(&entries(&s, &[], None), 1, new_salt(), None, None);
         sizes.push((ask.ranges.len(), serde_json::to_string(&ask).unwrap().len()));
     }
     assert!(sizes.iter().all(|(ranges, bytes)| *ranges <= 16 && *bytes <= 1200), "{sizes:?}");
@@ -380,9 +435,9 @@ fn digest_fingerprint_is_keyed_by_the_salt() {
     let (founding, sid, t) = founded();
     let s = folded(&sid, &[founding, op_at(1, &sid, t + 1, 0, setting(1))]);
     let salt = new_salt();
-    let a = first_ask(&entries(&s, &[], None), 1, salt.clone(), None);
-    let b = first_ask(&entries(&s.clone(), &[], None), 1, salt, None);
-    let c = first_ask(&entries(&s, &[], None), 1, new_salt(), None);
+    let a = first_ask(&entries(&s, &[], None), 1, salt.clone(), None, None);
+    let b = first_ask(&entries(&s.clone(), &[], None), 1, salt, None, None);
+    let c = first_ask(&entries(&s, &[], None), 1, new_salt(), None, None);
     assert_eq!(a.ranges, b.ranges);
     assert_ne!(a.ranges, c.ranges);
 }
@@ -403,7 +458,7 @@ fn review_answer_refuses_overlapping_whole_log_ranges() {
     let (p, _, _) = big_log(10_000);
     let es = entries(&p, &[], None);
     let ranges = vec![Range(0, u64::MAX - 1, 1, "AAAAAAAAAAAAAAAAAAAAAA".into()); SPLIT_BUDGET];
-    let ask = OpDigest { ask: 1, salt: new_salt(), base: None, from: None, ranges, round: 0 };
+    let ask = OpDigest { ask: 1, salt: new_salt(), base: None, bref: None, from: None, ranges, round: 0 };
     assert!(answer(&es, &ask).is_none(), "overlapping ranges were answered");
     let reversed = OpDigest { ranges: vec![Range(10, 5, 0, String::new())], ..ask.clone() };
     assert!(answer(&es, &reversed).is_none(), "a range with lo > hi was answered");
@@ -462,6 +517,6 @@ fn a_reordered_log_never_reuses_the_cached_set() {
     r.op_log.swap(1, last);
     for e in entries(&r, &[], None) {
         let Item::Op(op) = e.item else { panic!("no kept ops here") };
-        assert_eq!(e.id, id_hash(&op.author, &op.hlc), "an entry points at another op");
+        assert_eq!(e.id, id_hash(&op.author, &op.hlc, &op.content_hash()), "an entry points at another op");
     }
 }

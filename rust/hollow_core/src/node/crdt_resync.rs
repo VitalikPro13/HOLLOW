@@ -107,6 +107,10 @@ pub(crate) struct Kept {
 /// Where a page starts: after the op at this fold position (`fold_key`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PageCursor {
+    /// The fold rank (founding op, checkpoints, the rest); a 0.13 cursor reads 0 and so
+    /// starts again from the checkpoints, never past an op.
+    #[serde(default)]
+    pub rank: u8,
     pub at: HlcTimestamp,
     #[serde(default)]
     pub checkpoint: bool,
@@ -114,8 +118,8 @@ pub struct PageCursor {
 
 impl PageCursor {
     fn of(op: &CrdtOp) -> Self {
-        let (at, checkpoint) = crate::crdt::server_state::fold_key(op);
-        Self { at: at.clone(), checkpoint }
+        let (rank, at) = crate::crdt::server_state::fold_key(op);
+        Self { rank, at: at.clone(), checkpoint: rank == 1 }
     }
 }
 
@@ -257,8 +261,10 @@ impl CrdtResync {
             {
                 read_again += ops.len();
                 let ingested = state.ingest_remote(&ops);
+                if let Some(delta) = ingested.delta(&sid) {
+                    saved &= db.persist_op_delta(&delta).is_ok();
+                }
                 if !ingested.admitted.is_empty() || ingested.rebuilt {
-                    db.persist_admitted_ops(&ingested.admitted, state.checkpoint_hlc.as_ref());
                     saved &= serde_json::to_string(&state.lean_snapshot())
                         .map_err(|e| e.to_string())
                         .and_then(|json| db.save_server_state(&sid, &json))
@@ -356,7 +362,7 @@ impl CrdtResync {
         ask: &crate::crdt::digest::OpDigest,
     ) -> Option<(String, crate::crdt::digest::DigestReply)> {
         let kept = Self::kept_refs(&self.kept, &state.server_id);
-        let entries = crate::crdt::digest::entries(state, &kept, ask.base.as_ref());
+        let entries = crate::crdt::digest::entries(state, &kept, Some(crate::crdt::digest::Asker::of(ask)));
         let (items, reply) = crate::crdt::digest::answer(&entries, ask)?;
         Some((crate::crdt::digest::items_json(&items), reply))
     }
@@ -406,7 +412,7 @@ impl CrdtResync {
         if !self.serving.take(asker, now) {
             return ("[]".to_string(), FullPage { busy: true, ..FullPage::default() });
         }
-        let (ops_json, next) = page(&state.op_log, ask.after.as_ref());
+        let (ops_json, next) = page(&state.served_log(), ask.after.as_ref());
         let partial = self.marks.get(&state.server_id).is_some_and(Mark::partial);
         (ops_json, FullPage { next, partial, ..FullPage::default() })
     }
@@ -793,14 +799,14 @@ fn fresh_nonce() -> u64 {
 /// One page of `log` (in fold order) after `after`: at most `PAGE_OPS` ops or about
 /// `PAGE_BYTES`, never splitting ops that share a fold position. `next` is none on the
 /// last page.
-pub(crate) fn page(log: &[CrdtOp], after: Option<&PageCursor>) -> (String, Option<PageCursor>) {
-    let start = after.map_or(0, |c| log.partition_point(|op| PageCursor::of(op) <= *c));
+pub(crate) fn page<O: std::borrow::Borrow<CrdtOp>>(log: &[O], after: Option<&PageCursor>) -> (String, Option<PageCursor>) {
+    let start = after.map_or(0, |c| log.partition_point(|op| PageCursor::of(op.borrow()) <= *c));
     let mut parts: Vec<String> = Vec::new();
     let mut bytes = 0usize;
     let mut end = start;
-    while let Some(op) = log.get(end) {
+    while let Some(op) = log.get(end).map(|o| o.borrow()) {
         let full = parts.len() >= PAGE_OPS || bytes >= PAGE_BYTES;
-        if full && PageCursor::of(op) != PageCursor::of(&log[end - 1]) {
+        if full && PageCursor::of(op) != PageCursor::of(log[end - 1].borrow()) {
             break;
         }
         if let Ok(json) = serde_json::to_string(op) {
@@ -809,7 +815,7 @@ pub(crate) fn page(log: &[CrdtOp], after: Option<&PageCursor>) -> (String, Optio
         }
         end += 1;
     }
-    let next = (end < log.len()).then(|| PageCursor::of(&log[end - 1]));
+    let next = (end < log.len()).then(|| PageCursor::of(log[end - 1].borrow()));
     (format!("[{}]", parts.join(",")), next)
 }
 
@@ -820,6 +826,7 @@ pub(crate) struct PageIngest {
     pub ok: bool,
     pub admitted: Vec<CrdtOp>,
     pub rebuilt: bool,
+    pub delta: Option<crate::crdt::fold::OpDelta>,
     /// The signed ops of members it skipped, unreadable to this build.
     pub unread: Vec<UnreadOp>,
     pub was_member: bool,
@@ -841,7 +848,8 @@ pub(crate) async fn ingest_page(server_states: &mut ServerStates, server_id: &st
         let was_member = state.is_member(&us);
         let ingested = state.ingest_remote(&parsed.ops);
         let unread = parsed.unread.into_iter().filter(|u| vouched(u, &state)).collect();
-        (state, Some(PageIngest { ok: true, admitted: ingested.admitted, rebuilt: ingested.rebuilt, unread, was_member }))
+        let delta = ingested.delta(&state.server_id);
+        (state, Some(PageIngest { ok: true, admitted: ingested.admitted, rebuilt: ingested.rebuilt, delta, unread, was_member }))
     });
     match job.await {
         Ok((state, out)) => {
@@ -1263,7 +1271,9 @@ mod tests {
         let sid = source.server_id.clone();
         let mut mine = source.clone();
         mine.op_log.truncate(1);
-        mine.restore_op_log(mine.op_log.clone());
+        // The saved state names the log it folded, so the restart keeps the fixture's members.
+        mine.retained_print = Some(mine.current_print());
+        mine.restore_op_log(mine.op_log.iter().map(|o| (o.clone(), None)).collect());
         let mut states: ServerStates = HashMap::from([(sid.clone(), mine)]);
         let mut v = serde_json::to_value(&source.op_log[1]).unwrap();
         v["payload"] = serde_json::json!({ "LaterVariant": { "x": 1 } });
@@ -1569,8 +1579,8 @@ mod tests {
         // What `load_ops_for_server` returns: ORDER BY hlc_ms, hlc_counter, author.
         log.sort_by(|a, b| (a.hlc.physical_ms, a.hlc.counter, &a.author).cmp(&(b.hlc.physical_ms, b.hlc.counter, &b.author)));
         // M1 fix: the restart restores the log through `restore_op_log`, which pages see.
-        state.restore_op_log(log);
-        let log = state.op_log.clone();
+        state.restore_op_log(log.into_iter().map(|o| (o, None)).collect());
+        let log: Vec<CrdtOp> = state.served_log().into_iter().cloned().collect();
         let mut after = None;
         let mut seen = Vec::new();
         for _ in 0..20 {

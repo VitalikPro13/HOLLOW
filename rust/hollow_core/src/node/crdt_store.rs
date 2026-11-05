@@ -21,8 +21,8 @@ pub(crate) enum CrdtStoreCmd {
     DeletePendingJoin(String),
     /// Keep only the newest N ops of each named LEGACY-anchored server.
     PruneLegacyOps { server_ids: Vec<String>, keep: usize },
-    /// Ops the fold admitted, plus the checkpoint they may have rebased on.
-    PersistAdmitted { ops: Vec<CrdtOp>, checkpoint: Option<crate::crdt::hlc::HlcTimestamp> },
+    /// The rows one ingest wrote and dropped (`crdt::fold::OpDelta`).
+    PersistDelta(Box<crate::crdt::fold::OpDelta>),
     /// READ-ONLY: newest stored message timestamp (ms) per channel, for the relay
     /// catch-up window. Answered on the actor's long-lived connection so the
     /// caller never opens a transient SQLCipher handle.
@@ -244,8 +244,10 @@ impl CrdtStore {
                     }
                 }
             }
-            CrdtStoreCmd::PersistAdmitted { ops, checkpoint } => {
-                store.persist_admitted_ops(&ops, checkpoint.as_ref());
+            CrdtStoreCmd::PersistDelta(delta) => {
+                if let Err(e) = store.persist_op_delta(&delta) {
+                    hollow_log!("CrdtStore: failed to persist ops of {}: {e}", delta.server_id);
+                }
             }
         }
     }
@@ -318,10 +320,10 @@ impl CrdtStore {
         rx.await.unwrap_or_default()
     }
 
-    /// Fire-and-forget: persist what an ingest admitted, pruning below a new checkpoint.
-    pub fn persist_admitted(&self, ops: Vec<CrdtOp>, checkpoint: Option<crate::crdt::hlc::HlcTimestamp>) {
-        if !ops.is_empty() {
-            let _ = self.cmd_tx.send(CrdtStoreCmd::PersistAdmitted { ops, checkpoint });
+    /// Fire-and-forget: persist the rows an ingest wrote and dropped, as one savepoint.
+    pub fn persist(&self, delta: Option<crate::crdt::fold::OpDelta>) {
+        if let Some(delta) = delta {
+            let _ = self.cmd_tx.send(CrdtStoreCmd::PersistDelta(Box::new(delta)));
         }
     }
 
@@ -551,7 +553,7 @@ mod tests {
     #[test]
     fn server_rows_are_written_only_through_the_actor() {
         let writes = [
-            ".save_server_state(", ".delete_server_state(", ".insert_crdt_op(", ".persist_admitted_ops(",
+            ".save_server_state(", ".delete_server_state(", ".insert_crdt_op(", ".persist_op_delta(",
             ".save_server_blob(", ".delete_server_blob(", ".delete_server_blobs(", ".prune_crdt_ops(",
         ];
         let allowed: &[(&str, usize)] = &[("crdt_resync.rs", 4)];

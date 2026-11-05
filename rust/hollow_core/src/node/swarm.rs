@@ -10,6 +10,10 @@ pub(crate) const MLS_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
 /// persists private key material.
 pub(crate) const KEY_PACKAGE_ANSWER_GAP: Duration = Duration::from_secs(10);
 
+/// The newest ops a join answer carries beyond the base and the joiner's authority
+/// closure (`ServerState::join_answer`).
+const JOIN_ANSWER_BYTES: usize = 256 * 1024;
+
 /// How long a served `ServerJoinRequest` is remembered, so a REPEAT ask is
 /// recognised as the joiner's retry and bypasses the coordinator gate. Longer
 /// than that retry, shorter than the join timeout: at most one escalation.
@@ -1035,61 +1039,11 @@ async fn run_event_loop(
 
     // -- CRDT state --
     // Server states keyed by server_id. Reload from DB so servers survive restarts.
-    let mut server_states: HashMap<String, ServerState> = HashMap::new();
     // Whether every server row was read, and those whose state did not load: the MLS
     // groups of neither may be forgotten below.
-    let mut server_rows_read = false;
-    let mut unreadable_servers: Vec<String> = Vec::new();
-    {
-        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
-            match store.load_all_servers() {
-                Ok(rows) => {
-                    server_rows_read = true;
-                    for (server_id, json) in rows {
-                        match serde_json::from_str::<ServerState>(&json) {
-                            Ok(mut state) => {
-                                state.set_hlc(Hlc::for_device(local_peer_str.to_string(), &device_peer_id));
-                                install_op_signer(&mut state, &bundle_keypair);
-                                // Restore op_log from crdt_ops table (no longer serialized in state JSON).
-                                // An anchored server is rebuilt from every op since its anchor.
-                                let legacy = state.anchor() == crate::crdt::server_state::Anchor::Legacy;
-                                if state.op_log.is_empty() {
-                                    if let Ok(ops) = store.load_ops_for_server(&server_id, legacy.then_some(1000)) {
-                                        state.restore_op_log(ops);
-                                    }
-                                }
-                                if state.refold_for_standing() {
-                                    crdt_store.save_state_snapshot(server_id.clone(), &state);
-                                }
-                                // Fold any legacy device-keyed member entries into
-                                // their master identity (the resolver was warmed just
-                                // above). A no-op for single-device, and never on an
-                                // anchored server, whose ops are master-keyed.
-                                if legacy && state.canonicalize_members(|id| super::resolver::resolve(id)) {
-                                    crdt_store.save_state_snapshot(server_id.clone(), &state);
-                                    hollow_log!("[HOLLOW-MULTIDEV] Canonicalized device-keyed members → master for server {server_id}");
-                                }
-                                server_states.insert(server_id.clone(), state);
-                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
-                                    room_code: server_id,
-                                });
-                            }
-                            Err(e) => {
-                                hollow_log!("Failed to deserialize server {}: {}", server_id, e);
-                                unreadable_servers.push(server_id);
-                            }
-                        }
-                    }
-                    if !server_states.is_empty() {
-                        hollow_log!("Loaded {} server(s) from DB", server_states.len());
-                    }
-                }
-                Err(e) => {
-                    hollow_log!("Failed to load servers from DB: {}", e);
-                }
-            }
-        }
-    }
+    let (mut server_states, server_rows_read, unreadable_servers) = load_server_states(
+        &db_path, &db_passphrase, &local_peer_str, &device_peer_id, &bundle_keypair, &crdt_store, &ws_cmd_tx,
+    );
 
     // Ops an older build skipped: read again from what we kept, or fetched again whole.
     // It writes on its own connection, so the canonicalize saves above land first.
@@ -1216,6 +1170,10 @@ async fn run_event_loop(
     // server_id -> (join key, owner pin) of the invite a join started from, for the
     // re-ask that answers a consent or Twitch question with no link in hand.
     let mut join_invites: HashMap<String, (String, Option<String>)> = HashMap::new();
+    // M2: servers whose rebuild refused our own admission, with the re-asks made and when
+    // the next may go (doubling from 30 s, six at most: a private or full server refuses
+    // for good).
+    let mut silent_reasks: HashMap<String, (u32, std::time::Instant)> = HashMap::new();
     // Our side of every server's join lock (`lock_keeper`), and joins that just
     // completed, whose later answers still merge (`RecentJoin`).
     let mut lock_keeper = super::lock_keeper::LockKeeper::default();
@@ -5919,10 +5877,12 @@ async fn run_event_loop(
                 arm_started = Some(("timer", "mls_batch", std::time::Instant::now()));
                 let landed = leave_book.drive(&olm, &ws_room_peers, &ws_cmd_tx);
                 release_leave_rooms(landed, leave_book.rooms(), &mut door_rooms, &server_states, &pending_server_joins, &ws_cmd_tx);
+                // M2: a rebuild that refused our own admission asks to join again, no prompt.
+                silent_reask_refused(&mut silent_reasks, &server_states, &pending_server_joins, &local_peer_str, &cmd_tx);
                 // Owner checkpoints (design E): one comparison per server when none is due.
                 sync_handler::author_due_checkpoints(
                     &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers,
-                    &mut gossip_overlays, &event_tx, &local_peer_str, &crypto_store, &crdt_store,
+                    &mut gossip_overlays, &event_tx, &local_peer_str, &crypto_store, &crdt_store, &crdt_resync,
                 ).await;
                 sync_handler::author_missing_join_keys(
                     &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers,
@@ -7516,6 +7476,172 @@ fn enforce_device_revocations(
     }
 }
 
+/// A `ServerStateSnapshot` answering a join of ours. Out of `handle_incoming_request_inner`
+/// so the whole states it parses stay off that poll frame.
+#[allow(clippy::too_many_arguments)]
+fn adopt_join_snapshot(
+    server_id: String,
+    state_json: &str,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    server_states: &mut HashMap<String, ServerState>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    crdt_store: &super::crdt_store::CrdtStore,
+    peer_str: &str,
+) {
+    // SECURITY: only honored while a join WE initiated is pending —
+    // an established member must never let another peer overwrite
+    // its server state wholesale.
+    let Some(owner_pin) = pending_server_joins.get(&server_id).map(|p| p.owner_pin.clone()) else {
+        hollow_log!("[HOLLOW-CRDT] Ignoring ServerStateSnapshot for {server_id} (no pending join)");
+        return;
+    };
+    // Never replaces a state already rebased on the owner's checkpoint.
+    if server_states.get(&server_id).is_some_and(|s| s.anchor() != crate::crdt::server_state::Anchor::Legacy) {
+        hollow_log!("[HOLLOW-CRDT] Ignoring ServerStateSnapshot for {server_id}: already anchored");
+        return;
+    }
+    // SECURITY (E1): the anchor rules (`accept_join_snapshot`): no snapshot for
+    // a self-certifying id, and with an invite pin only one owned by the pin.
+    let parsed = serde_json::from_str::<ServerState>(state_json).map_err(|e| e.to_string())
+        .and_then(|snap| ServerState::accept_join_snapshot(snap, &server_id, owner_pin.as_deref())
+            .map_err(str::to_string));
+    match parsed {
+        Ok(mut snap) => {
+            snap.set_hlc(Hlc::for_device(local_peer_str.to_string(), device_peer_id));
+            install_op_signer(&mut snap, bundle_keypair);
+            // SECURITY (CRDT-2): a snapshot is adopted wholesale from ONE
+            // responder, so its registers are only as honest as that peer.
+            // Pull any stamped past the drift bound back to it, or one hostile
+            // responder hands us a state no later honest write can overtake.
+            let clamped = snap.clamp_future_hlcs(crate::crdt::hlc::wall_clock_ms());
+            if clamped > 0 {
+                hollow_log!("[HOLLOW-SECURITY] Clamped {clamped} future-dated register(s) in the {server_id} snapshot from {peer_str}");
+            }
+            // Multi-device (Step 6): a snapshot from a not-yet-upgraded
+            // member may carry device-keyed joiners — fold to master.
+            snap.canonicalize_members(super::resolver::resolve);
+            hollow_log!("[HOLLOW-CRDT] Adopted state snapshot for {server_id} from {peer_str} ({} channels, {} members, {} layout items)",
+                snap.channels.len(), snap.members.len(), snap.channel_layout.len());
+            // Persist now — the SyncResponse that follows re-persists
+            // after merging ops, but a crash between the two must not
+            // strand a half-joined server.
+            crdt_store.save_state_snapshot(server_id.clone(), &snap);
+            server_states.insert(server_id, snap);
+        }
+        Err(e) => {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED ServerStateSnapshot for {server_id} from {peer_str}: {e}");
+        }
+    }
+}
+
+/// Asks again to join each server whose rebuild refused our own admission: doubling
+/// from 30 s, six asks at most. Out of `run_event_loop` so its locals stay off that frame.
+fn silent_reask_refused(
+    silent_reasks: &mut HashMap<String, (u32, std::time::Instant)>,
+    server_states: &HashMap<String, ServerState>,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    local_peer_str: &str,
+    cmd_tx: &mpsc::Sender<NodeCommand>,
+) {
+    let now = std::time::Instant::now();
+    silent_reasks.retain(|sid, _| server_states.get(sid).is_some_and(|s| !s.is_member(local_peer_str)));
+    for (sid, state) in server_states {
+        if pending_server_joins.contains_key(sid) || !state.refused_own_admission(local_peer_str) {
+            continue;
+        }
+        let (asked, next) = silent_reasks.entry(sid.clone()).or_insert((0, now));
+        if *asked >= 6 || now < *next {
+            continue;
+        }
+        *asked += 1;
+        *next = now + std::time::Duration::from_secs(30u64 << *asked);
+        hollow_log!("[HOLLOW-CRDT] A rebuild refused our admission to {sid}: asking again ({asked})");
+        let _ = cmd_tx.try_send(NodeCommand::JoinServer {
+            server_id: sid.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: true,
+            owner_pin: state.anchor_owner(),
+            join_key: None,
+        });
+    }
+}
+
+/// Every stored server state, rebuilt from its op rows: (states, whether every row was
+/// read, the servers whose state did not load). Out of `run_event_loop` so its locals
+/// stay off that poll frame.
+fn load_server_states(
+    db_path: &str,
+    db_passphrase: &str,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    crdt_store: &super::crdt_store::CrdtStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+) -> (HashMap<String, ServerState>, bool, Vec<String>) {
+    let mut server_states: HashMap<String, ServerState> = HashMap::new();
+    let mut server_rows_read = false;
+    let mut unreadable_servers: Vec<String> = Vec::new();
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
+        match store.load_all_servers() {
+            Ok(rows) => {
+                server_rows_read = true;
+                for (server_id, json) in rows {
+                    match serde_json::from_str::<ServerState>(&json) {
+                        Ok(mut state) => {
+                            state.set_hlc(Hlc::for_device(local_peer_str.to_string(), device_peer_id));
+                            install_op_signer(&mut state, bundle_keypair);
+                            // Restore op_log from crdt_ops table (no longer serialized in state JSON).
+                            // An anchored server is rebuilt from every op since its anchor.
+                            // The base comes from the rows, never the state JSON (F11).
+                            if state.op_log.is_empty()
+                                && let Ok(rows) = store.load_op_rows(&server_id)
+                            {
+                                let restored = state.restore_op_log(rows);
+                                if !restored.dropped.is_empty() {
+                                    crdt_store.persist(Some(crate::crdt::fold::OpDelta {
+                                        server_id: server_id.clone(),
+                                        rows: Vec::new(),
+                                        dropped: restored.dropped,
+                                    }));
+                                }
+                                if restored.refolded {
+                                    crdt_store.save_state_snapshot(server_id.clone(), &state);
+                                }
+                            }
+                            let legacy = state.anchor() == crate::crdt::server_state::Anchor::Legacy;
+                            // Fold any legacy device-keyed member entries into
+                            // their master identity (the resolver was warmed just
+                            // above). A no-op for single-device, and never on an
+                            // anchored server, whose ops are master-keyed.
+                            if legacy && state.canonicalize_members(super::resolver::resolve) {
+                                crdt_store.save_state_snapshot(server_id.clone(), &state);
+                                hollow_log!("[HOLLOW-MULTIDEV] Canonicalized device-keyed members → master for server {server_id}");
+                            }
+                            server_states.insert(server_id.clone(), state);
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                                room_code: server_id,
+                            });
+                        }
+                        Err(e) => {
+                            hollow_log!("Failed to deserialize server {}: {}", server_id, e);
+                            unreadable_servers.push(server_id);
+                        }
+                    }
+                }
+                if !server_states.is_empty() {
+                    hollow_log!("Loaded {} server(s) from DB", server_states.len());
+                }
+            }
+            Err(e) => {
+                hollow_log!("Failed to load servers from DB: {}", e);
+            }
+        }
+    }
+    (server_states, server_rows_read, unreadable_servers)
+}
+
 /// Install our MASTER signing key on a server state that will author ops.
 ///
 /// Goes hand in hand with `set_hlc` at EVERY site: a state that can create an
@@ -7558,11 +7684,13 @@ async fn take_resync_page(
 ) {
     let took = super::crdt_resync::ingest_page(server_states, &server_id, ops_json, local_peer_str).await;
     crdt_resync.note_skipped(&server_id, took.unread);
-    if (!took.admitted.is_empty() || took.rebuilt)
+    let folded = !took.admitted.is_empty() || took.rebuilt;
+    // A page can bring rows the fold keeps unfolded (dormant) and nothing else.
+    crdt_store.persist(took.delta);
+    if folded
         && let Some(state) = server_states.get(&server_id)
     {
         hollow_log!("[HOLLOW-CRDT] A page of {server_id}'s op log from {peer_str} brought back {} op(s)", took.admitted.len());
-        crdt_store.persist_admitted(took.admitted, state.checkpoint_hlc.clone());
         crdt_store.save_state_snapshot(server_id.clone(), state);
         let deleted = state.is_deleted();
         let evicted = took.was_member
@@ -7787,8 +7915,8 @@ async fn apply_remote_crdt_op_inner(
         let state = server_states.get_mut(&server_id).unwrap();
         let ingested = state.ingest_remote(std::slice::from_ref(&op));
         let op_is_new = ingested.admitted.iter().any(|o| o.author == op.author && o.hlc == op.hlc);
+        crdt_store.persist(ingested.delta(&server_id));
         if !ingested.admitted.is_empty() || ingested.rebuilt {
-            crdt_store.persist_admitted(ingested.admitted, state.checkpoint_hlc.clone());
             crdt_store.save_state_snapshot(server_id.clone(), state);
         }
         if ingested.rebuilt {
@@ -7858,7 +7986,7 @@ async fn apply_remote_crdt_op_inner(
                         peer_id: peer_id.clone(),
                     }).await;
                 }
-                CrdtPayload::MemberRemoved { peer_id } => {
+                CrdtPayload::MemberRemoved { peer_id, .. } => {
                     // Self-eviction: OUR identity was removed (our own LEAVE fanned from a
                     // sibling, or a plain kick) and the merge confirms we are no longer a
                     // member. Tear down DURABLY: the acting device deletes its state in
@@ -7894,7 +8022,7 @@ async fn apply_remote_crdt_op_inner(
                         server_id: server_id.clone(),
                     }).await;
                 }
-                CrdtPayload::MemberBanned { peer_id } => {
+                CrdtPayload::MemberBanned { peer_id, .. } => {
                     // A ban of our identity takes us out as a removal does.
                     let us = super::resolver::same_identity(peer_id, local_peer_str);
                     if us && !pending_server_joins.contains_key(&server_id) && !state.is_member(local_peer_str) {
@@ -10701,50 +10829,10 @@ async fn handle_incoming_request_inner(
         }
 
         HavenMessage::ServerStateSnapshot { server_id, state_json } => {
-            // SECURITY: only honored while a join WE initiated is pending —
-            // an established member must never let another peer overwrite
-            // its server state wholesale.
-            let Some(owner_pin) = pending_server_joins.get(&server_id).map(|p| p.owner_pin.clone()) else {
-                hollow_log!("[HOLLOW-CRDT] Ignoring ServerStateSnapshot for {server_id} (no pending join)");
-                return;
-            };
-            // Never replaces a state already rebased on the owner's checkpoint.
-            if server_states.get(&server_id).is_some_and(|s| s.anchor() != crate::crdt::server_state::Anchor::Legacy) {
-                hollow_log!("[HOLLOW-CRDT] Ignoring ServerStateSnapshot for {server_id}: already anchored");
-                return;
-            }
-            // SECURITY (E1): the anchor rules (`accept_join_snapshot`): no snapshot for
-            // a self-certifying id, and with an invite pin only one owned by the pin.
-            let parsed = serde_json::from_str::<ServerState>(&state_json).map_err(|e| e.to_string())
-                .and_then(|snap| ServerState::accept_join_snapshot(snap, &server_id, owner_pin.as_deref())
-                    .map_err(str::to_string));
-            match parsed {
-                Ok(mut snap) => {
-                    snap.set_hlc(Hlc::for_device(local_peer_str.to_string(), device_peer_id));
-                    install_op_signer(&mut snap, bundle_keypair);
-                    // SECURITY (CRDT-2): a snapshot is adopted wholesale from ONE
-                    // responder, so its registers are only as honest as that peer.
-                    // Pull any stamped past the drift bound back to it, or one hostile
-                    // responder hands us a state no later honest write can overtake.
-                    let clamped = snap.clamp_future_hlcs(crate::crdt::hlc::wall_clock_ms());
-                    if clamped > 0 {
-                        hollow_log!("[HOLLOW-SECURITY] Clamped {clamped} future-dated register(s) in the {server_id} snapshot from {peer_str}");
-                    }
-                    // Multi-device (Step 6): a snapshot from a not-yet-upgraded
-                    // member may carry device-keyed joiners — fold to master.
-                    snap.canonicalize_members(|id| super::resolver::resolve(id));
-                    hollow_log!("[HOLLOW-CRDT] Adopted state snapshot for {server_id} from {peer_str} ({} channels, {} members, {} layout items)",
-                        snap.channels.len(), snap.members.len(), snap.channel_layout.len());
-                    // Persist now — the SyncResponse that follows re-persists
-                    // after merging ops, but a crash between the two must not
-                    // strand a half-joined server.
-                    crdt_store.save_state_snapshot(server_id.clone(), &snap);
-                    server_states.insert(server_id, snap);
-                }
-                Err(e) => {
-                    hollow_log!("[HOLLOW-SECURITY] REJECTED ServerStateSnapshot for {server_id} from {peer_str}: {e}");
-                }
-            }
+            adopt_join_snapshot(
+                server_id, &state_json, pending_server_joins, server_states, local_peer_str, device_peer_id,
+                bundle_keypair, crdt_store, peer_str,
+            );
         }
 
         HavenMessage::SyncResponse { server_id, ops_json, nonce, page, mut digest, dg } => {
@@ -10823,18 +10911,25 @@ async fn handle_incoming_request_inner(
                 // (we were a member, the synced ops remove us → self-evict on reconnect).
                 let was_member_before = state.is_member(local_peer_str);
 
+                let mut deltas = Vec::new();
                 let mut admitted = Vec::new();
-                let merged = crdt_sync::merge_ops_with(state, &incoming_ops, |op| admitted.push(op.clone()));
+                let mut keep = |i: &crate::crdt::fold::Ingested| {
+                    admitted.extend(i.admitted.iter().cloned());
+                    deltas.push(i.delta(&server_id));
+                };
+                let merged = crdt_sync::merge_ops_with(state, &incoming_ops, &mut keep);
                 // A join folds in our identity's own leave of the server: a membership from
                 // before the leave answers no join of ours.
                 let left_here = match leave_book.left_op(&server_id).filter(|_| pending_server_joins.contains_key(&server_id)) {
                     Some(left) => {
-                        let _ = crdt_sync::merge_ops_with(state, std::slice::from_ref(&left), |op| admitted.push(op.clone()));
+                        let _ = crdt_sync::merge_ops_with(state, std::slice::from_ref(&left), &mut keep);
                         !state.is_member(local_peer_str) && state.left_at(local_peer_str).is_some()
                     }
                     None => false,
                 };
-                crdt_store.persist_admitted(admitted, state.checkpoint_hlc.clone());
+                for delta in deltas {
+                    crdt_store.persist(delta);
+                }
                 if let Ok(report) = &merged {
                     if report.rejected > 0 {
                         hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from a SyncResponse for {server_id} from {peer_str}", report.rejected);
@@ -11628,8 +11723,13 @@ async fn handle_incoming_request_inner(
                     });
                 }
 
-                // Send full server state to the joiner (all ops so they can reconstruct)
-                let all_ops: Vec<&crate::crdt::operations::CrdtOp> = state.op_log.iter().collect();
+                // M4: the base, its parent and the closure of the joiner's admission at
+                // once, then the newest ops within a budget; digest catch-up brings the rest.
+                let all_ops: Vec<&crate::crdt::operations::CrdtOp> = if legacy {
+                    state.op_log.iter().collect()
+                } else {
+                    state.join_answer(&member_master, JOIN_ANSWER_BYTES)
+                };
                 if let Ok(ops_json) = serde_json::to_string(&all_ops) {
                     hollow_log!("[HOLLOW-CRDT] Sending snapshot + {} ops to joiner {peer_str}", all_ops.len());
                     answer.reply(ws_cmd_tx, &HavenMessage::SyncResponse {

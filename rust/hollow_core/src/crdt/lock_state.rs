@@ -41,6 +41,10 @@ pub struct JoinLockState {
     door_hlc: Option<HlcTimestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     removal_hlc: Option<HlcTimestamp>,
+    /// The clock of the op that carried each grant: a master keeps its newest few by
+    /// clock, never by the order they arrived in.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    grant_at: BTreeMap<String, HlcTimestamp>,
 }
 
 impl std::fmt::Debug for JoinLockState {
@@ -82,15 +86,38 @@ impl JoinLockState {
             }
         }
         for (master, grant) in grants {
+            let at = self.grant_at.entry(grant.clone()).or_insert_with(|| hlc.clone());
+            if hlc < at {
+                *at = hlc.clone();
+            }
             let held = self.grants.entry(link.change.clone()).or_default().entry(master.clone()).or_default();
             if !held.contains(grant) {
                 held.push(grant.clone());
-                if held.len() > GRANTS_PER_MASTER {
-                    held.remove(0);
-                }
+            }
+            let when = |g: &String| self.grant_at.get(g).cloned();
+            held.sort_by(|a, b| when(a).cmp(&when(b)).then_with(|| a.cmp(b)));
+            if held.len() > GRANTS_PER_MASTER {
+                let excess = held.len() - GRANTS_PER_MASTER;
+                held.drain(..excess);
             }
         }
         self.prune();
+    }
+
+    /// Whether this lock already holds everything `JoinLock { link, door, grants }`
+    /// writes: the link, its door (or one too old to keep) and every grant (or one whose
+    /// change key is gone or that four newer ones pushed out).
+    pub(super) fn decides(&self, link: &LockLink, door: Option<&JoinSecret>, grants: &BTreeMap<String, String>, at: &HlcTimestamp) -> bool {
+        let top = self.doors.values().map(|d| d.n).max().unwrap_or(0);
+        let floor = top.saturating_sub(DOORS_KEPT);
+        self.links.iter().any(|l| l == link)
+            && door.is_none_or(|_| self.doors.contains_key(&link.door) || link.n < floor)
+            && grants.iter().all(|(master, grant)| {
+                let held = self.grants_for(&link.change, master);
+                held.contains(grant)
+                    || !self.grants.contains_key(&link.change)
+                    || held.len() >= GRANTS_PER_MASTER && self.grant_at.get(&held[0]).is_some_and(|oldest| at < oldest)
+            })
     }
 
     /// A member left, was removed or banned, or an owner, admin or mod lost that rank.
@@ -168,7 +195,7 @@ impl JoinLockState {
 
     pub(super) fn clamp_hlcs(&mut self, max_ms: u64) -> usize {
         let mut clamped = 0;
-        for hlc in [&mut self.door_hlc, &mut self.removal_hlc].into_iter().flatten() {
+        for hlc in [&mut self.door_hlc, &mut self.removal_hlc].into_iter().flatten().chain(self.grant_at.values_mut()) {
             if hlc.physical_ms > max_ms {
                 hlc.physical_ms = max_ms;
                 clamped += 1;
@@ -193,6 +220,8 @@ impl JoinLockState {
         let live: std::collections::HashSet<&str> =
             self.links.iter().filter(|l| l.n >= floor).map(|l| l.change.as_str()).collect();
         self.grants.retain(|change, _| live.contains(change.as_str()));
+        let kept: std::collections::HashSet<&String> = self.grants.values().flat_map(|m| m.values().flatten()).collect();
+        self.grant_at.retain(|g, _| kept.contains(g));
     }
 }
 

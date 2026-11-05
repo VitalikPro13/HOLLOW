@@ -1024,6 +1024,8 @@ impl MessageStore {
 
         ddl(conn, "crdt_ops index",
             "CREATE INDEX IF NOT EXISTS idx_crdt_ops_server ON crdt_ops (server_id, hlc_ms)")?;
+        // 0.14: a row the fold refuses now is parked (kept, not folded) until this epoch ms.
+        migrate(conn, "ALTER TABLE crdt_ops ADD COLUMN parked_until INTEGER");
 
         ddl(conn, "hlc_state table",
             "CREATE TABLE IF NOT EXISTS hlc_state (
@@ -3044,28 +3046,73 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Persist ops the fold admitted, and when one is a checkpoint, drop every row it
-    /// overwrote (the founding op stays: a joiner of a self-certifying id needs it).
-    pub fn persist_admitted_ops(&self, ops: &[CrdtOp], checkpoint: Option<&crate::crdt::hlc::HlcTimestamp>) {
-        for op in ops {
-            let _ = self.insert_crdt_op(op);
+    /// Apply what one ingest changed (`crdt::fold::OpDelta`) in one savepoint: write
+    /// every new or changed row with its parked mark (a lower-hash equivocation replaces
+    /// the row at its key), then delete the rows it names. Only named rows go, so the
+    /// founding op, which no fold ever drops, always stays.
+    pub fn persist_op_delta(&self, delta: &crate::crdt::fold::OpDelta) -> Result<(), String> {
+        self.conn
+            .execute_batch("SAVEPOINT op_delta")
+            .map_err(|e| format!("Failed to open op delta savepoint: {e}"))?;
+        let applied = self.apply_op_delta(delta);
+        let close = if applied.is_ok() { "RELEASE op_delta" } else { "ROLLBACK TO op_delta; RELEASE op_delta" };
+        let _ = self.conn.execute_batch(close);
+        applied
+    }
+
+    fn apply_op_delta(&self, delta: &crate::crdt::fold::OpDelta) -> Result<(), String> {
+        for (op, parked) in &delta.rows {
+            let op_json = serde_json::to_string(op).map_err(|e| format!("Failed to serialize CrdtOp: {e}"))?;
+            self.conn
+                .execute(
+                    "INSERT INTO crdt_ops (server_id, hlc_ms, hlc_counter, author, op_json, parked_until)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(server_id, hlc_ms, hlc_counter, author)
+                     DO UPDATE SET op_json = excluded.op_json, parked_until = excluded.parked_until",
+                    params![
+                        delta.server_id,
+                        op.hlc.physical_ms as i64,
+                        op.hlc.counter as i64,
+                        op.author,
+                        op_json,
+                        parked.map(|p| p.min(i64::MAX as u64) as i64),
+                    ],
+                )
+                .map_err(|e| format!("Failed to write crdt_op: {e}"))?;
         }
-        let rebased = ops.iter().any(|o| {
-            matches!(o.payload, crate::crdt::operations::CrdtPayload::ServerCheckpoint { .. })
-        });
-        if let (true, Some(base), Some(first)) = (rebased, checkpoint, ops.first()) {
-            let _ = self.conn.execute(
-                "DELETE FROM crdt_ops WHERE server_id = ?1
-                   AND (hlc_ms < ?2 OR (hlc_ms = ?2 AND hlc_counter < ?3))
-                   AND op_json NOT LIKE '%\"ServerCreated\"%'",
-                params![first.server_id, base.physical_ms as i64, base.counter as i64],
-            );
-            // A member's own leave this batch carries below the base is one the fold kept:
-            // `ServerState::ingest_remote` reports no other with a checkpoint.
-            for op in ops.iter().filter(|o| crate::crdt::server_state::is_self_leave(o) && o.hlc < *base) {
-                let _ = self.insert_crdt_op(op);
+        for (author, hlc) in &delta.dropped {
+            self.conn
+                .execute(
+                    "DELETE FROM crdt_ops WHERE server_id = ?1 AND hlc_ms = ?2 AND hlc_counter = ?3 AND author = ?4",
+                    params![delta.server_id, hlc.physical_ms as i64, hlc.counter as i64, author],
+                )
+                .map_err(|e| format!("Failed to delete crdt_op: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Every stored row of a server with its parked mark, in clock order: what
+    /// `ServerState::restore_op_log` rebuilds from.
+    pub fn load_op_rows(&self, server_id: &str) -> Result<Vec<(CrdtOp, Option<u64>)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT op_json, parked_until FROM crdt_ops WHERE server_id = ?1
+                 ORDER BY hlc_ms, hlc_counter, author",
+            )
+            .map_err(|e| format!("Failed to prepare crdt_ops query: {e}"))?;
+        let rows = stmt
+            .query_map(params![server_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)))
+            .map_err(|e| format!("Failed to query crdt_ops: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (json, parked) = row.map_err(|e| format!("Failed to read crdt_ops row: {e}"))?;
+            // One row this build cannot parse must not take the server's whole log with it.
+            if let Ok(op) = serde_json::from_str::<CrdtOp>(&json) {
+                out.push((op, parked.map(|p| p.max(0) as u64)));
             }
         }
+        Ok(out)
     }
 
     /// Every distinct author of a channel post we hold in `server_id`, as stored.
@@ -10837,10 +10884,13 @@ mod g13w3_sync_cost {
         assert!(large.2 < small.2 * 2, "a catch-up page costs {} at 20k rows, {} at 2k", large.2, small.2);
     }
 
-    /// Storing a checkpoint drops every row it covers, except a member's own leave the
-    /// same batch carries: the fold kept it (`ServerState::close_late_leaves`).
+    /// U18: a delta writes its rows and deletes only the rows it names, all or nothing:
+    /// a channel NAMED "ServerCreated" is deleted like any row (F11 keyed the founding op
+    /// on a JSON `LIKE`), a lower-hash op replaces the row at its key, and a parked mark
+    /// round-trips. Also a 0.13 database gains the parked column.
     #[test]
-    fn a_checkpoint_batch_keeps_the_late_leave_it_carries() {
+    fn persist_is_one_transaction_and_keys_the_founding_op() {
+        use crate::crdt::fold::OpDelta;
         use crate::crdt::hlc::HlcTimestamp;
         use crate::crdt::operations::CrdtPayload as P;
         let store = MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store");
@@ -10850,17 +10900,36 @@ mod g13w3_sync_cost {
             op.sign(&kp, &pk);
             op
         };
-        let member = crate::crdt::testkeys::keys(2).1;
-        let rename = op(1, 100, P::ServerRenamed { new_name: "old".into() });
-        let kick = op(1, 150, P::MemberRemoved { peer_id: crate::crdt::testkeys::keys(3).1 });
-        store.persist_admitted_ops(&[rename.clone(), kick.clone()], None);
-        let leave = op(2, 200, P::MemberRemoved { peer_id: member });
-        let base = HlcTimestamp { physical_ms: 300, counter: 0, actor: String::new() };
-        let checkpoint = op(1, 400, P::ServerCheckpoint { state: "{}".into(), covers: base.clone() });
-        store.persist_admitted_ops(&[checkpoint, leave.clone()], Some(&base));
-        let kept: Vec<u64> = store.load_ops_for_server("S", None).unwrap().iter().map(|o| o.hlc.physical_ms).collect();
-        assert!(kept.contains(&200), "the late leave the batch carried was dropped: {kept:?}");
-        assert!(!kept.contains(&100) && !kept.contains(&150), "rows the checkpoint covers stayed: {kept:?}");
+        let key = |o: &CrdtOp| (o.author.clone(), o.hlc.clone());
+        let founding = op(1, 50, P::ServerCreated { name: "s".into(), owner_peer_id: crate::crdt::testkeys::keys(1).1, nonce: "n".into() });
+        let named = op(1, 100, P::ChannelAdded { channel_id: "c".into(), name: "ServerCreated".into(), category: None, channel_type: "text".into() });
+        let rename = op(1, 150, P::ServerRenamed { new_name: "a".into() });
+        let delta = |rows: Vec<(CrdtOp, Option<u64>)>, dropped: Vec<_>| OpDelta { server_id: "S".into(), rows, dropped };
+        store.persist_op_delta(&delta(vec![(founding.clone(), None), (named.clone(), None), (rename.clone(), Some(77))], vec![])).unwrap();
+        let rows = store.load_op_rows("S").unwrap();
+        assert_eq!(rows.iter().find(|(o, _)| o.hlc == rename.hlc).map(|r| r.1), Some(Some(77)), "the parked mark round-trips");
+        store.persist_op_delta(&delta(vec![(rename.clone(), None)], vec![key(&named)])).unwrap();
+        let rows = store.load_op_rows("S").unwrap();
+        let ms: Vec<u64> = rows.iter().map(|(o, _)| o.hlc.physical_ms).collect();
+        assert_eq!(ms, vec![50, 150], "only the named row went; the founding op stayed");
+        assert_eq!(rows[1].1, None, "an unparked row loses its mark");
+        let mut rival = op(1, 150, P::ServerRenamed { new_name: "b".into() });
+        rival.hlc = rename.hlc.clone();
+        rival.sign(&crate::crdt::testkeys::keys(1).0, &crate::crdt::testkeys::keys(1).2);
+        store.persist_op_delta(&delta(vec![(rival.clone(), None)], vec![])).unwrap();
+        let stored = store.load_op_rows("S").unwrap();
+        assert!(matches!(&stored[1].0.payload, P::ServerRenamed { new_name } if new_name == "b"), "the winner replaces the row at its key");
+        // All or nothing: a delta that fails halfway leaves the rows as they were.
+        store.conn.execute_batch("CREATE TRIGGER no_delete BEFORE DELETE ON crdt_ops BEGIN SELECT RAISE(ABORT, 'no'); END;").unwrap();
+        let failing = delta(vec![(named.clone(), None)], vec![key(&founding)]);
+        assert!(store.persist_op_delta(&failing).is_err());
+        assert_eq!(store.load_op_rows("S").unwrap().len(), 2, "the failed delta's write was rolled back");
+        // A 0.13 table, without the column, gains it on open.
+        let old = Connection::open_in_memory().unwrap();
+        old.execute_batch("CREATE TABLE crdt_ops (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id TEXT NOT NULL, hlc_ms INTEGER NOT NULL, hlc_counter INTEGER NOT NULL, author TEXT NOT NULL, op_json TEXT NOT NULL, UNIQUE(server_id, hlc_ms, hlc_counter, author)); INSERT INTO crdt_ops (server_id, hlc_ms, hlc_counter, author, op_json) VALUES ('S', 1, 0, 'a', '{}');").unwrap();
+        migrate(&old, "ALTER TABLE crdt_ops ADD COLUMN parked_until INTEGER");
+        let n: i64 = old.query_row("SELECT COUNT(*) FROM crdt_ops WHERE parked_until IS NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "the 0.13 row survives the migration unparked");
     }
 }
 

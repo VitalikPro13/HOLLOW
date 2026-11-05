@@ -1,17 +1,20 @@
 //! The fold: a server's state as a pure function of the signed ops it holds.
 //!
-//! Every retained op is applied in HLC order and judged against the state just before
-//! it, so arrival order, the relay's timing and whichever member answered change
-//! nothing: two replicas holding the same ops hold the same state. Live ops newer than
-//! the log's tail apply at the tail (the common case); anything older rebuilds the
-//! state from its anchor. Design E, `reports/planned/security/audit/design_E_crdt_authority.md`.
+//! The base is the greatest checkpoint held; it is folded first (after a self-certifying
+//! id's founding op), then every op the base does not dominate, in HLC order, each judged
+//! by `op_allowed` against the state just before it (today's authority). An op the base
+//! dominates drops at the door, or stays stored but unfolded when only the base and not
+//! its parent decides it, so a step to a rival base loses nothing. Design E plus
+//! checkpoint coverage, `reports/planned/security/CHECKPOINT_COVERAGE_DESIGN.md`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::dominance::Judge;
 use super::hlc::HlcTimestamp;
 use super::operations::{CrdtOp, CrdtPayload, OpReject};
-use super::server_state::{fold_order, is_self_leave, Anchor, MemberSpan, ServerState};
+use super::server_state::{fold_order, Anchor, MemberSpan, ServerState};
 use super::sync::payload_name;
 
 /// Ops refused only for authority wait here for the admission or role grant they may
@@ -23,22 +26,479 @@ const HELD_TTL: Duration = Duration::from_secs(600);
 const CHECKPOINT_AFTER_OPS: usize = 2000;
 const CHECKPOINT_MIN_GAP_MS: u64 = 3600 * 1000;
 
+/// How long a row a rebuild refuses stays stored, judged again at every rebuild.
+pub(crate) const PARK_MS: u64 = 30 * 24 * 3600 * 1000;
+
+/// The bytes of ops a base leaves undecided that one server folds (H3). Shared max-min
+/// over the members of the anchor (the base, else the founding state), each with the tree
+/// of authors its admissions rooted, plus one pool for authors rooted in nobody; within a
+/// tree max-min again between a member's own ops and each subtree it admitted.
+#[cfg(not(test))]
+pub(crate) const QUOTA_BYTES: usize = 128 << 20;
+#[cfg(test)]
+pub(crate) const QUOTA_BYTES: usize = 192 << 10;
+/// What every group keeps whatever the others want: 512 members at the floor leave
+/// half the budget.
+#[cfg(not(test))]
+pub(crate) const QUOTA_FLOOR_BYTES: usize = 128 << 10;
+#[cfg(test)]
+pub(crate) const QUOTA_FLOOR_BYTES: usize = 8 << 10;
+/// The pool of authors rooted in no member of the anchor.
+#[cfg(not(test))]
+pub(crate) const QUOTA_DEPARTED_BYTES: usize = 8 << 20;
+#[cfg(test)]
+pub(crate) const QUOTA_DEPARTED_BYTES: usize = 16 << 10;
+/// Admissions, lock moves and sanctions by the anchor's moderators and above come first,
+/// up to this in all, oldest first: joins and moderation never stop on a flood. With the
+/// owner away it lasts as long as the staff's own acts fit (design section 8).
+#[cfg(not(test))]
+pub(crate) const QUOTA_LEADER_BYTES: usize = 64 << 20;
+#[cfg(test)]
+pub(crate) const QUOTA_LEADER_BYTES: usize = 64 << 10;
+/// The signed bytes of one op, and of a checkpoint (whose state grows with the server:
+/// about 0.75 MB for 512 identities): bigger ones are refused at the door, whoever signs
+/// them. Every honest op but a checkpoint is a few KB (a 64-grant lock move about 12 KB, a
+/// kick naming 1,024 grants about 36 KB).
+pub(crate) const MAX_OP_BYTES: usize = 1 << 20;
+pub(crate) const MAX_CHECKPOINT_BYTES: usize = 16 << 20;
+/// Rebuild passes that drop removals refused at their own point (`install`).
+const VOID_PASSES: usize = 4;
+
+/// Parked rows one group keeps, oldest first; past it a row is deleted.
+#[cfg(not(test))]
+pub(crate) const PARK_GROUP_BYTES: usize = 128 << 10;
+#[cfg(test)]
+pub(crate) const PARK_GROUP_BYTES: usize = 8 << 10;
+/// Admission chains deeper than this charge the pool.
+const MAX_DEPTH: usize = 64;
+/// The charge parent of authors no member of the anchor roots. Never a peer id.
+const POOL: &str = "";
+
+/// An op's dedup key.
+pub type OpKey = (String, HlcTimestamp);
+
+/// A stored row the fold does not apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    /// The base's parent checkpoint: what tells dormant ops from decided ones.
+    Parent,
+    /// Decided by the base but not by its parent, or a rival checkpoint above the parent.
+    Dormant,
+    /// Once admitted and refused now, until this epoch ms: judged again at every rebuild.
+    Parked(u64),
+}
+
+impl RowKind {
+    /// The `parked_until` a row of this kind is stored with.
+    pub fn parked_until(&self) -> Option<u64> {
+        match self {
+            Self::Parked(until) => Some(*until),
+            _ => None,
+        }
+    }
+}
+
+/// A checkpoint as a fold base, its state parsed once.
+#[derive(Debug, Clone)]
+pub struct Base {
+    pub hash: [u8; 32],
+    pub hlc: HlcTimestamp,
+    pub covers: HlcTimestamp,
+    pub generation: u64,
+    pub parent: Option<[u8; 32]>,
+    pub state: Arc<ServerState>,
+}
+
+impl Base {
+    /// The base order: generation, the op's clock, then its content hash.
+    fn key(&self) -> (u64, &HlcTimestamp, &[u8; 32]) {
+        (self.generation, &self.hlc, &self.hash)
+    }
+
+    pub(crate) fn judge(&self) -> Judge<'_> {
+        Judge { state: &self.state, covers: (!self.state.cp_stamped).then_some(&self.covers), floor: self.state.cp_floor.as_ref() }
+    }
+
+    pub fn hash_hex(&self) -> String {
+        hex::encode(self.hash)
+    }
+}
+
+/// The store rows an ingest changes: written (new or changed, with their parked mark)
+/// and deleted. Applied in one transaction (`MessageStore::persist_op_delta`).
+#[derive(Debug, Clone, Default)]
+pub struct OpDelta {
+    pub server_id: String,
+    pub rows: Vec<(CrdtOp, Option<u64>)>,
+    pub dropped: Vec<OpKey>,
+}
+
+impl OpDelta {
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty() && self.dropped.is_empty()
+    }
+}
+
+/// What a restart did with the stored rows.
+#[derive(Debug, Default)]
+pub struct Restored {
+    /// The rows folded into another set than the saved state names: save the state.
+    pub refolded: bool,
+    /// Rows to delete: parked past their time, or over their group's bound.
+    pub dropped: Vec<OpKey>,
+}
+
 /// What an ingest did.
 #[derive(Debug, Default)]
 pub struct Ingested {
-    /// Ops that entered the log for the first time: the ones to persist, emit and
-    /// pass on.
+    /// Ops that folded for the first time: the ones to emit and pass on.
     pub admitted: Vec<CrdtOp>,
+    /// Every row to write: the admitted ops and the rows that are kept unfolded.
+    pub rows: Vec<(CrdtOp, Option<u64>)>,
+    /// Rows to delete: decided by the base and its parent alike.
+    pub dropped: Vec<OpKey>,
     /// Ops refused (forged, foreign, future-dated, or not allowed at their point).
     pub rejected: usize,
     /// The state was rebuilt from its anchor, so anything may have changed.
     pub rebuilt: bool,
 }
 
+impl Ingested {
+    /// The store rows to change, `None` when nothing does.
+    pub fn delta(&self, server_id: &str) -> Option<OpDelta> {
+        let d = OpDelta { server_id: server_id.to_string(), rows: self.rows.clone(), dropped: self.dropped.clone() };
+        (!d.is_empty()).then_some(d)
+    }
+}
+
+/// Where one op goes in a rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Founding,
+    Base,
+    Fold,
+    Row(RowKind),
+    /// Over its group's quota: a row stays parked until then, unjudged.
+    Over(u64),
+    Held,
+    Drop,
+}
+
+/// A rebuild's input, classified against the base it picked.
+struct Plan {
+    ops: Vec<(CrdtOp, [u8; 32], Class, bool)>,
+    base: Option<Base>,
+    parent: Option<Base>,
+    quota: Quota,
+}
+
+/// A tail op's quota verdict, the one a rebuild of the same set gives.
+enum Tail {
+    Within,
+    Over,
+    Rebuild,
+}
+
+/// The quota allocation of an op set, kept so a tail op is judged without a rebuild.
+/// A pure function of the set; `tail` keeps it so (see there).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Quota {
+    computed: bool,
+    /// The anchor's members: each tops a charge tree.
+    roots: HashSet<String>,
+    /// Each other author's charge parent: who signed its earliest undecided admission
+    /// (`POOL` for a chain that reaches no root).
+    up: HashMap<String, String>,
+    /// The anchor's owner, whose ops no quota charges: it compacts its own log.
+    owner: Option<String>,
+    /// The anchor's moderators and above, with their rank there, as the owner's own role
+    /// changes in the set leave them.
+    staff: HashMap<String, u8>,
+    /// Bytes per author of every undecided op not exempt, and of those within its share:
+    /// the oldest first, up to the first that does not fit.
+    demand: HashMap<String, usize>,
+    used: HashMap<String, usize>,
+    lead_used: usize,
+    /// Ops in `held` because they were over their author's share.
+    over_held: HashSet<OpKey>,
+}
+
+impl Quota {
+    fn avail(&self) -> usize {
+        QUOTA_BYTES.saturating_sub(self.lead_used)
+    }
+
+    fn total(&self) -> usize {
+        self.demand.values().sum()
+    }
+
+    /// Whether `author` already has an op over its share: every newer one is too.
+    fn over(&self, author: &str) -> bool {
+        self.used.get(author).copied().unwrap_or(0) < self.demand.get(author).copied().unwrap_or(0)
+    }
+
+    /// An owner's role change moves who is staff.
+    fn restaff(&mut self, op: &CrdtOp) -> bool {
+        let CrdtPayload::RoleChanged { peer_id, role, .. } = &op.payload else { return false };
+        if self.owner.as_deref() != Some(op.author.as_str()) {
+            return false;
+        }
+        let was = self.staff.get(peer_id).copied();
+        if role.priority() >= super::operations::MemberRole::Moderator.priority() {
+            self.staff.insert(peer_id.clone(), role.priority());
+        } else {
+            self.staff.remove(peer_id);
+        }
+        was != self.staff.get(peer_id).copied()
+    }
+
+    /// Whether `op` goes ahead of every share: a staff admission, lock move, kick, ban,
+    /// mute or demotion.
+    fn first(&self, op: &CrdtOp) -> bool {
+        if !self.staff.contains_key(&op.author) {
+            return false;
+        }
+        match &op.payload {
+            CrdtPayload::MemberAdded { .. }
+            | CrdtPayload::JoinLock { .. }
+            | CrdtPayload::MemberBanned { .. }
+            | CrdtPayload::MemberMuted { .. } => true,
+            CrdtPayload::MemberRemoved { peer_id, .. } => *peer_id != op.author,
+            CrdtPayload::RoleChanged { peer_id, role, .. } => {
+                role.priority() < self.staff.get(peer_id).copied().unwrap_or(super::operations::MemberRole::Member.priority())
+            }
+            _ => false,
+        }
+    }
+
+    /// The tree top `author` charges: a root, or the pool.
+    fn top(&self, author: &str) -> String {
+        let mut at = author;
+        for _ in 0..=MAX_DEPTH {
+            if self.roots.contains(at) || at == POOL {
+                return at.to_string();
+            }
+            match self.up.get(at) {
+                Some(p) => at = p,
+                None => break,
+            }
+        }
+        POOL.to_string()
+    }
+
+    /// Point every chain at a root or the pool: one that ends short of a root, runs too
+    /// deep or loops charges the pool from where it broke.
+    fn resolve(&mut self) {
+        let mut authors: Vec<String> = self.demand.keys().chain(self.up.keys()).cloned().collect();
+        authors.sort();
+        authors.dedup();
+        for a in authors {
+            let mut at = a.clone();
+            let mut steps = 0;
+            while !self.roots.contains(&at) && at != POOL {
+                match self.up.get(&at) {
+                    Some(p) if steps < MAX_DEPTH => {
+                        at = p.clone();
+                        steps += 1;
+                    }
+                    Some(_) => {
+                        self.up.insert(a.clone(), POOL.to_string());
+                        break;
+                    }
+                    None => {
+                        self.up.insert(at.clone(), POOL.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// A new author's place in the tree, as `resolve` would give it.
+    fn place(&mut self, author: &str) {
+        if !self.roots.contains(author) && !self.up.contains_key(author) {
+            self.up.insert(author.to_string(), POOL.to_string());
+        }
+    }
+
+    /// Every author's share: max-min with the floor over the roots and the capped pool,
+    /// then within each node max-min (no floor) between its own ops and each subtree.
+    fn shares(&self) -> HashMap<String, usize> {
+        let mut kids: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (a, p) in &self.up {
+            kids.entry(p.as_str()).or_default().push(a.as_str());
+        }
+        let mut sub: HashMap<&str, usize> = HashMap::new();
+        for (a, d) in &self.demand {
+            let mut at = a.as_str();
+            for _ in 0..=MAX_DEPTH + 1 {
+                *sub.entry(at).or_default() += d;
+                if self.roots.contains(at) || at == POOL {
+                    break;
+                }
+                match self.up.get(at) {
+                    Some(p) => at = p,
+                    None => break,
+                }
+            }
+        }
+        let mut tops: Vec<(&str, usize)> =
+            self.roots.iter().map(|r| (r.as_str(), sub.get(r.as_str()).copied().unwrap_or(0))).filter(|t| t.1 > 0).collect();
+        if let Some(d) = sub.get(POOL) {
+            tops.push((POOL, (*d).min(QUOTA_DEPARTED_BYTES)));
+        }
+        tops.sort();
+        let got = fill(&tops, self.avail(), QUOTA_FLOOR_BYTES);
+        let mut out = HashMap::new();
+        let mut stack: Vec<(&str, usize)> = tops.iter().map(|t| t.0).zip(got).collect();
+        while let Some((node, share)) = stack.pop() {
+            let mut children: Vec<&str> = kids.get(node).cloned().unwrap_or_default();
+            children.sort();
+            let own = if node == POOL { 0 } else { self.demand.get(node).copied().unwrap_or(0) };
+            let items: Vec<(&str, usize)> =
+                std::iter::once((node, own)).chain(children.iter().map(|c| (*c, sub.get(c).copied().unwrap_or(0)))).collect();
+            let got = fill(&items, share, 0);
+            out.insert(node.to_string(), got[0]);
+            stack.extend(children.into_iter().zip(got.into_iter().skip(1)));
+        }
+        out
+    }
+
+    /// Whether every author's within bytes still fit its share.
+    fn fits(&self, shares: &HashMap<String, usize>) -> bool {
+        self.used.iter().all(|(a, u)| *u <= shares.get(a).copied().unwrap_or(0))
+    }
+
+    /// Charge a tail op: the newest of the set, so it comes last in every order the
+    /// allocation uses. It changes nobody's within ops unless the shares move below one
+    /// (then the caller rebuilds); an author already over its share stays over (a demand
+    /// at or above the level moves no level), so a flood costs no rebuild.
+    fn tail(&mut self, op: &CrdtOp) -> Tail {
+        // The founding op of a book computed before it held one: the anchor is its owner.
+        if let CrdtPayload::ServerCreated { owner_peer_id, .. } = &op.payload {
+            if self.owner.is_none() && self.roots.is_empty() && op.author == *owner_peer_id {
+                self.owner = Some(owner_peer_id.clone());
+                self.roots.insert(owner_peer_id.clone());
+                self.staff.insert(owner_peer_id.clone(), super::operations::MemberRole::Owner.priority());
+                return Tail::Within;
+            }
+            return Tail::Rebuild;
+        }
+        let size = op_size(op);
+        if let CrdtPayload::MemberAdded { peer_id, .. } = &op.payload
+            && *peer_id != op.author
+            && !self.roots.contains(peer_id)
+        {
+            match self.up.get(peer_id) {
+                Some(p) if p == POOL => return Tail::Rebuild,
+                Some(_) => {}
+                None if self.demand.get(peer_id).is_some_and(|d| *d > 0) => return Tail::Rebuild,
+                None => {
+                    self.place(&op.author);
+                    self.up.insert(peer_id.clone(), op.author.clone());
+                }
+            }
+        }
+        if self.owner.as_deref() == Some(op.author.as_str()) {
+            return if self.restaff(op) { Tail::Rebuild } else { Tail::Within };
+        }
+        if self.first(op) && self.lead_used + size <= QUOTA_LEADER_BYTES {
+            self.lead_used += size;
+            if self.total() > self.avail() && !self.fits(&self.shares()) {
+                return Tail::Rebuild;
+            }
+            return Tail::Within;
+        }
+        self.place(&op.author);
+        let author = op.author.clone();
+        if self.over(&author) {
+            *self.demand.entry(author).or_default() += size;
+            return Tail::Over;
+        }
+        *self.demand.entry(author.clone()).or_default() += size;
+        if self.total() <= self.avail() {
+            *self.used.entry(author).or_default() += size;
+            return Tail::Within;
+        }
+        let shares = self.shares();
+        if !self.fits(&shares) {
+            return Tail::Rebuild;
+        }
+        let used = self.used.entry(author.clone()).or_default();
+        if *used + size <= shares.get(&author).copied().unwrap_or(0) {
+            *used += size;
+            Tail::Within
+        } else {
+            Tail::Over
+        }
+    }
+
+    /// An op left `held`: an over op of an author still over changes no share; any other
+    /// leaves the book to be judged again.
+    fn forget(&mut self, op: &CrdtOp) {
+        let key = (op.author.clone(), op.hlc.clone());
+        if self.over_held.remove(&key) {
+            if let Some(d) = self.demand.get_mut(&op.author) {
+                *d = d.saturating_sub(op_size(op));
+            }
+            if self.over(&op.author) {
+                return;
+            }
+        }
+        self.computed = false;
+    }
+}
+
+/// Max-min shares of `avail` for `items`, each at least the least of its demand and
+/// `floor` (when the floors fit). Every item over the level gets exactly the level, so
+/// raising such an item's demand moves nothing: what `Quota::tail` relies on.
+fn fill(items: &[(&str, usize)], avail: usize, floor: usize) -> Vec<usize> {
+    let mut out: Vec<usize> = items.iter().map(|t| t.1.min(floor)).collect();
+    let floors: usize = out.iter().sum();
+    let mut left = if floors <= avail {
+        avail - floors
+    } else {
+        out.iter_mut().for_each(|o| *o = 0);
+        avail
+    };
+    let rest: Vec<usize> = items.iter().zip(&out).map(|(t, o)| t.1 - o).collect();
+    let mut idx: Vec<usize> = (0..items.len()).collect();
+    idx.sort_by_key(|&i| (rest[i], i));
+    for (k, &i) in idx.iter().enumerate() {
+        let level = left / (idx.len() - k);
+        if rest[i] <= level {
+            out[i] += rest[i];
+            left -= rest[i];
+        } else {
+            for &j in &idx[k..] {
+                out[j] += level;
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// What an op weighs against the quota.
+/// Whether a checkpoint carrying `state` signs within `MAX_CHECKPOINT_BYTES`: the state
+/// rides as a JSON string (each quote and backslash escaped once more) next to the
+/// server id, clock, author and covers, far inside the margin.
+fn checkpoint_fits(state: &str) -> bool {
+    const MARGIN: usize = 16 << 10;
+    let escapes = state.bytes().filter(|b| matches!(b, b'"' | b'\\')).count();
+    state.len() + escapes + MARGIN <= MAX_CHECKPOINT_BYTES
+}
+
+fn op_size(op: &CrdtOp) -> usize {
+    serde_json::to_string(op).map_or(0, |j| j.len())
+}
+
 impl ServerState {
     /// Author an op on our own replica, judged by the SAME predicate every receiver
     /// runs, so we never apply or send an op honest peers refuse. `None` = refused.
     pub fn author_checked(&mut self, payload: CrdtPayload) -> Option<CrdtOp> {
+        let me = self.hlc.as_ref().map(|h| h.actor().to_string()).unwrap_or_default();
+        let payload = self.with_seen(payload, &me);
         let op = self.create_op(payload);
         if !self.op_allowed(&op) {
             crate::hollow_log!(
@@ -47,65 +507,182 @@ impl ServerState {
             );
             return None;
         }
+        if matches!(op.payload, CrdtPayload::ServerCheckpoint { .. }) {
+            return self.author_checkpoint_op(op).map(|(op, _)| op);
+        }
+        // Our own op is charged like anyone's: past our share it would be folded here and
+        // held everywhere else.
+        if self.anchor() != Anchor::Legacy {
+            match if self.quota_ready() { self.quota.tail(&op) } else { Tail::Rebuild } {
+                Tail::Over => {
+                    crate::hollow_log!("[HOLLOW-CRDT] Not authoring {} in {}: over our share", payload_name(&op.payload), self.server_id);
+                    return None;
+                }
+                // The next ingest rebuilds against the set this op joins.
+                Tail::Rebuild => self.quota.computed = false,
+                Tail::Within => {}
+            }
+        }
         let _ = self.apply_op(&op);
         Some(op)
     }
 
+    /// Author our checkpoint: through the fold, since a new base rebuilds the state and
+    /// changes which rows the store keeps. `None` when it did not become the base.
+    pub fn author_checkpoint(&mut self, payload: CrdtPayload) -> Option<(CrdtOp, Ingested)> {
+        let op = self.create_op(payload);
+        if !self.op_allowed(&op) {
+            return None;
+        }
+        self.author_checkpoint_op(op)
+    }
+
+    fn author_checkpoint_op(&mut self, op: CrdtOp) -> Option<(CrdtOp, Ingested)> {
+        let ingested = self.fold_remote(std::slice::from_ref(&op));
+        let ours = self.base.as_ref().is_some_and(|b| b.hlc == op.hlc && b.hash == op.content_hash());
+        ours.then_some((op, ingested))
+    }
+
+    /// Author the checkpoint `checkpoint_due` says we owe. A state whose checkpoint would
+    /// pass `MAX_CHECKPOINT_BYTES` (every receiver refuses it) is measured before it is
+    /// signed, and a try that is not kept waits `CHECKPOINT_MIN_GAP_MS` for the next.
+    pub fn author_due_checkpoint(&mut self, me: &str, past_authors: &[String], now_ms: u64) -> Option<(CrdtOp, Ingested)> {
+        let kept = self
+            .checkpoint_json(me, past_authors, now_ms)
+            .filter(|json| checkpoint_fits(json))
+            .and_then(|state| {
+                let covers = self.checkpoint_covers();
+                self.author_checkpoint(CrdtPayload::ServerCheckpoint { state, covers })
+            });
+        if kept.is_none() {
+            self.cp_retry_at_ms = now_ms.saturating_add(CHECKPOINT_MIN_GAP_MS);
+        }
+        kept
+    }
+
     /// Whether the owner (`me`) owes this server a checkpoint now: once to move it off
-    /// the legacy anchor, then whenever its log has grown past `CHECKPOINT_AFTER_OPS`,
-    /// at most once an hour.
+    /// the legacy anchor or off a base from before 0.14, then whenever its log has grown
+    /// past `CHECKPOINT_AFTER_OPS`, at most once an hour after the base's own clock.
     pub fn checkpoint_due(&self, me: &str, now_ms: u64) -> bool {
-        if self.deleted || self.current_owner().as_deref() != Some(me) {
+        if self.deleted || now_ms < self.cp_retry_at_ms || self.current_owner().as_deref() != Some(me) {
             return false;
         }
         match self.anchor() {
             Anchor::Legacy => true,
+            _ if self.base.as_ref().is_some_and(|b| !b.state.cp_stamped) => true,
             _ => {
                 self.op_log.len() > CHECKPOINT_AFTER_OPS
-                    && self
-                        .checkpoint_hlc
-                        .as_ref()
-                        .is_none_or(|c| now_ms.saturating_sub(c.physical_ms) > CHECKPOINT_MIN_GAP_MS)
+                    && self.base.as_ref().is_none_or(|b| now_ms.saturating_sub(b.hlc.physical_ms) > CHECKPOINT_MIN_GAP_MS)
             }
         }
     }
 
-    /// The newest clock this state reflects: its log's tail, or a register written
-    /// later than that (a legacy log is capped). What an owner's checkpoint covers, so
-    /// an owner that was away never overwrites what happened meanwhile.
-    pub fn horizon(&self) -> HlcTimestamp {
-        fn newest<V: Clone>(
-            m: &std::collections::HashMap<String, super::admin_lww::AdminLwwReg<V>>,
-        ) -> Option<&HlcTimestamp> {
-            m.values().map(|r| r.hlc()).max()
+    /// Writer rule (F1 mitigation a, M1): the owner checkpoints only once completed digest
+    /// rounds since its last connect came from two other identities, one of them a
+    /// moderator or above, or two whose admissions root in different members of the base
+    /// other than the owner: the owner answers anyone's join, so an identity it admitted
+    /// is free, and one withholding member with puppets it admitted decides nothing. Or
+    /// from every other member (a small server). A legacy anchor syncs by state vector
+    /// and is exempt.
+    pub fn checkpoint_witnessed(&self, me: &str, witnesses: &HashSet<String>) -> bool {
+        if self.anchor() == Anchor::Legacy {
+            return true;
         }
-        let tail = self.op_log.last().map(|o| match &o.payload {
-            CrdtPayload::ServerCheckpoint { covers, .. } => covers,
-            _ => &o.hlc,
-        });
-        [
-            tail,
-            Some(self.name.hlc()),
-            newest(&self.roles),
-            newest(&self.settings),
-            newest(&self.nicknames),
-            newest(&self.banned_members),
-            newest(&self.muted_members),
-        ]
-        .into_iter()
-        .flatten()
-        .max()
-        .cloned()
-        .unwrap_or_else(|| HlcTimestamp::zero(""))
+        let others: Vec<&String> = self.members.keys().filter(|m| m.as_str() != me).collect();
+        if others.iter().all(|m| witnesses.contains(m.as_str())) {
+            return true;
+        }
+        let heard: Vec<&String> = others.into_iter().filter(|m| witnesses.contains(m.as_str())).collect();
+        if heard.len() < 2 {
+            return false;
+        }
+        let staff = |m: &str| self.get_role(m).priority() >= super::operations::MemberRole::Moderator.priority();
+        let roots: HashSet<String> = heard.iter().filter_map(|m| self.lineage_root(m, me)).collect();
+        heard.iter().any(|m| staff(m)) || roots.len() >= 2
     }
 
-    /// The owner's checkpoint of this state. The first one of an existing server also
-    /// seeds the membership record from what the owner vouches for: every current
-    /// member from the start, and every author of a channel post it holds up to now.
+    /// The member of the base whose admissions `member`'s own rest on, through the
+    /// earliest admitter of each span; `None` when the chain reaches the owner (`me`).
+    fn lineage_root(&self, member: &str, me: &str) -> Option<String> {
+        let base = self.base.as_ref()?;
+        let mut at = member.to_string();
+        for _ in 0..=MAX_DEPTH {
+            if at == me {
+                return None;
+            }
+            if base.state.members.contains_key(&at) {
+                return Some(at);
+            }
+            let span = self.member_record.get(&at).and_then(|s| s.last())?;
+            at = span.admitted.iter().min_by(|a, b| a.1.cmp(&b.1))?.0.clone();
+        }
+        None
+    }
+
+    /// M2: a rebuild refused our own admission and nothing removed us after it (a removal
+    /// or ban of us closes a span at its own clock, so it is never mistaken for this): we
+    /// hold that admission parked and are no member now. The node asks to join again.
+    pub fn refused_own_admission(&self, us: &str) -> bool {
+        if self.deleted || self.is_member(us) || self.is_banned(us) {
+            return false;
+        }
+        let removed_after = |at: &HlcTimestamp| {
+            self.events_of(us).iter().any(|e| matches!(e, super::members::MemberEvent::Leave { at: r } | super::members::MemberEvent::Remove { at: r } if r > at))
+        };
+        self.stored.iter().any(|(op, kind)| {
+            matches!(kind, RowKind::Parked(_))
+                && matches!(&op.payload, CrdtPayload::MemberAdded { peer_id, .. } if peer_id == us)
+                && !removed_after(&op.hlc)
+        })
+    }
+
+    /// The `covers` a new checkpoint carries: one step past its parent's, so a 0.13
+    /// replica, which prunes everything at or below it, keeps what it can.
+    pub fn checkpoint_covers(&self) -> HlcTimestamp {
+        if self.base.is_none() && self.anchor() == Anchor::Legacy {
+            return self.legacy_horizon();
+        }
+        let mut at = match &self.base {
+            Some(b) => b.covers.clone(),
+            None => self.op_log.first().map(|o| o.hlc.clone()).unwrap_or_else(|| HlcTimestamp::zero("")),
+        };
+        at.counter = at.counter.saturating_add(1);
+        at
+    }
+
+    /// What a legacy server's first checkpoint covers, as 0.13's did: everything its owner
+    /// had witnessed. A legacy state holds no provable history (a capped log, a joiner's
+    /// snapshot without stamps), so its stamps cannot say what it decided.
+    fn legacy_horizon(&self) -> HlcTimestamp {
+        let tail = self.op_log.iter().map(|o| &o.hlc).max();
+        match (self.hlc.as_ref().map(|h| h.latest()), tail) {
+            (Some(h), Some(t)) => h.max(t).clone(),
+            (Some(h), None) => h.clone(),
+            (None, Some(t)) => t.clone(),
+            (None, None) => HlcTimestamp::zero(""),
+        }
+    }
+
+    /// The owner's checkpoint of this state, a child of the base it stands on. The first
+    /// one of an existing server also seeds the membership record from what the owner
+    /// vouches for: every current member from the start, and every author of a channel
+    /// post it holds up to now.
     pub fn checkpoint_json(&self, me: &str, past_authors: &[String], now_ms: u64) -> Option<String> {
         let mut base = self.lean_snapshot();
         base.owner_pin = None;
         base.checkpoint_hlc = None;
+        base.retained_print = None;
+        base.cp_stamped = true;
+        match &self.base {
+            Some(b) => {
+                base.cp_generation = b.generation.checked_add(1)?;
+                base.cp_parent = Some(b.hash_hex());
+            }
+            None => {
+                base.cp_generation = 0;
+                base.cp_parent = None;
+            }
+        }
         // The owner is fixed: a co-owner an older client minted is an admin here.
         for (id, reg) in base.roles.iter_mut() {
             if id != me && *reg.read() == super::operations::MemberRole::Owner {
@@ -114,13 +691,15 @@ impl ServerState {
             }
         }
         if self.anchor() == Anchor::Legacy {
+            base.cp_floor = Some(self.checkpoint_covers());
             let current: Vec<(String, u64)> =
                 base.members.keys().map(|m| (m.clone(), u64::MAX)).collect();
             let past = past_authors.iter().map(|a| (a.clone(), now_ms));
             for (who, until_ms) in current.into_iter().chain(past) {
-                let spans = base.member_record.entry(who).or_default();
+                let spans = base.member_record.entry(who.clone()).or_default();
                 if spans.first().is_none_or(|s| s.from_ms > 0) {
                     spans.insert(0, MemberSpan { from_ms: 0, until_ms, ..MemberSpan::default() });
+                    base.member_events.remove(&who);
                 }
             }
         }
@@ -134,7 +713,8 @@ impl ServerState {
     /// use (residual R1), and the owner it names becomes the anchor from then on. A
     /// snapshot is only ever a legacy state: a checkpointed server's own checkpoint op
     /// follows in the ops and rebases the joiner. Until then it is one member's word,
-    /// so it decides who belongs and what exists, never who may decide (D2).
+    /// so it decides who belongs and what exists, never who may decide (D2), and it
+    /// dates nothing: its stamps and checkpoint fields go.
     pub fn accept_join_snapshot(
         mut snap: ServerState,
         server_id: &str,
@@ -163,6 +743,13 @@ impl ServerState {
         }
         snap.owner_pin = Some(owner);
         snap.checkpoint_hlc = None;
+        *snap.stamps = Default::default();
+        snap.member_events.clear();
+        snap.cp_generation = 0;
+        snap.cp_parent = None;
+        snap.cp_stamped = false;
+        snap.cp_floor = None;
+        snap.retained_print = None;
         Ok(snap)
     }
 
@@ -170,22 +757,7 @@ impl ServerState {
     /// alike: the stateless checks, dedup, then the fold. Only what it admits moves our
     /// clock, so a refused op cannot date our next writes.
     pub fn ingest_remote(&mut self, ops: &[CrdtOp]) -> Ingested {
-        let mut out = self.fold_remote(ops);
-        // Storing a checkpoint drops every row it covers and stores again the self-leaves
-        // below it the batch carries: exactly the late leaves the new checkpoint keeps.
-        if out.admitted.iter().any(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. }))
-            && let Some(base) = self.checkpoint_hlc.clone()
-        {
-            let genesis = super::anchor::is_genesis_id(&self.server_id);
-            out.admitted.retain(|o| !is_self_leave(o) || self.retains(o, &base, genesis));
-            for (author, hlc) in &self.late_leaves {
-                if !out.admitted.iter().any(|o| o.author == *author && o.hlc == *hlc)
-                    && let Some(op) = self.op_log.iter().find(|o| o.author == *author && o.hlc == *hlc)
-                {
-                    out.admitted.push(op.clone());
-                }
-            }
-        }
+        let out = self.fold_remote(ops);
         if let Some(hlc) = &mut self.hlc {
             for op in &out.admitted {
                 hlc.witness(&op.hlc);
@@ -197,10 +769,10 @@ impl ServerState {
     fn fold_remote(&mut self, ops: &[CrdtOp]) -> Ingested {
         let mut out = Ingested::default();
         self.ensure_dedup();
-        self.held.retain(|(_, at)| at.elapsed() < HELD_TTL);
+        self.expire_held();
         let now = super::hlc::wall_clock_ms();
-        let mut seen: HashSet<(String, HlcTimestamp)> = HashSet::new();
-        let mut fresh = Vec::new();
+        let mut batch: HashMap<OpKey, (CrdtOp, [u8; 32])> = HashMap::new();
+        let mut rival = false;
         for op in ops {
             if let Err(reason) = self.stateless_check(op, now) {
                 out.rejected += 1;
@@ -208,18 +780,33 @@ impl ServerState {
                 continue;
             }
             let key = (op.author.clone(), op.hlc.clone());
-            if self.op_log_dedup.contains(&key)
-                || self.held.iter().any(|(h, _)| h.author == op.author && h.hlc == op.hlc)
-                || !seen.insert(key)
-            {
+            let hash = op.content_hash();
+            let held = self.op_log_dedup.get(&key).copied().or_else(|| {
+                self.held.iter().find(|(h, _)| h.author == op.author && h.hlc == op.hlc).map(|(h, _)| h.content_hash())
+            });
+            if let Some(h) = held {
+                if h == hash {
+                    continue;
+                }
+                log_equivocation(op);
+                if hash > h {
+                    continue;
+                }
+                rival = true;
+            }
+            if batch.get(&key).is_some_and(|(_, h)| *h <= hash) {
                 continue;
             }
-            fresh.push(op.clone());
+            batch.insert(key, (op.clone(), hash));
         }
-        if fresh.is_empty() {
+        if batch.is_empty() {
             return out;
         }
+        let mut fresh: Vec<CrdtOp> = batch.into_values().map(|(op, _)| op).collect();
         fresh.sort_by(fold_order);
+        if rival {
+            return self.fold_all(fresh, out);
+        }
 
         if self.anchor() == Anchor::Legacy {
             // The owner's checkpoint moves a legacy replica onto the fold. It is judged
@@ -229,57 +816,119 @@ impl ServerState {
             });
             if let Some(cp) = checkpoint {
                 self.owner_pin = Some(cp.author.clone());
-                return self.fold_in(fresh, out);
+                return self.fold_all(fresh, out);
             }
             return self.apply_in_arrival(fresh, out);
         }
 
-        let in_order = self
-            .op_log
-            .last()
-            .is_none_or(|tail| fold_order(&fresh[0], tail) == std::cmp::Ordering::Greater);
-        if !in_order {
-            return self.fold_in(fresh, out);
-        }
-        let mut enabling = false;
+        let genesis = super::anchor::is_genesis_id(&self.server_id);
+        let mut keep = Vec::with_capacity(fresh.len());
         for op in fresh {
-            if self.op_allowed(&op) {
-                enabling |= enables_others(&op.payload);
-                self.apply_payload(&op);
-                self.log_admitted(op.clone());
-                out.admitted.push(op);
-            } else {
-                self.hold(op, &mut out);
+            if matches!(op.payload, CrdtPayload::ServerCheckpoint { .. }) {
+                keep.push(op);
+                continue;
+            }
+            match self.door(&op, genesis) {
+                Class::Row(kind) => {
+                    let hash = op.content_hash();
+                    out.rows.push((op.clone(), None));
+                    self.op_log_dedup.insert((op.author.clone(), op.hlc.clone()), hash);
+                    self.stored.push((op, kind));
+                }
+                Class::Drop => {}
+                _ => keep.push(op),
+            }
+        }
+        if keep.is_empty() {
+            return out;
+        }
+        let in_order = !keep.iter().any(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. }))
+            && self.op_log.last().is_none_or(|tail| fold_order(&keep[0], tail) == std::cmp::Ordering::Greater);
+        if !in_order {
+            return self.fold_all(keep, out);
+        }
+        // The tail: each op newer than everything folded, judged exactly as a rebuild of
+        // the same set would judge it, or the rest of the batch rebuilds.
+        let mut enabling = false;
+        for (i, op) in keep.iter().enumerate() {
+            if !self.known_author(op) {
+                out.rejected += 1;
+                log_refusal(op, &OpReject::NotAllowed);
+                continue;
+            }
+            let verdict = if self.quota_ready() { self.quota.tail(op) } else { Tail::Rebuild };
+            match verdict {
+                Tail::Rebuild => return self.fold_all(keep[i..].to_vec(), out),
+                Tail::Over => self.hold_over(op.clone(), &mut out),
+                Tail::Within if self.op_allowed(op) => {
+                    if self.voids_folded(op) {
+                        return self.fold_all(keep[i..].to_vec(), out);
+                    }
+                    enabling |= enables_others(&op.payload);
+                    self.apply_payload(op);
+                    self.log_admitted(op.clone());
+                    out.rows.push((op.clone(), None));
+                    out.admitted.push(op.clone());
+                }
+                Tail::Within => self.hold(op.clone(), &mut out),
             }
         }
         if enabling && !self.held.is_empty() {
-            return self.fold_in(Vec::new(), out);
+            return self.fold_all(Vec::new(), out);
         }
         out
     }
 
-    /// Refold an anchored log once on a state persisted before 0.13, whose spans lack the
-    /// admitters `node::standing` reads; true when the caller must persist the state. A
-    /// log that did not load leaves the mark unset, so the next start refolds.
-    pub fn refold_for_standing(&mut self) -> bool {
-        if self.standing_folded || self.anchor() == Anchor::Legacy || self.op_log.is_empty() {
+    /// Whether the quota book is the allocation of the set held now. Never computed, or
+    /// left stale by an op that left `held`: computed again, and when it binds the
+    /// caller rebuilds (a binding allocation may move what is folded).
+    fn quota_ready(&mut self) -> bool {
+        if self.quota.computed {
+            return true;
+        }
+        let plan = self.plan(Vec::new(), super::hlc::wall_clock_ms());
+        if plan.quota.total() > plan.quota.avail() {
             return false;
         }
-        self.refold();
-        self.standing_folded = true;
+        *self.quota = plan.quota;
         true
     }
 
-    /// Rebuild the materialized state from the log as it stands.
-    pub(super) fn refold(&mut self) {
-        let _ = self.fold_in(Vec::new(), Ingested::default());
+    /// F8: an op waits in `held` (or counts at all at the tail) only from an author the
+    /// state knows: one with a record, or one an admission we hold names. Identities are
+    /// free, so fairness per author alone would not bound strangers.
+    fn known_author(&self, op: &CrdtOp) -> bool {
+        matches!(op.payload, CrdtPayload::ServerCreated { .. } | CrdtPayload::ServerCheckpoint { .. })
+            || self.member_record.contains_key(&op.author)
+            || self.held.iter().map(|(o, _)| o).chain(self.stored.iter().map(|(o, _)| o)).any(|o| {
+                matches!(&o.payload, CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == op.author)
+            })
     }
 
+    /// Where the base sends a live op that is not a checkpoint: to the fold, stored
+    /// unfolded (decided by the base, not by its parent), or nowhere.
+    fn door(&self, op: &CrdtOp, genesis: bool) -> Class {
+        let Some(base) = &self.base else { return Class::Fold };
+        if !base.judge().dominates(op, genesis) {
+            return Class::Fold;
+        }
+        match &self.parent {
+            Some(parent) if parent.judge().dominates(op, genesis) => Class::Drop,
+            _ => Class::Row(RowKind::Dormant),
+        }
+    }
+
+    /// Rebuild the materialized state from the log as it stands.
     /// Server id, author signature and clock bound: everything that does not depend on
     /// the state.
     pub(super) fn stateless_check(&self, op: &CrdtOp, now_ms: u64) -> Result<(), OpReject> {
         if op.server_id != self.server_id {
             return Err(OpReject::WrongServer);
+        }
+        let bound = if matches!(op.payload, CrdtPayload::ServerCheckpoint { .. }) { MAX_CHECKPOINT_BYTES } else { MAX_OP_BYTES };
+        let signed = op.signing_payload();
+        if signed.len() > bound {
+            return Err(OpReject::TooLarge);
         }
         op.verify_author()?;
         if op.hlc.physical_ms > now_ms + super::hlc::MAX_DRIFT_MS {
@@ -295,6 +944,7 @@ impl ServerState {
         for op in fresh {
             if self.op_allowed(&op) {
                 if let Ok(true) = self.apply_op(&op) {
+                    out.rows.push((op.clone(), None));
                     out.admitted.push(op);
                 }
                 progressed = true;
@@ -307,8 +957,10 @@ impl ServerState {
             let mut held = std::mem::take(&mut self.held);
             held.sort_by(|a, b| a.0.hlc.cmp(&b.0.hlc));
             for (op, at) in held {
-                if self.op_allowed(&op) {
+                // A checkpoint moves the replica onto the fold (`fold_remote`), never here.
+                if !matches!(op.payload, CrdtPayload::ServerCheckpoint { .. }) && self.op_allowed(&op) {
                     if let Ok(true) = self.apply_op(&op) {
+                        out.rows.push((op.clone(), None));
                         out.admitted.push(op);
                     }
                     progressed = true;
@@ -320,78 +972,680 @@ impl ServerState {
         out
     }
 
-    /// Rebuild the state from its anchor: every retained, held and fresh op folded in
-    /// HLC order, each judged against the state just before it.
-    fn fold_in(&mut self, fresh: Vec<CrdtOp>, mut out: Ingested) -> Ingested {
-        let before = std::mem::take(&mut self.op_log_dedup);
-        let mut candidates = std::mem::take(&mut self.op_log);
-        candidates.extend(self.held.drain(..).map(|(op, _)| op));
-        candidates.extend(fresh);
-        candidates.sort_by(fold_order);
-        candidates.dedup_by(|a, b| a.author == b.author && a.hlc == b.hlc);
-
-        self.reset_materialized();
-        let now = Instant::now();
-        let mut refused = Vec::new();
-        for op in candidates {
-            if self.op_allowed(&op) {
-                if matches!(op.payload, CrdtPayload::ServerCheckpoint { .. }) {
-                    // A member's own leave refused at its place (the admission it rests on
-                    // is history this checkpoint overwrote) is judged against it too.
-                    let late = self.apply_checkpoint(&op, &refused);
-                    if !late.is_empty() {
-                        let keys: HashSet<(&str, &HlcTimestamp)> = late.iter().map(|o| (o.author.as_str(), &o.hlc)).collect();
-                        refused.retain(|r| !keys.contains(&(r.author.as_str(), &r.hlc)));
-                    }
-                    for op in late {
-                        self.log_admitted(op);
-                    }
-                } else {
-                    self.apply_payload(&op);
+    /// The owner every checkpoint must come from: the pin, else the founder a
+    /// self-certifying id names among `ops`, else the current owner.
+    fn fold_owner(&self, ops: &[(CrdtOp, [u8; 32], Class, bool)]) -> Option<String> {
+        if let Some(pin) = &self.owner_pin {
+            return Some(pin.clone());
+        }
+        if super::anchor::is_genesis_id(&self.server_id) {
+            return ops.iter().find_map(|(op, ..)| match &op.payload {
+                CrdtPayload::ServerCreated { owner_peer_id, nonce, .. }
+                    if op.author == *owner_peer_id
+                        && super::anchor::derive_server_id(owner_peer_id, nonce) == self.server_id =>
+                {
+                    Some(owner_peer_id.clone())
                 }
-                self.log_admitted(op);
-            } else {
-                refused.push(op);
-            }
+                _ => None,
+            });
         }
-        // What a checkpoint overwrote can never become valid again.
-        let base = self.checkpoint_hlc.clone();
-        for op in refused {
-            if base.as_ref().is_none_or(|b| op.hlc > *b) {
-                self.held.push((op, now));
-            }
-        }
-        let overflow = self.held.len().saturating_sub(HELD_CAP);
-        self.held.drain(..overflow);
+        self.current_owner()
+    }
 
-        // Admitted = in the log now and not before this ingest began. Ops the tail
-        // pass already admitted are in `before`, so they are carried over by key.
-        let tail_admitted: HashSet<(String, HlcTimestamp)> = out
-            .admitted
+    /// `op` as a base, when it is a well-formed checkpoint of this server by `owner`.
+    fn base_of(&self, op: &CrdtOp, hash: [u8; 32], owner: Option<&str>) -> Option<Base> {
+        let CrdtPayload::ServerCheckpoint { state, covers } = &op.payload else { return None };
+        if owner.is_some_and(|o| o != op.author) || (owner.is_none() && super::anchor::is_genesis_id(&self.server_id)) {
+            return None;
+        }
+        if *covers > op.hlc {
+            return None;
+        }
+        let known = [&self.base, &self.parent].into_iter().flatten().find(|b| b.hash == hash);
+        let parsed = match known {
+            Some(b) => b.state.clone(),
+            None => Arc::new(super::server_state::parse_state(state)?),
+        };
+        let owners: Vec<&String> = parsed
+            .roles
             .iter()
-            .map(|o| (o.author.clone(), o.hlc.clone()))
+            .filter(|(_, reg)| *reg.read() == super::operations::MemberRole::Owner)
+            .map(|(id, _)| id)
             .collect();
-        out.admitted = self
+        if parsed.server_id != self.server_id || parsed.deleted || owners != [&op.author] || parsed.cp_floor.as_ref().is_some_and(|f| f > covers) {
+            return None;
+        }
+        let parent = match &parsed.cp_parent {
+            None => None,
+            Some(text) => Some(<[u8; 32]>::try_from(hex::decode(text).ok()?).ok()?),
+        };
+        Some(Base { hash, hlc: op.hlc.clone(), covers: covers.clone(), generation: parsed.cp_generation, parent, state: parsed })
+    }
+
+    /// Every op this replica holds, the lowest content hash per key, classified against
+    /// the greatest checkpoint whose parent it holds.
+    fn plan(&self, fresh: Vec<CrdtOp>, now_ms: u64) -> Plan {
+        let genesis = super::anchor::is_genesis_id(&self.server_id);
+        let mut all: Vec<(CrdtOp, [u8; 32], Class, bool)> = Vec::new();
+        for op in &self.op_log {
+            let h = self.op_log_dedup.get(&(op.author.clone(), op.hlc.clone())).copied().unwrap_or_else(|| op.content_hash());
+            all.push((op.clone(), h, Class::Fold, true));
+        }
+        for (op, kind) in &self.stored {
+            if matches!(kind, RowKind::Parked(until) if *until <= now_ms) {
+                continue;
+            }
+            let h = self.op_log_dedup.get(&(op.author.clone(), op.hlc.clone())).copied().unwrap_or_else(|| op.content_hash());
+            all.push((op.clone(), h, Class::Row(*kind), true));
+        }
+        for (op, _) in &self.held {
+            all.push((op.clone(), op.content_hash(), Class::Held, false));
+        }
+        for op in fresh {
+            let h = op.content_hash();
+            all.push((op, h, Class::Fold, false));
+        }
+        all.sort_by(|a, b| a.0.author.cmp(&b.0.author).then_with(|| a.0.hlc.cmp(&b.0.hlc)).then(a.1.cmp(&b.1)));
+        all.dedup_by(|later, first| {
+            let same = later.0.author == first.0.author && later.0.hlc == first.0.hlc;
+            if same {
+                first.3 |= later.3;
+                if let Class::Row(RowKind::Parked(until)) = later.2 {
+                    first.2 = Class::Row(RowKind::Parked(until));
+                }
+            }
+            same
+        });
+
+        let owner = self.fold_owner(&all);
+        let bases: Vec<(usize, Base)> = all
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (op, h, ..))| self.base_of(op, *h, owner.as_deref()).map(|b| (i, b)))
+            .collect();
+        let eligible = |b: &Base| match b.parent {
+            None => b.generation == 0,
+            Some(p) => bases.iter().any(|(_, q)| q.hash == p && q.generation.checked_add(1) == Some(b.generation)),
+        };
+        let base = bases.iter().filter(|(_, b)| eligible(b)).max_by(|a, b| a.1.key().cmp(&b.1.key())).cloned();
+        let parent = base.as_ref().and_then(|(_, b)| b.parent).and_then(|p| bases.iter().find(|(_, q)| q.hash == p).cloned());
+
+        let base_at = base.as_ref().map(|(i, _)| *i);
+        let parent_at = parent.as_ref().map(|(i, _)| *i);
+        for (i, entry) in all.iter_mut().enumerate() {
+            let parked = matches!(entry.2, Class::Row(RowKind::Parked(_)));
+            let op = &entry.0;
+            let class = if Some(i) == base_at {
+                Class::Base
+            } else if Some(i) == parent_at {
+                Class::Row(RowKind::Parent)
+            } else if let CrdtPayload::ServerCheckpoint { .. } = op.payload {
+                match (bases.iter().find(|(j, _)| *j == i), &base) {
+                    (None, _) => Class::Drop,
+                    (Some(_), None) => Class::Held,
+                    (Some((_, c)), Some((_, b))) if c.key() > b.key() => Class::Held,
+                    (Some((_, c)), Some(_)) => match &parent {
+                        Some((_, p)) if c.key() <= p.key() => Class::Drop,
+                        _ => Class::Row(RowKind::Dormant),
+                    },
+                }
+            } else if genesis && matches!(op.payload, CrdtPayload::ServerCreated { .. }) {
+                Class::Founding
+            } else {
+                match &base {
+                    Some((_, b)) if b.judge().dominates(op, genesis) => match &parent {
+                        Some((_, p)) if p.judge().dominates(op, genesis) => Class::Drop,
+                        _ => Class::Row(RowKind::Dormant),
+                    },
+                    _ if parked => entry.2,
+                    _ => Class::Fold,
+                }
+            };
+            entry.2 = class;
+        }
+        // F8: what is not a row waits only for an author the set knows.
+        let mut known: HashSet<&str> = HashSet::new();
+        if let Some((_, b)) = &base {
+            known.extend(b.state.member_record.keys().map(String::as_str));
+        }
+        for (op, ..) in &all {
+            match &op.payload {
+                CrdtPayload::MemberAdded { peer_id, .. } => {
+                    known.insert(peer_id.as_str());
+                }
+                CrdtPayload::ServerCreated { owner_peer_id, .. } => {
+                    known.insert(owner_peer_id.as_str());
+                }
+                _ => {}
+            }
+        }
+        let unknown: Vec<usize> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.3 && matches!(e.2, Class::Fold) && !known.contains(e.0.author.as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        for i in unknown {
+            all[i].2 = Class::Drop;
+        }
+        let mut plan = Plan { ops: all, base: base.map(|(_, b)| b), parent: parent.map(|(_, b)| b), quota: Quota::default() };
+        self.allocate(&mut plan, now_ms);
+        plan
+    }
+
+    /// H3: allocate `QUOTA_BYTES` over the undecided ops before any authority (so a
+    /// quota never changes who may author what). Charge trees are rooted in the anchor's
+    /// members (the base, else the founding state), so an author with no base still has
+    /// a bound. An op over its author's share is parked when it is a row and waits in
+    /// `held` otherwise; staff admissions, lock moves and sanctions come first.
+    fn allocate(&self, plan: &mut Plan, now_ms: u64) {
+        use super::operations::MemberRole;
+        let mut q = Quota { computed: true, ..Quota::default() };
+        match &plan.base {
+            Some(b) => {
+                q.owner = b.state.current_owner();
+                q.roots = b.state.members.keys().cloned().collect();
+                for m in b.state.members.keys() {
+                    let p = b.state.get_role(m).priority();
+                    if p >= MemberRole::Moderator.priority() {
+                        q.staff.insert(m.clone(), p);
+                    }
+                }
+            }
+            None => {
+                for (op, _, class, _) in &plan.ops {
+                    if let (CrdtPayload::ServerCreated { owner_peer_id, .. }, Class::Founding) = (&op.payload, class) {
+                        q.owner = Some(owner_peer_id.clone());
+                        q.roots.insert(owner_peer_id.clone());
+                        q.staff.insert(owner_peer_id.clone(), MemberRole::Owner.priority());
+                    }
+                }
+            }
+        }
+        let mut undecided: Vec<usize> = plan
+            .ops
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e.2, Class::Fold | Class::Row(RowKind::Parked(_))))
+            .map(|(i, _)| i)
+            .collect();
+        undecided.sort_by(|&a, &b| fold_order(&plan.ops[a].0, &plan.ops[b].0).then(plan.ops[a].1.cmp(&plan.ops[b].1)));
+        let sizes: HashMap<usize, usize> = undecided.iter().map(|&i| (i, op_size(&plan.ops[i].0))).collect();
+        for &i in &undecided {
+            q.restaff(&plan.ops[i].0);
+        }
+        let mut exempt: HashSet<usize> = HashSet::new();
+        for &i in &undecided {
+            let op = &plan.ops[i].0;
+            if q.owner.as_ref() == Some(&op.author) {
+                exempt.insert(i);
+            } else if q.first(op) && q.lead_used + sizes[&i] <= QUOTA_LEADER_BYTES {
+                q.lead_used += sizes[&i];
+                exempt.insert(i);
+            }
+            if let CrdtPayload::MemberAdded { peer_id, .. } = &op.payload
+                && *peer_id != op.author
+                && !q.roots.contains(peer_id)
+                && !q.up.contains_key(peer_id)
+            {
+                q.up.insert(peer_id.clone(), op.author.clone());
+            }
+        }
+        for &i in undecided.iter().filter(|i| !exempt.contains(i)) {
+            *q.demand.entry(plan.ops[i].0.author.clone()).or_default() += sizes[&i];
+        }
+        q.resolve();
+        if q.total() <= q.avail() {
+            q.used = q.demand.clone();
+            plan.quota = q;
+            return;
+        }
+        let shares = q.shares();
+        let mut used: HashMap<String, usize> = HashMap::new();
+        let mut broken: HashSet<String> = HashSet::new();
+        for &i in undecided.iter().filter(|i| !exempt.contains(i)) {
+            let author = plan.ops[i].0.author.clone();
+            let size = sizes[&i];
+            let have = used.entry(author.clone()).or_default();
+            if !broken.contains(&author) && *have + size <= shares.get(&author).copied().unwrap_or(0) {
+                *have += size;
+                continue;
+            }
+            broken.insert(author);
+            let entry = &mut plan.ops[i];
+            entry.2 = match entry.2 {
+                Class::Row(RowKind::Parked(until)) => Class::Over(until),
+                _ if entry.3 => Class::Over(now_ms.saturating_add(PARK_MS)),
+                _ => {
+                    q.over_held.insert((entry.0.author.clone(), entry.0.hlc.clone()));
+                    Class::Held
+                }
+            };
+        }
+        q.used = used;
+        plan.quota = q;
+    }
+
+    /// Rebuild the state from its anchor: the founding op, the base, then every op the
+    /// base does not decide, in HLC order, each judged against the state just before it.
+    /// A row it now refuses is parked, never deleted; a refused op never stored waits in
+    /// `held`.
+    fn fold_all(&mut self, fresh: Vec<CrdtOp>, mut out: Ingested) -> Ingested {
+        let now_ms = super::hlc::wall_clock_ms();
+        let before: HashMap<OpKey, ([u8; 32], Option<u64>)> = self
             .op_log
             .iter()
-            .filter(|o| {
+            .map(|o| (o, None))
+            .chain(self.stored.iter().map(|(o, k)| (o, k.parked_until())))
+            .map(|(o, parked)| {
                 let key = (o.author.clone(), o.hlc.clone());
-                !before.contains(&key) || tail_admitted.contains(&key)
+                let h = self.op_log_dedup.get(&key).copied().unwrap_or_else(|| o.content_hash());
+                (key, (h, parked))
             })
-            .cloned()
             .collect();
+        let was_folded: HashSet<OpKey> = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+        let plan = self.plan(fresh, now_ms);
+        self.install(plan, now_ms);
+
+        // What changed in the store, against what it held when this rebuild began.
+        let mut after: HashMap<OpKey, ([u8; 32], Option<u64>)> = HashMap::new();
+        for op in &self.op_log {
+            let key = (op.author.clone(), op.hlc.clone());
+            let h = self.op_log_dedup[&key];
+            after.insert(key.clone(), (h, None));
+            if !was_folded.contains(&key) && !out.admitted.iter().any(|o| o.author == key.0 && o.hlc == key.1) {
+                out.admitted.push(op.clone());
+            }
+            if before.get(&key) != Some(&(h, None)) {
+                out.rows.push((op.clone(), None));
+            }
+        }
+        for (op, kind) in &self.stored {
+            let key = (op.author.clone(), op.hlc.clone());
+            let h = self.op_log_dedup[&key];
+            let parked = kind.parked_until();
+            after.insert(key.clone(), (h, parked));
+            if before.get(&key) != Some(&(h, parked)) {
+                out.rows.push((op.clone(), parked));
+            }
+        }
+        for key in before.keys() {
+            if !after.contains_key(key) {
+                out.dropped.push(key.clone());
+            }
+        }
+        out.rows.retain(|(o, _)| after.contains_key(&(o.author.clone(), o.hlc.clone())));
+        out.admitted.retain(|o| self.op_log_dedup.contains_key(&(o.author.clone(), o.hlc.clone())));
         out.rebuilt = true;
         out
+    }
+
+    /// Fold a plan into this state: what `fold_all` and a restart that cannot trust its
+    /// saved state run.
+    fn install(&mut self, plan: Plan, now_ms: u64) {
+        let Plan { mut ops, base, parent, quota } = plan;
+        ops.sort_by(|a, b| fold_order(&a.0, &b.0).then(a.1.cmp(&b.1)));
+        *self.quota = quota;
+        let held_since: HashMap<OpKey, Instant> =
+            std::mem::take(&mut self.held).into_iter().map(|(o, at)| ((o.author, o.hlc), at)).collect();
+        self.base = base.map(Box::new);
+        self.parent = parent.map(Box::new);
+        // A removal voids only what it ends if it folds at its own point, which a pass
+        // learns only on reaching it: a pass whose voiding removal was refused runs again
+        // without it (fewer voids can seat whom a later removal needs, so a few passes).
+        let mut refused: HashSet<OpKey> = HashSet::new();
+        for _ in 0..VOID_PASSES {
+            let ahead = super::voids::Ahead::of(
+                ops.iter().filter(|e| matches!(e.2, Class::Fold | Class::Row(RowKind::Parked(_)))).map(|e| &e.0),
+                &refused,
+            );
+            self.install_pass(&ops, &held_since, ahead, now_ms);
+            let voided_by = self.ahead.take().map(|a| a.voided_by()).unwrap_or_default();
+            let unfolded: Vec<OpKey> = voided_by
+                .into_iter()
+                .filter(|k| !self.op_log_dedup.contains_key(k) || self.stored.iter().any(|(o, _)| o.author == k.0 && o.hlc == k.1))
+                .collect();
+            if unfolded.is_empty() {
+                break;
+            }
+            refused.extend(unfolded);
+        }
+        self.cap_parked();
+        self.trim_held();
+    }
+
+    /// One fold of the sorted plan from the anchor, removals ahead judged by `ahead`.
+    fn install_pass(
+        &mut self,
+        ops: &[(CrdtOp, [u8; 32], Class, bool)],
+        held_since: &HashMap<OpKey, Instant>,
+        ahead: super::voids::Ahead,
+        now_ms: u64,
+    ) {
+        self.reset_materialized();
+        self.ahead = Some(Arc::new(ahead));
+        self.op_log.clear();
+        self.stored.clear();
+        self.op_log_dedup.clear();
+        self.held.clear();
+        let now = Instant::now();
+        for (op, hash, class, was_row) in ops {
+            let (op, hash) = (op.clone(), *hash);
+            let key = (op.author.clone(), op.hlc.clone());
+            match *class {
+                Class::Base => {
+                    if let Some(b) = self.base.take() {
+                        self.apply_base(&b, &op.author);
+                        self.base = Some(b);
+                    }
+                    self.op_log_dedup.insert(key, hash);
+                    self.op_log.push(op);
+                }
+                Class::Founding | Class::Fold => {
+                    if self.op_allowed(&op) {
+                        self.apply_payload(&op);
+                        self.op_log_dedup.insert(key, hash);
+                        self.op_log.push(op);
+                    } else if *was_row {
+                        self.op_log_dedup.insert(key, hash);
+                        self.stored.push((op, RowKind::Parked(now_ms.saturating_add(PARK_MS))));
+                    } else {
+                        let at = held_since.get(&key).copied().unwrap_or(now);
+                        self.held.push((op, at));
+                    }
+                }
+                Class::Row(RowKind::Parked(until)) => {
+                    if self.op_allowed(&op) {
+                        self.apply_payload(&op);
+                        self.op_log_dedup.insert(key, hash);
+                        self.op_log.push(op);
+                    } else {
+                        self.op_log_dedup.insert(key, hash);
+                        self.stored.push((op, RowKind::Parked(until)));
+                    }
+                }
+                Class::Row(kind) => {
+                    self.op_log_dedup.insert(key, hash);
+                    self.stored.push((op, kind));
+                }
+                Class::Over(until) => {
+                    self.op_log_dedup.insert(key, hash);
+                    self.stored.push((op, RowKind::Parked(until)));
+                }
+                Class::Held => {
+                    let at = held_since.get(&key).copied().unwrap_or(now);
+                    self.held.push((op, at));
+                }
+                Class::Drop => {}
+            }
+        }
+    }
+
+    /// Keep each charge group's parked rows within `PARK_GROUP_BYTES`, the oldest first:
+    /// what a quota or a refusal parks stays bounded whatever a group sends.
+    fn cap_parked(&mut self) {
+        let us = self.hlc.as_ref().map(|h| h.actor().to_string());
+        let mut parked: Vec<usize> =
+            (0..self.stored.len()).filter(|&i| matches!(self.stored[i].1, RowKind::Parked(_))).collect();
+        parked.sort_by(|&a, &b| fold_order(&self.stored[a].0, &self.stored[b].0));
+        let mut per: HashMap<String, usize> = HashMap::new();
+        let mut gone: HashSet<usize> = HashSet::new();
+        for i in parked {
+            let op = &self.stored[i].0;
+            // Our own admission is what the silent re-ask reads.
+            if matches!(&op.payload, CrdtPayload::MemberAdded { peer_id, .. } if Some(peer_id) == us.as_ref()) {
+                continue;
+            }
+            // Staff acts park against the staff budget, so a flood never deletes them.
+            let (group, cap) = if self.quota.first(op) {
+                (POOL.to_string() + "staff", QUOTA_LEADER_BYTES)
+            } else {
+                (self.quota.top(&op.author), PARK_GROUP_BYTES)
+            };
+            let used = per.entry(group).or_default();
+            let size = op_size(op);
+            if *used + size > cap {
+                gone.insert(i);
+            } else {
+                *used += size;
+            }
+        }
+        if gone.is_empty() {
+            return;
+        }
+        let stored = std::mem::take(&mut self.stored);
+        for (i, (op, kind)) in stored.into_iter().enumerate() {
+            if gone.contains(&i) {
+                self.op_log_dedup.remove(&(op.author, op.hlc));
+            } else {
+                self.stored.push((op, kind));
+            }
+        }
+    }
+
+    /// See [`ServerState::restore_op_log`].
+    pub(super) fn restore_rows(&mut self, rows: Vec<(CrdtOp, Option<u64>)>) -> Restored {
+        let now_ms = super::hlc::wall_clock_ms();
+        let had: Vec<OpKey> = rows.iter().map(|(o, _)| (o.author.clone(), o.hlc.clone())).collect();
+        let refolded = self.restore_classified(rows, now_ms);
+        let dropped = had.into_iter().filter(|k| !self.op_log_dedup.contains_key(k)).collect();
+        Restored { refolded, dropped }
+    }
+
+    fn restore_classified(&mut self, rows: Vec<(CrdtOp, Option<u64>)>, now_ms: u64) -> bool {
+        self.op_log.clear();
+        self.stored.clear();
+        self.op_log_dedup.clear();
+        self.held.clear();
+        for (op, parked) in rows {
+            self.op_log_dedup.insert((op.author.clone(), op.hlc.clone()), op.content_hash());
+            match parked {
+                Some(until) => self.stored.push((op, RowKind::Parked(until))),
+                None => self.op_log.push(op),
+            }
+        }
+        let checkpointed = self.op_log.iter().any(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. }));
+        if self.anchor() == Anchor::Legacy && !checkpointed {
+            self.op_log.sort_by(fold_order);
+            let excess = self.op_log.len().saturating_sub(super::server_state::LEGACY_OP_LOG_CAP);
+            for gone in self.op_log.drain(..excess) {
+                self.op_log_dedup.remove(&(gone.author, gone.hlc));
+            }
+            return false;
+        }
+        if checkpointed && self.owner_pin.is_none() {
+            self.owner_pin = self.op_log.iter().find(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. })).map(|o| o.author.clone());
+        }
+        let plan = self.plan(Vec::new(), now_ms);
+        let folds = |c: &Class| matches!(c, Class::Founding | Class::Base | Class::Fold);
+        let print = print_of(plan.ops.iter().filter(|e| folds(&e.2)).map(|e| &e.1));
+        if self.retained_print.as_deref() == Some(print.as_str()) && plan.base.is_some() == self.checkpoint_hlc.is_some() {
+            let Plan { mut ops, base, parent, quota } = plan;
+            *self.quota = quota;
+            ops.sort_by(|a, b| fold_order(&a.0, &b.0).then(a.1.cmp(&b.1)));
+            self.op_log.clear();
+            self.stored.clear();
+            self.op_log_dedup.clear();
+            self.base = base.map(Box::new);
+            self.parent = parent.map(Box::new);
+            for (op, hash, class, _) in ops {
+                let key = (op.author.clone(), op.hlc.clone());
+                match class {
+                    Class::Founding | Class::Base | Class::Fold => {
+                        self.op_log_dedup.insert(key, hash);
+                        self.op_log.push(op);
+                    }
+                    Class::Row(kind) => {
+                        self.op_log_dedup.insert(key, hash);
+                        self.stored.push((op, kind));
+                    }
+                    Class::Over(until) => {
+                        self.op_log_dedup.insert(key, hash);
+                        self.stored.push((op, RowKind::Parked(until)));
+                    }
+                    Class::Held | Class::Drop => {}
+                }
+            }
+            self.cap_parked();
+            return false;
+        }
+        self.install(plan, now_ms);
+        true
+    }
+
+    /// Every row a whole-log page serves, in fold order: the folded log and the rows
+    /// kept unfolded but compared (the base's parent and the dormant ones).
+    pub(crate) fn served_log(&self) -> Vec<&CrdtOp> {
+        let mut all: Vec<&CrdtOp> = self
+            .op_log
+            .iter()
+            .chain(self.stored.iter().filter(|(_, k)| !matches!(k, RowKind::Parked(_))).map(|(o, _)| o))
+            .collect();
+        all.sort_by(|a, b| fold_order(a, b));
+        all
+    }
+
+    /// What a joiner gets at once (M4): the founding op, the base and its parent, the
+    /// authority closure of the joiner's admission (every admission its admitters' spans
+    /// rest on back to the base, and the role changes of those members), then the newest
+    /// other ops while they fit in `budget` bytes; the base and the closure are outside the
+    /// budget. The joiner's paced digest catch-up pulls the rest. Fold order.
+    pub fn join_answer(&self, joiner: &str, budget: usize) -> Vec<&CrdtOp> {
+        let mut pick: Vec<&CrdtOp> = Vec::new();
+        let mut taken: HashSet<OpKey> = HashSet::new();
+        fn take<'a>(op: &'a CrdtOp, pick: &mut Vec<&'a CrdtOp>, taken: &mut HashSet<OpKey>) {
+            if taken.insert((op.author.clone(), op.hlc.clone())) {
+                pick.push(op);
+            }
+        }
+        for op in &self.op_log {
+            if matches!(op.payload, CrdtPayload::ServerCreated { .. } | CrdtPayload::ServerCheckpoint { .. }) {
+                take(op, &mut pick, &mut taken);
+            }
+        }
+        for (op, kind) in &self.stored {
+            if *kind == RowKind::Parent {
+                take(op, &mut pick, &mut taken);
+            }
+        }
+        let mut queue = vec![joiner.to_string()];
+        let mut seen: HashSet<String> = HashSet::new();
+        while let Some(member) = queue.pop() {
+            if !seen.insert(member.clone()) {
+                continue;
+            }
+            let opened = self.member_record.get(&member).and_then(|s| s.last()).and_then(|s| s.from_hlc.clone());
+            for op in &self.op_log {
+                match &op.payload {
+                    CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == member && Some(&op.hlc) == opened.as_ref() => {
+                        take(op, &mut pick, &mut taken);
+                        queue.push(op.author.clone());
+                    }
+                    CrdtPayload::RoleChanged { peer_id, .. } if *peer_id == member => take(op, &mut pick, &mut taken),
+                    _ => {}
+                }
+            }
+        }
+        let mut bytes = 0usize;
+        for op in self.op_log.iter().rev() {
+            if bytes >= budget {
+                break;
+            }
+            if taken.contains(&(op.author.clone(), op.hlc.clone())) {
+                continue;
+            }
+            bytes += serde_json::to_string(op).map_or(0, |j| j.len());
+            take(op, &mut pick, &mut taken);
+        }
+        pick.sort_by(|a, b| fold_order(a, b));
+        pick
+    }
+
+    /// The fingerprint of the folded log, saved with the state (`lean_snapshot`).
+    pub(crate) fn current_print(&self) -> String {
+        let hashes: Vec<[u8; 32]> = self.op_log.iter().map(|o| self.content_of(o)).collect();
+        print_of(hashes.iter())
+    }
+
+    /// An op's content hash, from the dedup map when we hold it.
+    pub(crate) fn content_of(&self, op: &CrdtOp) -> [u8; 32] {
+        self.op_log_dedup.get(&(op.author.clone(), op.hlc.clone())).copied().unwrap_or_else(|| op.content_hash())
+    }
+
+    /// A checkpoint we hold (the base, its parent or a stored rival), by content hash.
+    pub(crate) fn base_by_hash(&self, hex_hash: &str) -> Option<Base> {
+        if let Some(b) = [&self.base, &self.parent].into_iter().flatten().find(|b| b.hash_hex() == hex_hash) {
+            return Some(Base::clone(b));
+        }
+        let owner = self.anchor_owner();
+        self.stored.iter().find_map(|(op, _)| {
+            let h = self.content_of(op);
+            (hex::encode(h) == hex_hash).then(|| self.base_of(op, h, owner.as_deref())).flatten()
+        })
+    }
+
+    /// Rebase on `base`: replace everything materialized with its state.
+    fn apply_base(&mut self, base: &Base, author: &str) {
+        self.rebase_on((*base.state).clone(), author, &base.covers);
+    }
+
+    /// Drop held ops past their time.
+    fn expire_held(&mut self) {
+        let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held).into_iter().partition(|(_, at)| at.elapsed() < HELD_TTL);
+        self.held = keep;
+        for (op, _) in gone {
+            self.quota.forget(&op);
+        }
+    }
+
+    /// Keep `held` within its bound, giving up the newest ops of whoever holds the most.
+    fn trim_held(&mut self) {
+        while self.held.len() > HELD_CAP {
+            let mut per: HashMap<&str, usize> = HashMap::new();
+            for (op, _) in &self.held {
+                *per.entry(op.author.as_str()).or_default() += 1;
+            }
+            let heaviest = per.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map(|(a, _)| a.to_string());
+            let Some(heaviest) = heaviest else { break };
+            let at = self
+                .held
+                .iter()
+                .enumerate()
+                .filter(|(_, (op, _))| op.author == heaviest)
+                .max_by(|a, b| a.1 .0.hlc.cmp(&b.1 .0.hlc))
+                .map(|(i, _)| i);
+            match at {
+                Some(i) => {
+                    let (op, _) = self.held.remove(i);
+                    self.quota.forget(&op);
+                }
+                None => break,
+            }
+        }
     }
 
     fn hold(&mut self, op: CrdtOp, out: &mut Ingested) {
         out.rejected += 1;
         log_refusal(&op, &OpReject::NotAllowed);
-        if self.held.len() >= HELD_CAP {
-            self.held.remove(0);
-        }
         self.held.push((op, Instant::now()));
+        self.trim_held();
     }
+
+    /// A tail op over its author's share waits in `held`, never as a row.
+    fn hold_over(&mut self, op: CrdtOp, out: &mut Ingested) {
+        out.rejected += 1;
+        self.quota.over_held.insert((op.author.clone(), op.hlc.clone()));
+        self.held.push((op, Instant::now()));
+        self.trim_held();
+    }
+}
+
+/// A set's fingerprint: its count and the wrapping sum of its hashes, order-free.
+fn print_of<'a>(hashes: impl Iterator<Item = &'a [u8; 32]>) -> String {
+    let (n, sum) = hashes.fold((0u64, 0u128), |(n, sum), h| {
+        (n + 1, sum.wrapping_add(u128::from_be_bytes(h[..16].try_into().expect("16 bytes"))))
+    });
+    format!("{n}:{sum:032x}")
 }
 
 /// Ops that can make a held op valid: an admission, a grant, or the anchor itself.
@@ -419,11 +1673,18 @@ fn log_refusal(op: &CrdtOp, reason: &OpReject) {
     );
 }
 
+fn log_equivocation(op: &CrdtOp) {
+    crate::hollow_log!(
+        "[HOLLOW-SECURITY] Two different CrdtOps at one clock in {} by {}: keeping the lower hash",
+        op.server_id, op.author,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crdt::hlc::Hlc;
-    use crate::crdt::operations::{CrdtPayload as P, MemberRole};
+    use crate::crdt::operations::{CrdtPayload as P, MemberRole, SeenGrants};
     use crate::crdt::server_state::Anchor;
     use crate::crdt::testkeys::keys;
 
@@ -550,7 +1811,7 @@ mod tests {
             admitted.clone(),
             opened.clone(),
             op_at(1, &sid, t + 3, P::ChannelPublicChanged { channel_id: ch.clone(), is_public: false }),
-            op_at(1, &sid, t + 4, P::MemberRemoved { peer_id: id(2) }),
+            op_at(1, &sid, t + 4, P::MemberRemoved { peer_id: id(2), seen: None }),
             op_at(1, &sid, t + 5, P::ServerRenamed { new_name: "Renamed".into() }),
         ];
         for i in 0..1100u64 {
@@ -598,7 +1859,10 @@ mod tests {
         assert_eq!(member.anchor(), Anchor::Legacy);
 
         let now = crate::crdt::hlc::wall_clock_ms();
-        let covers = legacy.horizon();
+        let witnessed = op_at(2, &legacy.server_id, now + 60_000, P::NicknameChanged { peer_id: id(2), nickname: "seen".into() });
+        legacy.ingest_remote(std::slice::from_ref(&witnessed));
+        let covers = legacy.checkpoint_covers();
+        assert!(covers >= witnessed.hlc, "a legacy checkpoint covers everything its owner witnessed");
         let json = legacy.checkpoint_json(&o, &[], now).unwrap();
         // The admin's own state, naming itself the one Owner: well formed, wrong author.
         let mut usurped = legacy.lean_snapshot();
@@ -611,21 +1875,21 @@ mod tests {
         assert_eq!(member.anchor(), Anchor::Legacy, "an admin's checkpoint is refused");
         assert_eq!(member.current_owner(), Some(o.clone()));
 
-        let late_old = op_at(1, &legacy.server_id, covers.physical_ms - 1, P::ChannelRenamed { channel_id: ch.clone(), new_name: "stale".into() });
+        let late_old = op_at(1, &legacy.server_id, now + 30_000, P::ChannelRenamed { channel_id: ch.clone(), new_name: "stale".into() });
         let checkpoint = legacy.author_checked(P::ServerCheckpoint { state: json, covers: covers.clone() }).unwrap();
         member.ingest_remote(std::slice::from_ref(&checkpoint));
         assert_eq!(member.anchor(), Anchor::Checkpoint);
         assert_eq!(member.owner_pin.as_deref(), Some(o.as_str()));
-        assert_eq!(member.op_log.len(), 1, "everything the checkpoint overwrote is dropped");
+        assert_eq!(member.op_log.len(), 1, "everything the checkpoint decided leaves the fold");
 
         member.ingest_remote(std::slice::from_ref(&late_old));
-        assert_eq!(member.channels[&ch].name, "general", "an op older than the checkpoint is ignored");
+        assert_eq!(member.channels[&ch].name, "general", "a legacy server's first checkpoint decides everything its owner had witnessed");
         let newer = op_at(1, &legacy.server_id, checkpoint.hlc.physical_ms + 1, P::ChannelRenamed { channel_id: ch.clone(), new_name: "new".into() });
         member.ingest_remote(std::slice::from_ref(&newer));
         assert_eq!(member.channels[&ch].name, "new");
 
         let again = op_at(2, &legacy.server_id, newer.hlc.physical_ms + 1, P::ServerCheckpoint {
-            state: member.checkpoint_json(&id(2), &[], now).unwrap(), covers: member.horizon(),
+            state: member.checkpoint_json(&id(2), &[], now).unwrap(), covers: member.checkpoint_covers(),
         });
         member.ingest_remote(std::slice::from_ref(&again));
         assert_eq!(member.owner_pin.as_deref(), Some(o.as_str()), "the owner is fixed");
@@ -654,8 +1918,7 @@ mod tests {
         let meanwhile = op_at(2, &sid, t + hour, P::ChannelRenamed { channel_id: ch.clone(), new_name: "renamed while away".into() });
         member.ingest_remote(std::slice::from_ref(&meanwhile));
 
-        let covers = away.horizon();
-        assert!(covers.physical_ms < t + hour, "the owner's state is hours old");
+        let covers = away.checkpoint_covers();
         let json = away.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
         let checkpoint = away.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
         member.ingest_remote(std::slice::from_ref(&checkpoint));
@@ -730,7 +1993,7 @@ mod tests {
         r.ingest_remote(&[
             founding,
             op_at(1, &sid, t + hour, add(&sid, 2)),
-            op_at(1, &sid, t + 2 * hour, P::MemberRemoved { peer_id: id(2) }),
+            op_at(1, &sid, t + 2 * hour, P::MemberRemoved { peer_id: id(2), seen: None }),
         ]);
         assert!(r.was_member_at(&id(1), t + 1));
         assert!(r.was_member_at(&id(2), t + hour + 1));
@@ -750,41 +2013,6 @@ mod tests {
     /// standing reads; the first 0.13 load refolds it once into exactly what a replica
     /// that folded under 0.13 holds.
     #[test]
-    fn a_state_persisted_before_0_13_refolds_once_into_its_admitters() {
-        let t = crate::crdt::hlc::wall_clock_ms() - 3_600_000;
-        let sid = crate::crdt::anchor::derive_server_id(&id(1), "n");
-        let history = vec![
-            op_at(1, &sid, t, P::ServerCreated { name: "S".into(), owner_peer_id: id(1), nonce: "n".into() }),
-            op_at(1, &sid, t + 1, add(&sid, 2)),
-            op_at(1, &sid, t + 2, add(&sid, 3)),
-        ];
-        let mut live = joiner(&sid, 4);
-        live.ingest_remote(&history);
-        let want = live.member_record.clone();
-        assert!(want[&id(3)].last().is_some_and(|s| s.admitted.len() == 1 && s.from_hlc.is_some()), "control: a 0.13 fold records them");
-
-        let mut old = live.clone();
-        for spans in old.member_record.values_mut() {
-            for span in spans {
-                span.from_hlc = None;
-                span.admitted.clear();
-            }
-        }
-        let log = std::mem::take(&mut old.op_log);
-        assert!(!old.refold_for_standing() && !old.standing_folded, "a log that did not load leaves the mark unset");
-        old.op_log = log;
-        assert!(old.refold_for_standing(), "a state never refolded is refolded and saved");
-        assert_eq!(old.member_record, want);
-        assert!(!old.refold_for_standing(), "only once");
-        let restored: ServerState = serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
-        assert!(restored.standing_folded, "the mark persists");
-    }
-
-    /// M1: after a restart the store hands the log in clock order, where a checkpoint
-    /// sits at its own clock. A late op of an admin, stamped before its demotion but
-    /// after what the checkpoint covers, is judged at its point on a replica that
-    /// restarted exactly as on one that did not.
-    #[test]
     fn a_restarted_log_with_a_checkpoint_folds_a_late_op_at_its_point() {
         let hour = 3_600_000;
         let t = crate::crdt::hlc::wall_clock_ms() - 3 * hour;
@@ -797,7 +2025,7 @@ mod tests {
         ];
         let mut owner = joiner(&sid, 1);
         owner.ingest_remote(&history);
-        let covers = owner.horizon();
+        let covers = owner.checkpoint_covers();
         let json = owner.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
         let checkpoint = owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
         let demoted = op_at(1, &sid, t + hour, P::RoleChanged { peer_id: id(2), role: MemberRole::Member, priority: 4 });
@@ -807,9 +2035,8 @@ mod tests {
         assert_eq!(live.anchor(), Anchor::Checkpoint);
 
         let mut restarted = live.clone();
-        let mut stored = restarted.op_log.clone();
-        stored.sort_by(|a, b| (a.hlc.physical_ms, a.hlc.counter, &a.author).cmp(&(b.hlc.physical_ms, b.hlc.counter, &b.author)));
-        assert!(matches!(stored.last().unwrap().payload, P::ServerCheckpoint { .. }), "control: the checkpoint is the store's newest op");
+        let mut stored: Vec<(CrdtOp, Option<u64>)> = restarted.served_log().into_iter().map(|o| (o.clone(), None)).collect();
+        stored.sort_by(|a, b| (a.0.hlc.physical_ms, a.0.hlc.counter, &a.0.author).cmp(&(b.0.hlc.physical_ms, b.0.hlc.counter, &b.0.author)));
         restarted.restore_op_log(stored);
         assert!(restarted.op_log.is_sorted_by(|a, b| fold_order(a, b) != std::cmp::Ordering::Greater), "a restored log is not in fold order");
 
@@ -930,7 +2157,7 @@ mod tests {
         clock_first.op_log.clear();
         clock_first.op_log_dedup.clear();
         clock_first.set_hlc(Hlc::for_device(id(1), "desktop"));
-        clock_first.restore_op_log(live.op_log.clone());
+        clock_first.restore_op_log(live.op_log.iter().map(|o| (o.clone(), None)).collect());
         assert!(clock_first.create_op(P::ServerRenamed { new_name: "d".into() }).hlc > newest, "clock then log");
 
         let mut log_first = live.clone();
@@ -978,14 +2205,16 @@ mod tests {
         let (owner, founding) = founded(1);
         let sid = owner.server_id.clone();
         let mut r = joiner(&sid, 9);
-        r.ingest_remote(&[founding]);
+        r.ingest_remote(&[founding.clone(), op_at(1, &sid, founding.hlc.physical_ms + 1, add(&sid, 2))]);
         let wall = crate::crdt::hlc::wall_clock_ms();
-        let early = op_at(2, &sid, wall + 120_000, P::NicknameChanged { peer_id: id(2), nickname: "n".into() });
+        let early = op_at(2, &sid, wall + 120_000, P::ServerRenamed { new_name: "n".into() });
         assert!(r.ingest_remote(&[early]).admitted.is_empty());
-        assert!(!r.held.is_empty(), "fixture: the op of a member not yet admitted is held");
+        assert!(!r.held.is_empty(), "fixture: a member's op its role does not allow yet is held");
         r.set_hlc(Hlc::for_device(id(9), "device"));
         assert!(r.create_op(P::ServerRenamed { new_name: "x".into() }).hlc.physical_ms < wall + 60_000, "a held op moved our clock");
     }
+
+    // ---- t14-cover: checkpoint coverage (design rev 2 + review rev 2) ----
 
     /// A rejoin's admission, on a fresh ask of its own.
     fn readd(sid: &str, tag: u8, at: i64) -> P {
@@ -993,498 +2222,2398 @@ mod tests {
         P::MemberAdded { peer_id: id(tag), display_name: "m".into(), follow: None, ask: Some(ask) }
     }
 
-    /// Owner 1 founds S at `t`; 2 joins at t+1 and 3 at t+2; the owner renames at t+10
-    /// and checkpoints there, never having seen 2's own leave at t+5. Returns S, the ops
-    /// a replica needs (founding, checkpoint), the owner, the leave and `t`.
-    fn behind_a_checkpoint() -> (String, Vec<CrdtOp>, ServerState, CrdtOp, u64) {
-        let (sid, _, anchor, owner, leave, t) = behind_a_checkpoint_with_history();
-        (sid, anchor, owner, leave, t)
-    }
-
-    /// [`behind_a_checkpoint`], with the history the checkpoint covers.
-    fn behind_a_checkpoint_with_history() -> (String, Vec<CrdtOp>, Vec<CrdtOp>, ServerState, CrdtOp, u64) {
-        let t = crate::crdt::hlc::wall_clock_ms() - 3 * 3_600_000;
-        let sid = crate::crdt::anchor::derive_server_id(&id(1), "n");
-        let created = op_at(1, &sid, t, P::ServerCreated { name: "S".into(), owner_peer_id: id(1), nonce: "n".into() });
-        let history = vec![
-            created.clone(),
-            op_at(1, &sid, t + 1, add(&sid, 2)),
-            op_at(1, &sid, t + 2, add(&sid, 3)),
-            op_at(1, &sid, t + 10, P::ServerRenamed { new_name: "moved on".into() }),
-        ];
-        let mut owner = joiner(&sid, 1);
-        owner.ingest_remote(&history);
-        let covers = owner.horizon();
-        let json = owner.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
-        let checkpoint = owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
-        let leave = op_at(2, &sid, t + 5, P::MemberRemoved { peer_id: id(2) });
-        (sid, history, vec![created, checkpoint], owner, leave, t)
-    }
-
-    fn holds(s: &ServerState, op: &CrdtOp) -> bool {
-        s.op_log.iter().any(|o| o.author == op.author && o.hlc == op.hlc)
-    }
-
-    /// t14 item 2b: a member's own leave that reaches the owner behind the owner's
-    /// checkpoint ends its span there at the leave's own clock, stays in the log across
-    /// a restart, and a later checkpoint that already reflects it lets it go.
-    #[test]
-    fn a_members_own_leave_behind_a_checkpoint_still_ends_its_span() {
-        let (sid, history, anchor, mut owner, leave, t) = behind_a_checkpoint_with_history();
-        assert!(owner.is_member(&id(2)) && owner.checkpoint_hlc.as_ref().is_some_and(|c| *c > leave.hlc), "fixture");
-        let out = owner.ingest_remote(std::slice::from_ref(&leave));
-        assert!(!owner.is_member(&id(2)), "the owner still counts a member whose own leave came behind its checkpoint");
-        assert!(owner.is_member(&id(3)), "another member is untouched");
-        assert_eq!(owner.member_record[&id(2)].last().unwrap().until_ms, t + 5, "the span ends at the leave's own clock");
-        assert!(holds(&owner, &leave) && out.admitted.iter().any(|o| o.hlc == leave.hlc), "the leave is kept and stored");
-
-        // A replica handed the checkpoint and the leave together folds the same.
-        let mut replica = joiner(&sid, 9);
-        replica.ingest_remote(&[anchor.clone(), vec![leave.clone()]].concat());
-        assert!(!replica.is_member(&id(2)) && holds(&replica, &leave));
-        let base = replica.checkpoint_hlc.clone().unwrap();
-        let entries = crate::crdt::digest::entries(&replica, &[], Some(&base));
-        assert_eq!(entries.len(), crate::crdt::digest::entries(&owner, &[], Some(&base)).len(), "both replicas fingerprint the same ops");
-        assert!(
-            entries.iter().any(|e| matches!(e.item, crate::crdt::digest::Item::Op(o) if o.hlc == leave.hlc)),
-            "the digest leaves out the late leave, so a replica without it never asks",
-        );
-
-        // A replica that took the leave in its place, then the owner's checkpoint that
-        // never saw it, keeps 2 out.
-        let mut early = joiner(&sid, 8);
-        early.ingest_remote(&history);
-        early.ingest_remote(std::slice::from_ref(&leave));
-        assert!(!early.is_member(&id(2)), "fixture");
-        let out = early.ingest_remote(&anchor[1..]);
-        assert!(!early.is_member(&id(2)) && holds(&early, &leave), "a checkpoint that never saw the leave undid it");
-        assert!(out.admitted.iter().any(|o| o.hlc == leave.hlc), "storing the checkpoint would drop the late leave");
-
-        // A restart restores the log from the store and the state from its snapshot.
-        let mut restarted: ServerState = serde_json::from_str(&serde_json::to_string(&owner).unwrap()).unwrap();
-        restarted.restore_op_log(owner.op_log.clone());
-        assert!(holds(&restarted, &leave), "a restart drops the late leave from the log");
-        assert!(restarted.retains(&leave, &base, true));
-
-        // The owner's next checkpoint lists 2 as gone: the leave is history now.
-        owner.author_checked(P::ServerRenamed { new_name: "again".into() }).unwrap();
-        let covers = owner.horizon();
+    /// The owner's checkpoint of what `owner` holds now, already its base.
+    fn checkpoint(owner: &mut ServerState) -> CrdtOp {
+        let covers = owner.checkpoint_covers();
         let json = owner.checkpoint_json(&id(1), &[], crate::crdt::hlc::wall_clock_ms()).unwrap();
-        owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
-        assert!(!holds(&owner, &leave) && owner.late_leaves.is_empty(), "a checkpoint that reflects the leave still keeps it");
-        assert!(!owner.is_member(&id(2)));
+        owner.author_checkpoint(P::ServerCheckpoint { state: json, covers }).expect("the owner's checkpoint becomes its base").0
     }
 
-    /// A rejoin admitted after the leave still wins after the checkpoint or recorded in
-    /// the span the checkpoint lists; one before the checkpoint that it never folded
-    /// loses, as everything a checkpoint's author never saw.
-    #[test]
-    fn a_rejoin_after_the_late_leave_still_wins() {
-        let (sid, anchor, owner, leave, t) = behind_a_checkpoint();
-        // After the checkpoint.
-        let mut after = owner.clone();
-        after.ingest_remote(&[op_at(1, &sid, t + 20, readd(&sid, 2, (t + 20) as i64))]);
-        after.ingest_remote(std::slice::from_ref(&leave));
-        assert!(after.is_member(&id(2)), "a rejoin after the checkpoint lost to an older leave");
-
-        // Before the checkpoint, in the batch that brings the leave: the checkpoint never
-        // folded it, so it is history the checkpoint overwrote.
-        let mut replica = joiner(&sid, 9);
-        replica.ingest_remote(&anchor);
-        replica.ingest_remote(&[leave.clone(), op_at(1, &sid, t + 7, readd(&sid, 2, (t + 7) as i64))]);
-        assert!(!replica.is_member(&id(2)), "a rejoin the checkpoint never folded beat the late leave");
-        assert!(holds(&replica, &leave));
-
-        // Recorded in the span: another admitter took 2 in again after the leave.
-        let t2 = t;
-        let created = anchor[0].clone();
-        let history = vec![
-            created,
-            op_at(1, &sid, t2 + 1, add(&sid, 2)),
-            op_at(1, &sid, t2 + 2, add(&sid, 3)),
-            op_at(1, &sid, t2 + 3, P::RoleChanged { peer_id: id(3), role: MemberRole::Admin, priority: 3 }),
-            op_at(3, &sid, t2 + 7, readd(&sid, 2, (t2 + 7) as i64)),
-            op_at(1, &sid, t2 + 10, P::ServerRenamed { new_name: "moved on".into() }),
-        ];
-        let mut owner2 = joiner(&sid, 1);
-        owner2.ingest_remote(&history);
-        assert!(owner2.member_record[&id(2)].last().unwrap().admitted.iter().any(|(a, _)| *a == id(3)), "fixture");
-        let covers = owner2.horizon();
-        let json = owner2.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
-        owner2.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
-        owner2.ingest_remote(std::slice::from_ref(&leave));
-        assert!(owner2.is_member(&id(2)), "a span re-admitted after the leave was closed by it");
-
-        // The checkpoint already folded the leave and a rejoin by the same admitter: the
-        // span it lists opened after the leave.
-        let history = vec![
-            anchor[0].clone(),
-            op_at(1, &sid, t + 1, add(&sid, 2)),
-            leave.clone(),
-            op_at(1, &sid, t + 7, readd(&sid, 2, (t + 7) as i64)),
-            op_at(1, &sid, t + 10, P::ServerRenamed { new_name: "moved on".into() }),
-        ];
-        let mut owner3 = joiner(&sid, 1);
-        owner3.ingest_remote(&history);
-        assert!(owner3.is_member(&id(2)), "fixture");
-        let covers = owner3.horizon();
-        let json = owner3.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
-        let checkpoint = owner3.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
-        let mut late = joiner(&sid, 9);
-        late.ingest_remote(&[anchor[0].clone(), checkpoint]);
-        late.ingest_remote(std::slice::from_ref(&leave));
-        assert!(late.is_member(&id(2)), "a leave from before the span the checkpoint lists closed it");
-    }
-
-    /// Only a member's own leave, from a member the checkpoint lists, changes anything:
-    /// a stranger's leave and one member removing another stay as they were.
-    #[test]
-    fn only_a_listed_members_own_leave_outlives_a_checkpoint() {
-        let (sid, _, owner, _, t) = behind_a_checkpoint();
-        let mut s = owner.clone();
-        let stranger = op_at(4, &sid, t + 5, P::MemberRemoved { peer_id: id(4) });
-        let other = op_at(3, &sid, t + 5, P::MemberRemoved { peer_id: id(2) });
-        let owners = op_at(1, &sid, t + 6, P::MemberRemoved { peer_id: id(1) });
-        s.ingest_remote(&[stranger.clone(), other.clone(), owners.clone()]);
-        assert!(s.is_member(&id(2)) && s.is_member(&id(3)) && s.is_member(&id(1)), "a removal that is no listed member's own leave took effect");
-        assert!(!holds(&s, &stranger) && !holds(&s, &other) && !holds(&s, &owners) && s.late_leaves.is_empty());
-
-        // A span with no exact opening clock (seeded, or older than 0.13) proves nothing
-        // about when it opened.
-        let (_, history, _, mut seeded, leave, _) = behind_a_checkpoint_with_history();
-        seeded.ingest_remote(&history);
-        let mut base: ServerState = serde_json::from_str(&seeded.checkpoint_json(&id(1), &[], t + 11).unwrap()).unwrap();
-        let span = base.member_record.get_mut(&id(2)).unwrap().last_mut().unwrap();
-        span.from_hlc = None;
-        span.admitted.clear();
-        seeded.author_checked(P::ServerRenamed { new_name: "again".into() }).unwrap();
-        let covers = seeded.horizon();
-        let checkpoint = op_at(1, &sid, covers.physical_ms + 1, P::ServerCheckpoint { state: serde_json::to_string(&base).unwrap(), covers });
-        let mut replica = joiner(&sid, 9);
-        replica.ingest_remote(&[history[0].clone(), checkpoint]);
-        assert!(replica.is_member(&id(2)), "fixture");
-        replica.ingest_remote(std::slice::from_ref(&leave));
-        assert!(replica.is_member(&id(2)), "a leave closed a span with no exact opening clock");
-    }
-
-    /// Replicas holding the same ops agree, whatever order they arrived in.
-    #[test]
-    fn a_late_leave_folds_the_same_in_any_arrival_order() {
-        let (sid, anchor, _, leave, t) = behind_a_checkpoint();
-        let later = op_at(1, &sid, t + 30, P::ServerRenamed { new_name: "later".into() });
-        let leave3 = op_at(3, &sid, t + 6, P::MemberRemoved { peer_id: id(3) });
-        let rejoin = op_at(1, &sid, t + 40, readd(&sid, 3, (t + 40) as i64));
-        let ops = [anchor.clone(), vec![leave.clone(), later, leave3, rejoin]].concat();
-        let view = |s: &ServerState| {
-            let mut log: Vec<(String, HlcTimestamp)> = s.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
-            log.sort();
-            let mut members: Vec<String> = s.members.keys().cloned().collect();
-            members.sort();
-            let spans: Vec<(u64, u64)> = [id(2), id(3)].iter().flat_map(|m| s.member_record[m].iter().map(|sp| (sp.from_ms, sp.until_ms))).collect();
-            (log, members, spans)
-        };
-        let mut together = joiner(&sid, 9);
-        together.ingest_remote(&ops);
-        let expected = view(&together);
-        assert!(!expected.1.contains(&id(2)) && expected.1.contains(&id(3)));
-        for order in [vec![0, 1, 2, 3, 4, 5], vec![0, 1, 5, 4, 3, 2], vec![0, 1, 3, 2, 5, 4], vec![2, 4, 0, 1, 5, 3]] {
-            let mut s = joiner(&sid, 9);
-            for i in &order {
-                s.ingest_remote(std::slice::from_ref(&ops[*i]));
+    /// Everything a replica's fold decided, with what only says how it got there (stamps,
+    /// events, anchors, inert register priorities) left out.
+    fn view(s: &ServerState) -> serde_json::Value {
+        fn strip(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    m.remove("priority");
+                    m.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(a) => a.iter_mut().for_each(strip),
+                _ => {}
             }
-            assert_eq!(view(&s), expected, "arrival order {order:?} folded differently");
         }
-    }
-
-    /// The log keeps at most one late leave per member the checkpoint lists: a second
-    /// leave of the same member, or a flood of them, keeps nothing more.
-    #[test]
-    fn late_leaves_are_bounded_by_the_members_a_checkpoint_lists() {
-        let (sid, _, owner, leave, t) = behind_a_checkpoint();
-        let mut s = owner.clone();
-        let mut flood = vec![leave.clone()];
-        for i in 0..50 {
-            flood.push(op_at(2, &sid, t + 6 + i, P::MemberRemoved { peer_id: id(2) }));
-            flood.push(op_at(3, &sid, t + 3 + (i % 5), P::MemberRemoved { peer_id: id(3) }));
+        let mut v = serde_json::to_value(s.lean_snapshot()).unwrap();
+        let o = v.as_object_mut().unwrap();
+        for k in ["stamps", "member_events", "checkpoint_hlc", "owner_pin", "retained_print", "cp_generation", "cp_parent", "cp_stamped"] {
+            o.remove(k);
         }
-        s.ingest_remote(&flood);
-        let base = s.checkpoint_hlc.clone().unwrap();
-        let below: Vec<&CrdtOp> = s.op_log.iter().filter(|o| o.hlc < base && !matches!(o.payload, P::ServerCreated { .. })).collect();
-        assert_eq!(below.len(), 2, "one late leave per listed member, got {}", below.len());
-        assert!(s.late_leaves.len() <= s.member_record.len());
-        assert!(!s.is_member(&id(2)) && !s.is_member(&id(3)));
+        strip(&mut v);
+        v
     }
 
-    /// Production saves `lean_snapshot()`, which carries no `late_leaves`: a restart
-    /// judges the stored late leave again, so the next rebuild keeps the leaver out.
-    #[test]
-    fn late_leave_survives_a_lean_snapshot_restart() {
-        let (sid, _, _, mut owner, leave, t) = behind_a_checkpoint_with_history();
-        owner.ingest_remote(&[op_at(1, &sid, t + 40, P::ServerRenamed { new_name: "tail".into() })]);
-        owner.ingest_remote(std::slice::from_ref(&leave));
-        assert!(!owner.is_member(&id(2)) && holds(&owner, &leave), "fixture");
-        // What CrdtStore writes, and the rows the DB hands back on start.
-        let json = serde_json::to_string(&owner.lean_snapshot()).unwrap();
-        let mut restarted: ServerState = serde_json::from_str(&json).unwrap();
-        restarted.restore_op_log(owner.op_log.clone());
-        let base = restarted.checkpoint_hlc.clone().unwrap();
-        let ours = crate::crdt::digest::entries(&restarted, &[], Some(&base)).len();
-        let theirs = crate::crdt::digest::entries(&owner, &[], Some(&base)).len();
-        // Any op older than the tail rebuilds from the checkpoint.
-        restarted.ingest_remote(&[op_at(1, &sid, t + 20, P::ServerRenamed { new_name: "mid".into() })]);
-        assert!(!restarted.is_member(&id(2)), "a rebuild after a restart counts the leaver again");
-        assert!(holds(&restarted, &leave), "a restart dropped the late leave from the log");
-        assert_eq!(ours, theirs, "a restarted replica fingerprints a different op set");
+    fn keys_of(s: &ServerState) -> Vec<OpKey> {
+        s.served_log().iter().map(|o| (o.author.clone(), o.hlc.clone())).collect()
     }
 
-    /// The verdict on a late leave never depends on which batch a rejoin the checkpoint
-    /// never saw rode in.
-    #[test]
-    fn late_leave_and_unseen_rejoin_fold_the_same_in_either_order() {
-        let (sid, anchor, _, leave, t) = behind_a_checkpoint();
-        let rejoin = op_at(3, &sid, t + 7, readd(&sid, 2, (t + 7) as i64));
-        let mut leave_first = joiner(&sid, 9);
-        leave_first.ingest_remote(&anchor);
-        leave_first.ingest_remote(std::slice::from_ref(&leave));
-        leave_first.ingest_remote(std::slice::from_ref(&rejoin));
-        let mut rejoin_first = joiner(&sid, 8);
-        rejoin_first.ingest_remote(&anchor);
-        rejoin_first.ingest_remote(std::slice::from_ref(&rejoin));
-        rejoin_first.ingest_remote(std::slice::from_ref(&leave));
-        assert_eq!(
-            (leave_first.is_member(&id(2)), holds(&leave_first, &leave)),
-            (rejoin_first.is_member(&id(2)), holds(&rejoin_first, &leave)),
-            "two replicas holding the same ops disagree on 2's membership",
-        );
-    }
-
-    /// A signed `MemberAdded` naming the leaver that the fold refuses (a stranger's, with
-    /// no ask) does not stop a late leave from landing.
-    #[test]
-    fn a_refused_admission_does_not_cancel_a_late_leave() {
-        let (sid, anchor, _, leave, t) = behind_a_checkpoint();
-        let junk = op_at(4, &sid, t + 6, P::MemberAdded { peer_id: id(2), display_name: "m".into(), follow: None, ask: None });
-        let mut s = joiner(&sid, 9);
-        s.ingest_remote(&anchor);
-        s.ingest_remote(&[leave.clone(), junk]);
-        assert!(!s.is_member(&id(2)), "a stranger's refused admission kept the leaver a member");
-    }
-
-    /// A batch carrying history plus the checkpoint reports as admitted only the
-    /// self-leaves below the base the log keeps, so the store re-inserts only those.
-    #[test]
-    fn store_reinserts_only_leaves_the_fold_kept() {
-        let t = crate::crdt::hlc::wall_clock_ms() - 3 * 3_600_000;
-        let sid = crate::crdt::anchor::derive_server_id(&id(1), "n");
-        let created = op_at(1, &sid, t, P::ServerCreated { name: "S".into(), owner_peer_id: id(1), nonce: "n".into() });
-        let gone = op_at(3, &sid, t + 5, P::MemberRemoved { peer_id: id(3) });
-        let history = vec![
-            created,
+    /// A founded server with 2 an admin, 3 a moderator and 4 a member, all owner-admitted.
+    fn staffed() -> (ServerState, Vec<CrdtOp>, u64) {
+        let (mut owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let ops = vec![
+            founding,
             op_at(1, &sid, t + 1, add(&sid, 2)),
             op_at(1, &sid, t + 2, add(&sid, 3)),
-            gone.clone(),
-            op_at(1, &sid, t + 10, P::ServerRenamed { new_name: "moved on".into() }),
+            op_at(1, &sid, t + 3, add(&sid, 4)),
+            op_at(1, &sid, t + 4, P::RoleChanged { peer_id: id(2), role: MemberRole::Admin, priority: 3 }),
+            op_at(1, &sid, t + 5, P::RoleChanged { peer_id: id(3), role: MemberRole::Moderator, priority: 3 }),
         ];
-        let mut owner = joiner(&sid, 1);
-        owner.ingest_remote(&history);
-        let covers = owner.horizon();
-        let json = owner.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
-        let checkpoint = owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
-        let mut late = joiner(&sid, 9);
-        let out = late.ingest_remote(&[history, vec![checkpoint]].concat());
-        assert!(!holds(&late, &gone), "fixture: the checkpoint reflects 3's leave");
-        let store = crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
-        store.persist_admitted_ops(&out.admitted, late.checkpoint_hlc.as_ref());
-        let stored = store.load_ops_for_server(&sid, None).unwrap();
-        assert!(
-            !stored.iter().any(|o| o.author == gone.author && o.hlc == gone.hlc),
-            "the store kept a leave the fold dropped",
-        );
+        owner.ingest_remote(&ops[1..]);
+        (owner, ops, t)
     }
 
-    /// A batch of junk a checkpoint covers costs about what the same junk above it does,
-    /// never quadratic time on the event loop.
+    /// U2: whatever the owner never folded survives its checkpoint, on a replica that got
+    /// it before the checkpoint, one that got it after, and the owner itself.
     #[test]
-    fn refused_junk_below_a_checkpoint_costs_linear_time() {
-        let (sid, anchor, _, _, t) = behind_a_checkpoint();
-        let junk = |base: u64| -> Vec<CrdtOp> {
-            (0..20_000u64).map(|i| {
-                let (kp, id, pk) = keys(4);
-                let mut op = CrdtOp {
-                    server_id: sid.clone(),
-                    hlc: HlcTimestamp { physical_ms: base, counter: i as u32, actor: id.clone() },
-                    author: id,
-                    payload: P::ServerRenamed { new_name: "x".into() },
-                    auth: None,
-                };
-                op.sign(&kp, &pk);
-                op
-            }).collect()
+    fn a_checkpoint_never_drops_an_op_its_owner_did_not_fold() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let ch = general(&owner);
+        let mut sibling = owner.clone();
+        sibling.set_hlc(Hlc::for_device(id(1), "owner-laptop"));
+        let unseen = vec![
+            op_at(4, &sid, t + 10, P::MemberRemoved { peer_id: id(4), seen: None }),
+            op_at(2, &sid, t + 11, readd(&sid, 5, (t + 11) as i64)),
+            op_at(2, &sid, t + 12, P::RoleChanged { peer_id: id(5), role: MemberRole::Moderator, priority: 2 }),
+            op_at(2, &sid, t + 13, readd(&sid, 6, (t + 13) as i64)),
+            op_at(3, &sid, t + 14, P::MemberBanned { peer_id: id(6), seen: None }),
+            op_at(2, &sid, t + 15, P::ChannelRenamed { channel_id: ch.clone(), new_name: "by-admin".into() }),
+            sibling.author_checked(P::NicknameChanged { peer_id: id(1), nickname: "from-the-laptop".into() }).unwrap(),
+        ];
+        let cp = checkpoint(&mut owner);
+        let mut before = joiner(&sid, 9);
+        before.ingest_remote(&history);
+        before.ingest_remote(&unseen);
+        before.ingest_remote(std::slice::from_ref(&cp));
+        let mut after = joiner(&sid, 8);
+        after.ingest_remote(&history);
+        after.ingest_remote(std::slice::from_ref(&cp));
+        after.ingest_remote(&unseen);
+        owner.ingest_remote(&unseen);
+        let mut oracle = joiner(&sid, 7);
+        oracle.ingest_remote(&history);
+        oracle.ingest_remote(&unseen);
+        for s in [&before, &after, &owner] {
+            assert!(!s.is_member(&id(4)), "the late leave lands");
+            assert!(s.is_member(&id(5)) && s.get_role(&id(5)) == MemberRole::Moderator, "the member-admitted join and its promotion land");
+            assert!(!s.is_member(&id(6)) && s.is_banned(&id(6)), "the moderator's ban lands");
+            assert_eq!(s.channels[&ch].name, "by-admin");
+            assert_eq!(s.get_nickname(&id(1)), "from-the-laptop", "the owner sibling's op lands");
+            assert_eq!(view(s), view(&oracle), "the rebase equals the fold from history");
+        }
+        assert_eq!(keys_of(&before), keys_of(&after));
+    }
+
+    /// U3: the uncovered ops fold the same in every arrival order and batching.
+    #[test]
+    fn uncovered_ops_fold_the_same_in_every_order() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let unban = op_at(1, &sid, t + 40, P::MemberUnbanned { peer_id: id(3) });
+        let ban = op_at(1, &sid, t + 30, P::MemberBanned { peer_id: id(3), seen: None });
+        owner.ingest_remote(std::slice::from_ref(&unban));
+        let cp = checkpoint(&mut owner);
+        let uncovered = vec![
+            op_at(4, &sid, t + 20, P::MemberRemoved { peer_id: id(4), seen: None }),
+            op_at(2, &sid, t + 25, readd(&sid, 4, (t + 24) as i64)),
+            ban,
+            op_at(2, &sid, t + 50, readd(&sid, 4, (t + 24) as i64)),
+            op_at(1, &sid, t + 60, readd(&sid, 3, (t + 59) as i64)),
+        ];
+        let mut all = uncovered.clone();
+        all.push(cp);
+        let mut views = Vec::new();
+        let n = all.len();
+        let mut perm: Vec<usize> = (0..n).collect();
+        // Heap's algorithm over every order of the six ops.
+        let mut c = vec![0usize; n];
+        let mut fold = |order: &[usize]| {
+            let mut r = joiner(&sid, 9);
+            r.ingest_remote(&history);
+            for i in order {
+                r.ingest_remote(std::slice::from_ref(&all[*i]));
+            }
+            let mut batched = joiner(&sid, 8);
+            batched.ingest_remote(&history);
+            let ops: Vec<CrdtOp> = order.iter().map(|i| all[*i].clone()).collect();
+            batched.ingest_remote(&ops);
+            assert_eq!(view(&r), view(&batched), "one batch and one op at a time differ");
+            views.push((view(&r), keys_of(&r)));
         };
-        let time = |ops: &[CrdtOp]| {
-            let mut s = joiner(&sid, 9);
-            s.ingest_remote(&anchor);
-            let at = std::time::Instant::now();
-            s.ingest_remote(ops);
-            at.elapsed()
-        };
-        let below = time(&junk(t + 6));
-        let above = time(&junk(t + 60));
-        assert!(below < above * 3, "junk below a checkpoint costs {below:?}, above it {above:?}");
+        fold(&perm);
+        let mut i = 0;
+        while i < n {
+            if c[i] < i {
+                if i % 2 == 0 { perm.swap(0, i) } else { perm.swap(c[i], i) }
+                fold(&perm);
+                c[i] += 1;
+                i = 0;
+            } else {
+                c[i] = 0;
+                i += 1;
+            }
+        }
+        assert!(views.windows(2).all(|w| w[0] == w[1]), "an arrival order changed the state");
+        let r = &views[0].0;
+        assert!(r["members"].get(id(4)).is_some(), "the rejoin on a newer ask stands after the late leave");
+        assert!(r["members"].get(id(3)).is_some(), "the covered unban lets the re-admission in");
     }
 
-    /// What a restart restores: the lean snapshot production saves, the rows the store
-    /// keeps of every batch persisted as the node persists it.
-    fn restart_from(s: &ServerState, store: &crate::storage::MessageStore) -> ServerState {
-        let mut r: ServerState = serde_json::from_str(&serde_json::to_string(&s.lean_snapshot()).unwrap()).unwrap();
-        r.restore_op_log(store.load_ops_for_server(&s.server_id, None).unwrap());
-        r
+    /// U5: an owner device back after months writes a child of the base it held; what
+    /// members did meanwhile is newer than its stamps and folds on top.
+    #[test]
+    fn a_stale_checkpoint_undoes_nothing_members_did() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let ch = general(&owner);
+        let _ = checkpoint(&mut owner);
+        let mut stale = owner.clone();
+        stale.set_hlc(Hlc::for_device(id(1), "old-laptop"));
+        let meanwhile = vec![
+            op_at(2, &sid, t + 100, readd(&sid, 5, (t + 100) as i64)),
+            op_at(2, &sid, t + 101, P::ChannelRenamed { channel_id: ch.clone(), new_name: "meanwhile".into() }),
+            op_at(4, &sid, t + 102, P::MemberRemoved { peer_id: id(4), seen: None }),
+        ];
+        owner.ingest_remote(&meanwhile);
+        let fresh = checkpoint(&mut owner);
+        let old = checkpoint(&mut stale);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&meanwhile);
+        r.ingest_remote(&[old.clone(), fresh.clone()]);
+        let mut s = joiner(&sid, 8);
+        s.ingest_remote(&history);
+        s.ingest_remote(&[fresh, old]);
+        s.ingest_remote(&meanwhile);
+        for x in [&r, &s] {
+            assert!(x.is_member(&id(5)) && !x.is_member(&id(4)));
+            assert_eq!(x.channels[&ch].name, "meanwhile");
+        }
+        assert_eq!(view(&r), view(&s));
+        assert_eq!(keys_of(&r), keys_of(&s));
     }
 
-    fn ingest_and_store(s: &mut ServerState, store: &crate::storage::MessageStore, ops: &[CrdtOp]) {
-        let out = s.ingest_remote(ops);
-        store.persist_admitted_ops(&out.admitted, s.checkpoint_hlc.as_ref());
+    /// U7: a replay of an op the base decided drops at the door: no rebuild, no row.
+    #[test]
+    fn a_dominated_replay_is_dropped_without_a_rebuild() {
+        let (mut owner, history, _) = staffed();
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&owner.server_id, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        let out = r.ingest_remote(&history[1..]);
+        assert!(!out.rebuilt && out.admitted.is_empty(), "a decided replay rebuilt or folded");
+        let _ = &out.rows;
     }
 
-    type FoldView = (Vec<String>, Vec<(u64, u64)>, Vec<(String, HlcTimestamp)>, Vec<(String, HlcTimestamp)>);
-
-    /// Membership, spans, the log and the digest a replica's peers see.
-    fn fold_view(s: &ServerState) -> FoldView {
-        let mut members: Vec<String> = s.members.keys().cloned().collect();
-        members.sort();
-        let spans = [id(2), id(3)].iter().flat_map(|m| s.member_record[m].iter().map(|sp| (sp.from_ms, sp.until_ms))).collect();
-        let mut log: Vec<(String, HlcTimestamp)> = s.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
-        log.sort();
-        let digest = crate::crdt::digest::entries(s, &[], s.checkpoint_hlc.as_ref())
+    /// U8 and the review's F4 path: three owner devices checkpoint from one parent; each
+    /// replica takes another path, and all converge on one base with nothing lost.
+    #[test]
+    fn rival_owner_checkpoints_converge_without_loss() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let c1 = checkpoint(&mut owner);
+        let devices: Vec<ServerState> = ["a", "b", "c"]
             .iter()
-            .filter_map(|e| match e.item {
-                crate::crdt::digest::Item::Op(o) => Some((o.author.clone(), o.hlc.clone())),
-                crate::crdt::digest::Item::Raw(_) => None,
+            .map(|d| {
+                let mut s = owner.clone();
+                s.set_hlc(Hlc::for_device(id(1), d));
+                s
             })
             .collect();
-        (members, spans, log, digest)
-    }
-
-    /// A late leave survives the real save path (lean snapshot + `persist_admitted_ops` +
-    /// `restore_op_log`), whether it came after the checkpoint or before it, and a
-    /// rebuild after the restart still keeps the leaver out.
-    #[test]
-    fn a_late_leave_survives_the_production_save_path() {
-        let (sid, history, anchor, _, leave, t) = behind_a_checkpoint_with_history();
-        let mid = op_at(1, &sid, t + 20, P::ServerRenamed { new_name: "mid".into() });
-        let tail = op_at(1, &sid, t + 40, P::ServerRenamed { new_name: "tail".into() });
-        // The leave after the checkpoint, and the leave first with the checkpoint after.
-        for batches in [vec![anchor.clone(), vec![tail.clone()], vec![leave.clone()]], vec![history.clone(), vec![leave.clone()], anchor[1..].to_vec(), vec![tail.clone()]]] {
-            let store = crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
-            let mut live = joiner(&sid, 9);
-            for batch in &batches {
-                ingest_and_store(&mut live, &store, batch);
+        let mut cps = Vec::new();
+        let mut seen = Vec::new();
+        for (i, mut dev) in devices.into_iter().enumerate() {
+            let op = op_at(2, &sid, t + 200 + i as u64, P::NicknameChanged { peer_id: id(2), nickname: format!("seen-by-{i}") });
+            let mine = op_at(4, &sid, t + 210 + i as u64, P::NicknameChanged { peer_id: id(4), nickname: format!("{i}") });
+            dev.ingest_remote(&[op.clone(), mine.clone()]);
+            seen.push(op);
+            seen.push(mine);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            cps.push(checkpoint(&mut dev));
+        }
+        let paths: [&[usize]; 4] = [&[0, 1, 2], &[1, 2], &[2, 0, 1], &[2, 1, 0]];
+        let mut results = Vec::new();
+        for path in paths {
+            let mut r = joiner(&sid, 9);
+            r.ingest_remote(&history);
+            r.ingest_remote(std::slice::from_ref(&c1));
+            for i in path {
+                r.ingest_remote(&seen[2 * i..2 * i + 2]);
+                r.ingest_remote(std::slice::from_ref(&cps[*i]));
             }
-            assert!(!live.is_member(&id(2)) && holds(&live, &leave), "fixture");
-            let mut restarted = restart_from(&live, &store);
-            assert_eq!(fold_view(&restarted), fold_view(&live), "a restart folds a different state or digest");
-            ingest_and_store(&mut live, &store, std::slice::from_ref(&mid));
-            ingest_and_store(&mut restarted, &store, std::slice::from_ref(&mid));
-            assert!(!restarted.is_member(&id(2)) && holds(&restarted, &leave), "a rebuild after a restart counts the leaver again");
-            assert_eq!(fold_view(&restarted), fold_view(&live));
-            assert_eq!(fold_view(&restart_from(&restarted, &store)), fold_view(&live), "a second restart drifted");
+            // Whatever the path missed reaches it by sync from a replica on another.
+            for i in 0..3 {
+                r.ingest_remote(&seen[2 * i..2 * i + 2]);
+                r.ingest_remote(std::slice::from_ref(&cps[i]));
+            }
+            assert_eq!(r.get_nickname(&id(4)), "2", "the newest write wins");
+            assert_eq!(r.get_nickname(&id(2)), "seen-by-2");
+            results.push((view(&r), keys_of(&r)));
         }
+        assert!(results.windows(2).all(|w| w[0] == w[1]), "replicas on different paths diverge");
     }
 
-    /// Late leaves count in the digest only under the checkpoint that judged them: a
-    /// replica still on an older checkpoint never offers one to a peer whose newer
-    /// checkpoint reflects it (the peer would drop it and be offered it again), and once
-    /// it takes the newer checkpoint the two stop asking.
+    /// The review's probe: two owner devices checkpoint at once; the later never saw an op
+    /// the earlier folded. Today the op is wiped on every replica holding both.
     #[test]
-    fn replicas_on_different_checkpoints_do_not_trade_a_late_leave() {
-        use crate::crdt::digest::{answer, entries, first_ask, new_salt, Item};
-        let (sid, anchor, mut owner, leave, _) = behind_a_checkpoint();
-        let mut behind = joiner(&sid, 9);
-        behind.ingest_remote(&[anchor.clone(), vec![leave.clone()]].concat());
-        owner.ingest_remote(std::slice::from_ref(&leave));
-        owner.author_checked(P::ServerRenamed { new_name: "again".into() }).unwrap();
-        let covers = owner.horizon();
-        let json = owner.checkpoint_json(&id(1), &[], crate::crdt::hlc::wall_clock_ms()).unwrap();
-        owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
-        assert!(holds(&behind, &leave) && !holds(&owner, &leave), "fixture");
-        let exchange = |asker: &mut ServerState, answerer: &ServerState| -> Vec<CrdtOp> {
-            let base = asker.checkpoint_hlc.clone();
-            let ask = first_ask(&entries(asker, &[], base.as_ref()), 1, new_salt(), base.clone());
-            let (items, _) = answer(&entries(answerer, &[], base.as_ref()), &ask).unwrap();
-            let ops: Vec<CrdtOp> = items.iter().filter_map(|i| match i { Item::Op(o) => Some((*o).clone()), Item::Raw(_) => None }).collect();
-            asker.ingest_remote(&ops);
-            ops
-        };
-        for _ in 0..2 {
-            let sent = exchange(&mut owner, &behind);
-            assert!(sent.iter().all(|o| holds(&owner, o)), "a replica on an older checkpoint offered an op the asker drops");
-        }
-        exchange(&mut behind, &owner);
-        assert_eq!(behind.checkpoint_hlc, owner.checkpoint_hlc, "fixture: the replica takes the newer checkpoint");
-        let salt = new_salt();
-        let base = owner.checkpoint_hlc.clone();
-        let print = |s: &ServerState| first_ask(&entries(s, &[], base.as_ref()), 1, salt.clone(), base.clone()).ranges;
-        assert_eq!(print(&behind), print(&owner), "two replicas holding the same ops keep asking");
+    fn probe_concurrent_owner_checkpoints_lose_an_op_today() {
+        let (kp, owner_id, pk) = keys(1);
+        let (mut dev_a, founding) = founded(1);
+        let sid = dev_a.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let admit2 = dev_a.author_checked(add(&sid, 2)).expect("owner admits");
+        let mut dev_b = dev_a.clone();
+        dev_b.set_hlc(crate::crdt::hlc::Hlc::for_device(owner_id.clone(), "owner-device-b"));
+        dev_b.set_signer(kp, pk);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let x = op_at(2, &sid, t + 10, P::NicknameChanged { peer_id: id(2), nickname: "seen-by-a".into() });
+        assert_eq!(dev_a.ingest_remote(std::slice::from_ref(&x)).admitted.len(), 1);
+        let cp_a = checkpoint(&mut dev_a);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let y = dev_b.author_checked(P::ServerRenamed { new_name: "by-b".into() }).expect("y");
+        let cp_b = checkpoint(&mut dev_b);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[founding, admit2, x, cp_a, y, cp_b]);
+        assert_eq!(r.name(), "by-b");
+        assert_eq!(r.get_nickname(&id(2)), "seen-by-a", "an op owner device A folded and checkpointed is wiped by device B's checkpoint");
     }
 
-    /// Two leaves of one member that the checkpoint both covers: the earlier one ends the
-    /// span, whether the replica admitted the later one at its place (it held the history
-    /// of a kick and a rejoin the owner never saw) or started from the anchor.
+    /// U9: a member can make no checkpoint, so nothing it sends makes the base decide,
+    /// and so drop, another author's op.
     #[test]
-    fn two_late_leaves_of_one_member_fold_the_same_from_history_or_anchor() {
-        let t = crate::crdt::hlc::wall_clock_ms() - 3 * 3_600_000;
-        let sid = crate::crdt::anchor::derive_server_id(&id(1), "n");
-        let created = op_at(1, &sid, t, P::ServerCreated { name: "S".into(), owner_peer_id: id(1), nonce: "n".into() });
-        let seen = vec![
-            created.clone(),
+    fn nothing_a_member_sends_makes_the_base_drop_another_authors_op() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let ch = general(&owner);
+        let cp = checkpoint(&mut owner);
+        let mut forged = owner.lean_snapshot();
+        forged.cp_generation = 99;
+        forged.cp_stamped = true;
+        let theirs = op_at(4, &sid, t + 300, P::ServerCheckpoint { state: serde_json::to_string(&forged).unwrap(), covers: cp.hlc.clone() });
+        let rename = op_at(2, &sid, t + 290, P::ChannelRenamed { channel_id: ch.clone(), new_name: "x".into() });
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&[cp.clone(), theirs]);
+        assert_eq!(r.base.as_ref().map(|b| b.hash), Some(cp.content_hash()), "a member's checkpoint is no base");
+        let _ = r.ingest_remote(std::slice::from_ref(&rename));
+        assert!(r.op_log.iter().any(|o| o.hlc == rename.hlc), "another author's op folds");
+    }
+
+    /// U11: an op the base does not decide is judged by today's authority: a demoted
+    /// admin's backdated act, a kicked member's backdated admission, an author not yet a
+    /// member, a spent ask inside a gap (H2), an ask older than the asker's own leave (F9).
+    #[test]
+    fn a_late_op_is_judged_by_todays_authority() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let ch = general(&owner);
+        owner.ingest_remote(&[op_at(1, &sid, t + 20, P::RoleChanged { peer_id: id(2), role: MemberRole::Member, priority: 3 })]);
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        let demoted = op_at(2, &sid, t + 10, P::ChannelRenamed { channel_id: ch.clone(), new_name: "late".into() });
+        r.ingest_remote(std::slice::from_ref(&demoted));
+        assert_eq!(r.channels[&ch].name, "general", "a since-demoted admin's backdated act is refused");
+        let stranger = op_at(7, &sid, t + 30, P::NicknameChanged { peer_id: id(7), nickname: "x".into() });
+        assert!(r.ingest_remote(std::slice::from_ref(&stranger)).admitted.is_empty(), "an author not yet a member");
+    }
+
+    /// The review's probe: a kicked member signs an admission dated before its kick. Once
+    /// the owner's base holds the kick, the admission is judged by today's authority.
+    /// Residual: before the base holds it, both fold in clock order (design section 6).
+    #[test]
+    fn probe_a_kicked_member_backdates_an_admission_today() {
+        let (mut owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let history = vec![
+            founding.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 10, P::MemberRemoved { peer_id: id(2), seen: None }),
+        ];
+        owner.ingest_remote(&history[1..]);
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        assert!(!r.is_member(&id(2)));
+        let backdated = op_at(2, &sid, t + 9, add(&sid, 5));
+        r.ingest_remote(std::slice::from_ref(&backdated));
+        assert!(!r.is_member(&id(5)), "a kicked member's backdated admission seated a newcomer");
+    }
+
+    /// The review's F9 probe: an ask signed before the asker's own leave never re-admits it.
+    #[test]
+    fn probe_an_ask_older_than_the_askers_own_leave_readmits_it() {
+        let (owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let early = crate::crdt::operations::JoinAsk::sign(&sid, (t + 5) as i64, &keys(2).0);
+        let again = P::MemberAdded { peer_id: id(2), display_name: "m".into(), follow: None, ask: Some(early) };
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[
+            founding.clone(),
             op_at(1, &sid, t + 1, add(&sid, 2)),
             op_at(1, &sid, t + 2, add(&sid, 3)),
-            op_at(1, &sid, t + 3, P::RoleChanged { peer_id: id(3), role: MemberRole::Admin, priority: 3 }),
-            op_at(1, &sid, t + 20, P::ServerRenamed { new_name: "moved on".into() }),
-        ];
-        let mut owner = joiner(&sid, 1);
-        owner.ingest_remote(&seen);
-        let covers = owner.horizon();
-        let json = owner.checkpoint_json(&id(1), &[], covers.physical_ms).unwrap();
-        let checkpoint = owner.author_checked(P::ServerCheckpoint { state: json, covers }).unwrap();
-        let first = op_at(2, &sid, t + 6, P::MemberRemoved { peer_id: id(2) });
-        let unseen = vec![
-            op_at(3, &sid, t + 4, P::MemberRemoved { peer_id: id(2) }),
-            first.clone(),
-            op_at(3, &sid, t + 7, readd(&sid, 2, (t + 7) as i64)),
-            op_at(2, &sid, t + 8, P::MemberRemoved { peer_id: id(2) }),
-        ];
-        let late_nick = op_at(1, &sid, t + 5, P::NicknameChanged { peer_id: id(1), nickname: "o".into() });
-
-        let mut history = joiner(&sid, 9);
-        for op in seen[..4].iter().chain(&unseen) {
-            history.ingest_remote(std::slice::from_ref(op));
-        }
-        assert!(holds(&history, &unseen[3]) && !holds(&history, &first), "fixture: the later leave was admitted, the earlier refused");
-        history.ingest_remote(&[late_nick.clone(), checkpoint.clone()]);
-
-        let mut anchored = joiner(&sid, 8);
-        anchored.ingest_remote(&[created, checkpoint]);
-        anchored.ingest_remote(&[unseen.clone(), vec![late_nick]].concat());
-
-        for s in [&history, &anchored] {
-            assert!(!s.is_member(&id(2)) && holds(s, &first), "the earlier late leave does not end the span");
-            assert_eq!(s.member_record[&id(2)].last().unwrap().until_ms, t + 6);
-        }
-        assert_eq!(fold_view(&history), fold_view(&anchored), "the history a replica held decided the verdict");
+            op_at(2, &sid, t + 10, P::MemberRemoved { peer_id: id(2), seen: None }),
+            op_at(3, &sid, t + 20, again),
+        ]);
+        assert!(!r.is_member(&id(2)), "an ask signed before the asker's own leave brought it back");
     }
 
-    /// `late_leaves` is derived by the fold alone: never written into a saved or sent
-    /// state, and a peer's JSON naming one is not believed.
+    /// The rev 2 probe (H2): a late admission of a current member, inside the gap a kick
+    /// left, on the ask that admitted it before.
     #[test]
-    fn late_leaves_are_never_stored_or_read_from_a_peer() {
-        let (_, _, mut owner, leave, _) = behind_a_checkpoint();
-        owner.ingest_remote(std::slice::from_ref(&leave));
-        assert!(!owner.late_leaves.is_empty(), "fixture");
-        let mut json: serde_json::Value = serde_json::to_value(&owner).unwrap();
-        assert!(json.get("late_leaves").is_none(), "a saved state carries late leaves");
-        json["late_leaves"] = serde_json::to_value(vec![(id(4), leave.hlc.clone())]).unwrap();
-        let read: ServerState = serde_json::from_value(json).unwrap();
-        assert!(read.late_leaves.is_empty(), "a peer's state named a late leave and was believed");
+    fn probe2_a_late_admission_of_a_current_member_skips_ask_once() {
+        let (owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let spent = crate::crdt::operations::JoinAsk::sign(&sid, (t + 1) as i64, &keys(2).0);
+        let fresh = crate::crdt::operations::JoinAsk::sign(&sid, (t + 8) as i64, &keys(2).0);
+        let admit = |ask| P::MemberAdded { peer_id: id(2), display_name: "m".into(), follow: None, ask: Some(ask) };
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[
+            founding.clone(),
+            op_at(1, &sid, t + 1, admit(spent.clone())),
+            op_at(1, &sid, t + 2, add(&sid, 3)),
+            op_at(1, &sid, t + 5, P::MemberRemoved { peer_id: id(2), seen: None }),
+            op_at(1, &sid, t + 10, admit(fresh.clone())),
+        ]);
+        assert!(r.is_member(&id(2)));
+        let late = op_at(3, &sid, t + 7, admit(spent));
+        assert!(!r.op_allowed(&late), "an admission inside the kicked gap, on the ask that admitted the member before, passes today's gate");
+        let same_ask = op_at(3, &sid, t + 7, admit(fresh.clone()));
+        assert!(r.op_allowed(&same_ask), "the next span's own ask may move it back");
+        let early_ask = op_at(3, &sid, t + 7, admit(crate::crdt::operations::JoinAsk::sign(&sid, (t + 7) as i64 + crate::crdt::hlc::MAX_DRIFT_MS as i64 + 10, &keys(2).0)));
+        assert!(!r.op_allowed(&early_ask), "no admission dated before its own ask");
+        let other_ask = op_at(3, &sid, t + 7, admit(crate::crdt::operations::JoinAsk::sign(&sid, (t + 7) as i64, &keys(2).0)));
+        assert!(!r.op_allowed(&other_ask), "a span opened inside history on another ask");
+        r.ingest_remote(std::slice::from_ref(&same_ask));
+        let spans = &r.member_record[&id(2)];
+        assert_eq!((spans.len(), spans[0].until_ms, spans[1].from_ms), (2, t + 5, t + 7), "only the next span moved back");
+    }
+
+    /// U12 and the review's probe: two different ops at one clock keep the lowest content
+    /// hash at the door, in the rebuild and in the digest.
+    #[test]
+    fn equivocation_keeps_the_lowest_hash_everywhere() {
+        let (owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let base = vec![
+            founding.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, P::RoleChanged { peer_id: id(2), role: MemberRole::Admin, priority: 2 }),
+            op_at(1, &sid, t + 3, add(&sid, 3)),
+        ];
+        let o1 = op_at(2, &sid, t + 10, P::RoleChanged { peer_id: id(3), role: MemberRole::Moderator, priority: 1 });
+        let o2 = op_at(2, &sid, t + 10, P::NicknameChanged { peer_id: id(2), nickname: "n".into() });
+        let low = if o1.content_hash() < o2.content_hash() { &o1 } else { &o2 };
+        let first_ranges = |s: &ServerState| {
+            let e = crate::crdt::digest::entries(s, &[], None);
+            crate::crdt::digest::first_ask(&e, 1, "AAAAAAAAAAAAAAAAAAAAAA".into(), None, None).ranges
+        };
+        let mut x = joiner(&sid, 9);
+        x.ingest_remote(&base);
+        x.ingest_remote(std::slice::from_ref(&o1));
+        x.ingest_remote(std::slice::from_ref(&o2));
+        let mut y = joiner(&sid, 8);
+        y.ingest_remote(&base);
+        y.ingest_remote(std::slice::from_ref(&o2));
+        y.ingest_remote(std::slice::from_ref(&o1));
+        let mut z = joiner(&sid, 7);
+        let mut both = base.clone();
+        both.push(o2.clone());
+        both.push(o1.clone());
+        z.ingest_remote(&both);
+        assert_eq!(x.get_role(&id(3)), y.get_role(&id(3)));
+        assert_eq!(view(&x), view(&y));
+        assert_eq!(view(&x), view(&z), "one batch keeps the same one");
+        assert!(x.op_log.iter().any(|o| o.hlc == low.hlc && o.content_hash() == low.content_hash()), "the lower hash wins");
+        assert_eq!(first_ranges(&x), first_ranges(&y));
+        let mut w = joiner(&sid, 6);
+        w.ingest_remote(&base);
+        let other = if std::ptr::eq(low, &o1) { &o2 } else { &o1 };
+        w.ingest_remote(std::slice::from_ref(other));
+        assert_ne!(first_ranges(&x), first_ranges(&w), "the digest tells the two ops at one key apart");
+    }
+
+    /// U14 and the review's probe: a stranger's flood cannot push a member's op out of
+    /// `held`; the heaviest author gives way.
+    #[test]
+    fn held_admits_only_known_authors_and_evicts_the_heaviest() {
+        let (owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let admit3 = op_at(1, &sid, t + 1, add(&sid, 3));
+        let promote3 = op_at(1, &sid, t + 2, P::RoleChanged { peer_id: id(3), role: MemberRole::Admin, priority: 3 });
+        let rename3 = op_at(3, &sid, t + 5, P::ServerRenamed { new_name: "kept".into() });
+        let junk: Vec<CrdtOp> = (0..300u64)
+            .map(|i| op_at(7, &sid, t + 100 + i, P::NicknameChanged { peer_id: id(7), nickname: format!("j{i}") }))
+            .collect();
+        let mut a = joiner(&sid, 9);
+        a.ingest_remote(&[founding.clone(), admit3.clone()]);
+        a.ingest_remote(std::slice::from_ref(&rename3));
+        assert_eq!(a.held.len(), 1, "fixture: the member's op waits for its role");
+        for j in &junk {
+            a.ingest_remote(std::slice::from_ref(j));
+        }
+        assert_eq!(a.held.len(), 1, "a stranger's ops never wait in held");
+        a.ingest_remote(std::slice::from_ref(&promote3));
+        let mut b = joiner(&sid, 8);
+        b.ingest_remote(&[founding.clone(), admit3.clone(), promote3.clone(), rename3.clone()]);
+        assert_eq!(b.name(), "kept");
+        assert_eq!(a.name(), b.name(), "a stranger's flood evicted a member's held op");
+    }
+
+    /// U21: member at its clock spares a legacy anchor and an author with no record, and
+    /// refuses a member's op dated before its admission.
+    #[test]
+    fn member_at_its_clock_spares_legacy_and_unrecorded_authors() {
+        let (owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[founding, op_at(1, &sid, t + 10, add(&sid, 2))]);
+        assert!(!r.op_allowed(&op_at(2, &sid, t + 5, P::NicknameChanged { peer_id: id(2), nickname: "early".into() })), "dated before its admission");
+        assert!(r.op_allowed(&op_at(2, &sid, t + 15, P::NicknameChanged { peer_id: id(2), nickname: "in".into() })));
+        let (mut legacy, _) = crate::crdt::testkeys::owned_state("s-legacy", "Old", 1);
+        legacy.author_checked(add("s-legacy", 2)).unwrap();
+        legacy.member_record.clear();
+        assert_eq!(legacy.anchor(), Anchor::Legacy);
+        let at = legacy.op_log.last().unwrap().hlc.physical_ms;
+        assert!(legacy.op_allowed(&op_at(2, "s-legacy", at.saturating_sub(10_000), P::NicknameChanged { peer_id: id(2), nickname: "n".into() })), "a legacy anchor is not judged at the op's clock");
+        let mut genesis = joiner(&sid, 9);
+        let (_, f2) = founded(1);
+        let _ = (&mut genesis, f2);
+        let mut unrecorded = r.clone();
+        unrecorded.member_record.remove(&id(2));
+        assert!(unrecorded.op_allowed(&op_at(2, &sid, t + 5, P::NicknameChanged { peer_id: id(2), nickname: "x".into() })), "no record passes (F12)");
+    }
+
+    /// Both arrival orders of a late leave and an unseen rejoin, and a leave missed with
+    /// the re-admission in the base on a newer ask (M3: the leave is decided) or an older
+    /// one (it applies, F9).
+    #[test]
+    fn late_leave_rejoin_and_readmission_fold_by_clock() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let readmit_newer = op_at(1, &sid, t + 30, readd(&sid, 4, (t + 25) as i64));
+        owner.ingest_remote(std::slice::from_ref(&readmit_newer));
+        let cp = checkpoint(&mut owner);
+        let leave = op_at(4, &sid, t + 20, P::MemberRemoved { peer_id: id(4), seen: None });
+        for order in [[0, 1], [1, 0]] {
+            let ops = [cp.clone(), leave.clone()];
+            let mut r = joiner(&sid, 9);
+            r.ingest_remote(&history);
+            for i in order {
+                r.ingest_remote(std::slice::from_ref(&ops[i]));
+            }
+            assert!(r.is_member(&id(4)), "M3: a re-admission on an ask after the leave keeps it");
+        }
+        let (mut owner, history, t) = staffed();
+        let readmit_older = op_at(1, &sid_of(&owner), t + 30, readd(&sid_of(&owner), 4, (t + 15) as i64));
+        owner.ingest_remote(std::slice::from_ref(&readmit_older));
+        assert!(owner.is_member(&id(4)), "fixture: a repeat for the owner");
+        let cp = checkpoint(&mut owner);
+        let leave = op_at(4, &sid_of(&owner), t + 20, P::MemberRemoved { peer_id: id(4), seen: None });
+        let mut r = joiner(&sid_of(&owner), 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&[cp, leave]);
+        assert!(!r.is_member(&id(4)), "F9: an ask older than the leave never re-admits");
+    }
+
+    fn sid_of(s: &ServerState) -> String {
+        s.server_id.clone()
+    }
+
+    /// U4: a restart through the production save path (state JSON from `lean_snapshot`,
+    /// rows written as deltas to a store, base taken from the rows) matches the live
+    /// replica; a stale fingerprint refolds once.
+    #[test]
+    fn a_restart_through_the_store_matches_a_live_replica() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let store = crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+        let mut live = joiner(&sid, 9);
+        let feed = |s: &mut ServerState, ops: &[CrdtOp]| {
+            let out = s.ingest_remote(ops);
+            if let Some(d) = out.delta(&sid) {
+                store.persist_op_delta(&d).unwrap();
+            }
+        };
+        feed(&mut live, &history);
+        let late = op_at(4, &sid, t + 20, P::MemberRemoved { peer_id: id(4), seen: None });
+        let cp = checkpoint(&mut owner);
+        feed(&mut live, std::slice::from_ref(&cp));
+        feed(&mut live, std::slice::from_ref(&late));
+        feed(&mut live, &[op_at(2, &sid, t + 40, readd(&sid, 5, (t + 40) as i64))]);
+        let json = serde_json::to_string(&live.lean_snapshot()).unwrap();
+        let restart = |json: &str| {
+            let mut s: ServerState = serde_json::from_str(json).unwrap();
+            s.set_hlc(Hlc::new(id(9)));
+            let refolded = s.restore_op_log(store.load_op_rows(&sid).unwrap()).refolded;
+            (s, refolded)
+        };
+        let (back, refolded) = restart(&json);
+        assert!(!refolded, "a matching fingerprint skips the refold");
+        assert_eq!(view(&back), view(&live));
+        assert_eq!(keys_of(&back), keys_of(&live));
+        assert!(!back.is_member(&id(4)), "the late leave survives the restart");
+        let mut stale: serde_json::Value = serde_json::from_str(&json).unwrap();
+        stale["retained_print"] = serde_json::json!("0:0");
+        stale["name"]["value"] = serde_json::json!("not what the rows say");
+        let (back, refolded) = restart(&stale.to_string());
+        assert!(refolded, "a stale fingerprint refolds");
+        assert_eq!(view(&back), view(&live));
+    }
+
+    /// U10: the rebase equals a fold of the whole history (the oracle) for random op sets
+    /// over every payload kind, random owner-seen subsets and checkpoint points. Ops whose
+    /// verdict differs between their clock and the base are left out one by one, never
+    /// the whole set.
+    #[test]
+    fn rebase_equals_a_clone_and_apply_oracle() {
+        // Device tests map these same keys in the process-global resolver.
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let mut compared = 0;
+        for _case in 0..160 {
+            let (owner0, history, t) = staffed();
+            let sid = owner0.server_id.clone();
+            let ch = general(&owner0);
+            let mut ops = Vec::new();
+            let len = 8 + next(18);
+            for i in 0..len {
+                let at = t + 20 + i * 3;
+                let author = [1u8, 2, 3, 4, 5][next(5) as usize];
+                let target = [2u8, 3, 4, 5, 6][next(5) as usize];
+                ops.push(op_at(author, &sid, at, gen_payload(&mut next, &sid, &ch, target, at)));
+            }
+            let cut = next(len) as usize;
+            // Each op with whether the owner folded it before its checkpoint.
+            let mut kept: Vec<(CrdtOp, bool)> = ops.into_iter().enumerate().map(|(i, o)| (o, i < cut && next(10) < 6)).collect();
+            for _round in 0..12 {
+                let mut owner = owner0.clone();
+                owner.ingest_remote(&kept.iter().filter(|(_, s)| *s).map(|(o, _)| o.clone()).collect::<Vec<_>>());
+                let owner_folded: Vec<OpKey> = owner.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+                let cp = checkpoint(&mut owner);
+                let all: Vec<CrdtOp> = kept.iter().map(|(o, _)| o.clone()).collect();
+                let mut r = joiner(&sid, 9);
+                r.ingest_remote(&history);
+                r.ingest_remote(std::slice::from_ref(&cp));
+                r.ingest_remote(&all);
+                let mut fresh = joiner(&sid, 7);
+                fresh.ingest_remote(&[history[0].clone(), cp.clone()]);
+                fresh.ingest_remote(&all);
+                let mut oracle = joiner(&sid, 8);
+                oracle.ingest_remote(&history);
+                oracle.ingest_remote(&all);
+                let judge = r.base.clone().unwrap();
+                let in_log = |s: &ServerState, o: &CrdtOp| s.op_log.iter().any(|x| x.author == o.author && x.hlc == o.hlc);
+                // The verdict an op got where it was decided (the owner's fold for what the
+                // base holds, the rebase for the rest) against the one history gives it.
+                let differ = kept.iter().position(|(o, seen)| {
+                    let decided = if judge.judge().dominates(o, true) || *seen {
+                        owner_folded.contains(&(o.author.clone(), o.hlc.clone()))
+                    } else {
+                        in_log(&r, o)
+                    };
+                    decided != in_log(&oracle, o)
+                });
+                match differ {
+                    Some(i) => {
+                        kept.remove(i);
+                    }
+                    None => {
+                        let (rv, ov) = (view(&r), view(&oracle));
+                        let diff: Vec<String> = rv
+                            .as_object()
+                            .unwrap()
+                            .iter()
+                            .filter(|(k, v)| ov.get(k.as_str()) != Some(v))
+                            .map(|(k, v)| format!("{k}: rebase {v} / history {}", ov.get(k.as_str()).unwrap_or(&serde_json::Value::Null)))
+                            .collect();
+                        let names: Vec<String> = kept
+                            .iter()
+                            .map(|(o, seen)| format!("{}@{} by {}{}", payload_name(&o.payload), o.hlc.physical_ms - t, &o.author[o.author.len() - 4..], if *seen { " (owner saw)" } else { "" }))
+                            .collect();
+                        assert!(diff.is_empty(), "rebase and history differ: {diff:#?}\nops {names:#?}");
+                        assert_eq!(view(&fresh), rv, "a joiner holding only the base and the late ops differs\nops {names:#?}");
+                        compared += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(compared > 100, "too few cases compared: {compared}");
+    }
+
+    /// One random payload of U10's generator: every kind the fold can take on top of a base.
+    fn gen_payload(next: &mut impl FnMut(u64) -> u64, sid: &str, ch: &str, target: u8, at: u64) -> P {
+        let chans = [ch.to_string(), format!("{}-c1", &sid[..8])];
+        let c = chans[next(2) as usize].clone();
+        let label = ["l1", "l2"][next(2) as usize].to_string();
+        let roles = [MemberRole::Admin, MemberRole::Moderator, MemberRole::Member];
+        match next(36) {
+            0 => P::ServerRenamed { new_name: format!("n{}", next(4)) },
+            1 => P::ServerSettingChanged { key: "is_private".into(), value: ["true", "false"][next(2) as usize].into() },
+            2 => P::RolePermissionsChanged { role: "member".into(), permissions: crate::crdt::operations::Permission::MANAGE_CHANNELS * next(2) as u32 },
+            3 => P::MemberMuted { peer_id: id(target), expires_at: u64::MAX },
+            4 => P::MemberUnmuted { peer_id: id(target) },
+            5 => P::ChannelGrantSet { channel_id: c, peer_id: id(target), expires_at: u64::MAX },
+            6 => P::ChannelGrantRevoked { channel_id: c, peer_id: id(target) },
+            7 => P::MemberBanned { peer_id: id(target), seen: None },
+            8 => P::MemberUnbanned { peer_id: id(target) },
+            9 => P::RoleChanged { peer_id: id(target), role: roles[next(3) as usize].clone(), priority: 1 },
+            10 => P::NicknameChanged { peer_id: id(target), nickname: format!("k{}", next(4)) },
+            11 => P::TwitchUsernameChanged { peer_id: id(target), twitch_username: format!("tw{}", next(4)) },
+            12 => P::StoragePledgeChanged { peer_id: id(target), pledge_bytes: next(4) },
+            13 => P::MemberAdded {
+                peer_id: id(target),
+                display_name: "m".into(),
+                follow: None,
+                ask: Some(crate::crdt::operations::JoinAsk::sign(sid, at as i64 - next(3) as i64 * 5, &keys(target).0)),
+            },
+            14 => P::MemberRemoved { peer_id: id(target), seen: None },
+            15 => P::ChannelAdded { channel_id: chans[1].clone(), name: "c1".into(), category: None, channel_type: "text".into() },
+            16 => P::ChannelRemoved { channel_id: c },
+            17 => P::ChannelRenamed { channel_id: c, new_name: format!("r{}", next(4)) },
+            18 => P::ChannelPostingChanged { channel_id: c, posting: ["moderator", "everyone"][next(2) as usize].into() },
+            19 => P::ChannelSlowModeChanged { channel_id: c, seconds: next(3) as u32 },
+            20 => P::ChannelMediaOnlyChanged { channel_id: c, media_only: next(2) == 0 },
+            21 => P::ChannelPostingLabelsChanged { channel_id: c, labels: vec![label] },
+            22 => P::ChannelPublicChanged { channel_id: c, is_public: next(2) == 0 },
+            23 => P::ChannelVisibilityChanged { channel_id: c, visibility: ["moderator", "everyone"][next(2) as usize].into() },
+            24 => P::ChannelVisibilityLabelsChanged { channel_id: c, labels: if next(2) == 0 { vec![] } else { vec![label] } },
+            25 => P::ChannelLayoutUpdated { layout_json: format!("[{{\"type\":\"separator\"}}{}]", ",{\"type\":\"separator\"}".repeat(next(2) as usize)) },
+            26 => P::MessagePinned { channel_id: c, message_id: format!("m{}", next(3)) },
+            27 => P::MessageUnpinned { channel_id: c, message_id: format!("m{}", next(3)) },
+            28 => P::LabelCreated { label_id: label, name: "L".into(), color: "#fff".into(), access: false },
+            29 => P::LabelUpdated { label_id: label, name: format!("L{}", next(3)), color: "#000".into(), access: None },
+            30 => P::LabelDeleted { label_id: label },
+            31 => P::LabelAssigned { label_id: label, peer_id: id(target) },
+            32 => P::LabelUnassigned { label_id: label, peer_id: id(target) },
+            33 => P::EmojiAdded { name: format!("e{}", next(3)), hash: format!("{:064x}", next(3)), animated: false },
+            34 => P::EmojiRemoved { name: format!("e{}", next(3)) },
+            _ => match next(4) {
+                3 => P::JoinKeySet { secret: crate::crdt::operations::JoinSecret(format!("{:064x}", next(3) + 1)) },
+                0 => P::StickerAdded { hash: format!("{:064x}", next(3)), name: "s".into(), pack: "p".into(), animated: false, w: 1, h: 1 },
+                1 => P::StickerRemoved { hash: format!("{:064x}", next(3)) },
+                _ => P::ChannelVoiceChatChanged { channel_id: c, mode: crate::crdt::server_state::VoiceChat::Server },
+            },
+        }
+    }
+
+    /// U10's generator covers every payload kind but the four judged on their own: the
+    /// founding op, checkpoints, deletion and the join lock (`a_join_lock_op_*`).
+    #[test]
+    fn the_oracle_generates_every_payload_kind() {
+        let src = include_str!("fold.rs");
+        let ops = include_str!("operations.rs");
+        let start = ops.find("pub enum CrdtPayload").unwrap();
+        let body = &ops[start..start + ops[start..].find("\n}\n").unwrap()];
+        let variants: Vec<&str> = body
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim();
+                let name = l.split(|c: char| !c.is_alphanumeric()).next()?;
+                (name.chars().next()?.is_uppercase() && (l.ends_with('{') || l.ends_with(',') && !l.contains(':'))).then_some(name)
+            })
+            .collect();
+        assert!(variants.len() > 40, "parsed {variants:?}");
+        let gen_at = src.find("fn gen_payload").unwrap();
+        let generator = &src[gen_at..gen_at + src[gen_at..].find("\n    }\n").unwrap()];
+        for v in variants {
+            if ["ServerCreated", "ServerCheckpoint", "ServerDeleted", "JoinLock"].contains(&v) {
+                continue;
+            }
+            assert!(generator.contains(&format!("P::{v} ")), "U10 never generates {v}");
+        }
+    }
+
+    /// U13: past the budget, shares are max-min over charge groups (a puppet tree charges
+    /// the member who started it), the same in every order; the leader's admissions and an
+    /// honest admin's ops stay folded; a flood row once admitted is parked, never deleted.
+    #[test]
+    fn quota_shares_are_order_independent_and_park_never_delete() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut flood = Vec::new();
+        for p in 0..20u8 {
+            let tag = 40 + p;
+            flood.push(op_at(4, &sid, t + 1000 + p as u64, readd(&sid, tag, (t + 1000) as i64)));
+            for k in 0..40u64 {
+                let at = t + 2000 + p as u64 * 100 + k;
+                flood.push(op_at(tag, &sid, at, P::NicknameChanged { peer_id: id(tag), nickname: "x".repeat(400) + &k.to_string() }));
+            }
+        }
+        let honest = vec![
+            op_at(2, &sid, t + 9000, P::ServerRenamed { new_name: "honest".into() }),
+            op_at(1, &sid, t + 9001, readd(&sid, 7, (t + 9001) as i64)),
+        ];
+        let mut a = joiner(&sid, 9);
+        a.ingest_remote(&history);
+        a.ingest_remote(std::slice::from_ref(&cp));
+        a.ingest_remote(&flood[..200]);
+        let early_rows = a.served_log().len();
+        a.ingest_remote(&flood[200..]);
+        a.ingest_remote(&honest);
+        let mut b = joiner(&sid, 8);
+        b.ingest_remote(&history);
+        b.ingest_remote(&honest);
+        let mut rev = flood.clone();
+        rev.reverse();
+        b.ingest_remote(&rev);
+        b.ingest_remote(std::slice::from_ref(&cp));
+        for s in [&a, &b] {
+            assert_eq!(s.name(), "honest", "an honest admin's op stays folded");
+            assert!(s.is_member(&id(7)), "the leader's admission stays folded: joins go on");
+            let folded = s.op_log.iter().filter(|o| matches!(o.payload, P::NicknameChanged { .. })).count();
+            assert!(folded < 20 * 40, "the flood is bounded: {folded}");
+        }
+        assert_eq!(view(&a), view(&b), "the shares depend on the set, never the order");
+        assert_eq!(keys_of(&a), keys_of(&b));
+        let parked: Vec<&CrdtOp> = a.stored.iter().filter(|(_, k)| matches!(k, RowKind::Parked(_))).map(|(o, _)| o).collect();
+        let bytes: usize = parked.iter().map(|o| op_size(o)).sum();
+        assert!(!parked.is_empty() && bytes <= PARK_GROUP_BYTES, "a once-admitted row over the share is parked, within its group's bound ({bytes})");
+        assert!(a.served_log().len() + parked.len() < early_rows + flood.len(), "the rest of the flood is no row at all");
+    }
+
+    /// U6: junk stays bounded: a stranger's and a non-member's ops never become rows, and
+    /// a member's backdated own-leave flood lands once.
+    #[test]
+    fn junk_below_a_checkpoint_stays_bounded() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        let rows = r.served_log().len();
+        let junk: Vec<CrdtOp> = (0..400u64)
+            .map(|i| op_at(70 + (i % 3) as u8, &sid, t + 10 + i, P::ServerRenamed { new_name: format!("j{i}") }))
+            .collect();
+        let out = r.ingest_remote(&junk);
+        assert!(out.rows.is_empty() && r.held.len() <= HELD_CAP);
+        let leaves: Vec<CrdtOp> = (0..300u64).map(|i| op_at(4, &sid, t + 6 + i, P::MemberRemoved { peer_id: id(4), seen: None })).collect();
+        r.ingest_remote(&leaves);
+        assert!(!r.is_member(&id(4)));
+        assert_eq!(r.served_log().len(), rows + 1, "one leave lands, the rest are refused and stored nowhere");
+        assert!(r.held.len() <= HELD_CAP);
+    }
+
+
+    /// U16: a 0.13 log loads: its checkpoint (no stamps) is a generation-0 base whose
+    /// `covers` decides everything at or below it, exactly 0.13's rule once; ops after it
+    /// fold on top; the owner owes a stamped child; 0.13 state fields load.
+    #[test]
+    fn a_0_13_log_and_checkpoint_load_and_seed_stamps() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let ch = general(&owner);
+        let mut old = owner.lean_snapshot();
+        *old.stamps = Default::default();
+        old.member_events.clear();
+        old.cp_stamped = false;
+        let covers = HlcTimestamp { physical_ms: t + 50, counter: 0, actor: id(1) };
+        let mut json: serde_json::Value = serde_json::to_value(&old).unwrap();
+        json["standing_folded"] = serde_json::json!(true);
+        json["late_leaves"] = serde_json::json!([["x", covers]]);
+        let cp = owner.author_checked(P::ServerCheckpoint { state: json.to_string(), covers: covers.clone() });
+        let cp = cp.unwrap_or_else(|| op_at(1, &sid, t + 60, P::ServerCheckpoint { state: json.to_string(), covers: covers.clone() }));
+        let below = op_at(2, &sid, t + 40, P::ChannelRenamed { channel_id: ch.clone(), new_name: "below".into() });
+        let above = op_at(2, &sid, t + 70, P::ChannelRenamed { channel_id: ch.clone(), new_name: "above".into() });
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&[cp.clone(), below.clone()]);
+        assert_eq!(r.base.as_ref().map(|b| b.generation), Some(0));
+        assert_eq!(r.channels[&ch].name, "general", "at or below covers is decided, as 0.13 did");
+        r.ingest_remote(std::slice::from_ref(&above));
+        assert_eq!(r.channels[&ch].name, "above");
+        assert!(r.checkpoint_due(&id(1), crate::crdt::hlc::wall_clock_ms()) || r.current_owner().as_deref() != Some(id(1).as_str()));
+        let mut back: ServerState = serde_json::from_value(json).expect("a 0.13 state with retired fields loads");
+        back.set_hlc(Hlc::new(id(9)));
+        let mut child = owner.clone();
+        child.ingest_remote(std::slice::from_ref(&cp));
+        assert!(child.checkpoint_due(&id(1), crate::crdt::hlc::wall_clock_ms()), "a 0.13 base is due a stamped child");
+        let c1 = checkpoint(&mut child);
+        let mut s = joiner(&sid, 8);
+        s.ingest_remote(&history);
+        s.ingest_remote(&[cp, c1, below, above]);
+        assert_eq!(s.base.as_ref().map(|b| (b.generation, b.state.cp_stamped)), Some((1, true)));
+        assert_eq!(s.channels[&ch].name, "above");
+    }
+
+    /// U17: the checkpoint of a 512-identity server stays small.
+    #[test]
+    fn a_checkpoint_of_512_identities_stays_small() {
+        let (mut owner, _, t) = staffed();
+        let sid = owner.server_id.clone();
+        let mut ops = Vec::new();
+        for i in 0..512u32 {
+            let (kp, who, _) = crate::crdt::testkeys::keys_n(i + 1000);
+            let at = t + 100 + i as u64 * 4;
+            let ask = crate::crdt::operations::JoinAsk::sign(&sid, at as i64, &kp);
+            ops.push(op_at(1, &sid, at, P::MemberAdded { peer_id: who.clone(), display_name: format!("member {i}"), follow: None, ask: Some(ask) }));
+            ops.push(op_at(1, &sid, at + 1, P::NicknameChanged { peer_id: who.clone(), nickname: format!("nick {i}") }));
+            ops.push(op_at(1, &sid, at + 2, P::StoragePledgeChanged { peer_id: who, pledge_bytes: 1 << 30 }));
+        }
+        owner.ingest_remote(&ops);
+        assert!(owner.members.len() >= 512);
+        let size = owner.checkpoint_json(&id(1), &[], crate::crdt::hlc::wall_clock_ms()).unwrap().len();
+        // Measured 2026-11-01: 749,830 bytes (members, roles, nicknames, pledges, spans, events).
+        assert!(size < 1_000_000, "a 512-identity checkpoint is {size} bytes");
+    }
+
+
+    /// M2: the F1 cascade (B admits C, B's leave reaches the owner, the owner's checkpoint
+    /// never saw the admission): C's replica parks its own admission and asks again; a
+    /// real removal of C after it never triggers that, nor a member.
+    #[test]
+    fn a_refused_own_admission_triggers_the_silent_reask_and_a_removal_does_not() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let admit_c = op_at(4, &sid, t + 10, readd(&sid, 8, (t + 10) as i64));
+        let leave_b = op_at(4, &sid, t + 20, P::MemberRemoved { peer_id: id(4), seen: None });
+        let mut c = joiner(&sid, 8);
+        c.ingest_remote(&history);
+        c.ingest_remote(std::slice::from_ref(&admit_c));
+        assert!(c.is_member(&id(8)) && !c.refused_own_admission(&id(8)));
+        owner.ingest_remote(std::slice::from_ref(&leave_b));
+        let cp = checkpoint(&mut owner);
+        c.ingest_remote(&[leave_b, cp.clone()]);
+        assert!(!c.is_member(&id(8)), "today's authority refuses an admission by someone gone");
+        assert!(c.refused_own_admission(&id(8)), "C asks again");
+        let mut kicked = c.clone();
+        kicked.ingest_remote(&[op_at(1, &sid, t + 30, readd(&sid, 8, (t + 30) as i64)), op_at(1, &sid, t + 40, P::MemberRemoved { peer_id: id(8), seen: None })]);
+        assert!(!kicked.refused_own_admission(&id(8)), "a real removal after it never triggers a re-ask");
+    }
+
+
+    /// M5: a checkpoint is a base only with its generation its parent's plus one, the
+    /// parent held; one naming a parent we lack waits in `held`.
+    #[test]
+    fn a_checkpoint_with_a_wrong_generation_or_a_missing_parent_is_no_base() {
+        let (mut owner, history, _) = staffed();
+        let sid = owner.server_id.clone();
+        let c1 = checkpoint(&mut owner);
+        let forge = |owner: &mut ServerState, generation: u64, parent: Option<String>| {
+            let mut st: ServerState = serde_json::from_str(&owner.checkpoint_json(&id(1), &[], 0).unwrap()).unwrap();
+            st.cp_generation = generation;
+            st.cp_parent = parent;
+            let covers = owner.checkpoint_covers();
+            owner.create_op(P::ServerCheckpoint { state: serde_json::to_string(&st).unwrap(), covers })
+        };
+        let wrong = forge(&mut owner, 7, Some(hex::encode(c1.content_hash())));
+        let orphan = forge(&mut owner, 2, Some(hex::encode([9u8; 32])));
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&[c1.clone(), wrong, orphan]);
+        assert_eq!(r.base.as_ref().map(|b| b.hash), Some(c1.content_hash()), "only the well-formed child of a held parent is a base");
+        assert!(r.held.iter().any(|(o, _)| matches!(o.payload, P::ServerCheckpoint { .. })), "an orphan waits for its parent");
+    }
+
+    /// M1: the writer rule wants two other identities' finished digest rounds, one a
+    /// moderator or above or owner-admitted; or every other member of a small server.
+    #[test]
+    fn the_owner_checkpoints_only_after_two_witnesses_one_vouched() {
+        let (owner, _, _) = staffed();
+        let mut s = owner.clone();
+        let sid = s.server_id.clone();
+        let t = s.op_log.last().unwrap().hlc.physical_ms;
+        s.ingest_remote(&[op_at(4, &sid, t + 10, readd(&sid, 9, (t + 10) as i64)), op_at(9, &sid, t + 11, readd(&sid, 10, (t + 11) as i64))]);
+        let w = |ids: &[u8]| ids.iter().map(|i| id(*i)).collect::<HashSet<String>>();
+        assert!(!s.checkpoint_witnessed(&id(1), &w(&[4])), "one identity");
+        assert!(!s.checkpoint_witnessed(&id(1), &w(&[9, 10])), "a puppet and the puppet it admitted");
+        assert!(s.checkpoint_witnessed(&id(1), &w(&[4, 3])), "one of them a moderator");
+        assert!(s.checkpoint_witnessed(&id(1), &w(&[2, 3, 4, 9, 10])), "every other member");
+        let (small, _) = founded(1);
+        let mut small = small;
+        let sid = small.server_id.clone();
+        let t = small.op_log[0].hlc.physical_ms;
+        small.ingest_remote(&[op_at(1, &sid, t + 1, add(&sid, 2))]);
+        assert!(small.checkpoint_witnessed(&id(1), &w(&[2])), "a two-member server can checkpoint");
+    }
+
+    /// U2 for every element kind the base dates with its own stamp: channels, the public
+    /// flag, pins, emotes and label assignments. An admin's ops the owner never saw land
+    /// on every replica as history folds them; an assignment older than the label's
+    /// deletion stays gone after the label is made again, and a restriction older than a
+    /// later visibility write still takes the channel off the public list (HOL-SEC-094),
+    /// also when it held its field across the owner's later `public` write, and not when
+    /// the owner's own visibility write ended it before that.
+    #[test]
+    fn a_checkpoint_keeps_late_writes_to_every_stamped_element() {
+        let (mut owner, mut history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let ch = general(&owner);
+        let [c2, c3, c4, c5] = ["c2", "c3", "c4", "c5"].map(|c| format!("{}-{c}", &sid[..8]));
+        let text = |c: &str| P::ChannelAdded { channel_id: c.into(), name: "c".into(), category: None, channel_type: "text".into() };
+        let vis = |c: &str, v: &str| P::ChannelVisibilityChanged { channel_id: c.into(), visibility: v.into() };
+        let public = |c: &str| P::ChannelPublicChanged { channel_id: c.into(), is_public: true };
+        let seen = vec![
+            op_at(1, &sid, t + 6, text(&c2)),
+            op_at(1, &sid, t + 7, text(&c3)),
+            op_at(1, &sid, t + 8, text(&c4)),
+            op_at(1, &sid, t + 9, vis(&c4, "everyone")),
+            op_at(1, &sid, t + 10, text(&c5)),
+            op_at(1, &sid, t + 27, public(&c5)),
+            op_at(1, &sid, t + 36, P::ChannelVisibilityLabelsChanged { channel_id: c5.clone(), labels: vec![] }),
+            op_at(1, &sid, t + 35, vis(&c3, "everyone")),
+            op_at(1, &sid, t + 40, public(&c3)),
+            op_at(1, &sid, t + 41, public(&c4)),
+            op_at(1, &sid, t + 50, vis(&c4, "everyone")),
+            op_at(1, &sid, t + 20, P::LabelCreated { label_id: "l1".into(), name: "L".into(), color: "#fff".into(), access: false }),
+            op_at(1, &sid, t + 24, P::LabelDeleted { label_id: "l1".into() }),
+            op_at(1, &sid, t + 26, P::LabelCreated { label_id: "l1".into(), name: "L".into(), color: "#fff".into(), access: false }),
+            op_at(1, &sid, t + 30, P::ChannelPublicChanged { channel_id: c2.clone(), is_public: true }),
+            op_at(1, &sid, t + 32, P::ChannelVisibilityChanged { channel_id: c2.clone(), visibility: "everyone".into() }),
+        ];
+        owner.ingest_remote(&seen);
+        history.extend(seen);
+        let c1 = format!("{}-c1", &sid[..8]);
+        let unseen = vec![
+            op_at(2, &sid, t + 11, P::ChannelAdded { channel_id: c1.clone(), name: "c1".into(), category: None, channel_type: "text".into() }),
+            op_at(2, &sid, t + 12, P::ChannelPublicChanged { channel_id: ch.clone(), is_public: true }),
+            op_at(2, &sid, t + 13, P::MessagePinned { channel_id: ch.clone(), message_id: "m1".into() }),
+            op_at(2, &sid, t + 14, P::EmojiAdded { name: "e1".into(), hash: format!("{:064x}", 7), animated: false }),
+            op_at(2, &sid, t + 22, P::LabelAssigned { label_id: "l1".into(), peer_id: id(4) }),
+            op_at(2, &sid, t + 31, P::ChannelVisibilityChanged { channel_id: c2.clone(), visibility: "moderator".into() }),
+            op_at(2, &sid, t + 33, vis(&c3, "moderator")),
+            op_at(2, &sid, t + 34, vis(&c4, "moderator")),
+            op_at(2, &sid, t + 29, P::ChannelVisibilityLabelsChanged { channel_id: c5.clone(), labels: vec!["l1".into()] }),
+        ];
+        let cp = checkpoint(&mut owner);
+        let mut before = joiner(&sid, 9);
+        before.ingest_remote(&history);
+        before.ingest_remote(&unseen);
+        before.ingest_remote(std::slice::from_ref(&cp));
+        let mut after = joiner(&sid, 8);
+        after.ingest_remote(&history);
+        after.ingest_remote(std::slice::from_ref(&cp));
+        after.ingest_remote(&unseen);
+        owner.ingest_remote(&unseen);
+        let mut fresh = joiner(&sid, 6);
+        fresh.ingest_remote(&[history[0].clone(), cp.clone()]);
+        fresh.ingest_remote(&unseen);
+        let late_assignment = &unseen[4];
+        assert!(after.base.as_ref().unwrap().judge().dominates(late_assignment, true), "the label's deletion decides the late assignment");
+        assert!(!after.op_log.iter().any(|o| o.hlc == late_assignment.hlc), "a decided assignment never folds");
+        let mut oracle = joiner(&sid, 7);
+        oracle.ingest_remote(&history);
+        oracle.ingest_remote(&unseen);
+        for (who, s) in [("history", &oracle), ("before", &before), ("after", &after), ("owner", &owner), ("fresh", &fresh)] {
+            assert!(s.channels.contains_key(&c1), "{who}: the admin's channel lands");
+            assert!(s.channels[&ch].is_public, "{who}: the admin's public flag lands");
+            assert_eq!(s.pinned_messages.get(&ch).map(Vec::as_slice), Some(&["m1".to_string()][..]), "{who}: the admin's pin lands");
+            assert!(s.emotes.contains_key("e1"), "{who}: the admin's emote lands");
+            assert!(s.label_assignments.get(&id(4)).is_none_or(|l| l.is_empty()), "{who}: the deletion took the label back");
+            assert!(!s.channels[&c2].is_public, "{who}: the restriction closed the channel for good");
+            assert!(s.channels[&c3].is_public, "{who}: a restriction ended before the public write closes nothing");
+            assert!(!s.channels[&c4].is_public, "{who}: a restriction held across the public write closed it");
+            assert!(!s.channels[&c5].is_public, "{who}: a label gate closes it like a visibility tier");
+            assert_eq!(view(s), view(&oracle), "{who}: the rebase equals the fold from history");
+        }
+    }
+
+    /// A field write older than its channel's re-creation is decided by the base: it
+    /// drops at the door instead of taking a row (the apply arm refuses it too).
+    #[test]
+    fn a_field_write_before_a_channel_was_made_again_drops_at_the_door() {
+        let (mut owner, mut history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let ch = general(&owner);
+        let seen = vec![
+            op_at(1, &sid, t + 20, P::ChannelRemoved { channel_id: ch.clone() }),
+            op_at(1, &sid, t + 21, P::ChannelAdded { channel_id: ch.clone(), name: "again".into(), category: None, channel_type: "text".into() }),
+        ];
+        owner.ingest_remote(&seen);
+        history.extend(seen);
+        let late = op_at(2, &sid, t + 15, P::ChannelRenamed { channel_id: ch.clone(), new_name: "late".into() });
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        assert!(r.base.as_ref().unwrap().judge().dominates(&late, true), "the re-creation decides it");
+        r.ingest_remote(std::slice::from_ref(&late));
+        assert!(!r.op_log.iter().any(|o| o.hlc == late.hlc), "a decided op never folds");
+        let mut oracle = joiner(&sid, 7);
+        oracle.ingest_remote(&history);
+        oracle.ingest_remote(std::slice::from_ref(&late));
+        assert_eq!(r.channels[&ch].name, "again");
+        assert_eq!(view(&r), view(&oracle));
+    }
+
+    /// Whatever the base calls decided changes nothing when folded on top of it anyway,
+    /// for every payload kind the generator makes; and the public flag's stamp is never
+    /// older than either visibility field's (both arms date it).
+    #[test]
+    fn an_op_the_base_decides_changes_nothing_on_top_of_it() {
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let mut decided = 0;
+        let mut kinds = HashSet::new();
+        let mut bad = std::collections::BTreeSet::new();
+        for _case in 0..120 {
+            let (owner0, _, t) = staffed();
+            let sid = owner0.server_id.clone();
+            let ch = general(&owner0);
+            let mut owner = owner0.clone();
+            let len = 10 + next(30);
+            let seen: Vec<CrdtOp> = (0..len)
+                .map(|i| {
+                    let at = t + 20 + i * 4;
+                    let author = [1u8, 1, 2, 3, 4][next(5) as usize];
+                    let target = [2u8, 3, 4, 5, 6][next(5) as usize];
+                    op_at(author, &sid, at, gen_payload(&mut next, &sid, &ch, target, at))
+                })
+                .collect();
+            owner.ingest_remote(&seen);
+            checkpoint(&mut owner);
+            let base = owner.base.clone().unwrap();
+            for c in base.state.stamps.channels.values() {
+                for f in [&c.visibility, &c.vis_labels] {
+                    assert!(c.public >= *f, "is_public dated before a visibility write: {c:?}");
+                }
+            }
+            for _probe in 0..40 {
+                let at = t + 18 + next(len * 4 + 4);
+                let author = [1u8, 2, 3, 4][next(4) as usize];
+                let target = [2u8, 3, 4, 5, 6][next(5) as usize];
+                let mut o = op_at(author, &sid, at, gen_payload(&mut next, &sid, &ch, target, at));
+                o.hlc.counter = 1 + next(2) as u32;
+                let (kp, _, pk) = keys(author);
+                o.sign(&kp, &pk);
+                if !base.judge().dominates(&o, true) {
+                    continue;
+                }
+                let mut s = (*base.state).clone();
+                if s.op_allowed(&o) {
+                    s.apply_payload(&o);
+                }
+                if view(&s) != view(&base.state) {
+                    bad.insert(payload_name(&o.payload));
+                }
+                decided += 1;
+                kinds.insert(payload_name(&o.payload));
+            }
+        }
+        assert!(bad.is_empty(), "decided ops that changed the base: {bad:?}");
+        assert!(decided > 500 && kinds.len() > 25, "too few decided probes: {decided} over {} kinds", kinds.len());
+    }
+
+    /// U13, owner away: the admin answering joins is not the base's first position, yet
+    /// its admissions keep folding while twenty members flood their own shares, the same
+    /// on replicas that got the ops in opposite orders.
+    #[test]
+    fn an_admin_answering_joins_while_the_owner_is_away_keeps_them_going_through_a_flood() {
+        let (mut owner, mut history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let flooders: Vec<u8> = (40..60).collect();
+        let admitted: Vec<CrdtOp> = flooders.iter().map(|&f| op_at(1, &sid, t + 10 + f as u64, add(&sid, f))).collect();
+        owner.ingest_remote(&admitted);
+        history.extend(admitted);
+        let cp = checkpoint(&mut owner);
+        let mut flood = Vec::new();
+        for &f in &flooders {
+            for k in 0..20u64 {
+                flood.push(op_at(f, &sid, t + 1000 + f as u64 * 100 + k, P::NicknameChanged { peer_id: id(f), nickname: "x".repeat(500) + &k.to_string() }));
+            }
+        }
+        let joins: Vec<CrdtOp> = (100..140u8).map(|j| op_at(2, &sid, t + 5000 + j as u64, readd(&sid, j, (t + 5000 + j as u64) as i64))).collect();
+        let mut a = joiner(&sid, 9);
+        a.ingest_remote(&history);
+        a.ingest_remote(std::slice::from_ref(&cp));
+        a.ingest_remote(&flood);
+        a.ingest_remote(&joins);
+        let mut b = joiner(&sid, 8);
+        b.ingest_remote(&history);
+        let mut rev: Vec<CrdtOp> = joins.iter().chain(&flood).cloned().collect();
+        rev.reverse();
+        b.ingest_remote(&rev);
+        b.ingest_remote(std::slice::from_ref(&cp));
+        for (who, s) in [("tail", &a), ("reversed", &b)] {
+            let kept = (100..140u8).filter(|&j| s.is_member(&id(j))).count();
+            let held = s.held.iter().filter(|(o, _)| matches!(o.payload, P::MemberAdded { .. })).count();
+            assert_eq!(kept, 40, "{who}: every admission by the acting leader folds ({held} held)");
+            let folded = s.op_log.iter().filter(|o| matches!(o.payload, P::NicknameChanged { .. })).count();
+            assert!(folded < flooders.len() * 20, "the flood is bounded: {folded}");
+            let bytes: usize = s.op_log.iter().filter(|o| o.hlc.physical_ms > t + 900).map(|o| serde_json::to_string(o).unwrap().len()).sum();
+            assert!(bytes <= QUOTA_BYTES, "the staff budget comes out of the whole budget: {bytes}");
+        }
+        assert_eq!(view(&a), view(&b));
+    }
+
+    /// Decision 4's measurement: three months of a busy 512-identity server with the owner
+    /// away and one admin answering every join (60 admissions and 60 lock moves a day,
+    /// each move sealed to 16 staff devices; 40 joiner renames, 20 leaves, 20 moderator acts
+    /// a day), sized from real signed ops against the shipping budget. The admin's
+    /// admissions and moves fit the staff budget, for two months with 64 grants a move; the rest fits
+    /// the budget with no flood, and keeps above the floor beside 512 members flooding.
+    #[test]
+    fn three_months_of_an_honest_admin_fit_the_shipping_budget() {
+        const BUDGET: usize = 128 << 20;
+        const FLOOR: usize = 128 << 10;
+        const LEAD: usize = 64 << 20;
+        let src = include_str!("fold.rs");
+        for line in ["QUOTA_BYTES: usize = 128 << 20;", "QUOTA_FLOOR_BYTES: usize = 128 << 10;", "QUOTA_LEADER_BYTES: usize = 64 << 20;"] {
+            assert!(src.contains(&format!("pub(crate) const {line}")), "the shipping constant moved: {line}");
+        }
+        let (owner, _, t) = staffed();
+        let sid = owner.server_id.clone();
+        let size = |op: &CrdtOp| serde_json::to_string(op).unwrap().len();
+        let lock_move = |n: u64, staff: usize| {
+            let link = crate::node::join_lock::LockLink {
+                n,
+                door: "d".repeat(43),
+                change: "c".repeat(48),
+                sig: "s".repeat(88),
+                owner: None,
+                nonce: None,
+                dev: Some(Box::new(crate::node::join_lock::LockDev { device: id(2), master: id(2), sig: "s".repeat(88) })),
+            };
+            let grants = (0..staff)
+                .map(|k| {
+                    let m = id(100 + k as u8);
+                    crate::node::join_lock::seal_grant(&sid, &link.change, &m, &m, &[7u8; 32]).unwrap()
+                })
+                .collect();
+            op_at(2, &sid, t + 100 + n, P::JoinLock { link, door: None, grants })
+        };
+        let admission = size(&op_at(2, &sid, t + 50, readd(&sid, 7, (t + 50) as i64)));
+        let (lock16, lock64) = (size(&lock_move(1, 16)), size(&lock_move(2, 64)));
+        let rename = size(&op_at(7, &sid, t + 60, P::NicknameChanged { peer_id: id(7), nickname: "n".repeat(32) }));
+        let leave = size(&op_at(7, &sid, t + 61, P::MemberRemoved { peer_id: id(7), seen: None }));
+        let moderation = size(&op_at(3, &sid, t + 62, P::MemberBanned { peer_id: id(7), seen: None }));
+        let days = 90;
+        let first16 = days * 60 * (admission + lock16);
+        let first64 = days * 60 * (admission + lock64);
+        let joiners = days * (40 * rename + 20 * leave);
+        let staff_acts = days * 20 * moderation;
+        let numbers = format!(
+            "op bytes: admission {admission}, lock move 16/64 grants {lock16}/{lock64}, rename {rename}, leave {leave}, ban {moderation}; \
+             90 days: staff-first {:.1}/{:.1} MiB, joiners' own ops {:.2} MiB, moderator acts {:.2} MiB",
+            first16 as f64 / 1048576.0,
+            first64 as f64 / 1048576.0,
+            joiners as f64 / 1048576.0,
+            staff_acts as f64 / 1048576.0
+        );
+        // At 64 grants a move the accepted claim is two months (no budget raise): what the
+        // staff wrote by then.
+        let two_months64 = first64 * 60 / days;
+        assert!(first16 <= LEAD && two_months64 <= LEAD, "an honest admin's admissions and moves outgrow the staff budget: {numbers}");
+        let quiet = fill(&[("admin", joiners), ("moderator", staff_acts)], BUDGET - first16, FLOOR);
+        assert_eq!((quiet[0], quiet[1]), (joiners, staff_acts), "no flood parks an honest op: {numbers}");
+        let names: Vec<String> = (0..512).map(|k| format!("sybil{k}")).collect();
+        let mut flood: Vec<(&str, usize)> = names.iter().map(|n| (n.as_str(), 1usize << 30)).collect();
+        flood.push(("moderator", staff_acts));
+        let squeezed = fill(&flood, BUDGET - two_months64, FLOOR);
+        assert!(squeezed[512] >= FLOOR.min(staff_acts), "beside 512 floods the moderator keeps its floor: {numbers}");
+    }
+
+    /// At the bound a flood costs no rebuild: an author already over its share stays over
+    /// whatever it adds (its demand moves no level), so its ops wait in `held` at once;
+    /// an honest author's live ops fold, and the tail ends where a whole rebuild ends.
+    #[test]
+    fn at_the_bound_a_capped_flood_costs_no_rebuild() {
+        let (mut owner, mut history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let ch = general(&owner);
+        let flooders: Vec<u8> = (40..60).collect();
+        let admitted: Vec<CrdtOp> = flooders.iter().map(|&f| op_at(1, &sid, t + 10 + f as u64, add(&sid, f))).collect();
+        owner.ingest_remote(&admitted);
+        history.extend(admitted);
+        let cp = checkpoint(&mut owner);
+        let nick = |f: u8, at: u64, k: u64| op_at(f, &sid, at, P::NicknameChanged { peer_id: id(f), nickname: "x".repeat(500) + &k.to_string() });
+        let flood: Vec<CrdtOp> = flooders.iter().flat_map(|&f| (0..20u64).map(move |k| (f, k))).map(|(f, k)| nick(f, t + 1000 + f as u64 * 100 + k, k)).collect();
+        let more: Vec<CrdtOp> = (0..20u64).flat_map(|k| flooders.iter().map(move |&f| (f, k))).map(|(f, k)| nick(f, t + 50_000 + k * 100 + f as u64, k)).collect();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        r.ingest_remote(&flood);
+        let parked = |r: &ServerState| r.stored.iter().filter(|(_, k)| matches!(k, RowKind::Parked(_))).count();
+        let rows = (r.op_log.len(), parked(&r));
+        let rebuilds = more.iter().filter(|o| r.ingest_remote(std::slice::from_ref(*o)).rebuilt).count();
+        assert_eq!(rebuilds, 0, "a capped author's op at the bound rebuilt the server");
+        assert!(!r.held.is_empty() && (r.op_log.len(), parked(&r)) == rows, "over its share it waits in held, never as a row");
+        let live: Vec<CrdtOp> = (0..12u64)
+            .map(|k| op_at(2, &sid, t + 90_000 + k, P::ChannelRenamed { channel_id: ch.clone(), new_name: format!("{k}") }))
+            .collect();
+        for op in &live {
+            r.ingest_remote(std::slice::from_ref(op));
+        }
+        assert_eq!(r.channels[&ch].name, "11", "an author under the level folds every live op");
+        let mut whole = joiner(&sid, 8);
+        whole.ingest_remote(&history);
+        whole.ingest_remote(&[cp.clone()].into_iter().chain(flood).chain(more).chain(live).collect::<Vec<_>>());
+        assert_eq!(view(&r), view(&whole), "the tail and a whole rebuild of the same set");
+    }
+
+    /// The base order puts generation before clock: a deeper chain of the owner's
+    /// checkpoints is the base though a rival of its parent's generation is later, and
+    /// that rival stays a dormant row (served, not folded), in every arrival order.
+    #[test]
+    fn a_deeper_checkpoint_chain_is_the_base_whatever_its_clock() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let c1 = checkpoint(&mut owner);
+        let covers = owner.checkpoint_covers();
+        let forge = |owner: &ServerState, generation: u64, parent: &CrdtOp, ms: u64| {
+            let mut st: ServerState = serde_json::from_str(&owner.checkpoint_json(&id(1), &[], 0).unwrap()).unwrap();
+            st.cp_generation = generation;
+            st.cp_parent = Some(hex::encode(parent.content_hash()));
+            op_at(1, &sid, ms, P::ServerCheckpoint { state: serde_json::to_string(&st).unwrap(), covers: covers.clone() })
+        };
+        let c2a = forge(&owner, 1, &c1, t + 2000);
+        let c2b = forge(&owner, 1, &c1, t + 1500);
+        let c3b = forge(&owner, 2, &c2b, t + 1600);
+        for order in [[&c1, &c2a, &c2b, &c3b], [&c3b, &c2b, &c2a, &c1], [&c2b, &c3b, &c1, &c2a]] {
+            let mut r = joiner(&sid, 9);
+            r.ingest_remote(&history);
+            for cp in order {
+                r.ingest_remote(std::slice::from_ref(cp));
+            }
+            assert_eq!(r.base.as_ref().map(|b| b.hash), Some(c3b.content_hash()), "the deeper chain is the base");
+            assert!(keys_of(&r).contains(&(c2a.author.clone(), c2a.hlc.clone())), "the later rival of the parent stays a dormant row");
+        }
+    }
+
+    /// The other half of U2 for every stamped element: an admin's write older than the
+    /// owner's newer one, which the owner never saw, changes nothing on any replica: a
+    /// rename, a removal before a channel was added, an add before it was removed, an
+    /// unpin, an unassignment, a label made before its deletion, an emote removal, a
+    /// layout, a grant before its revocation, and a nickname from before a re-admission.
+    #[test]
+    fn a_late_older_write_never_undoes_a_newer_one_on_any_element() {
+        let (mut owner, mut history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let ch = general(&owner);
+        let [c3, c4] = ["c3", "c4"].map(|c| format!("{}-{c}", &sid[..8]));
+        let text = |c: &str| P::ChannelAdded { channel_id: c.into(), name: "c".into(), category: None, channel_type: "text".into() };
+        let label = |l: &str| P::LabelCreated { label_id: l.into(), name: "L".into(), color: "#fff".into(), access: false };
+        let layout = |n: usize| P::ChannelLayoutUpdated { layout_json: format!("[{}]", vec!["{\"type\":\"separator\"}"; n].join(",")) };
+        let seen = vec![
+            op_at(1, &sid, t + 6, text(&c4)),
+            op_at(1, &sid, t + 7, label("l3")),
+            op_at(1, &sid, t + 8, label("l4")),
+            op_at(1, &sid, t + 30, P::ChannelRenamed { channel_id: ch.clone(), new_name: "new".into() }),
+            op_at(1, &sid, t + 31, text(&c3)),
+            op_at(1, &sid, t + 32, P::ChannelRemoved { channel_id: c4.clone() }),
+            op_at(1, &sid, t + 33, P::MessagePinned { channel_id: ch.clone(), message_id: "m2".into() }),
+            op_at(1, &sid, t + 34, P::LabelAssigned { label_id: "l3".into(), peer_id: id(4) }),
+            op_at(1, &sid, t + 35, P::LabelDeleted { label_id: "l4".into() }),
+            op_at(1, &sid, t + 36, P::EmojiAdded { name: "e2".into(), hash: format!("{:064x}", 9), animated: false }),
+            op_at(1, &sid, t + 37, layout(2)),
+            op_at(1, &sid, t + 38, P::ChannelGrantRevoked { channel_id: ch.clone(), peer_id: id(4) }),
+            op_at(1, &sid, t + 39, P::MemberRemoved { peer_id: id(4), seen: None }),
+            op_at(1, &sid, t + 40, readd(&sid, 4, (t + 40) as i64)),
+        ];
+        owner.ingest_remote(&seen);
+        history.extend(seen);
+        let unseen = vec![
+            op_at(4, &sid, t + 19, P::NicknameChanged { peer_id: id(4), nickname: "old".into() }),
+            op_at(2, &sid, t + 20, P::ChannelRenamed { channel_id: ch.clone(), new_name: "old".into() }),
+            op_at(2, &sid, t + 21, P::ChannelRemoved { channel_id: c3.clone() }),
+            op_at(2, &sid, t + 22, text(&c4)),
+            op_at(2, &sid, t + 23, P::MessageUnpinned { channel_id: ch.clone(), message_id: "m2".into() }),
+            op_at(2, &sid, t + 24, P::LabelUnassigned { label_id: "l3".into(), peer_id: id(4) }),
+            op_at(2, &sid, t + 25, label("l4")),
+            op_at(2, &sid, t + 26, P::EmojiRemoved { name: "e2".into() }),
+            op_at(2, &sid, t + 27, layout(1)),
+            op_at(2, &sid, t + 29, P::ChannelGrantSet { channel_id: ch.clone(), peer_id: id(4), expires_at: u64::MAX }),
+        ];
+        let cp = checkpoint(&mut owner);
+        let mut before = joiner(&sid, 9);
+        before.ingest_remote(&history);
+        before.ingest_remote(&unseen);
+        before.ingest_remote(std::slice::from_ref(&cp));
+        let mut after = joiner(&sid, 8);
+        after.ingest_remote(&history);
+        after.ingest_remote(std::slice::from_ref(&cp));
+        after.ingest_remote(&unseen);
+        owner.ingest_remote(&unseen);
+        let mut fresh = joiner(&sid, 6);
+        fresh.ingest_remote(&[history[0].clone(), cp.clone()]);
+        fresh.ingest_remote(&unseen);
+        let mut oracle = joiner(&sid, 7);
+        oracle.ingest_remote(&history);
+        oracle.ingest_remote(&unseen);
+        for (who, s) in [("history", &oracle), ("before", &before), ("after", &after), ("owner", &owner), ("fresh", &fresh)] {
+            assert_eq!(s.channels[&ch].name, "new", "{who}: rename");
+            assert!(s.channels.contains_key(&c3) && !s.channels.contains_key(&c4), "{who}: channel existence");
+            assert!(s.pinned_messages.get(&ch).is_some_and(|p| p.contains(&"m2".to_string())), "{who}: pin");
+            assert!(s.label_assignments.get(&id(4)).is_some_and(|l| l.contains(&"l3".to_string())), "{who}: assignment");
+            assert!(!s.labels.contains_key("l4") && s.emotes.contains_key("e2"), "{who}: label and emote");
+            assert_eq!(s.get_nickname(&id(4)), "", "{who}: a nickname from before the re-admission");
+            assert_eq!(view(s), view(&oracle), "{who}: the rebase equals the fold from history");
+        }
+    }
+
+    /// H2's drift rule: an admission dated before its own ask (past the clock bound) is
+    /// refused, whoever signs it.
+    #[test]
+    fn an_admission_dated_before_its_own_ask_is_refused() {
+        let (mut owner, _, t) = staffed();
+        let sid = owner.server_id.clone();
+        let ahead = (t + 50 + crate::crdt::hlc::MAX_DRIFT_MS + 1_000) as i64;
+        let early = op_at(1, &sid, t + 50, readd(&sid, 7, ahead));
+        owner.ingest_remote(std::slice::from_ref(&early));
+        assert!(!owner.is_member(&id(7)), "an ask from after the admission seated someone");
+        let fine = op_at(1, &sid, t + 51, readd(&sid, 7, (t + 51) as i64));
+        owner.ingest_remote(std::slice::from_ref(&fine));
+        assert!(owner.is_member(&id(7)), "control: the same ask in time admits");
+    }
+
+    /// H3's charge groups: a member's puppet tree charges that member, so a heavy honest
+    /// moderator keeps every op beside twenty puppets flooding.
+    #[test]
+    fn a_puppet_tree_charges_the_member_who_started_it() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut ops = Vec::new();
+        for p in 0..20u8 {
+            let tag = 40 + p;
+            ops.push(op_at(4, &sid, t + 1000 + p as u64, readd(&sid, tag, (t + 1000) as i64)));
+            for k in 0..40u64 {
+                ops.push(op_at(tag, &sid, t + 2000 + p as u64 * 100 + k, P::NicknameChanged { peer_id: id(tag), nickname: "x".repeat(500) + &k.to_string() }));
+            }
+        }
+        let honest: Vec<CrdtOp> = (0..60u64)
+            .map(|k| op_at(3, &sid, t + 9000 + k, P::NicknameChanged { peer_id: id(3), nickname: format!("{k}{}", "h".repeat(500)) }))
+            .collect();
+        ops.extend(honest.iter().cloned());
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        r.ingest_remote(&ops);
+        let kept = honest.iter().filter(|o| r.op_log.iter().any(|x| x.hlc == o.hlc)).count();
+        assert_eq!(kept, honest.len(), "the honest moderator's ops all fold");
+    }
+
+    /// The staff budget is part of the whole: past it, an admin's admissions count against
+    /// its own share, and nothing folded passes the budget.
+    #[test]
+    fn staff_admissions_past_their_budget_stay_inside_the_whole() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let joins: Vec<CrdtOp> = (0..320u32)
+            .map(|j| {
+                let (kp, jid, _) = crate::crdt::testkeys::keys_n(1000 + j);
+                let ask = crate::crdt::operations::JoinAsk::sign(&sid, (t + 5000) as i64, &kp);
+                op_at(2, &sid, t + 5000 + j as u64, P::MemberAdded { peer_id: jid, display_name: "m".repeat(200), follow: None, ask: Some(ask) })
+            })
+            .collect();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        r.ingest_remote(&joins);
+        let bytes: usize = r.op_log.iter().filter(|o| o.hlc.physical_ms >= t + 5000).map(|o| serde_json::to_string(o).unwrap().len()).sum();
+        let total: usize = joins.iter().map(|o| serde_json::to_string(o).unwrap().len()).sum();
+        assert!(total > QUOTA_BYTES && bytes <= QUOTA_BYTES, "folded {bytes} of {total}");
+    }
+
+
+    // ---- t14-cover fix round (review rev 3) ----
+
+    /// A 0.14 kick or ban that names no grant as seen.
+    fn kick(tag: u8) -> P {
+        P::MemberRemoved { peer_id: id(tag), seen: Some(Box::default()) }
+    }
+
+    fn ban(tag: u8) -> P {
+        P::MemberBanned { peer_id: id(tag), seen: Some(Box::default()) }
+    }
+
+    /// An unstamped (0.13) checkpoint of `owner` covering `covers`, as 0.13 wrote it.
+    fn checkpoint_0_13(owner: &ServerState, sid: &str, covers_ms: u64, at_ms: u64) -> CrdtOp {
+        let mut old = owner.lean_snapshot();
+        *old.stamps = Default::default();
+        old.member_events.clear();
+        old.cp_stamped = false;
+        old.retained_print = None;
+        let covers = HlcTimestamp { physical_ms: covers_ms, counter: 0, actor: id(1) };
+        op_at(1, sid, at_ms, P::ServerCheckpoint { state: serde_json::to_string(&old).unwrap(), covers })
+    }
+
+    /// Finding 1, the re-creation variants: what a 0.13 checkpoint decided by its `covers`
+    /// (a channel, a label and an emote removed and made again) stays decided on its
+    /// stamped child and grandchild, at the door and in the apply arm alike.
+    #[test]
+    fn a_stamped_child_of_a_0_13_base_keeps_what_it_made_again() {
+        let (mut owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let x = format!("{}-cx", &sid[..8]);
+        let chan = P::ChannelAdded { channel_id: x.clone(), name: "x".into(), category: None, channel_type: "text".into() };
+        let label = P::LabelCreated { label_id: "l1".into(), name: "L".into(), color: "#fff".into(), access: false };
+        let emote = P::EmojiAdded { name: "e1".into(), hash: format!("{:064x}", 3), animated: false };
+        owner.ingest_remote(&[
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, P::RoleChanged { peer_id: id(2), role: MemberRole::Admin, priority: 3 }),
+            op_at(1, &sid, t + 5, chan.clone()),
+            op_at(1, &sid, t + 6, label.clone()),
+            op_at(1, &sid, t + 7, emote.clone()),
+            op_at(1, &sid, t + 10, P::ChannelRemoved { channel_id: x.clone() }),
+            op_at(1, &sid, t + 11, P::LabelDeleted { label_id: "l1".into() }),
+            op_at(1, &sid, t + 12, P::EmojiRemoved { name: "e1".into() }),
+            op_at(1, &sid, t + 30, chan),
+            op_at(1, &sid, t + 31, label),
+            op_at(1, &sid, t + 32, emote),
+        ]);
+        let cp0 = checkpoint_0_13(&owner, &sid, t + 50, t + 60);
+        let stale = vec![
+            op_at(2, &sid, t + 20, P::ChannelRemoved { channel_id: x.clone() }),
+            op_at(2, &sid, t + 21, P::LabelDeleted { label_id: "l1".into() }),
+            op_at(2, &sid, t + 22, P::EmojiRemoved { name: "e1".into() }),
+        ];
+        let mut child = owner.clone();
+        child.ingest_remote(std::slice::from_ref(&cp0));
+        let c1 = checkpoint(&mut child);
+        child.ingest_remote(&[op_at(2, &sid, t + 70, P::ServerRenamed { new_name: "later".into() })]);
+        let c2 = checkpoint(&mut child);
+        for (generation, chain) in [(1u64, vec![cp0.clone(), c1.clone()]), (2, vec![cp0.clone(), c1.clone(), c2.clone()])] {
+            let mut r = joiner(&sid, 8);
+            r.ingest_remote(std::slice::from_ref(&founding));
+            r.ingest_remote(&chain);
+            assert_eq!(r.base.as_ref().map(|b| b.generation), Some(generation));
+            let before = view(&r);
+            let mut applied = r.clone();
+            for op in &stale {
+                applied.apply_payload(op);
+            }
+            assert_eq!(view(&applied), before, "gen {generation}: the apply arm changed what the 0.13 covers decided");
+            r.ingest_remote(&stale);
+            assert!(r.channels.contains_key(&x) && r.labels.contains_key("l1") && r.emotes.contains_key("e1"), "gen {generation}: a stale removal undid a re-creation");
+            assert!(!stale.iter().any(|o| r.op_log.iter().any(|x| x.hlc == o.hlc)), "gen {generation}: the door folded an op the floor decides");
+            assert_eq!(view(&r), before, "gen {generation}");
+        }
+    }
+
+    /// Finding 2, the tree layer alone: a member's own later op is not parked by the flood
+    /// of a puppet it admitted (the puppet is a subtree of its own inside the member's tree).
+    #[test]
+    fn a_puppets_flood_never_parks_its_admitters_own_ops() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut ops = vec![op_at(4, &sid, t + 100, readd(&sid, 60, (t + 100) as i64))];
+        ops.extend((0..30u64).map(|k| op_at(60, &sid, t + 200 + k, P::NicknameChanged { peer_id: id(60), nickname: "x".repeat(10_000) + &k.to_string() })));
+        ops.push(op_at(4, &sid, t + 400, P::NicknameChanged { peer_id: id(4), nickname: "mine".into() }));
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        r.ingest_remote(&ops);
+        assert_eq!(r.get_nickname(&id(4)), "mine", "the puppet's flood parked its admitter's own op");
+        assert!(r.get_nickname(&id(60)).len() < 20_000 || r.held.iter().any(|(o, _)| o.author == id(60)), "control: the puppet is over its share");
+    }
+
+    /// Finding 2, the staff layer alone: a moderator over its own share still bans, kicks
+    /// and mutes; those come before every share.
+    #[test]
+    fn a_staff_member_over_its_share_still_bans_and_kicks() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut ops: Vec<CrdtOp> = (0..30u64)
+            .map(|k| op_at(3, &sid, t + 100 + k, P::NicknameChanged { peer_id: id(3), nickname: "x".repeat(10_000) + &k.to_string() }))
+            .collect();
+        ops.push(op_at(3, &sid, t + 500, P::MemberMuted { peer_id: id(4), expires_at: u64::MAX }));
+        ops.push(op_at(3, &sid, t + 501, ban(4)));
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        r.ingest_remote(&ops);
+        assert!(r.op_log.iter().any(|o| o.hlc.physical_ms == t + 500), "the moderator's mute was parked");
+        assert!(r.is_banned(&id(4)), "the moderator's ban was parked");
+    }
+
+    /// A floor above the checkpoint's own `covers` would decide ops it never covered: such a
+    /// checkpoint is no base.
+    #[test]
+    fn a_checkpoint_whose_floor_passes_its_covers_is_no_base() {
+        let (mut owner, history, _) = staffed();
+        let sid = owner.server_id.clone();
+        let c1 = checkpoint(&mut owner);
+        let mut st: ServerState = serde_json::from_str(&owner.checkpoint_json(&id(1), &[], 0).unwrap()).unwrap();
+        let covers = owner.checkpoint_covers();
+        st.cp_floor = Some(HlcTimestamp { physical_ms: covers.physical_ms + 1, counter: 0, actor: String::new() });
+        let forged = owner.create_op(P::ServerCheckpoint { state: serde_json::to_string(&st).unwrap(), covers });
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&[c1.clone(), forged]);
+        assert_eq!(r.base.as_ref().map(|b| b.hash), Some(c1.content_hash()), "a floor past its covers made a base");
+    }
+
+    /// The owner's own role change at the bound moves who acts first: the tail rebuilds, so
+    /// a member it promotes has its earlier admissions counted as staff acts there as a
+    /// whole rebuild counts them.
+    #[test]
+    fn an_owner_promotion_at_the_bound_folds_as_a_whole_rebuild_does() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut ops: Vec<CrdtOp> = (0..14u64)
+            .map(|k| op_at(4, &sid, t + 100 + k, P::NicknameChanged { peer_id: id(4), nickname: "x".repeat(15_000) + &k.to_string() }))
+            .collect();
+        ops.extend((0..6u8).map(|j| op_at(4, &sid, t + 200 + j as u64, readd(&sid, 70 + j, (t + 200 + j as u64) as i64))));
+        let promote = op_at(1, &sid, t + 300, P::RoleChanged { peer_id: id(4), role: MemberRole::Moderator, priority: 3 });
+        let mut tail = joiner(&sid, 9);
+        tail.ingest_remote(&history);
+        tail.ingest_remote(std::slice::from_ref(&cp));
+        tail.ingest_remote(&ops);
+        assert!(!tail.is_member(&id(75)), "control: past its share the member's admissions wait");
+        tail.ingest_remote(std::slice::from_ref(&promote));
+        let mut whole = joiner(&sid, 8);
+        whole.ingest_remote(&history);
+        whole.ingest_remote(&[cp.clone()].into_iter().chain(ops.iter().cloned()).chain([promote]).collect::<Vec<_>>());
+        assert!(whole.is_member(&id(75)), "control: a moderator's admissions come first");
+        assert_eq!(view(&tail), view(&whole), "the tail and a whole rebuild of the same set");
+    }
+
+    /// A removal its author could not make voids nothing: a member's forged kick of an
+    /// admin leaves the admin's grants standing.
+    #[test]
+    fn a_kick_its_author_could_not_make_voids_nothing() {
+        let (owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&[op_at(2, &sid, t + 10, add(&sid, 5)), op_at(4, &sid, t + 20, kick(2))]);
+        assert!(r.is_member(&id(2)), "control: the kick is refused");
+        r.ingest_remote(&[op_at(1, &sid, t + 15, P::ServerRenamed { new_name: "rebuild".into() })]);
+        assert!(r.is_member(&id(5)), "a refused kick voided the admin's admission");
+    }
+
+    /// A legacy server folds in arrival order: nothing is "after" there, so nothing voids.
+    #[test]
+    fn a_legacy_server_voids_nothing() {
+        let (mut legacy, _) = crate::crdt::testkeys::owned_state("s-legacy", "Old", 1);
+        let sid = legacy.server_id.clone();
+        let t = crate::crdt::hlc::wall_clock_ms() - 10_000;
+        legacy.ingest_remote(&[op_at(1, &sid, t + 1, add(&sid, 2)), op_at(1, &sid, t + 10, kick(2)), op_at(1, &sid, t + 20, readd(&sid, 2, (t + 20) as i64))]);
+        assert!(legacy.is_member(&id(2)));
+        assert_eq!(legacy.anchor(), Anchor::Legacy);
+        legacy.ingest_remote(&[op_at(2, &sid, t + 5, add(&sid, 5))]);
+        assert!(legacy.is_member(&id(5)), "a legacy replica voided an op it took in arrival order");
+    }
+
+    /// An op bigger than any honest one is refused at the door, signature or not; a
+    /// checkpoint has a bound of its own, far above a 512-identity state.
+    #[test]
+    fn an_op_past_its_byte_bound_is_refused() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        let fat = op_at(1, &sid, t + 50, P::ServerRenamed { new_name: "x".repeat(MAX_OP_BYTES) });
+        let got = r.ingest_remote(std::slice::from_ref(&fat));
+        assert!(got.admitted.is_empty() && got.rejected == 1 && r.held.is_empty(), "a 1 MiB op was taken");
+        let fine = op_at(1, &sid, t + 51, P::ServerRenamed { new_name: "x".repeat(MAX_OP_BYTES - 4096) });
+        let got = r.ingest_remote(std::slice::from_ref(&fine));
+        assert_eq!(got.admitted.len(), 1, "control: under the bound ({} rejected, {} held)", got.rejected, r.held.len());
+        let covers = owner.checkpoint_covers();
+        let mut st: ServerState = serde_json::from_str(&owner.checkpoint_json(&id(1), &[], 0).unwrap()).unwrap();
+        st.name = crate::crdt::admin_lww::AdminLwwReg::new("n".repeat(MAX_CHECKPOINT_BYTES), st.name.hlc().clone(), 4);
+        let huge = owner.create_op(P::ServerCheckpoint { state: serde_json::to_string(&st).unwrap(), covers });
+        assert_eq!(r.ingest_remote(std::slice::from_ref(&huge)).rejected, 1, "a checkpoint past its bound was taken");
+        let cp = checkpoint(&mut owner);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        assert!(r.base.is_some(), "control: a real checkpoint is taken");
+    }
+
+    /// Without a checkpoint a joiner that took the founding op at the tail charges the
+    /// same trees as one that folded everything at once.
+    #[test]
+    fn a_joiner_built_op_by_op_charges_as_a_whole_rebuild_does() {
+        let (_owner, history, t) = staffed();
+        let sid = history[0].server_id.clone();
+        let mut all = history.clone();
+        all.push(op_at(1, &sid, t + 50, P::ServerRenamed { new_name: "o".repeat(200_000) }));
+        all.extend((0..10u64).map(|k| op_at(4, &sid, t + 100 + k, P::NicknameChanged { peer_id: id(4), nickname: "x".repeat(1_000) + &k.to_string() })));
+        let mut tail = joiner(&sid, 9);
+        for op in &all {
+            tail.ingest_remote(std::slice::from_ref(op));
+        }
+        let mut whole = joiner(&sid, 8);
+        whole.ingest_remote(&all);
+        assert_eq!(tail.name().len(), 200_000, "the owner is never charged");
+        assert_eq!(view(&tail), view(&whole));
+    }
+
+    /// A late leave that moves a member's current span later voids the registers written
+    /// before the new start, as a removal would have (the record changed in the past, not
+    /// at the tail), and the apply arm alone voids a register write dated before the span.
+    #[test]
+    fn a_late_leave_moving_the_span_voids_the_registers_before_it() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        owner.ingest_remote(&[
+            op_at(4, &sid, t + 10, P::NicknameChanged { peer_id: id(4), nickname: "old".into() }),
+            op_at(1, &sid, t + 40, readd(&sid, 4, (t + 40) as i64)),
+        ]);
+        assert_eq!(owner.get_nickname(&id(4)), "old", "control: a repeat admission keeps the span");
+        let cp = checkpoint(&mut owner);
+        let leave = op_at(4, &sid, t + 20, P::MemberRemoved { peer_id: id(4), seen: None });
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        r.ingest_remote(std::slice::from_ref(&leave));
+        assert!(r.is_member(&id(4)), "the admission on a newer ask opens again after the late leave");
+        assert_eq!(r.get_nickname(&id(4)), "", "a nickname from before the span the late leave moved stays");
+        let mut applied = r.clone();
+        applied.apply_payload(&op_at(4, &sid, t + 30, P::NicknameChanged { peer_id: id(4), nickname: "gap".into() }));
+        assert_eq!(applied.get_nickname(&id(4)), "", "the apply arm took a write dated before the current span");
+    }
+
+    /// The owner promoting a member whose acts are parked rows (nothing held) rebuilds:
+    /// those acts come first now, as a whole rebuild of the same set has them.
+    #[test]
+    fn an_owner_promotion_at_the_bound_counts_parked_staff_acts() {
+        let (mut owner, mut history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let admit5 = op_at(1, &sid, t + 6, add(&sid, 5));
+        owner.ingest_remote(std::slice::from_ref(&admit5));
+        history.push(admit5);
+        let cp = checkpoint(&mut owner);
+        let mut mine: Vec<CrdtOp> = (0..10u64)
+            .map(|k| op_at(4, &sid, t + 100 + k, P::NicknameChanged { peer_id: id(4), nickname: "x".repeat(14_000) + &k.to_string() }))
+            .collect();
+        mine.extend((0..6u8).map(|j| op_at(4, &sid, t + 200 + j as u64, readd(&sid, 70 + j, (t + 200 + j as u64) as i64))));
+        let theirs: Vec<CrdtOp> = (0..6u64)
+            .map(|k| op_at(5, &sid, t + 300 + k, P::NicknameChanged { peer_id: id(5), nickname: "y".repeat(15_000) + &k.to_string() }))
+            .collect();
+        let promote = op_at(1, &sid, t + 400, P::RoleChanged { peer_id: id(4), role: MemberRole::Moderator, priority: 3 });
+        let mut tail = joiner(&sid, 9);
+        tail.ingest_remote(&history);
+        tail.ingest_remote(std::slice::from_ref(&cp));
+        tail.ingest_remote(&mine);
+        tail.ingest_remote(&theirs);
+        assert!(!tail.is_member(&id(75)) && tail.held.is_empty(), "control: the member's admissions are parked rows, nothing held");
+        tail.ingest_remote(std::slice::from_ref(&promote));
+        let mut whole = joiner(&sid, 8);
+        whole.ingest_remote(&history);
+        whole.ingest_remote(&[cp].into_iter().chain(mine).chain(theirs).chain([promote]).collect::<Vec<_>>());
+        assert!(whole.is_member(&id(75)), "control: a moderator's admissions come first");
+        assert_eq!(view(&tail), view(&whole), "the tail and a whole rebuild of the same set");
+    }
+
+    /// A staff act at the bound takes its bytes out of everyone's budget: when that moves a
+    /// share below what is folded, the tail rebuilds as a whole rebuild would.
+    #[test]
+    fn a_staff_act_at_the_bound_folds_as_a_whole_rebuild_does() {
+        let (mut owner, mut history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let flooders: Vec<u8> = (40..60).collect();
+        let admitted: Vec<CrdtOp> = flooders.iter().map(|&f| op_at(1, &sid, t + 10 + f as u64, add(&sid, f))).collect();
+        owner.ingest_remote(&admitted);
+        history.extend(admitted);
+        let cp = checkpoint(&mut owner);
+        let flood: Vec<CrdtOp> = flooders
+            .iter()
+            .flat_map(|&f| (0..20u64).map(move |k| (f, k)))
+            .map(|(f, k)| op_at(f, &sid, t + 1000 + f as u64 * 100 + k, P::NicknameChanged { peer_id: id(f), nickname: "x".repeat(500) + &k.to_string() }))
+            .collect();
+        // Mutes, not admissions: no rebuild for a held op can hide the tail's own verdict.
+        let joins: Vec<CrdtOp> = (0..40u64)
+            .map(|k| op_at(3, &sid, t + 9000 + k, P::MemberMuted { peer_id: id(40 + (k % 20) as u8), expires_at: u64::MAX - k }))
+            .collect();
+        let mut tail = joiner(&sid, 9);
+        tail.ingest_remote(&history);
+        tail.ingest_remote(std::slice::from_ref(&cp));
+        tail.ingest_remote(&flood);
+        for j in &joins {
+            tail.ingest_remote(std::slice::from_ref(j));
+        }
+        let mut whole = joiner(&sid, 8);
+        whole.ingest_remote(&history);
+        whole.ingest_remote(&[cp].into_iter().chain(flood).chain(joins).collect::<Vec<_>>());
+        assert_eq!(view(&tail), view(&whole), "the tail and a whole rebuild of the same set");
+    }
+
+    /// Finding 3: a parked row past its time is deleted at the restart, not kept.
+    #[test]
+    fn a_restart_deletes_the_rows_parked_past_their_time() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        let rows: Vec<(CrdtOp, Option<u64>)> = r.op_log.iter().map(|o| (o.clone(), None)).collect();
+        let now = crate::crdt::hlc::wall_clock_ms();
+        let expired = op_at(4, &sid, t + 100, P::NicknameChanged { peer_id: id(4), nickname: "old".into() });
+        let waiting = op_at(4, &sid, t + 101, P::NicknameChanged { peer_id: id(9), nickname: "x".into() });
+        let mut restarted = joiner(&sid, 9);
+        let mut all = rows.clone();
+        all.push((expired.clone(), Some(now - 1)));
+        all.push((waiting.clone(), Some(now + PARK_MS)));
+        let restored = restarted.restore_op_log(all);
+        assert_eq!(restored.dropped, vec![(expired.author.clone(), expired.hlc.clone())], "only the expired row is deleted");
+        assert!(restarted.stored.iter().any(|(o, _)| o.hlc == waiting.hlc), "a row still within its time stays parked");
+    }
+
+    /// Finding 3: whatever a refusal or a quota parks, a charge group keeps at most
+    /// `PARK_GROUP_BYTES` of it, the oldest first.
+    #[test]
+    fn a_group_keeps_its_parked_rows_within_their_bound() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        let posts: Vec<CrdtOp> = (0..30u64)
+            .map(|k| op_at(4, &sid, t + 100 + k, P::NicknameChanged { peer_id: id(4), nickname: format!("{k:02}{}", "x".repeat(1000)) }))
+            .collect();
+        r.ingest_remote(&posts);
+        assert_eq!(r.get_nickname(&id(4)).get(..2), Some("29"), "control: they all folded");
+        r.ingest_remote(&[op_at(1, &sid, t + 50, P::MemberRemoved { peer_id: id(4), seen: None })]);
+        let parked: Vec<&CrdtOp> = r.stored.iter().filter(|(_, k)| matches!(k, RowKind::Parked(_))).map(|(o, _)| o).collect();
+        let bytes: usize = parked.iter().map(|o| op_size(o)).sum();
+        assert!(!parked.is_empty() && bytes <= PARK_GROUP_BYTES, "{} parked rows of {bytes} bytes", parked.len());
+        assert!(parked.iter().any(|o| o.hlc == posts[0].hlc), "the oldest stay");
+        assert!(!parked.iter().any(|o| o.hlc == posts[29].hlc), "the newest go");
+    }
+
+    /// AR-11, the leave case: a member that left and was banned after cannot backdate an
+    /// admission into the span its leave closed.
+    #[test]
+    fn a_ban_after_a_leave_voids_an_admission_backdated_into_that_span() {
+        let (_owner, founding) = founded(1);
+        let sid = _owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[
+            founding.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(2, &sid, t + 10, P::MemberRemoved { peer_id: id(2), seen: None }),
+            op_at(1, &sid, t + 20, ban(2)),
+        ]);
+        let backdated = op_at(2, &sid, t + 9, add(&sid, 5));
+        let mut control = r.clone();
+        control.ingest_remote(&[op_at(2, &sid, t + 2, add(&sid, 6))]);
+        r.ingest_remote(std::slice::from_ref(&backdated));
+        r.ingest_remote(&[op_at(5, &sid, t + 30, P::NicknameChanged { peer_id: id(5), nickname: "p".into() })]);
+        assert!(!r.is_member(&id(5)), "a banned leaver seated a puppet in its old span");
+        assert!(!control.is_member(&id(6)), "nor earlier in it");
+    }
+
+    /// A kick from before 0.14 carries no list and voids nothing: the history a server
+    /// already holds keeps whom its later-kicked members admitted.
+    #[test]
+    fn a_removal_from_before_0_14_voids_nothing() {
+        let (_owner, founding) = founded(1);
+        let sid = _owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let history = vec![
+            founding.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(2, &sid, t + 5, add(&sid, 5)),
+            op_at(1, &sid, t + 10, P::MemberRemoved { peer_id: id(2), seen: None }),
+        ];
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&[op_at(1, &sid, t + 4, P::ServerRenamed { new_name: "rebuild".into() })]);
+        assert!(r.is_member(&id(5)) && !r.is_member(&id(2)));
+    }
+
+    /// AR-11: what the remover saw stays; what it never saw is void, whichever arrives
+    /// first, live at the tail or in a rebuild.
+    #[test]
+    fn a_kick_keeps_the_grants_its_author_saw_and_voids_the_rest() {
+        let (mut owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let admit2 = op_at(1, &sid, t + 1, add(&sid, 2));
+        let seen = op_at(2, &sid, t + 5, add(&sid, 5));
+        let unseen = op_at(2, &sid, t + 6, add(&sid, 6));
+        owner.ingest_remote(&[admit2.clone(), seen.clone()]);
+        let authored = owner.clone().author_checked(P::MemberRemoved { peer_id: id(2), seen: None }).expect("the owner kicks 2");
+        let P::MemberRemoved { seen: Some(list), .. } = &authored.payload else { panic!("the kick names what it saw") };
+        assert_eq!(list.ops.len(), 1, "the one grant of 2 the owner folded");
+        let kick = op_at(1, &sid, t + 10, P::MemberRemoved { peer_id: id(2), seen: Some(list.clone()) });
+        for order in [vec![admit2.clone(), seen.clone(), unseen.clone(), kick.clone()], vec![admit2.clone(), kick.clone(), unseen.clone(), seen.clone()]] {
+            let mut r = joiner(&sid, 9);
+            r.ingest_remote(std::slice::from_ref(&founding));
+            for op in &order {
+                r.ingest_remote(std::slice::from_ref(op));
+            }
+            assert!(r.is_member(&id(5)), "a grant the remover saw stays");
+            assert!(!r.is_member(&id(6)), "a grant it never saw is void");
+            assert!(!r.is_member(&id(2)));
+        }
+    }
+
+    /// A ban closes only the span it ends: after a leave and an admission again, the
+    /// grants of the older span stand, listed or not.
+    #[test]
+    fn a_ban_closes_only_the_last_span() {
+        let (_owner, founding) = founded(1);
+        let sid = _owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[
+            founding.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(2, &sid, t + 5, add(&sid, 5)),
+            op_at(2, &sid, t + 10, P::MemberRemoved { peer_id: id(2), seen: None }),
+            op_at(1, &sid, t + 15, readd(&sid, 2, (t + 15) as i64)),
+            op_at(1, &sid, t + 20, ban(2)),
+        ]);
+        assert!(r.is_member(&id(5)) && r.is_banned(&id(2)), "a ban voided a grant of a span a leave had closed");
+    }
+
+    /// AR-11 on top of a base: the removal's op is gone, its span end is in the record,
+    /// and the member admitted again cannot backdate into the span it was kicked from.
+    #[test]
+    fn a_member_kicked_and_admitted_again_cannot_backdate_into_its_old_span() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        owner.ingest_remote(&[
+            op_at(1, &sid, t + 10, kick(4)),
+            op_at(1, &sid, t + 20, readd(&sid, 4, (t + 20) as i64)),
+        ]);
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        assert!(r.is_member(&id(4)));
+        r.ingest_remote(&[op_at(4, &sid, t + 9, add(&sid, 5))]);
+        assert!(!r.is_member(&id(5)), "a backdated admission inside the kicked span");
+        r.ingest_remote(&[op_at(4, &sid, t + 30, add(&sid, 6))]);
+        assert!(r.is_member(&id(6)), "control: an admission in its new span stands");
+    }
+
+    /// A removal naming a base this replica lacks waits for it: it neither applies nor
+    /// voids by a list it cannot judge.
+    #[test]
+    fn a_removal_naming_a_base_we_lack_waits_for_that_base() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let c1 = checkpoint(&mut owner);
+        owner.ingest_remote(&[op_at(2, &sid, t + 40, P::ServerRenamed { new_name: "n".into() })]);
+        let c2 = checkpoint(&mut owner);
+        let kick = owner.author_checked(P::MemberRemoved { peer_id: id(4), seen: None }).unwrap();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&c1));
+        r.ingest_remote(std::slice::from_ref(&kick));
+        assert!(r.is_member(&id(4)), "the kick waits for the base it names");
+        r.ingest_remote(std::slice::from_ref(&c2));
+        assert!(!r.is_member(&id(4)), "and applies once it is here");
+    }
+
+    /// The list stays inside the op bound: past `SEEN_CAP` it names the newest and marks
+    /// the rest by clock; a list past the cap or not hex is refused.
+    #[test]
+    fn a_removal_list_is_bounded_and_well_formed() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let grants: Vec<CrdtOp> = (0..(crate::crdt::voids::SEEN_CAP as u64 + 5))
+            .map(|k| op_at(2, &sid, t + 100 + k, P::RolePermissionsChanged { role: "member".into(), permissions: (k % 2) as u32 }))
+            .collect();
+        owner.ingest_remote(&grants);
+        let ban = owner.author_checked(P::MemberBanned { peer_id: id(2), seen: None }).expect("the owner bans 2");
+        let P::MemberBanned { seen: Some(list), .. } = &ban.payload else { panic!() };
+        assert_eq!(list.ops.len(), crate::crdt::voids::SEEN_CAP);
+        assert_eq!(list.before.as_ref(), Some(&grants[5].hlc));
+        let shipped = SeenGrants { base: list.base.clone(), ops: vec!["f".repeat(32); 1024], before: list.before.clone() };
+        let full = op_at(1, &sid, t + 99, P::MemberBanned { peer_id: id(3), seen: Some(Box::new(shipped)) });
+        assert!(serde_json::to_string(&full).unwrap().len() < 48 << 10, "the shipping cap keeps a kick about 36 KB");
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&grants);
+        r.ingest_remote(std::slice::from_ref(&ban));
+        assert!(r.is_banned(&id(2)), "control");
+        assert!(grants.iter().all(|g| r.op_log.iter().any(|o| o.hlc == g.hlc)), "every grant counts as seen, the cut ones too");
+        let mut fat = (**list).clone();
+        fat.ops.push("0".repeat(32));
+        let bad = op_at(1, &sid, ban.hlc.physical_ms + 1, P::MemberBanned { peer_id: id(3), seen: Some(Box::new(fat)) });
+        let mut odd = (**list).clone();
+        odd.ops[0] = "ZZ".repeat(16);
+        let bad2 = op_at(1, &sid, ban.hlc.physical_ms + 2, P::MemberBanned { peer_id: id(3), seen: Some(Box::new(odd)) });
+        assert!(!r.op_allowed(&bad) && !r.op_allowed(&bad2), "a list past the cap or not hex is refused");
+        let plain = op_at(1, &sid, t + 99, P::MemberRemoved { peer_id: id(3), seen: None });
+        assert!(!serde_json::to_string(&plain.payload).unwrap().contains("seen"), "a removal without a list keeps its bytes");
+    }
+
+    /// Finding 6: one member and identities the owner admitted (the owner answers anyone)
+    /// never make two witnesses; two members of the base from different roots do.
+    #[test]
+    fn the_writer_rule_needs_two_roots_in_the_base() {
+        let (mut owner, _, t) = staffed();
+        let sid = owner.server_id.clone();
+        owner.ingest_remote(&[op_at(1, &sid, t + 6, add(&sid, 6))]);
+        let _cp = checkpoint(&mut owner);
+        owner.ingest_remote(&[
+            op_at(1, &sid, t + 20, readd(&sid, 9, (t + 20) as i64)),
+            op_at(4, &sid, t + 21, readd(&sid, 10, (t + 21) as i64)),
+        ]);
+        let w = |ids: &[u8]| ids.iter().map(|i| id(*i)).collect::<HashSet<String>>();
+        assert!(!owner.checkpoint_witnessed(&id(1), &w(&[4, 9])), "a member and an identity the owner admitted");
+        assert!(!owner.checkpoint_witnessed(&id(1), &w(&[4, 10])), "a member and its own puppet");
+        assert!(owner.checkpoint_witnessed(&id(1), &w(&[4, 6])), "two members of the base");
+        assert!(owner.checkpoint_witnessed(&id(1), &w(&[10, 6])), "a puppet of one and another member");
+        assert!(owner.checkpoint_witnessed(&id(1), &w(&[9, 3])), "one of them a moderator");
+    }
+
+    /// F8: a stranger's op is never held, at the tail or in a rebuild.
+    #[test]
+    fn held_takes_only_authors_the_state_knows() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        r.ingest_remote(&[op_at(77, &sid, t + 100, P::ServerRenamed { new_name: "x".into() })]);
+        r.ingest_remote(&[op_at(4, &sid, t + 300, P::NicknameChanged { peer_id: id(4), nickname: "n".into() })]);
+        let rebuilt = r.ingest_remote(&[op_at(78, &sid, t + 250, P::ServerRenamed { new_name: "y".into() })]).rebuilt;
+        assert!(rebuilt, "control: an op behind the tail goes through a rebuild");
+        assert!(r.held.is_empty(), "a stranger's op waits in held");
+        r.ingest_remote(&[op_at(5, &sid, t + 200, P::NicknameChanged { peer_id: id(5), nickname: "early".into() })]);
+        r.ingest_remote(&[op_at(4, &sid, t + 150, readd(&sid, 5, (t + 150) as i64))]);
+        assert_eq!(r.get_nickname(&id(5)), "", "an op ahead of its author's admission is not kept");
+        let mut s = r.clone();
+        s.ingest_remote(&[op_at(4, &sid, t + 160, readd(&sid, 11, (t + 160) as i64)), op_at(11, &sid, t + 170, P::NicknameChanged { peer_id: id(11), nickname: "ok".into() })]);
+        assert_eq!(s.get_nickname(&id(11)), "ok", "control: one known by an admission in the batch folds");
+    }
+
+    /// A field of a channel that does not exist, or a label that does not, is refused at
+    /// its point: it never stays in a log as an undecided no-op.
+    #[test]
+    fn a_write_to_a_missing_channel_or_label_is_refused() {
+        let (owner, _, _) = staffed();
+        let mut s = owner.clone();
+        for p in [
+            P::ChannelRenamed { channel_id: "nope-c9".into(), new_name: "x".into() },
+            P::ChannelPublicChanged { channel_id: "nope-c9".into(), is_public: true },
+            P::ChannelPostingChanged { channel_id: "nope-c9".into(), posting: "moderator".into() },
+            P::ChannelSlowModeChanged { channel_id: "nope-c9".into(), seconds: 5 },
+            P::ChannelMediaOnlyChanged { channel_id: "nope-c9".into(), media_only: true },
+            P::ChannelVisibilityChanged { channel_id: "nope-c9".into(), visibility: "moderator".into() },
+            P::ChannelVisibilityLabelsChanged { channel_id: "nope-c9".into(), labels: vec![] },
+            P::ChannelPostingLabelsChanged { channel_id: "nope-c9".into(), labels: vec![] },
+            P::LabelUpdated { label_id: "nope".into(), name: "x".into(), color: "#000".into(), access: None },
+        ] {
+            let name = payload_name(&p);
+            assert!(s.author_checked(p).is_none(), "{name} on a missing element");
+        }
+        let ch = general(&owner);
+        assert!(s.author_checked(P::ChannelRenamed { channel_id: ch, new_name: "x".into() }).is_some(), "control");
+    }
+
+    /// A live op the base decides and its parent does not is a row on its own: the ingest
+    /// says so, so the node persists it with nothing admitted.
+    #[test]
+    fn a_dormant_row_made_at_the_door_is_in_the_delta() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let _c1 = checkpoint(&mut owner);
+        let late = op_at(2, &sid, t + 40, P::ServerRenamed { new_name: "n".into() });
+        owner.ingest_remote(std::slice::from_ref(&late));
+        let c2 = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&_c1));
+        r.ingest_remote(std::slice::from_ref(&c2));
+        let got = r.ingest_remote(std::slice::from_ref(&late));
+        assert!(got.admitted.is_empty(), "decided by the base");
+        assert!(got.delta(&sid).is_some_and(|d| d.rows.iter().any(|(o, _)| o.hlc == late.hlc)), "the dormant row is in the delta");
+    }
+
+    /// R3-1: the first stamped child of a 0.13 checkpoint carries no stamps for anything the
+    /// 0.13 checkpoint decided, so an op dated below the 0.13 `covers` (dominated by the
+    /// generation-0 base) folds on top of generation 1: an old "everyone" reopens a channel
+    /// restricted before the 0.13 checkpoint, an old rename undoes a newer one.
+    #[test]
+    fn rev3_a_stamped_child_of_a_0_13_base_still_decides_what_covers_decided() {
+        let (mut owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let ch = general(&owner);
+        let t = founding.hlc.physical_ms;
+        let history = vec![
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 4, P::RoleChanged { peer_id: id(2), role: MemberRole::Admin, priority: 3 }),
+            op_at(1, &sid, t + 30, P::ChannelVisibilityChanged { channel_id: ch.clone(), visibility: "moderator".into() }),
+            op_at(1, &sid, t + 31, P::ChannelRenamed { channel_id: ch.clone(), new_name: "newer".into() }),
+        ];
+        owner.ingest_remote(&history);
+        // The 0.13 checkpoint: no stamps, no events, covers t+50.
+        let mut old = owner.lean_snapshot();
+        *old.stamps = Default::default();
+        old.member_events.clear();
+        old.cp_stamped = false;
+        old.retained_print = None;
+        let covers = HlcTimestamp { physical_ms: t + 50, counter: 0, actor: id(1) };
+        let cp0 = op_at(1, &sid, t + 60, P::ServerCheckpoint { state: serde_json::to_string(&old).unwrap(), covers });
+        // A phone of admin 2 offline across the 0.13 checkpoint still holds these (0.13 pruned
+        // them everywhere else, and gen 0 decides them).
+        let stale = vec![
+            op_at(2, &sid, t + 20, P::ChannelVisibilityChanged { channel_id: ch.clone(), visibility: "everyone".into() }),
+            op_at(2, &sid, t + 21, P::ChannelRenamed { channel_id: ch.clone(), new_name: "older".into() }),
+        ];
+        let mut gen0 = joiner(&sid, 9);
+        gen0.ingest_remote(&[founding.clone(), cp0.clone()]);
+        gen0.ingest_remote(&stale);
+        assert_eq!(gen0.base.as_ref().map(|b| b.generation), Some(0));
+        assert_eq!(gen0.channels[&ch].visibility, crate::crdt::server_state::ChannelVisibility::ModeratorPlus, "control: gen 0 decides it");
+        // The owner upgrades: its state rebases on cp0 and it writes the stamped child.
+        let mut child = owner.clone();
+        child.ingest_remote(std::slice::from_ref(&cp0));
+        let c1 = checkpoint(&mut child);
+        let mut r = joiner(&sid, 8);
+        r.ingest_remote(&[founding, cp0, c1]);
+        assert_eq!(r.base.as_ref().map(|b| b.generation), Some(1));
+        r.ingest_remote(&stale);
+        assert_eq!(
+            (r.channels[&ch].visibility.clone(), r.channels[&ch].name.clone()),
+            (crate::crdt::server_state::ChannelVisibility::ModeratorPlus, "newer".to_string()),
+            "ops below the 0.13 covers reopened a restricted channel and undid a newer rename on generation 1"
+        );
+    }
+
+    /// R3-2: the quota charges a joiner's ops to the member at the root of its admission
+    /// lineage, and inside a group the oldest ops keep their place. A member the acting
+    /// leader admitted floods its own group (the leader's) and, once banned, adds one op
+    /// dated just before the ban (still inside its span): the leader's ban is the op the
+    /// allocation parks, and the flooder is seated again on every replica.
+    #[test]
+    fn rev3_a_joiner_flood_never_parks_the_ban_of_the_flooder() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let admit50 = op_at(2, &sid, t + 100, readd(&sid, 50, (t + 100) as i64));
+        let flood: Vec<CrdtOp> = (0..24u64)
+            .map(|k| op_at(50, &sid, t + 200 + k, P::NicknameChanged { peer_id: id(50), nickname: "x".repeat(10_000) + &k.to_string() }))
+            .collect();
+        let ban = op_at(2, &sid, t + 300, P::MemberBanned { peer_id: id(50), seen: None });
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        r.ingest_remote(std::slice::from_ref(&admit50));
+        r.ingest_remote(&flood);
+        r.ingest_remote(std::slice::from_ref(&ban));
+        let mut unbanned_by = None;
+        // Every length the flooder could pick to fill the ban's slot, sampled.
+        for len in (0..12_000usize).step_by(37) {
+            let extra = op_at(50, &sid, t + 299, P::NicknameChanged { peer_id: id(50), nickname: "y".repeat(len) });
+            let mut probe = r.clone();
+            probe.ingest_remote(std::slice::from_ref(&extra));
+            if !probe.is_banned(&id(50)) {
+                unbanned_by = Some((len, probe.is_member(&id(50))));
+                break;
+            }
+        }
+        assert_eq!(unbanned_by, None, "one backdated op of the flooder parked the ban of it (len, seated again)");
+    }
+
+    /// R3-3: the rebuild hysteresis lets a tail op fold that a whole rebuild of the same op set
+    /// parks, so two replicas holding the same ops disagree (and a restart changes the state).
+    #[test]
+    fn rev3_the_same_ops_fold_the_same_at_the_quota_bound() {
+        let (mut owner, mut history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let flooders: Vec<u8> = (40..60).collect();
+        let admitted: Vec<CrdtOp> = flooders.iter().map(|&f| op_at(1, &sid, t + 10 + f as u64, add(&sid, f))).collect();
+        owner.ingest_remote(&admitted);
+        history.extend(admitted);
+        let cp = checkpoint(&mut owner);
+        let flood: Vec<CrdtOp> = flooders
+            .iter()
+            .flat_map(|&f| (0..20u64).map(move |k| (f, k)))
+            .map(|(f, k)| op_at(f, &sid, t + 1000 + f as u64 * 100 + k, P::NicknameChanged { peer_id: id(f), nickname: "x".repeat(500) + &k.to_string() }))
+            .collect();
+        let live = op_at(40, &sid, t + 90_000, P::NicknameChanged { peer_id: id(40), nickname: "LIVE".to_string() + &"z".repeat(2_000) });
+        let mut tail = joiner(&sid, 9);
+        tail.ingest_remote(&history);
+        tail.ingest_remote(std::slice::from_ref(&cp));
+        tail.ingest_remote(&flood);
+        tail.ingest_remote(std::slice::from_ref(&live));
+        let mut whole = joiner(&sid, 8);
+        whole.ingest_remote(&history);
+        let mut all: Vec<CrdtOp> = flood.clone();
+        all.push(live.clone());
+        all.push(cp.clone());
+        whole.ingest_remote(&all);
+        assert_eq!(
+            tail.get_nickname(&id(40)),
+            whole.get_nickname(&id(40)),
+            "same ops, different state at the quota bound"
+        );
+        assert_eq!(view(&tail), view(&whole));
+    }
+
+    /// R3-4: what the quota parks stays stored (RAM `stored`, a `crdt_ops` row) for 30 days
+    /// and is never trimmed: one member sending its ops in clock order folds a sixteenth of
+    /// the budget between rebuilds, and each rebuild parks the excess as rows. The parked set
+    /// grows with whatever the member sends.
+    #[test]
+    fn rev3_a_members_in_order_flood_keeps_the_stored_rows_bounded() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        let mut sent = 0usize;
+        for k in 0..400u64 {
+            let op = op_at(4, &sid, t + 1000 + k, P::NicknameChanged { peer_id: id(4), nickname: "x".repeat(10_000) + &k.to_string() });
+            sent += serde_json::to_string(&op).unwrap().len();
+            r.ingest_remote(std::slice::from_ref(&op));
+        }
+        let stored: usize = r.stored.iter().map(|(o, _)| serde_json::to_string(o).unwrap().len()).sum();
+        let folded: usize = r.op_log.iter().map(|o| serde_json::to_string(o).unwrap().len()).sum();
+        assert!(stored + folded <= 2 * QUOTA_BYTES, "one member made us keep {stored} parked + {folded} folded bytes of {sent} sent (budget {QUOTA_BYTES})");
+    }
+
+    /// R3-5: design section 3.2: "An op the owner folded is always dominated" by its own
+    /// checkpoint. The U10 oracle never checks it (its replicas hold the whole history, so an
+    /// undominated history op folds again in order and hides a missing stamp). Lists every
+    /// payload kind the owner folded that its checkpoint does not decide.
+    #[test]
+    fn rev3_every_op_the_owner_folded_is_decided_by_its_checkpoint() {
+        let mut rng = 0x1234_5678_9abc_def1u64;
+        let mut next = move |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let mut leaks: std::collections::BTreeMap<String, usize> = Default::default();
+        for _case in 0..300 {
+            let (mut owner, _history, t) = staffed();
+            let sid = owner.server_id.clone();
+            let ch = general(&owner);
+            let mut ops = Vec::new();
+            for i in 0..(8 + next(18)) {
+                let at = t + 20 + i * 3;
+                let author = [1u8, 2, 3, 4, 5][next(5) as usize];
+                let target = [2u8, 3, 4, 5, 6][next(5) as usize];
+                ops.push(op_at(author, &sid, at, gen_payload(&mut next, &sid, &ch, target, at)));
+            }
+            owner.ingest_remote(&ops);
+            let folded: Vec<CrdtOp> = owner.op_log.iter().filter(|o| o.hlc.physical_ms >= t + 20).cloned().collect();
+            let _cp = checkpoint(&mut owner);
+            let base = owner.base.clone().unwrap();
+            for o in folded {
+                if !base.judge().dominates(&o, true) {
+                    let mut again = owner.clone();
+                    again.apply_payload(&o);
+                    if view(&again) != view(&owner) {
+                        *leaks.entry(payload_name(&o.payload).to_string()).or_default() += 1;
+                    }
+                }
+            }
+        }
+        assert!(leaks.is_empty(), "ops the owner folded that its checkpoint leaves undecided (never pruned, folded again on top): {leaks:#?}");
+    }
+
+    /// R3-6: before the owner's first checkpoint there is no base, and the allocation returns
+    /// at once: a server whose owner never checkpointed (under 2,000 ops, or the writer rule
+    /// never met) folds whatever a member sends, without bound.
+    #[test]
+    fn rev3_a_server_without_a_checkpoint_bounds_a_flood_too() {
+        let (_owner, history, t) = staffed();
+        let sid = _owner.server_id.clone();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        for k in 0..400u64 {
+            let op = op_at(4, &sid, t + 1000 + k, P::NicknameChanged { peer_id: id(4), nickname: "x".repeat(10_000) + &k.to_string() });
+            r.ingest_remote(std::slice::from_ref(&op));
+        }
+        let folded: usize = r.op_log.iter().map(|o| serde_json::to_string(o).unwrap().len()).sum();
+        let stored: usize = r.stored.iter().map(|(o, _)| serde_json::to_string(o).unwrap().len()).sum();
+        assert!(folded + stored <= 2 * QUOTA_BYTES, "no base, no bound: {folded} folded + {stored} stored (budget {QUOTA_BYTES})");
+    }
+    /// A member kicked at t+10 signs an admission of a puppet dated t+9 and hands it to any
+    /// member after the kick: the fold judges it at its own point, where the kicked member
+    /// still sat, and seats the puppet; the puppet then authors as a member.
+    #[test]
+    fn rev3_cover_a_kicked_member_backdates_an_admission() {
+        let (_owner, founding) = founded(1);
+        let sid = _owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[
+            founding.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, add(&sid, 3)),
+            op_at(1, &sid, t + 10, kick(2)),
+        ]);
+        assert!(!r.is_member(&id(2)));
+        let backdated = op_at(2, &sid, t + 9, add(&sid, 5));
+        r.ingest_remote(std::slice::from_ref(&backdated));
+        let puppet_writes = op_at(5, &sid, t + 20, P::NicknameChanged { peer_id: id(5), nickname: "p".into() });
+        r.ingest_remote(std::slice::from_ref(&puppet_writes));
+        assert!(!r.is_member(&id(5)), "a kicked member's backdated admission seated a puppet after the kick (puppet nickname {:?})", r.get_nickname(&id(5)));
+    }
+
+    /// R3-7: the shape every stamp test lacks: a replica that holds only the founding op, the
+    /// base and the late ops (a joiner after the owner's checkpoint). A removal dated before a
+    /// channel's creation, which the owner never saw, must not delete the channel there.
+    #[test]
+    fn rev3_a_late_removal_older_than_the_add_keeps_the_channel_on_a_fresh_joiner() {
+        let (mut owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let c3 = format!("{}-c3", &sid[..8]);
+        owner.ingest_remote(&[
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, P::RoleChanged { peer_id: id(2), role: MemberRole::Admin, priority: 3 }),
+            op_at(1, &sid, t + 31, P::ChannelAdded { channel_id: c3.clone(), name: "c3".into(), category: None, channel_type: "text".into() }),
+        ]);
+        let cp = checkpoint(&mut owner);
+        let late = op_at(2, &sid, t + 21, P::ChannelRemoved { channel_id: c3.clone() });
+        let mut fresh = joiner(&sid, 9);
+        fresh.ingest_remote(&[founding, cp]);
+        fresh.ingest_remote(std::slice::from_ref(&late));
+        assert!(fresh.channels.contains_key(&c3), "a removal older than the channel's creation deleted it on a joiner after the checkpoint");
+    }
+
+    // ---- t14-cover final round (review 4) ----
+
+    /// An admin the owner kicked sends a removal stamped now: refused at its own point, it
+    /// voids nothing, whether a rebuild or the tail decides.
+    #[test]
+    fn review4_a_kicked_admins_refused_removal_voids_honest_grants() {
+        let (_owner, history, t) = staffed();
+        let sid = history[0].server_id.clone();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&[op_at(3, &sid, t + 10, add(&sid, 5)), op_at(1, &sid, t + 20, kick(2))]);
+        assert!(r.is_member(&id(5)) && !r.is_member(&id(2)) && r.is_member(&id(3)));
+        r.ingest_remote(&[op_at(2, &sid, t + 30, kick(3))]);
+        assert!(r.is_member(&id(3)), "the ex-admin's kick is refused");
+        assert!(r.is_member(&id(5)), "before any rebuild");
+        assert!(!r.op_log.iter().chain(r.stored.iter().map(|(o, _)| o)).any(|o| o.author == id(2)), "control: 2 has no kept op");
+        assert!(r.held.iter().any(|(o, _)| o.author == id(2)), "control: the refused kick waits in held");
+        assert!(r.has_op_author(&id(2)), "the author of a held op is outside the authority set");
+        r.ingest_remote(&[op_at(1, &sid, t + 15, P::ServerRenamed { new_name: "any late op".into() })]);
+        assert!(r.is_member(&id(3)), "the ex-admin's kick is still refused");
+        assert!(r.is_member(&id(5)), "a refused removal by a kicked admin voided 3's honest admission of 5");
+    }
+
+    /// The same with a demotion instead of a kick.
+    #[test]
+    fn review4_a_demoted_admins_refused_removal_voids_honest_grants() {
+        let (_owner, history, t) = staffed();
+        let sid = history[0].server_id.clone();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&[
+            op_at(4, &sid, t + 10, add(&sid, 5)),
+            op_at(1, &sid, t + 20, P::RoleChanged { peer_id: id(3), role: MemberRole::Member, priority: 3 }),
+        ]);
+        r.ingest_remote(&[op_at(3, &sid, t + 30, kick(4))]);
+        r.ingest_remote(&[op_at(1, &sid, t + 15, P::ServerRenamed { new_name: "any late op".into() })]);
+        assert!(r.is_member(&id(4)), "the demoted moderator's kick is refused");
+        assert!(r.is_member(&id(5)), "a refused removal by a demoted moderator voided 4's honest admission of 5");
+    }
+
+    /// The tail and a rebuild of the same set agree when a removal is refused at its own
+    /// point, and when an honest one voids (control): a held refused kick changes nothing.
+    #[test]
+    fn a_refused_removal_leaves_the_tail_and_a_rebuild_equal() {
+        let (_owner, history, t) = staffed();
+        let sid = history[0].server_id.clone();
+        let refused = vec![
+            op_at(3, &sid, t + 10, add(&sid, 5)),
+            op_at(1, &sid, t + 20, kick(2)),
+            op_at(2, &sid, t + 30, kick(3)),
+            op_at(1, &sid, t + 40, P::ServerRenamed { new_name: "after".into() }),
+        ];
+        let honest = vec![op_at(3, &sid, t + 10, add(&sid, 5)), op_at(2, &sid, t + 30, kick(3))];
+        for (case, late, voided) in [("refused", refused, false), ("honest", honest, true)] {
+            let mut tail = joiner(&sid, 9);
+            tail.ingest_remote(&history);
+            for op in &late {
+                tail.ingest_remote(std::slice::from_ref(op));
+            }
+            let mut batch = joiner(&sid, 9);
+            batch.ingest_remote(&history);
+            let mut shuffled = late.clone();
+            shuffled.reverse();
+            batch.ingest_remote(&shuffled);
+            let mut rebuilt = tail.clone();
+            rebuilt.fold_all(Vec::new(), Ingested::default());
+            assert_eq!(tail.is_member(&id(5)), !voided, "{case}: the tail");
+            assert_eq!(view(&tail), view(&rebuilt), "{case}: a rebuild of the tail's own set differs");
+            assert_eq!(view(&tail), view(&batch), "{case}: one batch of the same set differs");
+            assert_eq!(keys_of(&tail), keys_of(&rebuilt), "{case}: the folded log differs");
+        }
+    }
+
+    /// A removal folded first and refused only once a late kick of its author arrives is
+    /// a parked row, not a held op: it voids nothing either.
+    #[test]
+    fn a_removal_parked_by_a_late_kick_of_its_author_voids_nothing() {
+        let (_owner, history, t) = staffed();
+        let sid = history[0].server_id.clone();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(&[op_at(3, &sid, t + 10, add(&sid, 5)), op_at(2, &sid, t + 30, kick(3))]);
+        assert!(!r.is_member(&id(3)) && !r.is_member(&id(5)), "control: the admin's kick folds and voids what it did not see");
+        r.ingest_remote(&[op_at(1, &sid, t + 20, kick(2))]);
+        assert!(r.stored.iter().any(|(o, k)| o.author == id(2) && matches!(k, RowKind::Parked(_))), "the refused kick is a parked row");
+        assert!(r.is_member(&id(3)), "the kicked admin's kick is refused");
+        assert!(r.is_member(&id(5)), "a parked removal voided 3's honest admission of 5");
+        assert!(!r.op_log.iter().any(|o| o.author == id(2)), "control: 2 has no folded op");
+        assert!(r.has_op_author(&id(2)), "the author of a parked op is outside the authority set");
+    }
+
+    /// A state whose checkpoint would pass its byte bound is measured before it is
+    /// signed: no op, no clock tick, and no new try until the retry time.
+    #[test]
+    fn an_over_bound_checkpoint_is_tried_once_then_waits() {
+        let (mut owner, _history, _t) = staffed();
+        checkpoint(&mut owner);
+        Arc::make_mut(&mut owner.base.as_mut().unwrap().state).cp_stamped = false;
+        let now = crate::crdt::hlc::wall_clock_ms();
+        assert!(owner.checkpoint_due(&id(1), now), "control: a base from before 0.14 is due a child");
+        let name = owner.name.clone();
+        let mut later = now;
+        // Plain bytes past the bound, and quotes that pass it only once escaped twice.
+        for big in ["n".repeat(MAX_CHECKPOINT_BYTES), "\"".repeat(MAX_CHECKPOINT_BYTES / 3)] {
+            owner.name = crate::crdt::admin_lww::AdminLwwReg::new(big, name.hlc().clone(), 4);
+            let (log, clock) = (owner.op_log.len(), owner.hlc.as_ref().unwrap().latest().clone());
+            assert!(owner.author_due_checkpoint(&id(1), &[], later).is_none(), "an over-bound checkpoint was kept");
+            assert_eq!(owner.op_log.len(), log);
+            assert_eq!(owner.hlc.as_ref().unwrap().latest(), &clock, "an over-bound checkpoint was signed");
+            assert!(!owner.checkpoint_due(&id(1), later + 2_000), "an over-bound checkpoint is tried again at the next tick");
+            later += CHECKPOINT_MIN_GAP_MS + 1;
+            assert!(owner.checkpoint_due(&id(1), later), "the try comes back after the gap");
+        }
+        owner.name = name;
+        assert!(owner.author_due_checkpoint(&id(1), &[], later).is_some(), "control: a state within the bound checkpoints");
+        assert!(!owner.checkpoint_due(&id(1), later), "control: nothing more is due");
     }
 }

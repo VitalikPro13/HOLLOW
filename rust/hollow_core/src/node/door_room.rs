@@ -532,7 +532,7 @@ mod tests {
         state.ingest_remote(&[
             founding,
             op_at(1, &sid, t + 1, admit(1)),
-            op_at(1, &sid, t + 2, CrdtPayload::MemberRemoved { peer_id: kicked.clone() }),
+            op_at(1, &sid, t + 2, CrdtPayload::MemberRemoved { peer_id: kicked.clone(), seen: None }),
         ]);
         let mut states = std::collections::HashMap::from([(sid.clone(), state)]);
         resolver::update("kicked-device", &kicked);
@@ -560,7 +560,7 @@ mod tests {
                     other => panic!("not a carried envelope: {other:?}"),
                 };
                 assert!(
-                    matches!(ops.last().map(|op| &op.payload), Some(CrdtPayload::MemberRemoved { peer_id }) if *peer_id == kicked),
+                    matches!(ops.last().map(|op| &op.payload), Some(CrdtPayload::MemberRemoved { peer_id, .. }) if *peer_id == kicked),
                     "the notice does not end on the removal"
                 );
             }
@@ -572,7 +572,7 @@ mod tests {
         // Admitted again on a newer ask and removed again: that removal is news.
         states.get_mut(&sid).unwrap().ingest_remote(&[
             op_at(1, &sid, t + 3, admit(2)),
-            op_at(1, &sid, t + 4, CrdtPayload::MemberRemoved { peer_id: kicked.clone() }),
+            op_at(1, &sid, t + 4, CrdtPayload::MemberRemoved { peer_id: kicked.clone(), seen: None }),
         ]);
         assert!(ask(&mut doors, &states, &olm, "kicked-device"), "a second removal was never told");
         assert!(matches!(rx.try_recv(), Ok(WsCommand::Carry { .. })));

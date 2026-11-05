@@ -288,11 +288,15 @@ pub(crate) async fn author_due_checkpoints(
     local_peer_str: &str,
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
+    crdt_resync: &super::crdt_resync::CrdtResync,
 ) {
     let now = crate::crdt::hlc::wall_clock_ms();
     let due: Vec<String> = server_states
         .iter()
-        .filter(|(_, s)| s.checkpoint_due(local_peer_str, now))
+        .filter(|(id, s)| {
+            s.checkpoint_due(local_peer_str, now)
+                && s.checkpoint_witnessed(local_peer_str, &crdt_resync.op_sync.witnesses(id))
+        })
         .map(|(id, _)| id.clone())
         .collect();
     for server_id in due {
@@ -310,11 +314,12 @@ pub(crate) async fn author_due_checkpoints(
             Vec::new()
         };
         let Some(state) = server_states.get_mut(&server_id) else { continue };
-        let covers = state.horizon();
-        let Some(json) = state.checkpoint_json(local_peer_str, &past_authors, now) else { continue };
-        let Some(op) = state.author_checked(CrdtPayload::ServerCheckpoint { state: json, covers }) else { continue };
+        let Some((op, ingested)) = state.author_due_checkpoint(local_peer_str, &past_authors, now) else {
+            hollow_log!("[HOLLOW-CRDT] Could not checkpoint {server_id}; next try in an hour");
+            continue;
+        };
         hollow_log!("[HOLLOW-CRDT] Checkpointed {server_id} ({} ops kept)", state.op_log.len());
-        crdt_store.persist_admitted(vec![op.clone()], state.checkpoint_hlc.clone());
+        crdt_store.persist(ingested.delta(&server_id));
         crdt_store.save_state_snapshot(server_id.clone(), state);
         broadcast_op_mls_first(
             mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op, crypto_store,
@@ -2497,6 +2502,7 @@ pub(crate) async fn handle_kick_member(
         let targets = other_member_targets(state, local_peer_str);
         let Some(op) = author_op(state, crdt_store, &server_id, CrdtPayload::MemberRemoved {
             peer_id: peer_id.clone(),
+            seen: None,
         }) else {
             return deny(event_tx, "Permission denied: cannot kick this member").await;
         };
@@ -2720,6 +2726,7 @@ pub(crate) async fn handle_leave_server(
         state.witness_own_ask(local_peer_str);
         let Some(op) = author_op(state, crdt_store, &server_id, CrdtPayload::MemberRemoved {
             peer_id: local_peer_str.to_string(),
+            seen: None,
         }) else {
             return deny(event_tx, "You can't leave this server right now").await;
         };
@@ -2798,6 +2805,7 @@ pub(crate) async fn handle_ban_member(
         let targets = other_member_targets(state, local_peer_str);
         let Some(op) = author_op(state, crdt_store, &server_id, CrdtPayload::MemberBanned {
             peer_id: peer_id.clone(),
+            seen: None,
         }) else {
             return deny(event_tx, "Permission denied: cannot ban this member").await;
         };
@@ -4042,11 +4050,12 @@ pub(crate) async fn handle_envelope_crdt_op(
     // signature, the clock bound, then the shared permission matrix. It
     // validates op.author (the creator), never the transport sender.
     let ingested = state.ingest_remote(std::slice::from_ref(&op));
+    // A live op the base decides but its parent did not is kept as a dormant row only.
+    crdt_store.persist(ingested.delta(&sid));
     if ingested.admitted.is_empty() && !ingested.rebuilt {
         return;
     }
     let op_is_new = ingested.admitted.iter().any(|o| o.author == op.author && o.hlc == op.hlc);
-    crdt_store.persist_admitted(ingested.admitted, state.checkpoint_hlc.clone());
     crdt_store.save_state_snapshot(sid.clone(), state);
     if ingested.rebuilt {
         let _ = event_tx.send(NetworkEvent::ServerUpdated { server_id: sid.clone() }).await;
@@ -4084,7 +4093,7 @@ async fn emit_crdt_apply_event(
                     server_id: sid.clone(), peer_id: peer_id.clone(),
                 }).await;
             }
-            CrdtPayload::MemberRemoved { peer_id } => {
+            CrdtPayload::MemberRemoved { peer_id, .. } => {
                 let _ = event_tx.send(NetworkEvent::MemberLeft {
                     server_id: sid.clone(), peer_id: peer_id.clone(),
                 }).await;

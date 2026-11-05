@@ -5529,7 +5529,7 @@ mod epoch_catchup_wire_tests {
             SyncResponse { ops_json: String, #[serde(default)] nonce: Option<u64> },
         }
         let digest = crate::crdt::digest::OpDigest {
-            ask: 1, salt: crate::crdt::digest::new_salt(), base: None, from: Some(0), ranges: Vec::new(), round: 0,
+            ask: 1, salt: crate::crdt::digest::new_salt(), base: None, bref: None, from: Some(0), ranges: Vec::new(), round: 0,
         };
         let ask = HavenMessage::SyncRequest {
             server_id: "s".into(), state_vector_json: String::new(), mls_epoch: Some(3), nonce: Some(9), full: None,

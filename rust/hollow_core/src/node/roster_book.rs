@@ -1027,7 +1027,7 @@ pub(crate) fn notice_may_be_kept(
 }
 
 /// Whether `state` names `master`: its owner, a member, or the author of an op it keeps
-/// (DEVICE_PROOF_DESIGN section 9's authority set, before parked and held ops exist).
+/// (DEVICE_PROOF_DESIGN section 9's authority set: retained, parked and held ops).
 pub(crate) fn server_names_master(state: &crate::crdt::server_state::ServerState, master: &str) -> bool {
     state.current_owner().as_deref() == Some(master)
         || state.anchor_owner().as_deref() == Some(master)

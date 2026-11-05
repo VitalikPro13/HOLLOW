@@ -192,6 +192,11 @@ impl Hlc {
         self.latest.physical_ms
     }
 
+    /// The newest stamp minted or witnessed: every later `now()` is above it.
+    pub fn latest(&self) -> &HlcTimestamp {
+        &self.latest
+    }
+
     /// The actor ID for this clock.
     pub fn actor(&self) -> &str {
         &self.actor

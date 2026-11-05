@@ -1,9 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
 use super::admin_lww::AdminLwwReg;
+use super::dominance::{newer, raise, ChannelStamps, Stamps};
 use super::hlc::{Hlc, HlcTimestamp};
+use super::members::MemberEvent;
 use super::operations::{CrdtOp, CrdtPayload, MemberRole, Permission};
 #[cfg(test)]
 use super::operations::OpReject;
@@ -155,6 +157,28 @@ pub enum ChannelVisibility {
     AdminPlus,
 }
 
+/// A checkpoint's state, parsed on a thread of its own: serde's frames for the whole
+/// state take a few hundred KB in a Windows debug build, more than a node task has left.
+pub(crate) fn parse_state(json: &str) -> Option<ServerState> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn_scoped(scope, || serde_json::from_str::<ServerState>(json).ok())
+            .ok()?
+            .join()
+            .ok()
+            .flatten()
+    })
+}
+
+pub(crate) fn parse_visibility(v: &str) -> ChannelVisibility {
+    match v {
+        "moderator" => ChannelVisibility::ModeratorPlus,
+        "admin" => ChannelVisibility::AdminPlus,
+        _ => ChannelVisibility::Everyone,
+    }
+}
+
 impl Default for ChannelVisibility {
     fn default() -> Self {
         Self::Everyone
@@ -253,24 +277,15 @@ pub struct MemberSpan {
     /// The full clock of the op that opened it; `None` for spans written before 0.13.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_hlc: Option<HlcTimestamp>,
+    /// The full clock of the op that closed it; `None` while open and for spans written
+    /// before 0.14.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_hlc: Option<HlcTimestamp>,
     /// Every distinct author of a `MemberAdded` naming this member while the span was
     /// open, with that author's earliest such clock: the inputs of its standing
     /// (`node::standing`). Empty for the founder and seeded or pre-0.13 spans.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub admitted: Vec<(String, HlcTimestamp)>,
-    /// The full clock of the op that closed it: what a rejoin's ask names as the leave it
-    /// follows. `None` while open, and for spans closed before 0.14.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub until_hlc: Option<HlcTimestamp>,
-}
-
-/// Keep `by`'s earliest admission clock in `span`, one entry per distinct author.
-fn note_admitter(span: &mut MemberSpan, by: &str, at: &HlcTimestamp) {
-    match span.admitted.iter_mut().find(|(author, _)| author == by) {
-        Some((_, hlc)) if at < hlc => *hlc = at.clone(),
-        Some(_) => {}
-        None => span.admitted.push((by.to_string(), at.clone())),
-    }
 }
 
 /// Slack either side of a membership span when judging a post's time: post clocks
@@ -289,18 +304,33 @@ pub enum Anchor {
     Checkpoint,
 }
 
-/// The (author, clock) of every logged op, by author: whether a master authored an op
-/// here is one lookup (a roster notice asks it of every server on the event loop).
+/// The (author, clock) of every logged or stored op with its content hash, by author:
+/// whether a master authored an op here is one lookup (a roster notice asks it of every
+/// server on the event loop).
 #[derive(Debug, Clone, Default)]
-pub(crate) struct OpKeys(HashMap<String, HashSet<HlcTimestamp>>);
+pub(crate) struct OpKeys(HashMap<String, HashMap<HlcTimestamp, [u8; 32]>>);
 
 impl OpKeys {
-    pub(crate) fn contains(&self, (author, hlc): &(String, HlcTimestamp)) -> bool {
-        self.0.get(author).is_some_and(|clocks| clocks.contains(hlc))
+    pub(crate) fn contains_key(&self, (author, hlc): &(String, HlcTimestamp)) -> bool {
+        self.0.get(author).is_some_and(|clocks| clocks.contains_key(hlc))
     }
 
-    pub(crate) fn insert(&mut self, (author, hlc): (String, HlcTimestamp)) -> bool {
-        self.0.entry(author).or_default().insert(hlc)
+    pub(crate) fn get(&self, (author, hlc): &(String, HlcTimestamp)) -> Option<&[u8; 32]> {
+        self.0.get(author)?.get(hlc)
+    }
+
+    pub(crate) fn insert(&mut self, (author, hlc): (String, HlcTimestamp), hash: [u8; 32]) -> Option<[u8; 32]> {
+        self.0.entry(author).or_default().insert(hlc, hash)
+    }
+
+    /// An author whose last key goes is no author here any more.
+    pub(crate) fn remove(&mut self, (author, hlc): &(String, HlcTimestamp)) -> Option<[u8; 32]> {
+        let clocks = self.0.get_mut(author)?;
+        let gone = clocks.remove(hlc);
+        if clocks.is_empty() {
+            self.0.remove(author);
+        }
+        gone
     }
 
     pub(crate) fn clear(&mut self) {
@@ -316,11 +346,19 @@ impl OpKeys {
     }
 }
 
-impl FromIterator<(String, HlcTimestamp)> for OpKeys {
-    fn from_iter<I: IntoIterator<Item = (String, HlcTimestamp)>>(iter: I) -> Self {
+impl std::ops::Index<&(String, HlcTimestamp)> for OpKeys {
+    type Output = [u8; 32];
+
+    fn index(&self, key: &(String, HlcTimestamp)) -> &[u8; 32] {
+        self.get(key).expect("an indexed op key")
+    }
+}
+
+impl FromIterator<((String, HlcTimestamp), [u8; 32])> for OpKeys {
+    fn from_iter<I: IntoIterator<Item = ((String, HlcTimestamp), [u8; 32])>>(iter: I) -> Self {
         let mut keys = OpKeys::default();
-        for key in iter {
-            keys.insert(key);
+        for (key, hash) in iter {
+            keys.insert(key, hash);
         }
         keys
     }
@@ -328,6 +366,8 @@ impl FromIterator<(String, HlcTimestamp)> for OpKeys {
 
 /// The full CRDT state of a Hollow server: operation-based, so every mutation goes
 /// through `apply_op()`, which is commutative and idempotent.
+/// Its large fields are boxed: a swarm future keeps several in one frame, close to the
+/// worker stack in a debug build.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerState {
     pub server_id: String,
@@ -396,10 +436,31 @@ pub struct ServerState {
     /// Clock of the checkpoint this state was last rebased on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_hlc: Option<HlcTimestamp>,
-    /// This replica refolded its log once under 0.13, so every span carries the admitters
-    /// `node::standing` reads (`refold_for_standing`). Remove in 0.14.
+    /// Every admission and removal of each identity in clock order, what `member_record`
+    /// folds from (`crdt::members`). Carried by checkpoints.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub member_events: HashMap<String, Vec<MemberEvent>>,
+    /// The clock of the newest write to each element the registers do not date.
+    #[serde(default, skip_serializing_if = "Stamps::is_empty")]
+    pub stamps: Box<Stamps>,
+    /// In a checkpoint's own state: its generation (the parent's plus one) and its parent
+    /// by content hash. Never set on a live replica.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cp_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_parent: Option<String>,
+    /// In a checkpoint's own state: its stamps decide what it covers (0.14).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub standing_folded: bool,
+    pub cp_stamped: bool,
+    /// Every op at or below this clock is decided: what a checkpoint from before 0.14 or
+    /// a legacy server's first checkpoint covered without stamps. Every descendant carries
+    /// it, so a stamped child never forgets what its unstamped ancestor decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_floor: Option<HlcTimestamp>,
+    /// Fingerprint of the ops this state folded: a restart that classifies its rows into
+    /// the same set skips the refold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_print: Option<String>,
     /// Admitted ops since the anchor, HLC-sorted. Persisted in `crdt_ops`, never in
     /// the state JSON. Capped at `LEGACY_OP_LOG_CAP` only while `Anchor::Legacy`.
     #[serde(default, skip_serializing)]
@@ -413,12 +474,27 @@ pub struct ServerState {
     #[serde(skip)]
     pub(super) held: Vec<(CrdtOp, std::time::Instant)>,
     #[serde(skip)]
-    pub(crate) id_memo: super::digest::IdMemo,
-    /// Members' own leaves the current checkpoint covers that still end the span it
-    /// lists them in (`close_late_leaves`): kept in the log, at most one per member.
-    /// Derived by the fold, never stored or sent: a peer's word cannot keep an op here.
+    pub(crate) id_memo: Box<super::digest::IdMemo>,
+    /// Rows stored but not folded: the base's parent, ops only it leaves undecided, and
+    /// once-admitted ops refused now (`crdt::fold::RowKind`).
     #[serde(skip)]
-    pub(super) late_leaves: Vec<(String, HlcTimestamp)>,
+    pub(crate) stored: Vec<(CrdtOp, super::fold::RowKind)>,
+    /// The checkpoint this state folds on, and its parent, parsed.
+    #[serde(skip)]
+    pub(crate) base: Option<Box<super::fold::Base>>,
+    #[serde(skip)]
+    pub(crate) parent: Option<Box<super::fold::Base>>,
+    /// The quota allocation the last rebuild left, so a tail op is charged without one.
+    #[serde(skip)]
+    pub(crate) quota: Box<super::fold::Quota>,
+    /// During a rebuild: the kicks and bans of the whole op set, which void the
+    /// target's unseen grants before them (`crdt::voids`).
+    #[serde(skip)]
+    pub(crate) ahead: Option<std::sync::Arc<super::voids::Ahead>>,
+    /// No checkpoint try before this wall-clock time: one that could not be kept (past
+    /// its byte bound) costs a whole serialization, so it is not retried every tick.
+    #[serde(skip)]
+    pub(crate) cp_retry_at_ms: u64,
     /// Set by the node right after `set_hlc` on any state that authors ops.
     /// Never persisted and never sent: it is our own secret.
     #[serde(skip)]
@@ -441,8 +517,10 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, join_secret, join_lock, owner_pin, checkpoint_hlc, standing_folded,
-            op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, late_leaves: _, signer: _,
+            member_record, join_secret, join_lock, owner_pin, checkpoint_hlc, member_events, stamps,
+            cp_generation, cp_parent, cp_stamped, cp_floor, retained_print,
+            op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, stored: _, base: _, parent: _, signer: _,
+            quota: _, ahead: _, cp_retry_at_ms: _,
         } = self;
         // Judged against this replica's own checkpoint: a snapshot or a new checkpoint
         // made from it carries none.
@@ -472,13 +550,24 @@ impl ServerState {
             join_lock: join_lock.clone(),
             owner_pin: owner_pin.clone(),
             checkpoint_hlc: checkpoint_hlc.clone(),
-            standing_folded: *standing_folded,
+            member_events: member_events.clone(),
+            stamps: stamps.clone(),
+            cp_generation: *cp_generation,
+            cp_parent: cp_parent.clone(),
+            cp_stamped: *cp_stamped,
+            cp_floor: cp_floor.clone(),
+            retained_print: if self.anchor() == Anchor::Legacy { retained_print.clone() } else { Some(self.current_print()) },
             op_log: Vec::new(),
             hlc: None,
             op_log_dedup: OpKeys::default(),
             held: Vec::new(),
             id_memo: Default::default(),
-            late_leaves: Vec::new(),
+            stored: Vec::new(),
+            base: None,
+            parent: None,
+            quota: Default::default(),
+            ahead: None,
+            cp_retry_at_ms: 0,
             signer: None,
         }
     }
@@ -512,13 +601,24 @@ impl ServerState {
             join_lock: Default::default(),
             owner_pin: None,
             checkpoint_hlc: None,
-            standing_folded: false,
+            member_events: HashMap::new(),
+            stamps: Box::default(),
+            cp_generation: 0,
+            cp_parent: None,
+            cp_stamped: false,
+            cp_floor: None,
+            retained_print: None,
             op_log: Vec::new(),
             hlc: None,
             op_log_dedup: OpKeys::default(),
             held: Vec::new(),
             id_memo: Default::default(),
-            late_leaves: Vec::new(),
+            stored: Vec::new(),
+            base: None,
+            parent: None,
+            quota: Default::default(),
+            ahead: None,
+            cp_retry_at_ms: 0,
             signer: None,
         }
     }
@@ -560,6 +660,7 @@ impl ServerState {
     /// The founder's seat: name, Owner role, membership span, #general, and the anchor.
     fn seed_founder(&mut self, name: &str, owner: &str, at: &HlcTimestamp) {
         self.name = AdminLwwReg::new(name.to_string(), at.clone(), MemberRole::Owner.priority());
+        self.record_event(owner, MemberEvent::Admit { at: at.clone(), by: String::new(), ask: 0, name: short_name(owner) }, at);
         self.members.insert(owner.to_string(), MemberInfo {
             peer_id: owner.to_string(),
             display_name: short_name(owner),
@@ -568,7 +669,6 @@ impl ServerState {
             owner.to_string(),
             AdminLwwReg::new(MemberRole::Owner, at.clone(), MemberRole::Owner.priority()),
         );
-        self.open_span(owner, at, 0, None);
         let general_id = format!("{}-general", &self.server_id[..8.min(self.server_id.len())]);
         self.channels.entry(general_id.clone()).or_insert_with(|| ChannelInfo {
             channel_id: general_id,
@@ -605,30 +705,85 @@ impl ServerState {
         self.owner_pin.clone().or_else(|| self.current_owner())
     }
 
-    fn open_span(&mut self, master: &str, at: &HlcTimestamp, asked_at: i64, by: Option<&str>) {
-        let spans = self.member_record.entry(master.to_string()).or_default();
-        if spans.last().is_none_or(|s| s.until_ms != u64::MAX) {
-            spans.push(MemberSpan {
-                from_ms: at.physical_ms,
-                until_ms: u64::MAX,
-                asked_at,
-                from_hlc: Some(at.clone()),
-                admitted: Vec::new(),
-                until_hlc: None,
-            });
-        }
-        if let (Some(by), Some(open)) = (by, spans.last_mut()) {
-            note_admitter(open, by, at);
+    /// `master`'s record as events: its own, or for a state persisted before 0.14 the
+    /// events behind its spans.
+    pub(crate) fn events_of(&self, master: &str) -> std::borrow::Cow<'_, [MemberEvent]> {
+        match self.member_events.get(master) {
+            Some(events) => std::borrow::Cow::Borrowed(events.as_slice()),
+            None => std::borrow::Cow::Owned(
+                self.member_record.get(master).map(|spans| super::members::from_spans(spans)).unwrap_or_default(),
+            ),
         }
     }
 
-    fn close_span(&mut self, master: &str, at: &HlcTimestamp) {
-        if let Some(open) = self.member_record.get_mut(master)
-            .and_then(|spans| spans.last_mut())
-            .filter(|s| s.until_ms == u64::MAX)
-        {
-            open.until_ms = at.physical_ms.max(open.from_ms);
-            open.until_hlc = Some(at.clone());
+    /// Enter `event` into `master`'s record at its own clock and fold the spans again.
+    /// Membership follows the last span; when the current span now starts later, what
+    /// the member held from before it is void, as a removal would have left it.
+    fn record_event(&mut self, master: &str, event: MemberEvent, at: &HlcTimestamp) {
+        let mut events = self.events_of(master).into_owned();
+        // A member from before spans existed has no record: a repeat admission opens none,
+        // which would make it a member only from now (0.12.2 left it unrecorded too).
+        if events.is_empty() && self.members.contains_key(master) && matches!(event, MemberEvent::Admit { .. }) {
+            return;
+        }
+        if !super::members::insert(&mut events, event) {
+            return;
+        }
+        let open_of = |spans: Option<&Vec<MemberSpan>>| spans.and_then(|s| s.last()).filter(|s| s.until_ms == u64::MAX).cloned();
+        let before = open_of(self.member_record.get(master));
+        let spans = super::members::derive(&events);
+        let after = open_of(Some(&spans));
+        let name = after.as_ref().and_then(|s| super::members::opening_name(&events, s)).map(str::to_string);
+        self.member_events.insert(master.to_string(), events);
+        if spans.is_empty() {
+            self.member_record.remove(master);
+        } else {
+            self.member_record.insert(master.to_string(), spans);
+        }
+        let start = |s: &MemberSpan| s.from_hlc.clone().unwrap_or(HlcTimestamp { physical_ms: s.from_ms, counter: 0, actor: String::new() });
+        match (before, after) {
+            (Some(_), None) => {
+                self.join_lock.note_removal(at);
+                self.members.remove(master);
+                self.roles.remove(master);
+                self.nicknames.remove(master);
+                self.twitch_usernames.remove(master);
+                self.storage_pledges.remove(master);
+            }
+            (None, Some(span)) => {
+                let from = start(&span);
+                let display_name = name.unwrap_or_else(|| short_name(master));
+                self.members.entry(master.to_string()).or_insert_with(|| MemberInfo { peer_id: master.to_string(), display_name });
+                self.roles.entry(master.to_string()).or_insert_with(|| {
+                    AdminLwwReg::new(MemberRole::Member, from, MemberRole::Member.priority())
+                });
+            }
+            (Some(was), Some(span)) if start(&was) != start(&span) => {
+                let from = start(&span);
+                if let (Some(name), Some(info)) = (name, self.members.get_mut(master)) {
+                    info.display_name = name;
+                }
+                if from > start(&was) {
+                    self.nicknames.retain(|k, r| k != master || *r.hlc() >= from);
+                    self.twitch_usernames.retain(|k, r| k != master || *r.hlc() >= from);
+                    self.storage_pledges.retain(|k, r| k != master || *r.hlc() >= from);
+                    if self.roles.get(master).is_some_and(|r| *r.hlc() < from) {
+                        self.roles.insert(master.to_string(), AdminLwwReg::new(MemberRole::Member, from, MemberRole::Member.priority()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A per-member register write dated before the member's current span, or while the
+    /// member is out: a removal voided it (`crdt::dominance` drops the same at the door).
+    fn before_span(&self, master: &str, at: &HlcTimestamp) -> bool {
+        match self.member_record.get(master).and_then(|s| s.last()) {
+            Some(last) if last.until_ms == u64::MAX => {
+                last.from_hlc.as_ref().map_or(at.physical_ms < last.from_ms, |from| at < from)
+            }
+            _ => false,
         }
     }
 
@@ -819,94 +974,15 @@ impl ServerState {
         changed
     }
 
-    /// Restore op_log from DB-persisted ops, at startup. The store hands them in clock
-    /// order, where a checkpoint sits at its own clock; the log keeps fold order, which
-    /// the fold's tail check and every search over the log assume.
-    pub fn restore_op_log(&mut self, mut ops: Vec<CrdtOp>) {
-        ops.sort_by(fold_order);
-        self.op_log = ops;
-        self.op_log_dedup.clear();
-        for op in &self.op_log {
-            self.op_log_dedup.insert((op.author.clone(), op.hlc.clone()));
-        }
-        self.late_leaves.clear();
-        let mut rejudge = false;
-        if let Some(base) = self.checkpoint_hlc.clone() {
-            let genesis = super::anchor::is_genesis_id(&self.server_id);
-            // A stored self-leave under the checkpoint is one the fold kept: refold to
-            // judge it again, since `late_leaves` is never stored.
-            self.op_log.retain(|o| {
-                let late = is_self_leave(o) && !retained_under(o, &base, genesis);
-                rejudge |= late;
-                late || retained_under(o, &base, genesis)
-            });
-            self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
-        }
-        if rejudge && self.anchor() != Anchor::Legacy {
-            self.refold();
-        }
+    /// Restore the log from the stored rows, at startup: `(op, parked_until)` in any
+    /// order. The base is picked from the ROWS (the greatest checkpoint whose parent is
+    /// held), never from the state JSON, which a separate job wrote. When the rows fold
+    /// into the set the saved fingerprint names, the saved state stands; otherwise the
+    /// state is refolded and `true` tells the caller to save it.
+    pub fn restore_op_log(&mut self, rows: Vec<(CrdtOp, Option<u64>)>) -> super::fold::Restored {
+        let restored = self.restore_rows(rows);
         self.witness_retained();
-    }
-
-    /// The checkpoint `op` (already allowed) replaces the materialized state, then every
-    /// member's own leave it covers, logged or among `refused`, is judged in fold order
-    /// against the span the checkpoint lists alone, so the verdict depends on the op set
-    /// and never on batching. Returns the leaves from `refused` it applied, for the log.
-    pub(super) fn apply_checkpoint(&mut self, op: &CrdtOp, refused: &[CrdtOp]) -> Vec<CrdtOp> {
-        let CrdtPayload::ServerCheckpoint { state, covers } = &op.payload else { return Vec::new() };
-        let Ok(base) = serde_json::from_str::<ServerState>(state) else { return Vec::new() };
-        self.rebase_on(base, &op.author, covers);
-        self.close_late_leaves(refused, covers)
-    }
-
-    /// See [`Self::apply_checkpoint`]. A rejoin the checkpoint never folded loses to the
-    /// leave: a checkpoint overwrites what its author never saw.
-    fn close_late_leaves(&mut self, refused: &[CrdtOp], covers: &HlcTimestamp) -> Vec<CrdtOp> {
-        self.late_leaves.clear();
-        let covered = |o: &&CrdtOp| is_self_leave(o) && o.hlc <= *covers;
-        let mut leaves: Vec<(CrdtOp, bool)> = self.op_log.iter().filter(covered).map(|o| (o.clone(), true))
-            .chain(refused.iter().filter(covered).map(|o| (o.clone(), false)))
-            .collect();
-        leaves.sort_by(|a, b| fold_order(&a.0, &b.0));
-        let mut fresh = Vec::new();
-        for (op, logged) in leaves {
-            if self.leave_outlives_checkpoint(&op, covers) {
-                self.apply_payload(&op);
-                self.late_leaves.push((op.author.clone(), op.hlc.clone()));
-                if !logged {
-                    fresh.push(op);
-                }
-            }
-        }
-        fresh
-    }
-
-    /// `op` is a member's own leave at or before `covers` that this state, as the
-    /// checkpoint left it, still counts that member through: a span whose exact opening
-    /// clock and every admission it records come before the leave, never the owner's.
-    fn leave_outlives_checkpoint(&self, op: &CrdtOp, covers: &HlcTimestamp) -> bool {
-        if !is_self_leave(op) || op.hlc > *covers || !self.members.contains_key(&op.author) {
-            return false;
-        }
-        if self.current_owner().as_deref() == Some(op.author.as_str()) {
-            return false;
-        }
-        self.member_record
-            .get(&op.author)
-            .and_then(|spans| spans.last())
-            .is_some_and(|span| {
-                span.until_ms == u64::MAX
-                    && span.from_hlc.as_ref().is_some_and(|from| *from < op.hlc)
-                    && span.admitted.iter().all(|(_, at)| *at < op.hlc)
-            })
-    }
-
-    /// Whether the log keeps `op` under the checkpoint at `base`: what [`retained_under`]
-    /// keeps, and the late leaves when `base` is our own checkpoint, the one that judged
-    /// them (under another base a peer would drop them, then be offered them again).
-    pub(crate) fn retains(&self, op: &CrdtOp, base: &HlcTimestamp, genesis: bool) -> bool {
-        retained_under(op, base, genesis)
-            || (self.checkpoint_hlc.as_ref() == Some(base) && self.late_leaves.iter().any(|(a, h)| *a == op.author && *h == op.hlc))
+        restored
     }
 
     /// Generate a new CrdtOp with our HLC, signed with our master key, but do NOT apply
@@ -924,7 +1000,7 @@ impl ServerState {
         // A wall stepped back past the drift bound leaves our clock below ops we hold,
         // and a stamp we already used would make this op a duplicate of that one.
         let mut ts = hlc.now();
-        while self.op_log_dedup.contains(&(hlc.actor().to_string(), ts.clone()))
+        while self.op_log_dedup.contains_key(&(hlc.actor().to_string(), ts.clone()))
             || self.held.iter().any(|(h, _)| h.author == hlc.actor() && h.hlc == ts)
         {
             ts = hlc.now();
@@ -978,14 +1054,15 @@ impl ServerState {
 
         let ServerState {
             name, roles, nicknames, twitch_usernames, storage_pledges, settings,
-            role_permissions, banned_members, muted_members, channel_grants, join_secret, join_lock,
+            role_permissions, banned_members, muted_members, channel_grants, join_secret, join_lock, stamps,
             // No timestamp of their own — these converge through the ops that
             // write them, never through an LWW register.
             server_id: _, channels: _, members: _, pinned_messages: _,
             channel_layout: _, labels: _, label_assignments: _, emotes: _,
             stickers: _, deleted: _, member_record: _, owner_pin: _,
-            checkpoint_hlc: _, standing_folded: _, op_log: _, hlc: _, op_log_dedup: _, held: _,
-            id_memo: _, late_leaves: _, signer: _,
+            checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _, held: _,
+            id_memo: _, stored: _, base: _, parent: _, signer: _, member_events: _,
+            cp_generation: _, cp_parent: _, cp_stamped: _, cp_floor, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _,
         } = self;
 
         if name.clamp_hlc(max_ms) {
@@ -995,6 +1072,11 @@ impl ServerState {
             clamped += 1;
         }
         clamped += join_lock.clamp_hlcs(max_ms);
+        clamped += stamps.clamp(max_ms);
+        if let Some(f) = cp_floor.as_mut().filter(|f| f.physical_ms > max_ms) {
+            f.physical_ms = max_ms;
+            clamped += 1;
+        }
         clamped += clamp_map(roles, max_ms);
         clamped += clamp_map(nicknames, max_ms);
         clamped += clamp_map(twitch_usernames, max_ms);
@@ -1026,7 +1108,7 @@ impl ServerState {
         }
         self.ensure_dedup();
         let dedup_key = (op.author.clone(), op.hlc.clone());
-        if self.op_log_dedup.contains(&dedup_key) {
+        if self.op_log_dedup.contains_key(&dedup_key) {
             return Ok(false);
         }
         if let Some(hlc) = &mut self.hlc {
@@ -1034,91 +1116,85 @@ impl ServerState {
         }
         self.apply_payload(op);
         self.log_admitted(op.clone());
-        Ok(self.op_log_dedup.contains(&dedup_key))
+        Ok(self.op_log_dedup.contains_key(&dedup_key))
     }
 
-    /// The dedup set is not persisted: rebuild it from the log on first use.
+    /// The dedup map is not persisted: rebuild it from the log and the stored rows on
+    /// first use.
     pub(super) fn ensure_dedup(&mut self) {
-        if self.op_log_dedup.is_empty() && !self.op_log.is_empty() {
-            self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+        if self.op_log_dedup.is_empty() && !(self.op_log.is_empty() && self.stored.is_empty()) {
+            self.op_log_dedup = self
+                .op_log
+                .iter()
+                .chain(self.stored.iter().map(|(o, _)| o))
+                .map(|o| ((o.author.clone(), o.hlc.clone()), o.content_hash()))
+                .collect();
         }
     }
 
-    /// Whether `master` authored an op this replica keeps.
+    /// Whether `master` authored an op this replica keeps: folded, stored (parked or
+    /// dormant) or held.
     pub(crate) fn has_op_author(&self, master: &str) -> bool {
-        if self.op_log_dedup.is_empty() {
-            self.op_log.iter().any(|op| op.author == master)
+        let kept = if self.op_log_dedup.is_empty() {
+            self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o)).any(|op| op.author == master)
         } else {
             self.op_log_dedup.has_author(master)
-        }
+        };
+        kept || self.held.iter().any(|(op, _)| op.author == master)
     }
 
-    /// Enter an applied op into the log in fold order. A legacy log is capped; an
-    /// anchored one drops everything a checkpoint has overwritten instead.
+    /// Enter an applied op into the log in fold order. A legacy log is capped.
     pub(super) fn log_admitted(&mut self, op: CrdtOp) {
         let pos = self
             .op_log
             .binary_search_by(|existing| fold_order(existing, &op))
             .unwrap_or_else(|pos| pos);
-        self.op_log_dedup.insert((op.author.clone(), op.hlc.clone()));
-        let is_checkpoint = matches!(op.payload, CrdtPayload::ServerCheckpoint { .. });
+        self.op_log_dedup.insert((op.author.clone(), op.hlc.clone()), op.content_hash());
         self.op_log.insert(pos, op);
-        if is_checkpoint {
-            self.prune_before_checkpoint();
-        } else if self.anchor() == Anchor::Legacy && self.op_log.len() > LEGACY_OP_LOG_CAP {
+        if self.anchor() == Anchor::Legacy && self.op_log.len() > LEGACY_OP_LOG_CAP {
             let drain = self.op_log.len() - LEGACY_OP_LOG_CAP;
-            self.op_log.drain(..drain);
-            self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+            for gone in self.op_log.drain(..drain) {
+                self.op_log_dedup.remove(&(gone.author, gone.hlc));
+            }
         }
-    }
-
-    /// Drop every logged op the current checkpoint overwrote, except the founding op
-    /// of a self-certifying id: a joiner needs it to prove who the owner is.
-    pub(super) fn prune_before_checkpoint(&mut self) {
-        let Some(base) = self.checkpoint_hlc.clone() else { return };
-        let genesis = super::anchor::is_genesis_id(&self.server_id);
-        let late = std::mem::take(&mut self.late_leaves);
-        self.op_log.retain(|o| retained_under(o, &base, genesis) || late.iter().any(|(a, h)| *a == o.author && *h == o.hlc));
-        self.late_leaves = late;
-        self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
     }
 
     /// The state change an op makes, and nothing else: no dedup, no log, no judgment.
     /// The fold replays admitted ops through this in HLC order.
     pub(super) fn apply_payload(&mut self, op: &CrdtOp) {
+        let at = &op.hlc;
+        if self.cp_floor.as_ref().is_some_and(|f| at <= f) && super::dominance::below_floor_counts(&op.payload) {
+            return;
+        }
         match &op.payload {
             CrdtPayload::ServerCreated { name, owner_peer_id, .. } => {
                 // `op_allowed` admits a founding op only on an ownerless state; the
                 // guard keeps a local replay path from re-seating anyone.
                 if self.current_owner().is_none() {
-                    self.seed_founder(name, owner_peer_id, &op.hlc);
+                    self.seed_founder(name, owner_peer_id, at);
                 }
             }
 
-            CrdtPayload::ServerCheckpoint { .. } => {
-                self.apply_checkpoint(op, &[]);
+            CrdtPayload::ServerCheckpoint { state, covers } => {
+                // Only a legacy replica's arrival-order path reaches here; the fold
+                // rebases through `apply_base`.
+                if let Some(base) = parse_state(state) {
+                    self.rebase_on(base, &op.author, covers);
+                }
             }
 
             CrdtPayload::ServerRenamed { new_name } => {
                 let priority = self.author_priority(&op.author);
-                let remote = AdminLwwReg::new(new_name.clone(), op.hlc.clone(), priority);
-                self.name.merge(&remote);
+                self.name.merge(&AdminLwwReg::new(new_name.clone(), at.clone(), priority));
             }
 
             CrdtPayload::ServerSettingChanged { key, value } => {
                 let priority = self.author_priority(&op.author);
-                let entry = self
-                    .settings
-                    .entry(key.clone())
-                    .or_insert_with(|| {
-                        AdminLwwReg::new(value.clone(), op.hlc.clone(), priority)
-                    });
-                let remote = AdminLwwReg::new(value.clone(), op.hlc.clone(), priority);
-                entry.merge(&remote);
+                merge_into(&mut self.settings, key, value.clone(), at, priority);
             }
 
             CrdtPayload::JoinKeySet { secret } => {
-                let remote = AdminLwwReg::new(secret.clone(), op.hlc.clone(), MemberRole::Owner.priority());
+                let remote = AdminLwwReg::new(secret.clone(), at.clone(), MemberRole::Owner.priority());
                 match self.join_secret.as_mut() {
                     Some(reg) => reg.merge(&remote),
                     None => self.join_secret = Some(remote),
@@ -1126,7 +1202,7 @@ impl ServerState {
             }
 
             CrdtPayload::JoinLock { link, door, grants } => {
-                self.join_lock.apply(link, door.as_ref(), grants, &op.hlc);
+                self.join_lock.apply(link, door.as_ref(), grants, at);
             }
 
             CrdtPayload::ServerDeleted { .. } => {
@@ -1145,18 +1221,19 @@ impl ServerState {
                 self.label_assignments.clear();
             }
 
-            CrdtPayload::ChannelAdded {
-                channel_id,
-                name,
-                category,
-                channel_type,
-            } => {
-                let ct = match channel_type.as_str() {
-                    "voice" => ChannelType::Voice,
-                    _ => ChannelType::Text,
-                };
-                self.channels.entry(channel_id.clone()).or_insert_with(|| {
-                    ChannelInfo {
+            CrdtPayload::ChannelAdded { channel_id, name, category, channel_type } => {
+                let stamps = self.stamps.channels.entry(channel_id.clone()).or_default();
+                if !newer(&stamps.exist, at) {
+                    return;
+                }
+                raise(&mut stamps.exist, at);
+                if !self.channels.contains_key(channel_id) {
+                    stamps.created = Some(at.clone());
+                    let ct = match channel_type.as_str() {
+                        "voice" => ChannelType::Voice,
+                        _ => ChannelType::Text,
+                    };
+                    self.channels.insert(channel_id.clone(), ChannelInfo {
                         channel_id: channel_id.clone(),
                         name: name.clone(),
                         category: category.clone(),
@@ -1169,78 +1246,57 @@ impl ServerState {
                         visibility_labels: Vec::new(),
                         posting_labels: Vec::new(),
                         voice_chat: VoiceChat::Server,
-                    }
-                });
+                    });
+                }
             }
 
             CrdtPayload::ChannelRemoved { channel_id } => {
-                self.channels.remove(channel_id);
-            }
-
-            CrdtPayload::ChannelRenamed {
-                channel_id,
-                new_name,
-            } => {
-                if let Some(ch) = self.channels.get_mut(channel_id) {
-                    ch.name = new_name.clone();
+                let stamps = self.stamps.channels.entry(channel_id.clone()).or_default();
+                if newer(&stamps.exist, at) {
+                    raise(&mut stamps.exist, at);
+                    self.channels.remove(channel_id);
                 }
             }
 
-            CrdtPayload::MemberAdded {
-                peer_id,
-                display_name,
-                ask, ..
-            } => {
-                if !self.members.contains_key(peer_id) {
-                    self.open_span(peer_id, &op.hlc, ask.as_ref().map_or(0, |a| a.at), Some(&op.author));
-                } else if let Some(open) = self.member_record.get_mut(peer_id).and_then(|s| s.last_mut()).filter(|s| s.until_ms == u64::MAX) {
-                    // A duplicate admission adds its author to an open span and never opens
-                    // one: a span opened here would widen `was_member_at` for older rows.
-                    note_admitter(open, &op.author, &op.hlc);
+            CrdtPayload::ChannelRenamed { channel_id, new_name } => {
+                if self.channel_field(channel_id, at, |c| &mut c.name) {
+                    self.channel_mut(channel_id).name = new_name.clone();
                 }
-                self.members.entry(peer_id.clone()).or_insert_with(|| {
-                    MemberInfo {
-                        peer_id: peer_id.clone(),
-                        display_name: display_name.clone(),
-                    }
-                });
-                self.roles.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(
-                        MemberRole::Member,
-                        op.hlc.clone(),
-                        MemberRole::Member.priority(),
-                    )
-                });
             }
 
-            CrdtPayload::MemberRemoved { peer_id } => {
-                if self.members.contains_key(peer_id) {
-                    self.join_lock.note_removal(&op.hlc);
-                }
-                self.close_span(peer_id, &op.hlc);
-                self.members.remove(peer_id);
-                self.roles.remove(peer_id);
-                self.nicknames.remove(peer_id);
-                self.twitch_usernames.remove(peer_id);
-                self.storage_pledges.remove(peer_id);
+            CrdtPayload::MemberAdded { peer_id, display_name, ask, .. } => {
+                let ask = ask.as_ref().map_or(super::members::LEGACY_ASK, |a| a.at);
+                let event = MemberEvent::Admit { at: at.clone(), by: op.author.clone(), ask, name: display_name.clone() };
+                self.record_event(peer_id, event, at);
+            }
+
+            CrdtPayload::MemberRemoved { peer_id, .. } => {
+                let event = if *peer_id == op.author {
+                    MemberEvent::Leave { at: at.clone() }
+                } else {
+                    MemberEvent::Remove { at: at.clone() }
+                };
+                self.record_event(peer_id, event, at);
             }
 
             // Closing a channel also takes it off the public list for good, so lifting
-            // the restriction later never reopens it to guests.
+            // the restriction later never reopens it to guests. Both visibility arms date
+            // `is_public`, so a late `public = true` never reopens it either.
             CrdtPayload::ChannelVisibilityChanged { channel_id, visibility } => {
-                if let Some(ch) = self.channels.get_mut(channel_id) {
-                    ch.visibility = match visibility.as_str() {
-                        "moderator" => ChannelVisibility::ModeratorPlus,
-                        "admin" => ChannelVisibility::AdminPlus,
-                        _ => ChannelVisibility::Everyone,
-                    };
-                    ch.is_public &= !ch.restricted();
+                let visibility = parse_visibility(visibility);
+                let restricts = visibility != ChannelVisibility::Everyone;
+                if self.late_restriction_closes(channel_id, restricts, false, at) {
+                    self.channel_mut(channel_id).is_public = false;
                 }
+                if self.channel_field(channel_id, at, |c| &mut c.visibility) {
+                    self.channel_mut(channel_id).visibility = visibility;
+                }
+                self.close_if_restricted(channel_id, at);
             }
 
             CrdtPayload::ChannelPostingChanged { channel_id, posting } => {
-                if let Some(ch) = self.channels.get_mut(channel_id) {
-                    ch.posting = match posting.as_str() {
+                if self.channel_field(channel_id, at, |c| &mut c.posting) {
+                    self.channel_mut(channel_id).posting = match posting.as_str() {
                         "moderator" => ChannelPosting::ModeratorPlus,
                         "admin" => ChannelPosting::AdminPlus,
                         _ => ChannelPosting::Everyone,
@@ -1249,315 +1305,336 @@ impl ServerState {
             }
 
             CrdtPayload::ChannelPublicChanged { channel_id, is_public } => {
-                if let Some(ch) = self.channels.get_mut(channel_id) {
-                    // Voice channels can never be public (#44) — drop the flag
-                    // at apply so a pre-guard client's op can't wedge one in.
+                if self.channel_field(channel_id, at, |c| &mut c.public) {
+                    let st = self.stamps.channels.entry(channel_id.clone()).or_default();
+                    st.set = Some(at.clone());
+                    st.set_vis = st.visibility.clone();
+                    st.set_labels = st.vis_labels.clone();
+                    let ch = self.channel_mut(channel_id);
+                    // Voice channels can never be public (#44): drop the flag at apply so
+                    // a pre-guard client's op can't wedge one in.
                     if ch.channel_type == ChannelType::Text {
-                        ch.is_public = *is_public;
+                        ch.is_public = *is_public && !ch.restricted();
                     }
                 }
             }
 
             CrdtPayload::ChannelSlowModeChanged { channel_id, seconds } => {
-                if let Some(ch) = self.channels.get_mut(channel_id) {
-                    ch.slow_mode = *seconds;
+                if self.channel_field(channel_id, at, |c| &mut c.slow) {
+                    self.channel_mut(channel_id).slow_mode = *seconds;
                 }
             }
 
             CrdtPayload::ChannelMediaOnlyChanged { channel_id, media_only } => {
-                if let Some(ch) = self.channels.get_mut(channel_id) {
-                    ch.media_only = *media_only;
+                if self.channel_field(channel_id, at, |c| &mut c.media) {
+                    self.channel_mut(channel_id).media_only = *media_only;
                 }
             }
 
             CrdtPayload::ChannelVoiceChatChanged { channel_id, mode } => {
-                if let Some(ch) = self.channels.get_mut(channel_id) {
-                    ch.voice_chat = *mode;
+                if self.channel_field(channel_id, at, |c| &mut c.voice) {
+                    self.channel_mut(channel_id).voice_chat = *mode;
                 }
             }
 
             CrdtPayload::ChannelVisibilityLabelsChanged { channel_id, labels } => {
-                if let Some(ch) = self.channels.get_mut(channel_id) {
-                    ch.visibility_labels = labels.clone();
-                    ch.is_public &= !ch.restricted();
+                if self.late_restriction_closes(channel_id, !labels.is_empty(), true, at) {
+                    self.channel_mut(channel_id).is_public = false;
                 }
+                if self.channel_field(channel_id, at, |c| &mut c.vis_labels) {
+                    self.channel_mut(channel_id).visibility_labels = labels.clone();
+                }
+                self.close_if_restricted(channel_id, at);
             }
 
             CrdtPayload::ChannelPostingLabelsChanged { channel_id, labels } => {
-                if let Some(ch) = self.channels.get_mut(channel_id) {
-                    ch.posting_labels = labels.clone();
+                if self.channel_field(channel_id, at, |c| &mut c.post_labels) {
+                    self.channel_mut(channel_id).posting_labels = labels.clone();
                 }
             }
 
+            // Grants, mutes and bans keep their lifted register as a tombstone: a late
+            // op older than the lift must find it.
             CrdtPayload::ChannelGrantSet { channel_id, peer_id, expires_at } => {
                 let priority = self.author_priority(&op.author);
                 let per_chan = self.channel_grants.entry(channel_id.clone()).or_default();
-                let entry = per_chan.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(*expires_at, op.hlc.clone(), priority)
-                });
-                let remote = AdminLwwReg::new(*expires_at, op.hlc.clone(), priority);
-                entry.merge(&remote);
+                merge_into(per_chan, peer_id, *expires_at, at, priority);
             }
 
             CrdtPayload::ChannelGrantRevoked { channel_id, peer_id } => {
                 let priority = self.author_priority(&op.author);
                 let per_chan = self.channel_grants.entry(channel_id.clone()).or_default();
-                let entry = per_chan.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(0u64, op.hlc.clone(), priority)
-                });
-                let remote = AdminLwwReg::new(0u64, op.hlc.clone(), priority);
-                entry.merge(&remote);
-                // Prune (mirrors MemberUnmuted): only this arm can flip a
-                // register to 0, so the sweep lives only here. A newer grant
-                // wins the merge above and survives the retain.
-                per_chan.retain(|_, reg| *reg.read() != 0);
-                if per_chan.is_empty() {
-                    self.channel_grants.remove(channel_id);
-                }
+                merge_into(per_chan, peer_id, 0u64, at, priority);
             }
 
-            CrdtPayload::RoleChanged {
-                peer_id,
-                role,
-                priority,
-            } => {
+            CrdtPayload::RoleChanged { peer_id, role, priority } => {
                 // The payload's `priority` is inert wire-compat metadata: merge is pure
                 // HLC LWW and authority is enforced by can_change_role at author and
                 // ingest. Old clients still merge priority-first, so keep sending it.
-                // Old clients still merge priority-first, so keep sending it.
+                if self.before_span(peer_id, at) {
+                    return;
+                }
                 let was_moderation = self.roles.get(peer_id).is_some_and(|r| r.read().priority() >= MemberRole::Moderator.priority());
-                let entry = self.roles.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(role.clone(), op.hlc.clone(), *priority)
-                });
-                let remote = AdminLwwReg::new(role.clone(), op.hlc.clone(), *priority);
-                entry.merge(&remote);
+                merge_into(&mut self.roles, peer_id, role.clone(), at, *priority);
                 // A demoted mod still holds the change key the lock must now leave behind.
-                if was_moderation && entry.read().priority() < MemberRole::Moderator.priority() {
-                    self.join_lock.note_removal(&op.hlc);
+                if was_moderation && self.roles[peer_id].read().priority() < MemberRole::Moderator.priority() {
+                    self.join_lock.note_removal(at);
                 }
             }
 
             CrdtPayload::NicknameChanged { peer_id, nickname } => {
-                // Any member can set their own nickname. Use author's priority
-                // so admins can also change others' nicknames.
-                let priority = self.author_priority(&op.author);
-                let entry = self.nicknames.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(nickname.clone(), op.hlc.clone(), priority)
-                });
-                let remote = AdminLwwReg::new(nickname.clone(), op.hlc.clone(), priority);
-                entry.merge(&remote);
+                if !self.before_span(peer_id, at) {
+                    let priority = self.author_priority(&op.author);
+                    merge_into(&mut self.nicknames, peer_id, nickname.clone(), at, priority);
+                }
             }
 
             CrdtPayload::TwitchUsernameChanged { peer_id, twitch_username } => {
-                let priority = self.author_priority(&op.author);
-                let entry = self.twitch_usernames.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(twitch_username.clone(), op.hlc.clone(), priority)
-                });
-                let remote = AdminLwwReg::new(twitch_username.clone(), op.hlc.clone(), priority);
-                entry.merge(&remote);
+                if !self.before_span(peer_id, at) {
+                    let priority = self.author_priority(&op.author);
+                    merge_into(&mut self.twitch_usernames, peer_id, twitch_username.clone(), at, priority);
+                }
             }
 
             CrdtPayload::ChannelLayoutUpdated { layout_json } => {
-                if let Ok(layout) = serde_json::from_str::<Vec<ChannelLayoutItem>>(layout_json) {
+                if newer(&self.stamps.layout, at)
+                    && let Ok(layout) = serde_json::from_str::<Vec<ChannelLayoutItem>>(layout_json)
+                {
                     self.channel_layout = layout;
+                    raise(&mut self.stamps.layout, at);
                 }
             }
 
             CrdtPayload::MessagePinned { channel_id, message_id } => {
-                let pins = self.pinned_messages.entry(channel_id.clone()).or_default();
-                if !pins.contains(message_id) {
-                    pins.push(message_id.clone());
-                }
+                self.write_pin(channel_id, message_id, at, true);
             }
 
             CrdtPayload::MessageUnpinned { channel_id, message_id } => {
-                if let Some(pins) = self.pinned_messages.get_mut(channel_id) {
-                    pins.retain(|id| id != message_id);
-                    if pins.is_empty() {
-                        self.pinned_messages.remove(channel_id);
-                    }
-                }
+                self.write_pin(channel_id, message_id, at, false);
             }
 
             CrdtPayload::StoragePledgeChanged { peer_id, pledge_bytes } => {
-                let priority = self.author_priority(&op.author);
-                let entry = self.storage_pledges.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(*pledge_bytes, op.hlc.clone(), priority)
-                });
-                let remote = AdminLwwReg::new(*pledge_bytes, op.hlc.clone(), priority);
-                entry.merge(&remote);
+                if !self.before_span(peer_id, at) {
+                    let priority = self.author_priority(&op.author);
+                    merge_into(&mut self.storage_pledges, peer_id, *pledge_bytes, at, priority);
+                }
             }
 
             CrdtPayload::RolePermissionsChanged { role, permissions } => {
                 let priority = self.author_priority(&op.author);
-                let entry = self.role_permissions.entry(role.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(*permissions, op.hlc.clone(), priority)
-                });
-                let remote = AdminLwwReg::new(*permissions, op.hlc.clone(), priority);
-                entry.merge(&remote);
+                merge_into(&mut self.role_permissions, role, *permissions, at, priority);
             }
 
-            CrdtPayload::MemberBanned { peer_id } => {
+            CrdtPayload::MemberBanned { peer_id, .. } => {
                 let priority = self.author_priority(&op.author);
-                let entry = self.banned_members.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(true, op.hlc.clone(), priority)
-                });
-                let remote = AdminLwwReg::new(true, op.hlc.clone(), priority);
-                entry.merge(&remote);
-                // Also remove from server (ban = kick + prevent rejoin)
-                if self.members.contains_key(peer_id) {
-                    self.join_lock.note_removal(&op.hlc);
-                }
-                self.close_span(peer_id, &op.hlc);
-                self.members.remove(peer_id);
-                self.roles.remove(peer_id);
-                self.nicknames.remove(peer_id);
-                self.twitch_usernames.remove(peer_id);
-                self.storage_pledges.remove(peer_id);
+                merge_into(&mut self.banned_members, peer_id, true, at, priority);
+                // Ban = kick + prevent rejoin.
+                self.record_event(peer_id, MemberEvent::Remove { at: at.clone() }, at);
             }
 
             CrdtPayload::MemberUnbanned { peer_id } => {
                 let priority = self.author_priority(&op.author);
-                let entry = self.banned_members.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(false, op.hlc.clone(), priority)
-                });
-                let remote = AdminLwwReg::new(false, op.hlc.clone(), priority);
-                entry.merge(&remote);
-                // Prune unbanned members to prevent unbounded growth. Only this
-                // arm can flip a register to false, so the sweep lives here
-                // instead of running on every op. LWW-aware: a newer ban wins
-                // the merge above and survives the retain.
-                self.banned_members.retain(|_, reg| *reg.read());
+                merge_into(&mut self.banned_members, peer_id, false, at, priority);
             }
 
             CrdtPayload::MemberMuted { peer_id, expires_at } => {
                 let priority = self.author_priority(&op.author);
-                let entry = self.muted_members.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(*expires_at, op.hlc.clone(), priority)
-                });
-                let remote = AdminLwwReg::new(*expires_at, op.hlc.clone(), priority);
-                entry.merge(&remote);
+                merge_into(&mut self.muted_members, peer_id, *expires_at, at, priority);
             }
 
             CrdtPayload::MemberUnmuted { peer_id } => {
                 let priority = self.author_priority(&op.author);
-                let entry = self.muted_members.entry(peer_id.clone()).or_insert_with(|| {
-                    AdminLwwReg::new(0u64, op.hlc.clone(), priority)
-                });
-                let remote = AdminLwwReg::new(0u64, op.hlc.clone(), priority);
-                entry.merge(&remote);
-                // Prune unmuted entries to prevent unbounded growth. Mirrors the
-                // MemberUnbanned sweep: only this arm can flip a register to 0,
-                // and a newer mute wins the merge above and survives the retain.
-                self.muted_members.retain(|_, reg| *reg.read() != 0);
+                merge_into(&mut self.muted_members, peer_id, 0u64, at, priority);
             }
 
             CrdtPayload::LabelCreated { label_id, name, color, access } => {
-                self.labels.entry(label_id.clone()).or_insert_with(|| {
-                    LabelInfo {
+                let stamps = self.stamps.labels.entry(label_id.clone()).or_default();
+                if !newer(&stamps.exist, at) {
+                    return;
+                }
+                raise(&mut stamps.exist, at);
+                if !self.labels.contains_key(label_id) {
+                    stamps.created = Some(at.clone());
+                    self.labels.insert(label_id.clone(), LabelInfo {
                         label_id: label_id.clone(),
                         name: name.clone(),
                         color: color.clone(),
                         access: *access,
-                    }
-                });
+                    });
+                }
             }
 
             CrdtPayload::LabelDeleted { label_id } => {
+                let stamps = self.stamps.labels.entry(label_id.clone()).or_default();
+                if !newer(&stamps.exist, at) {
+                    return;
+                }
+                raise(&mut stamps.exist, at);
                 self.labels.remove(label_id);
-                for assignments in self.label_assignments.values_mut() {
-                    assignments.retain(|id| id != label_id);
+                let members: Vec<String> =
+                    self.label_assignments.iter().filter(|(_, l)| l.contains(label_id)).map(|(m, _)| m.clone()).collect();
+                for member in members {
+                    self.write_assignment(&member, label_id, at, false);
                 }
             }
 
             CrdtPayload::LabelUpdated { label_id, name, color, access } => {
+                let Some(stamps) = self.stamps.labels.get_mut(label_id) else {
+                    // A label from before 0.14 carries no stamps of its own.
+                    if let Some(label) = self.labels.get_mut(label_id) {
+                        update_label(label, name, color, *access);
+                        self.stamps.labels.entry(label_id.clone()).or_default().fields = Some(at.clone());
+                    }
+                    return;
+                };
+                if stamps.created.as_ref().is_some_and(|c| c > at) || !newer(&stamps.fields, at) {
+                    return;
+                }
                 if let Some(label) = self.labels.get_mut(label_id) {
-                    label.name = name.clone();
-                    label.color = color.clone();
-                    // None = the author predates the flag — PRESERVE it. An
-                    // old client recoloring an access label must not silently
-                    // demote it to cosmetic (that re-opens self-assignment).
-                    if let Some(a) = access {
-                        label.access = *a;
-                    }
+                    update_label(label, name, color, *access);
+                    raise(&mut stamps.fields, at);
                 }
             }
 
-            CrdtPayload::LabelAssigned { label_id, peer_id } => {
-                let assignments = self.label_assignments.entry(peer_id.clone()).or_default();
-                if !assignments.contains(label_id) {
-                    assignments.push(label_id.clone());
+            // A label deleted or made again at or after the write voided it.
+            CrdtPayload::LabelAssigned { label_id, peer_id } | CrdtPayload::LabelUnassigned { label_id, peer_id } => {
+                if self.stamps.labels.get(label_id).is_none_or(|l| newer(&l.exist, at)) {
+                    self.write_assignment(peer_id, label_id, at, matches!(op.payload, CrdtPayload::LabelAssigned { .. }));
                 }
             }
 
-            CrdtPayload::LabelUnassigned { label_id, peer_id } => {
-                if let Some(assignments) = self.label_assignments.get_mut(peer_id) {
-                    assignments.retain(|id| id != label_id);
-                    if assignments.is_empty() {
-                        self.label_assignments.remove(peer_id);
-                    }
-                }
-            }
-
+            // No refusal past the cap: which 50 show is decided at read time by add
+            // clock (`emotes_list`), so it never depends on the order ops arrived in.
             CrdtPayload::EmojiAdded { name, hash, animated } => {
-                // Replace-on-same-name (re-adding a name swaps the image);
-                // refuse NEW names past the cap so replicas converge on the
-                // same refusal regardless of op arrival order relative to
-                // other adds already in the log.
-                let is_new = !self.emotes.contains_key(name);
-                if !is_new || self.emotes.len() < MAX_SERVER_EMOTES {
-                    self.emotes.insert(
-                        name.clone(),
-                        EmoteInfo {
-                            name: name.clone(),
-                            hash: hash.clone(),
-                            animated: *animated,
-                        },
-                    );
+                if newer(&self.stamps.emotes.get(name).cloned(), at) {
+                    self.stamps.emotes.insert(name.clone(), at.clone());
+                    self.emotes.insert(name.clone(), EmoteInfo { name: name.clone(), hash: hash.clone(), animated: *animated });
                 }
             }
 
             CrdtPayload::EmojiRemoved { name } => {
-                self.emotes.remove(name);
+                if newer(&self.stamps.emotes.get(name).cloned(), at) {
+                    self.stamps.emotes.insert(name.clone(), at.clone());
+                    self.emotes.remove(name);
+                }
             }
 
             CrdtPayload::StickerAdded { hash, name, pack, animated, w, h } => {
-                // Same convergence rule as emotes: replacing an existing
-                // entry always applies, a NEW one only under the cap, so
-                // replicas refuse identically regardless of arrival order.
-                let is_new = !self.stickers.contains_key(hash);
-                if !is_new || self.stickers.len() < MAX_SERVER_STICKERS {
-                    self.stickers.insert(
-                        hash.clone(),
-                        StickerInfo {
-                            hash: hash.clone(),
-                            name: name.clone(),
-                            pack: pack.clone(),
-                            animated: *animated,
-                            w: *w,
-                            h: *h,
-                        },
-                    );
+                if newer(&self.stamps.stickers.get(hash).cloned(), at) {
+                    self.stamps.stickers.insert(hash.clone(), at.clone());
+                    self.stickers.insert(hash.clone(), StickerInfo {
+                        hash: hash.clone(),
+                        name: name.clone(),
+                        pack: pack.clone(),
+                        animated: *animated,
+                        w: *w,
+                        h: *h,
+                    });
                 }
             }
 
             CrdtPayload::StickerRemoved { hash } => {
-                self.stickers.remove(hash);
+                if newer(&self.stamps.stickers.get(hash).cloned(), at) {
+                    self.stamps.stickers.insert(hash.clone(), at.clone());
+                    self.stickers.remove(hash);
+                }
             }
+        }
+    }
+
+    /// Whether an op at `at` still writes a field of the existing channel `id`: the
+    /// field's stamp is older, and the channel was not made again after `at`. Raises the
+    /// stamp when it does.
+    fn channel_field(&mut self, id: &str, at: &HlcTimestamp, field: fn(&mut ChannelStamps) -> &mut Option<HlcTimestamp>) -> bool {
+        if !self.channels.contains_key(id) {
+            return false;
+        }
+        let stamps = self.stamps.channels.entry(id.to_string()).or_default();
+        if stamps.created.as_ref().is_some_and(|c| c > at) {
+            return false;
+        }
+        let f = field(stamps);
+        if !newer(f, at) {
+            return false;
+        }
+        *f = Some(at.clone());
+        true
+    }
+
+    fn channel_mut(&mut self, id: &str) -> &mut ChannelInfo {
+        self.channels.get_mut(id).expect("channel_field checked it exists")
+    }
+
+    /// Whether a visibility write at `at` that restricts on its own closes the public
+    /// channel `id` though a newer write of its field may win: no `public` write landed
+    /// after it, or the newest one came while this write still held its field.
+    pub(super) fn late_restriction_closes(&self, id: &str, restricts: bool, labels: bool, at: &HlcTimestamp) -> bool {
+        let (Some(ch), Some(st)) = (self.channels.get(id), self.stamps.channels.get(id)) else { return false };
+        if !restricts || !ch.is_public || st.created.as_ref().is_some_and(|c| c > at) {
+            return false;
+        }
+        newer(&st.set, at) || newer(if labels { &st.set_labels } else { &st.set_vis }, at)
+    }
+
+    /// A restricted channel is never public (HOL-SEC-094), whatever order the writes came in.
+    fn close_if_restricted(&mut self, id: &str, at: &HlcTimestamp) {
+        let Some(ch) = self.channels.get_mut(id) else { return };
+        let stamps = self.stamps.channels.entry(id.to_string()).or_default();
+        if stamps.created.as_ref().is_some_and(|c| c > at) {
+            return;
+        }
+        raise(&mut stamps.public, at);
+        ch.is_public &= !ch.restricted();
+    }
+
+    /// A pin list is kept in pin-clock order, so a late pin lands where history put it.
+    fn write_pin(&mut self, channel_id: &str, message_id: &str, at: &HlcTimestamp, pinned: bool) {
+        let stamps = self.stamps.pins.entry(channel_id.to_string()).or_default();
+        if !newer(&stamps.get(message_id).cloned(), at) {
+            return;
+        }
+        stamps.insert(message_id.to_string(), at.clone());
+        let pins = self.pinned_messages.entry(channel_id.to_string()).or_default();
+        pins.retain(|id| id != message_id);
+        if pinned {
+            let pos = pins.partition_point(|id| stamps.get(id).is_none_or(|s| s < at));
+            pins.insert(pos, message_id.to_string());
+        }
+        if pins.is_empty() {
+            self.pinned_messages.remove(channel_id);
+        }
+    }
+
+    /// Assignments are kept in assignment-clock order, like pins.
+    fn write_assignment(&mut self, member: &str, label_id: &str, at: &HlcTimestamp, assigned: bool) {
+        let stamps = self.stamps.assigned.entry(member.to_string()).or_default();
+        if !newer(&stamps.get(label_id).cloned(), at) {
+            return;
+        }
+        stamps.insert(label_id.to_string(), at.clone());
+        let list = self.label_assignments.entry(member.to_string()).or_default();
+        list.retain(|id| id != label_id);
+        if assigned {
+            let pos = list.partition_point(|id| stamps.get(id).is_none_or(|s| s < at));
+            list.insert(pos, label_id.to_string());
+        }
+        if list.is_empty() {
+            self.label_assignments.remove(member);
         }
     }
 
     /// Replace everything materialized with a checkpoint's state. The anchor owner is
     /// the checkpoint's author; the log, clock, signer and held ops are ours.
-    fn rebase_on(&mut self, base: ServerState, owner: &str, covers: &HlcTimestamp) {
+    pub(super) fn rebase_on(&mut self, base: ServerState, owner: &str, covers: &HlcTimestamp) {
         let ServerState {
             server_id: _, name, channels, members, roles, nicknames,
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, join_secret, join_lock,
-            owner_pin: _, checkpoint_hlc: _, standing_folded: _, op_log: _, hlc: _, op_log_dedup: _,
-            held: _, id_memo: _, late_leaves: _, signer: _,
+            member_record, join_secret, join_lock, member_events, stamps,
+            owner_pin: _, checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _,
+            held: _, id_memo: _, stored: _, base: _, parent: _, signer: _,
+            cp_generation: _, cp_parent: _, cp_stamped, cp_floor, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _,
         } = base;
         self.name = name;
         self.channels = channels;
@@ -1582,6 +1659,10 @@ impl ServerState {
         self.member_record = member_record;
         self.join_secret = join_secret;
         self.join_lock = join_lock;
+        self.member_events = member_events;
+        self.stamps = stamps;
+        // An unstamped base decided everything up to its `covers`.
+        self.cp_floor = if cp_stamped { cp_floor } else { cp_floor.into_iter().chain([covers.clone()]).max() };
         self.owner_pin = Some(owner.to_string());
         self.checkpoint_hlc = Some(covers.clone());
         // The owner is trusted with the values, never with timestamps that would
@@ -1604,11 +1685,11 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, join_secret, join_lock, checkpoint_hlc,
-            owner_pin: _, standing_folded: _, op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _,
-            late_leaves: _, signer: _,
+            member_record, join_secret, join_lock, checkpoint_hlc, member_events, stamps,
+            owner_pin: _, op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _,
+            stored: _, base: _, parent: _, signer: _,
+            cp_generation: _, cp_parent: _, cp_stamped: _, cp_floor, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _,
         } = fresh;
-        self.late_leaves.clear();
         self.name = name;
         self.channels = channels;
         self.members = members;
@@ -1631,6 +1712,9 @@ impl ServerState {
         self.member_record = member_record;
         self.join_secret = join_secret;
         self.join_lock = join_lock;
+        self.member_events = member_events;
+        self.stamps = stamps;
+        self.cp_floor = cp_floor;
         self.checkpoint_hlc = checkpoint_hlc;
     }
 
@@ -1895,6 +1979,11 @@ impl ServerState {
                 || (perms & Permission::KICK_MEMBERS != 0 && actor.outranks(&target_role)))
     }
 
+    /// Whether `author`, a current member, may kick `target` in this state.
+    pub(super) fn can_kick_now(&self, author: &str, target: &str) -> bool {
+        self.author_role(author).is_some_and(|role| self.kick_allowed(&role, self.permissions_of(&role), target))
+    }
+
     /// Check if a peer is currently banned.
     pub fn is_banned(&self, peer_id: &str) -> bool {
         // Multi-device: bans are master-keyed; collapse a device id first.
@@ -1970,6 +2059,9 @@ impl ServerState {
             _ => {}
         }
         let Some(role) = self.author_role(&op.author) else { return false };
+        if !self.member_at_its_clock(op) || self.void_at_its_point(op) {
+            return false;
+        }
         let perms = self.permissions_of(&role);
         let has = |bits: u32| perms & bits != 0;
         match &op.payload {
@@ -1978,18 +2070,22 @@ impl ServerState {
                 has(Permission::MANAGE_CHANNELS) && super::valid_channel_id(channel_id)
             }
             CrdtPayload::ChannelRemoved { .. }
-            | CrdtPayload::ChannelRenamed { .. }
             | CrdtPayload::ChannelLayoutUpdated { .. }
             | CrdtPayload::MessagePinned { .. }
             | CrdtPayload::MessageUnpinned { .. }
-            | CrdtPayload::ChannelVisibilityChanged { .. }
-            | CrdtPayload::ChannelPostingChanged { .. }
-            | CrdtPayload::ChannelSlowModeChanged { .. }
-            | CrdtPayload::ChannelMediaOnlyChanged { .. }
-            | CrdtPayload::ChannelVisibilityLabelsChanged { .. }
-            | CrdtPayload::ChannelPostingLabelsChanged { .. }
             | CrdtPayload::ChannelGrantSet { .. }
             | CrdtPayload::ChannelGrantRevoked { .. } => has(Permission::MANAGE_CHANNELS),
+            // A field of a channel that does not exist at the op's point changes nothing,
+            // and would stay in every log undecided: refused, so it is parked and expires.
+            CrdtPayload::ChannelRenamed { channel_id, .. }
+            | CrdtPayload::ChannelVisibilityChanged { channel_id, .. }
+            | CrdtPayload::ChannelPostingChanged { channel_id, .. }
+            | CrdtPayload::ChannelSlowModeChanged { channel_id, .. }
+            | CrdtPayload::ChannelMediaOnlyChanged { channel_id, .. }
+            | CrdtPayload::ChannelVisibilityLabelsChanged { channel_id, .. }
+            | CrdtPayload::ChannelPostingLabelsChanged { channel_id, .. } => {
+                has(Permission::MANAGE_CHANNELS) && self.channels.contains_key(channel_id)
+            }
             CrdtPayload::RoleChanged { peer_id, role: new_role, .. } => {
                 self.role_change_allowed(&role, perms, peer_id, new_role)
             }
@@ -2005,12 +2101,15 @@ impl ServerState {
                 self.setting_allowed_for(&role, perms, key, value)
             }
             // Voluntary leave for everyone but the Owner, who deletes instead.
-            CrdtPayload::MemberRemoved { peer_id } if *peer_id == op.author => {
+            CrdtPayload::MemberRemoved { peer_id, .. } if *peer_id == op.author => {
                 role != MemberRole::Owner
             }
-            CrdtPayload::MemberRemoved { peer_id }
-            | CrdtPayload::MemberBanned { peer_id }
-            | CrdtPayload::MemberMuted { peer_id, .. } => self.kick_allowed(&role, perms, peer_id),
+            CrdtPayload::MemberRemoved { peer_id, seen } | CrdtPayload::MemberBanned { peer_id, seen } => {
+                self.kick_allowed(&role, perms, peer_id)
+                    && seen.as_deref().is_none_or(super::voids::seen_well_formed)
+                    && !self.removal_unresolved(op)
+            }
+            CrdtPayload::MemberMuted { peer_id, .. } => self.kick_allowed(&role, perms, peer_id),
             CrdtPayload::MemberUnbanned { peer_id } => {
                 has(Permission::KICK_MEMBERS)
                     && self.lifts_register(&role, self.banned_members.get(&super::resolve_identity(peer_id)))
@@ -2045,16 +2144,14 @@ impl ServerState {
             }
             CrdtPayload::ChannelPublicChanged { channel_id, is_public } => {
                 // Voice channels can never be public (#44), nor restricted ones (D6).
-                // Unknown channel id passes (apply is a no-op there).
                 has(Permission::MANAGE_CHANNELS)
                     && self
                         .channels
                         .get(channel_id)
-                        .is_none_or(|ch| ch.channel_type == ChannelType::Text && !(*is_public && ch.restricted()))
+                        .is_some_and(|ch| ch.channel_type == ChannelType::Text && !(*is_public && ch.restricted()))
             }
-            CrdtPayload::LabelCreated { .. }
-            | CrdtPayload::LabelDeleted { .. }
-            | CrdtPayload::LabelUpdated { .. } => has(Permission::MANAGE_ROLES),
+            CrdtPayload::LabelCreated { .. } | CrdtPayload::LabelDeleted { .. } => has(Permission::MANAGE_ROLES),
+            CrdtPayload::LabelUpdated { label_id, .. } => has(Permission::MANAGE_ROLES) && self.labels.contains_key(label_id),
             // Self-toggle only for existing COSMETIC labels; access labels and unknown
             // ids need MANAGE_ROLES. An assignment lands only on a current member.
             CrdtPayload::LabelAssigned { label_id, peer_id } => {
@@ -2088,6 +2185,18 @@ impl ServerState {
         }
     }
 
+    /// The author held a span containing the op's own clock. Skipped on a legacy anchor,
+    /// whose spans a checkpoint has not vouched for yet, and passed by an author with no
+    /// record, who is never a current member of an anchored server anyway (F12).
+    fn member_at_its_clock(&self, op: &CrdtOp) -> bool {
+        if self.anchor() == Anchor::Legacy {
+            return true;
+        }
+        self.member_record
+            .get(&op.author)
+            .is_none_or(|spans| spans.iter().any(|s| super::members::span_contains(s, &op.hlc)))
+    }
+
     /// Lifting a ban or mute needs at least the rank that set it.
     fn lifts_register<V: Clone>(&self, role: &MemberRole, reg: Option<&AdminLwwReg<V>>) -> bool {
         reg.is_none_or(|r| role.priority() >= r.priority())
@@ -2116,11 +2225,17 @@ impl ServerState {
         if self.is_banned(target) {
             return false;
         }
-        if self.is_member(target) {
-            return true;
-        }
-        if self.member_record.get(target).is_some_and(|spans| spans.iter().any(|s| ask.at <= s.asked_at)) {
+        // H2: never dated before its own ask, and judged at its clock against the spans
+        // around it: an admission inside history only repeats a span or moves the next one
+        // back on that span's own ask.
+        if i128::from(ask.at) > i128::from(op.hlc.physical_ms) + i128::from(super::hlc::MAX_DRIFT_MS) {
             return false;
+        }
+        let event = MemberEvent::Admit { at: op.hlc.clone(), by: op.author.clone(), ask: ask.at, name: String::new() };
+        match super::members::admission(&self.events_of(target), &event) {
+            super::members::Admission::Repeat | super::members::Admission::Extends => return true,
+            super::members::Admission::Ignored | super::members::Admission::Rewrites => return false,
+            super::members::Admission::Opens => {}
         }
         if self.is_private() || self.max_members().is_some_and(|max| self.members.len() as u32 >= max) {
             return false;
@@ -2158,10 +2273,11 @@ impl ServerState {
             None if super::anchor::is_genesis_id(&self.server_id) => return false,
             _ => {}
         }
-        if *covers > op.hlc || self.checkpoint_hlc.as_ref().is_some_and(|base| covers <= base) {
+        // Which checkpoint is the base is the fold's order (`crdt::fold`), never this.
+        if *covers > op.hlc {
             return false;
         }
-        let Ok(base) = serde_json::from_str::<ServerState>(state) else { return false };
+        let Some(base) = parse_state(state) else { return false };
         let owners: Vec<&String> = base
             .roles
             .iter()
@@ -2213,17 +2329,23 @@ impl ServerState {
         list
     }
 
-    /// Get all custom emotes, sorted by name for stable ordering.
+    /// The custom emotes that show: of the live ones, the `MAX_SERVER_EMOTES` added first
+    /// (by add clock, so every replica shows the same ones whatever order the adds came
+    /// in), sorted by name.
     pub fn emotes_list(&self) -> Vec<&EmoteInfo> {
         let mut list: Vec<_> = self.emotes.values().collect();
+        list.sort_by(|a, b| self.stamps.emotes.get(&a.name).cmp(&self.stamps.emotes.get(&b.name)).then_with(|| a.name.cmp(&b.name)));
+        list.truncate(MAX_SERVER_EMOTES);
         list.sort_by(|a, b| a.name.cmp(&b.name));
         list
     }
 
-    /// All stickers, pack-major then name then hash, so the order is total and identical
-    /// on every replica: two stickers can share a name.
+    /// The stickers that show, chosen like emotes, then pack-major, name, hash, so the
+    /// order is total and identical on every replica: two stickers can share a name.
     pub fn stickers_list(&self) -> Vec<&StickerInfo> {
         let mut list: Vec<_> = self.stickers.values().collect();
+        list.sort_by(|a, b| self.stamps.stickers.get(&a.hash).cmp(&self.stamps.stickers.get(&b.hash)).then_with(|| a.hash.cmp(&b.hash)));
+        list.truncate(MAX_SERVER_STICKERS);
         list.sort_by(|a, b| {
             a.pack
                 .cmp(&b.pack)
@@ -2400,32 +2522,18 @@ impl ServerState {
     }
 }
 
-/// Where an op sits in the fold: its clock, except a checkpoint, which sits at what it
-/// covers and after any op at that same clock (the op it covered).
+/// Where an op sits in the fold: the founding op, then the base (the only checkpoint a
+/// log folds), then every other op by clock.
 pub(super) fn fold_order(a: &CrdtOp, b: &CrdtOp) -> std::cmp::Ordering {
     fold_key(a).cmp(&fold_key(b))
 }
 
-/// Whether a checkpoint at `base` leaves `op` in the log: a checkpoint covering at least
-/// `base`, the founding op of a self-certifying id, and anything after `base`.
-pub(crate) fn retained_under(op: &CrdtOp, base: &HlcTimestamp, genesis: bool) -> bool {
+/// An op's place in the fold: its rank (founding 0, checkpoint 1, others 2), then its clock.
+pub(crate) fn fold_key(op: &CrdtOp) -> (u8, &HlcTimestamp) {
     match &op.payload {
-        CrdtPayload::ServerCheckpoint { covers, .. } => covers >= base,
-        CrdtPayload::ServerCreated { .. } if genesis => true,
-        _ => op.hlc > *base,
-    }
-}
-
-/// A member's own leave: the only op a member's word alone ends its membership with.
-pub(crate) fn is_self_leave(op: &CrdtOp) -> bool {
-    matches!(&op.payload, CrdtPayload::MemberRemoved { peer_id } if *peer_id == op.author)
-}
-
-/// An op's place in the fold: a checkpoint sits at what it covers.
-pub(crate) fn fold_key(op: &CrdtOp) -> (&HlcTimestamp, bool) {
-    match &op.payload {
-        CrdtPayload::ServerCheckpoint { covers, .. } => (covers, true),
-        _ => (&op.hlc, false),
+        CrdtPayload::ServerCreated { .. } => (0, &op.hlc),
+        CrdtPayload::ServerCheckpoint { .. } => (1, &op.hlc),
+        _ => (2, &op.hlc),
     }
 }
 
@@ -2447,6 +2555,31 @@ fn join_secret_shape(secret: &str) -> Option<zeroize::Zeroizing<[u8; 32]>> {
 }
 
 /// Truncate a peer ID to a short display name.
+/// LWW-merge one write into a register map, creating the register on first write.
+fn merge_into<V: Clone>(map: &mut HashMap<String, AdminLwwReg<V>>, key: &str, value: V, at: &HlcTimestamp, priority: u8) {
+    let remote = AdminLwwReg::new(value, at.clone(), priority);
+    match map.get_mut(key) {
+        Some(reg) => reg.merge(&remote),
+        None => {
+            map.insert(key.to_string(), remote);
+        }
+    }
+}
+
+fn update_label(label: &mut LabelInfo, name: &str, color: &str, access: Option<bool>) {
+    label.name = name.to_string();
+    label.color = color.to_string();
+    // None = the author predates the flag: PRESERVE it. An old client recoloring an
+    // access label must not silently demote it to cosmetic (that re-opens self-assignment).
+    if let Some(a) = access {
+        label.access = a;
+    }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 fn short_name(peer_id: &str) -> String {
     if peer_id.len() > 12 {
         format!("{}...", &peer_id[..12])
@@ -2512,6 +2645,7 @@ mod tests {
         };
         let first = add(&mut s);
         s.member_record.remove("m");
+        s.member_events.remove("m");
         let dup = add(&mut s);
         assert!(s.member_record.get("m").is_none_or(|spans| spans.is_empty()), "a duplicate opened a span");
         assert!(!s.was_member_at("m", dup.physical_ms) && !s.was_member_at("m", first.physical_ms));
@@ -2556,11 +2690,13 @@ mod tests {
             });
             let _ = s.apply_op(&op);
         }
-        // A voice room for the voice chat override rows.
-        let op = s.create_op(CrdtPayload::ChannelAdded {
-            channel_id: "vc".into(), name: "vc".into(), category: None, channel_type: "voice".into(),
-        });
-        let _ = s.apply_op(&op);
+        // A voice room for the voice chat override rows, and a text one to rename.
+        for (cid, kind) in [("vc", "voice"), ("c1", "text"), ("c", "text")] {
+            let op = s.create_op(CrdtPayload::ChannelAdded {
+                channel_id: cid.into(), name: cid.into(), category: None, channel_type: kind.into(),
+            });
+            let _ = s.apply_op(&op);
+        }
         // Labels for the assign/unassign rows: one cosmetic, one access-bearing
         // (self-toggle is only legal for EXISTING cosmetic labels).
         for (lid, access) in [("l1", false), ("lacc", true)] {
@@ -2597,10 +2733,10 @@ mod tests {
             ("owner", CrdtPayload::JoinKeySet { secret: JoinSecret("ab".repeat(31)) }, false),
             ("owner", CrdtPayload::JoinKeySet { secret: JoinSecret("zz".repeat(32)) }, false),
             // MemberRemoved: voluntary self-leave always; kicks need KICK_MEMBERS + outrank.
-            ("alice", CrdtPayload::MemberRemoved { peer_id: "alice".into() }, true),
-            ("alice", CrdtPayload::MemberRemoved { peer_id: "bob".into() }, false),
-            ("moder", CrdtPayload::MemberRemoved { peer_id: "bob".into() }, true),
-            ("moder", CrdtPayload::MemberRemoved { peer_id: "admin".into() }, false),
+            ("alice", CrdtPayload::MemberRemoved { peer_id: "alice".into(), seen: None }, true),
+            ("alice", CrdtPayload::MemberRemoved { peer_id: "bob".into(), seen: None }, false),
+            ("moder", CrdtPayload::MemberRemoved { peer_id: "bob".into(), seen: None }, true),
+            ("moder", CrdtPayload::MemberRemoved { peer_id: "admin".into(), seen: None }, false),
             // MemberAdded: any current member, on the joiner's own ask; a stranger no.
             ("alice", add_on_ask(30, 1, None), true),
             ("stranger", add_on_ask(31, 1, None), false),
@@ -2619,9 +2755,9 @@ mod tests {
             ("admin", CrdtPayload::RolePermissionsChanged { role: "admin".into(), permissions: 0 }, false),
             ("moder", CrdtPayload::RolePermissionsChanged { role: "member".into(), permissions: 0 }, false),
             // Ban / unban / mute / unmute: KICK_MEMBERS (+outrank for targeted ones).
-            ("moder", CrdtPayload::MemberBanned { peer_id: "bob".into() }, true),
-            ("moder", CrdtPayload::MemberBanned { peer_id: "admin".into() }, false),
-            ("alice", CrdtPayload::MemberBanned { peer_id: "bob".into() }, false),
+            ("moder", CrdtPayload::MemberBanned { peer_id: "bob".into(), seen: None }, true),
+            ("moder", CrdtPayload::MemberBanned { peer_id: "admin".into(), seen: None }, false),
+            ("alice", CrdtPayload::MemberBanned { peer_id: "bob".into(), seen: None }, false),
             ("moder", CrdtPayload::MemberUnbanned { peer_id: "bob".into() }, true),
             ("alice", CrdtPayload::MemberUnbanned { peer_id: "bob".into() }, false),
             ("moder", CrdtPayload::MemberMuted { peer_id: "bob".into(), expires_at: u64::MAX }, true),
@@ -2803,7 +2939,7 @@ mod tests {
         let ahead = lock_op(&mut s, "moder", &skipped.link, door_of(&skipped), Default::default());
         assert!(!s.op_allowed(&ahead), "no successor of a lock we do not hold");
 
-        let leave = op_by(&mut s, "bob", CrdtPayload::MemberRemoved { peer_id: "bob".into() });
+        let leave = op_by(&mut s, "bob", CrdtPayload::MemberRemoved { peer_id: "bob".into(), seen: None });
         let _ = s.apply_op(&leave);
         assert!(s.join_lock.rotation_due(), "a leave makes the lock due to move");
         let moved = lock_op(&mut s, "moder", &next.link, door_of(&next), grants("moder"));
@@ -2813,7 +2949,7 @@ mod tests {
         assert_eq!(s.join_lock.door_secrets(1).len(), 1, "the older door still opens a request sealed to it");
         assert_eq!(s.join_lock.chain().len(), 2);
 
-        let ban = op_by(&mut s, &owner, CrdtPayload::MemberBanned { peer_id: "alice".into() });
+        let ban = op_by(&mut s, &owner, CrdtPayload::MemberBanned { peer_id: "alice".into(), seen: None });
         let _ = s.apply_op(&ban);
         assert!(s.join_lock.rotation_due(), "a ban makes it due to move");
         let third = mint_next(&server, &next.link, &next.change).unwrap();
@@ -3413,6 +3549,7 @@ mod tests {
 
         let op = state.create_op(CrdtPayload::MemberRemoved {
             peer_id: "peer_b".into(),
+            seen: None,
         });
         state.apply_op(&op).unwrap();
         assert_eq!(state.get_storage_pledge("peer_b"), 0);
@@ -3886,14 +4023,14 @@ mod tests {
         assert!(s.can_see_channel_at("member", "ch", u64::MAX - 1), "permanent grant");
         assert!(b.can_see_channel_at("member", "ch", u64::MAX - 1), "same result in reverse order");
 
-        // Revoke prunes the row (and the empty per-channel map).
+        // Revoke keeps the row as a tombstone a late, older grant must find.
         let op = s.create_op(CrdtPayload::ChannelGrantRevoked {
             channel_id: "ch".into(),
             peer_id: "member".into(),
         });
         s.apply_op(&op).unwrap();
         assert!(!s.can_see_channel_at("member", "ch", 1_000));
-        assert!(!s.channel_grants.contains_key("ch"));
+        assert!(s.channel_grants_list("ch", 0).is_empty());
     }
 
     // --- Bans ---
@@ -3924,6 +4061,7 @@ mod tests {
         // Ban them
         let op = state.create_op(CrdtPayload::MemberBanned {
             peer_id: "bad_peer".into(),
+            seen: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -3948,6 +4086,7 @@ mod tests {
 
         let op = state.create_op(CrdtPayload::MemberBanned {
             peer_id: "peer_b".into(),
+            seen: None,
         });
         state.apply_op(&op).unwrap();
         assert!(state.is_banned("peer_b"));
@@ -4368,6 +4507,7 @@ mod tests {
 
         let op = state.create_op(CrdtPayload::MemberRemoved {
             peer_id: "peer_b".into(),
+            seen: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -4736,7 +4876,7 @@ mod tests {
             CrdtPayload::StoragePledgeChanged { peer_id: member_id.clone(), pledge_bytes: 1 },
             CrdtPayload::ServerSettingChanged { key: "k".into(), value: "v".into() },
             CrdtPayload::RolePermissionsChanged { role: "member".into(), permissions: 1 },
-            CrdtPayload::MemberBanned { peer_id: "banned".into() },
+            CrdtPayload::MemberBanned { peer_id: "banned".into(), seen: None },
             CrdtPayload::MemberMuted { peer_id: member_id.clone(), expires_at: u64::MAX },
             CrdtPayload::ChannelGrantSet {
                 channel_id: "c".into(),
@@ -4938,12 +5078,12 @@ mod tests {
         let nick = |id: &str| CrdtPayload::NicknameChanged { peer_id: id.into(), nickname: "x".into() };
         assert!(allowed(&mut s, "alice", nick("alice")));
         assert!(!allowed(&mut s, "stranger", nick("stranger")), "a stranger's self op");
-        assert!(!allowed(&mut s, "stranger", CrdtPayload::MemberRemoved { peer_id: "stranger".into() }));
+        assert!(!allowed(&mut s, "stranger", CrdtPayload::MemberRemoved { peer_id: "stranger".into(), seen: None }));
         assert!(!allowed(&mut s, "stranger", CrdtPayload::LabelUnassigned {
             label_id: "l".into(), peer_id: "stranger".into(),
         }));
 
-        apply_as(&mut s, "moder", CrdtPayload::MemberRemoved { peer_id: "bob".into() });
+        apply_as(&mut s, "moder", CrdtPayload::MemberRemoved { peer_id: "bob".into(), seen: None });
         assert!(!allowed(&mut s, "bob", nick("bob")), "a kicked member's self op");
 
         let rename = CrdtPayload::ServerRenamed { new_name: "Mine".into() };
@@ -4967,7 +5107,7 @@ mod tests {
         assert!(allowed(&mut s, "alice", add(CAROL, None)), "any member admits");
         apply_as(&mut s, "alice", add(DAVE, None));
         assert!(allowed(&mut s, "alice", add(DAVE, None)), "re-adding a member is a no-op");
-        apply_as(&mut s, "moder", CrdtPayload::MemberBanned { peer_id: keys(MALLORY).1 });
+        apply_as(&mut s, "moder", CrdtPayload::MemberBanned { peer_id: keys(MALLORY).1, seen: None });
         assert!(!allowed(&mut s, "alice", add(MALLORY, None)), "a banned identity");
 
         apply_as(&mut s, "owner", setting("max_members", "6"));
@@ -5015,10 +5155,12 @@ mod tests {
         assert!(!allowed(&mut s, "alice", add(moved)), "an ask whose time was changed");
 
         apply_as(&mut s, "alice", add(ask("s1", 5, &carol_kp)));
-        apply_as(&mut s, &carol, CrdtPayload::MemberRemoved { peer_id: carol.clone() });
+        apply_as(&mut s, &carol, CrdtPayload::MemberRemoved { peer_id: carol.clone(), seen: None });
         assert!(!allowed(&mut s, "alice", add(ask("s1", 5, &carol_kp))), "the ask that admitted her once");
         assert!(!allowed(&mut s, "alice", add(ask("s1", 4, &carol_kp))), "an older one");
-        assert!(allowed(&mut s, "alice", add(ask("s1", 9, &carol_kp))), "a newer ask");
+        assert!(!allowed(&mut s, "alice", add(ask("s1", 9, &carol_kp))), "F9: newer than the last ask, older than her leave");
+        let after_leave = crate::crdt::hlc::wall_clock_ms() as i64 + 1_000;
+        assert!(allowed(&mut s, "alice", add(ask("s1", after_leave, &carol_kp))), "an ask newer than her leave");
     }
 
     /// D6: a restricted channel is never public: it cannot be flagged public, restricting
@@ -5083,7 +5225,7 @@ mod tests {
         let joined = ServerState::accept_join_snapshot(snap.clone(), "s1", None).unwrap();
         assert_eq!(joined.channels.keys().collect::<Vec<_>>(), ["s1-general"], "a join snapshot");
         let mut rebased = ranked_fixture();
-        let covers = rebased.horizon();
+        let covers = rebased.checkpoint_covers();
         rebased.rebase_on(snap, "owner", &covers);
         assert_eq!(rebased.channels.keys().collect::<Vec<_>>(), ["s1-general"], "a checkpoint");
     }
@@ -5094,7 +5236,7 @@ mod tests {
     #[test]
     fn authz_moderation_edges_respect_rank() {
         let mut s = ranked_fixture();
-        apply_as(&mut s, "admin", CrdtPayload::MemberBanned { peer_id: "mallory".into() });
+        apply_as(&mut s, "admin", CrdtPayload::MemberBanned { peer_id: "mallory".into(), seen: None });
         assert!(!allowed(&mut s, "moder", CrdtPayload::MemberUnbanned { peer_id: "mallory".into() }));
         assert!(allowed(&mut s, "admin", CrdtPayload::MemberUnbanned { peer_id: "mallory".into() }));
         apply_as(&mut s, "admin", CrdtPayload::MemberMuted { peer_id: "alice".into(), expires_at: u64::MAX });
@@ -5132,10 +5274,10 @@ mod tests {
         let role = |id: &str, r: MemberRole| CrdtPayload::RoleChanged { peer_id: id.into(), role: r, priority: 3 };
         assert!(!allowed(&mut s, "owner", role("admin", MemberRole::Owner)), "no co-owners");
         assert!(!allowed(&mut s, "owner", role("owner", MemberRole::Admin)), "no self-demotion");
-        assert!(!allowed(&mut s, "owner", CrdtPayload::MemberRemoved { peer_id: "owner".into() }));
-        assert!(!allowed(&mut s, "admin", CrdtPayload::MemberBanned { peer_id: "owner".into() }));
+        assert!(!allowed(&mut s, "owner", CrdtPayload::MemberRemoved { peer_id: "owner".into(), seen: None }));
+        assert!(!allowed(&mut s, "admin", CrdtPayload::MemberBanned { peer_id: "owner".into(), seen: None }));
         assert!(!allowed(&mut s, "admin", CrdtPayload::MemberMuted { peer_id: "owner".into(), expires_at: 1 }));
-        assert!(!allowed(&mut s, "owner", CrdtPayload::MemberBanned { peer_id: "owner".into() }), "nor itself");
+        assert!(!allowed(&mut s, "owner", CrdtPayload::MemberBanned { peer_id: "owner".into(), seen: None }), "nor itself");
         assert!(!allowed(&mut s, "owner", CrdtPayload::MemberMuted { peer_id: "owner".into(), expires_at: 1 }));
         assert!(!allowed(&mut s, "admin", CrdtPayload::NicknameChanged { peer_id: "owner".into(), nickname: "x".into() }));
         assert!(!allowed(&mut s, "owner", CrdtPayload::ServerCreated {

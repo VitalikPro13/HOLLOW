@@ -4521,7 +4521,7 @@ mod tests {
         handle_envelope_edit_message(&tx, &us, Some(&state), &b, "r1".into(), "edited as a member".into(), 5_000, sig, pk, s, c, &path, &pass).await;
         assert_eq!(row().text, "edited as a member");
 
-        let op = state.create_op(crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: b.clone() });
+        let op = state.create_op(crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: b.clone(), seen: None });
         state.apply_op(&op).unwrap();
         let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", "srv-r:general", "r1", 6_000, "edited once removed");
         let (s, c) = place();

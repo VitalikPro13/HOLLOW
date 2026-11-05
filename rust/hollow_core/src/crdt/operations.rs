@@ -32,6 +32,8 @@ pub enum OpReject {
     WrongServer,
     /// The author lacks the permission this payload requires (`op_allowed`).
     NotAllowed,
+    /// The signed op is larger than any honest one (`crdt::fold::MAX_OP_BYTES`).
+    TooLarge,
 }
 
 impl std::fmt::Display for OpReject {
@@ -44,6 +46,7 @@ impl std::fmt::Display for OpReject {
             Self::FutureHlc => "timestamp too far ahead of the wall clock",
             Self::WrongServer => "op belongs to another server",
             Self::NotAllowed => "author lacks permission for this operation",
+            Self::TooLarge => "op larger than the bound",
         };
         f.write_str(s)
     }
@@ -80,6 +83,13 @@ impl CrdtOp {
     pub fn signing_payload(&self) -> String {
         let payload_json = serde_json::to_string(&self.payload).unwrap_or_default();
         signing_payload(&self.server_id, &self.hlc, &self.author, &payload_json)
+    }
+
+    /// The op's identity beyond its dedup key: SHA-256 of the bytes its master signed, so
+    /// two ops at one (author, clock) are told apart and every replica keeps the lower.
+    pub fn content_hash(&self) -> [u8; 32] {
+        use sha2::Digest;
+        sha2::Sha256::digest(self.signing_payload().as_bytes()).into()
     }
 
     /// Sign this op with the MASTER keypair: `author` and the state's maps are
@@ -228,6 +238,26 @@ impl JoinAsk {
     }
 }
 
+/// What a kick or ban of a member names of the grants that member made in the span it
+/// closes (AR-11): every target op of a power-granting kind dated inside that span and
+/// not named here, nor decided by the remover's base, is void (`crdt::voids`). A
+/// kicked member therefore cannot backdate an admission, promotion or grant to just
+/// before its removal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeenGrants {
+    /// The remover's base: (generation, content hash in hex). What it decides counts as
+    /// seen; a replica that cannot tell holds the removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<(u64, String)>,
+    /// The first 16 bytes, in hex, of each seen op's content hash, at most
+    /// `crdt::voids::SEEN_CAP` (about 36 KB), the newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ops: Vec<String>,
+    /// Set when `ops` was cut at its bound: a target op dated before it counts as seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<HlcTimestamp>,
+}
+
 /// The payload of a CRDT operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CrdtPayload {
@@ -311,8 +341,12 @@ pub enum CrdtPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ask: Option<JoinAsk>,
     },
+    /// A removal of someone else (a kick) carries what the remover had seen of the
+    /// target's grants; a member's own leave carries none.
     MemberRemoved {
         peer_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seen: Option<Box<SeenGrants>>,
     },
 
     // Role operations
@@ -433,6 +467,8 @@ pub enum CrdtPayload {
     // Ban system (Phase 6.75)
     MemberBanned {
         peer_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seen: Option<Box<SeenGrants>>,
     },
     MemberUnbanned {
         peer_id: String,

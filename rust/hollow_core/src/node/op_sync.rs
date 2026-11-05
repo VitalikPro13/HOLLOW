@@ -102,6 +102,9 @@ pub(crate) struct OpSync {
     unseen: HashMap<String, Vec<HavenMessage>>,
     /// This node plays a 0.12.2 build (tests of the mixed-version server only).
     old: bool,
+    /// Per server, the identities (masters) whose digest round with us ended since the
+    /// socket came up: what the owner's checkpoint writer rule reads.
+    witnesses: HashMap<String, std::collections::HashSet<String>>,
 }
 
 /// Ops kept per server for its first room listing.
@@ -233,7 +236,8 @@ impl OpSync {
         let id = fresh_id();
         let salt = digest::new_salt();
         let base = state.checkpoint_hlc.clone();
-        let d = digest::first_ask(&digest::entries(state, kept, base.as_ref()), id, salt.clone(), base);
+        let bref = state.base.as_ref().map(|b| b.hash_hex());
+        let d = digest::first_ask(&digest::entries(state, kept, None), id, salt.clone(), base, bref);
         let key = (state.server_id.clone(), device.to_string());
         // A newer ask replaces the open one, keeping the nonce a held join waits on.
         let nonce = nonce.or_else(|| self.asks.get(&key).and_then(|a| a.nonce));
@@ -304,10 +308,10 @@ impl OpSync {
         }
         if reply.groups.is_empty() || reply.round >= digest::MAX_ROUNDS {
             self.asks.remove(&key);
+            self.witnesses.entry(state.server_id.clone()).or_default().insert(super::resolver::resolve(device));
             return Step::Done;
         }
-        let base = state.checkpoint_hlc.clone();
-        let Some(ranges) = digest::follow_up(&digest::entries(state, kept, base.as_ref()), &ask.salt, &ask.asked, reply) else {
+        let Some(ranges) = digest::follow_up(&digest::entries(state, kept, None), &ask.salt, &ask.asked, reply) else {
             self.asks.remove(&key);
             return Step::Malformed;
         };
@@ -324,7 +328,15 @@ impl OpSync {
             mls_epoch: None,
             nonce: ask.nonce,
             full: None,
-            digest: Some(OpDigest { ask: ask.id, salt: ask.salt.clone(), base, from: None, ranges, round: ask.round }),
+            digest: Some(OpDigest {
+                ask: ask.id,
+                salt: ask.salt.clone(),
+                base: state.checkpoint_hlc.clone(),
+                bref: state.base.as_ref().map(|b| b.hash_hex()),
+                from: None,
+                ranges,
+                round: ask.round,
+            }),
             dg: Some(DG),
         };
         Step::Again(ask.last.clone())
@@ -405,6 +417,12 @@ impl OpSync {
     /// The socket went away: no open ask can be answered any more.
     pub(crate) fn went_away(&mut self) {
         self.asks.clear();
+        self.witnesses.clear();
+    }
+
+    /// The identities whose digest round on `server` ended since the socket came up.
+    pub(crate) fn witnesses(&self, server: &str) -> std::collections::HashSet<String> {
+        self.witnesses.get(server).cloned().unwrap_or_default()
     }
 
     #[cfg(test)]

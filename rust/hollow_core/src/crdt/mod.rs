@@ -1,12 +1,15 @@
 pub(crate) mod admin_lww;
 pub(crate) mod anchor;
 pub(crate) mod digest;
+pub(crate) mod dominance;
 pub(crate) mod fold;
 pub(crate) mod hlc;
 pub(crate) mod lock_state;
+pub(crate) mod members;
 pub(crate) mod operations;
 pub(crate) mod server_state;
 pub(crate) mod sync;
+pub(crate) mod voids;
 
 use std::sync::OnceLock;
 
@@ -41,6 +44,16 @@ pub(crate) mod testkeys {
     /// `(keypair, peer_id, pk_b64)` for a small tag. Same tag = same identity.
     pub(crate) fn keys(tag: u8) -> (NativeKeypair, String, String) {
         let kp = NativeKeypair::from_secret_bytes(&[tag.wrapping_add(1); 32]);
+        let pk = base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf());
+        let id = kp.peer_id();
+        (kp, id, pk)
+    }
+
+    /// `keys` for more identities than a tag holds.
+    pub(crate) fn keys_n(n: u32) -> (NativeKeypair, String, String) {
+        let mut secret = [7u8; 32];
+        secret[..4].copy_from_slice(&n.to_be_bytes());
+        let kp = NativeKeypair::from_secret_bytes(&secret);
         let pk = base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf());
         let id = kp.peer_id();
         (kp, id, pk)

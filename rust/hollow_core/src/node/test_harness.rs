@@ -32401,8 +32401,9 @@ async fn join_lock_moves_after_a_leave_and_a_leavers_refusal_never_ends_the_join
         wait_until(10, async || l.store().load_server_state(&server_id).ok().flatten().is_none()).await,
         "the leaver's own app forgets the server and the door in it",
     );
+    // The state may not have been saved yet when the leave starts: wait on the rows too.
     assert!(
-        l.store().load_ops_for_server(&server_id, None).unwrap_or_default().is_empty(),
+        wait_until(10, async || l.store().load_ops_for_server(&server_id, None).unwrap_or_default().is_empty()).await,
         "and every op that carried a door",
     );
     assert_eq!(relay_tip(&relay, &server_id).n, first.n, "nobody who can move the lock is online");
@@ -32976,7 +32977,7 @@ async fn authz_a_member_lists_only_someone_who_asked_to_join() {
         assert_eq!(admissions(node).await, vec![first], "{who} took an admission nobody asked for");
     }
 
-    let leave = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: victim.clone() };
+    let leave = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: victim.clone(), seen: None };
     deliver(crdt_broadcast(&server_id, &forge_crdt_op(&server_id, &victim, leave, 0, Some(&victim_kp)))).await;
     assert!(
         wait_until(10, async || !listed(&o).await && !listed(&x).await).await,
@@ -35166,7 +35167,7 @@ async fn authz_a_kick_notice_without_its_removal_op_is_ignored() {
     let refused = forge_crdt_op(
         &server_id,
         &x.master_id,
-        crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: m.master_id.clone() },
+        crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: m.master_id.clone(), seen: None },
         0,
         Some(&x.master_kp),
     );
@@ -35225,7 +35226,7 @@ async fn a_ban_of_us_heard_as_an_op_leaves_the_server() {
     let ban = forge_crdt_op(
         &server_id,
         &o.master_id,
-        crate::crdt::operations::CrdtPayload::MemberBanned { peer_id: x.master_id.clone() },
+        crate::crdt::operations::CrdtPayload::MemberBanned { peer_id: x.master_id.clone(), seen: None },
         0,
         Some(&o.master_kp),
     );
@@ -35264,7 +35265,7 @@ async fn authz_a_kick_from_before_a_rejoin_is_ignored() {
         .op_log
         .into_iter()
         .find(|op| {
-            matches!(&op.payload, crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id } if *peer_id == m.master_id)
+            matches!(&op.payload, crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id, .. } if *peer_id == m.master_id)
         })
         .expect("the owner's log holds the removal");
 
@@ -35324,7 +35325,7 @@ async fn removal_in(node: &TestNode, server_id: &str, master: &str) -> crate::cr
         .op_log
         .into_iter()
         .rev()
-        .find(|op| matches!(&op.payload, P::MemberRemoved { peer_id } | P::MemberBanned { peer_id } if peer_id == master))
+        .find(|op| matches!(&op.payload, P::MemberRemoved { peer_id, .. } | P::MemberBanned { peer_id, .. } if peer_id == master))
         .expect("the log holds the removal")
 }
 
@@ -41460,7 +41461,7 @@ async fn authz_a_kick_notice_needs_a_kicker_with_the_right_and_the_rank() {
     let notice = || super::types::HavenMessage::MemberKickBroadcast {
         server_id: server_id.clone(),
         op_json: serde_json::to_string(&forge_crdt_op(
-            &server_id, &x_master, CrdtPayload::MemberRemoved { peer_id: m_master.clone() }, 0, Some(&x.master_kp),
+            &server_id, &x_master, CrdtPayload::MemberRemoved { peer_id: m_master.clone(), seen: None }, 0, Some(&x.master_kp),
         ))
         .unwrap(),
     };
@@ -41632,7 +41633,7 @@ async fn authz_both_batch_arms_take_backfill_only_from_a_reader() {
     relay.swallow_direct(&o.device_id, &c.device_id);
     relay.swallow_direct(&v.device_id, &c.device_id);
     let removal = forge_crdt_op(
-        &server_id, &o.master_id, CrdtPayload::MemberRemoved { peer_id: c.master_id.clone() }, 0, Some(&o.master_kp),
+        &server_id, &o.master_id, CrdtPayload::MemberRemoved { peer_id: c.master_id.clone(), seen: None }, 0, Some(&o.master_kp),
     );
     carry_as(&v, &o, crdt_broadcast(&server_id, &removal)).await;
     assert!(
@@ -41662,7 +41663,7 @@ async fn a_sync_answer_stores_exactly_what_the_fold_admitted() {
     assert!(expect_joined(&mut m, &server_id, 15).await, "M joins");
 
     let state = o.live_server_state(&server_id).await.expect("the owner's state");
-    let covers = state.horizon();
+    let covers = state.checkpoint_covers();
     let base = state.checkpoint_json(&o.master_id, &[], crate::crdt::hlc::wall_clock_ms()).expect("a checkpoint");
     let checkpoint = forge_crdt_op(
         &server_id, &o.master_id, CrdtPayload::ServerCheckpoint { state: base, covers: covers.clone() }, 1_000, Some(&o.master_kp),
@@ -51785,7 +51786,7 @@ async fn a_kick_learned_by_sync_stays_a_kick_after_restart() {
         server_id: server_id.clone(),
         hlc: crate::crdt::hlc::HlcTimestamp { physical_ms: super::types::now_ms() as u64 + 5, counter: 0, actor: o_kp.peer_id() },
         author: o_kp.peer_id(),
-        payload: crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: y_kp.peer_id() },
+        payload: crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: y_kp.peer_id(), seen: None },
         auth: None,
     };
     kick.sign(&o_kp, &base64::engine::general_purpose::STANDARD.encode(o_kp.public_key_protobuf()));
@@ -54002,7 +54003,7 @@ async fn g13_non_member_digest_gets_only_the_removal_notice() {
         nonce: Some(5),
         full: None,
         digest: Some(crate::crdt::digest::OpDigest {
-            ask: 9, salt: crate::crdt::digest::new_salt(), base: None, from: Some(0), ranges: Vec::new(), round: 0,
+            ask: 9, salt: crate::crdt::digest::new_salt(), base: None, bref: None, from: Some(0), ranges: Vec::new(), round: 0,
         }),
         dg: Some(super::op_sync::DG),
     };
@@ -54136,7 +54137,7 @@ async fn g13_join_hold_waits_for_the_final_round() {
     go_offline(&relay, &x, &sid).await;
     let j_key = NativeKeypair::from_secret_bytes(&seed_bytes(188));
     let j = j_key.peer_id();
-    let ban = g13_op_at(&o, &sid, t0 + 1 + NICKS / 2, 7, crate::crdt::operations::CrdtPayload::MemberBanned { peer_id: j.clone() });
+    let ban = g13_op_at(&o, &sid, t0 + 1 + NICKS / 2, 7, crate::crdt::operations::CrdtPayload::MemberBanned { peer_id: j.clone(), seen: None });
     carry_as(&o, &m, crdt_broadcast(&sid, &ban)).await;
     assert!(wait_until(15, async || m.live_server_state(&sid).await.is_some_and(|s| s.is_banned(&j))).await, "M took the ban");
     go_offline(&relay, &o, &sid).await;
@@ -58486,7 +58487,7 @@ async fn leave_racing_a_sibling_announce_join_stays_left() {
         let state = o.live_server_state(&sid).await.expect("the owner holds its server");
         let saw_leave = state.op_log.iter().any(|op| {
             op.author == m_master
-                && matches!(&op.payload, crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id } if *peer_id == m_master)
+                && matches!(&op.payload, crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id, .. } if *peer_id == m_master)
         });
         (saw_leave, state.is_member(&m_master))
     };
@@ -58702,7 +58703,7 @@ async fn t14_owner_view(o: &TestNode, sid: &str, master: &str) -> (bool, bool) {
     let Some(state) = o.live_server_state(sid).await else { return (false, true) };
     let saw = state.op_log.iter().any(|op| {
         op.author == master
-            && matches!(&op.payload, crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id } if peer_id == master)
+            && matches!(&op.payload, crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id, .. } if peer_id == master)
     });
     (saw, state.is_member(master))
 }
@@ -58719,7 +58720,7 @@ fn t14_book_holds(node: &TestNode, part: &str, sid: &str) -> bool {
 
 /// `node`'s identity leaving `sid`, signed by its master as a device of it would.
 fn t14_own_leave(node: &TestNode, sid: &str) -> super::types::HavenMessage {
-    let payload = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: node.master_id.clone() };
+    let payload = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: node.master_id.clone(), seen: None };
     // A second ahead: a seal clock running ahead of the wall never hides it behind the announce.
     crdt_broadcast(sid, &forge_crdt_op(sid, &node.master_id, payload, 1_000, Some(&node.master_kp)))
 }
@@ -58846,7 +58847,7 @@ async fn an_announced_join_ends_only_on_its_own_identitys_leave() {
     assert!(wait_until(10, async || relay.room_devices(&sid).contains(&c.device_id)).await, "C starts the announced join");
 
     let removal = |author: &str, removed: &str, signer: &NativeKeypair| {
-        let payload = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: removed.to_string() };
+        let payload = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: removed.to_string(), seen: None };
         crdt_broadcast(&sid, &forge_crdt_op(&sid, author, payload, 1_000, Some(signer)))
     };
     // A stranger hands on our real leave; our device hands on a leave signed by another
@@ -58857,7 +58858,7 @@ async fn an_announced_join_ends_only_on_its_own_identitys_leave() {
     carry_as(&b, &c, removal(&x_master, &m_master, &x.master_kp)).await;
     carry_as(&b, &c, removal(&m_master, &x_master, &c.master_kp)).await;
     let elsewhere = "0123456789abcdef0123456789abcdef01234567";
-    let payload = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: m_master.clone() };
+    let payload = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: m_master.clone(), seen: None };
     carry_as(&b, &c, crdt_broadcast(&sid, &forge_crdt_op(elsewhere, &m_master, payload, 1_000, Some(&c.master_kp)))).await;
     // Absence: none of these ends the join.
     sleep_ms(1_500).await;
@@ -59231,13 +59232,13 @@ async fn a_leave_landing_behind_the_owners_checkpoint_still_closes_the_span() {
     // The owner writes past the leave's clock, then checkpoints with B still a member.
     o.cmd_tx.send(NodeCommand::RenameServer { server_id: sid.clone(), new_name: "Moved on".into() }).await.unwrap();
     assert!(
-        wait_until(10, async || o.live_server_state(&sid).await.is_some_and(|s| s.horizon() > leave.hlc)).await,
+        wait_until(10, async || o.live_server_state(&sid).await.is_some_and(|s| s.op_log.last().is_some_and(|t| t.hlc > leave.hlc))).await,
         "the owner's state moves past the leave",
     );
     let state = o.live_server_state(&sid).await.expect("the owner's state");
     let base = state.checkpoint_json(&o.master_id, &[], crate::crdt::hlc::wall_clock_ms()).expect("a checkpoint");
     let checkpoint = forge_crdt_op(
-        &sid, &o.master_id, CrdtPayload::ServerCheckpoint { state: base, covers: state.horizon() }, 1_000, Some(&o.master_kp),
+        &sid, &o.master_id, CrdtPayload::ServerCheckpoint { state: base, covers: state.checkpoint_covers() }, 1_000, Some(&o.master_kp),
     );
     carry_as(&x, &o, crdt_broadcast(&sid, &checkpoint)).await;
     assert!(
@@ -61707,4 +61708,107 @@ async fn t14p_a_meeting_carries_no_profile_update_even_from_a_friend() {
     );
     assert_eq!(guest.store().roster_updated_at(&pal.master_id), 0, "a meeting's profile update kept the friend's roster");
     drop((host, guest, pal));
+}
+
+// t14-cover
+
+/// H7: B admits C while the owner is away, then leaves; the owner's checkpoint holds B's
+/// leave but never saw C's admission. C's rebuild refuses its own admission (today's
+/// authority), and C asks again by itself with the owner still away: a member answers
+/// and C is a member again on its own replica and the answerer's, with no prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14c_the_f1_cascade_heals_by_silent_re_asks() {
+    use crate::crdt::operations::CrdtPayload;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 184;
+    const X: u8 = 185;
+    const B: u8 = 186;
+    const C_MASTER: u8 = 187;
+    const C: u8 = 188;
+    let mut o = spawn_node_with_friends(&relay, O, O, &[]).await;
+    let mut x = spawn_node_with_friends(&relay, X, X, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, B, B, &[]).await;
+    let mut c = spawn_node_with_friends(&relay, C_MASTER, C, &[]).await;
+    let c_master = c.master_id.clone();
+    let sid = create_server_and_wait(&mut o, "Cascade").await;
+    for node in [&mut x, &mut b] {
+        node.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+        assert!(
+            wait_event(node, std::time::Duration::from_secs(10), |ev| {
+                matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+            })
+            .await,
+            "a member never joined",
+        );
+    }
+    expect_olm_confirmed(&o, &b, 20).await;
+    expect_olm_confirmed(&o, &x, 20).await;
+    let owner_before = o.live_server_state(&sid).await.expect("the owner's state");
+
+    // Owner and X away: only B can answer C.
+    go_offline(&relay, &o, &sid).await;
+    go_offline(&relay, &x, &sid).await;
+    c.cmd_tx.send(g1_join_cmd(&sid)).await.unwrap();
+    assert!(
+        wait_event(&mut c, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)
+        })
+        .await,
+        "B never let C in",
+    );
+    let admission = c
+        .live_server_state(&sid)
+        .await
+        .and_then(|s| s.op_log.iter().find(|op| matches!(&op.payload, CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == c_master)).cloned())
+        .expect("C holds its admission");
+    assert_eq!(admission.author, b.master_id, "precondition: B admitted C");
+    relay.set_online(&x.device_id, true);
+    b.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(
+        wait_until(30, async || c.live_server_state(&sid).await.is_some_and(|s| !s.is_member(&b.master_id))).await,
+        "C never saw B leave",
+    );
+
+    // The owner's checkpoint, made from what it held plus B's leave: C's admission unseen.
+    let leave = c
+        .live_server_state(&sid)
+        .await
+        .and_then(|s| s.op_log.iter().find(|op| op.author == b.master_id && matches!(&op.payload, CrdtPayload::MemberRemoved { .. })).cloned())
+        .expect("C holds B's leave");
+    let mut owner_view = owner_before.clone();
+    owner_view.ingest_remote(std::slice::from_ref(&leave));
+    assert!(!owner_view.is_member(&b.master_id) && !owner_view.is_member(&c_master), "precondition: the owner's view");
+    let base = owner_view.checkpoint_json(&o.master_id, &[], crate::crdt::hlc::wall_clock_ms()).expect("a checkpoint");
+    let checkpoint = forge_crdt_op(
+        &sid, &o.master_id, CrdtPayload::ServerCheckpoint { state: base, covers: owner_view.checkpoint_covers() }, 1_000, Some(&o.master_kp),
+    );
+    carry_as(&x, &c, crdt_broadcast(&sid, &checkpoint)).await;
+    carry_as(&c, &x, crdt_broadcast(&sid, &checkpoint)).await;
+    assert!(
+        wait_until(60, async || {
+            let c_view = c.live_server_state(&sid).await;
+            let x_view = x.live_server_state(&sid).await;
+            c_view.is_some_and(|s| s.checkpoint_hlc.is_some() && s.is_member(&c_master))
+                && x_view.is_some_and(|s| s.checkpoint_hlc.is_some() && s.is_member(&c_master))
+        })
+        .await,
+        "C never got back in: C {:?}, X {:?}",
+        c.live_server_state(&sid).await.map(|s| (s.checkpoint_hlc.is_some(), s.is_member(&c_master), s.refused_own_admission(&c_master))),
+        x.live_server_state(&sid).await.map(|s| (s.checkpoint_hlc.is_some(), s.is_member(&c_master))),
+    );
+    let readmitted = x.live_server_state(&sid).await.is_some_and(|s| {
+        s.op_log.iter().any(|op| matches!(&op.payload, CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == c_master) && op.hlc > admission.hlc)
+    });
+    assert!(readmitted, "C is a member by a fresh admission, not by B's refused one");
+
+    // The rows, the base and the refused admission survive a restart (H2's restart step).
+    let c = restart_node(&relay, c, C_MASTER, C).await;
+    assert!(
+        wait_until(20, async || c.live_server_state(&sid).await.is_some_and(|s| s.checkpoint_hlc.is_some() && s.is_member(&c_master))).await,
+        "C lost its membership or its base over a restart",
+    );
 }

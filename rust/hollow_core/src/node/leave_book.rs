@@ -104,7 +104,7 @@ impl Probe {
 fn closed_by_owner(op: &CrdtOp, server_id: &str, owner: &str, local_master: &str, left: &HlcTimestamp) -> bool {
     let closes = match &op.payload {
         CrdtPayload::ServerDeleted { .. } => true,
-        CrdtPayload::MemberRemoved { peer_id } | CrdtPayload::MemberBanned { peer_id } => {
+        CrdtPayload::MemberRemoved { peer_id, .. } | CrdtPayload::MemberBanned { peer_id, .. } => {
             peer_id == local_master && op.hlc >= *left
         }
         _ => false,
@@ -116,7 +116,7 @@ fn closed_by_owner(op: &CrdtOp, server_id: &str, owner: &str, local_master: &str
 /// membership no earlier than our leave (`crdt::sync::removal_notice`).
 fn ends_us_since(ops: &[CrdtOp], server_id: &str, local_master: &str, left: &HlcTimestamp) -> bool {
     ops.last().is_some_and(|op| {
-        matches!(&op.payload, CrdtPayload::MemberRemoved { peer_id } | CrdtPayload::MemberBanned { peer_id } if peer_id == local_master)
+        matches!(&op.payload, CrdtPayload::MemberRemoved { peer_id, .. } | CrdtPayload::MemberBanned { peer_id, .. } if peer_id == local_master)
             && op.server_id == server_id
             && op.hlc >= *left
             && op.verify_author().is_ok()
@@ -137,6 +137,7 @@ fn ask_owner(server_id: &str, nonce: u64) -> HavenMessage {
             ask: nonce,
             salt: crate::crdt::digest::new_salt(),
             base: None,
+            bref: None,
             from: None,
             ranges: Vec::new(),
             round: 0,
@@ -186,7 +187,7 @@ pub(crate) fn own_leave(server_id: &str, op_json: &str, sender: &str, local_mast
     let crate::crdt::operations::ReadOp::Op(op) = crate::crdt::operations::read_op(op_json) else { return None };
     let ours = op.server_id == server_id
         && op.author == local_master
-        && matches!(&op.payload, CrdtPayload::MemberRemoved { peer_id } if peer_id == local_master)
+        && matches!(&op.payload, CrdtPayload::MemberRemoved { peer_id, .. } if peer_id == local_master)
         && op.hlc.physical_ms <= crate::crdt::hlc::wall_clock_ms().saturating_add(crate::crdt::hlc::MAX_DRIFT_MS);
     (ours && op.verify_author().is_ok()).then_some(op)
 }
@@ -563,7 +564,7 @@ mod tests {
 
     /// Our leave of S, made at 1000, waiting on owner 1's word; we asked with nonce 7.
     fn waiting(us: &str) -> (LeaveBook, CrdtOp) {
-        let leave = signed(2, 1_000, CrdtPayload::MemberRemoved { peer_id: us.into() });
+        let leave = signed(2, 1_000, CrdtPayload::MemberRemoved { peer_id: us.into(), seen: None });
         let mut b = book();
         b.stored.pending.insert(
             "S".into(),
@@ -595,21 +596,21 @@ mod tests {
         assert!(!b.on_answer("S", &notice, Some(7), &x, &us), "a member who is not the owner");
         assert!(!b.on_answer("T", &notice, Some(7), &owner, &us), "another server's answer");
         assert!(!b.on_answer("S", "[]", Some(7), &owner, &us), "a member's answer: the owner still counts us");
-        let older = signed(1, 500, CrdtPayload::MemberRemoved { peer_id: us.clone() });
+        let older = signed(1, 500, CrdtPayload::MemberRemoved { peer_id: us.clone(), seen: None });
         assert!(!b.on_answer("S", &json(&[&older]), Some(7), &owner, &us), "a removal from before our leave");
-        let other = signed(1, 2_000, CrdtPayload::MemberRemoved { peer_id: x.clone() });
+        let other = signed(1, 2_000, CrdtPayload::MemberRemoved { peer_id: x.clone(), seen: None });
         assert!(!b.on_answer("S", &json(&[&other]), Some(7), &owner, &us), "someone else's removal");
         let mut forged = leave.clone();
         forged.hlc.physical_ms += 1;
         assert!(!b.on_answer("S", &json(&[&forged]), Some(7), &owner, &us), "a removal its signature does not cover");
-        let elsewhere = signed_in("T", 2, 1_000, CrdtPayload::MemberRemoved { peer_id: us.clone() });
+        let elsewhere = signed_in("T", 2, 1_000, CrdtPayload::MemberRemoved { peer_id: us.clone(), seen: None });
         assert!(!b.on_answer("S", &json(&[&elsewhere]), Some(7), &owner, &us), "a removal from another server");
         assert!(b.stored.pending.contains_key("S"));
         assert!(b.on_answer("S", &json(&[&other, &leave]), Some(7), &owner, &us), "the owner's notice of our leave");
         assert!(!b.stored.pending.contains_key("S"), "a leave the owner holds stays pending");
 
         let (mut b, _) = waiting(&us);
-        let ban = signed(1, 1_500, CrdtPayload::MemberBanned { peer_id: us.clone() });
+        let ban = signed(1, 1_500, CrdtPayload::MemberBanned { peer_id: us.clone(), seen: None });
         assert!(b.on_answer("S", &json(&[&ban, &older]), Some(7), &owner, &us), "the owner's ban of us closes the server to us");
         let (mut b, _) = waiting(&us);
         let deleted = signed(1, 900, CrdtPayload::ServerDeleted { deleted_at: 900 });
@@ -624,16 +625,16 @@ mod tests {
         let x = crate::crdt::testkeys::keys(3).1;
         let closes = |op: CrdtOp| waiting(&us).0.owner_closed("S", &serde_json::to_string(&op).unwrap(), &us);
         assert!(!closes(signed(3, 900, CrdtPayload::ServerDeleted { deleted_at: 900 })), "a member's deletion");
-        assert!(!closes(signed(3, 900, CrdtPayload::MemberBanned { peer_id: us.clone() })), "a member's ban");
-        assert!(!closes(signed(1, 900, CrdtPayload::MemberRemoved { peer_id: x.clone() })), "the owner removing someone else");
+        assert!(!closes(signed(3, 900, CrdtPayload::MemberBanned { peer_id: us.clone(), seen: None })), "a member's ban");
+        assert!(!closes(signed(1, 900, CrdtPayload::MemberRemoved { peer_id: x.clone(), seen: None })), "the owner removing someone else");
         assert!(!closes(signed(1, 900, CrdtPayload::ServerRenamed { new_name: "n".into() })), "an op that closes nothing");
-        assert!(!closes(signed(1, 900, CrdtPayload::MemberBanned { peer_id: us.clone() })), "a ban from before our leave");
+        assert!(!closes(signed(1, 900, CrdtPayload::MemberBanned { peer_id: us.clone(), seen: None })), "a ban from before our leave");
         assert!(!closes(signed_in("T", 1, 1_500, CrdtPayload::ServerDeleted { deleted_at: 900 })), "another server's deletion");
         let mut unsigned = signed(1, 900, CrdtPayload::ServerDeleted { deleted_at: 900 });
         unsigned.auth = None;
         assert!(!closes(unsigned), "an unsigned deletion");
         assert!(closes(signed(1, 900, CrdtPayload::ServerDeleted { deleted_at: 900 })));
-        assert!(closes(signed(1, 1_001, CrdtPayload::MemberRemoved { peer_id: us.clone() })));
-        assert!(closes(signed(1, 1_500, CrdtPayload::MemberBanned { peer_id: us.clone() })));
+        assert!(closes(signed(1, 1_001, CrdtPayload::MemberRemoved { peer_id: us.clone(), seen: None })));
+        assert!(closes(signed(1, 1_500, CrdtPayload::MemberBanned { peer_id: us.clone(), seen: None })));
     }
 }
