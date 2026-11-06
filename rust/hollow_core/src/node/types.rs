@@ -1995,6 +1995,14 @@ pub(crate) enum HavenMessage {
         /// Absent from older clients.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<GapDigest>,
+        /// The asker honours a page's `held_from`. An older asker does not, and a holder
+        /// lacking part of what it asked answers it no rows and more to come, as before.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        partial_ok: bool,
+        /// Nothing at or after this timestamp is wanted: the ask for a stretch the asker
+        /// still lacks. An older responder serves past it, which costs only bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<i64>,
     },
 
     #[serde(rename = "dm_sync_req")]
@@ -3592,6 +3600,11 @@ pub(crate) enum MessageEnvelope {
         /// Target peer (only that peer processes; others decrypt but discard).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
+        /// The holder vouches only for rows at or after this timestamp (`i64::MAX`: for
+        /// none it holds), as it lacks some of what the ask reached below it. One rule for
+        /// every kind of partial holder; see `MessageStore::channel_held_from`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        held_from: Option<i64>,
     },
     /// DM sync batch — carries missed DMs from the sender.
     #[serde(rename = "dm_sync")]

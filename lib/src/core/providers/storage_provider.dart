@@ -69,6 +69,14 @@ final channelHistoryClearedProvider =
       serverId: key.$1, channelId: key.$2),
 );
 
+/// Whether this device's history of a channel begins later than the channel's
+/// and the rest has not arrived yet (server, channel).
+final channelHistoryBeginsLaterProvider =
+    FutureProvider.autoDispose.family<bool, (String, String)>(
+  (ref, key) => storage_api.channelHistoryBeginsLater(
+      serverId: key.$1, channelId: key.$2),
+);
+
 /// Actions for the Storage Manager: clear cached file bytes, enforce the files
 /// cap, and clear/evict the vault cache. Each refreshes the breakdown. The
 /// FFIs keep the signed FileHeader rows, so only the heavy bytes go.

@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::crdt::operations::CrdtOp;
 
@@ -24,6 +24,13 @@ const SYNC_GAP_MAX_SPAN_MS: i64 = SYNC_GAP_WINDOW_MS + DAY_MS;
 /// there is nothing behind it.
 fn gap_window(since: i64) -> Option<(i64, i64)> {
     (since > 0).then(|| ((since - SYNC_GAP_WINDOW_MS).max(0), since))
+}
+
+/// The digest window of a channel ask: from a UTC day's start, so a day a cleared device
+/// counts whole (`channel_cleared_days`) is compared whole; still within the span a
+/// responder honours.
+fn channel_gap_window(since: i64) -> Option<(i64, i64)> {
+    gap_window(since).map(|(from, until)| (from.div_euclid(DAY_MS) * DAY_MS, until))
 }
 
 /// A responder ignores a digest it did not ask for the shape of: empty, inverted
@@ -376,9 +383,12 @@ const CHANNEL_FTS_TRIGGERS: &str = "
         INSERT INTO channel_messages_fts(rowid, text) VALUES (new.id, new.text);
     END;";
 
-/// Senders a cleared channel names in its sync asks, at most: past it a sender first
-/// met below the floor is served again at each catch-up, and dropped again.
-const MAX_FLOOR_SENDERS: i64 = 4096;
+/// What a channel's history still lacks: every sender's rows from `from` up to `below`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelHole {
+    pub below: i64,
+    pub from: i64,
+}
 
 /// Rows one history-clear transaction deletes, so the node's writers never wait on
 /// the whole clear.
@@ -517,6 +527,101 @@ fn remember_cleared_ids(conn: &Connection, sid: &str, cid: &str, floor: i64, old
     }
     conn.execute("DELETE FROM channel_cleared_ids WHERE server_id = ?1 AND channel_id = ?2 AND ts <= ?3", params![sid, cid, exact])?;
     conn.execute("UPDATE channel_floors SET exact_from = ?3 WHERE server_id = ?1 AND channel_id = ?2", params![sid, cid, exact])?;
+    Ok(())
+}
+
+/// Cleared senders a channel's asks name; past them the oldest go (their rows come back
+/// in full to an ask and are refused).
+const MAX_CLEARED_SENDERS: i64 = 4096;
+
+/// Cleared rows a channel counts one by one near its newest; past them the oldest fold
+/// into their day, which a digest ending among them then counts whole.
+const MAX_CLEARED_TAIL: i64 = 4096;
+
+/// Count one clear batch (`temp.clear_batch`) into what the cleared channels' asks still
+/// count as held, in the batch's own transaction, before its rows go.
+fn count_cleared_batch(conn: &Connection) -> rusqlite::Result<()> {
+    let rows: Vec<(String, String, String, Option<String>, i64)> = conn
+        .prepare_cached(
+            "SELECT server_id, channel_id, sender_id, message_id, timestamp FROM channel_messages
+             WHERE id IN (SELECT id FROM temp.clear_batch)",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut oldest: BTreeMap<(String, String), i64> = BTreeMap::new();
+    {
+        let mut sender = conn.prepare_cached(
+            "INSERT INTO channel_cleared_senders (server_id, channel_id, sender_id, last_ts) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(server_id, channel_id, sender_id) DO UPDATE SET last_ts = MAX(last_ts, excluded.last_ts)",
+        )?;
+        let mut tail = conn.prepare_cached("INSERT OR IGNORE INTO channel_cleared_tail (server_id, channel_id, ts, h) VALUES (?1, ?2, ?3, ?4)")?;
+        for (sid, cid, from, mid, ts) in &rows {
+            sender.execute(params![sid, cid, from, ts])?;
+            if let Some(mid) = mid {
+                tail.execute(params![sid, cid, ts, mid_hash(mid) as i64])?;
+            }
+            let first = oldest.entry((sid.clone(), cid.clone())).or_insert(*ts);
+            *first = (*first).min(*ts);
+        }
+    }
+    for ((sid, cid), first) in oldest {
+        conn.execute(
+            "UPDATE channel_floors SET history_from = MIN(COALESCE(history_from, ?3), ?3) WHERE server_id = ?1 AND channel_id = ?2",
+            params![sid, cid, first],
+        )?;
+        settle_cleared_counts(conn, &sid, &cid)?;
+    }
+    Ok(())
+}
+
+/// Keep one cleared channel's counts bounded. A later ask's `since` is at least the newest
+/// cleared stamp, so its digest ends at or past that stamp's lookback and starts at or
+/// past the window before it: rows below the lookback fold into their day (counted whole
+/// by every such digest), days before the window go, and only the newest senders stay.
+fn settle_cleared_counts(conn: &Connection, sid: &str, cid: &str) -> rusqlite::Result<()> {
+    let top: Option<i64> = conn.query_row(
+        "SELECT MAX(last_ts) FROM channel_cleared_senders WHERE server_id = ?1 AND channel_id = ?2",
+        params![sid, cid],
+        |r| r.get(0),
+    )?;
+    let Some(top) = top else { return Ok(()) };
+    let cut = top.saturating_sub(SYNC_LOOKBACK_MS);
+    let first_day = cut.saturating_sub(SYNC_GAP_WINDOW_MS).div_euclid(DAY_MS);
+    let folded = "server_id = ?1 AND channel_id = ?2 AND (ts < ?3 OR (ts, h) NOT IN (
+             SELECT ts, h FROM channel_cleared_tail WHERE server_id = ?1 AND channel_id = ?2 ORDER BY ts DESC LIMIT ?4))";
+    let fold: Vec<(i64, i64)> = conn
+        .prepare(&format!("SELECT ts, h FROM channel_cleared_tail WHERE {folded}"))?
+        .query_map(params![sid, cid, cut, MAX_CLEARED_TAIL], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    conn.execute(&format!("DELETE FROM channel_cleared_tail WHERE {folded}"), params![sid, cid, cut, MAX_CLEARED_TAIL])?;
+    let mut days: BTreeMap<i64, (i64, u64)> = BTreeMap::new();
+    for (ts, h) in fold {
+        let day = days.entry(ts.div_euclid(DAY_MS)).or_default();
+        day.0 += 1;
+        day.1 ^= h as u64;
+    }
+    for (day, (n, h)) in days {
+        let held: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT n, h FROM channel_cleared_days WHERE server_id = ?1 AND channel_id = ?2 AND day = ?3",
+                params![sid, cid, day],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (n0, h0) = held.unwrap_or_default();
+        conn.execute(
+            "INSERT OR REPLACE INTO channel_cleared_days (server_id, channel_id, day, n, h) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![sid, cid, day, n0 + n, (h0 as u64 ^ h) as i64],
+        )?;
+    }
+    conn.execute("DELETE FROM channel_cleared_days WHERE server_id = ?1 AND channel_id = ?2 AND day < ?3", params![sid, cid, first_day])?;
+    conn.execute("DELETE FROM channel_cleared_tail WHERE server_id = ?1 AND channel_id = ?2 AND ts < ?3", params![sid, cid, first_day.saturating_mul(DAY_MS)])?;
+    conn.execute(
+        "DELETE FROM channel_cleared_senders WHERE server_id = ?1 AND channel_id = ?2 AND sender_id NOT IN (
+             SELECT sender_id FROM channel_cleared_senders WHERE server_id = ?1 AND channel_id = ?2
+             ORDER BY last_ts DESC, sender_id LIMIT ?3)",
+        params![sid, cid, MAX_CLEARED_SENDERS],
+    )?;
     Ok(())
 }
 
@@ -1316,13 +1421,8 @@ impl MessageStore {
                 floor_ts   INTEGER NOT NULL,
                 PRIMARY KEY (server_id, channel_id)
             )")?;
-        ddl(conn, "channel_floor_senders table",
-            "CREATE TABLE IF NOT EXISTS channel_floor_senders (
-                server_id  TEXT NOT NULL,
-                channel_id TEXT NOT NULL,
-                sender_id  TEXT NOT NULL,
-                PRIMARY KEY (server_id, channel_id, sender_id)
-            )")?;
+        // 0.14 development builds named a cleared channel's senders in its asks.
+        migrate(conn, "DROP TABLE IF EXISTS channel_floor_senders; DROP TABLE IF EXISTS channel_sync_hole_senders;");
         // Rows up to `exact_from` are refused outright; above it, up to the floor, only
         // the ids this device cleared there, so a slow clock's later post still lands.
         migrate(conn, "ALTER TABLE channel_floors ADD COLUMN exact_from INTEGER;");
@@ -1336,6 +1436,47 @@ impl MessageStore {
             ) WITHOUT ROWID")?;
         ddl(conn, "idx_cleared_ids_ts",
             "CREATE INDEX IF NOT EXISTS idx_cleared_ids_ts ON channel_cleared_ids (server_id, channel_id, ts)")?;
+        // What a channel's history lacks when it begins here later than the channel's
+        // (`note_held_page`, a copy's floors): every sender from `all_from` to `below`,
+        // asked for by itself until a holder serves it whole.
+        ddl(conn, "channel_sync_holes table",
+            "CREATE TABLE IF NOT EXISTS channel_sync_holes (
+                server_id  TEXT    NOT NULL,
+                channel_id TEXT    NOT NULL,
+                below      INTEGER NOT NULL,
+                all_from   INTEGER,
+                PRIMARY KEY (server_id, channel_id)
+            )")?;
+        // What a clear took, as the asks of a cleared channel still count it held
+        // (`count_cleared_batch`): each sender's newest stamp, the id hashes of the
+        // newest rows one by one (a digest may end among them), the rest per UTC day as
+        // the gap digest counts a day. `history_from` = the oldest row it cleared.
+        migrate(conn, "ALTER TABLE channel_floors ADD COLUMN history_from INTEGER;");
+        ddl(conn, "channel_cleared_senders table",
+            "CREATE TABLE IF NOT EXISTS channel_cleared_senders (
+                server_id  TEXT    NOT NULL,
+                channel_id TEXT    NOT NULL,
+                sender_id  TEXT    NOT NULL,
+                last_ts    INTEGER NOT NULL,
+                PRIMARY KEY (server_id, channel_id, sender_id)
+            ) WITHOUT ROWID")?;
+        ddl(conn, "channel_cleared_tail table",
+            "CREATE TABLE IF NOT EXISTS channel_cleared_tail (
+                server_id  TEXT    NOT NULL,
+                channel_id TEXT    NOT NULL,
+                ts         INTEGER NOT NULL,
+                h          INTEGER NOT NULL,
+                PRIMARY KEY (server_id, channel_id, ts, h)
+            ) WITHOUT ROWID")?;
+        ddl(conn, "channel_cleared_days table",
+            "CREATE TABLE IF NOT EXISTS channel_cleared_days (
+                server_id  TEXT    NOT NULL,
+                channel_id TEXT    NOT NULL,
+                day        INTEGER NOT NULL,
+                n          INTEGER NOT NULL,
+                h          INTEGER NOT NULL,
+                PRIMARY KEY (server_id, channel_id, day)
+            ) WITHOUT ROWID")?;
         // A clear's downloads still to unlink: its batches commit before the unlink, so a
         // crash between them leaves the names here for the next start.
         ddl(conn, "channel_cleared_files table",
@@ -2830,23 +2971,67 @@ impl MessageStore {
         server_id: &str,
         channel_id: &str,
     ) -> Option<crate::node::types::GapDigest> {
-        let latest = self.get_latest_channel_timestamp(server_id, channel_id).ok()??;
-        let (from, until) = gap_window((latest - SYNC_LOOKBACK_MS).max(0))?;
-        // What a floor refuses outright is never wanted back, so the digest never shows it as missing.
-        let from = match self.channel_ask_start(server_id, channel_id) {
-            Some(start) if start >= until => return None,
-            Some(start) => from.max(start),
+        let latest = self.channel_ask_since(server_id, channel_id);
+        let (from, until) = channel_gap_window((latest - SYNC_LOOKBACK_MS).max(0))?;
+        let held = self.channel_held_from(server_id, channel_id);
+        let counted = held.is_some() && self.counts_cleared(server_id, channel_id);
+        let from = match held {
+            // What we cleared counts as held, so a day we cleared compares as a full
+            // holder's and the posts we missed after the clear show as missing.
+            Some(_) if counted => from,
+            // A later-starting device's lack below where it vouches is never shown as missing.
+            Some(held) => from.max(held),
             None => from,
         };
-        self.gap_digest(
-            "SELECT message_id, timestamp FROM channel_messages
-             WHERE server_id = ?1 AND channel_id = ?2 AND timestamp >= ?3 AND timestamp < ?4
-               AND message_id IS NOT NULL",
-            &[&server_id, &channel_id, &from, &until],
-            from,
-            until,
-        )
-        .ok()
+        if from >= until {
+            return None;
+        }
+        let mut digest = self
+            .gap_digest(
+                "SELECT message_id, timestamp FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND timestamp >= ?3 AND timestamp < ?4
+                   AND message_id IS NOT NULL",
+                &[&server_id, &channel_id, &from, &until],
+                from,
+                until,
+            )
+            .ok()?;
+        if counted {
+            self.add_cleared_counts(server_id, channel_id, &mut digest).ok()?;
+        }
+        Some(digest)
+    }
+
+    /// Fold what a clear counted into a digest of this channel's rows, over its window:
+    /// whole days (they lie wholly inside it, see `settle_cleared_counts`) and the rows
+    /// near the newest one by one.
+    fn add_cleared_counts(&self, server_id: &str, channel_id: &str, digest: &mut crate::node::types::GapDigest) -> Result<(), String> {
+        let err = |e: rusqlite::Error| format!("Failed to read the cleared counts: {e}");
+        let mut days: BTreeMap<i64, (u32, u64)> = digest.days.iter().map(|d| (d.d, (d.n, d.h))).collect();
+        let mut add = |day: i64, n: i64, h: i64| {
+            let entry = days.entry(day).or_default();
+            entry.0 = entry.0.saturating_add(u32::try_from(n).unwrap_or(u32::MAX));
+            entry.1 ^= h as u64;
+        };
+        let (first, last) = (digest.from.div_euclid(DAY_MS), (digest.until - 1).div_euclid(DAY_MS));
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT day, n, h FROM channel_cleared_days WHERE server_id = ?1 AND channel_id = ?2 AND day >= ?3 AND day <= ?4")
+            .map_err(err)?;
+        for row in stmt.query_map(params![server_id, channel_id, first, last], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(err)? {
+            let (day, n, h) = row.map_err(err)?;
+            add(day, n, h);
+        }
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT ts, h FROM channel_cleared_tail WHERE server_id = ?1 AND channel_id = ?2 AND ts >= ?3 AND ts < ?4")
+            .map_err(err)?;
+        for row in stmt.query_map(params![server_id, channel_id, digest.from, digest.until], |r| Ok((r.get::<_, i64>(0)?, r.get(1)?))).map_err(err)? {
+            let (ts, h) = row.map_err(err)?;
+            add(ts.div_euclid(DAY_MS), 1, h);
+        }
+        digest.days = days.into_iter().map(|(d, (n, h))| crate::node::types::GapDay { d, n, h }).collect();
+        Ok(())
     }
 
     /// Per-day digest of the DM rows in `[from, until)` of one conversation, both
@@ -3031,6 +3216,13 @@ impl MessageStore {
         self.conn
             .execute("DELETE FROM crdt_ops WHERE server_id = ?1", params![server_id])
             .map_err(|e| format!("Failed to delete server ops: {e}"))?;
+        // A hole would ask the server's members for history after we left it; what a clear
+        // counted goes with it (a floor without it asks as a device whose history begins later).
+        for table in ["channel_sync_holes", "channel_cleared_senders", "channel_cleared_tail", "channel_cleared_days"] {
+            self.conn
+                .execute(&format!("DELETE FROM {table} WHERE server_id = ?1"), params![server_id])
+                .map_err(|e| format!("Failed to delete server holes: {e}"))?;
+        }
         self.delete_server_blobs(server_id)
     }
 
@@ -3309,7 +3501,7 @@ impl MessageStore {
         if rows > 0 {
             return Ok(ChannelInsert::Stored);
         }
-        Ok(if self.refuse_below_floor(server_id, channel_id, sender_id, timestamp, message_id) {
+        Ok(if self.channel_floor_refuses(server_id, channel_id, timestamp, message_id) {
             ChannelInsert::Cleared
         } else {
             ChannelInsert::Duplicate
@@ -3317,7 +3509,7 @@ impl MessageStore {
     }
 
     /// Whether a channel row, or a header, reaction or card riding one, is history
-    /// this device cleared. Pure: see [`Self::refuse_below_floor`].
+    /// this device cleared.
     pub fn channel_floor_refuses(&self, server_id: &str, channel_id: &str, timestamp: i64, message_id: Option<&str>) -> bool {
         self.conn
             .prepare_cached(&format!("SELECT {}", floor_refuses_sql("?1", "?2", "?3", "?4")))
@@ -3325,22 +3517,6 @@ impl MessageStore {
                 s.query_row(params![server_id, channel_id, timestamp, message_id.map(cleared_id_hash)], |r| r.get(0))
             })
             .unwrap_or(false)
-    }
-
-    /// [`Self::channel_floor_refuses`], and a sender first met in cleared history
-    /// joins the senders the channel's sync asks name, so no one serves its old rows
-    /// again; bounded per channel.
-    pub fn refuse_below_floor(&self, server_id: &str, channel_id: &str, sender_id: &str, timestamp: i64, message_id: Option<&str>) -> bool {
-        if !self.channel_floor_refuses(server_id, channel_id, timestamp, message_id) {
-            return false;
-        }
-        let _ = self.conn.execute(
-            "INSERT OR IGNORE INTO channel_floor_senders (server_id, channel_id, sender_id)
-             SELECT ?1, ?2, ?3
-             WHERE (SELECT COUNT(*) FROM channel_floor_senders WHERE server_id = ?1 AND channel_id = ?2) < ?4",
-            params![server_id, channel_id, sender_id, MAX_FLOOR_SENDERS],
-        );
-        true
     }
 
     /// Test-only: the connection, for writing a row past every gate.
@@ -3392,15 +3568,14 @@ impl MessageStore {
             for (sid, cid, floor, old_exact) in floors {
                 remember_cleared_ids(conn, &sid, &cid, floor, old_exact).map_err(err("cleared ids"))?;
             }
+            // A clear's floor is its line: a hole would ask for what it threw away.
             conn.execute(
-                "INSERT OR IGNORE INTO channel_floor_senders (server_id, channel_id, sender_id)
-                 SELECT DISTINCT m.server_id, m.channel_id, m.sender_id FROM channel_floors f
-                 JOIN channel_messages m ON m.server_id = f.server_id AND m.channel_id = f.channel_id
-                 WHERE ?1 IS NULL OR f.server_id = ?1",
-                [server_id],
+                "DELETE FROM channel_sync_holes WHERE EXISTS (SELECT 1 FROM channel_floors f
+                     WHERE f.server_id = channel_sync_holes.server_id AND f.channel_id = channel_sync_holes.channel_id)",
+                [],
             )
             .map(|_| ())
-            .map_err(err("floor senders"))
+            .map_err(err("holes"))
         })
         .map_err(|e| format!("Failed to mark the cleared history: {e}"))?;
         self.finish_cleared_history()
@@ -3434,6 +3609,7 @@ impl MessageStore {
                     .execute(CLEAR_BATCH_SELECT, [CLEAR_BATCH_ROWS])
                     .map_err(|e| e.to_string())?;
                 if rows > 0 {
+                    count_cleared_batch(conn).map_err(|e| e.to_string())?;
                     // Ids are sender-chosen: a DM sharing one keeps its evidence.
                     run(
                         "INSERT OR IGNORE INTO channel_cleared_files (file_id, file_ext)
@@ -3566,43 +3742,266 @@ impl MessageStore {
         )
     }
 
-    /// The first timestamp a sync ask of a channel this device cleared wants: just past
-    /// the outright refusal, as a slow clock's newer post may land up to the floor.
-    pub fn channel_ask_start(&self, server_id: &str, channel_id: &str) -> Option<i64> {
-        self.conn
-            .prepare_cached("SELECT COALESCE(exact_from, floor_ts) + 1 FROM channel_floors WHERE server_id = ?1 AND channel_id = ?2")
-            .and_then(|mut s| s.query_row(params![server_id, channel_id], |r| r.get(0)))
-            .ok()
+    /// Where a sync page from this device starts vouching for a channel: its oldest row
+    /// at or after the point below which it lacks history (`i64::MAX` with none there),
+    /// `None` for a device lacking none. One rule for a device that cleared the channel
+    /// and one whose history begins later (a late join, a return, a copy): the value
+    /// names a row the page serves or the asker holds, never the clear or the hole.
+    pub fn channel_held_from(&self, server_id: &str, channel_id: &str) -> Option<i64> {
+        let mark: i64 = self
+            .conn
+            .prepare_cached(
+                "SELECT MAX(m) FROM (
+                     SELECT MAX(f.floor_ts, COALESCE((SELECT MAX(k.ts) FROM channel_cleared_ids k
+                         WHERE k.server_id = f.server_id AND k.channel_id = f.channel_id
+                           AND k.ts > f.floor_ts AND k.ts <= f.floor_ts + ?3), f.floor_ts)) + 1 AS m
+                     FROM channel_floors f WHERE f.server_id = ?1 AND f.channel_id = ?2
+                     UNION ALL
+                     SELECT below FROM channel_sync_holes WHERE server_id = ?1 AND channel_id = ?2
+                 )",
+            )
+            .and_then(|mut s| s.query_row(params![server_id, channel_id, CLEAR_SKEW_MS], |r| r.get::<_, Option<i64>>(0)))
+            // Unreadable: lacking everything, never vouching for what we may not hold.
+            .unwrap_or(Some(i64::MAX))?;
+        let oldest: Option<i64> = self
+            .conn
+            .prepare_cached("SELECT MIN(timestamp) FROM channel_messages WHERE server_id = ?1 AND channel_id = ?2 AND timestamp >= ?3")
+            .and_then(|mut s| s.query_row(params![server_id, channel_id, mark], |r| r.get(0)))
+            .unwrap_or(None);
+        Some(oldest.unwrap_or(i64::MAX))
     }
 
-    /// Whether a channel sync ask wants rows at or below the floor this device cleared
-    /// to, which it no longer holds: a plain watermark below it, a sender named at or
-    /// below it, a sender it cleared that the ask leaves out (served in full), or a gap
-    /// digest (`gap_from`) starting at or below it.
-    pub fn channel_ask_reaches_floor(
+    /// Whether a channel sync ask wants a row before `held_from`: a plain `since` (an ask
+    /// naming no sender) or a named sender below it, a gap digest starting below it, or a
+    /// sender we hold from it on that the ask leaves out (served in full). Reads only
+    /// rows at or after it.
+    pub fn channel_ask_reaches_below(
         &self,
         server_id: &str,
         channel_id: &str,
+        held_from: i64,
         since: i64,
         sender_timestamps: &HashMap<String, i64>,
         gap_from: Option<i64>,
     ) -> bool {
-        let Some(floor) = self.channel_floor(server_id, channel_id) else { return false };
-        if gap_from.is_some_and(|from| from <= floor) {
+        if (sender_timestamps.is_empty() && since.saturating_add(1) < held_from)
+            || sender_timestamps.values().any(|ts| *ts < held_from)
+            || gap_from.is_some_and(|from| from < held_from)
+        {
             return true;
         }
         if sender_timestamps.is_empty() {
-            return since < floor;
+            return false;
         }
-        if sender_timestamps.values().any(|ts| *ts <= floor) {
-            return true;
-        }
-        let cleared = self
-            .conn
-            .prepare_cached("SELECT sender_id FROM channel_floor_senders WHERE server_id = ?1 AND channel_id = ?2")
-            .and_then(|mut s| s.query_map(params![server_id, channel_id], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>());
         // Unreadable: answered as reaching it, never as the whole channel.
-        cleared.map_or(true, |senders| senders.iter().any(|s| !sender_timestamps.contains_key(s)))
+        self.channel_sender_spans(server_id, channel_id)
+            .map_or(true, |spans| spans.iter().any(|s| s.last >= held_from && !sender_timestamps.contains_key(&s.sender)))
+    }
+
+    /// Every sender a page vouching only from `held_from` serves, named from there on
+    /// (an ask naming none, from past its `since`): what a holder lacking part of a
+    /// channel serves, whatever the ask named.
+    pub fn channel_marks_from(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        held_from: i64,
+        since: i64,
+        sender_timestamps: &HashMap<String, i64>,
+    ) -> Result<HashMap<String, i64>, String> {
+        let unnamed = if sender_timestamps.is_empty() { since.saturating_add(1).max(held_from) } else { held_from };
+        // Every sender we hold is named, or the query serves it in full from below.
+        Ok(self
+            .channel_sender_spans(server_id, channel_id)?
+            .into_iter()
+            .map(|s| {
+                let from = sender_timestamps.get(&s.sender).copied().unwrap_or(unnamed).max(held_from);
+                (s.sender, from)
+            })
+            .collect())
+    }
+
+    /// What this device lacks of a channel whose history here begins later than the
+    /// channel's: every sender's rows from `from` up to `below`.
+    pub fn channel_hole(&self, server_id: &str, channel_id: &str) -> Option<ChannelHole> {
+        self.conn
+            .prepare_cached("SELECT below, COALESCE(all_from, 0) FROM channel_sync_holes WHERE server_id = ?1 AND channel_id = ?2")
+            .and_then(|mut s| s.query_row(params![server_id, channel_id], |r| Ok(ChannelHole { below: r.get(0)?, from: r.get(1)? })))
+            .ok()
+    }
+
+    /// A holder served the hole whole.
+    pub fn close_channel_hole(&self, server_id: &str, channel_id: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM channel_sync_holes WHERE server_id = ?1 AND channel_id = ?2", params![server_id, channel_id])
+            .map(|_| ())
+            .map_err(|e| format!("Failed to close a channel hole: {e}"))
+    }
+
+    /// Whether any row of a channel is held, for [`Self::note_held_page`].
+    pub fn channel_holds_rows(&self, server_id: &str, channel_id: &str) -> Result<bool, String> {
+        self.conn
+            .prepare_cached("SELECT EXISTS (SELECT 1 FROM channel_messages WHERE server_id = ?1 AND channel_id = ?2)")
+            .and_then(|mut s| s.query_row(params![server_id, channel_id], |r| r.get(0)))
+            .map_err(|e| format!("Failed to read a channel: {e}"))
+    }
+
+    /// A page of our own ask that vouched only from `held`, in the transaction landing its
+    /// rows (`landed` = the stamps of the rows ingest accepted), before any watermark
+    /// moves. Only a device that held no row of the channel before the page and never
+    /// cleared it opens a hole; one holding anything judges what it lacks by the gap
+    /// digest, as for any watermark a live post moved, and keeps vouching for all it
+    /// holds. A page of the hole's own ask narrows it to the oldest row it landed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn note_held_page(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        held: i64,
+        held_rows_before: bool,
+        landed: &[i64],
+        answers_hole: bool,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        if self.channel_floor(server_id, channel_id).is_some() {
+            return Ok(());
+        }
+        let held = if held == i64::MAX { now_ms } else { held.min(now_ms.saturating_add(CLEAR_SKEW_MS)) };
+        let first = landed.iter().copied().filter(|ts| *ts >= held).min();
+        let err = |e: rusqlite::Error| format!("Failed to note a channel hole: {e}");
+        match self.channel_hole(server_id, channel_id) {
+            Some(hole) if answers_hole => {
+                let Some(first) = first.filter(|f| *f < hole.below) else { return Ok(()) };
+                self.conn
+                    .execute(
+                        "UPDATE channel_sync_holes SET below = ?3 WHERE server_id = ?1 AND channel_id = ?2",
+                        params![server_id, channel_id, first],
+                    )
+                    .map_err(err)?;
+                self.drop_filled_hole(server_id, channel_id)
+            }
+            Some(_) => Ok(()),
+            None if held_rows_before => Ok(()),
+            None => self
+                .conn
+                .execute(
+                    "INSERT INTO channel_sync_holes (server_id, channel_id, below, all_from) VALUES (?1, ?2, ?3, 0)",
+                    params![server_id, channel_id, first.unwrap_or(held)],
+                )
+                .map(|_| ())
+                .map_err(err),
+        }
+    }
+
+    /// A page of the hole's own ask that vouched for all it served ends at `end`: below
+    /// it the hole is filled, so an ask cut short later starts there, not again from below.
+    pub fn raise_channel_hole(&self, server_id: &str, channel_id: &str, end: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE channel_sync_holes SET all_from = MAX(COALESCE(all_from, 0), ?3) WHERE server_id = ?1 AND channel_id = ?2",
+                params![server_id, channel_id, end],
+            )
+            .map_err(|e| format!("Failed to raise a channel hole: {e}"))?;
+        self.drop_filled_hole(server_id, channel_id)
+    }
+
+    fn drop_filled_hole(&self, server_id: &str, channel_id: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM channel_sync_holes WHERE server_id = ?1 AND channel_id = ?2 AND COALESCE(all_from, 0) >= below",
+                params![server_id, channel_id],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("Failed to close a channel hole: {e}"))
+    }
+
+    /// Whether a channel has a hole to ask for.
+    pub fn channel_hole_open(&self, server_id: &str, channel_id: &str) -> bool {
+        self.conn
+            .prepare_cached("SELECT EXISTS (SELECT 1 FROM channel_sync_holes WHERE server_id = ?1 AND channel_id = ?2)")
+            .and_then(|mut s| s.query_row(params![server_id, channel_id], |r| r.get(0)))
+            .unwrap_or(false)
+    }
+
+    /// Whether what this device holds of a channel starts later than the channel did for
+    /// a reason other than our own clear (a late join, a copy), until the rest arrives.
+    pub fn channel_history_begins_later(&self, server_id: &str, channel_id: &str) -> bool {
+        self.channel_hole_open(server_id, channel_id) && self.channel_floor(server_id, channel_id).is_none()
+    }
+
+    /// The senders a catch-up ask of a channel names, with their newest rows. A device
+    /// that cleared the channel counts what it cleared as held, so it asks exactly as it
+    /// would have without the clear; a device whose history begins later names only the
+    /// rows it vouches for (`channel_held_from`), so its asks say no more than its answers.
+    fn channel_ask_spans(&self, server_id: &str, channel_id: &str) -> Result<HashMap<String, i64>, String> {
+        let held = self.channel_held_from(server_id, channel_id);
+        let counted = held.is_some() && self.counts_cleared(server_id, channel_id);
+        let mut spans: HashMap<String, i64> = self
+            .channel_sender_spans(server_id, channel_id)?
+            .into_iter()
+            .filter(|s| counted || held.is_none_or(|from| s.last >= from))
+            .map(|s| (s.sender, s.last))
+            .collect();
+        if counted {
+            for (sender, last) in self.cleared_senders(server_id, channel_id)? {
+                let newest = spans.entry(sender).or_insert(last);
+                *newest = (*newest).max(last);
+            }
+        }
+        Ok(spans)
+    }
+
+    /// The `since` of a catch-up ask: the newest row it names; with none, 0 (everything),
+    /// or our clock for a channel we cleared, which wants nothing it would refuse.
+    pub fn channel_ask_since(&self, server_id: &str, channel_id: &str) -> i64 {
+        self.channel_ask_spans(server_id, channel_id)
+            .ok()
+            .and_then(|spans| spans.into_values().max())
+            .unwrap_or_else(|| if self.channel_floor(server_id, channel_id).is_some() { crate::node::frame_auth::now_ms() } else { 0 })
+    }
+
+    /// Where a catch-up's next page may start: below it this device lacks the channel (a
+    /// hole) or never held it (the oldest row a clear took), `None` for neither.
+    pub fn channel_page_start(&self, server_id: &str, channel_id: &str) -> Option<i64> {
+        let held = self.channel_held_from(server_id, channel_id)?;
+        if self.counts_cleared(server_id, channel_id) {
+            self.cleared_history_from(server_id, channel_id)
+        } else {
+            Some(held)
+        }
+    }
+
+    /// Whether a clear of this channel took rows its asks still count as held.
+    fn counts_cleared(&self, server_id: &str, channel_id: &str) -> bool {
+        self.conn
+            .prepare_cached("SELECT EXISTS (SELECT 1 FROM channel_cleared_senders WHERE server_id = ?1 AND channel_id = ?2)")
+            .and_then(|mut s| s.query_row(params![server_id, channel_id], |r| r.get(0)))
+            .unwrap_or(false)
+    }
+
+    /// The oldest row a clear of this channel took.
+    fn cleared_history_from(&self, server_id: &str, channel_id: &str) -> Option<i64> {
+        self.conn
+            .prepare_cached("SELECT history_from FROM channel_floors WHERE server_id = ?1 AND channel_id = ?2")
+            .and_then(|mut s| s.query_row(params![server_id, channel_id], |r| r.get(0)))
+            .unwrap_or(None)
+    }
+
+    /// Every sender a clear of this channel took rows of, with its newest one.
+    fn cleared_senders(&self, server_id: &str, channel_id: &str) -> Result<Vec<(String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT sender_id, last_ts FROM channel_cleared_senders WHERE server_id = ?1 AND channel_id = ?2")
+            .map_err(|e| format!("Failed to read the cleared senders: {e}"))?;
+        let rows = stmt
+            .query_map(params![server_id, channel_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| format!("Failed to read the cleared senders: {e}"))?;
+        collect_rows(rows, "cleared senders")
+    }
+
+    /// Every sender of a channel we hold a row of.
+    pub fn channel_sender_ids(&self, server_id: &str, channel_id: &str) -> Result<Vec<String>, String> {
+        Ok(self.channel_sender_spans(server_id, channel_id)?.into_iter().map(|s| s.sender).collect())
     }
 
     /// Where this device cleared a channel's history, if it did.
@@ -3990,37 +4389,21 @@ impl MessageStore {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    /// Latest timestamp per sender for a channel, as `{ sender_id -> max_timestamp }`.
+    /// Latest timestamp per sender for a channel, as `{ sender_id -> max_timestamp }`,
+    /// minus the lookback, for the senders `channel_ask_spans` names.
     pub fn get_per_sender_timestamps(
         &self,
         server_id: &str,
         channel_id: &str,
     ) -> Result<HashMap<String, i64>, String> {
-        // A responder serves a sender from its watermark on, inclusive, and a cleared
-        // channel stores nothing again at or before its outright refusal: asks start past it.
-        let after_floor = self.channel_ask_start(server_id, channel_id).unwrap_or(0);
-        let mut map = HashMap::new();
-        for span in self.channel_sender_spans(server_id, channel_id)? {
-            // Lookback overlap: a MAX(timestamp) watermark permanently skips a message MISSED
-            // while a newer one arrived, so ask from `watermark - LOOKBACK`. The overlap is
-            // deduplicated by message_id on receipt.
-            map.insert(span.sender, (span.last - SYNC_LOOKBACK_MS).max(after_floor).max(0));
-        }
-        if after_floor > 0 {
-            // A sender the ask leaves out is served in full, so a cleared channel names
-            // every sender it held.
-            let mut stmt = self
-                .conn
-                .prepare_cached("SELECT sender_id FROM channel_floor_senders WHERE server_id = ?1 AND channel_id = ?2")
-                .map_err(|e| format!("Failed to prepare floor senders: {e}"))?;
-            let senders = stmt
-                .query_map(params![server_id, channel_id], |r| r.get::<_, String>(0))
-                .map_err(|e| format!("Failed to query floor senders: {e}"))?;
-            for sender in collect_rows(senders, "floor sender")? {
-                map.entry(sender).or_insert(after_floor);
-            }
-        }
-        Ok(map)
+        // Lookback overlap: a MAX(timestamp) watermark permanently skips a message MISSED
+        // while a newer one arrived, so ask from `watermark - LOOKBACK`. The overlap is
+        // deduplicated by message_id on receipt.
+        Ok(self
+            .channel_ask_spans(server_id, channel_id)?
+            .into_iter()
+            .map(|(sender, last)| (sender, (last - SYNC_LOOKBACK_MS).max(0)))
+            .collect())
     }
 
     /// Every sender of one channel with its oldest and newest row. Two index seeks per
@@ -4355,6 +4738,22 @@ impl MessageStore {
     /// floors of history this device cleared (a new device syncs it whole). Deleted
     /// pages are zeroed and the file rebuilt, so no free page still holds them.
     pub fn scrub_device_secrets(&self) -> Result<(), String> {
+        // A copy lacks what the clear took, so it asks for it again and vouches only from
+        // its oldest row past the floor, like any device whose history begins later; the
+        // hole names that row, never the floor.
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO channel_sync_holes (server_id, channel_id, below, all_from)
+                 SELECT f.server_id, f.channel_id,
+                        COALESCE((SELECT MIN(m.timestamp) FROM channel_messages m
+                            WHERE m.server_id = f.server_id AND m.channel_id = f.channel_id
+                              AND m.timestamp > MAX(f.floor_ts, COALESCE((SELECT MAX(k.ts) FROM channel_cleared_ids k
+                                  WHERE k.server_id = f.server_id AND k.channel_id = f.channel_id
+                                    AND k.ts > f.floor_ts AND k.ts <= f.floor_ts + ?1), f.floor_ts))), ?2), 0
+                 FROM channel_floors f",
+                params![CLEAR_SKEW_MS, i64::MAX],
+            )
+            .map_err(|e| format!("Failed to keep what a copy lacks: {e}"))?;
         self.conn
             .execute_batch(
                 "PRAGMA secure_delete = ON;
@@ -4368,8 +4767,10 @@ impl MessageStore {
                  DELETE FROM app_settings WHERE key = 'recovery_mnemonic';
                  DELETE FROM image_verdicts;
                  DELETE FROM channel_floors;
-                 DELETE FROM channel_floor_senders;
                  DELETE FROM channel_cleared_ids;
+                 DELETE FROM channel_cleared_senders;
+                 DELETE FROM channel_cleared_tail;
+                 DELETE FROM channel_cleared_days;
                  DELETE FROM channel_cleared_files;",
             )
             .map_err(|e| format!("Failed to scrub device secrets: {e}"))?;
@@ -11172,7 +11573,7 @@ mod w2c_storage {
 
     /// Clearing takes this device's server history and keeps it gone: each channel's
     /// floor sits at its newest row, nothing at or before it is stored again on any
-    /// path, a newer post lands, and a sender first met below the floor is named.
+    /// path, a newer post lands, and the asks still name what it cleared.
     #[test]
     fn w2c_cleared_history_is_refused_when_it_comes_back() {
         let tmp = crate::test_tmp::tempdir().unwrap();
@@ -11193,33 +11594,38 @@ mod w2c_storage {
         assert_eq!(post(&store, "fresh", "bob", 1, "elsewhere", "m6"), 1, "a channel never cleared refused history");
         assert_eq!(mids(&store, "ch"), vec!["m5"]);
 
+        // Asks name every sender held or cleared from its newest row, as they did before the
+        // clear, and never one the floor only refused.
         let marks = store.get_per_sender_timestamps("srv", "ch").unwrap();
-        let start = t + 2_001 - CLEAR_SKEW_MS;
-        assert_eq!(marks.get("alice"), Some(&start), "a cleared sender is not named where asks start");
-        assert_eq!(marks.get("dave"), Some(&start), "a sender met below the floor is not named");
-        assert_eq!(marks.get("bob"), Some(&start), "a lookback reached past where asks start");
+        let lb = SYNC_LOOKBACK_MS;
+        assert_eq!(marks, HashMap::from([("alice".to_string(), t + 1_000 - lb), ("bob".to_string(), t + 2_001 - lb)]));
     }
 
-    /// A cleared channel asks from just past its outright refusal: the per-sender marks
-    /// and the gap digest never ask for what it refuses whatever its id.
+    /// A cleared channel asks as it did before its clear: the per-sender marks, `since` and
+    /// gap digest count what it cleared, so they never stop at the floor, and a post
+    /// arriving later asks below itself as a device that never cleared does.
     #[test]
-    fn w2c_a_cleared_channel_asks_from_its_floor() {
+    fn w2c_a_cleared_channel_asks_as_before_its_clear() {
         let tmp = crate::test_tmp::tempdir().unwrap();
-        let store = file_store(tmp.path());
+        let (store, twin) = (file_store(tmp.path()), MessageStore::open(tmp.path().join("twin.db").to_str().unwrap(), KEY).unwrap());
         let day = 24 * 60 * 60 * 1000;
         let floor = 40 * day;
-        post(&store, "ch", "alice", floor - 5 * day, "old", "m1");
-        post(&store, "ch", "alice", floor, "newest", "m2");
+        for s in [&store, &twin] {
+            post(s, "ch", "alice", floor - 5 * day, "old", "m1");
+            post(s, "ch", "alice", floor, "newest", "m2");
+        }
         store.clear_channel_history(floor + day).unwrap();
-        assert_eq!(store.get_latest_channel_timestamp("srv", "ch").unwrap(), Some(floor));
-        let start = floor - CLEAR_SKEW_MS + 1;
-        assert_eq!(store.get_per_sender_timestamps("srv", "ch").unwrap(), HashMap::from([("alice".to_string(), start)]));
-        assert!(store.channel_gap_anchor("srv", "ch").is_none(), "an empty cleared channel sent a digest");
-
-        // Days later, the digest behind the newest post stops at the floor.
-        post(&store, "ch", "bob", floor + 3 * day, "later", "m3");
+        let ask = |s: &MessageStore| {
+            (s.channel_ask_since("srv", "ch"), s.get_per_sender_timestamps("srv", "ch").unwrap(), s.channel_gap_anchor("srv", "ch"))
+        };
+        assert_eq!(ask(&store), ask(&twin));
+        assert_eq!(store.get_per_sender_timestamps("srv", "ch").unwrap(), HashMap::from([("alice".to_string(), floor - SYNC_LOOKBACK_MS)]));
+        for s in [&store, &twin] {
+            post(s, "ch", "bob", floor + 3 * day, "later", "m3");
+        }
+        assert_eq!(ask(&store), ask(&twin));
         let gap = store.channel_gap_anchor("srv", "ch").expect("a digest behind the newest post");
-        assert_eq!(gap.from, start, "the digest reaches below where asks start");
+        assert!(gap.from < floor - 5 * day && gap.days.iter().map(|d| d.n).sum::<u32>() == 2, "the digest stops short of what it cleared: {gap:?}");
     }
 
     /// The floor never passes the clock: a post stamped ahead of it goes by its id, and
@@ -11439,12 +11845,12 @@ mod w2c_review_cases {
         assert_eq!(post(&j, "xavier", 100, "never held by J", "x1"), 0);
         assert_eq!(post(&j, "xavier", 200, "never held by J", "x2"), 0);
         let end = crate::node::sync_handler::ChannelPageEnd::of(&served).unwrap();
-        let ask = crate::node::sync_handler::channel_next_page_request(&j, "srv", "ch", end);
+        let ask = crate::node::sync_handler::channel_next_page_request(&j, "srv", "ch", end, None);
         let crate::node::types::HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, .. } = ask else {
             panic!("a channel ask")
         };
         let (env, _) = crate::node::sync_handler::build_channel_sync_batch(
-            &o, "srv", "ch", since_timestamp, &sender_timestamps, gap.as_ref(),
+            &o, "srv", "ch", since_timestamp, &sender_timestamps, gap.as_ref(), false, None,
         )
         .unwrap();
         let crate::node::types::MessageEnvelope::ChannelSyncBatch { messages, .. } = env else { panic!("a batch") };
@@ -11666,7 +12072,7 @@ mod w2c_round2 {
     }
 
     fn answer(holder: &MessageStore, since: i64, marks: &HashMap<String, i64>) -> (Page, Vec<SyncMessageItem>) {
-        let (env, _) = build_channel_sync_batch(holder, "srv", "ch", since, marks, None).unwrap();
+        let (env, _) = build_channel_sync_batch(holder, "srv", "ch", since, marks, None, false, None).unwrap();
         let MessageEnvelope::ChannelSyncBatch { messages, has_more, .. } = env else { panic!("a batch") };
         (Page::of(has_more, ChannelPageEnd::of(&messages).as_ref()), messages)
     }
@@ -11706,11 +12112,17 @@ mod w2c_round2 {
         // A legacy ask reaching below the floor.
         assert_eq!(answer(&holder, floor - 1, &HashMap::new()).0, Page::Stuck, "a legacy ask below the floor ended");
 
-        // Asks wholly past the floor are served as usual.
-        let past = marks(&[("alice", floor + 1), ("bob", floor + 1), ("carol", floor + 1)]);
+        // The holder vouches from its oldest row past the floor (AR-39): an ask between
+        // the two still reaches below it, so no ask finds where the floor lies.
+        let held = holder.channel_held_from("srv", "ch").unwrap();
+        assert_eq!(held, floor + 5_000);
+        let between = marks(&[("alice", floor + 1), ("bob", floor + 1), ("carol", floor + 1)]);
+        assert_eq!(answer(&holder, 0, &between).0, Page::Stuck, "an ask below the holder's oldest row ended");
+        // Asks wholly past it are served as usual.
+        let past = marks(&[("alice", held), ("bob", held), ("carol", held)]);
         let (page, rows) = answer(&holder, 0, &past);
         assert_eq!((page, rows.len()), (Page::Last, 2), "an ask past the floor was refused");
-        let (page, rows) = answer(&holder, floor, &HashMap::new());
+        let (page, rows) = answer(&holder, held - 1, &HashMap::new());
         assert_eq!((page, rows.len()), (Page::Last, 2), "a legacy ask past the floor was refused");
     }
 
@@ -11731,33 +12143,39 @@ mod w2c_round2 {
         post(&responder, "alice", "m1", T);
         post(&responder, "alice", "slow", slow_ts);
         let (since, wm, _) = ask(&us, "ch");
-        assert_eq!(wm.get("alice"), Some(&(exact + 1)), "a sender is asked from past the floor, not from past exact_from");
+        assert_eq!(wm.get("alice"), Some(&(T - SYNC_LOOKBACK_MS)), "a sender is asked from its newest row's lookback, as before the clear");
         let (_, rows) = answer(&responder, since, &wm);
         assert!(rows.iter().any(|m| m.mid.as_deref() == Some("slow")), "sync never serves the slow clock's post");
 
-        // A channel cleared while empty names no sender: the plain watermark reaches it.
+        // A channel cleared while empty counts nothing: it asks for nothing older than our
+        // clock, never naming the floor (a slow clock's post there comes live only).
         let now = T + 10 * CLEAR_SKEW_MS;
         us.clear_history_in(None, &[("srv".to_string(), "empty".to_string())], now).unwrap();
-        let (since, wm, _) = ask(&us, "empty");
-        assert!(wm.is_empty());
-        assert_eq!(since, now - CLEAR_SKEW_MS, "the plain watermark starts at the floor, past exact_from");
+        let (since, wm, gap) = ask(&us, "empty");
+        assert!(wm.is_empty() && gap.is_none());
+        assert!(since >= crate::node::frame_auth::now_ms() - 60_000, "an empty cleared channel asked for its history: {since}");
 
-        // The gap digest behind a later post, and a next page, start at exact_from too.
+        // The gap digest behind a later post counts the cleared row, so the day it shares
+        // with the slow clock's post differs and is served; a next page that served a
+        // sender from before the oldest row the clear took goes on from that row.
         let day = 24 * 60 * 60 * 1000;
         post(&us, "bob", "later", T + 3 * day);
         let gap = us.channel_gap_anchor("srv", "ch").expect("a digest behind the newest post");
-        assert_eq!(gap.from, exact + 1, "the digest starts at the floor, past exact_from");
+        assert!(gap.from < exact && gap.days.iter().any(|d| d.n == 1), "the digest stops at the floor: {gap:?}");
+        let (env, _) = build_channel_sync_batch(&responder, "srv", "ch", T + 3 * day, &HashMap::new(), Some(&gap), true, None).unwrap();
+        let MessageEnvelope::ChannelSyncBatch { messages, .. } = env else { panic!("a batch") };
+        assert!(messages.iter().any(|m| m.mid.as_deref() == Some("slow")), "the digest never brings the slow clock's post");
         let served: Vec<SyncMessageItem> = serde_json::from_value(serde_json::json!([
             { "s": "xavier", "t": "x", "ts": 100, "mid": "x1" },
             { "s": "xavier", "t": "x", "ts": 200, "mid": "x2" },
         ]))
         .unwrap();
         let HavenMessage::ChannelSyncRequest { since_timestamp, .. } =
-            channel_next_page_request(&us, "srv", "ch", ChannelPageEnd::of(&served).unwrap())
+            channel_next_page_request(&us, "srv", "ch", ChannelPageEnd::of(&served).unwrap(), None)
         else {
             panic!("a channel ask")
         };
-        assert_eq!(since_timestamp, exact + 1, "a next page starts at the floor, past exact_from");
+        assert_eq!(since_timestamp, T, "a next page asks again for what the clear took");
     }
 
     /// A member whose clock runs ahead posted just before the clear: the post is stamped
@@ -11909,14 +12327,405 @@ mod w2c_round2 {
         holder.clear_channel_history(T + 10_000).unwrap();
         let floor = holder.channel_floor("srv", "ch").unwrap();
         post(&holder, "alice", "after", floor + 5_000);
-        let past = marks(&[("alice", floor + 1)]);
+        let past = marks(&[("alice", floor + 5_000)]);
         let with_gap = |from: i64| {
             let gap = crate::node::types::GapDigest { from, until: floor + 10_000, days: Vec::new() };
-            let (env, _) = build_channel_sync_batch(&holder, "srv", "ch", 0, &past, Some(&gap)).unwrap();
+            let (env, _) = build_channel_sync_batch(&holder, "srv", "ch", 0, &past, Some(&gap), false, None).unwrap();
             let MessageEnvelope::ChannelSyncBatch { messages, has_more, .. } = env else { panic!("a batch") };
             Page::of(has_more, ChannelPageEnd::of(&messages).as_ref())
         };
         assert_eq!(with_gap(floor), Page::Stuck, "a gap at the floor was answered as complete");
-        assert_eq!(with_gap(floor + 1), Page::Last, "a gap past the floor was refused");
+        // The holder vouches from its oldest row past the floor (AR-39).
+        assert_eq!(with_gap(floor + 4_999), Page::Stuck, "a gap below the holder's oldest row was answered as complete");
+        assert_eq!(with_gap(floor + 5_000), Page::Last, "a gap past the floor was refused");
+    }
+}
+
+// w3-ar39: a holder lacking part of a channel answers "held from X" (AR-39).
+#[cfg(test)]
+mod w3_ar39 {
+    use super::*;
+    use crate::node::channel_asks::Page;
+    use crate::node::sync_handler::{build_channel_sync_batch, channel_hole_request, channel_next_page_request, ChannelPageEnd};
+    use crate::node::types::{GapDigest, HavenMessage, MessageEnvelope, SyncMessageItem};
+
+    const KEY: &str = "abababababababababababababababababababababababababababababababab";
+    const T: i64 = 100 * CLEAR_SKEW_MS;
+
+    fn store(tmp: &std::path::Path, name: &str) -> MessageStore {
+        MessageStore::open(tmp.join(name).to_str().unwrap(), KEY).unwrap()
+    }
+
+    fn post(store: &MessageStore, sender: &str, mid: &str, ts: i64) {
+        store.insert_channel_message("srv", "ch", sender, mid, false, ts, None, None, Some(mid), None, None, Some(ts * 1000), None).unwrap();
+    }
+
+    fn marks(pairs: &[(&str, i64)]) -> HashMap<String, i64> {
+        pairs.iter().map(|(s, t)| (s.to_string(), *t)).collect()
+    }
+
+    fn served(env: &MessageEnvelope) -> (Vec<i64>, Option<bool>, Option<i64>) {
+        let MessageEnvelope::ChannelSyncBatch { messages, has_more, held_from, .. } = env else { panic!("a batch") };
+        (messages.iter().map(|m| m.ts).collect(), *has_more, *held_from)
+    }
+
+    fn answer(holder: &MessageStore, since: i64, marks: &HashMap<String, i64>, gap: Option<&GapDigest>, partial_ok: bool) -> MessageEnvelope {
+        build_channel_sync_batch(holder, "srv", "ch", since, marks, gap, partial_ok, None).unwrap().0
+    }
+
+    /// A holder that cleared (floor at T + 3000, posts at T + 5000 on).
+    fn cleared(tmp: &std::path::Path) -> MessageStore {
+        let a = store(tmp, "cleared.db");
+        for i in 0..4 {
+            post(&a, "alice", &format!("old{i}"), T + 1_000 * (i + 1));
+        }
+        a.clear_channel_history(T + 10_000).unwrap();
+        post(&a, "alice", "p1", T + 5_000);
+        post(&a, "bob", "p2", T + 6_000);
+        a
+    }
+
+    /// A holder whose history begins later: it held nothing when a page vouching from
+    /// T + 5000 came in, and a full holder's hole pages since brought older rows before
+    /// the ask was cut short.
+    fn late(tmp: &std::path::Path) -> MessageStore {
+        let j = store(tmp, "late.db");
+        j.note_held_page("srv", "ch", T + 5_000, false, &[T + 5_000, T + 6_000], false, T + 20_000).unwrap();
+        post(&j, "alice", "p1", T + 5_000);
+        post(&j, "bob", "p2", T + 6_000);
+        post(&j, "alice", "older", T - 50_000);
+        post(&j, "gone", "gone", T - 40_000);
+        j.raise_channel_hole("srv", "ch", T - 40_000).unwrap();
+        j
+    }
+
+    /// The uniformity probe: a device that cleared and one whose history begins later,
+    /// holding the same rows from where they vouch, answer every ask byte for byte alike,
+    /// though the second holds older rows the first threw away.
+    #[test]
+    fn ar39_a_cleared_holder_and_a_late_holder_answer_alike() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (a, j) = (cleared(tmp.path()), late(tmp.path()));
+        assert_eq!(a.channel_held_from("srv", "ch"), Some(T + 5_000));
+        assert_eq!(j.channel_held_from("srv", "ch"), Some(T + 5_000));
+        let gap = GapDigest { from: T - 60_000, until: T + 7_000, days: Vec::new() };
+        let asks: Vec<(i64, HashMap<String, i64>, Option<&GapDigest>)> = vec![
+            (-1, HashMap::new(), None),
+            (T - 60_000, HashMap::new(), None),
+            (0, marks(&[("alice", T - 60_000)]), None),
+            (0, marks(&[("alice", T + 5_000), ("bob", T + 6_000)]), None),
+            (0, marks(&[("alice", T + 5_000)]), None),
+            (0, marks(&[("alice", T + 5_000), ("bob", T + 6_000)]), Some(&gap)),
+        ];
+        for (since, named, gap) in &asks {
+            for partial_ok in [true, false] {
+                let (ours, theirs) = (answer(&a, *since, named, *gap, partial_ok), answer(&j, *since, named, *gap, partial_ok));
+                assert_eq!(serde_json::to_string(&ours).unwrap(), serde_json::to_string(&theirs).unwrap(), "{since} {named:?} {gap:?} {partial_ok}");
+                assert!(served(&theirs).0.iter().all(|ts| *ts >= T + 5_000), "a late holder served a row below where it vouches");
+            }
+        }
+    }
+
+    /// A page from a holder lacking part of the channel serves only rows from where it
+    /// vouches, and says so whenever the ask reached below there.
+    #[test]
+    fn ar39_a_partial_page_names_where_it_vouches_from() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let a = cleared(tmp.path());
+        let held = Some(T + 5_000);
+        assert_eq!(served(&answer(&a, -1, &HashMap::new(), None, true)), (vec![T + 5_000, T + 6_000], None, held), "a joiner's ask");
+        assert_eq!(served(&answer(&a, 0, &marks(&[("alice", T)]), None, true)), (vec![T + 5_000, T + 6_000], None, held), "a returner's ask");
+        assert_eq!(served(&answer(&a, 0, &marks(&[("alice", T + 5_000)]), None, true)).2, held, "an ask leaving out a sender we hold");
+        assert_eq!(served(&answer(&a, 0, &marks(&[("alice", T + 5_000), ("bob", T + 6_000)]), None, true)), (vec![T + 5_000, T + 6_000], None, None), "an ask past it");
+        assert_eq!(served(&answer(&a, T + 5_000, &HashMap::new(), None, true)), (vec![T + 6_000], None, None), "a plain ask past it");
+        // Holding nothing from where it vouches: nothing, from nowhere.
+        let empty = store(tmp.path(), "empty.db");
+        post(&empty, "alice", "x", T);
+        empty.clear_channel_history(T + 1).unwrap();
+        assert_eq!(served(&answer(&empty, -1, &HashMap::new(), None, true)), (vec![], None, Some(i64::MAX)));
+        // A full holder says nothing of the kind.
+        let full = store(tmp.path(), "full.db");
+        post(&full, "alice", "x", T);
+        assert_eq!(served(&answer(&full, -1, &HashMap::new(), None, true)), (vec![T], None, None));
+    }
+
+    /// An older asker never honours `held_from`, so a holder lacking what it asked for
+    /// still answers it no rows and more to come; the new fields never wedge a parse.
+    #[test]
+    fn ar39_an_older_asker_still_moves_on_from_a_partial_holder() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (a, j) = (cleared(tmp.path()), late(tmp.path()));
+        for holder in [&a, &j] {
+            let (rows, more, held) = served(&answer(holder, -1, &HashMap::new(), None, false));
+            assert_eq!((rows.len(), Page::of(more, None), held), (0, Page::Stuck, None));
+        }
+        // An older asker's request parses as one that does not honour it.
+        let old = r#"{"type":"ch_sync_req","server_id":"srv","channel_id":"ch","since_timestamp":0}"#;
+        let HavenMessage::ChannelSyncRequest { partial_ok, until, .. } = serde_json::from_str(old).unwrap() else { panic!("a request") };
+        assert!(!partial_ok && until.is_none());
+        // A page without the field is a whole page, and an older peer reads ours.
+        let old_page = r#"{"t":"ch_sync","sid":"srv","cid":"ch","messages":[]}"#;
+        let MessageEnvelope::ChannelSyncBatch { held_from, .. } = serde_json::from_str(old_page).unwrap() else { panic!("a page") };
+        assert_eq!(held_from, None);
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct OlderPage { sid: String, cid: String, messages: Vec<SyncMessageItem>, #[serde(default)] has_more: Option<bool> }
+        let ours = serde_json::to_value(answer(&a, -1, &HashMap::new(), None, true)).unwrap();
+        assert!(ours.get("held_from").is_some());
+        assert!(serde_json::from_value::<OlderPage>(ours).is_ok(), "an older peer cannot read a partial page");
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct OlderAsk { server_id: String, channel_id: String, since_timestamp: i64, #[serde(default)] sender_timestamps: HashMap<String, i64> }
+        let ask = channel_hole_request(&j, "srv", "ch").expect("the late holder's hole");
+        let ask = serde_json::to_value(&ask).unwrap();
+        assert!(ask.get("partial_ok").is_some() && ask.get("until").is_some());
+        assert!(serde_json::from_value::<OlderAsk>(ask).is_ok(), "an older peer cannot read a hole ask");
+    }
+
+    /// The gap digest repair asks a partial holder for days it lacks: the page serves only
+    /// what it vouches for and says where that starts.
+    #[test]
+    fn ar39_a_gap_digest_is_answered_only_from_where_the_holder_vouches() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (a, j) = (cleared(tmp.path()), late(tmp.path()));
+        let past = marks(&[("alice", T + 5_000), ("bob", T + 6_000)]);
+        let gap = GapDigest { from: T - 60_000, until: T + 9_000, days: Vec::new() };
+        for holder in [&a, &j] {
+            let (rows, _, held) = served(&answer(holder, 0, &past, Some(&gap), true));
+            assert_eq!((rows, held), (vec![T + 5_000, T + 6_000], Some(T + 5_000)));
+        }
+        let gap = GapDigest { from: T + 5_000, until: T + 9_000, days: Vec::new() };
+        assert_eq!(served(&answer(&a, 0, &past, Some(&gap), true)).2, None, "a digest from where it vouches");
+    }
+
+    /// Only a device that held no row of the channel, and never cleared it, opens a hole:
+    /// one holding anything keeps vouching for all it holds (a member catching up from a
+    /// cleared one included), and gap repair stays the gap digest's job.
+    #[test]
+    fn ar39_only_a_device_holding_nothing_opens_a_hole() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let k = store(tmp.path(), "k.db");
+        post(&k, "alice", "a", T);
+        k.note_held_page("srv", "ch", T + 5_000, true, &[T + 5_000, T + 9_000], false, T + 20_000).unwrap();
+        assert!(k.channel_hole("srv", "ch").is_none(), "a device holding rows opened a hole");
+        assert_eq!(k.channel_held_from("srv", "ch"), None);
+        // Holding nothing: everything below the oldest row the page landed.
+        let joiner = store(tmp.path(), "joiner.db");
+        joiner.note_held_page("srv", "ch", T + 5_000, false, &[T + 7_000, T + 6_000, T + 1_000], false, T + 20_000).unwrap();
+        assert_eq!(joiner.channel_hole("srv", "ch"), Some(ChannelHole { below: T + 6_000, from: 0 }), "the oldest row it landed from where the page vouches");
+        let empty = store(tmp.path(), "empty.db");
+        empty.note_held_page("srv", "ch", i64::MAX, false, &[], false, T + 20_000).unwrap();
+        assert_eq!(empty.channel_hole("srv", "ch").map(|h| h.below), Some(T + 20_000));
+        assert_eq!(empty.channel_held_from("srv", "ch"), Some(i64::MAX), "a device holding nothing new serves as one lacking it");
+        // A cleared device: its floor is its line.
+        let cleared = store(tmp.path(), "cleared.db");
+        post(&cleared, "alice", "x", T);
+        cleared.clear_channel_history(T + 1).unwrap();
+        cleared.note_held_page("srv", "ch", T + 5_000, false, &[T + 5_000], false, T + 20_000).unwrap();
+        assert!(cleared.channel_hole("srv", "ch").is_none(), "a cleared device opened a hole below its floor");
+    }
+
+    /// The ask for a hole names every sender we hold from where the hole starts and stops
+    /// at its top; a full holder's answer ends there, and its next page keeps the bound.
+    #[test]
+    fn ar39_a_hole_is_asked_for_by_itself() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let k = store(tmp.path(), "k.db");
+        k.note_held_page("srv", "ch", T + 500_000, false, &[T + 500_000], false, T + 900_000).unwrap();
+        post(&k, "alice", "a9", T + 500_000);
+        post(&k, "bob", "b9", T + 600_000);
+        let Some(HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, partial_ok, until, .. }) = channel_hole_request(&k, "srv", "ch") else {
+            panic!("a hole ask")
+        };
+        assert_eq!((since_timestamp, gap, partial_ok, until), (-1, None, true, Some(T + 500_000)));
+        assert_eq!(sender_timestamps, marks(&[("alice", 0), ("bob", 0)]));
+        let full = store(tmp.path(), "full.db");
+        for i in 0..=250 {
+            post(&full, "alice", &format!("f{i}"), T + i * 1_000);
+        }
+        post(&full, "alice", "top", T + 600_000);
+        let (env, _) = build_channel_sync_batch(&full, "srv", "ch", since_timestamp, &sender_timestamps, None, true, until).unwrap();
+        let MessageEnvelope::ChannelSyncBatch { messages, has_more, held_from, .. } = env else { panic!("a batch") };
+        assert_eq!((messages.len(), Page::of(has_more, ChannelPageEnd::of(&messages).as_ref()), held_from), (200, Page::Next(T + 199_000), None));
+        let HavenMessage::ChannelSyncRequest { sender_timestamps, until: next_until, since_timestamp, .. } =
+            channel_next_page_request(&k, "srv", "ch", ChannelPageEnd::of(&messages).unwrap(), until)
+        else {
+            panic!("a next page")
+        };
+        assert_eq!(next_until, until, "the next page of a hole ask lost its bound");
+        assert_eq!(since_timestamp, T + 199_000, "a hole's next page jumped to where we vouch");
+        let (env, _) = build_channel_sync_batch(&full, "srv", "ch", since_timestamp, &sender_timestamps, None, true, next_until).unwrap();
+        let (rows, more, _) = served(&env);
+        assert!(rows.iter().all(|ts| *ts < T + 500_000) && rows.last() == Some(&(T + 250_000)), "{rows:?}");
+        assert_eq!(more, None, "the page past the hole's top asked for more");
+    }
+
+    /// An answer to the hole's own ask narrows it only to a row it landed; a catch-up page
+    /// never moves it, and a page vouching for all of it closes it once its rows are in.
+    #[test]
+    fn ar39_an_answer_to_the_hole_narrows_it() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let k = store(tmp.path(), "k.db");
+        k.note_held_page("srv", "ch", T + 500_000, false, &[T + 500_000], false, T + 900_000).unwrap();
+        post(&k, "alice", "a5", T + 500_000);
+        k.note_held_page("srv", "ch", T + 400_000, true, &[T + 450_000, T + 420_000], true, T + 900_000).unwrap();
+        assert_eq!(k.channel_hole("srv", "ch").map(|h| h.below), Some(T + 420_000), "narrowed to the oldest row it landed");
+        k.note_held_page("srv", "ch", T + 100_000, true, &[], true, T + 900_000).unwrap();
+        assert_eq!(k.channel_hole("srv", "ch").map(|h| h.below), Some(T + 420_000), "a page landing nothing narrowed it");
+        k.note_held_page("srv", "ch", T + 100_000, true, &[T + 150_000], false, T + 900_000).unwrap();
+        assert_eq!(k.channel_hole("srv", "ch").map(|h| h.below), Some(T + 420_000), "a catch-up page moved it");
+        k.raise_channel_hole("srv", "ch", T + 420_000).unwrap();
+        assert!(k.channel_hole("srv", "ch").is_none(), "a hole filled to its top is gone");
+        // A page vouching from far ahead of our clock opens no hole past it.
+        let j = store(tmp.path(), "j.db");
+        j.note_held_page("srv", "ch", T + 90 * DAY_MS, false, &[], false, T + 900_000).unwrap();
+        assert_eq!(j.channel_hole("srv", "ch").unwrap().below, T + 900_000 + CLEAR_SKEW_MS);
+    }
+
+    /// Where a cleared device vouches from counts the rows its clear took by id ahead of
+    /// the floor (a fast clock), never one stamped past the drift.
+    #[test]
+    fn ar39_a_clear_vouches_past_what_it_took_by_id() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let a = store(tmp.path(), "a.db");
+        post(&a, "alice", "old", T);
+        post(&a, "fast", "ahead", T + 12_000);
+        post(&a, "junk", "far", T + 10 * DAY_MS);
+        a.clear_channel_history(T + 10_000).unwrap();
+        let floor = a.channel_floor("srv", "ch").unwrap();
+        post(&a, "bob", "slow", T + 11_000);
+        post(&a, "bob", "after", T + 13_000);
+        assert_eq!(a.channel_held_from("srv", "ch"), Some(T + 13_000), "floor {floor}");
+    }
+
+    /// A copy of a cleared device's database lacks what the clear took: it asks for it
+    /// again and vouches only past it meanwhile; its own holes go with it.
+    #[test]
+    fn ar39_a_device_copy_keeps_what_it_lacks() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let a = cleared(tmp.path());
+        a.scrub_device_secrets().unwrap();
+        assert_eq!(a.channel_floor("srv", "ch"), None);
+        assert_eq!(a.channel_hole("srv", "ch"), Some(ChannelHole { below: T + 5_000, from: 0 }), "the copy's hole names its oldest row, never the floor");
+        assert_eq!(a.channel_held_from("srv", "ch"), Some(T + 5_000));
+        assert!(a.channel_history_begins_later("srv", "ch"));
+        let j = late(tmp.path());
+        j.scrub_device_secrets().unwrap();
+        assert!(j.channel_hole("srv", "ch").is_some());
+        // A copy holding nothing past the floor asks for everything, bounded by nothing.
+        let e = store(tmp.path(), "e.db");
+        post(&e, "alice", "x", T);
+        e.clear_channel_history(T + 1).unwrap();
+        e.scrub_device_secrets().unwrap();
+        assert_eq!(e.channel_hole("srv", "ch").map(|h| h.below), Some(i64::MAX));
+        let Some(HavenMessage::ChannelSyncRequest { until, since_timestamp, .. }) = channel_hole_request(&e, "srv", "ch") else { panic!("a hole ask") };
+        assert_eq!((until, since_timestamp), (None, -1));
+    }
+
+    /// `until` ends a full holder's page there, as the last.
+    #[test]
+    fn ar39_until_ends_the_page() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let full = store(tmp.path(), "full.db");
+        for i in 0..5 {
+            post(&full, "alice", &format!("m{i}"), T + i * 1_000);
+        }
+        let (env, _) = build_channel_sync_batch(&full, "srv", "ch", -1, &HashMap::new(), None, true, Some(T + 3_000)).unwrap();
+        assert_eq!(served(&env), (vec![T, T + 1_000, T + 2_000], None, None));
+        let gap = GapDigest { from: T, until: T + 5_000, days: Vec::new() };
+        let (env, _) = build_channel_sync_batch(&full, "srv", "ch", 0, &marks(&[("alice", T + 4_000)]), Some(&gap), true, Some(T + 2_000)).unwrap();
+        assert_eq!(served(&env).0, vec![T, T + 1_000], "a gap row past until");
+    }
+
+    /// A guest page from a late holder holds nothing below where it vouches, as a
+    /// cleared device's holds nothing below its floor.
+    #[test]
+    fn ar39_a_guest_page_is_cut_where_the_holder_vouches() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (a, j) = (cleared(tmp.path()), late(tmp.path()));
+        let page = |n: &MessageStore| {
+            let mut rows = n.get_visible_channel_messages_before("srv", "ch", i64::MAX, 50).unwrap();
+            let more = crate::node::sync_handler::guest_page_bounded(n, "srv", "ch", &mut rows, 50);
+            (rows.iter().map(|m| m.timestamp).collect::<Vec<_>>(), more)
+        };
+        assert_eq!(page(&a), page(&j));
+        assert_eq!(page(&j), (vec![T + 5_000, T + 6_000], Some(true)));
+    }
+
+    /// A full holder's pages of the hole ask fill it from below as they land, so an ask
+    /// cut short (a dropped socket, a holder's tenure) never asks for the filled part again.
+    #[test]
+    fn ar39_pages_filling_a_hole_keep_their_progress() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let j = store(tmp.path(), "j.db");
+        j.note_held_page("srv", "ch", i64::MAX, false, &[], false, T + 900_000).unwrap();
+        post(&j, "alice", "a9", T + 800_000);
+        j.raise_channel_hole("srv", "ch", T + 200_000).unwrap();
+        let Some(HavenMessage::ChannelSyncRequest { sender_timestamps, until, .. }) = channel_hole_request(&j, "srv", "ch") else { panic!("a hole ask") };
+        assert_eq!((sender_timestamps, until), (marks(&[("alice", T + 200_000)]), Some(T + 900_000)));
+        j.raise_channel_hole("srv", "ch", T + 900_000).unwrap();
+        assert!(j.channel_hole("srv", "ch").is_none(), "a hole filled to its top is gone");
+    }
+
+    fn count_of(store: &MessageStore, sql: &str) -> i64 {
+        store.conn_for_test().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// What a clear counts stays bounded: the newest senders, the newest rows one by one,
+    /// the rest by day, and no day a later ask's digest can never reach.
+    #[test]
+    fn ar39_cleared_counts_stay_bounded() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let a = store(tmp.path(), "a.db");
+        let base = 200 * DAY_MS;
+        a.begin_transaction().unwrap();
+        post(&a, "ancient", "ancient", base - 100 * DAY_MS);
+        for i in 0..5_000 {
+            post(&a, &format!("s{i:04}"), &format!("m{i}"), base + i);
+        }
+        a.commit_transaction().unwrap();
+        a.clear_channel_history(base + DAY_MS).unwrap();
+        let senders = count_of(&a, "SELECT COUNT(*) FROM channel_cleared_senders");
+        let tail = count_of(&a, "SELECT COUNT(*) FROM channel_cleared_tail");
+        let folded = count_of(&a, "SELECT COALESCE(SUM(n), 0) FROM channel_cleared_days");
+        assert_eq!((senders, tail), (MAX_CLEARED_SENDERS, MAX_CLEARED_TAIL));
+        assert_eq!(folded, 5_000 - MAX_CLEARED_TAIL, "the rows past the tail fold into their day, the ancient one goes");
+        assert_eq!(count_of(&a, "SELECT MIN(last_ts) FROM channel_cleared_senders"), base + 5_000 - MAX_CLEARED_SENDERS, "the newest senders stay");
+        assert_eq!(count_of(&a, "SELECT history_from FROM channel_floors"), base - 100 * DAY_MS);
+    }
+
+    /// Holes and what a clear counted are deleted with the server (leave and delete both
+    /// reach `delete_server_state`); a clear drops the holes of the channels it floors, and
+    /// a copy of the database keeps none of the counts.
+    #[test]
+    fn ar39_holes_and_cleared_counts_go_with_the_server() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let a = store(tmp.path(), "a.db");
+        let put = |sid: &str, cid: &str, mid: &str, ts: i64| {
+            a.insert_channel_message(sid, cid, "alice", mid, false, ts, None, None, Some(mid), None, None, Some(ts * 1000), None).unwrap();
+        };
+        for (sid, cid) in [("srv", "ch"), ("srv", "other"), ("srv2", "ch")] {
+            a.note_held_page(sid, cid, T, false, &[T], false, T + 1_000).unwrap();
+            put(sid, cid, &format!("{sid}-{cid}"), T);
+        }
+        assert!(a.channel_hole_open("srv", "ch"), "precondition: holes");
+        a.delete_server_state("srv").unwrap();
+        assert!(!a.channel_hole_open("srv", "ch") && !a.channel_hole_open("srv", "other"), "a server's holes outlived it");
+        assert!(a.channel_hole_open("srv2", "ch"));
+        a.clear_history_in(Some("srv2"), &[], T + 2_000).unwrap();
+        assert!(!a.channel_hole_open("srv2", "ch"), "a clear kept a hole below its floor");
+        put("srv", "ch", "later", T + 5_000);
+        a.clear_channel_history(T + 6_000).unwrap();
+        let counted = |sid: &str| {
+            ["channel_cleared_senders", "channel_cleared_tail"]
+                .iter()
+                .map(|t| a.conn_for_test().query_row(&format!("SELECT COUNT(*) FROM {t} WHERE server_id = ?1"), [sid], |r| r.get::<_, i64>(0)).unwrap())
+                .sum::<i64>()
+        };
+        assert!(counted("srv") > 0 && counted("srv2") > 0, "precondition: both servers counted");
+        a.delete_server_state("srv").unwrap();
+        assert_eq!((counted("srv"), counted("srv2") > 0), (0, true), "a server's counts outlived it");
+        a.scrub_device_secrets().unwrap();
+        assert_eq!(counted("srv2"), 0, "a copy kept what this device cleared");
     }
 }

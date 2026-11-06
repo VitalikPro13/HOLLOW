@@ -82,6 +82,17 @@ Future<bool> channelHistoryCleared({
   channelId: channelId,
 );
 
+/// Whether this device's history of the channel begins later than the channel's (a
+/// late join, a copy of a device that cleared it) and the rest has not arrived yet, so
+/// its empty state never says the channel starts there.
+Future<bool> channelHistoryBeginsLater({
+  required String serverId,
+  required String channelId,
+}) => RustLib.instance.api.crateApiStorageChannelHistoryBeginsLater(
+  serverId: serverId,
+  channelId: channelId,
+);
+
 /// Get a profile for a specific peer (or ourselves). Returns None if no profile stored.
 Future<UserProfile?> getProfile({required String peerId}) =>
     RustLib.instance.api.crateApiStorageGetProfile(peerId: peerId);

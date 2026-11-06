@@ -45,6 +45,7 @@ import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
+import 'package:hollow/src/core/providers/storage_provider.dart';
 import 'package:hollow/src/core/providers/typing_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
@@ -813,6 +814,8 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(syncProgressProvider.notifier).clearServer(serverId);
         ref.read(syncStatusProvider.notifier).setStatus(
             serverId, ServerSyncStatus.synced);
+        // A page may have started or filled what a late joiner lacks.
+        ref.invalidate(channelHistoryBeginsLaterProvider);
         final selectedServer = ref.read(selectedServerProvider);
         final selectedChannel = ref.read(selectedChannelProvider);
         if (newMessageCount > 0) {

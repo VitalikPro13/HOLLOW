@@ -1,0 +1,56 @@
+{
+ "_": [
+  "t14-ar39 part 2b: b restarted on its own data (fleet.ps1 -Peers <b> -ReuseData -KeepOthers -Live) after part 2a. Every holder online (a) cleared the channel again while b was away; b still shows the post made after the second clear and keeps what it had.",
+  "run: scripts/fleet.ps1 -Scenario ar39_returning_member_back -Peers a,b -Attach"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000,
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "ar39srv"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:after the second clear",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "b",
+   "op": "expect_text",
+   "value": "after clear 2"
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "ar39-05-returning-member"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ar39-06-holder-at-the-end"
+  }
+ ]
+}

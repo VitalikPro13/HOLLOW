@@ -2937,7 +2937,7 @@ fn persist_incoming_channel_message(
     db_passphrase: &str,
 ) -> Option<(ChannelInsert, Option<String>)> {
     let store = crate::storage::MessageStore::lease(db_path, db_passphrase).ok()?;
-    if store.refuse_below_floor(sid, cid, sender_peer_id, ts, mid) {
+    if store.channel_floor_refuses(sid, cid, ts, mid) {
         return Some((ChannelInsert::Cleared, None));
     }
     // Replied-to message's author (MASTER id), so the event's `reply_to_own` lets

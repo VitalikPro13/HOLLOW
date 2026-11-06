@@ -1267,17 +1267,19 @@ class _ChannelConversationStart extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Until the floor is read (or when it cannot be), claim nothing about
-    // where the channel starts: after a clear, other members hold more.
-    final cleared =
-        ref.watch(channelHistoryClearedProvider((serverId, channelId))).valueOrNull;
+    // Until both are read (or when one cannot be), claim nothing about where
+    // the channel starts: after a clear or a late join, other members hold more.
+    final key = (serverId, channelId);
+    final cleared = ref.watch(channelHistoryClearedProvider(key)).valueOrNull;
+    final later = ref.watch(channelHistoryBeginsLaterProvider(key)).valueOrNull;
     return HollowEmptyState(
       glyph: isVoice ? LucideIcons.volume2 : LucideIcons.hash,
       title: isVoice ? 'Welcome to $channelName' : 'Welcome to #$channelName',
-      description: switch (cleared) {
-        true => 'Older messages were cleared from this device.',
-        false => 'This is the beginning of the channel.',
-        null => null,
+      description: switch ((cleared, later)) {
+        (true, _) => 'Older messages were cleared from this device.',
+        (false, true) => "Older messages aren't on this device yet.",
+        (false, false) => 'This is the beginning of the channel.',
+        _ => null,
       },
     );
   }

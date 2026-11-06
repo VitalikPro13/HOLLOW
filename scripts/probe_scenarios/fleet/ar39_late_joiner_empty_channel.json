@@ -1,0 +1,325 @@
+{
+ "_": [
+  "t14-ar39 late-joiner copy on throwaway peers: a creates a server, posts three messages and clears its server messages with nothing posted after; b joins only then, so the one holder online holds nothing b may take.",
+  "b's empty #general must say \"Welcome to #general\" and \"Older messages aren't on this device yet.\", never \"This is the beginning of the channel.\" (the line before this change).",
+  "run on fresh peers (-Onboard -Fresh first; the clear toast counts every server a holds): scripts/fleet.ps1 -Scenario ar39_late_joiner_empty_channel -Peers a,b -Attach (remap onto your own letters)"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "ar39late"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:ar39late",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:ar39late"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "ar39late"
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "before clear 1 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "before clear 2 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "before clear 3 ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ar39-01-holder-before-clear"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Files & storage",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Files & storage",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Clean up",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Clear server messages",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Clear",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "contains:Cleared 3 messages",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "ar39late"
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 3000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ar39-late-01-holder-cleared"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "server:ar39late",
+   "timeout_ms": 90000
+  },
+  {
+   "peer": "b",
+   "op": "open_server",
+   "name": "ar39late"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 8000
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "b",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:Older messages aren't on this device yet.",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "expect_text",
+   "value": "Welcome to #general"
+  },
+  {
+   "peer": "b",
+   "op": "expect_no_text",
+   "value": "This is the beginning of the channel."
+  },
+  {
+   "peer": "b",
+   "op": "expect_no_text",
+   "value": "before clear 1 ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "ar39-late-02-joiner-empty-channel"
+  }
+ ]
+}

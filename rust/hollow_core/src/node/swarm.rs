@@ -6478,10 +6478,11 @@ async fn run_event_loop(
                         channels.len(), peers.len()
                     );
 
+                    // No store, no ask: one built without it would name what a clear threw away.
                     let sync_store = crate::storage::MessageStore::lease(&db_path, &db_passphrase).ok();
                     let state = server_states.get(server_id);
-                    for (channel_id, our_latest) in channels {
-                        let Some(state) = state else { continue };
+                    for (channel_id, _) in channels {
+                        let (Some(state), Some(store)) = (state, sync_store.as_ref()) else { continue };
                         let holders = super::channel_asks::holders_among(state, peers.iter(), channel_id);
                         let Some(holder) = channel_asks.start_catch_up(server_id, channel_id, &holders, std::time::Instant::now()) else {
                             continue;
@@ -6490,16 +6491,7 @@ async fn run_event_loop(
                         // A ChannelSyncRequest over Olm rather than an MLS ChannelProbe: an MLS
                         // probe silently fails at a stale epoch after reconnection, so sync never
                         // completes. The response handler uses MLS if available, Olm otherwise.
-                        let request = match sync_store.as_ref() {
-                            Some(store) => sync_handler::channel_sync_request(store, server_id, channel_id, true),
-                            None => HavenMessage::ChannelSyncRequest {
-                                server_id: server_id.clone(),
-                                channel_id: channel_id.clone(),
-                                since_timestamp: *our_latest,
-                                sender_timestamps: HashMap::new(),
-                                gap: None,
-                            },
-                        };
+                        let request = sync_handler::channel_sync_request(store, server_id, channel_id, true);
                         // One ask per channel: paced, as a server of many channels would
                         // overrun the peer's bucket.
                         super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &holder, &request);
@@ -6510,7 +6502,7 @@ async fn run_event_loop(
                         peer_id: "fan-out".to_string(),
                     }).await;
                 }
-                let moved = channel_asks.sweep(
+                let moved = channel_asks.sweep_asks(
                     std::time::Instant::now(),
                     &|device: &str| super::channel_asks::reachable(&ws_room_peers, device),
                     &|sid: &str, cid: &str| {
@@ -8937,50 +8929,44 @@ async fn handle_incoming_request_inner(
                         db_path, db_passphrase,
                     ).await;
                 }
-                Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, .. }) => {
-                    hollow_log!("[HOLLOW-SYNC] Received {} sync messages for {cid} in {sid} (total: {total}, has_more: {has_more:?})", messages.len());
+                Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, held_from, .. }) => {
+                    hollow_log!("[HOLLOW-SYNC] Received {} sync messages for {cid} in {sid} (total: {total}, has_more: {has_more:?}, held_from: {held_from:?})", messages.len());
                     if !crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), peer_str, &cid) {
                         return;
                     }
                     let page_end = if has_more == Some(true) { super::sync_handler::ChannelPageEnd::of(&messages) } else { None };
-                    let page = super::channel_asks::Page::of(has_more, page_end.as_ref());
-                    let heard = channel_asks.heard(&sid, &cid, peer_str, page, std::time::Instant::now());
-                    let page_end = page_end.filter(|_| heard.follow);
                     crypto_handler::backfill_filter(server_states.get(&sid), &mut messages);
-                    let local_peer = local_peer_str.to_string();
-                    let mut new_count = 0u32;
                     let received_count = messages.len() as u32;
-
-                    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
-                        let _ = store.begin_transaction();
-                        let mut pk_cache = PkCache::new();
-                        let mut events = Vec::new();
-                        for msg in &messages {
-                            let (inserted, item_events) = super::sync_handler::ingest_synced_channel_item(
-                                &store, &sid, &cid, msg, &local_peer, &mut pk_cache,
-                            );
-                            new_count += inserted;
-                            events.extend(item_events);
-                        }
-                        let _ = store.commit_transaction();
-                        // After the commit: Dart re-reads the rows these name.
-                        for ev in events {
-                            let _ = event_tx.send(ev).await;
-                        }
-
-                        if has_more == Some(true) {
-                            match page_end {
-                                Some(end) => {
-                                    hollow_log!("[HOLLOW-SYNC] Requesting next page for {cid} in {sid}");
-                                    super::olm_lane::carry(
-                                        ws_cmd_tx, peer_str, None,
-                                        &super::sync_handler::channel_next_page_request(&store, &sid, &cid, end),
-                                        super::olm_lane::NoSession::Queue,
-                                    );
-                                }
-                                None => hollow_log!("[HOLLOW-SYNC] Not following the channel page for {cid} from {peer_str}; the next catch-up takes the rest"),
+                    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
+                    let known = super::sync_handler::channel_known(server_states.get(&sid), &cid);
+                    let landed = super::sync_handler::land_channel_page(
+                        &store, channel_asks, &sid, &cid, peer_str, known, &messages, has_more, held_from, page_end, local_peer_str,
+                    );
+                    let heard = landed.heard;
+                    let new_count = landed.new_count;
+                    // After the commit: Dart re-reads the rows these name.
+                    for ev in landed.events {
+                        let _ = event_tx.send(ev).await;
+                    }
+                    if has_more == Some(true) {
+                        match landed.page_end {
+                            Some(end) => {
+                                hollow_log!("[HOLLOW-SYNC] Requesting next page for {cid} in {sid}");
+                                super::olm_lane::carry(
+                                    ws_cmd_tx, peer_str, None,
+                                    &super::sync_handler::channel_next_page_request(&store, &sid, &cid, end, landed.until),
+                                    super::olm_lane::NoSession::Queue,
+                                );
                             }
+                            None => hollow_log!("[HOLLOW-SYNC] Not following the channel page for {cid} from {peer_str}; the next catch-up takes the rest"),
                         }
+                    }
+                    if let Some(kind) = heard.again {
+                        super::olm_lane::carry(
+                            ws_cmd_tx, peer_str, None,
+                            &super::sync_handler::channel_ask_of(&store, &sid, &cid, kind),
+                            super::olm_lane::NoSession::Queue,
+                        );
                     }
 
                     // Emit progress so the UI can show "Syncing 47/120...". The progress line adds
@@ -11858,8 +11844,7 @@ async fn handle_incoming_request_inner(
             }
         }
 
-        HavenMessage::ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps, gap } => {
-            
+        HavenMessage::ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps, gap, partial_ok, until } => {
 
             // A current member who may see the channel, and nobody else: the page carries
             // deleted rows with their text, which members keep as evidence. A public
@@ -11871,7 +11856,7 @@ async fn handle_incoming_request_inner(
 
             // The same ask from this peer within 2 s is answered once (parallel sync
             // triggers on its side); the ask for the next page differs and is answered.
-            let ask = super::sync_handler::channel_sync_ask_key(since_timestamp, &sender_timestamps, gap.as_ref());
+            let ask = super::sync_handler::channel_sync_ask_key(since_timestamp, &sender_timestamps, gap.as_ref(), until);
             let resp_dedup_key = format!("{server_id}:{channel_id}:resp:{peer_str}:{ask:x}");
             if channel_sync_sent.get(&resp_dedup_key).is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
                 return;
@@ -11884,7 +11869,7 @@ async fn handle_incoming_request_inner(
                 // Per-sender sync when watermarks were sent, legacy single-timestamp
                 // fallback otherwise — shared with the MLS/Olm responders.
                 if let Ok((envelope, count)) = super::sync_handler::build_channel_sync_batch(
-                    &store, &server_id, &channel_id, since_timestamp, &sender_timestamps, gap.as_ref(),
+                    &store, &server_id, &channel_id, since_timestamp, &sender_timestamps, gap.as_ref(), partial_ok, until,
                 ) {
                     hollow_log!("[HOLLOW-SYNC] Sending {count} sync messages for {channel_id}");
                     // Over Olm, never MLS: a peer that asked before its Welcome cannot
@@ -12454,20 +12439,26 @@ async fn handle_incoming_request_inner(
                                 );
                             }
 
-                            MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, .. } => {
+                            MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, held_from, .. } => {
                                 if crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), &sender_master, &cid) {
                                     let page_end = if has_more == Some(true) { sync_handler::ChannelPageEnd::of(&messages) } else { None };
-                                    let page = super::channel_asks::Page::of(has_more, page_end.as_ref());
-                                    let follow = channel_asks.heard(&sid, &cid, &sender_peer_id, page, std::time::Instant::now()).follow;
-                                    let page_end = page_end.filter(|_| follow);
                                     crypto_handler::backfill_filter(server_states.get(&sid), &mut messages);
-                                    sync_handler::handle_envelope_channel_sync_batch(
-                                        olm, bundle_keypair, event_tx, ws_cmd_tx,
-                                        ws_room_peers, &local_peer, &sender_peer_id,
-                                        sid, cid, messages, total, has_more, page_end,
-                                        crypto_store, crdt_store,
-                                        db_path, db_passphrase,
-                                    ).await;
+                                    let landed = match crate::storage::MessageStore::lease(db_path, db_passphrase) {
+                                        Ok(store) => {
+                                            let known = sync_handler::channel_known(server_states.get(&sid), &cid);
+                                            Some(sync_handler::land_channel_page(
+                                                &store, channel_asks, &sid, &cid, &sender_peer_id, known, &messages, has_more, held_from, page_end, &local_peer,
+                                            ))
+                                        }
+                                        Err(_) => None,
+                                    };
+                                    if let Some(landed) = landed {
+                                        sync_handler::handle_envelope_channel_sync_batch(
+                                            event_tx, ws_cmd_tx, &sender_peer_id,
+                                            sid, cid, has_more, landed,
+                                            db_path, db_passphrase,
+                                        ).await;
+                                    }
                                 }
                             }
 
@@ -14356,9 +14347,8 @@ async fn handle_incoming_request_inner(
                         // Initial request: get the latest messages (not oldest).
                         store.get_visible_channel_messages_before(&server_id, &channel_id, i64::MAX, limit)
                     };
-                    if let Ok(msgs) = messages_result {
-                        let floor = store.channel_floor(&server_id, &channel_id);
-                        let Some(below_floor) = super::sync_handler::guest_page_more(floor, msgs.len(), limit as usize, msgs.last().map(|m| m.timestamp)) else {
+                    if let Ok(mut msgs) = messages_result {
+                        let Some(below_floor) = super::sync_handler::guest_page_bounded(&store, &server_id, &channel_id, &mut msgs, limit as usize) else {
                             return;
                         };
                         let msg_ids: Vec<String> = msgs.iter().filter_map(|m| m.message_id.clone()).collect();

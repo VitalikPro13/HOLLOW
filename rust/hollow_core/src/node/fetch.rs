@@ -857,7 +857,7 @@ fn insert_channel_row(
 ) -> Option<ChannelInsert> {
     let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
     // History this device cleared shows no banner either.
-    if store.refuse_below_floor(server_id, channel_id, sender, ts, mid) {
+    if store.channel_floor_refuses(server_id, channel_id, ts, mid) {
         return Some(ChannelInsert::Cleared);
     }
     {

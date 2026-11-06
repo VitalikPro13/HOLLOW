@@ -9,11 +9,23 @@ import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 
 import '../helpers/test_app.dart';
 
-/// An empty channel this device cleared never claims to be the channel's
-/// start: other members still hold what came before.
+/// An empty channel this device cleared, or whose history here begins later
+/// (a late join), never claims to be the channel's start: other members still
+/// hold what came before.
 class _Api implements RustLibApi {
   final cleared = <String>{};
+  final later = <String>{};
   Object? readError;
+  Object? laterError;
+
+  @override
+  Future<bool> crateApiStorageChannelHistoryBeginsLater({
+    required String serverId,
+    required String channelId,
+  }) async {
+    if (laterError != null) throw laterError!;
+    return later.contains('$serverId/$channelId');
+  }
 
   @override
   Future<bool> crateApiStorageChannelHistoryCleared({
@@ -47,6 +59,7 @@ final _api = _Api();
 
 const _beginning = 'This is the beginning of the channel.';
 const _clearedLine = 'Older messages were cleared from this device.';
+const _laterLine = "Older messages aren't on this device yet.";
 
 Future<ProviderContainer> _pump(WidgetTester tester) async {
   await tester.pumpWidget(
@@ -70,7 +83,9 @@ void main() {
   setUpAll(() => RustLib.initMock(api: _api));
   setUp(() {
     _api.cleared.clear();
+    _api.later.clear();
     _api.readError = null;
+    _api.laterError = null;
   });
 
   testWidgets('a channel never cleared here starts here', (tester) async {
@@ -87,6 +102,43 @@ void main() {
     expect(find.text('Welcome to #general'), findsOneWidget);
     expect(find.text(_clearedLine), findsOneWidget);
     expect(find.text(_beginning), findsNothing);
+  });
+
+  testWidgets('a late joiner lacking older messages says they are not here yet',
+      (tester) async {
+    _api.later.add('srv/general');
+    await _pump(tester);
+    expect(find.text('Welcome to #general'), findsOneWidget);
+    expect(find.text(_laterLine), findsOneWidget);
+    expect(find.text(_beginning), findsNothing);
+    expect(find.text(_clearedLine), findsNothing);
+  });
+
+  testWidgets('a phone shows the late joiner the same line', (tester) async {
+    tester.view.physicalSize = const Size(375, 812);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    _api.later.add('srv/general');
+    await _pump(tester);
+    expect(find.text(_laterLine), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a clear outranks a late start', (tester) async {
+    _api.cleared.add('srv/general');
+    _api.later.add('srv/general');
+    await _pump(tester);
+    expect(find.text(_clearedLine), findsOneWidget);
+    expect(find.text(_laterLine), findsNothing);
+  });
+
+  testWidgets('a late-start read that fails claims nothing about the start',
+      (tester) async {
+    _api.laterError = 'Message store is not open';
+    await _pump(tester);
+    expect(find.text('Welcome to #general'), findsOneWidget);
+    expect(find.text(_beginning), findsNothing);
+    expect(find.text(_laterLine), findsNothing);
   });
 
   testWidgets('a read that fails claims nothing about the start',

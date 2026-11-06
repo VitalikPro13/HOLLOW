@@ -6211,12 +6211,13 @@ mod tests {
         assert!(between(&ops, "fn live_change_dropped(", "\n}").contains("live_channel_change_refusal("));
         assert!(between(&ops, "pub(crate) fn live_channel_post_refusal(", "\n}").contains("live_channel_change_refusal("));
         for (arm, until) in [
-            ("Ok(MessageEnvelope::ChannelSyncBatch {", "ingest_synced_channel_item("),
-            (" MessageEnvelope::ChannelSyncBatch {", "handle_envelope_channel_sync_batch("),
+            ("Ok(MessageEnvelope::ChannelSyncBatch {", "land_channel_page("),
+            (" MessageEnvelope::ChannelSyncBatch {", "land_channel_page("),
         ] {
             let body = between(&swarm, arm, until);
             assert!(body.contains("channel_backfill_allowed_from("), "swarm.rs: {arm} takes backfill from anyone");
             assert!(body.contains("backfill_filter("), "swarm.rs: {arm} skips the author and reactor filter");
+            assert!(body.contains("channel_known("), "swarm.rs: {arm} notes a hole for a channel the server lacks");
         }
         for (arm, until) in [
             ("Ok(MessageEnvelope::DmSyncBatch {", "Ok(MessageEnvelope::DmSiblingSyncBatch {"),

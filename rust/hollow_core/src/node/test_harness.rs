@@ -27384,6 +27384,7 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
         since_timestamp: 0,
         sender_timestamps: HashMap::new(),
         gap: None,
+        partial_ok: false, until: None,
     })
     .unwrap();
     for frame in [retired_probe_resp, req] {
@@ -41598,7 +41599,7 @@ fn signed_channel_batch(
     let path = dir.path().join("batch.db");
     let store = crate::storage::MessageStore::open(path.to_str().unwrap(), "scratch").expect("scratch store");
     plant_signed_channel_row(&store, signer_tag, server_id, channel_id, false, ts, mid, text);
-    super::sync_handler::build_channel_sync_batch(&store, server_id, channel_id, 0, &HashMap::new(), None)
+    super::sync_handler::build_channel_sync_batch(&store, server_id, channel_id, 0, &HashMap::new(), None, false, None)
         .expect("a batch")
         .0
 }
@@ -52497,7 +52498,7 @@ async fn a_channel_backfill_event_reports_a_committed_row() {
     // The joiner loses the rows, and the owner's leaf serves the page again over MLS.
     assert!(reader.prune_channel_messages_in_range(&server_id, 0, i64::MAX).unwrap() > TRAILING as u32, "the joiner drops its rows");
     drain_events(&mut j);
-    let batch = super::sync_handler::build_channel_sync_batch(&o.store(), &server_id, &general, 0, &HashMap::new(), None)
+    let batch = super::sync_handler::build_channel_sync_batch(&o.store(), &server_id, &general, 0, &HashMap::new(), None, false, None)
         .expect("a batch")
         .0;
     let mut hostile = hostile_mls_copy(&o, o_tag, &server_id).await;
@@ -56578,6 +56579,7 @@ async fn g13w3_pages_nobody_asked_for_never_keep_a_channel_ask() {
         total: 0,
         has_more: None,
         target: None,
+        held_from: None,
     };
     let before = (g13w3_channel_asks_to(&l, &o.device_id).await, g13w3_channel_asks_to(&l, &k.device_id).await);
     let (mut asked_both, mut lost_first_ask, mut got) = (None, false, false);
@@ -56655,6 +56657,7 @@ async fn g13w3_a_page_nobody_asked_for_is_never_followed() {
         total: 400,
         has_more: Some(true),
         target: Some(l_device.clone()),
+        held_from: None,
     };
     for (lane, end) in [("Olm", 7_000_002i64), ("MLS", 8_000_002)] {
         if lane == "Olm" {
@@ -59946,6 +59949,7 @@ async fn w2c_cleared_history_stays_cleared_and_stays_on_other_members() {
         since_timestamp: nth,
         sender_timestamps: HashMap::new(),
         gap: None,
+        partial_ok: false, until: None,
     };
     let answered = async |relay: &MockRelay, j: &mut TestNode, o: &mut TestNode, ask: super::types::HavenMessage, tag: &str| {
         relay.hold_direct(&o.device_id, &j.device_id);
@@ -59966,18 +59970,15 @@ async fn w2c_cleared_history_stays_cleared_and_stays_on_other_members() {
         planted(&j),
     );
 
+    let before = serde_json::to_value(super::sync_handler::channel_sync_request(&j.store(), &server_id, &general, true)).unwrap();
     let cleared = j.store().clear_channel_history(super::types::now_ms()).expect("J clears its history");
     assert!(cleared.messages >= ROWS as u64, "J cleared {} rows", cleared.messages);
     assert_eq!(planted(&j), 0, "the clear left rows");
 
-    // The catch-up J's node asks after the clear names where it cleared to.
+    // The catch-up J's node asks after the clear counts what it cleared as held: it is the
+    // ask it sent before the clear, so it names nothing of the clear.
     let ask = super::sync_handler::channel_sync_request(&j.store(), &server_id, &general, true);
-    let super::types::HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, .. } = &ask else { panic!("a channel ask") };
-    // From past the outright refusal: the skew window below the floor comes again and
-    // the cleared ids there are refused by their hash.
-    let start = j.store().channel_ask_start(&server_id, &general).expect("J cleared the channel");
-    assert!(*since_timestamp == start - 1 && gap.is_none(), "J asks from {since_timestamp} with {gap:?}");
-    assert!(sender_timestamps.values().all(|ts| *ts >= start), "J asks for rows it refuses: {sender_timestamps:?}");
+    assert_eq!(serde_json::to_value(&ask).unwrap(), before, "J asks unlike it did before its clear");
     answered(&relay, &mut j, &mut o, ask, "w2c-catch-up").await;
     assert_eq!(planted(&j), 0, "J's catch-up brought cleared history back");
 
@@ -61962,6 +61963,7 @@ async fn a_non_member_channel_sync_ask_gets_no_deleted_text() {
             since_timestamp,
             sender_timestamps: HashMap::new(),
             gap: None,
+            partial_ok: false, until: None,
         };
         carry_as(&g, &o, ask).await;
     }
@@ -62213,4 +62215,226 @@ async fn t14d_a_second_removal_inside_the_gap_still_moves_the_lock_first() {
     let tip = relay_tip(&relay, &server_id);
     assert_eq!(super::join_lock::link_device(&server_id, &tip), Some((b.master_id.clone(), b.device_id.clone())), "the remover's move");
     drop((c, d));
+}
+
+// w3-ar39
+
+/// Plant `rows` posts by `author` into each of `nodes`, at `start + i` (ids `ar39-{tag}-{i}`).
+#[allow(clippy::too_many_arguments)]
+fn w3ar39_plant(nodes: &[&TestNode], author: u8, owner: &str, server_id: &str, channel_id: &str, start: i64, tag: &str, rows: std::ops::Range<i64>) {
+    for node in nodes {
+        let store = node.store();
+        store.begin_transaction().unwrap();
+        for i in rows.clone() {
+            plant_signed_channel_row(&store, author, server_id, channel_id, node.device_id == owner, start + i, &format!("ar39-{tag}-{i}"), &format!("{tag} {i}"));
+        }
+        store.commit_transaction().unwrap();
+    }
+}
+
+/// How many of `node`'s rows of a channel carry `tag`.
+fn w3ar39_rows(node: &TestNode, server_id: &str, channel_id: &str, tag: &str) -> usize {
+    node.store()
+        .get_channel_messages_since(server_id, channel_id, -1, 100_000)
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| m.message_id.as_deref().is_some_and(|id| id.starts_with(&format!("ar39-{tag}-"))))
+        .count()
+}
+
+/// Ask for `channel_id` from `node` until it holds `want` rows tagged `tag`, or `secs` pass.
+async fn w3ar39_sync_until(nodes: &mut [&mut TestNode], who: usize, server_id: &str, channel_id: &str, tag: &str, want: usize, secs: u64) -> bool {
+    // The store is opened about once a second: its key derivation is costly.
+    let mut looked = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    wait_until(secs, async || {
+        for n in nodes.iter_mut() {
+            drain_events(n);
+        }
+        if looked.elapsed() < std::time::Duration::from_secs(1) {
+            return false;
+        }
+        looked = std::time::Instant::now();
+        if w3ar39_rows(nodes[who], server_id, channel_id, tag) >= want {
+            return true;
+        }
+        let _ = nodes[who]
+            .cmd_tx
+            .send(NodeCommand::RequestChannelSync { server_id: server_id.to_string(), channel_id: channel_id.to_string() })
+            .await;
+        false
+    })
+    .await
+        || w3ar39_rows(nodes[who], server_id, channel_id, tag) >= want
+}
+
+/// O (owner) and K hold a channel's history `h` (100 posts) and what J missed `m` (100),
+/// then both clear it, then `p` is posted after the clears: 200 by O, 50 by K (two pages,
+/// one sender J never met). J holds `h` only when `returning`, else nothing and not a
+/// member yet.
+async fn w3ar39_everyone_cleared(relay: &MockRelay, tags: (u8, u8, u8), returning: bool) -> (TestNode, TestNode, TestNode, String, String) {
+    let (o_tag, k_tag, j_tag) = tags;
+    let (o_m, k_m, j_m) = (keys(o_tag).peer_id(), keys(k_tag).peer_id(), keys(j_tag).peer_id());
+    let mut o = spawn_node_with_friends(relay, o_tag, o_tag, &[&k_m, &j_m]).await;
+    let mut k = spawn_node_with_friends(relay, k_tag, k_tag, &[&o_m]).await;
+    let mut j = spawn_node_with_friends(relay, j_tag, j_tag, &[&o_m]).await;
+    expect_dm_pair_ready(relay, &o, &k, 15).await;
+    expect_dm_pair_ready(relay, &o, &j, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Everyone cleared").await;
+    let general = general_channel_of(&server_id);
+    join_and_wait(&mut k, &server_id).await;
+    expect_mls_leaf(&o, &server_id, &k.device_id, 15).await;
+    if returning {
+        join_and_wait(&mut j, &server_id).await;
+        expect_mls_leaf(&o, &server_id, &j.device_id, 15).await;
+    }
+    let start = super::types::now_ms() - 30_000;
+    w3ar39_plant(&[&o, &k], o_tag, &o.device_id, &server_id, &general, start, "h", 0..100);
+    if returning {
+        w3ar39_plant(&[&j], o_tag, &o.device_id, &server_id, &general, start, "h", 0..100);
+    }
+    w3ar39_plant(&[&o, &k], o_tag, &o.device_id, &server_id, &general, start + 200, "m", 0..100);
+    for n in [&o, &k] {
+        n.store().clear_channel_history(super::types::now_ms()).expect("a holder clears its history");
+    }
+    w3ar39_plant(&[&o, &k], o_tag, &o.device_id, &server_id, &general, start + 1_000, "p", 0..200);
+    w3ar39_plant(&[&o, &k], k_tag, &o.device_id, &server_id, &general, start + 1_000, "p", 200..250);
+    (o, k, j, server_id, general)
+}
+
+/// Every holder online cleared the channel while J was away: J's catch-up still brings
+/// every post made after the clears, over two pages and from a sender J never met, and J
+/// opens no hole: it held rows before, so it goes on vouching for its own history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w3ar39_a_return_while_every_holder_cleared_brings_the_posts_after_the_clears() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut k, mut j, server_id, general) = w3ar39_everyone_cleared(&relay, (241, 242, 243), true).await;
+    let all = w3ar39_sync_until(&mut [&mut j, &mut o, &mut k], 0, &server_id, &general, "p", 250, 40).await;
+    assert!(all, "J took {} of the 250 posts made after the clears", w3ar39_rows(&j, &server_id, &general, "p"));
+    assert_eq!(w3ar39_rows(&j, &server_id, &general, "h"), 100, "J lost what it held");
+    let hole = j.store().channel_hole(&server_id, &general);
+    assert!(hole.is_none(), "J held rows of the channel, so it opens no hole and keeps vouching for its history: {hole:?}");
+}
+
+/// Every holder cleared the channel before J joined: J still takes every post they hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w3ar39_a_joiner_takes_every_post_the_cleared_holders_still_hold() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut k, mut j, server_id, general) = w3ar39_everyone_cleared(&relay, (244, 245, 246), false).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    let all = w3ar39_sync_until(&mut [&mut j, &mut o, &mut k], 0, &server_id, &general, "p", 250, 40).await;
+    assert!(all, "J took {} of the 250 posts the cleared holders hold", w3ar39_rows(&j, &server_id, &general, "p"));
+    let hole = j.store().channel_hole(&server_id, &general);
+    assert!(hole.as_ref().is_some_and(|h| h.from == 0), "J forgot it lacks the history below them: {hole:?}");
+}
+
+/// The uniformity probe: a member that cleared and a member that joined after every
+/// holder cleared answer the same asks byte for byte alike, the old asker's too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w3ar39_a_cleared_holder_and_a_late_joiner_answer_alike() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut k, mut j, server_id, general) = w3ar39_everyone_cleared(&relay, (247, 248, 249), false).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(w3ar39_sync_until(&mut [&mut j, &mut o, &mut k], 0, &server_id, &general, "p", 250, 40).await, "precondition: J took the posts");
+    let (o_m, k_m) = (keys(247).peer_id(), keys(248).peer_id());
+    let returner = HashMap::from([(o_m.clone(), super::types::now_ms() - 3_600_000)]);
+    let up_to_date = HashMap::from([(o_m, super::types::now_ms()), (k_m, super::types::now_ms())]);
+    for (since, marks) in [(-1, HashMap::new()), (0, returner), (0, up_to_date)] {
+        for partial_ok in [true, false] {
+            let page = |n: &TestNode| {
+                let (env, _) = super::sync_handler::build_channel_sync_batch(&n.store(), &server_id, &general, since, &marks, None, partial_ok, None).unwrap();
+                serde_json::to_string(&env).unwrap()
+            };
+            assert_eq!(page(&k), page(&j), "a cleared member and a late joiner answer {marks:?} ({partial_ok}) apart");
+        }
+    }
+}
+
+/// O cleared the channel, K holds it whole but is out of J's sight when J returns: J
+/// takes the posts after the clear from O at once, and the older part it lacks from K
+/// once K is back (by its watermarks and digest, no hole), and then lacks nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w3ar39_a_full_holder_back_later_fills_what_a_cleared_holder_lacked() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_tag, k_tag, j_tag) = (250u8, 251u8, 252u8);
+    let (o_m, k_m, j_m) = (keys(o_tag).peer_id(), keys(k_tag).peer_id(), keys(j_tag).peer_id());
+    // J and K are no friends, so nothing but the server room shows J that K is online.
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&k_m, &j_m]).await;
+    let mut k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&o_m]).await;
+    let mut j = spawn_node_with_friends(&relay, j_tag, j_tag, &[&o_m]).await;
+    expect_dm_pair_ready(&relay, &o, &k, 15).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Full holder later").await;
+    let general = general_channel_of(&server_id);
+    join_and_wait(&mut k, &server_id).await;
+    join_and_wait(&mut j, &server_id).await;
+    expect_mls_leaf(&o, &server_id, &k.device_id, 15).await;
+    expect_mls_leaf(&o, &server_id, &j.device_id, 15).await;
+    let start = super::types::now_ms() - 30_000;
+    w3ar39_plant(&[&o, &k], o_tag, &o.device_id, &server_id, &general, start, "h", 0..300);
+    w3ar39_plant(&[&j], o_tag, &o.device_id, &server_id, &general, start, "h", 0..150);
+    o.store().clear_channel_history(super::types::now_ms()).expect("O clears its history");
+    w3ar39_plant(&[&o, &k], o_tag, &o.device_id, &server_id, &general, start + 1_000, "p", 0..50);
+
+    w2c_hide_from(&relay, &j.device_id, &k.device_id);
+    assert!(wait_until(5, async || !j.sees_peer(&k.device_id).await).await, "precondition: J no longer sees K");
+    let after = w3ar39_sync_until(&mut [&mut j, &mut o, &mut k], 0, &server_id, &general, "p", 50, 30).await;
+    assert!(after, "J took {} of the 50 posts after the clear from the holder that cleared", w3ar39_rows(&j, &server_id, &general, "p"));
+    assert_eq!(w3ar39_rows(&j, &server_id, &general, "h"), 150, "precondition: nobody J sees holds the rest");
+    assert!(!j.store().channel_hole_open(&server_id, &general), "J held rows, yet opened a hole");
+
+    relay.inject_room_members_everywhere(&j.device_id);
+    assert!(wait_until(5, async || j.sees_peer(&k.device_id).await).await, "precondition: J sees K again");
+    let whole = w3ar39_sync_until(&mut [&mut j, &mut o, &mut k], 0, &server_id, &general, "h", 300, 40).await;
+    assert!(whole, "J kept {} of 300 older posts once the full holder was back", w3ar39_rows(&j, &server_id, &general, "h"));
+    assert_eq!(w3ar39_rows(&j, &server_id, &general, "p"), 50);
+}
+
+/// J cleared the channel, then was away while K posted on: back, J has a newer post of
+/// O's live, and its catch-up still brings K's posts it missed below that one, though K
+/// wrote more before the clear than one page holds, all of which J refuses again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w3ar39_a_cleared_member_back_from_away_takes_the_posts_it_missed() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_tag, k_tag, j_tag) = (253u8, 254u8, 255u8);
+    let (o_m, k_m, j_m) = (keys(o_tag).peer_id(), keys(k_tag).peer_id(), keys(j_tag).peer_id());
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&k_m, &j_m]).await;
+    let mut k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&o_m]).await;
+    let mut j = spawn_node_with_friends(&relay, j_tag, j_tag, &[&o_m]).await;
+    expect_dm_pair_ready(&relay, &o, &k, 15).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Cleared and away").await;
+    let general = general_channel_of(&server_id);
+    join_and_wait(&mut k, &server_id).await;
+    join_and_wait(&mut j, &server_id).await;
+    expect_mls_leaf(&o, &server_id, &k.device_id, 15).await;
+    expect_mls_leaf(&o, &server_id, &j.device_id, 15).await;
+    let start = super::types::now_ms() - 20_000;
+    w3ar39_plant(&[&o, &k, &j], k_tag, &k.device_id, &server_id, &general, start, "h", 0..300);
+    j.store().clear_channel_history(super::types::now_ms()).expect("J clears its history");
+    w3ar39_plant(&[&o, &k], k_tag, &k.device_id, &server_id, &general, start + 5_000, "m", 0..60);
+    w3ar39_plant(&[&o, &k, &j], o_tag, &o.device_id, &server_id, &general, start + 10_000, "p", 0..20);
+    let all = w3ar39_sync_until(&mut [&mut j, &mut o, &mut k], 0, &server_id, &general, "m", 60, 30).await;
+    assert!(all, "J took {} of the 60 posts it missed after its clear", w3ar39_rows(&j, &server_id, &general, "m"));
+    assert_eq!(w3ar39_rows(&j, &server_id, &general, "h"), 0, "what J cleared came back");
+    assert_eq!(w3ar39_rows(&j, &server_id, &general, "p"), 20);
 }

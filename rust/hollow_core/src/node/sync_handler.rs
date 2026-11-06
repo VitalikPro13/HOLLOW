@@ -607,9 +607,6 @@ pub(crate) fn channel_sync_items(
     SyncPage { items, truncated }
 }
 
-/// Build one page (at most 200 messages) of a channel-sync response: per-sender
-/// watermarks when the requester sent them, a legacy single timestamp otherwise,
-/// then pack and stamp `total`/`has_more`. Returns the envelope and item count.
 /// The ChannelSyncRequest for everything we may be missing in one channel:
 /// per-sender watermarks plus the digest of what we hold behind them. A
 /// pagination follow-up passes `with_gap = false`, since the first page already
@@ -620,15 +617,52 @@ pub(crate) fn channel_sync_request(
     channel_id: &str,
     with_gap: bool,
 ) -> HavenMessage {
-    let latest = store.get_latest_channel_timestamp(server_id, channel_id).unwrap_or(None).unwrap_or(0);
     HavenMessage::ChannelSyncRequest {
         server_id: server_id.to_string(),
         channel_id: channel_id.to_string(),
-        // Served `timestamp >` it: a cleared channel's starts where its asks do.
-        since_timestamp: store.channel_ask_start(server_id, channel_id).map_or(latest, |start| latest.min(start - 1)),
+        // Every field from the rows we vouch for: a cleared device asks as one whose
+        // history begins at its oldest row past the floor, never naming the floor.
+        since_timestamp: store.channel_ask_since(server_id, channel_id),
         sender_timestamps: store.get_per_sender_timestamps(server_id, channel_id).unwrap_or_default(),
         gap: if with_gap { store.channel_gap_anchor(server_id, channel_id) } else { None },
+        partial_ok: true,
+        until: None,
     }
+}
+
+/// The ask for what a channel still lacks below its hole, `None` without one: every
+/// sender we hold from where the hole starts (one we never met, in full), up to the top.
+/// A gap digest would only serve rows of the hole again.
+pub(crate) fn channel_hole_request(
+    store: &crate::storage::MessageStore,
+    server_id: &str,
+    channel_id: &str,
+) -> Option<HavenMessage> {
+    let hole = store.channel_hole(server_id, channel_id)?;
+    let from = hole.from.max(0);
+    Some(HavenMessage::ChannelSyncRequest {
+        server_id: server_id.to_string(),
+        channel_id: channel_id.to_string(),
+        since_timestamp: from - 1,
+        sender_timestamps: store.channel_sender_ids(server_id, channel_id).unwrap_or_default().into_iter().map(|s| (s, from)).collect(),
+        gap: None,
+        partial_ok: true,
+        until: (hole.below != i64::MAX).then_some(hole.below),
+    })
+}
+
+/// The ask of `kind` for one channel; a hole served meanwhile asks as a catch-up.
+pub(crate) fn channel_ask_of(
+    store: &crate::storage::MessageStore,
+    server_id: &str,
+    channel_id: &str,
+    kind: super::channel_asks::Kind,
+) -> HavenMessage {
+    match kind {
+        super::channel_asks::Kind::Hole => channel_hole_request(store, server_id, channel_id),
+        super::channel_asks::Kind::Catch => None,
+    }
+    .unwrap_or_else(|| channel_sync_request(store, server_id, channel_id, true))
 }
 
 /// Where a channel sync page ended, read before anything in it is filtered out: the
@@ -665,10 +699,16 @@ pub(crate) fn channel_next_page_request(
     server_id: &str,
     channel_id: &str,
     end: ChannelPageEnd,
+    // The hole's top, for a page of the ask for a hole.
+    until: Option<i64>,
 ) -> HavenMessage {
-    // A page that served a sender we never held ends below a floor we cleared to;
-    // the next one starts where our asks do, or it would serve the cleared history again.
-    let from = store.channel_ask_start(server_id, channel_id).map_or(end.last, |start| end.last.max(start));
+    // A catch-up page that served a sender in full from below where our history starts
+    // goes on from there: below it is our hole, asked for by itself, or rows we never held
+    // before a clear, which the floor refuses.
+    let from = match (until, store.channel_page_start(server_id, channel_id)) {
+        (None, Some(start)) => end.last.max(start),
+        _ => end.last,
+    };
     let mut sender_timestamps: HashMap<String, i64> = store
         .get_per_sender_timestamps(server_id, channel_id)
         .unwrap_or_default()
@@ -682,6 +722,8 @@ pub(crate) fn channel_next_page_request(
         since_timestamp: from,
         sender_timestamps,
         gap: None,
+        partial_ok: true,
+        until,
     }
 }
 
@@ -691,6 +733,7 @@ pub(crate) fn channel_sync_ask_key(
     since_timestamp: i64,
     sender_timestamps: &HashMap<String, i64>,
     gap: Option<&GapDigest>,
+    until: Option<i64>,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut senders: Vec<(&String, &i64)> = sender_timestamps.iter().collect();
@@ -699,6 +742,7 @@ pub(crate) fn channel_sync_ask_key(
     since_timestamp.hash(&mut hasher);
     senders.hash(&mut hasher);
     serde_json::to_string(&gap).unwrap_or_default().hash(&mut hasher);
+    until.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -761,8 +805,23 @@ pub(crate) fn sibling_next_page_request(
     HavenMessage::DmSiblingSyncRequest { per_convo_since, gaps: HashMap::new() }
 }
 
+/// A guest page (the newest `limit` rows, oldest first) cut to where we vouch from, as a
+/// member's page is, so it tells a guest no clear: whether more follows, `None` = send nothing.
+pub(crate) fn guest_page_bounded(
+    store: &crate::storage::MessageStore,
+    server_id: &str,
+    channel_id: &str,
+    rows: &mut Vec<crate::storage::messages::StoredChannelMessage>,
+    limit: usize,
+) -> Option<bool> {
+    let held = store.channel_held_from(server_id, channel_id);
+    rows.retain(|m| held.is_none_or(|from| m.timestamp >= from));
+    // Oldest first, as the query returns them.
+    guest_page_more(held.map(|from| from.saturating_sub(1)), rows.len(), limit, rows.first().map(|m| m.timestamp))
+}
+
 /// A guest page (newest first, at most `limit` rows, the oldest at `oldest`) from a
-/// device that cleared the channel to `floor`: one reaching the floor is never the
+/// device holding the channel only past `floor` (a clear, a later start): one reaching it is never the
 /// channel's start, so it says more follows, and with no row it is not sent at all
 /// (`None`); every other member answers the guest too.
 pub(crate) fn guest_page_more(floor: Option<i64>, rows: usize, limit: usize, oldest: Option<i64>) -> Option<bool> {
@@ -775,6 +834,20 @@ pub(crate) fn guest_page_more(floor: Option<i64>, rows: usize, limit: usize, old
     }
 }
 
+/// What one channel sync answer serves, after the holder's own history bounds it.
+struct Served<'a> {
+    since: i64,
+    marks: std::borrow::Cow<'a, HashMap<String, i64>>,
+    gap: Option<GapDigest>,
+    held_from: Option<i64>,
+    /// Bounded to the stretch this holder vouches for: no ask names a row below it.
+    bounded: bool,
+}
+
+/// Build one page (at most 200 messages) of a channel-sync response: per-sender
+/// watermarks when the requester sent them, a legacy single timestamp otherwise,
+/// then pack and stamp `total`/`has_more`. Returns the envelope and item count.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_channel_sync_batch(
     store: &crate::storage::MessageStore,
     sid: &str,
@@ -785,24 +858,45 @@ pub(crate) fn build_channel_sync_batch(
     // there join this page and are never paginated: whatever does not fit is
     // still missing at the next sync and is served then.
     gap: Option<&GapDigest>,
+    partial_ok: bool,
+    until: Option<i64>,
 ) -> Result<(MessageEnvelope, usize), String> {
-    // We hold nothing at or below a floor we cleared to: an ask reaching there gets no
-    // rows and more to come (`Page::Stuck`), so the asker moves to another holder now.
-    // Any row would move its watermarks past the history we no longer hold.
-    if store.channel_ask_reaches_floor(sid, cid, since_timestamp, sender_timestamps, gap.map(|g| g.from)) {
-        let below = MessageEnvelope::ChannelSyncBatch {
-            sid: sid.to_string(),
-            cid: cid.to_string(),
-            messages: Vec::new(),
-            total: 0,
-            has_more: Some(true),
-            target: None,
-        };
-        return Ok((below, 0));
-    }
+    let served = match store.channel_held_from(sid, cid) {
+        None => Served { since: since_timestamp, marks: std::borrow::Cow::Borrowed(sender_timestamps), gap: gap.cloned(), held_from: None, bounded: false },
+        Some(held) => {
+            let reaches = store.channel_ask_reaches_below(sid, cid, held, since_timestamp, sender_timestamps, gap.map(|g| g.from));
+            // An older asker would move its watermarks past what we lack: no rows and more
+            // to come (`Page::Stuck`), so it asks another holder now.
+            if reaches && !partial_ok {
+                let below = MessageEnvelope::ChannelSyncBatch {
+                    sid: sid.to_string(),
+                    cid: cid.to_string(),
+                    messages: Vec::new(),
+                    total: 0,
+                    has_more: Some(true),
+                    target: None,
+                    held_from: None,
+                };
+                return Ok((below, 0));
+            }
+            // Only the stretch we vouch for, whatever we hold below it: every holder lacking
+            // part of the channel serves alike, so the page tells no clear from a late join.
+            Served {
+                since: since_timestamp.max(held.saturating_sub(1)),
+                marks: std::borrow::Cow::Owned(store.channel_marks_from(sid, cid, held, since_timestamp, sender_timestamps)?),
+                gap: gap.filter(|g| g.until > held).map(|g| GapDigest { from: g.from.max(held), ..g.clone() }),
+                held_from: reaches.then_some(held),
+                bounded: true,
+            }
+        }
+    };
+    let (since_timestamp, sender_timestamps, gap) = (served.since, served.marks.as_ref(), served.gap.as_ref());
+    let empty_bound = served.bounded && sender_timestamps.is_empty();
     // One row past the page says whether more follow, without counting what is left:
     // a count on every page made a long first sync quadratic.
-    let (mut messages, per_sender_more) = if !sender_timestamps.is_empty() {
+    let (mut messages, per_sender_more) = if empty_bound {
+        (Vec::new(), false)
+    } else if !sender_timestamps.is_empty() {
         let mut rows = store.get_channel_messages_since_per_sender(sid, cid, sender_timestamps, 201)?;
         let more = rows.len() > 200;
         rows.truncate(200);
@@ -810,6 +904,9 @@ pub(crate) fn build_channel_sync_batch(
     } else {
         (store.get_channel_messages_since(sid, cid, since_timestamp, 200)?, false)
     };
+    // Rows come oldest first: one at or past `until` ends the stretch asked for.
+    let past_until = until.is_some_and(|u| messages.iter().any(|m| m.timestamp >= u));
+    messages.retain(|m| until.is_none_or(|u| m.timestamp < u));
     let tail_len = messages.len();
     if let Some(gap) = gap {
         let paged: std::collections::HashSet<String> =
@@ -820,7 +917,9 @@ pub(crate) fn build_channel_sync_batch(
         let tail_end = if tail_len >= 200 { messages.last().map(|m| m.timestamp) } else { None };
         let missed = store.get_channel_gap_messages(sid, cid, gap, 200).unwrap_or_default();
         messages.extend(missed.into_iter().filter(|m| {
-            m.message_id.as_ref().is_some_and(|id| !paged.contains(id)) && tail_end.is_none_or(|end| m.timestamp <= end)
+            m.message_id.as_ref().is_some_and(|id| !paged.contains(id))
+                && tail_end.is_none_or(|end| m.timestamp <= end)
+                && until.is_none_or(|u| m.timestamp < u)
         }));
         messages.sort_by_key(|m| m.timestamp);
     }
@@ -829,7 +928,9 @@ pub(crate) fn build_channel_sync_batch(
     // `total` only drives the asker's progress line, so the ask for a next page (every
     // sender from where the last page ended) counts just this page.
     let next_page = gap.is_none() && sender_timestamps.values().all(|ts| *ts == since_timestamp);
-    let tail_total = if sender_timestamps.is_empty() {
+    let tail_total = if empty_bound {
+        0
+    } else if sender_timestamps.is_empty() {
         store.count_channel_messages_since(sid, cid, since_timestamp)
             .unwrap_or(tail_len as u32)
     } else if next_page {
@@ -841,7 +942,8 @@ pub(crate) fn build_channel_sync_batch(
     let total = tail_total + gap_len;
     // `truncated` = the preview budget ended the page before the query did, so
     // there is definitely more to serve even though the page is short.
-    let more_rows = if sender_timestamps.is_empty() { tail_len >= 200 && tail_total > 200 } else { per_sender_more };
+    let more_rows = !past_until
+        && if sender_timestamps.is_empty() { tail_len >= 200 && tail_total > 200 } else { per_sender_more };
     let has_more = if truncated || more_rows {
         Some(true)
     } else {
@@ -855,6 +957,7 @@ pub(crate) fn build_channel_sync_batch(
         total,
         has_more,
         target: None,
+        held_from: served.held_from,
     }, count))
 }
 
@@ -3685,19 +3788,20 @@ pub(crate) async fn handle_request_channel_sync(
     if let Some(state) = server_states.get(&server_id) {
         let holders = super::channel_asks::holders(ws_room_peers, state, local_peer_str, &channel_id);
         if let Some(holder) = channel_asks.start(&server_id, &channel_id, &holders, std::time::Instant::now()) {
-            ask_channel_holders(frame_budget, ws_cmd_tx, device_peer_id, vec![(server_id, channel_id, holder)], db_path, db_passphrase);
+            let kind = super::channel_asks::Kind::Catch;
+            ask_channel_holders(frame_budget, ws_cmd_tx, device_peer_id, vec![(server_id, channel_id, holder, kind)], db_path, db_passphrase);
         }
     }
     false
 }
 
-/// Send each `(server, channel, holder)` the ask for what we miss in that channel,
+/// Send each `(server, channel, holder, kind)` the ask for what we miss in that channel,
 /// paced to the holder's bucket: a sweep can move several asks to one holder at once.
 pub(crate) fn ask_channel_holders(
     frame_budget: &mut super::frame_budget::FrameBudget,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     device_peer_id: &str,
-    asks: Vec<(String, String, String)>,
+    asks: Vec<(String, String, String, super::channel_asks::Kind)>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -3705,13 +3809,97 @@ pub(crate) fn ask_channel_holders(
         return;
     }
     let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
-    for (server_id, channel_id, holder) in asks {
-        hollow_log!("[HOLLOW-SYNC] Asking {holder} for channel {channel_id} in {server_id}");
+    for (server_id, channel_id, holder, kind) in asks {
+        hollow_log!("[HOLLOW-SYNC] Asking {holder} for channel {channel_id} in {server_id} ({kind:?})");
         super::frame_budget::pace_carried(
             frame_budget, ws_cmd_tx, device_peer_id, &holder,
-            &channel_sync_request(&store, &server_id, &channel_id, true),
+            &channel_ask_of(&store, &server_id, &channel_id, kind),
         );
     }
+}
+
+/// Whether a server has the channel a page names: an owner passes the read check for
+/// any id, a channel that does not exist included.
+pub(crate) fn channel_known(state: Option<&ServerState>, cid: &str) -> bool {
+    state.is_some_and(|s| s.channels.contains_key(cid))
+}
+
+/// One channel sync page once landed: what it stored, whether to follow it (the end to
+/// follow from), the hole's top to bound that next page by, and what the ask does next.
+pub(crate) struct PageLanded {
+    pub(crate) new_count: u32,
+    pub(crate) events: Vec<NetworkEvent>,
+    pub(crate) page_end: Option<ChannelPageEnd>,
+    pub(crate) until: Option<i64>,
+    pub(crate) heard: super::channel_asks::Heard,
+}
+
+/// Land one channel sync page from `from` in one transaction (one fsync, not one per
+/// row). What it vouches for is noted in the same transaction, before its rows can move
+/// a watermark, and only from a page of an ask we opened, of a channel the server has
+/// (`channel_known`), with the rows ingest accepted. `messages` are filtered already;
+/// `page_end` is where the page ended as served.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn land_channel_page(
+    store: &crate::storage::MessageStore,
+    channel_asks: &mut super::channel_asks::ChannelAsks,
+    sid: &str,
+    cid: &str,
+    from: &str,
+    channel_known: bool,
+    messages: &[SyncMessageItem],
+    has_more: Option<bool>,
+    held_from: Option<i64>,
+    page_end: Option<ChannelPageEnd>,
+    local_peer: &str,
+) -> PageLanded {
+    use super::channel_asks::{Kind, Page};
+    let now = std::time::Instant::now();
+    let asked = channel_asks.page_held(sid, cid, from, held_from, now);
+    let (held, kind) = asked.unwrap_or((None, Kind::Catch));
+    let _ = store.begin_transaction();
+    let before = store.channel_holds_rows(sid, cid);
+    let mut pk_cache = PkCache::new();
+    let (mut new_count, mut events, mut landed) = (0u32, Vec::new(), Vec::new());
+    for msg in messages {
+        let (inserted, item_events, accepted) = ingest_synced_channel_item_judged(store, sid, cid, msg, local_peer, &mut pk_cache);
+        new_count += inserted;
+        events.extend(item_events);
+        if accepted {
+            landed.push(msg.ts);
+        }
+    }
+    let noted = match held.filter(|_| asked.is_some() && channel_known) {
+        Some(held) => before.and_then(|before| {
+            store.note_held_page(sid, cid, held, before, &landed, kind == Kind::Hole, super::types::now_ms())
+        }),
+        None => Ok(()),
+    };
+    // Unnoted, its rows would move watermarks past what we lack: the page goes whole.
+    let land = match noted.and_then(|()| store.commit_transaction()) {
+        Ok(()) => true,
+        Err(e) => {
+            hollow_log!("[HOLLOW-SYNC] Dropped a page of {cid}: {e}");
+            let _ = store.rollback_transaction();
+            false
+        }
+    };
+    if !land {
+        new_count = 0;
+        events.clear();
+    }
+    let hole = store.channel_hole(sid, cid).map(|h| h.below);
+    let page = Page::of(has_more, page_end.as_ref());
+    let heard = channel_asks.hear(sid, cid, from, page, held, hole, now);
+    // After the rows: a crash between leaves the hole, asked for again.
+    if land && heard.filled {
+        let _ = store.close_channel_hole(sid, cid);
+    } else if let (true, Kind::Hole, None, Page::Next(end), Some(top)) = (land, kind, held, page, landed.iter().max()) {
+        // Filled only up to the newest row that landed: a forged row fills nothing.
+        let _ = store.raise_channel_hole(sid, cid, end.min(*top));
+    }
+    let until = (kind == Kind::Hole).then(|| store.channel_hole(sid, cid).map(|h| h.below)).flatten();
+    PageLanded { new_count, events, page_end: page_end.filter(|_| heard.follow && land), until, heard }
 }
 
 // ── 13. UpdateChannelLayout ───────────────────────────────────────────
@@ -4111,61 +4299,46 @@ async fn emit_crdt_apply_event(
     }
 }
 
-/// Handle `MessageEnvelope::ChannelSyncBatch` (MLS path).
+/// Handle `MessageEnvelope::ChannelSyncBatch` (MLS path), once [`land_channel_page`]
+/// landed it: emit its events, follow it, and ask what the ask asks next.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_channel_sync_batch(
-    olm: &mut OlmManager,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    local_peer: &str,
     sender_peer_id: &str,
     sid: String,
     cid: String,
-    messages: Vec<SyncMessageItem>,
-    _total: u32,
     has_more: Option<bool>,
-    // Where the page ended as served, read before the caller filtered it; `None` when
-    // the next page is not ours to ask for (see `ChannelAsks::heard`).
-    page_end: Option<ChannelPageEnd>,
-    crypto_store: &CryptoStore,
-    _crdt_store: &CrdtStore,
+    landed: PageLanded,
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
-    // One transaction for the whole batch (up to 200 items) — the per-item
-    // auto-commit made this handler fsync hundreds of times per sync page.
-    // Same pattern as its plaintext twin in swarm.rs (ChannelSyncBatch).
-    let _ = store.begin_transaction();
-    let mut pk_cache = PkCache::new();
-    let mut new_count = 0u32;
-    let mut events = Vec::new();
-    for msg in &messages {
-        let (inserted, item_events) = ingest_synced_channel_item(&store, &sid, &cid, msg, local_peer, &mut pk_cache);
-        new_count += inserted;
-        events.extend(item_events);
-    }
-    let _ = store.commit_transaction();
     // After the commit: Dart re-reads the rows these name.
-    for ev in events {
+    for ev in landed.events {
         let _ = event_tx.send(ev).await;
     }
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
     if has_more == Some(true) {
-        match page_end {
+        match landed.page_end {
             Some(end) => super::olm_lane::carry(
                 ws_cmd_tx, sender_peer_id, None,
-                &channel_next_page_request(&store, &sid, &cid, end),
+                &channel_next_page_request(&store, &sid, &cid, end, landed.until),
                 super::olm_lane::NoSession::Queue,
             ),
             None => hollow_log!("[HOLLOW-SYNC] Not following the channel page for {cid} from {sender_peer_id}; the next catch-up takes the rest"),
         }
     }
+    if let Some(kind) = landed.heard.again {
+        super::olm_lane::carry(
+            ws_cmd_tx, sender_peer_id, None,
+            &channel_ask_of(&store, &sid, &cid, kind),
+            super::olm_lane::NoSession::Queue,
+        );
+    }
     if has_more != Some(true) {
         let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
             server_id: sid,
-            new_message_count: new_count,
+            new_message_count: landed.new_count,
         }).await;
     }
 }
@@ -4182,6 +4355,20 @@ pub(crate) fn ingest_synced_channel_item(
     local_peer: &str,
     pk_cache: &mut PkCache,
 ) -> (u32, Vec<NetworkEvent>) {
+    let (inserted, events, _) = ingest_synced_channel_item_judged(store, sid, cid, msg, local_peer, pk_cache);
+    (inserted, events)
+}
+
+/// [`ingest_synced_channel_item`], and whether the item passed every gate (a row we
+/// already held included): only such a row may say where a page vouches from.
+pub(crate) fn ingest_synced_channel_item_judged(
+    store: &crate::storage::MessageStore,
+    sid: &str,
+    cid: &str,
+    msg: &SyncMessageItem,
+    local_peer: &str,
+    pk_cache: &mut PkCache,
+) -> (u32, Vec<NetworkEvent>, bool) {
     let sig_check = verify_sync_item_sig(msg, sid, cid, pk_cache);
     // SECURITY: only a VERIFYING signature gets stored, and the whole item is
     // dropped (text, edit, file metadata, reactions and the hidden flag all ride
@@ -4192,23 +4379,23 @@ pub(crate) fn ingest_synced_channel_item(
             "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — {} (mid={:?}, ts={})",
             msg.s, sig_check.reject_reason(), msg.mid, msg.ts
         );
-        return (0, Vec::new());
+        return (0, Vec::new(), false);
     }
     let scope = super::message_ops::RowScope::Channel { sid, cid, signer: &msg.s };
     if !super::message_ops::change_may_touch_row(store, &scope, msg.mid.as_deref()) {
-        return (0, Vec::new());
+        return (0, Vec::new(), false);
     }
     // History this device cleared: neither the row nor anything riding it (file
     // header, reactions, hidden flag, card) is stored or shown again.
-    if store.refuse_below_floor(sid, cid, &msg.s, msg.ts, msg.mid.as_deref()) {
-        return (0, Vec::new());
+    if store.channel_floor_refuses(sid, cid, msg.ts, msg.mid.as_deref()) {
+        return (0, Vec::new(), false);
     }
     let sig_verified = sig_check == BackfillSig::Valid;
     // Multi-device: a message authored by ANY of our own devices is ours.
     let is_mine = super::resolver::same_identity(&msg.s, local_peer);
     let (inserted, mut events) = upsert_synced_channel_message(store, sid, cid, msg, is_mine, sig_verified);
     events.extend(apply_sync_item_extras(store, sid, cid, msg, is_mine, pk_cache));
-    (inserted, events)
+    (inserted, events, true)
 }
 
 /// Verify one synced item's signature (cached pubkey parse) under the backfill
@@ -4502,7 +4689,7 @@ mod tests {
         channel_row(&store, "live", 10_000_000, "m2");
         let end = ChannelPageEnd::of(&[channel_item("live", 4), channel_item("paged", 6)]).unwrap();
         let HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, .. } =
-            channel_next_page_request(&store, "srv", "ch", end)
+            channel_next_page_request(&store, "srv", "ch", end, None)
         else {
             panic!("a channel ask");
         };
@@ -4519,10 +4706,10 @@ mod tests {
         let same = HashMap::from([("b".to_string(), 2), ("a".to_string(), 1)]);
         let next = HashMap::from([("a".to_string(), 5), ("b".to_string(), 5)]);
         let gap = GapDigest { from: 1, until: 2, days: Vec::new() };
-        assert_eq!(channel_sync_ask_key(0, &first, None), channel_sync_ask_key(0, &same, None));
-        assert_ne!(channel_sync_ask_key(0, &first, None), channel_sync_ask_key(0, &next, None));
-        assert_ne!(channel_sync_ask_key(0, &first, None), channel_sync_ask_key(0, &first, Some(&gap)));
-        assert_ne!(channel_sync_ask_key(0, &first, None), channel_sync_ask_key(1, &first, None));
+        assert_eq!(channel_sync_ask_key(0, &first, None, None), channel_sync_ask_key(0, &same, None, None));
+        assert_ne!(channel_sync_ask_key(0, &first, None, None), channel_sync_ask_key(0, &next, None, None));
+        assert_ne!(channel_sync_ask_key(0, &first, None, None), channel_sync_ask_key(0, &first, Some(&gap), None));
+        assert_ne!(channel_sync_ask_key(0, &first, None, None), channel_sync_ask_key(1, &first, None, None));
     }
 
     #[test]
@@ -4548,7 +4735,7 @@ mod tests {
             assert_eq!(has_more, Some(true));
             messages.into_iter().filter_map(|m| m.mid).collect()
         };
-        let (page, _) = build_channel_sync_batch(&store, "srv", "ch", 0, &watermarks, Some(&theirs)).unwrap();
+        let (page, _) = build_channel_sync_batch(&store, "srv", "ch", 0, &watermarks, Some(&theirs), false, None).unwrap();
         let page = mids(page);
         assert!(page.contains(&"before-end".to_string()), "a gap row inside the page stays");
         assert!(!page.contains(&"past-end".to_string()), "a gap row past the page's end waits for the next page");
@@ -4565,7 +4752,7 @@ mod tests {
             channel_row(&store, if i % 3 == 0 { "a" } else { "b" }, 1_000 + i, &format!("r{i}"));
         }
         let batch = |since: i64, wm: &HashMap<String, i64>| {
-            let (env, _) = build_channel_sync_batch(&store, "srv", "ch", since, wm, None).unwrap();
+            let (env, _) = build_channel_sync_batch(&store, "srv", "ch", since, wm, None, false, None).unwrap();
             let MessageEnvelope::ChannelSyncBatch { messages, total, has_more, .. } = env else { panic!("a batch") };
             (messages.len(), total, has_more, messages.iter().map(|m| m.ts).max().unwrap_or(0))
         };
@@ -4673,11 +4860,362 @@ mod w3_gp1 {
         }
         holder.set_channel_message_hidden("old-gone", 11 * DAY).unwrap();
         let HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, .. } = channel_sync_request(&asker, "srv", "ch", true) else { panic!("an ask") };
-        let (env, _) = build_channel_sync_batch(&holder, "srv", "ch", since_timestamp, &sender_timestamps, gap.as_ref()).unwrap();
+        let (env, _) = build_channel_sync_batch(&holder, "srv", "ch", since_timestamp, &sender_timestamps, gap.as_ref(), false, None).unwrap();
         let MessageEnvelope::ChannelSyncBatch { messages, .. } = env else { panic!("a batch") };
         assert!(
             messages.iter().any(|m| m.mid.as_deref() == Some("old-gone") && m.t == "t-old-gone" && m.hidden_at.is_some()),
             "the member's old evidence is missing",
         );
     }
+}
+
+// w3-ar39
+#[cfg(test)]
+mod w3_ar39 {
+    use super::*;
+    use crate::identity::native_identity::NativeKeypair;
+    use crate::node::channel_asks::{ChannelAsks, Holder, Standing};
+    use crate::node::crypto_handler::SignedExtras;
+    use crate::storage::MessageStore;
+
+    const KEY: &str = "abababababababababababababababababababababababababababababababab";
+    const T: i64 = 1_000_000_000_000;
+
+    fn store(tmp: &std::path::Path, name: &str) -> MessageStore {
+        MessageStore::open(tmp.join(name).to_str().unwrap(), KEY).unwrap()
+    }
+
+    fn kp(seed: u8) -> NativeKeypair {
+        NativeKeypair::from_secret_bytes(&[seed; 32])
+    }
+
+    /// A row as its author signed it.
+    fn signed(k: &NativeKeypair, mid: &str, ts: i64) -> SyncMessageItem {
+        let pk = base64::engine::general_purpose::STANDARD.encode(k.public_key_protobuf());
+        let extras = SignedExtras { mid: Some(mid), reply_to: None, file_id: None, order_us: Some(ts * 1000), lp_digest: None, album: None };
+        let (sig, pk) = super::super::crypto_handler::sign_message_versioned(k, &pk, "ch", "srv:ch", &k.peer_id(), ts, &extras, mid);
+        serde_json::from_value(serde_json::json!({
+            "s": k.peer_id(), "t": mid, "ts": ts, "mid": mid, "sig": sig, "pk": pk, "order_us": ts * 1000,
+        }))
+        .unwrap()
+    }
+
+    fn put(store: &MessageStore, m: &SyncMessageItem) {
+        store
+            .insert_channel_message("srv", "ch", &m.s, &m.t, false, m.ts, m.sig.as_deref(), m.pk.as_deref(), m.mid.as_deref(), None, None, m.order_us, None)
+            .unwrap();
+    }
+
+    fn post(store: &MessageStore, sender: &str, mid: &str, ts: i64) {
+        store.insert_channel_message("srv", "ch", sender, mid, false, ts, None, None, Some(mid), None, None, Some(ts * 1000), None).unwrap();
+    }
+
+    fn rows_of(env: &MessageEnvelope) -> (usize, Option<bool>, Option<i64>) {
+        let MessageEnvelope::ChannelSyncBatch { messages, has_more, held_from, .. } = env else { panic!("a batch") };
+        (messages.len(), *has_more, *held_from)
+    }
+
+    fn joiner_page(holder: &MessageStore, partial_ok: bool) -> MessageEnvelope {
+        build_channel_sync_batch(holder, "srv", "ch", -1, &HashMap::new(), None, partial_ok, None).unwrap().0
+    }
+
+    fn holders(device: &str) -> Vec<Holder> {
+        vec![Holder { device: device.into(), master: device.into(), standing: Standing::Established }]
+    }
+
+    /// `asker` asks `holder` once and lands its first page as the swarm does.
+    fn ask_and_land(asker: &MessageStore, asks: &mut ChannelAsks, holder: &MessageStore, device: &str) -> (PageLanded, Option<i64>) {
+        let asked = asks.start("srv", "ch", &holders(device), std::time::Instant::now()).expect("an ask");
+        assert_eq!(asked, device);
+        let HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, partial_ok, until, .. } = channel_sync_request(asker, "srv", "ch", true) else { panic!() };
+        let (env, _) = build_channel_sync_batch(holder, "srv", "ch", since_timestamp, &sender_timestamps, gap.as_ref(), partial_ok, until).unwrap();
+        let MessageEnvelope::ChannelSyncBatch { messages, has_more, held_from, .. } = env else { panic!() };
+        let end = if has_more == Some(true) { ChannelPageEnd::of(&messages) } else { None };
+        (land_channel_page(asker, asks, "srv", "ch", device, true, &messages, has_more, held_from, end, "us"), held_from)
+    }
+
+    /// A page nobody asked for, carrying `held_from` and a forged row, changes nothing
+    /// about what a full holder serves: only a chain we opened is noted.
+    #[test]
+    fn ar39_an_unasked_forged_page_never_changes_what_a_holder_serves() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let v = store(tmp.path(), "v.db");
+        for i in 0..100 {
+            post(&v, "alice", &format!("h{i}"), T + i);
+        }
+        let mut forged = signed(&kp(7), "forged", T + 500);
+        forged.t = "not what was signed".into();
+        let mut asks = ChannelAsks::with_seed(1);
+        let empty = store(tmp.path(), "nothing.db");
+        for target in [&v, &empty] {
+            land_channel_page(target, &mut asks, "srv", "ch", "mallory", true, std::slice::from_ref(&forged), None, Some(T + 500), None, "us");
+            assert!(target.channel_hole("srv", "ch").is_none(), "an unasked page opened a hole");
+        }
+        assert_eq!(rows_of(&joiner_page(&v, true)), (100, None, None));
+        assert_eq!(rows_of(&joiner_page(&v, false)), (100, None, None));
+    }
+
+    /// Of a page we asked for, only a row ingest accepted says where our history starts:
+    /// a forged row below the first real one never moves the hole down to it.
+    #[test]
+    fn ar39_only_rows_ingest_accepted_place_a_hole() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (o, j) = (store(tmp.path(), "o.db"), store(tmp.path(), "j.db"));
+        let alice = kp(11);
+        let real = signed(&alice, "real", T + 900);
+        put(&o, &real);
+        let mut forged = signed(&alice, "forged", T + 500);
+        forged.t = "tampered".into();
+        let mut asks = ChannelAsks::with_seed(2);
+        asks.start("srv", "ch", &holders("o"), std::time::Instant::now()).unwrap();
+        let page = vec![forged, real];
+        let landed = land_channel_page(&j, &mut asks, "srv", "ch", "o", true, &page, None, Some(T + 500), None, "us");
+        assert_eq!(landed.new_count, 1);
+        assert_eq!(j.channel_hole("srv", "ch").map(|h| h.below), Some(T + 900), "a forged row placed the hole");
+        assert_eq!(j.channel_held_from("srv", "ch"), Some(T + 900));
+    }
+
+    /// A channel the server does not have (an owner may send one) never gets a hole row.
+    #[test]
+    fn ar39_a_made_up_channel_gets_no_hole() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let j = store(tmp.path(), "j.db");
+        let mut asks = ChannelAsks::with_seed(3);
+        asks.start("srv", "ch", &holders("o"), std::time::Instant::now()).unwrap();
+        land_channel_page(&j, &mut asks, "srv", "ch", "o", false, &[], None, Some(T), None, "us");
+        assert!(j.channel_hole("srv", "ch").is_none(), "a channel the server lacks got a hole");
+        let state = ServerState::new("srv".into(), "srv".into(), "owner".into());
+        let general = state.channels.keys().next().cloned().expect("a founding channel");
+        assert!(!channel_known(Some(&state), "ch") && !channel_known(None, &general));
+        assert!(channel_known(Some(&state), &general));
+    }
+
+    /// K was online for everything up to the clear and lacks nothing, then catches up the
+    /// posts after it from the holder that cleared: it keeps serving its whole history to
+    /// every asker, exactly as before, and opens no hole.
+    #[test]
+    fn ar39_a_full_holder_catching_up_from_a_cleared_one_keeps_serving_its_history() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (o, k, base) = (store(tmp.path(), "o.db"), store(tmp.path(), "k.db"), store(tmp.path(), "base.db"));
+        for i in 0..100 {
+            for s in [&o, &k, &base] {
+                post(s, "alice", &format!("h{i}"), T + i * 10);
+            }
+        }
+        o.clear_channel_history(T + 2_000).unwrap();
+        let (p1, p2) = (signed(&kp(21), "p1", T + 400_000), signed(&kp(22), "p2", T + 400_100));
+        put(&o, &p1);
+        put(&o, &p2);
+        put(&base, &p1);
+        put(&base, &p2);
+        let mut asks = ChannelAsks::with_seed(4);
+        let (landed, held) = ask_and_land(&k, &mut asks, &o, "o");
+        assert_eq!((landed.new_count, held), (2, Some(T + 400_000)), "precondition: a partial page");
+        assert!(k.channel_hole("srv", "ch").is_none(), "a full holder opened a hole");
+        assert_eq!(k.channel_held_from("srv", "ch"), None);
+        for partial_ok in [true, false] {
+            let (ours, theirs) = (joiner_page(&k, partial_ok), joiner_page(&base, partial_ok));
+            assert_eq!(rows_of(&ours).0, 102);
+            assert_eq!(serde_json::to_string(&ours).unwrap(), serde_json::to_string(&theirs).unwrap(), "it answers an asker unlike a full holder (partial_ok {partial_ok})");
+        }
+    }
+
+    /// A device whose history begins later (it held nothing) lands a partial page and opens
+    /// a hole there, inside the page's own transaction; a hole page vouching for part keeps it.
+    #[test]
+    fn ar39_a_late_joiner_lacks_what_lies_below_a_partial_page() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (o, j) = (store(tmp.path(), "o.db"), store(tmp.path(), "j.db"));
+        post(&o, "alice", "old", T);
+        o.clear_channel_history(T + 1).unwrap();
+        put(&o, &signed(&kp(31), "p1", T + 400_000));
+        let mut asks = ChannelAsks::with_seed(5);
+        let (landed, held) = ask_and_land(&j, &mut asks, &o, "o");
+        assert_eq!((landed.new_count, held), (1, Some(T + 400_000)));
+        assert_eq!(j.channel_hole("srv", "ch").map(|h| h.below), Some(T + 400_000));
+        assert!(j.channel_history_begins_later("srv", "ch"));
+        assert_eq!(rows_of(&joiner_page(&j, false)), (0, Some(true), None), "it answers an older asker as a partial holder");
+        // The hole ask goes to a second cleared holder, which vouches for part again.
+        let o2 = store(tmp.path(), "o2.db");
+        post(&o2, "alice", "old", T);
+        o2.clear_channel_history(T + 1).unwrap();
+        put(&o2, &signed(&kp(31), "p1", T + 400_000));
+        let two = |_: &str, _: &str| [holders("o"), holders("o2")].concat();
+        let moved = asks.sweep_asks(std::time::Instant::now() + std::time::Duration::from_secs(2), &|_| true, &two);
+        assert_eq!(moved, vec![("srv".into(), "ch".into(), "o2".into(), Kind::Hole)], "the hole goes to the holder not short of it");
+        let ask = channel_hole_request(&j, "srv", "ch").unwrap();
+        let HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, partial_ok, until, .. } = ask else { panic!() };
+        let (env, _) = build_channel_sync_batch(&o2, "srv", "ch", since_timestamp, &sender_timestamps, None, partial_ok, until).unwrap();
+        let MessageEnvelope::ChannelSyncBatch { messages, has_more, held_from, .. } = env else { panic!() };
+        let landed = land_channel_page(&j, &mut asks, "srv", "ch", "o2", true, &messages, has_more, held_from, None, "us");
+        assert!(!landed.heard.filled);
+        assert!(j.channel_hole_open("srv", "ch"), "a partial answer filled the hole");
+    }
+
+    const DAY: i64 = 86_400_000;
+
+    fn mids_served(env: &MessageEnvelope) -> Vec<String> {
+        let MessageEnvelope::ChannelSyncBatch { messages, .. } = env else { panic!("a batch") };
+        messages.iter().filter_map(|m| m.mid.clone()).collect()
+    }
+
+    fn catch_up_page(asker: &MessageStore, holder: &MessageStore) -> MessageEnvelope {
+        let HavenMessage::ChannelSyncRequest { since_timestamp, sender_timestamps, gap, partial_ok, until, .. } = channel_sync_request(asker, "srv", "ch", true) else { panic!() };
+        build_channel_sync_batch(holder, "srv", "ch", since_timestamp, &sender_timestamps, gap.as_ref(), partial_ok, until).unwrap().0
+    }
+
+    /// A device that cleared a channel and was away takes the posts made after its clear
+    /// that it missed, older than the first one it then received, and none of what it
+    /// cleared is served again.
+    #[test]
+    fn ar39_a_cleared_device_back_from_away_takes_the_posts_it_missed() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (o, a) = (store(tmp.path(), "o.db"), store(tmp.path(), "a.db"));
+        for s in [&o, &a] {
+            for i in 0..20 {
+                post(s, "alice", &format!("h{i}"), T + i * 1_000);
+            }
+        }
+        a.clear_channel_history(T + DAY).unwrap();
+        let missed: Vec<String> = (0..5).flat_map(|i| [format!("m{i}"), format!("b{i}")]).collect();
+        for i in 0..5 {
+            post(&o, "alice", &format!("m{i}"), T + 3 * DAY + i * 1_000);
+            post(&o, "bob", &format!("b{i}"), T + 3 * DAY + 500 + i * 1_000);
+        }
+        for s in [&o, &a] {
+            post(s, "alice", "p", T + 5 * DAY);
+            post(s, "bob", "pb", T + 5 * DAY + 1);
+        }
+        let served = mids_served(&catch_up_page(&a, &o));
+        assert!(missed.iter().all(|m| served.contains(m)), "the posts it missed after its clear were not served: {served:?}");
+        assert!(!served.iter().any(|m| m.starts_with('h')), "what it cleared was served again: {served:?}");
+    }
+
+    /// A device that cleared a channel and holds nothing of it since lands a partial page
+    /// and opens no hole: its floor is its line, and its asks count what it cleared.
+    #[test]
+    fn ar39_a_cleared_device_opens_no_hole() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (o, a) = (store(tmp.path(), "o.db"), store(tmp.path(), "a.db"));
+        for s in [&o, &a] {
+            post(s, "alice", "old", T);
+            s.clear_channel_history(T + 1).unwrap();
+        }
+        put(&o, &signed(&kp(31), "p1", T + 400_000));
+        let mut asks = ChannelAsks::with_seed(6);
+        let (landed, held) = ask_and_land(&a, &mut asks, &o, "o");
+        assert_eq!((landed.new_count, held), (1, Some(T + 400_000)), "precondition: a partial page landed");
+        assert!(a.channel_hole("srv", "ch").is_none() && !a.channel_history_begins_later("srv", "ch"), "a cleared device opened a hole");
+    }
+
+    /// A cleared device asks exactly as it would have without the clear: its since, sender
+    /// marks and gap digest count what it cleared as held, so no ask shows a clear or where
+    /// it lies, whether or not it received anything since.
+    #[test]
+    fn ar39_a_cleared_device_asks_as_it_would_have_without_the_clear() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let (a, b) = (store(tmp.path(), "a.db"), store(tmp.path(), "b.db"));
+        let floor = T + 20 * DAY;
+        for s in [&a, &b] {
+            // From before the digest window on, as a history the device holds from its start.
+            for i in 0..70 {
+                post(s, "alice", &format!("old{i}"), floor - 35 * DAY + i * DAY / 2);
+            }
+            // On the window's first day, before the window's own start.
+            post(s, "alice", "first-day", floor - 30 * DAY - 3_600_000);
+            post(s, "carol", "c-old", floor - 40 * 60_000);
+            // Within the lookback of the newest row, below where a later ask's digest ends.
+            post(s, "erin", "e-near", floor - 25 * 60_000);
+            // Within the lookback of the newest row, where the digest of a later ask ends.
+            for i in 0..5 {
+                post(s, "dave", &format!("near{i}"), floor - i * 60_000);
+            }
+        }
+        a.clear_channel_history(floor + 60_000).unwrap();
+        assert_eq!((a.channel_floor("srv", "ch"), a.count_all_channel_messages().unwrap()), (Some(floor), 0), "precondition: a cleared all of it");
+        let ask = |s: &MessageStore| serde_json::to_value(channel_sync_request(s, "srv", "ch", true)).unwrap();
+        assert_eq!(ask(&a), ask(&b), "a cleared device holding nothing since asks unlike the device it was");
+        // A slow clock's post after the clear, stamped below the floor, lands and is named.
+        for s in [&a, &b] {
+            post(s, "gwen", "slow", floor - 60_000);
+        }
+        assert_eq!(a.count_all_channel_messages().unwrap(), 1, "precondition: the slow post landed");
+        for s in [&a, &b] {
+            post(s, "alice", "p1", floor + 10 * 60_000);
+            post(s, "bob", "p2", floor + 12 * 60_000);
+        }
+        assert_eq!(ask(&a), ask(&b), "a cleared device asks unlike the device it was");
+        let HavenMessage::ChannelSyncRequest { gap, .. } = channel_sync_request(&a, "srv", "ch", true) else { panic!() };
+        assert!(gap.is_some_and(|g| g.until < floor && g.from < floor - 29 * DAY), "the digest does not reach below its first new post");
+        let end = || ChannelPageEnd::of(&[item("erin", floor - DAY), item("erin", floor - DAY + 5)]).unwrap();
+        let next = |s: &MessageStore| serde_json::to_value(channel_next_page_request(s, "srv", "ch", end(), None)).unwrap();
+        assert_eq!(next(&a), next(&b), "a cleared device's next page differs from the device it was");
+    }
+
+    /// A copy of a cleared device asks for its hole up to its oldest row past the floor,
+    /// which is a row it serves, never the floor.
+    #[test]
+    fn ar39_a_copys_hole_ask_names_a_row_not_the_floor() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let a = store(tmp.path(), "a.db");
+        for i in 0..4 {
+            post(&a, "alice", &format!("old{i}"), T + 1_000 * (i + 1));
+        }
+        a.clear_channel_history(T + 900_000).unwrap();
+        let floor = a.channel_floor("srv", "ch").unwrap();
+        post(&a, "alice", "p1", T + 2_000_000);
+        a.scrub_device_secrets().unwrap();
+        let Some(HavenMessage::ChannelSyncRequest { until, since_timestamp, sender_timestamps, .. }) = channel_hole_request(&a, "srv", "ch") else { panic!("a hole ask") };
+        assert_eq!(until, Some(T + 2_000_000), "the copy's hole ask names until {until:?}, the floor is {floor}");
+        assert!(since_timestamp == -1 && sender_timestamps.values().all(|t| *t == 0));
+    }
+
+    /// A hole page from a holder lacking part of what we lack keeps the hole open, and
+    /// one that served it whole closes it once its rows are in.
+    #[test]
+    fn ar39_a_hole_closes_only_on_a_whole_answer() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let k = store(tmp.path(), "k.db");
+        k.note_held_page("srv", "ch", T + 500_000, false, &[T + 500_000], false, T + 900_000).unwrap();
+        post(&k, "alice", "a9", T + 500_000);
+        let mut asks = ChannelAsks::with_seed(6);
+        let device = asks.start("srv", "ch", &holders("o"), std::time::Instant::now()).unwrap();
+        let heard = land_channel_page(&k, &mut asks, "srv", "ch", &device, true, &[], None, None, None, "us").heard;
+        assert_eq!(heard.again, Some(Kind::Hole), "the whole catch-up hands the hole to the same holder");
+        let landed = land_channel_page(&k, &mut asks, "srv", "ch", &device, true, &[], None, Some(T + 500_000), None, "us");
+        assert!(!landed.heard.filled && k.channel_hole_open("srv", "ch"), "a partial answer filled the hole");
+        let mut asks = ChannelAsks::with_seed(6);
+        let device = asks.start("srv", "ch", &holders("p"), std::time::Instant::now()).unwrap();
+        land_channel_page(&k, &mut asks, "srv", "ch", &device, true, &[], None, None, None, "us");
+        let landed = land_channel_page(&k, &mut asks, "srv", "ch", &device, true, &[], None, None, None, "us");
+        assert!(landed.heard.filled && !k.channel_hole_open("srv", "ch"), "a whole answer left the hole open");
+    }
+
+    /// A full page of the hole's own ask raises the hole's bottom once its rows are in; a
+    /// partial one never does.
+    #[test]
+    fn ar39_a_hole_page_keeps_its_progress() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let k = store(tmp.path(), "k.db");
+        k.note_held_page("srv", "ch", 50_000 + T, false, &[50_000 + T], false, T + 90_000).unwrap();
+        let mut asks = ChannelAsks::with_seed(7);
+        let device = asks.start("srv", "ch", &holders("h"), std::time::Instant::now()).unwrap();
+        land_channel_page(&k, &mut asks, "srv", "ch", &device, true, &[], None, None, None, "us");
+        let carol = kp(41);
+        let mut forged = signed(&carol, "c3", T + 300);
+        forged.t = "tampered".into();
+        let page = vec![signed(&carol, "c1", T + 100), signed(&carol, "c2", T + 200), forged];
+        let landed = land_channel_page(&k, &mut asks, "srv", "ch", &device, true, &page, Some(true), None, ChannelPageEnd::of(&page), "us");
+        assert_eq!(landed.until, Some(T + 50_000), "a hole page's next page lost its bound");
+        assert_eq!(k.channel_hole("srv", "ch").map(|h| h.from), Some(T + 200), "the hole's bottom moved past what the page landed");
+        let page = vec![signed(&carol, "c4", T + 400), signed(&carol, "c5", T + 500)];
+        land_channel_page(&k, &mut asks, "srv", "ch", &device, true, &page, Some(true), Some(T + 400), ChannelPageEnd::of(&page), "us");
+        assert_eq!(k.channel_hole("srv", "ch").map(|h| h.from), Some(T + 200), "a partial page filled the hole below it");
+    }
+
+    fn item(sender: &str, ts: i64) -> SyncMessageItem {
+        serde_json::from_value(serde_json::json!({ "s": sender, "t": "x", "ts": ts, "mid": format!("m{ts}") })).unwrap()
+    }
+
+    use crate::node::channel_asks::Kind;
 }
