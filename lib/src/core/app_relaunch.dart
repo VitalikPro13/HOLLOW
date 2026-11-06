@@ -33,8 +33,11 @@ Future<Never> relaunchApp() async {
 /// Ends the process for a relay change, the one exit every relay switch takes.
 ///
 /// The node binds its relay at startup, so a change only lands on a fresh
-/// process; mobile has no self-relaunch and the user reopens.
-Future<void> exitForRelaySwitch() async {
+/// process; mobile has no self-relaunch and the user reopens. [endProcess]: an
+/// Android screen that only closes keeps the process and its open store, and
+/// the next launch's wipe of a link's throwaway must not run beneath them.
+Future<void> exitForRelaySwitch({bool endProcess = false}) async {
+  if (endProcess) await relaunchApp();
   if (Platform.isAndroid || Platform.isIOS) {
     try {
       await network_api.notifyShutdown();

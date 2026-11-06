@@ -675,6 +675,7 @@ mod tests {
     #[test]
     fn wipe_routine_is_idempotent_and_marker_resumes() {
         let _g = crate::node::resolver::test_lock();
+        let _s = super::super::storage::store_test_lock();
         let tmp = crate::test_tmp::tempdir().unwrap();
         let root = tmp.path();
         seed_root(root);
@@ -865,6 +866,7 @@ mod tests {
     #[test]
     fn the_boot_wipe_takes_the_recordings_after_the_keys_are_gone() {
         let _g = crate::node::resolver::test_lock();
+        let _s = super::super::storage::store_test_lock();
         let tmp = crate::test_tmp::tempdir().unwrap();
         let root = tmp.path().join("root");
         std::fs::create_dir_all(&root).unwrap();
@@ -890,6 +892,7 @@ mod tests {
     #[test]
     fn a_recording_still_being_written_goes_at_the_next_launch() {
         let _g = crate::node::resolver::test_lock();
+        let _s = super::super::storage::store_test_lock();
         let tmp = crate::test_tmp::tempdir().unwrap();
         let root = tmp.path().join("root");
         std::fs::create_dir_all(&root).unwrap();
@@ -916,6 +919,7 @@ mod tests {
     #[test]
     fn the_boot_wipe_tells_a_destroy_from_a_cancelled_link() {
         let _g = crate::node::resolver::test_lock();
+        let _s = super::super::storage::store_test_lock();
         let tmp = crate::test_tmp::tempdir().unwrap();
         let root = tmp.path().join("root");
         std::fs::create_dir_all(&root).unwrap();
@@ -1073,6 +1077,9 @@ mod tests {
         let boot = storage.split("pub fn perform_pending_wipe(").nth(1).expect("boot wipe");
         let boot = &boot[..boot.find("\n}\n").expect("end of perform_pending_wipe")];
         assert!(!boot.contains(log_macro), "perform_pending_wipe writes a log line");
+        let link = storage.split("pub fn settle_link_throwaway(").nth(1).expect("link settle");
+        let link = &link[..link.find("\n}\n").expect("end of settle_link_throwaway")];
+        assert!(!link.contains(log_macro), "settle_link_throwaway writes a log line");
 
         let mut named = Vec::new();
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

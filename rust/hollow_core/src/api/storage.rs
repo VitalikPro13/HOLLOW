@@ -42,13 +42,14 @@ pub(crate) fn set_test_store(ms: MessageStore) {
     *guard = Some(ms);
 }
 
-/// Serializes every test that swaps the process-global store.
+/// Serializes every test that swaps the process-global store, and hands it over
+/// empty: a store a test left behind would read as an identity this process holds.
 #[cfg(test)]
 pub(crate) fn store_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    let lock = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+    get_store().lock().unwrap_or_else(|e| e.into_inner()).take();
+    lock
 }
 
 static CACHED_PEER_ID: OnceLock<String> = OnceLock::new();
@@ -2598,6 +2599,8 @@ pub fn import_pending_link() -> Result<(), String> {
     match land_stashed_link(&blob, &code, &device) {
         Ok(()) => {
             drop_pending_link();
+            // Bound to the throwaway's key, so a marker left behind here wipes nothing.
+            clear_link_throwaway_mark();
             hollow_log!("[HOLLOW-LINK] Pending link imported via backup pipeline ({} bytes)", blob.len());
             Ok(())
         }
@@ -2616,6 +2619,69 @@ pub fn import_pending_link() -> Result<(), String> {
             Err(e)
         }
     }
+}
+
+// ── A link that never finished: its throwaway goes at the next launch (#123) ──
+
+const LINK_THROWAWAY_MARKER: &str = "link_throwaway.marker";
+
+/// What the marker holds: a digest of the key file the link started on, so only
+/// that very identity is ever taken for a throwaway.
+fn link_throwaway_digest(root: &std::path::Path) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let key = zeroize::Zeroizing::new(std::fs::read(root.join("identity.key")).ok()?);
+    let mut h = Sha256::new();
+    h.update(b"hollow-link-throwaway1");
+    h.update(key.as_slice());
+    Some(h.finalize().into())
+}
+
+/// The mark is bound to the throwaway's key, so one left behind wipes nothing.
+fn clear_link_throwaway_mark() {
+    let Ok(root) = crate::identity::data_dir() else { return };
+    let mark = root.join(LINK_THROWAWAY_MARKER);
+    if std::fs::remove_file(&mark).is_err() && present(&mark) {
+        hollow_log!("[HOLLOW-LINK] The throwaway mark stays until the next launch");
+    }
+}
+
+/// (Receiver) Marks the identity "Link a device" just made as a throwaway: a launch
+/// that still finds it in place with no link stashed starts at Welcome again
+/// ([`settle_link_throwaway`]) rather than on an account the person never chose.
+#[frb]
+pub fn mark_link_throwaway() -> Result<(), String> {
+    let root = crate::identity::data_dir()?;
+    let digest = link_throwaway_digest(&root).ok_or("No identity to mark")?;
+    std::fs::write(root.join(LINK_THROWAWAY_MARKER), digest)
+        .map_err(|e| format!("Failed to mark the link's identity: {e}"))
+}
+
+/// (At launch, BEFORE the wipe check) Queues the wipe of a throwaway whose link
+/// never landed. Any other key in the root (a link that landed, a key replaced
+/// since) only clears the marker; a stashed link keeps it until it lands or is
+/// dropped, and a wipe already queued (a destroy above all) keeps its own marker.
+/// True when it queued a wipe.
+#[frb]
+pub fn settle_link_throwaway() -> Result<bool, String> {
+    use subtle::ConstantTimeEq;
+    let root = crate::identity::data_dir()?;
+    let marker = root.join(LINK_THROWAWAY_MARKER);
+    let Ok(marked) = std::fs::read(&marker) else { return Ok(false) };
+    if present(&root.join(PENDING_WIPE_MARKER))
+        || (present(&pending_link_blob_path()?) && present(&pending_link_code_path()?))
+    {
+        return Ok(false);
+    }
+    let still_throwaway = link_throwaway_digest(&root)
+        .is_some_and(|now| marked.len() == now.len() && bool::from(now.ct_eq(marked.as_slice())));
+    if still_throwaway {
+        // Only queued: the sweep takes the marker with everything else, and never
+        // runs beneath an identity this process holds open.
+        stash_pending_wipe()?;
+        return Ok(true);
+    }
+    std::fs::remove_file(&marker).map_err(|e| format!("Failed to clear the link mark: {e}"))?;
+    Ok(false)
 }
 
 // ── Pending data-dir wipe: next-boot clean slate ─────────────────────────────
@@ -2656,6 +2722,12 @@ pub fn has_pending_wipe() -> Result<bool, String> {
 /// forgets it); false for a cancelled link's throwaway, or while the wipe is unfinished.
 #[frb]
 pub fn perform_pending_wipe() -> Result<bool, String> {
+    // A phone screen that closed keeps its process: a reopened app boots beside
+    // the old identity's store or node, and a sweep beneath them leaves the next
+    // identity running on the old one's handles and id.
+    if identity_open_here() {
+        return Ok(false);
+    }
     let marker = pending_wipe_marker_path()?;
     let data_dir = crate::identity::data_dir()?;
     std::fs::read_dir(&data_dir).map_err(|e| format!("Failed to read data dir for wipe: {e}"))?;
@@ -2677,6 +2749,11 @@ pub fn perform_pending_wipe() -> Result<bool, String> {
     // Last: a crash before this line re-runs the wipe next launch.
     let _ = std::fs::remove_file(&marker);
     Ok(destroyed)
+}
+
+/// This process holds an identity open: the store, a node or a fetch node.
+fn identity_open_here() -> bool {
+    get_store().lock().map_or(true, |store| store.is_some()) || crate::api::network::a_node_runs()
 }
 
 /// Removes what is left of the identity set, of any key and of any landing, waiting
@@ -2751,10 +2828,7 @@ pub(crate) fn finish_wipe_before_a_new_identity() -> Result<(), String> {
     if !present(&root.join(PENDING_WIPE_MARKER)) {
         return Ok(());
     }
-    let store_open = get_store().lock().map_or(true, |store| store.is_some());
-    if !store_open && !crate::api::network::a_node_runs() {
-        perform_pending_wipe()?;
-    }
+    perform_pending_wipe()?;
     if present(&root.join(PENDING_WIPE_MARKER)) {
         return Err(IDENTITY_NOT_READY.into());
     }
@@ -5645,6 +5719,157 @@ mod landing_tests {
         drop(held);
         landing.join().unwrap().unwrap();
         assert_eq!(pair_in_root().as_deref(), Ok("linked"));
+    }
+
+    /// #123: a link the person never finished leaves no account behind; the next
+    /// launch wipes the throwaway it ran on and starts at Welcome.
+    #[test]
+    fn an_unfinished_link_wipes_its_throwaway_at_the_next_launch() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xc1, "throwaway");
+        mark_link_throwaway().unwrap();
+        assert!(!has_pending_wipe().unwrap());
+        assert!(settle_link_throwaway().unwrap(), "the throwaway was kept");
+        assert!(has_pending_wipe().unwrap() && !has_identity().unwrap());
+        perform_pending_wipe().unwrap();
+        let left = !root.join("identity.key").exists() && !root.join(LINK_THROWAWAY_MARKER).exists();
+        unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        assert!(left, "the throwaway or its mark outlived the wipe");
+    }
+
+    /// The mark names one key: an identity that took the throwaway's place is never
+    /// wiped for it, and a link still stashed keeps the throwaway until it lands.
+    #[test]
+    fn a_link_mark_never_wipes_another_identity_or_a_stashed_link() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xc2, "throwaway");
+        mark_link_throwaway().unwrap();
+        std::fs::write(pending_link_blob_path().unwrap(), b"blob").unwrap();
+        std::fs::write(pending_link_code_path().unwrap(), b"code").unwrap();
+        let stashed = settle_link_throwaway().unwrap();
+        let stash_kept_it = root.join(LINK_THROWAWAY_MARKER).exists() && !has_pending_wipe().unwrap();
+        drop_pending_link();
+
+        // What a landing does: the linked identity's set takes the throwaway's place.
+        std::fs::remove_file(root.join("messages.db")).unwrap();
+        identity_in(&root, 0xc3, "linked");
+        let landed = settle_link_throwaway().unwrap();
+        let mark_gone = !root.join(LINK_THROWAWAY_MARKER).exists();
+        let who = pair_in_root();
+        let wipe = has_pending_wipe().unwrap();
+        unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        assert!(!stashed && stash_kept_it, "a stashed link lost its throwaway or its mark");
+        assert!(!landed && !wipe, "the identity that landed was queued for a wipe");
+        assert!(mark_gone, "a mark naming another key stayed");
+        assert_eq!(who.as_deref(), Ok("linked"));
+    }
+
+    /// A link that lands keeps the identity it brought: the throwaway's mark goes
+    /// with the landing, and a launch after it settles nothing. A link refused at
+    /// the landing leaves the throwaway to the wipe.
+    #[test]
+    fn a_landed_link_is_kept_and_a_refused_one_goes_back_to_welcome() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let code = "cd".repeat(32);
+        let blob = link_blob(tmp.path(), 0xc5, &code);
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xc6, "throwaway");
+        mark_link_throwaway().unwrap();
+        let device = NativeKeypair::from_secret_bytes(&[0xc7; 32]).to_protobuf_encoding().unwrap();
+        stash_pending_link(&blob, &code, &device).unwrap();
+        assert!(!settle_link_throwaway().unwrap(), "a stashed link lost its throwaway");
+        import_pending_link().unwrap();
+        let mark_gone = !root.join(LINK_THROWAWAY_MARKER).exists();
+        let settled = settle_link_throwaway().unwrap();
+        let who = pair_in_root();
+
+        let refused = tmp.path().join("refused");
+        identity_in(&refused, 0xc8, "throwaway");
+        mark_link_throwaway().unwrap();
+        stash_pending_link(b"HOLLOW-but-not-decryptable-at-all-000000000000000000", "", &device).unwrap();
+        let import = import_pending_link();
+        let wiped = settle_link_throwaway().unwrap();
+        unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        assert!(mark_gone, "the landing kept the throwaway's mark");
+        assert!(!settled, "the linked identity was queued for a wipe");
+        assert_eq!(who.as_deref(), Ok("linked"));
+        assert!(import.is_err() && wiped, "a refused link kept its throwaway");
+    }
+
+    /// A destroy the last launch could not finish keeps its own marker: a link mark
+    /// settled over it would finish it as a plain wipe and spare the old data kept
+    /// aside.
+    #[test]
+    fn a_link_mark_never_settles_over_a_queued_destroy() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xc9, "throwaway");
+        mark_link_throwaway().unwrap();
+        std::fs::write(pending_wipe_marker_path().unwrap(), crate::api::wipe::DESTROY_MARK).unwrap();
+        let settled = settle_link_throwaway().unwrap();
+        let marker = std::fs::read(pending_wipe_marker_path().unwrap()).unwrap();
+        unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        assert!(!settled, "a link mark settled over a queued destroy");
+        assert_eq!(marker, crate::api::wipe::DESTROY_MARK, "the destroy became a plain wipe");
+    }
+
+    /// An Android screen that closed keeps its process, so a reopened app can boot
+    /// beside the throwaway's open store or node: the throwaway is still queued (it
+    /// never becomes the account), but nothing is swept beneath the live handles.
+    /// Each alone.
+    #[test]
+    fn the_boot_wipe_never_sweeps_while_this_process_has_the_identity_open() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        for what in ["store", "node", "fetch node"] {
+            let root = tmp.path().join(what);
+            let pass = identity_in(&root, 0xca, "throwaway");
+            mark_link_throwaway().unwrap();
+            match what {
+                "store" => set_test_store(MessageStore::open(root.join("messages.db").to_str().unwrap(), &pass).unwrap()),
+                "node" => crate::api::network::pretend_a_node_runs(true, false),
+                _ => crate::api::network::pretend_a_node_runs(false, true),
+            }
+            let queued = settle_link_throwaway();
+            let refused = perform_pending_wipe();
+            let key_kept = root.join("identity.key").exists();
+            get_store().lock().unwrap().take();
+            crate::api::network::pretend_a_node_runs(false, false);
+            let who = pair_in_root();
+            let later = perform_pending_wipe();
+            let gone = !root.join("identity.key").exists() && !has_pending_wipe().unwrap();
+            unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+            assert_eq!(queued, Ok(true), "{what}: the throwaway was not queued");
+            assert!(refused.is_ok(), "{what}: {refused:?}");
+            assert!(key_kept, "{what}: the key went beneath the open identity");
+            assert_eq!(who.as_deref(), Ok("throwaway"), "{what}: the open database was swept");
+            assert!(later.is_ok() && gone, "{what}: the queued wipe never ran once let go");
+        }
+    }
+
+    /// No mark, nothing to settle: an ordinary identity is never touched.
+    #[test]
+    fn an_identity_without_a_link_mark_is_left_alone() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        identity_in(&root, 0xc4, "mine");
+        let settled = settle_link_throwaway().unwrap();
+        let wipe = has_pending_wipe().unwrap();
+        unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        assert!(!settled && !wipe);
     }
 }
 

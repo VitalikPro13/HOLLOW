@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/services/android_version.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
-import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/core/services/overlay_publisher.dart';
@@ -53,6 +52,7 @@ import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/rust/api/recovery.dart' as recovery_api;
 import 'package:hollow/src/ui/shell/data_recovery.dart';
+import 'package:hollow/src/ui/shell/first_run_link.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recent_files_sweep.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
@@ -379,7 +379,24 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // the user replaces it below.
     ref.read(nodeProvider.notifier).stop();
     ref.read(licenseErrorProvider.notifier).state = null;
+    final prompt = Completer<void>();
+    _keyPrompt = prompt.future;
+    try {
+      await _askForNewKey(reason);
+    } finally {
+      prompt.complete();
+    }
+  }
 
+  /// True while this launch links the device: its key prompts point at the key
+  /// the other device already uses.
+  bool _linkingThisDevice = false;
+
+  /// The relay's key prompt while it is open; the first-run link dialog waits
+  /// for it, or would cover it.
+  Future<void>? _keyPrompt;
+
+  Future<void> _askForNewKey(String reason) async {
     final friendlyMessage = switch (reason) {
       'invalid_license_key' =>
         "The relay didn't accept that access key. Check it and try again.",
@@ -389,8 +406,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     };
 
     if (!mounted) return;
-    final newKey =
-        await showLicenseKeyDialog(context, error: friendlyMessage);
+    final newKey = await showLicenseKeyDialog(context,
+        error: friendlyMessage, linking: _linkingThisDevice);
     if (!mounted) return;
     if (newKey != null) {
       await ref.read(licenseKeyProvider.notifier).setKey(newKey);
@@ -1017,19 +1034,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     DeepLinkService.instance.handleUrl(parked);
   }
 
-  /// Finishes a wipe the last session left; a finished destroy also takes this
-  /// profile off the profile list. Says nothing either way.
-  Future<void> _finishPendingWipe() async {
-    try {
-      if (await storage_api.hasPendingWipe()) {
-        if (await storage_api.performPendingWipe()) {
-          await settleProfileAfterBootWipe();
-        }
-      }
-    } catch (e) {
-      debugPrint('[HOLLOW] Pending data-dir wipe failed: $e');
-    }
-  }
+  Future<void> _finishPendingWipe() => finishBootWipe();
 
   Future<void> _bootstrap() async {
     if (_initialized) return;
@@ -1067,6 +1072,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
       unawaited(network_api
           .logFromDart(message: '[HOLLOW-LINK] Pending link import failed: $e')
           .catchError((_) {}));
+      // A dropped link takes its throwaway with it: back to Welcome.
+      await _finishPendingWipe();
     }
 
     final hasExisting = await storage_api.hasIdentity();
@@ -1102,6 +1109,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
 
     await ref.read(identityProvider.notifier).load();
+    // The moment it exists: a launch before the link lands starts at Welcome
+    // again (#123).
+    if (welcomeResult?.action == 'link_device') {
+      await storage_api.markLinkThrowaway().catchError((_) {});
+    }
 
     if (ref.read(identityProvider).error != null) {
       if (_unlocking && mounted) setState(() => _unlocking = false);
@@ -1130,6 +1142,25 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
   /// Everything a launch does once the identity and its database are open.
   Future<void> _afterIdentity({
+    required WelcomeResult? welcomeResult,
+    required bool linkedThisLaunch,
+  }) async {
+    if (welcomeResult?.action != 'link_device') {
+      await _startUp(
+          welcomeResult: welcomeResult, linkedThisLaunch: linkedThisLaunch);
+      return;
+    }
+    _linkingThisDevice = true;
+    await runFirstRunLink(
+      context,
+      startUp: () =>
+          _startUp(welcomeResult: welcomeResult, linkedThisLaunch: false),
+      keyPrompt: () => _keyPrompt,
+    );
+  }
+
+  /// The launch up to a running node; false when it stopped short of one.
+  Future<bool> _startUp({
     required WelcomeResult? welcomeResult,
     required bool linkedThisLaunch,
   }) async {
@@ -1346,13 +1377,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (relayStatus.licenseRequired) {
       var cachedKey = ref.read(licenseKeyProvider);
       if (cachedKey == null && mounted) {
-        final enteredKey = await showLicenseKeyDialog(context);
-        if (!mounted) return;
+        final enteredKey =
+            await showLicenseKeyDialog(context, linking: isLinkDevice);
+        if (!mounted) return false;
         if (enteredKey != null) {
           await ref.read(licenseKeyProvider.notifier).setKey(enteredKey);
           cachedKey = enteredKey;
         } else {
-          return;
+          return false;
         }
       }
       if (cachedKey != null) {
@@ -1446,30 +1478,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await ref.read(systemNotificationProvider.notifier).init();
     _registerDesktopNotificationHandlers();
 
-    // The node is connected on a throwaway identity, so the enter-code flow can
-    // pull the real data; a successful import replaces identity and DB.
-    if (isLinkDevice && mounted) {
-      dismissConnectingDialog();
-      final wentBack = await showDeviceLinkDialog(context, mode: DeviceLinkMode.enterCode);
-      // Back means "go back to Welcome", and the running node still holds the DB
-      // handle, so the throwaway identity is discarded by RELAUNCHING rather than
-      // by re-showing Welcome in place.
-      //
-      // The wipe is MARKED, not done now: with SQLCipher handles open, deleting
-      // messages.db fails silently on Windows and it survives encrypted with the
-      // throwaway passphrase, so the next identity loads forever. The next
-      // launch's _bootstrap wipes before the node starts.
-      if (wentBack == true) {
-        await storage_api.stashPendingWipe();
-        // The shared waiter: a copy spawned while this one runs is handed to
-        // this window and exits, and it would drop --portable.
-        await relaunchApp();
-      }
-    }
-
     // Primed so the screen-share sheet can lock the audio toggle on Android < 10
     // without a first-frame flash.
     if (Platform.isAndroid) await AndroidScreenAudioSupport.prime();
+    return true;
   }
 
   @override

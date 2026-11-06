@@ -409,6 +409,25 @@ debug log alone proves nothing, it sits beside the Windows exe). Tests:
 `erasing_another_profile_takes_its_recordings_and_refuses_the_running_one`,
 `test/profile_wipe_test.dart`, `test/wipe_profile_guard_test.dart`.
 
+The boot wipe has a third trigger, local and bound to one key (#123, t14-123):
+"Link a device" makes a throwaway identity, marked the moment it exists
+(`mark_link_throwaway`: `link_throwaway.marker` = SHA-256 of `hollow-link-throwaway1`
+and the key file). At launch `settle_link_throwaway` queues the wipe only while the
+key file still matches the mark (constant time), no link is stashed and no wipe is
+already queued (a `destroy` marker is never overwritten); any other key just clears
+the mark, and a landing clears it. Nothing remote reaches it. The boot wipe sweeps
+nothing while this process holds an identity open (store, node, fetch node): an
+Android screen that closed keeps its process, so the link-mode relay switch ends the
+process instead. The first-run link has no exit but Back and a landed link
+(`runFirstRunLink`, no system back on the placeholder, the link dialog or the
+link-mode key prompt), so nobody uses the throwaway as an account. Tests:
+`an_unfinished_link_wipes_its_throwaway_at_the_next_launch`,
+`a_link_mark_never_wipes_another_identity_or_a_stashed_link`,
+`a_landed_link_is_kept_and_a_refused_one_goes_back_to_welcome`,
+`a_link_mark_never_settles_over_a_queued_destroy`,
+`the_boot_wipe_never_sweeps_while_this_process_has_the_identity_open`,
+`test/widget/first_run_link_test.dart`, `test/widget/review_link_back_exit_test.dart`.
+
 
 ## 14. Files, vault, recovery, share and relay gates (security audit session 6, 2026-09-27)
 

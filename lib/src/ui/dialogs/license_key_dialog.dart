@@ -13,21 +13,26 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 
 /// Asks for the access key a SELF-HOSTED relay's owner switched on; the
 /// default relay never asks. Resolves to the typed key. The only other way
-/// out is back to the default relay, which restarts Hollow.
+/// out is back to the default relay, which restarts Hollow. [linking]: this
+/// device is joining an identity whose other device already holds a key, and
+/// no system back leaves the prompt.
 Future<String?> showLicenseKeyDialog(
   BuildContext context, {
   String? error,
+  bool linking = false,
 }) {
   return showHollowDialog<String>(
     context: context,
     barrierDismissible: false,
-    builder: (dialogContext) => _LicenseKeyContent(initialError: error),
+    builder: (dialogContext) =>
+        _LicenseKeyContent(initialError: error, linking: linking),
   );
 }
 
 class _LicenseKeyContent extends ConsumerStatefulWidget {
   final String? initialError;
-  const _LicenseKeyContent({this.initialError});
+  final bool linking;
+  const _LicenseKeyContent({this.initialError, this.linking = false});
 
   @override
   ConsumerState<_LicenseKeyContent> createState() => _LicenseKeyContentState();
@@ -99,7 +104,7 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
         await ref
             .read(relayDomainProvider.notifier)
             .setDomain(kDefaultRelayDomain);
-        await exitForRelaySwitch();
+        await exitForRelaySwitch(endProcess: widget.linking);
       }, fallback: "Couldn't switch relays. Try again.");
 
   @override
@@ -108,7 +113,8 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
     final relay = ref.watch(relayDomainProvider);
     final onDefault = relay == kDefaultRelayDomain;
 
-    return HollowDialog(
+    // Linking: a system back would leave the shell on the throwaway (#123).
+    return PopScope(canPop: !widget.linking, child: HollowDialog(
       title: 'This relay needs an access key',
       width: 420,
       busy: actionRunning,
@@ -124,9 +130,12 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
                 style: HollowTypography.mono
                     .copyWith(color: hollow.textPrimary),
               ),
-              const TextSpan(
-                text: ' only lets people in with an access key, set by '
-                    'whoever runs it. Ask them for one and enter it here.',
+              TextSpan(
+                text: widget.linking
+                    ? ' only lets people in with an access key. Enter the one '
+                        'your other device uses.'
+                    : ' only lets people in with an access key, set by '
+                        'whoever runs it. Ask them for one and enter it here.',
               ),
             ]),
             style: HollowTypography.body.copyWith(color: hollow.textSecondary),
@@ -159,6 +168,6 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
           child: const Text('Connect'),
         ),
       ],
-    );
+    ));
   }
 }

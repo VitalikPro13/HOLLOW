@@ -12,7 +12,6 @@ import 'package:hollow/src/core/providers/storage_provider.dart'
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_progress_bar.dart';
@@ -49,6 +48,7 @@ const kExpiredCodeLine = 'This code expired.';
 // Tracks the transient placeholder so it is dismissed exactly once, when the
 // real link dialog is ready.
 bool _connectingDialogOpen = false;
+Route<void>? _connectingRoute;
 
 /// Fills the gap between picking "Link a device" and the node finishing
 /// startup, so the screen is not blank. Not dismissible.
@@ -58,16 +58,33 @@ void showConnectingDialog(BuildContext context, {required String message}) {
   showHollowDialog<void>(
     context: context,
     barrierDismissible: false,
-    builder: (_) => _ConnectingContent(message: message),
+    builder: (dialogContext) {
+      final route = ModalRoute.of(dialogContext);
+      if (_connectingDialogOpen) {
+        _connectingRoute = route;
+      } else if (route != null) {
+        // Dismissed before its first frame.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (route.isActive) route.navigator?.removeRoute(route);
+        });
+      }
+      // Its own route closes it; a system back would leave the link half begun.
+      return PopScope(
+        canPop: false,
+        child: _ConnectingContent(message: message),
+      );
+    },
   );
 }
 
-/// Dismisses the "Connecting…" dialog if it's showing.
+/// Dismisses the "Connecting…" dialog if it's showing. By route identity, never
+/// the top route: a relay's access-key prompt can sit above it (#123).
 void dismissConnectingDialog() {
   if (!_connectingDialogOpen) return;
   _connectingDialogOpen = false;
-  final nav = hollowNavigatorKey.currentState;
-  if (nav != null && nav.canPop()) nav.pop();
+  final route = _connectingRoute;
+  _connectingRoute = null;
+  if (route != null && route.isActive) route.navigator?.removeRoute(route);
 }
 
 /// Drawn in Welcome's frame, so the first-run link reads as one flow.
@@ -189,9 +206,9 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
       notifier.cancelShowingCode().catchError((_) {});
     }
     notifier.reset();
-    // Pops true so the first-run link flow re-shows the Welcome dialog; other
-    // callers ignore the result.
-    Navigator.of(context).maybePop(true);
+    // True takes the first-run link back to Welcome; other callers ignore it.
+    // Never maybePop: the first-run dialog refuses every pop it did not ask for.
+    Navigator.of(context).pop(true);
   }
 
   String _fmtCountdown(int s) {
@@ -205,9 +222,11 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
     final hollow = HollowTheme.of(context);
     final state = ref.watch(deviceLinkSyncProvider);
     // The empty device is still on its first run, so its steps stay in
-    // Welcome's frame; the populated device answers in ordinary dialogs.
+    // Welcome's frame; the populated device answers in ordinary dialogs. Its
+    // only ways out are Back and a landed link: a system back would leave the
+    // shell running on the throwaway identity (#123).
     if (widget.mode == DeviceLinkMode.enterCode) {
-      return _receiver(hollow, state);
+      return PopScope(canPop: false, child: _receiver(hollow, state));
     }
     final declining = _decliningPeer;
     if (declining != null) return _confirmPush(hollow, declining);

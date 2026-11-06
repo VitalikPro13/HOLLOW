@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `backup_database`, `build_snapshot_bytes`, `call_record_from_row`, `check_snapshot`, `clean_staged_database`, `clear_landing_leftovers`, `commit_new_set`, `database_opens_with`, `databases_kept_in`, `db_key_of`, `decrypt_backup_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `drop_pending_link`, `export_backup_bytes`, `finish_interrupted_clear`, `finish_landing`, `finish_wipe_before_a_new_identity`, `get_peer_id`, `get_store`, `identity_set_gone`, `import_backup_bytes`, `import_snapshot_bytes`, `keep_aside_a_database_this_identity_cannot_open`, `land_snapshot`, `land_stashed_link`, `landing_in_progress`, `move_database_to`, `note_store_refusal`, `pending_link_blob_path`, `pending_link_code_path`, `pending_link_device_path`, `pending_link_tries_path`, `pending_wipe_marker_path`, `place_content`, `present`, `put_back_a_kept_database_this_identity_opens`, `put_database_back`, `raise`, `recover_interrupted_landing`, `referenced_asset_hashes`, `refuse_while_not_ready`, `remove_landing_dir`, `remove_set_file`, `rename_when_free`, `roll_back_landing`, `scrubbed_db_copy`, `set_aside_old_set`, `set_database_aside`, `shown`, `snapshot_landing`, `snapshot_leaf`, `snapshot_state_summary`, `spend_link_try`, `stage_new_set`, `stash_pending_link`, `stored_file_to_ffi`, `transfer_temp`, `unlink_cleared_files`, `utc_stamp`
+// These functions are ignored because they are not marked as `pub`: `backup_database`, `build_snapshot_bytes`, `call_record_from_row`, `check_snapshot`, `clean_staged_database`, `clear_landing_leftovers`, `clear_link_throwaway_mark`, `commit_new_set`, `database_opens_with`, `databases_kept_in`, `db_key_of`, `decrypt_backup_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `drop_pending_link`, `export_backup_bytes`, `finish_interrupted_clear`, `finish_landing`, `finish_wipe_before_a_new_identity`, `get_peer_id`, `get_store`, `identity_open_here`, `identity_set_gone`, `import_backup_bytes`, `import_snapshot_bytes`, `keep_aside_a_database_this_identity_cannot_open`, `land_snapshot`, `land_stashed_link`, `landing_in_progress`, `link_throwaway_digest`, `move_database_to`, `note_store_refusal`, `pending_link_blob_path`, `pending_link_code_path`, `pending_link_device_path`, `pending_link_tries_path`, `pending_wipe_marker_path`, `place_content`, `present`, `put_back_a_kept_database_this_identity_opens`, `put_database_back`, `raise`, `recover_interrupted_landing`, `referenced_asset_hashes`, `refuse_while_not_ready`, `remove_landing_dir`, `remove_set_file`, `rename_when_free`, `roll_back_landing`, `scrubbed_db_copy`, `set_aside_old_set`, `set_database_aside`, `shown`, `snapshot_landing`, `snapshot_leaf`, `snapshot_state_summary`, `spend_link_try`, `stage_new_set`, `stash_pending_link`, `stored_file_to_ffi`, `transfer_temp`, `unlink_cleared_files`, `utc_stamp`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CheckedSnapshot`, `LandingFlag`, `LinkImportFailure`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `drop`
 
@@ -439,6 +439,20 @@ Future<bool> hasPendingLink() =>
 /// the throwaway identity whole and its stash for the next launch.
 Future<void> importPendingLink() =>
     RustLib.instance.api.crateApiStorageImportPendingLink();
+
+/// (Receiver) Marks the identity "Link a device" just made as a throwaway: a launch
+/// that still finds it in place with no link stashed starts at Welcome again
+/// ([`settle_link_throwaway`]) rather than on an account the person never chose.
+Future<void> markLinkThrowaway() =>
+    RustLib.instance.api.crateApiStorageMarkLinkThrowaway();
+
+/// (At launch, BEFORE the wipe check) Queues the wipe of a throwaway whose link
+/// never landed. Any other key in the root (a link that landed, a key replaced
+/// since) only clears the marker; a stashed link keeps it until it lands or is
+/// dropped, and a wipe already queued (a destroy above all) keeps its own marker.
+/// True when it queued a wipe.
+Future<bool> settleLinkThrowaway() =>
+    RustLib.instance.api.crateApiStorageSettleLinkThrowaway();
 
 /// Mark the data dir to be wiped clean on the next launch (pre-node-start). Call
 /// this, then relaunch — do NOT try to delete the DB in-process while the node runs.

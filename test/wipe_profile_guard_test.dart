@@ -29,11 +29,11 @@ void main() {
   });
 
   test('the boot wipe settles the profile list when it ended an identity', () {
-    final shell = read('lib/src/ui/shell/hollow_shell.dart');
+    final boot = read('lib/src/ui/shell/first_run_link.dart');
     expect(
         RegExp(r'if \(await storage_api\.performPendingWipe\(\)\) \{\s*'
                 r'await settleProfileAfterBootWipe\(\);')
-            .hasMatch(shell),
+            .hasMatch(boot),
         isTrue);
   });
 
