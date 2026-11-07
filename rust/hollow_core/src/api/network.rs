@@ -1550,6 +1550,7 @@ pub fn set_auto_download_config(
 /// Start the node with the persistent identity from disk. Returns the local peer ID.
 #[frb]
 pub fn start_node() -> Result<String, String> {
+    crate::crash_dumps::keep_secrets_out();
     let node = get_node();
     let mut guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
 
@@ -2828,6 +2829,7 @@ pub fn start_fetch_node(
     timeout_secs: u32,
     server_room: Option<String>,
 ) -> Result<Vec<FetchedMessage>, String> {
+    crate::crash_dumps::keep_secrets_out();
     if FETCH_ACTIVE.swap(true, Ordering::SeqCst) {
         return Err("Fetch already in progress".to_string());
     }

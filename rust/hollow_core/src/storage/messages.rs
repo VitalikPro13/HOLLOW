@@ -817,6 +817,9 @@ fn early_sender_split(spans: &[SenderSpan]) -> usize {
 /// public_key) — shape shared by reaction sync rows and reaction removals.
 pub(crate) type SignedEmojiRow = (String, String, i64, Option<String>, Option<String>);
 
+/// A stored Olm session: (peer_id, pickle_json, sends, reads), the pickle wiped on drop.
+pub(crate) type OlmSessionRow = (String, zeroize::Zeroizing<String>, i64, i64);
+
 /// Column list every DM-message query selects, in [`dm_message_from_row`] order.
 const DM_MSG_COLS: &str = "id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us, album_id";
 
@@ -2729,13 +2732,13 @@ impl MessageStore {
     }
 
     /// Load the Olm account pickle, if one exists.
-    pub fn load_olm_account(&self) -> Result<Option<String>, String> {
+    pub fn load_olm_account(&self) -> Result<Option<zeroize::Zeroizing<String>>, String> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT pickle FROM olm_account WHERE id = 1")
             .map_err(|e| format!("Failed to prepare olm_account query: {e}"))?;
         let mut rows = stmt
-            .query_map([], |row| row.get(0))
+            .query_map([], |row| row.get(0).map(zeroize::Zeroizing::new))
             .map_err(|e| format!("Failed to query olm_account: {e}"))?;
         match rows.next() {
             Some(Ok(pickle)) => Ok(Some(pickle)),
@@ -2771,13 +2774,13 @@ impl MessageStore {
     }
 
     /// A peer's stored session with its version: (pickle_json, sends, reads).
-    pub fn load_olm_session(&self, peer_id: &str) -> Result<Option<(String, i64, i64)>, String> {
+    pub fn load_olm_session(&self, peer_id: &str) -> Result<Option<(zeroize::Zeroizing<String>, i64, i64)>, String> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT pickle, sends, reads FROM olm_sessions WHERE peer_id = ?1")
             .map_err(|e| format!("Failed to prepare olm_sessions query: {e}"))?;
         let mut rows = stmt
-            .query_map(params![peer_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .query_map(params![peer_id], |row| Ok((zeroize::Zeroizing::new(row.get(0)?), row.get(1)?, row.get(2)?)))
             .map_err(|e| format!("Failed to query olm_sessions: {e}"))?;
         match rows.next() {
             Some(Ok(pickle)) => Ok(Some(pickle)),
@@ -2830,13 +2833,13 @@ impl MessageStore {
     }
 
     /// Every stored session with its version: (peer_id, pickle_json, sends, reads).
-    pub fn load_olm_sessions_versioned(&self) -> Result<Vec<(String, String, i64, i64)>, String> {
+    pub fn load_olm_sessions_versioned(&self) -> Result<Vec<OlmSessionRow>, String> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT peer_id, pickle, sends, reads FROM olm_sessions")
             .map_err(|e| format!("Failed to prepare olm_sessions query: {e}"))?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .query_map([], |row| Ok((row.get(0)?, zeroize::Zeroizing::new(row.get(1)?), row.get(2)?, row.get(3)?)))
             .map_err(|e| format!("Failed to query olm_sessions: {e}"))?;
         collect_rows(rows, "olm_sessions")
     }
@@ -2844,11 +2847,11 @@ impl MessageStore {
     /// TEST-ONLY: put a stored session row back as it was, past every version check,
     /// as a database restored from a backup does.
     #[cfg(test)]
-    pub fn restore_olm_session_for_test(&self, peer_id: &str, row: &(String, i64, i64)) {
+    pub fn restore_olm_session_for_test(&self, peer_id: &str, row: &(zeroize::Zeroizing<String>, i64, i64)) {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO olm_sessions (peer_id, pickle, sends, reads) VALUES (?1, ?2, ?3, ?4)",
-                params![peer_id, row.0, row.1, row.2],
+                params![peer_id, row.0.as_str(), row.1, row.2],
             )
             .expect("restore an olm session row");
     }
@@ -11231,7 +11234,7 @@ mod tests {
     }
 
     fn stored_session(store: &MessageStore, peer: &str) -> Option<(String, i64, i64)> {
-        store.load_olm_session(peer).unwrap()
+        store.load_olm_session(peer).unwrap().map(|(pickle, sends, reads)| (pickle.to_string(), sends, reads))
     }
 
     /// AR-30: two processes write session pickles, so a copy that has not come as far
@@ -11287,7 +11290,7 @@ mod tests {
             .unwrap();
         }
         let store = MessageStore::open(&path, &pass).unwrap();
-        assert_eq!(store.load_olm_sessions_versioned().unwrap(), vec![("bob".into(), "from-0.12.0".into(), 0, 0)]);
+        assert_eq!(store.load_olm_sessions_versioned().unwrap(), vec![("bob".into(), zeroize::Zeroizing::new("from-0.12.0".to_string()), 0, 0)]);
         assert!(!store.save_olm_session("bob", "same", 0, 0).unwrap());
         assert!(store.save_olm_session("bob", "next", 0, 1).unwrap());
         assert!(store.load_olm_session_floors().unwrap().is_empty());

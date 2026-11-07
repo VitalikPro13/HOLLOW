@@ -7,14 +7,14 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::mls_storage::MlsSave;
 use crate::node::frame_auth::{LIVE_SKEW_MS, NONCE_LEN};
-use super::olm_manager::{SessionVersion, StoredSession};
+use super::olm_manager::{Pickle, SessionVersion, StoredSession};
 use crate::storage::MessageStore;
 
 /// Commands the swarm task can send to persist crypto state.
 pub(crate) enum CryptoStoreCmd {
-    SaveAccount(String),
+    SaveAccount(Pickle),
     /// `saved` hears what became of the save, for a frame that waits on it.
-    SaveSession { peer_id: String, pickle: String, version: SessionVersion, saved: Option<watch::Sender<Saved>> },
+    SaveSession { peer_id: String, pickle: Pickle, version: SessionVersion, saved: Option<watch::Sender<Saved>> },
     DeleteSession { peer_id: String },
     SaveReadMark { peer_id: String, sealed_ms: i64 },
     /// A live frame the replay guard saw first, kept until it turns stale; `placed` is
@@ -513,17 +513,17 @@ impl CryptoStore {
     }
 
     /// Fire-and-forget: persist the account pickle.
-    pub fn save_account(&self, pickle_json: String) {
+    pub fn save_account(&self, pickle_json: Pickle) {
         let _ = self.cmd_tx.send(CryptoStoreCmd::SaveAccount(pickle_json));
     }
 
     /// Fire-and-forget: persist a session pickle at `version`, past any older copy.
-    pub fn save_session(&self, peer_id: String, pickle_json: String, version: SessionVersion) {
+    pub fn save_session(&self, peer_id: String, pickle_json: Pickle, version: SessionVersion) {
         let _ = self.cmd_tx.send(CryptoStoreCmd::SaveSession { peer_id, pickle: pickle_json, version, saved: None });
     }
 
     /// Persist a session pickle at `version` and hear what became of it.
-    pub fn save_session_awaited(&self, peer_id: String, pickle_json: String, version: SessionVersion) -> SessionSaved {
+    pub fn save_session_awaited(&self, peer_id: String, pickle_json: Pickle, version: SessionVersion) -> SessionSaved {
         let (tx, rx) = watch::channel(Saved::Pending);
         let cmd = CryptoStoreCmd::SaveSession { peer_id, pickle: pickle_json, version, saved: Some(tx) };
         // A closed actor drops the sender with the command, which settles as failed.
@@ -694,6 +694,10 @@ mod tests {
 
     fn v(sends: u64, reads: u64) -> SessionVersion {
         SessionVersion { sends, reads }
+    }
+
+    fn pickle(json: &str) -> Pickle {
+        zeroize::Zeroizing::new(json.to_string())
     }
 
     fn temp_db() -> (crate::test_tmp::TestDir, String, String) {
@@ -873,7 +877,7 @@ mod tests {
             sink.note(&format!("flood{i}"), nonce_n(i, 2), NOW + 300_000, None);
         }
         let started = std::time::Instant::now();
-        let saved = store.save_session_awaited("bob".into(), "p1".into(), v(1, 0));
+        let saved = store.save_session_awaited("bob".into(), pickle("p1"), v(1, 0));
         assert_eq!(saved.settled(Duration::from_secs(120)).await, Saved::Stored);
         let waited = started.elapsed();
         assert!(store.flushed(SOON).await);
@@ -940,16 +944,16 @@ mod tests {
         let (_tmp, path, pass) = temp_db();
         let store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
         held_saves::hold(&path);
-        let saved = store.save_session_awaited("bob".into(), "p1".into(), v(1, 0));
+        let saved = store.save_session_awaited("bob".into(), pickle("p1"), v(1, 0));
         assert_eq!(saved.clone().settled(Duration::from_millis(400)).await, Saved::Pending, "settled before it was written");
         assert_eq!(MessageStore::open(&path, &pass).unwrap().load_olm_session("bob").unwrap(), None);
         held_saves::release(&path, &pass);
         assert_eq!(saved.settled(SOON).await, Saved::Stored);
-        assert_eq!(MessageStore::open(&path, &pass).unwrap().load_olm_session("bob").unwrap(), Some(("p1".into(), 1, 0)));
+        assert_eq!(MessageStore::open(&path, &pass).unwrap().load_olm_session("bob").unwrap(), Some((pickle("p1"), 1, 0)));
 
-        let older = store.save_session_awaited("bob".into(), "older".into(), v(0, 5));
+        let older = store.save_session_awaited("bob".into(), pickle("older"), v(0, 5));
         assert_eq!(older.settled(SOON).await, Saved::Refused, "an older copy must not count as saved");
-        let again = store.save_session_awaited("bob".into(), "p1".into(), v(1, 0));
+        let again = store.save_session_awaited("bob".into(), pickle("p1"), v(1, 0));
         assert_eq!(again.settled(SOON).await, Saved::Stored, "the same state saved again is on disk");
     }
 
@@ -1089,9 +1093,24 @@ mod tests {
     async fn a_save_to_a_store_that_cannot_write_says_failed() {
         let (_tmp, path, _pass) = temp_db();
         let wrong_key = CryptoStore::open(path, "00".repeat(32)).unwrap();
-        let saved = wrong_key.save_session_awaited("bob".into(), "p".into(), v(1, 0));
+        let saved = wrong_key.save_session_awaited("bob".into(), pickle("p"), v(1, 0));
         assert_eq!(saved.settled(SOON).await, Saved::Failed);
         assert_eq!(SessionSaved::failed().settled(SOON).await, Saved::Failed);
+    }
+
+    /// HOL-SEC-200. A pickle read back from the store is wiped when dropped, on every
+    /// read the account and sessions come back through.
+    #[test]
+    fn pickles_read_back_from_the_store_are_wiped_on_drop() {
+        fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+        let (_tmp, path, pass) = temp_db();
+        let disk = MessageStore::open(&path, &pass).unwrap();
+        disk.save_olm_account("{}").unwrap();
+        disk.save_olm_session("bob", "b", 1, 0).unwrap();
+        wiped_on_drop(&disk.load_olm_account().unwrap().unwrap());
+        wiped_on_drop(&disk.load_olm_session("bob").unwrap().unwrap().0);
+        wiped_on_drop(&disk.load_olm_sessions_versioned().unwrap()[0].1);
+        wiped_on_drop(&read_newer(&disk, &HashMap::new()).sessions[0].pickle);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1106,7 +1125,7 @@ mod tests {
         let held = HashMap::from([("behind".to_string(), v(2, 0)), ("ahead".to_string(), v(1, 3))]);
         let newer = tokio::time::timeout(SOON, store.ask_newer(held)).await.unwrap().unwrap();
         let mut got: Vec<(String, String, SessionVersion)> =
-            newer.sessions.into_iter().map(|s| (s.peer_id, s.pickle, s.version)).collect();
+            newer.sessions.into_iter().map(|s| (s.peer_id, s.pickle.to_string(), s.version)).collect();
         got.sort();
         assert_eq!(got, vec![("ahead".into(), "a".into(), v(1, 4)), ("new".into(), "n".into(), v(0, 1))]);
         assert_eq!(newer.read_marks, vec![("ahead".to_string(), 77)]);

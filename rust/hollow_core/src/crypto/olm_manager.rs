@@ -9,6 +9,11 @@ use vodozemac::olm::{
     SessionCreationError,
 };
 use vodozemac::Curve25519PublicKey;
+use zeroize::Zeroizing;
+
+/// An account or session pickle as JSON: every secret key of it, wiped when dropped
+/// (HOL-SEC-200). It rides the store channel to the SQL bind and back this way.
+pub(crate) type Pickle = Zeroizing<String>;
 
 /// Wraps a vodozemac Olm Account and per-peer Sessions: all crypto state lives here.
 pub(crate) struct OlmManager {
@@ -73,7 +78,7 @@ impl SessionVersion {
 #[derive(Clone, Debug)]
 pub(crate) struct StoredSession {
     pub peer_id: String,
-    pub pickle: String,
+    pub pickle: Pickle,
     pub version: SessionVersion,
 }
 
@@ -85,14 +90,66 @@ struct KeySlot {
 }
 
 /// The account row: vodozemac's pickle plus the slot table, which an older build
-/// reading the row ignores. The pickle stays a JSON map here because its integer map
-/// keys do not survive serde's flatten buffer.
-#[derive(Serialize, Deserialize)]
-struct StoredAccount {
+/// reading the row ignores. Written straight from the pickle and read back as two
+/// views of the row, never through a JSON value tree, which would leave the secret
+/// keys behind in freed memory.
+#[derive(Serialize)]
+struct AccountRow<'a> {
     #[serde(flatten)]
-    account: serde_json::Map<String, serde_json::Value>,
-    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    account: &'a AccountPickle,
+    #[serde(skip_serializing_if = "no_slots")]
+    key_slots: &'a VecDeque<KeySlot>,
+}
+
+fn no_slots(slots: &&VecDeque<KeySlot>) -> bool {
+    slots.is_empty()
+}
+
+/// The slot table of an account row, its pickle skipped unread.
+#[derive(Deserialize)]
+struct AccountRowSlots {
+    #[serde(default)]
     key_slots: VecDeque<KeySlot>,
+}
+
+/// `value` as JSON in a buffer sized to it before the first byte is written, so no
+/// growth leaves a copy of a secret behind in freed memory.
+fn pickle_json<T: Serialize + ?Sized>(value: &T) -> Result<Pickle, String> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    /// Refuses to grow past the capacity it was given.
+    struct Fixed<'a>(&'a mut Vec<u8>);
+    impl std::io::Write for Fixed<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.0.capacity() - self.0.len() < buf.len() {
+                return Err(std::io::Error::other("pickle outgrew its buffer"));
+            }
+            self.0.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).map_err(|e| format!("Failed to serialize pickle: {e}"))?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(count.0));
+    serde_json::to_writer(Fixed(&mut bytes), value).map_err(|e| format!("Failed to serialize pickle: {e}"))?;
+    match String::from_utf8(std::mem::take(&mut *bytes)) {
+        Ok(json) => Ok(Zeroizing::new(json)),
+        Err(e) => {
+            drop(Zeroizing::new(e.into_bytes()));
+            Err("Failed to serialize pickle: not UTF-8".to_string())
+        }
+    }
 }
 
 /// Ciphertexts remembered per peer; more than the frames a session sees between two
@@ -146,12 +203,17 @@ fn fail(stale: bool, why: String) -> OlmFail {
 }
 
 /// Whether `key` has small order, so a key agreement with it is the same for every
-/// secret. vodozemac does not check (its 3DH reads no `was_contributory`), so session
-/// setup does: one agreement with a fixed scalar comes out all zero exactly then.
+/// secret. Session setup checks it before vodozemac's own refusal, which reaches a
+/// PreKey's inner ratchet key only at our first send: one agreement with a fixed scalar
+/// comes out all zero exactly then.
 fn small_order(key: &Curve25519PublicKey) -> bool {
     let probe = x25519_dalek::StaticSecret::from([0x5a; 32]);
     !probe.diffie_hellman(&x25519_dalek::PublicKey::from(key.to_bytes())).was_contributory()
 }
+
+/// The wire version of an Olm message with the full MAC (vodozemac's v2 session config);
+/// v1's truncated MAC is version 3.
+const OLM_V2_MESSAGE_VERSION: u8 = 4;
 
 fn ciphertext_digest(ciphertext: &[u8]) -> [u8; 16] {
     use sha2::{Digest, Sha256};
@@ -211,11 +273,11 @@ impl OlmManager {
     /// Restore from previously pickled account + sessions.
     pub fn from_pickles(
         account_json: &str,
-        sessions: Vec<(String, String)>,
+        sessions: Vec<(String, Pickle)>,
     ) -> Result<Self, String> {
-        let stored: StoredAccount = serde_json::from_str(account_json)
+        let account_pickle: AccountPickle = serde_json::from_str(account_json)
             .map_err(|e| format!("Failed to deserialize account pickle: {e}"))?;
-        let account_pickle: AccountPickle = serde_json::from_value(serde_json::Value::Object(stored.account))
+        let stored: AccountRowSlots = serde_json::from_str(account_json)
             .map_err(|e| format!("Failed to deserialize account pickle: {e}"))?;
         let account = Account::from_pickle(account_pickle);
 
@@ -389,11 +451,10 @@ impl OlmManager {
         }
         self.take_newer_if_answered();
 
-        let session = self.account.create_outbound_session(
-            SessionConfig::version_2(),
-            their_identity_key,
-            their_otk,
-        );
+        let session = self
+            .account
+            .create_outbound_session(SessionConfig::version_2(), their_identity_key, their_otk)
+            .map_err(|e| format!("Failed to create outbound session: {e}"))?;
         self.install(peer_id, session);
         self.outbound_at.insert(peer_id.to_string(), (Instant::now(), false));
         self.stepped(peer_id, true);
@@ -435,7 +496,7 @@ impl OlmManager {
             OlmMessage::Normal(_) => return Err(OlmFail::Unreadable("Expected PreKeyMessage but got Normal".to_string())),
         };
         // We only ever start v2 sessions; the 8-byte MAC of v1 is someone else's choice.
-        if message.message().mac_truncated() {
+        if message.message().version() != OLM_V2_MESSAGE_VERSION {
             return Err(OlmFail::Unreadable("PreKey asks for a truncated MAC".to_string()));
         }
         let session_id = message.session_id();
@@ -476,12 +537,17 @@ impl OlmManager {
         }
         let their_identity_key = Curve25519PublicKey::from_base64(their_identity_key_b64)
             .map_err(|e| OlmFail::Unreadable(format!("Invalid identity key: {e}")))?;
-        if small_order(&their_identity_key) || small_order(&message.base_key()) {
+        // The inner ratchet key is first DH'd at our first send, which vodozemac then
+        // refuses for good: a session built on it could never answer.
+        if small_order(&their_identity_key)
+            || small_order(&message.base_key())
+            || small_order(&message.message().ratchet_key())
+        {
             return Err(OlmFail::Unreadable("PreKey carries a small-order key".to_string()));
         }
         let InboundCreationResult { session, plaintext } = self
             .account
-            .create_inbound_session(their_identity_key, &message)
+            .create_inbound_session(SessionConfig::version_2(), their_identity_key, &message)
             .map_err(|e| {
                 let stale = matches!(e, SessionCreationError::MissingOneTimeKey(_));
                 fail(stale, format!("Failed to create inbound session: {e}"))
@@ -499,13 +565,25 @@ impl OlmManager {
 
     /// Encrypt a plaintext message for a peer. Returns (message_type, ciphertext_bytes).
     /// message_type: 0 = PreKey, 1 = Normal.
+    ///
+    /// A session that cannot encrypt never will (its peer's ratchet key has small
+    /// order), so it is retired: the next send finds no session and re-keys, and what
+    /// the peer sent on it still reads. The retire counts as a send, so no stored copy
+    /// of that session (the push fetch's included) outranks it.
     pub fn encrypt(&mut self, peer_id: &str, plaintext: &[u8]) -> Result<(usize, Vec<u8>), String> {
         self.take_newer_if_answered();
         let session = self
             .sessions
             .get_mut(peer_id)
             .ok_or_else(|| format!("No session for peer {peer_id}"))?;
-        let olm_msg = session.encrypt(plaintext);
+        let olm_msg = match session.encrypt(plaintext) {
+            Ok(message) => message,
+            Err(e) => {
+                self.retire_session(peer_id);
+                self.stepped(peer_id, true);
+                return Err(format!("Olm encrypt failed: {e}"));
+            }
+        };
         let (msg_type, ciphertext) = olm_msg.to_parts();
         self.session_last_used.insert(peer_id.to_string(), Instant::now());
         self.stepped(peer_id, true);
@@ -661,7 +739,7 @@ impl OlmManager {
     }
 
     /// The pickle of the session we encrypt with for `peer_id`, with its version.
-    pub(crate) fn session_save(&self, peer_id: &str) -> Result<Option<(String, SessionVersion)>, String> {
+    pub(crate) fn session_save(&self, peer_id: &str) -> Result<Option<(Pickle, SessionVersion)>, String> {
         Ok(self.session_pickle_json(peer_id)?.map(|pickle| (pickle, self.session_version(peer_id))))
     }
 
@@ -764,38 +842,24 @@ impl OlmManager {
     }
 
     /// Serialize the Account, with who holds which requested key, for DB storage.
-    pub fn account_pickle_json(&self) -> Result<String, String> {
-        self.stored_account_json(self.key_slots.clone())
+    pub fn account_pickle_json(&self) -> Result<Pickle, String> {
+        self.stored_account_json(&self.key_slots)
     }
 
     /// The account without who holds which requested key, for a host that keeps no
     /// record of its peers (the media forwarder). A restart then forgets the slots,
     /// which orphans only keys vodozemac drops in time.
-    pub(crate) fn identity_pickle_json(&self) -> Result<String, String> {
-        self.stored_account_json(VecDeque::new())
+    pub(crate) fn identity_pickle_json(&self) -> Result<Pickle, String> {
+        self.stored_account_json(&VecDeque::new())
     }
 
-    fn stored_account_json(&self, key_slots: VecDeque<KeySlot>) -> Result<String, String> {
-        let account = match serde_json::to_value(self.account.pickle()) {
-            Ok(serde_json::Value::Object(map)) => map,
-            Ok(_) => return Err("Failed to serialize account pickle: not a map".to_string()),
-            Err(e) => return Err(format!("Failed to serialize account pickle: {e}")),
-        };
-        serde_json::to_string(&StoredAccount { account, key_slots })
-            .map_err(|e| format!("Failed to serialize account pickle: {e}"))
+    fn stored_account_json(&self, key_slots: &VecDeque<KeySlot>) -> Result<Pickle, String> {
+        pickle_json(&AccountRow { account: &self.account.pickle(), key_slots })
     }
 
     /// Serialize a specific Session for DB storage.
-    pub fn session_pickle_json(&self, peer_id: &str) -> Result<Option<String>, String> {
-        match self.sessions.get(peer_id) {
-            Some(session) => {
-                let pickle = session.pickle();
-                let json = serde_json::to_string(&pickle)
-                    .map_err(|e| format!("Failed to serialize session pickle: {e}"))?;
-                Ok(Some(json))
-            }
-            None => Ok(None),
-        }
+    pub fn session_pickle_json(&self, peer_id: &str) -> Result<Option<Pickle>, String> {
+        self.sessions.get(peer_id).map(|session| pickle_json(&session.pickle())).transpose()
     }
 
     /// Encode bytes as standard base64.
@@ -1499,12 +1563,12 @@ mod tests {
         let mut bob = OlmManager::new();
         let bob_identity = Curve25519PublicKey::from_base64(&bob.identity_key_base64()).unwrap();
         let bob_otk = Curve25519PublicKey::from_base64(&bob.generate_one_time_key()).unwrap();
-        let mut v1 = alice.account.create_outbound_session(SessionConfig::version_1(), bob_identity, bob_otk);
-        let (kind, bytes) = v1.encrypt(b"short tag").to_parts();
+        let mut v1 = alice.account.create_outbound_session(SessionConfig::version_1(), bob_identity, bob_otk).unwrap();
+        let (kind, bytes) = v1.encrypt(b"short tag").unwrap().to_parts();
         assert_eq!(kind, 0);
 
-        let opened = bob.open_prekey(ALICE, &alice.identity_key_base64(), &bytes, BOB);
-        assert!(opened.is_err(), "a v1 PreKey opened a session");
+        let refused = bob.open_prekey(ALICE, &alice.identity_key_base64(), &bytes, BOB).expect_err("a v1 PreKey opened a session");
+        assert!(refused.to_string().contains("truncated MAC"), "refused for another reason: {refused}");
         assert!(!bob.has_session(ALICE));
     }
 
@@ -1521,8 +1585,9 @@ mod tests {
         let mut bob = OlmManager::new();
         let bob_identity = bob.identity_key_base64();
         let bob_otk = bob.generate_one_time_key();
-        assert!(alice.create_outbound_session(BOB, &BASE64.encode(ZERO_POINT), &bob_otk).is_err());
-        assert!(alice.create_outbound_session(BOB, &bob_identity, &BASE64.encode(ORDER_8_POINT)).is_err());
+        let ours = Err("Refused a small-order key".to_string());
+        assert_eq!(alice.create_outbound_session(BOB, &BASE64.encode(ZERO_POINT), &bob_otk), ours);
+        assert_eq!(alice.create_outbound_session(BOB, &bob_identity, &BASE64.encode(ORDER_8_POINT)), ours);
         assert!(!alice.has_session(BOB));
         alice.create_outbound_session(BOB, &bob_identity, &bob_otk).unwrap();
 
@@ -1533,6 +1598,15 @@ mod tests {
         bytes[at..at + 32].copy_from_slice(&ORDER_8_POINT);
         let refused = bob.open_prekey(ALICE, &BASE64.encode(ORDER_8_POINT), &bytes, BOB).expect_err("opened");
         assert!(refused.to_string().contains("small-order"), "refused for another reason: {refused}");
+
+        // Inbound: a PreKey whose base key is small order.
+        let (_, mut bytes) = alice.encrypt(BOB, b"hello").unwrap();
+        let base = alice.sessions.get(BOB).unwrap().session_keys().base_key.to_bytes();
+        let at = bytes.windows(32).position(|w| w == base).expect("the PreKey carries the base key");
+        bytes[at..at + 32].copy_from_slice(&ORDER_8_POINT);
+        let refused = bob.open_prekey(ALICE, &alice.identity_key_base64(), &bytes, BOB).expect_err("opened");
+        assert!(refused.to_string().contains("small-order"), "refused for another reason: {refused}");
+        assert!(!bob.has_session(ALICE));
     }
 
     // AR-30: the version saved with each session decides which copy the store keeps.
@@ -1673,5 +1747,214 @@ mod tests {
         );
         assert_eq!(open(&mut alice, BOB, &app, b1, ALICE).plaintext, b"b1");
         assert_eq!(open(&mut alice, BOB, &app, sent, ALICE).plaintext, b"b2");
+    }
+
+    /// Olm state saved by vodozemac 0.9 (every install before 0.14) loads under the
+    /// current vodozemac: sessions read what was in flight, keep talking, and a saved
+    /// one-time key still opens a new session.
+    #[test]
+    fn olm_state_saved_by_vodozemac_0_9_keeps_working() {
+        let f: serde_json::Value =
+            serde_json::from_str(include_str!("olm_fixtures/vodozemac_0_9_pickles.json")).unwrap();
+        let text = |k: &str| f[k].as_str().unwrap().to_string();
+        let account = |k: &str| serde_json::to_string(&f[k]).unwrap();
+        let wire = |k: &str| -> Wire {
+            (f[k][0].as_u64().unwrap() as usize, OlmManager::decode_base64(f[k][1].as_str().unwrap()).unwrap())
+        };
+        let mut alice = OlmManager::from_pickles(&account("alice_account"), vec![(BOB.into(), text("alice_session").into())]).unwrap();
+        let mut bob = OlmManager::from_pickles(&account("bob_account"), vec![(ALICE.into(), text("bob_session").into())]).unwrap();
+        assert_eq!(alice.identity_key_base64(), text("alice_identity"));
+        assert_eq!(bob.identity_key_base64(), text("bob_identity"));
+
+        assert_eq!(open(&mut bob, ALICE, &alice, wire("pending_alice_to_bob"), BOB).plaintext, b"pending alice to bob");
+        assert_eq!(open(&mut alice, BOB, &bob, wire("pending_bob_to_alice"), ALICE).plaintext, b"pending bob to alice");
+        for i in 0..3 {
+            let a = alice.encrypt(BOB, format!("a{i}").as_bytes()).unwrap();
+            assert_eq!(a.0, 1);
+            assert_eq!(open(&mut bob, ALICE, &alice, a, BOB).plaintext, format!("a{i}").as_bytes());
+            let b = bob.encrypt(ALICE, format!("b{i}").as_bytes()).unwrap();
+            assert_eq!(open(&mut alice, BOB, &bob, b, ALICE).plaintext, format!("b{i}").as_bytes());
+        }
+
+        let mut carol = OlmManager::new();
+        carol.create_outbound_session(BOB, &bob.identity_key_base64(), &text("bob_unused_otk")).unwrap();
+        let hello = carol.encrypt(BOB, b"hello from a new device").unwrap();
+        let opened = open(&mut bob, "carol", &carol, hello, BOB);
+        assert!(opened.created);
+        assert_eq!(opened.plaintext, b"hello from a new device");
+    }
+
+    /// HOL-SEC-161, vodozemac's own layer alone: a v1 PreKey under the v2 config is
+    /// refused before its one-time key is looked up or spent.
+    #[test]
+    fn vodozemac_alone_refuses_a_v1_prekey_under_the_v2_config() {
+        let alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let bob_identity = Curve25519PublicKey::from_base64(&bob.identity_key_base64()).unwrap();
+        let bob_otk = Curve25519PublicKey::from_base64(&bob.generate_one_time_key()).unwrap();
+        let mut v1 = alice.account.create_outbound_session(SessionConfig::version_1(), bob_identity, bob_otk).unwrap();
+        let OlmMessage::PreKey(m) = v1.encrypt(b"short tag").unwrap() else { panic!("not a PreKey") };
+        let before = bob.stored_one_time_key_count();
+        let alice_id = Curve25519PublicKey::from_base64(&alice.identity_key_base64()).unwrap();
+        let Err(e) = bob.account.create_inbound_session(SessionConfig::version_2(), alice_id, &m) else { panic!("opened") };
+        assert!(matches!(e, SessionCreationError::MismatchedSessionConfig { .. }), "{e:?}");
+        assert_eq!(bob.stored_one_time_key_count(), before, "the refused PreKey spent a key");
+    }
+
+    /// HOL-SEC-161, vodozemac's own layer alone: no outbound session on a small-order
+    /// identity or one-time key.
+    #[test]
+    fn vodozemac_alone_refuses_an_outbound_session_on_a_small_order_key() {
+        let alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let bob_identity = Curve25519PublicKey::from_base64(&bob.identity_key_base64()).unwrap();
+        let bob_otk = Curve25519PublicKey::from_base64(&bob.generate_one_time_key()).unwrap();
+        for small in [ZERO_POINT, ORDER_8_POINT] {
+            let small = Curve25519PublicKey::from_bytes(small);
+            assert!(alice.account.create_outbound_session(SessionConfig::version_2(), small, bob_otk).is_err());
+            assert!(alice.account.create_outbound_session(SessionConfig::version_2(), bob_identity, small).is_err());
+        }
+        assert!(alice.account.create_outbound_session(SessionConfig::version_2(), bob_identity, bob_otk).is_ok());
+    }
+
+    fn varint(mut n: usize, out: &mut Vec<u8>) {
+        while n >= 0x80 {
+            out.push((n as u8) | 0x80);
+            n >>= 7;
+        }
+        out.push(n as u8);
+    }
+
+    /// A PreKey from `alice` to `bob` whose inner message names `ratchet` as its ratchet
+    /// key, MAC'd with alice's real chain-0 message key: the receiver derives chain 0
+    /// from the 3DH alone, never from the ratchet key.
+    fn prekey_naming_ratchet(alice: &mut OlmManager, ratchet: [u8; 32], plaintext: &[u8]) -> Vec<u8> {
+        let session = alice.sessions.get_mut(BOB).unwrap();
+        let keys = session.session_keys();
+        let real = session.next_message_key().unwrap();
+        let forged = vodozemac::hazmat::olm::MessageKey::new(
+            Box::new(*real.key()),
+            vodozemac::olm::RatchetPublicKey::from(ratchet),
+            real.index(),
+        )
+        .encrypt(plaintext)
+        .to_bytes();
+        let mut out = vec![3u8];
+        for (tag, key) in [(0x0a, keys.one_time_key), (0x12, keys.base_key), (0x1a, keys.identity_key)] {
+            out.push(tag);
+            out.push(32);
+            out.extend_from_slice(key.as_bytes());
+        }
+        out.push(0x22);
+        varint(forged.len(), &mut out);
+        out.extend_from_slice(&forged);
+        out
+    }
+
+    /// vodozemac first DHs a PreKey's inner ratchet key at our first send and then
+    /// refuses it for good, so a session built on a small-order one could never answer.
+    #[test]
+    fn a_prekey_with_a_small_order_ratchet_key_never_opens_a_session() {
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let otk = bob.generate_one_time_key();
+        alice.create_outbound_session(BOB, &bob.identity_key_base64(), &otk).unwrap();
+        let bytes = prekey_naming_ratchet(&mut alice, ORDER_8_POINT, b"hello");
+        let keys = bob.stored_one_time_key_count();
+
+        let refused = bob.open_prekey(ALICE, &alice.identity_key_base64(), &bytes, BOB).expect_err("opened");
+        assert!(refused.to_string().contains("small-order"), "refused for another reason: {refused}");
+        assert!(!bob.has_session(ALICE));
+        assert_eq!(bob.stored_one_time_key_count(), keys, "the refused PreKey spent a key");
+    }
+
+    /// Control: the same crafted PreKey naming an honest ratchet key opens and answers.
+    #[test]
+    fn the_crafted_prekey_with_an_honest_ratchet_key_opens_and_answers() {
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let otk = bob.generate_one_time_key();
+        alice.create_outbound_session(BOB, &bob.identity_key_base64(), &otk).unwrap();
+        let honest = Curve25519PublicKey::from_base64(&OlmManager::new().identity_key_base64()).unwrap().to_bytes();
+        let bytes = prekey_naming_ratchet(&mut alice, honest, b"hello");
+        let opened = bob.open_prekey(ALICE, &alice.identity_key_base64(), &bytes, BOB).unwrap();
+        assert_eq!(opened.plaintext, b"hello");
+        bob.encrypt(ALICE, b"reply").unwrap();
+    }
+
+    /// A session that cannot encrypt (built past the PreKey check, as a pickle from an
+    /// older build can hold one) is retired at the failed send, so the next send
+    /// re-keys instead of failing forever.
+    #[test]
+    fn a_session_that_cannot_encrypt_is_retired_so_the_next_send_re_keys() {
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let otk = bob.generate_one_time_key();
+        alice.create_outbound_session(BOB, &bob.identity_key_base64(), &otk).unwrap();
+        let bytes = prekey_naming_ratchet(&mut alice, ORDER_8_POINT, b"hello");
+        let OlmMessage::PreKey(m) = OlmMessage::from_parts(0, &bytes).unwrap() else { panic!("not a PreKey") };
+        let alice_id = Curve25519PublicKey::from_base64(&alice.identity_key_base64()).unwrap();
+        let built = bob.account.create_inbound_session(SessionConfig::version_2(), alice_id, &m).unwrap();
+        bob.install(ALICE, built.session);
+        let before = bob.session_version(ALICE);
+
+        let e = bob.encrypt(ALICE, b"reply").expect_err("encrypted on a small-order ratchet key");
+        assert!(e.contains("Olm encrypt failed"), "{e}");
+        assert!(!bob.has_session(ALICE), "the session that cannot encrypt is still the one we send on");
+        assert!(bob.session_version(ALICE).sends > before.sends, "a stored copy of it would outrank the retire");
+
+        let alice_otk = alice.generate_one_time_key();
+        bob.create_outbound_session(ALICE, &alice.identity_key_base64(), &alice_otk).unwrap();
+        let rekeyed = bob.encrypt(ALICE, b"after the re-key").unwrap();
+        assert_eq!(open(&mut alice, BOB, &bob, rekeyed, ALICE).plaintext, b"after the re-key");
+    }
+
+    fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+    /// HOL-SEC-200: a value that writes more the second time it is serialized would
+    /// grow the sized buffer, so the pickle is refused instead.
+    #[test]
+    fn a_pickle_that_would_outgrow_its_buffer_is_refused() {
+        struct Growing(std::cell::Cell<usize>);
+        impl Serialize for Growing {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                self.0.set(self.0.get() + 1);
+                s.serialize_str(&"x".repeat(self.0.get() * 64))
+            }
+        }
+        assert!(pickle_json(&Growing(std::cell::Cell::new(0))).is_err());
+        assert_eq!(pickle_json(&[1u8, 2, 3]).unwrap().as_str(), "[1,2,3]");
+    }
+
+    /// HOL-SEC-200. Every pickle we save carries live secrets (the session's root key
+    /// here), so it is wiped when dropped and was written into a buffer sized up front,
+    /// which leaves no smaller copy behind in freed memory.
+    #[test]
+    fn a_saved_pickle_is_wiped_when_dropped_and_never_outgrew_its_buffer() {
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let otk = bob.generate_one_time_key();
+        alice.create_outbound_session(BOB, &bob.identity_key_base64(), &otk).unwrap();
+        alice.key_for_requester("carol");
+        let root = *alice.sessions.get(BOB).unwrap().active_sending_state().unwrap().root_key;
+
+        let (session, _) = alice.session_save(BOB).unwrap().unwrap();
+        assert!(session.contains(&serde_json::to_string(&root.to_vec()).unwrap()), "the pickle holds no root key");
+        let account = alice.account_pickle_json().unwrap();
+        assert!(account.contains("\"key_slots\""));
+        let identity = alice.identity_pickle_json().unwrap();
+        assert!(!identity.contains("key_slots"));
+        for pickle in [&session, &account, &identity] {
+            wiped_on_drop(pickle);
+            assert_eq!(pickle.capacity(), pickle.len(), "the pickle grew its buffer, leaving a copy behind");
+        }
+
+        let restored = OlmManager::from_pickles(&account, vec![(BOB.into(), session)]).unwrap();
+        assert_eq!(restored.identity_key_base64(), alice.identity_key_base64());
+        assert_eq!(restored.session_id(BOB), alice.session_id(BOB));
+        assert_eq!(restored.key_slots.len(), 1, "the row lost who holds which key");
+        let bare = OlmManager::from_pickles(&identity, vec![]).unwrap();
+        assert_eq!(bare.identity_key_base64(), alice.identity_key_base64());
+        assert!(bare.key_slots.is_empty());
     }
 }

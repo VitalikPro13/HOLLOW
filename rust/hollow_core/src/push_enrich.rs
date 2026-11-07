@@ -52,6 +52,7 @@ pub unsafe extern "C" fn hollow_push_fetch_and_decrypt(
     timeout_secs: u32,
     server_room: *const c_char,
 ) -> *mut c_char {
+    crate::crash_dumps::keep_secrets_out();
     let (data_dir, relay_domain, sender, license, server_room) = unsafe {
         let data_dir = match cstr(data_dir) {
             Some(s) if !s.is_empty() => s,
@@ -95,6 +96,7 @@ const MAX_FIELDS_JSON: usize = 16 * 1024;
 /// Both pointers must be valid NUL-terminated C strings for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hollow_push_open_wake(data_dir: *const c_char, fields_json: *const c_char) -> *mut c_char {
+    crate::crash_dumps::keep_secrets_out();
     let (Some(dir), Some(fields)) = (unsafe { cstr(data_dir) }, unsafe { cstr(fields_json) }) else {
         return ptr::null_mut();
     };

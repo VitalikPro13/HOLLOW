@@ -45,7 +45,7 @@ bip39 = "2.2"
 dirs = "6"
 getrandom = "0.3"
 # low-level-api: `Account::remove_one_time_key`, so a KeyRequest's key leaves with its slot.
-vodozemac = { version = "0.9", features = ["low-level-api"] }
+vodozemac = { version = "0.11.2", features = ["low-level-api", "experimental-session-config"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 crdts = "7.3"
@@ -127,7 +127,7 @@ socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Foundation", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Foundation", "Win32_System_SystemInformation", "Win32_System_ErrorReporting", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
