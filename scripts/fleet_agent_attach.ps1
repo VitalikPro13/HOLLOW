@@ -48,7 +48,21 @@ function Test-ServerAlive {
     $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
     return [bool]($proc -and $proc.ProcessName -eq 'powershell')
 }
-function Read-Text($path) { return [System.IO.File]::ReadAllText($path, $utf8).Trim() }
+# The server writes each file by tmp + move, and the move or a scanner can hold
+# it for a moment. $null once it stays unreadable, so the caller answers anyway.
+function Read-Text($path) {
+    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    for ($try = 1; $try -le 50; $try++) {
+        try {
+            $stream = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
+            try { return (New-Object System.IO.StreamReader($stream, $utf8)).ReadToEnd().Trim() }
+            finally { $stream.Dispose() }
+        } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    return $null
+}
 
 # Another driver's server: a new driver starts clean, as a fresh agent always did.
 $sessionFile = Join-Path $dir 'session'
@@ -85,7 +99,9 @@ if (-not (Test-ServerAlive)) {
 $hello = Join-Path $dir 'hello.json'
 for ($i = 0; $i -lt 1200 -and -not (Test-Path $hello); $i++) { Start-Sleep -Milliseconds 100 }
 if (-not (Test-Path $hello)) { Send-Fail 0 'agent server did not start'; exit 1 }
-Send-Proto (Read-Text $hello)
+$helloText = Read-Text $hello
+if ($null -eq $helloText) { Send-Fail 0 'could not read hello.json'; exit 1 }
+Send-Proto $helloText
 
 while ($true) {
     $line = [Console]::In.ReadLine()
@@ -111,5 +127,7 @@ while ($true) {
         if (-not (Test-ServerAlive)) { Send-Fail $key 'agent server ended'; exit 1 }
         Start-Sleep -Milliseconds 100
     }
-    Send-Proto (Read-Text $answer)
+    $answerText = Read-Text $answer
+    if ($null -eq $answerText) { Send-Fail $key 'could not read the answer'; continue }
+    Send-Proto $answerText
 }

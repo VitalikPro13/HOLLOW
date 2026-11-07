@@ -242,6 +242,9 @@ function Write-Step($message, $colour = 'Cyan') {
 # a different data directory, so it does not conflict with anything here, and
 # killing it would be a rude surprise in the middle of a conversation.
 function Stop-Fleet($onlyPeers = @()) {
+    # Only other machines' peers named: an empty local list would mean every
+    # hollow-* simulator, emulator or instance here, other agents' too.
+    if ($peersGiven -and -not $Peers) { return }
     if (Test-MacBackend) {
         # Several agents share the mini: only this tree's instances, and with
         # -Peers only those, each killed by its pid.
@@ -550,6 +553,11 @@ function Stage-Peer($peer) {
         Write-Step "installing into simulator hollow-$peer"
         & xcrun simctl install $udid $buildOutput 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "simctl install for $peer failed with $LASTEXITCODE" }
+        # A fresh simulator never answers the microphone ask, so a call or voice
+        # channel hangs in getUserMedia; the Android twin is adb's -g. Granted
+        # here, before launch, because a grant kills a running app.
+        & xcrun simctl privacy $udid grant microphone com.anonlisten.hollow 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "simctl privacy grant microphone for $peer failed with $LASTEXITCODE" }
         return
     }
     if (Test-AndroidBackend $peer) {

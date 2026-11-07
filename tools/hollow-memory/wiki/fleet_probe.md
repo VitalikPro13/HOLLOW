@@ -1502,6 +1502,17 @@ FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Stop -Peers e,windo
   `FLEET_MINI_SSH` now defaults to the mini's Tailscale address (the LAN lease moved to .8), and
   `mini_sync.sh` tries it first. A driver started INSIDE an ssh session to the PC hung waiting
   for the mini agent's hello (Windows ssh.exe under sshd); from the desktop session it works.
+- **A run with only remote peers stops nothing here (2026-11-07).** `-Peers windows:g,windows:h`
+  leaves this machine's `$Peers` empty, and an empty list means EVERY `hollow-*` simulator and
+  emulator (or every instance of the tree) to `Stop-Fleet`: the end of a Windows-only scenario run
+  from the mini under the default sim backend terminated other agents' simulators. `Stop-Fleet` now
+  returns at once when peers were given and none run on this machine. A tree from before this fix
+  runs Windows-only scenarios with `FLEET_BACKEND=macos`.
+- **The attach side never drops an answer (2026-11-07).** `fleet_agent_attach.ps1` reads
+  `hello.json`, the session file and each `ans/<key>.json` with FileShare ReadWrite|Delete and
+  retries an IOException 50 times 100 ms apart (the server writes each by tmp file + move, and a
+  scanner or the move can hold it for a moment); a read that still fails sends a failure for that
+  key, so the driver never waits out its timeout for an answer the server already wrote.
 - **Not covered yet:** `fleet_link_gate.ps1` and `fleet_sibling_gate.ps1` `-Build` still assume
   a PC driver (they call `mini_sync.sh` and build Windows locally); the hand-written Windows
   journeys run on the PC only. The relay's 10 new sockets per minute per address is shared by
