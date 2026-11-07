@@ -300,6 +300,9 @@ class VoiceChannelService {
   /// Publish a peer leg's health for the UI.
   void Function(String peerId, LinkHealthSnapshot snapshot)? onLinkHealth;
 
+  /// Publish a peer leg's route for the UI; null once the leg is gone.
+  void Function(String peerId, MediaRoute? route)? onLinkRoute;
+
   /// A leg spent its whole hold-open window without connecting.
   void Function(String peerId)? onLegGiveUp;
 
@@ -692,6 +695,7 @@ class VoiceChannelService {
     // AFTER its watchdog was already gone has nothing left to retract it.
     // Callers that mean to keep a flair up republish it straight after.
     onLinkHealth?.call(peerId, const LinkHealthSnapshot());
+    onLinkRoute?.call(peerId, null);
     final pc = _peerConnections.remove(peerId);
     if (pc != null) {
       unawaited(_reconcileAloneMeter());
@@ -2254,6 +2258,7 @@ class VoiceChannelService {
       peerConnection: () => _peerConnections[peerId],
       isPolite: shouldInitiateIceRepair(localPeerId, peerId),
       onHealth: (snapshot) => onLinkHealth?.call(peerId, snapshot),
+      onRoute: (route) => onLinkRoute?.call(peerId, route),
       onRecoverLink: () => _rebuildLeg(peerId),
       onApplyRung: (rung) => applyVideoRungFor(peerId, rung),
       canSignal: canSignal,

@@ -216,8 +216,9 @@ class MobileCallTopBar extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     // The chat would open ABOVE the lock cover.
     final openChat = ref.watch(appLockedProvider) ? null : onOpenChat;
-    return SizedBox(
-      height: MobileCallMetrics.bar,
+    // Large text grows the bar rather than clipping the subtitle line.
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: MobileCallMetrics.bar),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
         child: Row(

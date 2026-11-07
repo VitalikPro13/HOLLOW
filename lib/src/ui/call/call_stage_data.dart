@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/providers/link_health_provider.dart';
+import 'package:hollow/src/core/providers/media_route_provider.dart';
 
 /// What a stage source shows: someone's screen or someone's camera.
 enum CallSourceKind { screen, camera }
@@ -92,6 +93,9 @@ class CallShare {
   /// Who is watching OUR share, as masters.
   final List<String> watchers;
 
+  /// How a share we watch reaches us. Null for ours and for an offer.
+  final ProviderListenable<MediaRoute?>? route;
+
   const CallShare({
     required this.owner,
     required this.master,
@@ -101,6 +105,7 @@ class CallShare {
     this.renderer,
     this.quality,
     this.watchers = const [],
+    this.route,
   });
 
   CallSourceId get source => CallSourceId.screen(owner);

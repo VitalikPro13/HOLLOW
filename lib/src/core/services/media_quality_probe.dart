@@ -1,5 +1,6 @@
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'ice_route_probe.dart';
 import 'video_quality_ladder.dart';
 
 /// Reads one peer connection's `getStats()` and turns it into the two verdicts
@@ -86,6 +87,7 @@ class MediaQualityProbe {
       rttMs: rttMs,
       availableOutgoingBps: availableOut,
       isSendingVideo: sendingVideo,
+      route: iceRouteFromStats(stats),
     );
   }
 
@@ -148,6 +150,10 @@ class MediaQualitySample {
   /// keep adjusting a camera that is switched off.
   final bool isSendingVideo;
 
+  /// The pair carrying media, read from the same stats so the route badge
+  /// costs no extra native round trip.
+  final IceRoute? route;
+
   const MediaQualitySample({
     this.audioLossOut,
     this.audioLossIn,
@@ -155,6 +161,7 @@ class MediaQualitySample {
     this.rttMs,
     this.availableOutgoingBps,
     this.isSendingVideo = false,
+    this.route,
   });
 
   /// The worst loss figure in either direction. What the flair keys on: the

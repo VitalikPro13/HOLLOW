@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../providers/link_health_provider.dart';
+import 'ice_route_probe.dart';
 import 'link_resilience.dart';
 import 'media_quality_probe.dart';
 import 'video_quality_ladder.dart';
@@ -25,6 +26,7 @@ class LinkWatchdog {
     required this.onHealth,
     required this.onRecoverLink,
     required this.onGiveUp,
+    this.onRoute,
     this.onApplyRung,
     this.onTransportRebuilt,
     this.canSignal,
@@ -45,6 +47,10 @@ class LinkWatchdog {
 
   /// Publish health for the UI. Called only when the snapshot changes.
   final void Function(LinkHealthSnapshot snapshot) onHealth;
+
+  /// Publish the route class for the call UI. Called only when it changes;
+  /// null once the watchdog stops.
+  final void Function(MediaRoute? route)? onRoute;
 
   /// Recover the link. The lane decides what that means.
   ///
@@ -91,6 +97,7 @@ class LinkWatchdog {
   int _restartsThisLapse = 0;
 
   LinkHealthSnapshot _published = const LinkHealthSnapshot();
+  MediaRoute? _publishedRoute;
 
   LinkHealth get health => _resilience.health;
   bool get isLapsing => _resilience.isLapsing;
@@ -118,6 +125,7 @@ class LinkWatchdog {
     _rungApplied = true;
     _restartsThisLapse = 0;
     _publish(const LinkHealthSnapshot());
+    _publishRoute(null);
   }
 
   /// Feed a raw transport state from the lane's `onConnectionState`.
@@ -196,6 +204,10 @@ class LinkWatchdog {
     }
 
     _resilience.setQualityDegraded(sample.isDegraded);
+    // A reading with no selected pair (mid-lapse) keeps the last route: the
+    // health flair already says the link is in trouble.
+    final route = sample.route;
+    if (route != null) _publishRoute(route.mediaRoute);
 
     // The video ladder only has an opinion while a camera is sending and the
     // transport is up: during a lapse the sender is collapsed on purpose, and
@@ -269,6 +281,12 @@ class LinkWatchdog {
     if (snapshot == _published) return;
     _published = snapshot;
     onHealth(snapshot);
+  }
+
+  void _publishRoute(MediaRoute? route) {
+    if (route == _publishedRoute) return;
+    _publishedRoute = route;
+    onRoute?.call(route);
   }
 
   void _log(String line) => log?.call('[HOLLOW-$label] $line');

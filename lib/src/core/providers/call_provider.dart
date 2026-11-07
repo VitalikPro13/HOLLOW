@@ -20,6 +20,7 @@ import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/link_health_provider.dart';
+import 'package:hollow/src/core/providers/media_route_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
@@ -739,6 +740,7 @@ class CallNotifier extends Notifier<CallState> {
       isPolite: shouldInitiateIceRepair(localPeerId, peerId),
       onHealth: (snapshot) =>
           ref.read(callLinkHealthProvider.notifier).set(snapshot),
+      onRoute: (route) => ref.read(callMediaRouteProvider.notifier).set(route),
       onRecoverLink: _restartMediaSession,
       onApplyRung: (rung) => _service.applyVideoRung(rung),
       // A recovery after an ICE restart can rebuild the transport without any SDP
@@ -1708,6 +1710,7 @@ class CallNotifier extends Notifier<CallState> {
 
     final incoming = _incomingScreenShare;
     _incomingScreenShare = null;
+    ref.read(callShareRouteProvider.notifier).clear();
     await incoming?.close();
 
     final peerId = state.peerId;
@@ -2316,6 +2319,7 @@ class CallNotifier extends Notifier<CallState> {
       // racing a new offer's close() corrupts the PC's threads.
       final incoming = _incomingScreenShare;
       _incomingScreenShare = null;
+      ref.read(callShareRouteProvider.notifier).clear();
       await incoming?.close();
       _dmWatchConnectTimer?.cancel();
       _dmWatchConnectTimer = null;
@@ -2352,10 +2356,16 @@ class CallNotifier extends Notifier<CallState> {
       _incomingScreenShare = null;
     }
 
-    _incomingScreenShare = ScreenShareService(
+    ref.read(callShareRouteProvider.notifier).clear();
+    final incoming = ScreenShareService(
       localPeerId: localPeerId,
       iceServers: iceConfig,
     );
+    _incomingScreenShare = incoming;
+    incoming.onRoute = (pair) {
+      if (_incomingScreenShare != incoming) return;
+      ref.read(callShareRouteProvider.notifier).set(pair?.mediaRoute);
+    };
 
     _incomingScreenShare!.onIceCandidate = (candidate) {
       _sendSignal(peerId, 'screen_ice', jsonEncode({
@@ -2490,6 +2500,8 @@ class CallNotifier extends Notifier<CallState> {
     _restoreVideoAfterRestart = false;
     RealtimeSessionFlag.release('dm-call');
     ref.read(callLinkHealthProvider.notifier).clear();
+    ref.read(callMediaRouteProvider.notifier).clear();
+    ref.read(callShareRouteProvider.notifier).clear();
     // _undeliveredEnd is deliberately NOT cleared here: _cleanup runs as part of
     // the teardown that queued it. It is cleared on delivery.
     _iceRepairTimer?.cancel();

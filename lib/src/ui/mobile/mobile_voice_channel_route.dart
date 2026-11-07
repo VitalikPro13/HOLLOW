@@ -10,9 +10,11 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
+import 'package:hollow/src/ui/call/call_route.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
+import 'package:hollow/src/ui/components/drop_when_tight.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -194,13 +196,20 @@ class _MobileVoiceChannelRouteState
             children: [
               MobileCallTopBar(
                 title: widget.channelName,
-                subtitle: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (serverName != null && serverName.isNotEmpty)
-                      Flexible(child: Text('$serverName · ')),
-                    if (joinedAt != null) CallDurationText(startedAt: joinedAt),
-                  ],
+                subtitle: DropWhenTight(
+                  gap: HollowSpacing.sm,
+                  lead: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (serverName != null && serverName.isNotEmpty)
+                        Flexible(child: Text('$serverName · ')),
+                      if (joinedAt != null)
+                        CallDurationText(startedAt: joinedAt),
+                    ],
+                  ),
+                  extra: joinedAt != null
+                      ? CallRouteIndicator(roomRouteOf(data))
+                      : const SizedBox.shrink(),
                 ),
                 onMinimise: () => Navigator.of(context).maybePop(),
                 // A meeting's chat lives with the meeting, not in a channel;

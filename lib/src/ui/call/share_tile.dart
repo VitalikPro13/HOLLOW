@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hollow/src/core/providers/media_route_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -10,12 +11,14 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/call/call_person_tile.dart';
+import 'package:hollow/src/ui/call/call_route.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
 import 'package:hollow/src/ui/call/call_theme.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/share_quality_chip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -265,6 +268,12 @@ class ShareTile extends ConsumerWidget {
                               color: media.textSecondary,
                             ),
                           ],
+                          if (share.route != null)
+                            _ShareRouteText(
+                              route: share.route!,
+                              sharerName: share.name,
+                              color: media.textSecondary,
+                            ),
                         ],
                       ),
                     ),
@@ -411,6 +420,43 @@ class _QualityText extends StatelessWidget {
       valueListenable: r,
       builder: (_, v, _) => text(ShareQualityChip.receivedLabel(
           v.width.toInt(), v.height.toInt(), sourceLabel)),
+    );
+  }
+}
+
+/// How a watched share reaches us, in the title row's quiet voice. Over video
+/// it is a word in the label, never a second scrim.
+class _ShareRouteText extends ConsumerWidget {
+  final ProviderListenable<MediaRoute?> route;
+  final String sharerName;
+  final Color color;
+
+  const _ShareRouteText({
+    required this.route,
+    required this.sharerName,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final current = ref.watch(route);
+    if (current == null) return const SizedBox.shrink();
+    final words = shareRouteWords(current, sharerName);
+    return Padding(
+      padding: const EdgeInsets.only(left: HollowSpacing.sm),
+      child: HollowTooltip(
+        message: words.tip,
+        child: Semantics(
+          container: true,
+          label: '${words.label}. ${words.tip}',
+          excludeSemantics: true,
+          child: Text(
+            words.label,
+            maxLines: 1,
+            style: HollowTypography.caption.copyWith(color: color),
+          ),
+        ),
+      ),
     );
   }
 }

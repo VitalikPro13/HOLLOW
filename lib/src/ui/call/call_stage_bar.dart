@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/call/call_route.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
 import 'package:hollow/src/ui/call/call_theme.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
@@ -50,6 +51,9 @@ class CallBarModel {
   final String leaveLabel;
   final VoidCallback onLeave;
 
+  /// Whose media route the bar's badge describes. Null shows none.
+  final CallRouteSubject? route;
+
   const CallBarModel({
     required this.startedAt,
     required this.muted,
@@ -67,6 +71,7 @@ class CallBarModel {
     required this.watching,
     required this.leaveLabel,
     required this.onLeave,
+    this.route,
   });
 }
 
@@ -122,6 +127,13 @@ class CallStageBar extends ConsumerWidget {
                   ),
                 ),
         ),
+        if (m.startedAt != null && m.route != null)
+          // Matches the timer's inset on the far side, so the group sits even
+          // against the divider.
+          Padding(
+            padding: const EdgeInsets.only(right: HollowSpacing.xs),
+            child: CallRouteIndicator(m.route!),
+          ),
         if (rec.isMyRecording)
           RecordingIndicator(startedAt: rec.myStartedAt)
         else if (rec.remoteRecorders.isNotEmpty)

@@ -6,6 +6,7 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
+import 'package:hollow/src/core/providers/media_route_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -14,6 +15,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
+import 'package:hollow/src/ui/call/call_route.dart';
 import 'package:hollow/src/ui/call/call_stage.dart';
 import 'package:hollow/src/ui/call/call_stage_bar.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
@@ -101,6 +103,7 @@ class DmCallStageSource extends CallStageSource {
           watched: call.watchingRemoteShare,
           renderer: call.watchingRemoteShare ? calls.screenShareRenderer : null,
           quality: call.remoteScreenShareLabel,
+          route: call.watchingRemoteShare ? callShareRouteProvider : null,
         ),
       if (call.isScreenSharing)
         CallShare(
@@ -243,6 +246,7 @@ class DmCallStageSource extends CallStageSource {
       watching: call.watchingRemoteShare,
       leaveLabel: 'Leave the call',
       onLeave: () => leaveDmCall(context, ref),
+      route: DmCallRoute(dmCallPeerName(ref, peerMaster)),
     );
   }
 }
@@ -381,6 +385,9 @@ class VcCallStageSource extends CallStageSource {
                 ? notifier.getScreenShareRenderer(e.key)
                 : null,
             quality: vc.peerScreenShareLabels[e.key],
+            route: vc.watchingScreenShares.contains(e.key)
+                ? vcShareRouteProvider.select((m) => m[e.key])
+                : null,
           ),
       if (vc.isScreenSharing)
         CallShare(
@@ -516,6 +523,7 @@ class VcCallStageSource extends CallStageSource {
       watching: vc.isWatchingAnyShare,
       leaveLabel: isConference ? 'Leave the meeting' : 'Leave the room',
       onLeave: () => leaveVoiceRoom(context, ref),
+      route: roomRouteOf(data),
     );
   }
 }

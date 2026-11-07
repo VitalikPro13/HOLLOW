@@ -19,6 +19,7 @@ import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/link_health_provider.dart';
+import 'package:hollow/src/core/providers/media_route_provider.dart';
 import 'package:hollow/src/core/services/realtime_session_flag.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -862,6 +863,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // A member on a bad connection is labelled on their own tile only.
     svc.onLinkHealth = (peerId, snapshot) =>
         ref.read(vcLinkHealthProvider.notifier).setFor(peerId, snapshot);
+    svc.onLinkRoute = (peerId, route) =>
+        ref.read(vcMediaRouteProvider.notifier).setFor(peerId, route);
     svc.onLegGiveUp = (_) => _warnNoTurnOnce();
     // See the DM twin: an ICE restart offer needs the relay to carry it, so a
     // restart fired while our own relay link is down is a wasted attempt.
@@ -1303,6 +1306,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await mesh?.closeAll();
     });
     ref.read(vcLinkHealthProvider.notifier).clear();
+    ref.read(vcMediaRouteProvider.notifier).clear();
+    ref.read(vcShareRouteProvider.notifier).clear();
   }
 
   /// A phase that throws must not skip the ones after it: each owns peer
@@ -2232,6 +2237,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final localPeerId = ref.read(identityProvider).peerId ?? '';
 
     // Drop the old cryptors too, so the new PC's receivers re-enable cleanly.
+    ref.read(vcShareRouteProvider.notifier).setFor(originPeer, null);
     final priorIncoming = _incomingScreenShares.remove(originPeer);
     if (priorIncoming != null) {
       await priorIncoming.close();
@@ -2246,6 +2252,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     service.preferredAudioOutputDeviceId =
         await ref.read(audioOutputDeviceProvider.future);
+
+    service.onRoute = (pair) => _publishShareRoute(service, originPeer, pair,
+        delivererPeer: delivererPeer, viaForwarder: viaForwarder);
 
     if (!viaForwarder) {
       service.onIceCandidate = (candidate) {
@@ -3454,6 +3463,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Promotion replaces our existing direct leg: retire it OURSELVES, map-first
     // so its onDisconnected guard no-ops when the sharer's side closes.
     final prevService = _incomingScreenShares.remove(originPeer);
+    ref.read(vcShareRouteProvider.notifier).setFor(originPeer, null);
     if (prevService != null) {
       await prevService.close();
       await _dropShareCryptors(originPeer);
@@ -3482,6 +3492,34 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _vcLog('[HOLLOW-VC] Assigned to ${isSelf ? "OUR OWN engine" : "forwarder"} '
         'for $originPeer — attaching');
   }
+
+  /// Publishes the route of [leg], the share we watch from [originPeer]; null
+  /// while it has none.
+  void _publishShareRoute(
+    ScreenShareService leg,
+    String originPeer,
+    IceRoute? pair, {
+    required String delivererPeer,
+    required bool viaForwarder,
+  }) {
+    if (_incomingScreenShares[originPeer] != leg) return;
+    final vpsId = ref.read(forwarderInfoProvider).peerId;
+    final ownDevice = _service?.localPeerId ?? _myDevicePeerId ?? '';
+    ref.read(vcShareRouteProvider.notifier).setFor(
+        originPeer,
+        pair == null
+            ? null
+            : shareRouteOf(pair,
+                viaForwarder: viaForwarder,
+                byRelayForwarder: vpsId.isNotEmpty && vpsId == delivererPeer,
+                byOwnApp: ownDevice.isNotEmpty && ownDevice == delivererPeer));
+  }
+
+  @visibleForTesting
+  void debugShareLegRouted(String originPeer, IceRoute? pair,
+          {required String delivererPeer, required bool viaForwarder}) =>
+      _publishShareRoute(_incomingScreenShares[originPeer]!, originPeer, pair,
+          delivererPeer: delivererPeer, viaForwarder: viaForwarder);
 
   /// Arm (or re-arm) the 20 s "nothing rendered" watchdog for a share we watch:
   /// a promised delivery can silently never arrive after our previous leg was
@@ -3960,6 +3998,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     final incoming = _incomingScreenShares.remove(peerId);
     _incomingShareOrigins.remove(peerId);
+    ref.read(vcShareRouteProvider.notifier).setFor(peerId, null);
     if (incoming != null) {
       await incoming.close();
       await _dropShareCryptors(peerId);
@@ -4102,6 +4141,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
       final incoming = _incomingScreenShares.remove(origin);
       _incomingShareOrigins.remove(origin);
+      ref.read(vcShareRouteProvider.notifier).setFor(origin, null);
       if (incoming != null) {
         await incoming.close();
         await _dropShareCryptors(origin);

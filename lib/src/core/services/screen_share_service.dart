@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -65,6 +66,12 @@ class ScreenShareService {
   void Function(RTCIceCandidate candidate)? onIceCandidate;
   void Function()? onConnected;
   void Function()? onDisconnected;
+
+  /// The pair this leg carries media on, when it changes; null while the
+  /// transport is down. A forwarder leg's pair is only the hop to the
+  /// forwarder; the caller names the route.
+  void Function(IceRoute? route)? onRoute;
+  String? _publishedRoute;
   void Function()? onRemoteTrackReady;
   void Function()? onScreenShareEnded; // Track ended (window closed)
 
@@ -1090,8 +1097,10 @@ class ScreenShareService {
       case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
       case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
         _stopLivenessWatchdog();
+        _publishRoute(null);
         onDisconnected?.call();
       case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
+        _publishRoute(null);
         // Hold, do not tear down. `disconnected` means ICE consent has gone
         // unanswered for a couple of seconds, which a Wi-Fi stutter produces
         // routinely and which clears itself most of the time; rebuilding
@@ -1207,6 +1216,7 @@ class ScreenShareService {
   Future<bool> _consentLooksStale(RTCPeerConnection pc) async {
     try {
       final stats = await pc.getStats();
+      if (pc == _pc) _noteRouteIn(stats);
       StatsReport? pair;
       for (final r in stats) {
         if (r.type != 'candidate-pair') continue;
@@ -1393,7 +1403,29 @@ class ScreenShareService {
         : forwarderLeg
             ? '${prefix}pair ${route.detail}'
             : '$prefix$route');
+    if (route != null && _pc != null) _publishRoute(route);
   }
+
+  void _publishRoute(IceRoute? route) {
+    final key = route?.detail;
+    if (key == _publishedRoute) return;
+    _publishedRoute = key;
+    onRoute?.call(route);
+  }
+
+  /// A stats reading the leg already takes; one with no selected pair keeps
+  /// the last route, the state handler clears it.
+  void _noteRouteIn(List<StatsReport> stats) {
+    final route = iceRouteFromStats(stats);
+    if (route != null) _publishRoute(route);
+  }
+
+  @visibleForTesting
+  void debugConnectionState(RTCPeerConnectionState state) =>
+      _onConnectionStateChanged(state);
+
+  @visibleForTesting
+  void debugStatsReading(List<StatsReport> stats) => _noteRouteIn(stats);
 
   Future<void> _handleRemoteVideoTrack(RTCTrackEvent event) async {
     // Dispose any previously-synthesized remote stream before replacing it;

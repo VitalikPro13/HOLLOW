@@ -10,10 +10,12 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
+import 'package:hollow/src/ui/call/call_route.dart';
 import 'package:hollow/src/ui/call/call_person_tile.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
+import 'package:hollow/src/ui/components/drop_when_tight.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
@@ -122,7 +124,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
             children: [
               MobileCallTopBar(
                 title: peer.name,
-                subtitle: _subtitle(call),
+                subtitle: _subtitle(call, peer.name),
                 onMinimise: () => Navigator.of(context).maybePop(),
                 onOpenChat: () => openMobileCallChat(context, peer: master),
               ),
@@ -137,10 +139,14 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     );
   }
 
-  Widget _subtitle(CallState call) {
+  Widget _subtitle(CallState call, String peerName) {
     final startedAt = call.startedAt;
     if (call.status == CallStatus.active && startedAt != null) {
-      return CallDurationText(startedAt: startedAt);
+      return DropWhenTight(
+        gap: HollowSpacing.sm,
+        lead: CallDurationText(startedAt: startedAt),
+        extra: CallRouteIndicator(DmCallRoute(peerName)),
+      );
     }
     return Text(switch (call.status) {
       CallStatus.ringing => call.direction == CallDirection.outgoing

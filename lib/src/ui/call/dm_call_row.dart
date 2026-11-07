@@ -9,11 +9,13 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
 import 'package:hollow/src/ui/call/call_person_tile.dart';
+import 'package:hollow/src/ui/call/call_route.dart';
 import 'package:hollow/src/ui/call/call_stage_bar.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart';
 import 'package:hollow/src/ui/call/call_theme.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
+import 'package:hollow/src/ui/components/drop_when_tight.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
@@ -114,12 +116,19 @@ class DmCallRow extends ConsumerWidget {
         const SizedBox(width: HollowSpacing.md),
         Expanded(
           child: _titles(
-            Text(
-              weak ? 'Weak connection' : 'Voice call',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: HollowTypography.label.copyWith(
-                  color: weak ? hollow.warning : hollow.textPrimary),
+            DropWhenTight(
+              gap: HollowSpacing.sm,
+              lead: Text(
+                weak ? 'Weak connection' : 'Voice call',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: HollowTypography.label.copyWith(
+                    color: weak ? hollow.warning : hollow.textPrimary),
+              ),
+              extra: active
+                  ? CallRouteIndicator(
+                      DmCallRoute(dmCallPeerName(ref, peerMaster)))
+                  : const SizedBox.shrink(),
             ),
             active && call.startedAt != null
                 ? CallDurationText(

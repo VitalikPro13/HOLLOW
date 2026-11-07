@@ -12,6 +12,7 @@ import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/link_health_provider.dart';
+import 'package:hollow/src/core/providers/media_route_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -92,6 +93,7 @@ void main() {
     bool light = false,
     bool phone = true,
     bool overlay = false,
+    double textScale = 1.0,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1.0;
@@ -116,9 +118,11 @@ void main() {
         child: MaterialApp(
           debugShowCheckedModeBanner: false,
           theme: theme,
-          builder: overlay
-              ? (context, c) => Stack(children: [c!, child])
-              : null,
+          builder: (context, c) => MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.linear(textScale)),
+            child: overlay ? Stack(children: [c!, child]) : c!,
+          ),
           home: overlay ? const Scaffold() : child,
         ),
       ),
@@ -221,6 +225,40 @@ void main() {
           voiceChannelProvider.overrideWith(() => _Room(room())),
           vcSpeaking,
           weakLink,
+        ],
+      );
+    }
+  });
+
+  testWidgets('route badge drops whole where the header has no room',
+      (tester) async {
+    for (final (width, scale) in [(390.0, 1.0), (375.0, 1.0), (320.0, 1.0), (320.0, 1.5), (375.0, 1.5)]) {
+      await shoot(
+        tester,
+        'phone_route_room_${width.toInt()}_x$scale',
+        const MobileVoiceChannelRoute(
+          serverId: kServerId1,
+          channelId: kVoiceChannelId,
+          channelName: 'Jam room',
+        ),
+        size: Size(width, 640),
+        textScale: scale,
+        extra: [
+          voiceChannelProvider.overrideWith(() => _Room(room())),
+          vcMediaRouteProvider.overrideWith(_MixedRoutes.new),
+        ],
+      );
+    }
+    for (final (width, scale) in [(320.0, 1.0), (320.0, 2.0)]) {
+      await shoot(
+        tester,
+        'phone_route_dm_${width.toInt()}_x$scale',
+        const MobileCallScreen(peerId: kFriendPeerId1),
+        size: Size(width, 640),
+        textScale: scale,
+        extra: [
+          callProvider.overrideWith(() => _InCall(dm())),
+          callMediaRouteProvider.overrideWith(_Relayed.new),
         ],
       );
     }
@@ -400,6 +438,20 @@ class _QuietStatus extends StatusNotifier {
 class _NoRingtone extends RingtonePathNotifier {
   @override
   Future<String?> build() async => null;
+}
+
+class _MixedRoutes extends MediaRouteMapNotifier {
+  @override
+  Map<String, MediaRoute> build() => const {
+        kFriendPeerId1: MediaRoute.direct,
+        kFriendPeerId2: MediaRoute.direct,
+        kFriendPeerId3: MediaRoute.relayed,
+      };
+}
+
+class _Relayed extends MediaRouteNotifier {
+  @override
+  MediaRoute? build() => MediaRoute.relayed;
 }
 
 class _NoAvatars extends AvatarNotifier {
