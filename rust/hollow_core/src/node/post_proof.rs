@@ -359,6 +359,29 @@ mod tests {
         let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("m.db").to_string_lossy().into_owned();
         let store = crate::storage::MessageStore::open(&path, &"ab".repeat(32)).unwrap();
+        change_proof_rows(&store);
+    }
+
+    /// A clear of ours takes the rows and every change riding them, never the window
+    /// each device's proofs set: a retire after it names the same dates.
+    #[test]
+    fn a_clear_keeps_the_window_of_every_change_proof() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("m.db").to_string_lossy().into_owned();
+        let store = crate::storage::MessageStore::open(&path, &"ab".repeat(32)).unwrap();
+        let before = change_proof_rows(&store);
+        store.clear_channel_history(1_000_000).unwrap();
+        assert!(!store.channel_message_exists("p1") && !store.channel_message_exists("q3"), "precondition: the clear took the rows");
+        let master = keys(20).1;
+        let after: Vec<Option<i64>> = [21, 22, 23, 24, 26].iter().map(|t| store.newest_post_of_device("srv", &master, &keys(*t).1)).collect();
+        assert_eq!(after, before, "a clear moved a retire's window");
+        assert_eq!(store.newest_post_of_device("other-srv", &master, &keys(22).1), Some(9_500), "each server keeps its own");
+        assert_eq!(store.newest_post_of_device("srv", &keys(25).1, &keys(24).1), Some(9_800), "each identity keeps its own");
+    }
+
+    /// The rows of `lead_c_a_retires_window_counts_the_devices_change_proofs`, checked as
+    /// they land; returns the windows of devices 21, 22, 23, 24 and 26.
+    fn change_proof_rows(store: &crate::storage::MessageStore) -> Vec<Option<i64>> {
         let (master, other) = (keys(20).1, keys(25).1);
         let dev = |t: u8| DevProof { device: keys(t).1, sig: "s".into() };
         let window = |t: u8| store.newest_post_of_device("srv", &master, &keys(t).1);
@@ -404,6 +427,7 @@ mod tests {
         assert_eq!(store.add_reaction("p2", "+1", &other, 9_800, Some("sig"), Some("pk")), Ok(true));
         store.set_reaction_dev("p2", "+1", &other, 9_800, &dev(24)).unwrap();
         assert_eq!((window(22), window(23), window(24)), (Some(5_000), Some(6_000), Some(7_000)), "only this server's, this identity's, this exact device's changes count");
+        [21, 22, 23, 24, 26].iter().map(|t| window(*t)).collect()
     }
 
     /// The proof verifies only for the post it was made for (its words included), under

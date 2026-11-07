@@ -426,7 +426,9 @@ pub(crate) fn author_missing_join_keys(
 /// Whether this device sets a server's missing join key now. A second key is an invite
 /// reset, so only a device that knows none exists sets one: the lowest of the owner's
 /// devices the relay shows us in the room, with no join or whole-log fetch under way,
-/// once this connection's catch-up there finished or no other member is there.
+/// once this connection's catch-up there finished or no other member is there. Never
+/// while we are away: the relay hides us from our siblings too, so an on-screen
+/// higher one also thinks it is the lowest.
 #[allow(clippy::too_many_arguments)]
 fn sets_missing_join_key(
     server_id: &str,
@@ -438,7 +440,7 @@ fn sets_missing_join_key(
     local_master: &str,
     local_device: &str,
 ) -> bool {
-    if pending_server_joins.contains_key(server_id) || crdt_resync.whole_log_due(server_id) {
+    if super::ws_client::backgrounded() || pending_server_joins.contains_key(server_id) || crdt_resync.whole_log_due(server_id) {
         return false;
     }
     let lower_sibling = ws_room_peers.get(server_id).is_some_and(|peers| {
@@ -5313,6 +5315,43 @@ mod tests {
         pending.clear();
         resync.mark_due_for_test("srv");
         assert!(!sets(&hold, &resync, &pending, &room(&[]), &lo), "a whole-log fetch is due");
+    }
+
+    /// The relay hides a backgrounded device from every presence list, its siblings'
+    /// too, while it still sees them: an away lower owner device and an on-screen higher
+    /// one would both think they are the lowest, and two first keys fold as a reset.
+    #[test]
+    fn an_away_owner_device_sets_no_missing_join_key() {
+        use crate::identity::native_identity::NativeKeypair;
+        let id = |b: u8| NativeKeypair::from_secret_bytes(&[b; 32]).peer_id();
+        let (master, member) = (id(221), id(224));
+        let (mut lo, mut hi) = (id(222), id(223));
+        if hi < lo {
+            std::mem::swap(&mut lo, &mut hi);
+        }
+        crate::crdt::set_identity_resolver(super::super::resolver::resolve);
+        super::super::resolver::seed_self(&master, &[lo.clone(), hi.clone()]);
+        let mut state = ServerState::new("srv".into(), "S".into(), master.clone());
+        state.members.insert(member.clone(), crate::crdt::server_state::MemberInfo { peer_id: member.clone(), display_name: "m".into() });
+        let states: ServerStates = HashMap::from([("srv".to_string(), state)]);
+        let resync = super::super::crdt_resync::CrdtResync::for_test();
+        let pending: HashMap<String, PendingJoin> = HashMap::new();
+        let room = |peers: &[&String]| -> WsRoomPeers { HashMap::from([("srv".to_string(), peers.iter().map(|p| (*p).clone()).collect())]) };
+        let mut hold = super::super::join_hold::JoinHold::default();
+        hold.went_away(&states);
+        hold.joined("srv", false);
+        hold.synced(Some(("srv".into(), member.clone())));
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let sets_as = |away: bool, peers: &WsRoomPeers, device: &str| {
+            let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(away));
+            rt.block_on(super::super::ws_client::with_test_away(flag, async {
+                sets_missing_join_key("srv", &hold, &pending, &resync, &states, peers, &master, device)
+            }))
+        };
+        assert!(!sets_as(true, &room(&[&hi, &member]), &lo), "the away lower device set a key");
+        assert!(sets_as(false, &room(&[&member]), &hi), "the on-screen device the relay shows alone sets it");
+        assert!(!sets_as(true, &room(&[]), &lo), "an away owner alone set a key");
+        assert!(sets_as(false, &room(&[&hi, &member]), &lo), "back on screen, the lowest device sets it");
     }
 }
 

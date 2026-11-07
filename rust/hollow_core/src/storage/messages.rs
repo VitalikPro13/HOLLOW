@@ -595,12 +595,95 @@ fn count_cleared_batch(conn: &Connection) -> rusqlite::Result<()> {
             *first = (*first).min(*ts);
         }
     }
+    count_cleared_proofs(conn)?;
     for ((sid, cid), first) in oldest {
         conn.execute(
             "UPDATE channel_floors SET history_from = MIN(COALESCE(history_from, ?3), ?3) WHERE server_id = ?1 AND channel_id = ?2",
             params![sid, cid, first],
         )?;
         settle_cleared_counts(conn, &sid, &cid)?;
+    }
+    Ok(())
+}
+
+/// Proving devices a server keeps per sender from its clears; past them the oldest go.
+const MAX_CLEARED_DEVICES: i64 = 64;
+
+/// Proving (sender, device) pairs a server keeps from its clears; past them the oldest go.
+const MAX_CLEARED_DEVICE_ROWS: i64 = 4096;
+
+/// The device a stored post-change proof names, and a card's own date.
+fn proof_names(json: &str) -> Option<(String, Option<i64>)> {
+    #[derive(serde::Deserialize)]
+    struct Named {
+        device: String,
+        #[serde(default)]
+        at: Option<i64>,
+    }
+    serde_json::from_str::<Named>(json).ok().map(|n| (n.device, n.at))
+}
+
+/// Count what each device proved in one clear batch, at the dates
+/// `MessageStore::newest_post_of_device` reads, so a retire's window stays where it
+/// was before the rows went.
+fn count_cleared_proofs(conn: &Connection) -> rusqlite::Result<()> {
+    const IN_BATCH: &str = "cm.id IN (SELECT id FROM temp.clear_batch)";
+    // (server, sender or reactor, the date, the device or its proof JSON); is JSON, is a reaction.
+    let sql: [(String, bool, bool); 5] = [
+        (format!("SELECT cm.server_id, cm.sender_id, MAX(cm.timestamp, COALESCE(cm.edited_at, cm.timestamp)), cm.dev_device
+                  FROM channel_messages cm WHERE {IN_BATCH} AND cm.dev_device IS NOT NULL"), false, false),
+        (format!("SELECT cm.server_id, cm.sender_id, MAX(cm.timestamp, md.deleted_at), md.dev
+                  FROM message_deletions md JOIN channel_messages cm ON cm.message_id = md.message_id WHERE {IN_BATCH} AND md.dev IS NOT NULL"), true, false),
+        (format!("SELECT cm.server_id, cm.sender_id, cm.timestamp, cm.lp_dev FROM channel_messages cm WHERE {IN_BATCH} AND cm.lp_dev IS NOT NULL"), true, false),
+        (format!("SELECT cm.server_id, mr.peer_id, MAX(cm.timestamp, mr.added_at), mr.dev
+                  FROM message_reactions mr JOIN channel_messages cm ON cm.message_id = mr.message_id WHERE {IN_BATCH} AND mr.dev IS NOT NULL"), true, true),
+        (format!("SELECT cm.server_id, cm.sender_id, cm.timestamp, f.meta_dev
+                  FROM files f JOIN channel_messages cm ON cm.message_id = f.message_id WHERE {IN_BATCH} AND f.meta_dev IS NOT NULL"), true, false),
+    ];
+    let mut newest: BTreeMap<(String, String, String, bool), i64> = BTreeMap::new();
+    for (sql, json, reactor) in &sql {
+        let rows: Vec<(String, String, i64, String)> = conn
+            .prepare(sql)?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (sid, who, date, named) in rows {
+            let (device, date) = if *json {
+                let Some((device, at)) = proof_names(&named) else { continue };
+                (device, at.map_or(date, |at| at.max(date)))
+            } else {
+                (named, date)
+            };
+            let top = newest.entry((sid, who, device, *reactor)).or_insert(date);
+            *top = (*top).max(date);
+        }
+    }
+    let mut servers: Vec<String> = Vec::new();
+    {
+        let mut put = conn.prepare_cached(
+            "INSERT INTO channel_cleared_devices (server_id, sender_id, device, reactor, last_ts) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(server_id, sender_id, device, reactor) DO UPDATE SET last_ts = MAX(last_ts, excluded.last_ts)",
+        )?;
+        for ((sid, who, device, reactor), date) in newest {
+            put.execute(params![sid, who, device, reactor, date])?;
+            if servers.last() != Some(&sid) {
+                servers.push(sid);
+            }
+        }
+    }
+    for sid in servers {
+        conn.execute(
+            "DELETE FROM channel_cleared_devices WHERE server_id = ?1 AND (device, reactor) NOT IN (
+                 SELECT d.device, d.reactor FROM channel_cleared_devices d
+                 WHERE d.server_id = ?1 AND d.sender_id = channel_cleared_devices.sender_id
+                 ORDER BY d.last_ts DESC, d.device, d.reactor LIMIT ?2)",
+            params![sid, MAX_CLEARED_DEVICES],
+        )?;
+        conn.execute(
+            "DELETE FROM channel_cleared_devices WHERE server_id = ?1 AND (sender_id, device, reactor) NOT IN (
+                 SELECT sender_id, device, reactor FROM channel_cleared_devices WHERE server_id = ?1
+                 ORDER BY last_ts DESC, sender_id, device, reactor LIMIT ?2)",
+            params![sid, MAX_CLEARED_DEVICE_ROWS],
+        )?;
     }
     Ok(())
 }
@@ -1554,6 +1637,18 @@ impl MessageStore {
                 n          INTEGER NOT NULL,
                 h          INTEGER NOT NULL,
                 PRIMARY KEY (server_id, channel_id, day)
+            ) WITHOUT ROWID")?;
+        // The newest date of what each device proved in the rows a clear took, for a
+        // retire's post window; `reactor` = `sender_id` is the reaction's peer id, which
+        // may be the device itself.
+        ddl(conn, "channel_cleared_devices table",
+            "CREATE TABLE IF NOT EXISTS channel_cleared_devices (
+                server_id TEXT    NOT NULL,
+                sender_id TEXT    NOT NULL,
+                device    TEXT    NOT NULL,
+                reactor   INTEGER NOT NULL,
+                last_ts   INTEGER NOT NULL,
+                PRIMARY KEY (server_id, sender_id, device, reactor)
             ) WITHOUT ROWID")?;
         // A clear's downloads still to unlink: its batches commit before the unlink, so a
         // crash between them leaves the names here for the next start.
@@ -3317,7 +3412,7 @@ impl MessageStore {
             .map_err(|e| format!("Failed to delete the recovery row: {e}"))?;
         // A hole would ask the server's members for history after we left it; what a clear
         // counted goes with it (a floor without it asks as a device whose history begins later).
-        for table in ["channel_sync_holes", "channel_cleared_senders", "channel_cleared_tail", "channel_cleared_days"] {
+        for table in ["channel_sync_holes", "channel_cleared_senders", "channel_cleared_tail", "channel_cleared_days", "channel_cleared_devices"] {
             self.conn
                 .execute(&format!("DELETE FROM {table} WHERE server_id = ?1"), params![server_id])
                 .map_err(|e| format!("Failed to delete server holes: {e}"))?;
@@ -3827,28 +3922,22 @@ impl MessageStore {
     /// (posts, edits, deletions, cards, reactions, file cards): what a retire of that
     /// device keeps counting (section 13).
     pub(crate) fn newest_post_of_device(&self, server_id: &str, master: &str, device: &str) -> Option<i64> {
-        let posts = self
-            .conn
-            .query_row(
-                "SELECT MAX(MAX(timestamp, COALESCE(edited_at, timestamp))) FROM channel_messages WHERE server_id = ?1 AND sender_id = ?2 AND dev_device = ?3",
-                params![server_id, master, device],
-                |r| r.get::<_, Option<i64>>(0),
-            )
-            .ok()
-            .flatten();
-        posts.into_iter().chain(self.newest_change_of_device(server_id, master, device)).max()
+        let newest = |sql: &str| {
+            self.conn.query_row(sql, params![server_id, master, device], |r| r.get::<_, Option<i64>>(0)).ok().flatten()
+        };
+        let posts = newest(
+            "SELECT MAX(MAX(timestamp, COALESCE(edited_at, timestamp))) FROM channel_messages WHERE server_id = ?1 AND sender_id = ?2 AND dev_device = ?3",
+        );
+        // What a clear of ours took still counts: the remover's window never drops below it.
+        let cleared = newest(
+            "SELECT MAX(last_ts) FROM channel_cleared_devices WHERE server_id = ?1 AND device = ?3 AND (sender_id = ?2 OR (reactor = 1 AND sender_id = ?3))",
+        );
+        posts.into_iter().chain(cleared).chain(self.newest_change_of_device(server_id, master, device)).max()
     }
 
     /// [`Self::newest_post_of_device`] over the change proofs, each judged at the later of
     /// its post's date and its own. Only a proof naming exactly `device` counts.
     fn newest_change_of_device(&self, server_id: &str, master: &str, device: &str) -> Option<i64> {
-        #[derive(serde::Deserialize)]
-        struct Named {
-            device: String,
-            /// A card's own date; the other kinds date by their row.
-            #[serde(default)]
-            at: Option<i64>,
-        }
         // (the row's date, the proof); `instr` only narrows, the parse decides.
         const SQL: [&str; 4] = [
             "SELECT MAX(cm.timestamp, md.deleted_at), md.dev FROM message_deletions md JOIN channel_messages cm ON cm.message_id = md.message_id
@@ -3865,10 +3954,11 @@ impl MessageStore {
             let Ok(mut stmt) = self.conn.prepare_cached(sql) else { continue };
             let rows = stmt.query_map(params![server_id, master, device], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)));
             for (date, json) in rows.into_iter().flatten().flatten() {
-                if let Ok(n) = serde_json::from_str::<Named>(&json)
-                    && n.device == device
+                if let Some((named, at)) = proof_names(&json)
+                    && named == device
                 {
-                    newest = newest.max(Some(n.at.map_or(date, |at| at.max(date))));
+                    // A card dates by its own `at`; the other kinds by their row.
+                    newest = newest.max(Some(at.map_or(date, |at| at.max(date))));
                 }
             }
         }
@@ -12599,6 +12689,84 @@ mod w2c_floors {
         };
         assert_eq!(left, vec!["slow".to_string()]);
         assert_eq!(s.finish_cleared_history().unwrap().messages, 0, "a finished clear found more to delete");
+    }
+
+    /// A retire's post window is the newest date of what the device proved here. A clear
+    /// takes the rows, never the window: it stays as it was, a later post still moves
+    /// it, and it goes with the server.
+    #[test]
+    fn a_cleared_remover_keeps_the_retired_devices_window() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let s = store(tmp.path());
+        let proven = |mid: &str, ts: i64, device: &str| {
+            s.conn
+                .execute(
+                    "INSERT INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, message_id, dev_device, dev_sig)
+                     VALUES ('srv', 'ch', 'master', 'x', 0, ?1, ?2, ?3, 'sig')",
+                    params![ts, mid, device],
+                )
+                .unwrap();
+        };
+        proven("m1", T, "laptop");
+        proven("m0", T - 5_000, "laptop");
+        proven("o1", T + 1, "phone");
+        assert_eq!(s.newest_post_of_device("srv", "master", "laptop"), Some(T), "control: the window before the clear");
+        s.clear_history_in(Some("srv"), &[("srv".to_string(), "ch".to_string())], T + 10 * CLEAR_SKEW_MS).unwrap();
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM channel_messages"), 0, "precondition: the clear took the rows");
+        assert_eq!(s.newest_post_of_device("srv", "master", "laptop"), Some(T), "a clear lowered the retire window");
+        assert_eq!(s.newest_post_of_device("srv", "master", "phone"), Some(T + 1));
+        assert_eq!(s.newest_post_of_device("srv", "other", "laptop"), None, "another identity's window");
+        assert_eq!(s.newest_post_of_device("other-srv", "master", "laptop"), None, "another server's window");
+        // A second clear of an older row keeps the newer date.
+        proven("m3", T - 1_000, "laptop");
+        s.clear_history_in(Some("srv"), &[], T + 11 * CLEAR_SKEW_MS).unwrap();
+        assert_eq!(s.newest_post_of_device("srv", "master", "laptop"), Some(T), "a later clear lowered the window");
+        // A reaction under the device's own id counts for it; a post signed as that id does not.
+        s.conn
+            .execute_batch(&format!(
+                "INSERT INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, message_id, dev_device, dev_sig)
+                 VALUES ('srv', 'ch', 'tablet', 'x', 0, {a}, 'r1', 'tablet', 'sig'), ('srv', 'ch', 'bob', 'x', 0, {b}, 'r2', NULL, NULL);
+                 INSERT INTO message_reactions (message_id, emoji, peer_id, added_at, dev) VALUES ('r2', '+1', 'tablet', {b}, '{{\"device\":\"tablet\",\"sig\":\"s\"}}');",
+                a = T + 12 * CLEAR_SKEW_MS,
+                b = T + 12 * CLEAR_SKEW_MS - 5,
+            ))
+            .unwrap();
+        let tablet = s.newest_post_of_device("srv", "master", "tablet");
+        assert_eq!(tablet, Some(T + 12 * CLEAR_SKEW_MS - 5), "control: the reaction counts, the lookalike post does not");
+        s.clear_history_in(Some("srv"), &[], T + 13 * CLEAR_SKEW_MS).unwrap();
+        assert_eq!(s.newest_post_of_device("srv", "master", "tablet"), tablet, "a clear changed what the device's own id proved");
+        proven("m2", T + 20 * CLEAR_SKEW_MS, "laptop");
+        assert_eq!(s.newest_post_of_device("srv", "master", "laptop"), Some(T + 20 * CLEAR_SKEW_MS), "a later post moves it");
+        s.delete_server_state("srv").unwrap();
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM channel_cleared_devices"), 0, "the windows stayed after the server went");
+    }
+
+    /// What a clear keeps of the proving devices is bounded: per sender the newest
+    /// devices, per server the newest pairs.
+    #[test]
+    fn cleared_device_windows_stay_bounded() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let s = store(tmp.path());
+        let rows = MAX_CLEARED_DEVICE_ROWS + 100;
+        let flood_from = rows - MAX_CLEARED_DEVICES - 10;
+        let mut sql = String::from("BEGIN;");
+        for i in 0..rows {
+            let sender = if i >= flood_from { "flood".to_string() } else { format!("s{i}") };
+            sql.push_str(&format!(
+                "INSERT INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, message_id, dev_device, dev_sig)
+                 VALUES ('srv', 'ch', '{sender}', 'x', 0, {}, 'm{i}', 'd{i}', 'sig');",
+                T + i,
+            ));
+        }
+        sql.push_str("COMMIT;");
+        s.conn.execute_batch(&sql).unwrap();
+        s.clear_channel_history(T + rows + 10 * CLEAR_SKEW_MS).unwrap();
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM channel_cleared_devices WHERE sender_id = 'flood'"), MAX_CLEARED_DEVICES, "one sender's devices");
+        assert!(count(&s, "SELECT COUNT(*) FROM channel_cleared_devices") <= MAX_CLEARED_DEVICE_ROWS, "a server's pairs");
+        let last = flood_from - 1;
+        assert_eq!(s.newest_post_of_device("srv", &format!("s{last}"), &format!("d{last}")), Some(T + last), "another sender's newest pair went");
+        assert_eq!(s.newest_post_of_device("srv", "s0", "d0"), None, "the server's oldest pair stayed");
+        assert_eq!(s.newest_post_of_device("srv", "flood", &format!("d{flood_from}")), None, "a sender's oldest device stayed");
     }
 }
 
