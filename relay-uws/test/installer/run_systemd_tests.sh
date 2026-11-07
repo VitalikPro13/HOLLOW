@@ -72,7 +72,7 @@ EOF
 # from an image that holds a relay built from these sources.
 adopt_boxes() {
     local img=$1 tag=$2 slug=$3 rtag sc name scenarios
-    scenarios=${BOX_ADOPT:-takeover rollback interrupted fwdmismatch odd leave docker docker-rollback}
+    scenarios=${BOX_ADOPT:-takeover rollback interrupted fwdmismatch odd race stagerace leave docker docker-rollback}
     [ "$scenarios" = 0 ] && return 0
     rtag=$(relay_image "$tag" "$slug") || { echo "FAIL  the relay did not build in the $img box"; total_fail=1; return 0; }
     local image opts dtag=${BOX_TAG:-hollow-installer-box}-docker:$slug

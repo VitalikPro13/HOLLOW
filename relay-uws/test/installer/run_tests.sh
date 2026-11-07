@@ -310,7 +310,7 @@ echo "certbot choice"
 out=$(DRY_RUN=1 CFG_ADDRESS=ip; have() { [ "$1" != snap ] && command -v "$1" >/dev/null; }
       CERTBOT_VENV=$TMP/no-venv; [ -x /snap/bin/certbot ] && exit 0; certbot_install; echo "dir=$CERTBOT_DIR")
 if [ -n "$out" ]; then
-    has "venv for IP on a box without snap" "$out" "certbot==$CERTBOT_PIN"
+    has "venv for IP on a box without snap" "$out" "Installing certbot $CERTBOT_PIN"
     has "venv renew timer" "$out" "hollow-certbot-renew.timer"
     lacks "never installs snapd" "$out" "snapd"
     has "venv certbot is the one used" "$out" "dir=$TMP/no-venv/bin"
@@ -320,6 +320,48 @@ if [ -n "$out" ]; then
     lacks "a name needs no snap" "$out" "snap install"
     has "a name uses the distribution's certbot" "$out" "dir=/usr/bin"
 fi
+
+# certbot_venv_installs_only_hashed_requirements (HOL-SEC-199): the venv runs
+# as root, so every package it holds is pinned with its hash, and its renewal
+# runs in a sandbox check-host checks.
+t_certbot_venv_installs_only_hashed_requirements() {
+    local reqs=$DEPLOY/$CERTBOT_REQS out names blocks hashed unit
+    yes_ test -f "$reqs"
+    names=$(grep -cE '^[a-z0-9][a-z0-9._-]*==[^ ]+' "$reqs")
+    # mawk, Ubuntu's awk, reads no {n} counts.
+    blocks=$(awk '/^[a-z0-9]/ { n++; h[n] = 0 } /--hash=sha256:/ { h[n] = 1 } END { for (i in h) s += h[i]; print s + 0 }' "$reqs")
+    eq "every package in the requirements carries a hash" "$blocks" "$names"
+    eq "each a whole sha256" "$(grep -E -- '--hash=' "$reqs" | grep -cvE -- '--hash=sha256:[0-9a-f]{64}( \\)?$')" 0
+    eq "each pinned to one version" "$(grep -E '^[a-z]' "$reqs" | grep -vE '^[a-z0-9][a-z0-9._-]*==[^ ;]+( ;[^\\]*)? \\$')" ""
+    has "certbot is the pinned version" "$(cat "$reqs")" "certbot==$CERTBOT_PIN \\"
+    has "and acme matches it" "$(cat "$reqs")" "acme==$CERTBOT_PIN \\"
+    unit=$(cat "$DEPLOY/hollow-certbot-renew.service")
+    for l in NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes PrivateDevices=yes \
+             RestrictSUIDSGID=yes RestrictNamespaces=yes LimitCORE=0 SystemCallErrorNumber=EPERM \
+             "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_NET_BIND_SERVICE"; do
+        has "the renewal runs with $l" "$unit" "$l"
+    done
+    has "check-host checks the renewal unit" "$(cat "$DEPLOY/check-host.sh")" "renew=hollow-certbot-renew"
+    # A machine with snap's certbot uses that one, so only the files are checked there.
+    [ -x /snap/bin/certbot ] && return 0
+    out=$(DRY_RUN=1 CFG_ADDRESS=ip; have() { [ "$1" != snap ] && command -v "$1" >/dev/null; }
+          CERTBOT_VENV=$TMP/no-venv; certbot_install 2>&1)
+    has "pip checks every hash" "$out" "--require-hashes -r $reqs"
+    has "installs only what the file names" "$out" "--no-deps"
+    has "and only built wheels" "$out" "--only-binary :all:"
+    lacks "never certbot alone, with its packages left to PyPI" "$out" "certbot==$CERTBOT_PIN"
+    has "the environment records which requirements made it" "$out" "would write: $TMP/no-venv/$CERTBOT_MARK"
+    # An environment an older setup filled is made again; a current one is kept.
+    mkdir -p "$TMP/old-venv/bin"; printf '#!/bin/sh\n' >"$TMP/old-venv/bin/certbot"; chmod +x "$TMP/old-venv/bin/certbot"
+    out=$(DRY_RUN=1 CFG_ADDRESS=ip; CERTBOT_VENV=$TMP/old-venv; certbot_install 2>&1)
+    has "an older setup's environment is made again" "$out" "Installing certbot $CERTBOT_PIN again, from packages the setup pins"
+    has "and its renewal unit is written again" "$out" "hollow-certbot-renew.service"
+    sha256sum <"$reqs" | cut -d' ' -f1 >"$TMP/old-venv/$CERTBOT_MARK"
+    out=$(DRY_RUN=1 CFG_ADDRESS=ip; CERTBOT_VENV=$TMP/old-venv; certbot_install 2>&1)
+    lacks "a current one is kept" "$out" "again, from packages"
+    has "and its renewal unit still written" "$out" "hollow-certbot-renew.service"
+}
+in_sub t_certbot_venv_installs_only_hashed_requirements
 
 echo "ssh login gate"
 FAKE=$TMP/bin

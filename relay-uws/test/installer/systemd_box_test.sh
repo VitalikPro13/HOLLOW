@@ -685,6 +685,72 @@ has "off is an ok line" "$part" "ok    the fair-share shaper (CAKE) is off by th
 eq "with nothing failing" "$(grep FAIL <<<"$part")" ""
 rm -f "$CAKE_ENV"
 
+# certbot_venv_installs_only_hashed_requirements (HOL-SEC-199): a box without
+# snap gets certbot from the hash-pinned list, and its renewal, its deploy hook
+# and an http-01 listener all work inside the renewal unit's sandbox.
+echo "certbot's own Python environment"
+ensure_account hollow-relay
+ensure_account hollow-turn
+install -d -m 0750 -o root -g hollow-relay /etc/hollow-relay
+install -d -m 0750 -o root -g hollow-turn /etc/hollow-turn
+mkdir -p /etc/letsencrypt/live/relay
+CFG_ADDRESS=ip
+CERTBOT_VENV=/opt/hollow-certbot
+have() { [ "$1" != snap ] && command -v "$1" >/dev/null; }
+out=$(certbot_install 2>&1)
+has "certbot comes from the hashed list" "$out" "Every package is checked against the hash the setup pins."
+eq "the certbot it runs" "$("$CERTBOT_VENV/bin/certbot" --version 2>&1)" "certbot $CERTBOT_PIN"
+eq "the environment names the list that made it" "$(cat "$CERTBOT_VENV/$CERTBOT_MARK")" "$(sha256sum <"$DEPLOY/$CERTBOT_REQS" | cut -d' ' -f1)"
+want=$(grep -oE '^[a-z0-9][a-z0-9._-]*==[^ ]+' "$DEPLOY/$CERTBOT_REQS" | tr 'A-Z_' 'a-z-' | sort -u)
+got=$("$CERTBOT_VENV/bin/python" -I -m pip list --format=freeze --disable-pip-version-check 2>/dev/null | tr 'A-Z_' 'a-z-' | grep -vE '^(pip|setuptools)==' | sort -u)
+# pip and, on older Pythons, setuptools come with the venv from the distribution.
+eq "it holds only packages the list pins" "$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))" ""
+eq "the renewal timer is on" "$(systemctl is-enabled hollow-certbot-renew.timer)" enabled
+systemctl start hollow-certbot-renew.service
+eq "a renewal runs in its sandbox" "$(systemctl show -p Result --value hollow-certbot-renew.service)" success
+# The deploy hook, then a listener on port 80 as certbot's standalone one opens,
+# each in the same sandbox.
+mkdir -p "$UNIT_DIR/hollow-certbot-renew.service.d"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 7 -subj /CN=box \
+    -keyout /etc/letsencrypt/live/relay/privkey.pem -out /etc/letsencrypt/live/relay/fullchain.pem >/dev/null 2>&1
+install -D -m 0755 "$DEPLOY/certbot/host-deploy-hook.sh" "$CERT_HOOK"
+printf '[Service]\nExecStart=\nExecStart=/bin/sh %s\n' "$CERT_HOOK" >"$UNIT_DIR/hollow-certbot-renew.service.d/box.conf"
+systemctl daemon-reload
+systemctl start hollow-certbot-renew.service
+eq "the deploy hook runs in it" "$(systemctl show -p Result --value hollow-certbot-renew.service)" success
+eq "and hands the relay its copy" "$(stat -c '%a %U %G' /etc/hollow-relay/privkey.pem 2>/dev/null)" "640 root hollow-relay"
+eq "and coturn its own" "$(stat -c '%a %U %G' /etc/hollow-turn/privkey.pem 2>/dev/null)" "640 root hollow-turn"
+printf '[Service]\nExecStart=\nExecStart=%s/bin/python -I -c "import socket; s = socket.socket(); s.bind((\\"0.0.0.0\\", 80)); s.listen()"\n' \
+    "$CERTBOT_VENV" >"$UNIT_DIR/hollow-certbot-renew.service.d/box.conf"
+systemctl daemon-reload
+systemctl start hollow-certbot-renew.service
+eq "and certbot can answer http-01 on port 80" "$(systemctl show -p Result --value hollow-certbot-renew.service)" success
+rm -rf "$UNIT_DIR/hollow-certbot-renew.service.d"
+systemctl daemon-reload
+check=$(bash "$DEPLOY/check-host.sh" 2>&1)
+part=$(sed -n '/^Certificate renewal$/,/^Disk$/p' <<<"$check")
+has "check-host checks the renewal" "$part" "ok    hollow-certbot-renew runs certbot in a sandbox"
+has "and who may change certbot" "$part" "ok    only root can change certbot's Python environment in $CERTBOT_VENV"
+has "and its packages" "$part" "ok    certbot's packages are the ones the setup pins by hash"
+eq "with nothing failing" "$(grep FAIL <<<"$part")" ""
+echo "$part" | sed 's/^/  | /'
+# An environment an older setup made, from whatever PyPI served, fails the
+# check until the setup makes it again.
+rm -f "$CERTBOT_VENV/$CERTBOT_MARK"
+has "an unpinned environment fails check-host" "$(bash "$DEPLOY/check-host.sh" 2>&1)" "FAIL  an older setup installed certbot's packages without pinned hashes"
+out=$(certbot_install 2>&1)
+has "and the setup makes it again" "$out" "Installing certbot $CERTBOT_PIN again"
+yes_ "from the list" test -f "$CERTBOT_VENV/$CERTBOT_MARK"
+printf '[Service]\nNoNewPrivileges=no\n' | install -D -m 0644 /dev/stdin "$UNIT_DIR/hollow-certbot-renew.service.d/weak.conf"
+systemctl daemon-reload
+has "a weakened sandbox fails check-host" "$(bash "$DEPLOY/check-host.sh" 2>&1)" "FAIL  hollow-certbot-renew runs certbot as root without NoNewPrivileges=yes"
+rm -rf "$UNIT_DIR/hollow-certbot-renew.service.d"
+systemctl disable --now hollow-certbot-renew.timer >/dev/null 2>&1
+rm -f "$UNIT_DIR/hollow-certbot-renew.service" "$UNIT_DIR/hollow-certbot-renew.timer" "$CERT_HOOK"
+systemctl daemon-reload
+rm -rf "$CERTBOT_VENV" /etc/letsencrypt/live/relay /etc/hollow-relay/privkey.pem /etc/hollow-relay/fullchain.pem /etc/hollow-turn
+have() { command -v "$1" >/dev/null 2>&1; }
+
 echo ""
 echo "box $ID $VERSION_ID: $pass passed, $fail failed"
 [ "$fail" = 0 ]

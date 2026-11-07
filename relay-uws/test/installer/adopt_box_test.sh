@@ -4,7 +4,7 @@
 # Runs inside a throwaway container from run_systemd_tests.sh, never on a real
 # machine: it adds accounts, units and firewall rules.
 #
-#   bash adopt_box_test.sh takeover|rollback|interrupted|fwdmismatch|odd|leave|docker
+#   bash adopt_box_test.sh takeover|rollback|interrupted|fwdmismatch|odd|race|stagerace|leave|docker
 #
 # /opt/hollow-test-relay/hollow-relay is a relay built from these sources (the
 # box image builds it). Let's Encrypt is a staging-style lineage with a
@@ -542,6 +542,24 @@ check_taken_over() { # check_taken_over <old unit> <since>
     lacks "and never the take over again" "$out" "This setup did not install"
 }
 
+# A hand setup with its own names: another clone path and unit name, the
+# report counts in a folder of the old account's own, coturn stopped, no push.
+seed_odd() {
+    seed_native 012 /srv/hollow-src hollow.service
+    # The report counts in a folder of its own choosing.
+    install -d -m 0700 -o hollow -g hollow /srv/hollow-data
+    mv /var/lib/hollow-relay/reports.json /var/lib/hollow-relay/reports.json.key /srv/hollow-data/
+    sed -i 's|--reports-file /var/lib/hollow-relay/reports.json|--reports-file /srv/hollow-data/reports.json|; s|^ProtectSystem=strict|ProtectSystem=strict\nReadWritePaths=/srv/hollow-data|' \
+        /etc/systemd/system/hollow.service
+    systemctl disable --now hollow-push >/dev/null 2>&1; rm -f /etc/systemd/system/hollow-push.service
+    systemctl stop hollow-coturn
+    systemctl daemon-reload
+    systemctl restart hollow.service
+    wait_health || bad "the old relay did not come back with its reports elsewhere"
+    seed_old_report_key /srv/hollow-data/reports.json
+    REPORTKEY_SHA=$(sha /srv/hollow-data/reports.json.key)
+}
+
 # ---------------------------------------------------------------- scenarios
 
 case "$SCENARIO" in
@@ -560,6 +578,14 @@ takeover)
     eq "with the same token" "$(sed -n 's/^PUSH_TOKEN=//p' /etc/hollow-push/push.env)" "$PUSH_OLD"
     eq "which the relay has too" "$(sed -n 's/^HOLLOW_PUSH_TOKEN=//p' /etc/hollow-relay/relay.env)" "$PUSH_OLD"
     has "the summary names what was left" "$(flat "$W/setup.out")" "the account hollow"
+    # uninstall_names_or_removes_the_take_over_backup (HOL-SEC-198)
+    bk=$(ls -d /root/hollow-relay-adopt-* 2>/dev/null | head -n 1)
+    printf 'action=uninstall\nkeep_data=yes\nremove_backup=yes\nconfirm=yes\n' >"$W/answers.un"
+    out=$(bash "$RELAY/install.sh" --answers "$W/answers.un" 2>&1 | tr '\n' ' ' | tr -s ' ')
+    has "the removal names the take-over backup" "$out" "$bk"
+    has "with the old relay's secrets in it" "$out" "TLS private key"
+    no_ "and deletes it" test -e "$bk"
+    no_ "with the relay" test -e /etc/systemd/system/hollow-relay.service
     ;;
 
 rollback)
@@ -670,19 +696,7 @@ fwdmismatch)
 
 odd)
     echo "== a hand setup with its own names: another clone path, another unit name, coturn stopped, no push"
-    seed_native 012 /srv/hollow-src hollow.service
-    # The report counts in a folder of its own choosing.
-    install -d -m 0700 -o hollow -g hollow /srv/hollow-data
-    mv /var/lib/hollow-relay/reports.json /var/lib/hollow-relay/reports.json.key /srv/hollow-data/
-    sed -i 's|--reports-file /var/lib/hollow-relay/reports.json|--reports-file /srv/hollow-data/reports.json|; s|^ProtectSystem=strict|ProtectSystem=strict\nReadWritePaths=/srv/hollow-data|' \
-        /etc/systemd/system/hollow.service
-    systemctl disable --now hollow-push >/dev/null 2>&1; rm -f /etc/systemd/system/hollow-push.service
-    systemctl stop hollow-coturn
-    systemctl daemon-reload
-    systemctl restart hollow.service
-    wait_health || bad "the old relay did not come back with its reports elsewhere"
-    seed_old_report_key /srv/hollow-data/reports.json
-    REPORTKEY_SHA=$(sha /srv/hollow-data/reports.json.key)
+    seed_odd
     stage_programs
     answers takeover
     since=$(date +%s)
@@ -887,6 +901,87 @@ EOF
         no_ "the port lock the take over added is gone" test -e /etc/systemd/system/hollow-turn-port-lock.service
         no_ "with its rule" nft list table inet hollow_turn
     fi
+    ;;
+
+race)
+    # adopt_backup_refuses_an_entry_that_became_a_link (HOL-SEC-196)
+    echo "== a hand setup whose account swaps its report counts for a link while the backup copies them"
+    seed_odd
+    stage_programs
+    printf 'ROOT-ONLY-SECRET-%s\n' "$(openssl rand -hex 16)" >/root/box-secret
+    chmod 0600 /root/box-secret
+    SECRET=$(cat /root/box-secret)
+    # seed_odd changed the old unit after seed_native took its sums.
+    while read -r _ _ _ _ f; do
+        [ -f "$f" ] && echo "$(sha "$f") $(stat -c '%a %U %G' "$f") $f"
+    done <"$W/before.sums" >"$W/before.odd"
+    # Once the backup has begun, the old account swaps its file for a link
+    # right after the setup's last check by path.
+    cat >"$SAFE/readlink" <<EOF
+#!/bin/sh
+out=\$($(command -v readlink) "\$@"); rc=\$?
+[ -n "\$out" ] && printf '%s\n' "\$out"
+if [ "\$*" = "-f -- /srv/hollow-data/reports.json" ] && [ ! -e $W/race.done ] &&
+   ls /root/hollow-relay-adopt-*/manifest >/dev/null 2>&1; then
+    : >$W/race.done
+    setpriv --reuid=hollow --regid=hollow --clear-groups ln -sfn /root/box-secret /srv/hollow-data/reports.json
+fi
+exit \$rc
+EOF
+    chmod 0755 "$SAFE/readlink"
+    answers takeover
+    rc=$(run_setup)
+    rm -f "$SAFE/readlink"
+    yes_ "the old account swapped its file during the backup" test -e "$W/race.done"
+    no_ "the setup stopped" test "$rc" = 0
+    has "before anything changed" "$(flat "$W/setup.out")" "changed while I copied it, so I changed nothing"
+    lacks "so nothing needed putting back" "$(flat "$W/setup.out")" "putting the old relay back"
+    bk=$(ls -d /root/hollow-relay-adopt-* 2>/dev/null | head -n 1)
+    eq "the backup holds no link" "$(find "$bk" -type l)" ""
+    eq "the secret reached none of the relay's files" "$(grep -rlsF "$SECRET" "$bk" /srv/hollow-data /var/lib/hollow-relay /etc/hollow-relay)" ""
+    eq "the old relay still runs as its old account" "$(unit_user hollow.service)" hollow
+    yes_ "and answers" health
+    while read -r s mode owner group f; do
+        eq "$f is unchanged" "$(sha "$f") $(stat -c '%a %U %G' "$f" 2>/dev/null)" "$s $mode $owner $group"
+    done <"$W/before.odd"
+    ;;
+
+stagerace)
+    # adopt_stage_copies_only_the_old_accounts_own_plain_file (HOL-SEC-197)
+    echo "== a hand setup whose account swaps its report counts for a link while the take over moves them"
+    seed_odd
+    stage_programs
+    printf 'ROOT-ONLY-SECRET-%s\n' "$(openssl rand -hex 16)" >/root/box-secret
+    chmod 0600 /root/box-secret
+    SECRET_SHA=$(sha /root/box-secret)
+    swap="setpriv --reuid=hollow --regid=hollow --clear-groups ln -sfn /root/box-secret /srv/hollow-data/reports.json; : >$W/race.done"
+    # The old account swaps its file the moment the stage copies it: before
+    # 0.14 that was an install from the old path, now a temporary file beside
+    # the new one. What lands is recorded either way.
+    cat >"$SAFE/install" <<EOF
+#!/bin/sh
+for last; do :; done
+case "\$*" in *"-- /srv/hollow-data/reports.json /var/lib/hollow-relay/reports.json") $swap ;; esac
+$(command -v install) "\$@"; rc=\$?
+[ "\$last" = /var/lib/hollow-relay/reports.json ] && sha256sum /var/lib/hollow-relay/reports.json | cut -d' ' -f1 >>$W/landed
+exit \$rc
+EOF
+    cat >"$SAFE/mktemp" <<EOF
+#!/bin/sh
+case "\$*" in "/var/lib/hollow-relay/reports.json.restore."*) $swap ;; esac
+exec $(command -v mktemp) "\$@"
+EOF
+    chmod 0755 "$SAFE/install" "$SAFE/mktemp"
+    answers takeover
+    rc=$(run_setup)
+    rm -f "$SAFE/install" "$SAFE/mktemp"
+    yes_ "the old account swapped its file during the stage" test -e "$W/race.done"
+    if grep -qx "$SECRET_SHA" "$W/landed" 2>/dev/null; then bad "the secret landed as the new relay's report counts"; else ok "the secret never landed as the new relay's report counts"; fi
+    eq "the setup finished" "$rc" 0
+    [ "$rc" = 0 ] || tail -n 40 "$W/setup.out"
+    eq "the report counts came from the backup" "$(sha /var/lib/hollow-relay/reports.json)" "$REPORTS_SHA"
+    eq "owned by the new account" "$(stat -c '%a %U' /var/lib/hollow-relay/reports.json)" "600 hollow-relay"
+    eq "no copy of the secret is the relay's" "$(grep -rlsF "$(cat /root/box-secret)" /var/lib/hollow-relay /etc/hollow-relay)" ""
     ;;
 
 *) echo "unknown scenario $SCENARIO" >&2; exit 2 ;;

@@ -52,7 +52,7 @@ ui_init() {
 ANSWER_KEYS="action mode binaries address duckdns_name duckdns_token duckdns_token_file
 domain ip public_ip public_ipv6 email staging turn push forwarder members_only
 member_keys grace_secs public_stats cake cake_mbit cake_dev ssh_keys ssh_key_fingerprint ssh_wait_secs confirm keep_data change remove_key
-continue_anyway ssh_public_key adopt harden interrupted replace_setup"
+continue_anyway ssh_public_key adopt harden interrupted replace_setup remove_backup"
 
 ui_load_answers() {
     local file=$1 line key value n=0

@@ -876,9 +876,22 @@ duckdns_remove() {
 CERTBOT_DIR=/usr/bin
 CERTBOT_VENV=/opt/hollow-certbot
 CERTBOT_PIN=5.8.0
+# Every package of that environment, pinned with its hash: it runs as root.
+CERTBOT_REQS=certbot-requirements.txt
+CERTBOT_MARK=hollow-requirements.sha256
 certbot_install() {
     if [ -x /snap/bin/certbot ]; then CERTBOT_DIR=/snap/bin; return 0; fi
-    if [ -x "$CERTBOT_VENV/bin/certbot" ]; then CERTBOT_DIR=$CERTBOT_VENV/bin; return 0; fi
+    if [ -x "$CERTBOT_VENV/bin/certbot" ]; then
+        CERTBOT_DIR=$CERTBOT_VENV/bin
+        # A setup before 0.14 filled it with whatever PyPI served that day.
+        if ! certbot_venv_current; then
+            step "Installing certbot $CERTBOT_PIN again, from packages the setup pins"
+            certbot_venv_make ||
+                warn "certbot could not be installed again, so the one that renewed until now stays. Run the setup again later."
+        fi
+        certbot_renew_units
+        return 0
+    fi
     if [ "$CFG_ADDRESS" != ip ]; then
         apt_install certbot || die "certbot could not be installed."
         return 0
@@ -891,19 +904,49 @@ certbot_install() {
         run_logged snap install --classic certbot || die "certbot could not be installed."
     else
         CERTBOT_DIR=$CERTBOT_VENV/bin
-        say "  into its own Python environment in $CERTBOT_VENV, with a timer that renews the certificate"
-        apt_install python3-venv
-        run_logged python3 -m venv "$CERTBOT_VENV" || die "could not make a Python environment for certbot."
-        run_logged "$CERTBOT_VENV/bin/pip" install --quiet --disable-pip-version-check "certbot==$CERTBOT_PIN" ||
-            die "certbot $CERTBOT_PIN could not be installed."
-        put_unit hollow-certbot-renew.service <"$DEPLOY/hollow-certbot-renew.service"
-        put_unit hollow-certbot-renew.timer <"$DEPLOY/hollow-certbot-renew.timer"
-        run systemctl daemon-reload
-        run systemctl enable --quiet --now hollow-certbot-renew.timer
+        certbot_venv_make || die "certbot $CERTBOT_PIN could not be installed."
+        certbot_renew_units
     fi
     # Two certbots would both renew the same certificate.
     if unit_exists certbot.timer; then run_ok systemctl disable --now certbot.timer; fi
     return 0
+}
+
+certbot_venv_current() {
+    [ "$(cat "$CERTBOT_VENV/$CERTBOT_MARK" 2>/dev/null)" = "$(sha256sum <"$DEPLOY/$CERTBOT_REQS" | cut -d' ' -f1)" ]
+}
+
+# Installs only the packages $CERTBOT_REQS names, each checked against its
+# hash, and only as built wheels: building one from source would fetch its
+# build tools unchecked. A failure puts back the environment it replaced.
+certbot_venv_make() {
+    local old=$CERTBOT_VENV.previous
+    say "  into its own Python environment in $CERTBOT_VENV, with a timer that renews the certificate. Every package is checked against the hash the setup pins."
+    apt_install python3-venv
+    if [ "$DRY_RUN" = 0 ]; then
+        rm -rf -- "$old"
+        if [ -e "$CERTBOT_VENV" ]; then mv -T -- "$CERTBOT_VENV" "$old"; fi
+    fi
+    if run_logged python3 -m venv "$CERTBOT_VENV" &&
+       run_logged "$CERTBOT_VENV/bin/pip" install --quiet --disable-pip-version-check --no-deps --only-binary :all: \
+           --require-hashes -r "$DEPLOY/$CERTBOT_REQS" &&
+       run_logged "$CERTBOT_VENV/bin/certbot" --version; then
+        sha256sum <"$DEPLOY/$CERTBOT_REQS" | cut -d' ' -f1 | put_file "$CERTBOT_VENV/$CERTBOT_MARK" 0644 root root
+        run rm -rf -- "$old"
+        return 0
+    fi
+    if [ "$DRY_RUN" = 0 ]; then
+        rm -rf -- "$CERTBOT_VENV"
+        if [ -e "$old" ]; then mv -T -- "$old" "$CERTBOT_VENV"; fi
+    fi
+    return 1
+}
+
+certbot_renew_units() {
+    put_unit hollow-certbot-renew.service <"$DEPLOY/hollow-certbot-renew.service"
+    put_unit hollow-certbot-renew.timer <"$DEPLOY/hollow-certbot-renew.timer"
+    run systemctl daemon-reload
+    run systemctl enable --quiet --now hollow-certbot-renew.timer
 }
 
 cert_issue() {

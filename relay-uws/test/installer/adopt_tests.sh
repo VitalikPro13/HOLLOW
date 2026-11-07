@@ -743,3 +743,181 @@ eq "a killed take over is found before anything else" \
     "$(grep -nE '^(if adopt_interrupted; then|if \[ -r "\$CONF_FILE" \]; then|adopt_detect)$' "$RELAY/install.sh" | cut -d: -f2 | tr '\n' '|')" \
     'if adopt_interrupted; then|if [ -r "$CONF_FILE" ]; then|adopt_detect|'
 has "a checked take over is marked done" "$(sed -n '/^adopt_takeover() {/,/^}/p' "$DEPLOY/lib/adopt.sh" | tr '\n' ' ')" 'ADOPT_ARMED=0     [ "$DRY_RUN" = 1 ] || rm -f "$ADOPT_BACKUP/running"'
+
+# ---------------------------------------------------------------- HOL-SEC-196..198
+# The old relay's account can still run while a take over copies its files,
+# so it can swap a file for a link or a second name after any check by path.
+# A DEBUG trap stands in for it: it swaps the file the moment the copy opens it.
+race_at() { # race_at <command prefix> <path> <link|hard> <target>
+    RACE_CMD=$1 RACE_PATH=$2 RACE_KIND=$3 RACE_TO=$4
+    set -T
+    trap 'race_step' DEBUG
+}
+race_step() {
+    [ -n "${RACE_PATH:-}" ] && [[ "$BASH_COMMAND" == "$RACE_CMD"* ]] || return 0
+    command rm -f -- "$RACE_PATH"
+    if [ "$RACE_KIND" = hard ]; then command ln -- "$RACE_TO" "$RACE_PATH"; else command ln -s -- "$RACE_TO" "$RACE_PATH"; fi
+    RACE_PATH=""
+}
+race_off() { trap - DEBUG; set +T; RACE_PATH=""; }
+
+echo "adopt: a backup entry that became a link"
+t_adopt_backup_refuses_an_entry_that_became_a_link() {
+    local R=$TMP/adopt_race out k
+    for k in link hard; do
+        rm -rf "$R"; mkdir -p "$R/state" "$R/bk"
+        ADOPT_BACKUP=$R/bk
+        : >"$ADOPT_BACKUP/manifest"; : >"$ADOPT_BACKUP/manifest.paths"
+        printf 'counts\n' >"$R/state/reports.json"
+        printf 'ROOT-ONLY-SECRET\n' >"$R/secret"; chmod 0600 "$R/secret"
+        race_at 'exec {fd}< "$path"' "$R/state/reports.json" "$k" "$R/secret"
+        out=$( (adopt_backup "$R/state/reports.json") 2>&1)
+        race_off
+        has "$k: a copy leaves the setup's stderr as it was" "$( (plain_copy "$R/secret" "$R/copy" >/dev/null; echo "STILL HEARD" >&2) 2>&1)" "STILL HEARD"
+        has "$k: a file swapped after the checks stops the take over" "$out" "changed while I copied it, so I changed nothing"
+        if grep -rqs ROOT-ONLY-SECRET "$ADOPT_BACKUP"; then bad "$k: the backup read through the swap"; else ok; fi
+        if [ -n "$(find "$ADOPT_BACKUP" -type l)" ]; then bad "$k: the backup holds a link"; else ok; fi
+        lacks "$k: and records no copy" "$(cat "$ADOPT_BACKUP/manifest")" "file "
+    done
+    # A second name already there is refused before any copy.
+    rm -rf "$R"; mkdir -p "$R/state" "$R/bk"
+    ADOPT_BACKUP=$R/bk; : >"$ADOPT_BACKUP/manifest"; : >"$ADOPT_BACKUP/manifest.paths"
+    printf 'ROOT-ONLY-SECRET\n' >"$R/secret"; ln "$R/secret" "$R/state/reports.json"
+    has "a hard link is refused" "$( (adopt_backup "$R/state/reports.json") 2>&1)" "has a second name"
+    # fd_plain judges the open file, never the name.
+    printf 'x' >"$R/a"; ln -s "$R/a" "$R/l"
+    exec {k}<"$R/l"
+    no_ fd_plain "$k" "$R/l"
+    exec {k}<&-
+    exec {k}<"$R/a"
+    yes_ fd_plain "$k" "$R/a"
+    no_ fd_plain "$k" "$R/a" nobody-else
+    yes_ fd_plain "$k" "$R/a" nobody-else "$(id -un)"
+    command rm -f "$R/a"
+    no_ fd_plain "$k" "$R/a"
+    exec {k}<&-
+    mkfifo "$R/fifo"
+    exec {k}<>"$R/fifo"
+    no_ fd_plain "$k" "$R/fifo"
+    exec {k}>&-
+}
+in_sub t_adopt_backup_refuses_an_entry_that_became_a_link
+
+echo "adopt: a rollback restores only the backup's own plain copies"
+t_adopt_rollback_never_lands_a_link_target() {
+    local R=$TMP/adopt_rb out
+    rm -rf "$R"; mkdir -p "$R/state" "$R/bk/files$R/state"
+    ADOPT_BACKUP=$R/bk
+    printf 'ROOT-ONLY-SECRET\n' >"$R/secret"; chmod 0600 "$R/secret"
+    printf 'new relay counts\n' >"$R/state/reports.json"
+    # A backup entry that is not the copy the backup made: a link, then a second name.
+    ln -s "$R/secret" "$ADOPT_BACKUP/files$R/state/reports.json"
+    printf 'file 600 %s %s %s\n' "$(id -un)" "$(id -gn)" "$R/state/reports.json" >"$ADOPT_BACKUP/manifest"
+    out=$(adopt_restore_files 2>&1; echo "skipped=$ADOPT_RESTORE_SKIPPED")
+    has "a link in the backup is not restored" "$out" "because its copy in the backup is not a plain file"
+    has "and the rollback says so" "$out" "skipped=1"
+    eq "the file stays as it was" "$(cat "$R/state/reports.json")" "new relay counts"
+    command rm -f "$ADOPT_BACKUP/files$R/state/reports.json"
+    ln "$R/secret" "$ADOPT_BACKUP/files$R/state/reports.json"
+    adopt_restore_files 2>/dev/null
+    eq "nor a second name" "$(cat "$R/state/reports.json")" "new relay counts"
+    # The new file is swapped for a link to another file the moment it is opened.
+    command rm -f "$ADOPT_BACKUP/files$R/state/reports.json"
+    printf 'old relay counts\n' >"$ADOPT_BACKUP/files$R/state/reports.json"
+    printf 'file 644 %s %s %s\n' "$(id -un)" "$(id -gn)" "$R/state/reports.json" >"$ADOPT_BACKUP/manifest"
+    race_at 'exec {w}<> "$tmp"' "" link "$R/secret"
+    RACE_PATH=PENDING
+    race_step() {
+        [ "$RACE_PATH" = PENDING ] && [[ "$BASH_COMMAND" == "$RACE_CMD"* ]] || return 0
+        command rm -f -- "$tmp"; command ln -s -- "$RACE_TO" "$tmp"; RACE_PATH=""
+    }
+    adopt_restore_files 2>/dev/null
+    race_off
+    eq "a swapped temporary file is never written through" "$(cat "$R/secret")" "ROOT-ONLY-SECRET"
+    eq "nor its mode changed" "$(stat -c %a "$R/secret")" 600
+    eq "and the file stays as it was" "$(cat "$R/state/reports.json")" "new relay counts"
+    # Swapped after it passed its checks: owner and mode go through the open file.
+    race_at 'cat <&"$r" >&"$w"' "" link "$R/secret"
+    RACE_PATH=PENDING
+    adopt_restore_files 2>/dev/null
+    race_off
+    eq "a temporary file swapped later never passes its mode on" "$(stat -c %a "$R/secret")" 600
+    eq "nor its bytes" "$(cat "$R/secret")" "ROOT-ONLY-SECRET"
+    command rm -f "$R/state/reports.json"; printf 'new relay counts\n' >"$R/state/reports.json"
+    # The plain copy goes back, and the setup's own messages still reach the screen.
+    out=$( (adopt_restore_files; echo "STILL HEARD" >&2) 2>&1)
+    has "a restore leaves the setup's stderr as it was" "$out" "STILL HEARD"
+    eq "a plain copy is restored" "$(cat "$R/state/reports.json")" "old relay counts"
+    eq "with its mode" "$(stat -c %a "$R/state/reports.json")" 644
+}
+in_sub t_adopt_rollback_never_lands_a_link_target
+
+echo "adopt: the state a take over carries"
+t_adopt_stage_copies_only_the_old_accounts_own_plain_file() {
+    local R=$TMP/adopt_st out
+    rm -rf "$R"; mkdir -p "$R/state" "$R/new" "$R/bk"
+    ADOPT_BACKUP=$R/bk
+    : >"$ADOPT_BACKUP/manifest"; : >"$ADOPT_BACKUP/manifest.paths"
+    printf 'old relay counts\n' >"$R/state/reports.json"
+    printf 'ROOT-ONLY-SECRET\n' >"$R/secret"; chmod 0600 "$R/secret"
+    adopt_backup "$R/state/reports.json"
+    # After the backup, the old account points its file at another.
+    command rm -f "$R/state/reports.json"; ln -s "$R/secret" "$R/state/reports.json"
+    chown() { return 0; }
+    adopt_stage_copy "$R/state/reports.json" "$R/new/reports.json" hollow-relay "$(id -un)"
+    eq "the copy is the one the backup took" "$(cat "$R/new/reports.json")" "old relay counts"
+    eq "readable by its account only" "$(stat -c %a "$R/new/reports.json")" 600
+    # A file the backup saw owned by someone else is not carried.
+    printf 'file 600 mallory mallory %s/state/other.json\n' "$R" >>"$ADOPT_BACKUP/manifest"
+    mkdir -p "$ADOPT_BACKUP/files$R/state"; printf 'x' >"$ADOPT_BACKUP/files$R/state/other.json"
+    out=$( (adopt_stage_copy "$R/state/other.json" "$R/new/other.json" hollow-relay hollow) 2>&1)
+    has "another account's file is refused" "$out" "belonged to mallory"
+    no_ test -e "$R/new/other.json"
+    has "a file the backup does not hold is refused" "$( (adopt_stage_copy "$R/state/none.json" "$R/new/none.json" hollow-relay hollow) 2>&1)" "is not in the backup"
+    command rm -f "$ADOPT_BACKUP/files$R/state/reports.json"; ln -s "$R/secret" "$ADOPT_BACKUP/files$R/state/reports.json"
+    command rm -f "$R/new/reports.json"
+    has "a backup entry that is a link is refused" "$( (adopt_stage_copy "$R/state/reports.json" "$R/new/reports.json" hollow-relay "$(id -un)") 2>&1)" "is not a plain file"
+    no_ test -e "$R/new/reports.json"
+    # The stage itself reads only the backup, never the old path.
+    local stage
+    stage=$(declare -f adopt_native_stage)
+    has "the stage carries the counts through adopt_stage_copy" "$stage" 'adopt_stage_copy "$OLD_REPORTS_FILE"'
+    has "and the forwarder's identity" "$stage" 'adopt_stage_copy "$OLD_FWD_DATA/$f"'
+    lacks "it never reads the old file by name" "$stage" 'plain_read'
+    lacks "nor installs from it" "$stage" '-- "$OLD_'
+}
+in_sub t_adopt_stage_copies_only_the_old_accounts_own_plain_file
+
+echo "uninstall: the take-over backup"
+t_uninstall_names_or_removes_the_take_over_backup() {
+    local R=$TMP/un_bk d out
+    UI_MODE=answers DRY_RUN=0 CFG_MODE=native
+    native_uninstall() { echo "NATIVE-UNINSTALL $1"; }
+    docker_uninstall() { echo "DOCKER-UNINSTALL $1"; }
+    rm -rf "$R"; mkdir -p "$R"
+    ADOPT_BACKUP_ROOT=$R
+    out=$(declare -gA ANS=([confirm]=yes [keep_data]=yes); manage_uninstall 2>&1)
+    lacks "no backup, no question" "$out" "take-over backup"
+    d=$R/hollow-relay-adopt-20261101-101010
+    mkdir -p "$d/files/etc/hollow-relay"
+    printf 'PRIVATE KEY\n' >"$d/files/etc/hollow-relay/privkey.pem"
+    out=$(declare -gA ANS=([confirm]=yes [keep_data]=yes [remove_backup]=no); manage_uninstall 2>&1)
+    has "the removal screen names the backup" "$out" "$d"
+    has "and what it holds" "$out" "TLS private key"
+    has "the person can keep it" "$out" "The take-over backup stays, with the old relay's secrets in it."
+    has "and is told how to delete it" "$out" "sudo rm -rf $d"
+    yes_ test -d "$d"
+    out=$(declare -gA ANS=([confirm]=no [keep_data]=yes [remove_backup]=yes); manage_uninstall 2>&1)
+    yes_ test -d "$d"
+    out=$(declare -gA ANS=([confirm]=yes [keep_data]=yes [remove_backup]=yes); manage_uninstall 2>&1)
+    has "or delete it" "$out" "deleted the take-over backup $d"
+    has "before the relay goes" "$(sed -n '/deleted the take-over backup/,$p' <<<"$out")" "NATIVE-UNINSTALL yes"
+    no_ test -e "$d"
+    lacks "and then names nothing left" "$out" "sudo rm -rf"
+    # The Docker setup's removal asks the same.
+    mkdir -p "$d"; CFG_MODE=docker
+    out=$(declare -gA ANS=([confirm]=yes [keep_data]=no [remove_backup]=yes); manage_uninstall 2>&1)
+    has "Docker too" "$out" "deleted the take-over backup $d"
+    no_ test -e "$d"
+}
+in_sub t_uninstall_names_or_removes_the_take_over_backup

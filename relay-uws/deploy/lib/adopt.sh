@@ -50,6 +50,40 @@ plain_read() {
     [ "$(readlink -f -- "$1")" = "$dir/$(basename -- "$1")" ]
 }
 
+# fd_plain <fd> <path> [<owner>...]: what is open on <fd> is a regular file
+# with one name, opened at <path> and owned by one of <owner> (anyone when none
+# is named). Prints its "<mode> <owner> <group>". The checks read the open file
+# itself, so a link or a second name swapped in at <path> since is caught.
+fd_plain() {
+    local fd=$1 path=$2 dir at n mode user group o
+    shift 2
+    dir=$(cd "$(dirname -- "$path")" 2>/dev/null && pwd -P) || return 1
+    [ -f "/proc/self/fd/$fd" ] || return 1
+    at=$(readlink "/proc/self/fd/$fd" 2>/dev/null) || return 1
+    [ "$at" = "$dir/$(basename -- "$path")" ] || return 1
+    read -r n mode user group < <(stat -L -c '%h %a %U %G' "/proc/self/fd/$fd" 2>/dev/null) || return 1
+    [ "$n" = 1 ] || return 1
+    if [ $# -gt 0 ]; then
+        for o; do [ "$o" = "$user" ] && break; done
+        [ "$o" = "$user" ] || return 1
+    fi
+    printf '%s %s %s\n' "$mode" "$user" "$group"
+}
+
+# plain_copy <path> <dest> [<owner>...]: copies <path> into <dest>, a place
+# only root writes, when the file it opened passes fd_plain. Prints its
+# "<mode> <owner> <group>".
+plain_copy() {
+    local path=$1 dest=$2 fd meta rc=1
+    shift 2
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    { exec {fd}<"$path"; } 2>/dev/null || return 1
+    if meta=$(fd_plain "$fd" "$path" "$@") && (umask 077 && cat <&"$fd" >"$dest"); then rc=0; fi
+    exec {fd}<&-
+    [ "$rc" = 0 ] || return 1
+    printf '%s\n' "$meta"
+}
+
 # arg_value <flag> <program> <word...>: the value the relay takes for <flag>,
 # read as its config.h reads argv: the last copy wins, and the word after any
 # flag that takes one is that flag's value, never a flag of its own.
@@ -1172,10 +1206,12 @@ adopt_backup() {
         if [ -e "$p" ]; then
             [ -f "$p" ] || die "$p is not a plain file, so I changed nothing."
             [ "$(readlink -f -- "$p")" = "$p" ] || die "$p sits behind a link, so I changed nothing."
+            [ "$(stat -c %h -- "$p")" = 1 ] || die "$p has a second name (a hard link), so I changed nothing."
             dest=$ADOPT_BACKUP/files$p
             mkdir -p "$(dirname "$dest")"
-            cp -p --no-dereference -- "$p" "$dest"
-            meta=$(stat -c '%a %U %G' -- "$p")
+            # An old service still runs and can swap the file after the checks above.
+            meta=$(plain_copy "$p" "$dest") ||
+                { rm -f -- "$dest"; die "$p changed while I copied it, so I changed nothing."; }
             printf 'file %s %s\n' "$meta" "$p" >>"$ADOPT_BACKUP/manifest"
         else
             printf 'absent - - - %s\n' "$p" >>"$ADOPT_BACKUP/manifest"
@@ -1232,24 +1268,68 @@ adopt_backup_start() {
     chmod -R go-rwx "$ADOPT_BACKUP"
 }
 
-# restore_file <mode> <owner> <group> <path>: lands in one rename, which
-# replaces a link left at <path> rather than following it.
-restore_file() {
-    local mode=$1 owner=$2 group=$3 path=$4 tmp
+# land_file <src> <path> <mode> <owner> <group>: a copy of <src>, a plain
+# file of the setup's own in a folder only root writes, lands at <path> in one
+# rename, which replaces a link left there rather than following it. The new
+# file is changed through its open descriptor, never its name: a service
+# account may own the folder it lands in.
+land_file() {
+    local src=$1 path=$2 mode=$3 owner=$4 group=$5 me tmp r w rc=1
+    me=$(id -un)
     mkdir -p "$(dirname "$path")"
     tmp=$(mktemp "$path.restore.XXXXXX") || return 1
-    cat "$ADOPT_BACKUP/files$path" >"$tmp"
-    chown "$owner:$group" "$tmp" 2>/dev/null || chown root:root "$tmp"
-    chmod "$mode" "$tmp"
-    mv -f "$tmp" "$path"
+    if [ -f "$src" ] && [ ! -L "$src" ] && { exec {r}<"$src"; } 2>/dev/null; then
+        if { exec {w}<>"$tmp"; } 2>/dev/null; then
+            if fd_plain "$r" "$src" "$me" >/dev/null && fd_plain "$w" "$tmp" "$me" >/dev/null && cat <&"$r" >&"$w"; then
+                { chown "$owner:$group" "/proc/self/fd/$w" 2>/dev/null || chown root:root "/proc/self/fd/$w"; } &&
+                    chmod "$mode" "/proc/self/fd/$w" && rc=0
+            fi
+            exec {w}>&-
+        fi
+        exec {r}<&-
+    fi
+    [ "$rc" = 0 ] || { rm -f -- "$tmp"; return 1; }
+    mv -fT -- "$tmp" "$path"
+}
+
+# restore_file <mode> <owner> <group> <path>: the backup's copy back at <path>.
+restore_file() {
+    land_file "$ADOPT_BACKUP/files$4" "$4" "$1" "$2" "$3" && return 0
+    printf 'I did not put %s back, because its copy in the backup is not a plain file.\n' "$4" >&2
+    return 1
+}
+
+# adopt_backup_owner <path>: who owned <path> when the backup copied it.
+# Fails when the backup holds no copy of it.
+adopt_backup_owner() {
+    local kind mode owner group p
+    while read -r kind mode owner group p; do
+        if [ "$kind" = file ] && [ "$p" = "$1" ]; then printf '%s' "$owner"; return 0; fi
+    done 2>/dev/null <"$ADOPT_BACKUP/manifest"
+    return 1
+}
+
+# adopt_stage_copy <old path> <new path> <account> <owner...>: the backup's
+# copy of <old path> lands at <new path> for <account>. The backup took it
+# through plain_copy, so a service that still runs cannot swap in a link now;
+# and it must have been a file of root's or of one of <owner>.
+adopt_stage_copy() {
+    local old=$1 new=$2 acct=$3 own o
+    shift 3
+    own=$(adopt_backup_owner "$old") || die "$old is not in the backup, so I did not copy it."
+    for o in root "$@"; do [ "$o" = "$own" ] && break; done
+    [ "$o" = "$own" ] || die "$old belonged to $own, not to the old service's account, so I did not copy it."
+    land_file "$ADOPT_BACKUP/files$old" "$new" 0600 "$acct" "$acct" ||
+        die "the backup's copy of $old is not a plain file, so I did not copy it."
 }
 
 # Every file back as the backup holds it, and what the take over made, gone.
 adopt_restore_files() {
     local kind mode owner group p
+    ADOPT_RESTORE_SKIPPED=0
     while read -r kind mode owner group p; do
         case "$kind" in
-        file) restore_file "$mode" "$owner" "$group" "$p" ;;
+        file) restore_file "$mode" "$owner" "$group" "$p" || ADOPT_RESTORE_SKIPPED=1 ;;
         dir) [ -d "$p" ] && [ ! -L "$p" ] && chown "$owner:$group" "$p" && chmod "$mode" "$p" ;;
         absent) if [ -f "$p" ] || [ -L "$p" ]; then rm -f -- "$p"; fi ;;
         esac
@@ -1327,7 +1407,9 @@ adopt_rollback() {
         if curl -fsSk --max-time 3 --connect-to "$OLD_HOST:443:127.0.0.1:443" "https://$OLD_HOST/health" >/dev/null 2>&1; then up=yes; break; fi
         sleep 2
     done
-    if [ "$up" = yes ]; then
+    if [ "$ADOPT_RESTORE_SKIPPED" = 1 ]; then
+        printf 'I put back everything but the files named above. The backup is in %s.\n' "$ADOPT_BACKUP" >&2
+    elif [ "$up" = yes ]; then
         printf 'The old relay runs again, as it did before. Everything I replaced is back. A copy of it stays in %s.\n' "$ADOPT_BACKUP" >&2
     else
         printf 'I put every file back, but the old relay does not answer yet. Its copy of everything I replaced is in %s.\n' "$ADOPT_BACKUP" >&2
@@ -1355,6 +1437,23 @@ adopt_interrupted() {
         [[ "$OLD_PROJECT" =~ ^[a-z0-9_-]*$ ]] && { [ -z "$OLD_HOST" ] || host_usable "$OLD_HOST"; } || return 1
     ADOPT_BACKUP=$st
     return 0
+}
+
+# The backups take overs left here, one folder per line. They hold copies of
+# the old relay's secrets.
+adopt_backups() {
+    local d
+    for d in "$ADOPT_BACKUP_ROOT"/hollow-relay-adopt-*; do
+        [ -d "$d" ] && [ ! -L "$d" ] && printf '%s\n' "$d"
+    done
+    return 0
+}
+
+# adopt_backup_erase <folder>: zeroes each file first, as every key unlink does.
+adopt_backup_erase() {
+    run_ok find "$1" -xdev -type f -exec shred -z -n 0 {} +
+    run rm -rf -- "$1"
+    say "  deleted the take-over backup $1"
 }
 
 adopt_resume_main() {
@@ -1418,14 +1517,14 @@ adopt_native_stage() {
         say "  would copy the report counts and the forwarder's identity into /var/lib, and stop the old services that run under other names"
         return 0
     fi
-    # The report counts, when the old relay kept them elsewhere. Never their
-    # key: a relay since 0.13 keeps it in memory only, and the backup holds the
-    # old relay's copy for a rollback.
-    if [ "$OLD_REPORTS_FILE" != /var/lib/hollow-relay/reports.json ] && [ -e "$OLD_REPORTS_FILE" ] &&
+    # The report counts, when the old relay kept them elsewhere, from the
+    # backup's copy: the old services still run. Never their key: a relay since
+    # 0.13 keeps it in memory only, and the backup holds the old relay's copy
+    # for a rollback.
+    if [ "$OLD_REPORTS_FILE" != /var/lib/hollow-relay/reports.json ] && adopt_backup_owner "$OLD_REPORTS_FILE" >/dev/null &&
        [ ! -e /var/lib/hollow-relay/reports.json ]; then
         install -d -m 0700 -o hollow-relay -g hollow-relay /var/lib/hollow-relay
-        plain_read "$OLD_REPORTS_FILE" || die "$OLD_REPORTS_FILE is a link or not a plain file, so I did not copy it."
-        install -m 0600 -o hollow-relay -g hollow-relay -- "$OLD_REPORTS_FILE" /var/lib/hollow-relay/reports.json
+        adopt_stage_copy "$OLD_REPORTS_FILE" /var/lib/hollow-relay/reports.json hollow-relay "${OLD_RELAY_USER:-root}"
         say "  copied $OLD_REPORTS_FILE"
     fi
     # The forwarder's identity, so its id stays the same.
@@ -1433,10 +1532,9 @@ adopt_native_stage() {
         ensure_account hollow-fwd
         install -d -m 0700 -o hollow-fwd -g hollow-fwd /var/lib/hollow-forwarder
         for f in forwarder.key forwarder.db; do
-            [ -e "$OLD_FWD_DATA/$f" ] || continue
+            adopt_backup_owner "$OLD_FWD_DATA/$f" >/dev/null || continue
             [ -e "/var/lib/hollow-forwarder/$f" ] && die "/var/lib/hollow-forwarder/$f already exists, and it is not the old forwarder's. I stopped before the forwarder changed."
-            plain_read "$OLD_FWD_DATA/$f" || die "$OLD_FWD_DATA/$f is a link or not a plain file, so I did not copy it."
-            install -m 0600 -o hollow-fwd -g hollow-fwd -- "$OLD_FWD_DATA/$f" "/var/lib/hollow-forwarder/$f"
+            adopt_stage_copy "$OLD_FWD_DATA/$f" "/var/lib/hollow-forwarder/$f" hollow-fwd "$(adopt_prop "$OLD_FWD_UNIT" User)"
         done
         say "  copied the forwarder's identity from $OLD_FWD_DATA"
     fi

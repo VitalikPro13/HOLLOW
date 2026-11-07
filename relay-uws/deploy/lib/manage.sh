@@ -513,13 +513,16 @@ manage_check() {
 }
 
 manage_uninstall() {
-    local keeps
+    local keeps backups=() b
+    mapfile -t backups < <(adopt_backups)
     if [ "$CFG_MODE" = docker ]; then
         keeps="the Docker volumes with the certificate, the report counts and the forwarder's identity, if you choose to keep them"
     else
         keeps="the forwarder's identity and the report counts, copied to $BACKUP_DIR if you choose to keep them, so a reinstall picks them up again
 - the certificate in /etc/letsencrypt, so a reinstall does not need a new one. Its renewal stops, because the setup's renewal hooks are removed with it, and a reinstall turns it back on. sudo certbot delete --cert-name relay removes it."
     fi
+    [ ${#backups[@]} -gt 0 ] && keeps="$keeps
+- the backup made when the setup took this relay over, in ${backups[*]}, unless you choose to delete it"
     ui_msg "Remove the relay" \
 "This removes:
 - the relay and every service the setup added, their accounts, settings and secrets
@@ -539,11 +542,34 @@ Messages waiting for people who are offline are lost."
     else
         UNINSTALL_KEEP=no
     fi
+    UNINSTALL_BACKUPS=keep
+    if [ ${#backups[@]} -gt 0 ] && ui_yesno remove_backup "Delete the take-over backup?" "$(uninstall_backup_text "${backups[@]}")" yes; then
+        UNINSTALL_BACKUPS=remove
+    fi
     ui_yesno confirm "Remove the relay now?" "Remove the Hollow relay from this machine?" no || { say "Nothing was removed."; return 0; }
+    if [ "$UNINSTALL_BACKUPS" = remove ]; then
+        for b in "${backups[@]}"; do adopt_backup_erase "$b"; done
+    fi
     if [ "$CFG_MODE" = docker ]; then docker_uninstall "$UNINSTALL_KEEP"; else native_uninstall "$UNINSTALL_KEEP"; fi
     say ""
     say "The relay is removed. To set it up again, run install.sh from your copy of the repository."
+    if [ ${#backups[@]} -gt 0 ] && [ "$UNINSTALL_BACKUPS" = keep ]; then
+        say ""
+        say "The take-over backup stays, with the old relay's secrets in it. Delete it when you no longer need it:"
+        for b in "${backups[@]}"; do say "  sudo rm -rf $b"; done
+    fi
     exit 0
+}
+
+uninstall_backup_text() {
+    local where
+    where=$(printf '%s\n' "$@")
+    printf '%s' "When the setup took this relay over, it saved a copy of every file it replaced in:
+$where
+
+Only root can read it, but it holds the old relay's secrets, such as its TLS private key, the TURN secret, the push token, the DuckDNS token, the members-only keys and the forwarder's identity.
+
+Delete it now? We recommend yes, unless you want to set up the old relay again by hand."
 }
 
 # A run from a clone that holds an older setup than the one a release put

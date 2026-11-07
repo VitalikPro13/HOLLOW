@@ -225,6 +225,47 @@ if [[ " ${units[*]} " == *" hollow-relay "* ]]; then
     fi
 fi
 
+# certbot in the setup's own Python environment renews as root, twice a day.
+renew=hollow-certbot-renew
+if [ "$(systemctl show -p LoadState --value "$renew" 2>/dev/null)" = loaded ]; then
+    echo "Certificate renewal"
+    boxed=1
+    for p in NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes PrivateDevices=yes \
+             RestrictSUIDSGID=yes RestrictNamespaces=yes LimitCORE=0; do
+        if [ "$(systemctl show -p "${p%%=*}" --value "$renew")" != "${p#*=}" ]; then
+            bad "$renew runs certbot as root without ${p}"
+            boxed=0
+        fi
+    done
+    for c in $(systemctl show -p CapabilityBoundingSet --value "$renew"); do
+        case "$c" in
+        cap_chown|cap_dac_override|cap_fowner|cap_net_bind_service) ;;
+        *) bad "$renew keeps $c, which certbot and its deploy hook do not need"; boxed=0 ;;
+        esac
+    done
+    [ "$boxed" = 1 ] && ok "$renew runs certbot in a sandbox"
+    venv=$(systemctl show -p ExecStart --value "$renew" | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -n 1)
+    venv=${venv%/bin/certbot}
+    if [ -d "$venv" ]; then
+        open=$(find "$venv" ! -type l \( ! -user root -o -perm /022 \) 2>/dev/null | head -n 3)
+        if [ -z "$open" ]; then
+            ok "only root can change certbot's Python environment in $venv"
+        else
+            bad "certbot runs as root from files other accounts may change: $(echo "$open" | tr '\n' ' ')"
+        fi
+        reqs=$(dirname "$0")/certbot-requirements.txt
+        if [ ! -f "$reqs" ]; then
+            echo "  skip  certbot's packages: no certbot-requirements.txt beside this script to compare with"
+        elif [ "$(cat "$venv/hollow-requirements.sha256" 2>/dev/null)" = "$(sha256sum <"$reqs" | cut -d' ' -f1)" ]; then
+            ok "certbot's packages are the ones the setup pins by hash"
+        else
+            bad "an older setup installed certbot's packages without pinned hashes. Update the relay with sudo hollow-relay-setup"
+        fi
+    else
+        bad "$renew runs $venv/bin/certbot, which is not there"
+    fi
+fi
+
 echo "Disk"
 if [ -z "$(swapon --noheadings 2>/dev/null)" ]; then ok "no swap"; else bad "swap is on: relay memory can be paged to the disk"; fi
 case "$(sysctl -n kernel.core_pattern)" in

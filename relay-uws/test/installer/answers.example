@@ -50,6 +50,7 @@ confirm=yes              # the plan screen
 # names the new key instead.
 #ssh_public_key=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... me@laptop
 #keep_data=yes           # with action=uninstall: keep the forwarder identity and report counts
+#remove_backup=yes       # with action=uninstall: delete the backup a take over left, with the old relay's secrets
 #interrupted=rollback    # a take over that stopped part of the way: rollback (recommended) | leave
 #replace_setup=no        # a run from a clone older than the setup a release installed: no (recommended) | yes
 #confirm=yes             # update and uninstall ask for it too

@@ -418,12 +418,14 @@ domain, `--turn no` without TURN and `--forwarder yes` with the forwarder:
 
 ```bash
 cd HOLLOW/relay-uws
-sudo sh deploy/harden-host.sh --http no --turn yes --forwarder no
+sudo sh deploy/harden-host.sh --http no --turn yes --forwarder no --no-ssh
 ```
 
-On its own it turns SSH password logins off only if your account already has an
-SSH key in `~/.ssh/authorized_keys`. With no key it leaves passwords on, so it
-never locks you out. Add `--print` to see what it would do first.
+`--no-ssh` leaves SSH as it is. To turn password logins off, run
+`sudo bash install.sh` in `HOLLOW/relay-uws` once the relay runs and choose
+**Leave it alone**. It offers the [SSH key flow](#ssh-keys), which turns passwords off only
+after it has seen you log in with your key. Add `--print` to see what
+harden-host.sh would do first.
 
 Fill in the settings:
 
@@ -529,7 +531,7 @@ copy there. Run everything from your clone, as an account that can use `sudo`.
 
 ```bash
 cd HOLLOW
-sudo sh relay-uws/deploy/harden-host.sh --http no --turn yes --forwarder no
+sudo sh relay-uws/deploy/harden-host.sh --http no --turn yes --forwarder no --no-ssh
 ```
 
 **2. Build and install the relay.**
@@ -664,7 +666,7 @@ older. Copy it into place and give it the push token, under the name
 ```bash
 sudo install -d -m 0755 /opt/hollow-push
 sudo cp push-sidecar/index.js push-sidecar/fcm.js push-sidecar/unifiedpush.js push-sidecar/package.json push-sidecar/package-lock.json /opt/hollow-push/
-cd /opt/hollow-push && sudo npm install --omit=optional --omit=dev --ignore-scripts && cd -
+cd /opt/hollow-push && sudo npm ci --omit=optional --omit=dev --ignore-scripts --no-audit --no-fund && cd -
 sudo install -d -m 0700 /etc/hollow-push
 sudo install -m 0600 /dev/null /etc/hollow-push/push.env
 sudo nano /etc/hollow-push/push.env    # PUSH_TOKEN=the-second-value
@@ -721,7 +723,7 @@ sudo systemctl restart hollow-relay
 
 Messages waiting for offline people survive this restart, and connected apps
 pick up where they were within about 10 seconds. If `push-sidecar` changed, copy
-its files again, run the `npm install` again and restart `hollow-push`.
+its files again, run the `npm ci` line again and restart `hollow-push`.
 
 ## Optional parts
 
