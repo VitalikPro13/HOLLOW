@@ -11808,11 +11808,19 @@ async fn handle_incoming_request_inner(
                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: server_id.clone() });
             }
             if let Some(op) = super::leave_book::own_leave(&server_id, &op_json, peer_str, local_peer_str) {
-                leave_book.note_left(&server_id, &op, peer_str);
                 // Judged by the leave's own clock, never its carrier's: an old leave parked
                 // and sealed afresh may predate a rejoin it does not know of, and the join's
                 // own fold judges that one when it completes.
-                if pending_server_joins.get(&server_id).is_some_and(|p| p.from_sibling && op.hlc.physical_ms as i64 > p.announced_at) {
+                let ends_sibling_join = pending_server_joins.get(&server_id).is_some_and(|p| p.from_sibling && op.hlc.physical_ms as i64 > p.announced_at);
+                // A sibling's join announced before it began the membership this leave ends;
+                // else the span we still hold names its ask (read before the leave applies).
+                let opened = if ends_sibling_join {
+                    Some(op.hlc.physical_ms as i64)
+                } else {
+                    super::leave_book::opened_by(server_states.get(&server_id), local_peer_str)
+                };
+                leave_book.note_left(&server_id, &op, peer_str, opened);
+                if ends_sibling_join {
                     sync_handler::end_join_we_left(
                         pending_server_joins, server_states, mls, crypto_store, crdt_store, ws_cmd_tx,
                         leave_book.holds_room(&server_id), &server_id,
@@ -11972,7 +11980,11 @@ async fn handle_incoming_request_inner(
                 let mut election_view = ws_room_peers;
                 let mut ours = true;
                 if !is_sibling && !repeat_ask && hidden_asker {
-                    if super::door_room::reached(&server_id, peer_str, frame_ts_ms, ws_room_peers, device_peer_id) {
+                    // Away, our view of the room is frozen: the picks on screen serve it.
+                    if super::ws_client::backgrounded() {
+                        hollow_log!("[HOLLOW-CRDT] A hidden join ask for {server_id} reached us while away, leaving it to members on screen");
+                        ours = false;
+                    } else if super::door_room::reached(&server_id, peer_str, frame_ts_ms, ws_room_peers, device_peer_id) {
                         picked_view = super::door_room::reached_view(&server_id, peer_str, frame_ts_ms, ws_room_peers, device_peer_id);
                         election_view = &picked_view;
                     } else {
@@ -12108,12 +12120,25 @@ async fn handle_incoming_request_inner(
                     // to verify.
                     let follow = twitch::TwitchServerSettings::from_server_state(state)
                         .and(twitch_proof_json.clone());
+                    // A rejoin's admission sorts after the ask it carries, so a leave of the
+                    // joiner's stamped below that ask never ends the membership it opens. A
+                    // first-time joiner has no leave to sort after and moves no clock, and a
+                    // refused admission leaves the clock where it was.
+                    let clock_before = state.hlc.clone();
+                    let signed_at = ask
+                        .as_ref()
+                        .filter(|a| state.left_at(&member_master).is_some() && a.verifies(&server_id, &member_master))
+                        .and_then(|a| u64::try_from(a.at).ok());
+                    if let (Some(at), Some(hlc)) = (signed_at, state.hlc.as_mut()) {
+                        hlc.witness(&crate::crdt::hlc::HlcTimestamp { physical_ms: at, counter: 0, actor: member_master.clone() });
+                    }
                     let Some(op) = state.author_checked(CrdtPayload::MemberAdded {
                         peer_id: member_master.clone(),
                         display_name,
                         follow,
                         ask,
                     }) else {
+                        state.hlc = clock_before;
                         hollow_log!("[HOLLOW-CRDT] Not admitting {member_master} to {server_id}: the admission rules refuse it here");
                         return;
                     };

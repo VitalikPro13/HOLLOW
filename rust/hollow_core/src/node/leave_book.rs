@@ -155,6 +155,48 @@ struct LeftMark {
     from: String,
     #[serde(default)]
     at_ms: u64,
+    /// The leave that ended our membership as members fold it: the earliest at or past
+    /// `opened`. A book saved before it names `op_json`'s.
+    #[serde(default)]
+    closer: Option<HlcTimestamp>,
+    /// The ask of our identity's newest membership this device knows of: a leave
+    /// stamped before it ended an earlier one.
+    #[serde(default)]
+    opened: i64,
+}
+
+impl LeftMark {
+    fn closer(&self) -> Option<HlcTimestamp> {
+        self.closer.clone().or_else(|| match crate::crdt::operations::read_op(&self.op_json) {
+            crate::crdt::operations::ReadOp::Op(op) => Some(op.hlc),
+            _ => None,
+        })
+    }
+}
+
+/// The leave that ends the membership opened by ask `opened`, from the one held and a
+/// new one: the fold closes a span at its first leave, and no ask opens a span unless it
+/// is newer than the leave before (`crdt::members::opens`).
+fn first_leave_since(held: Option<HlcTimestamp>, leave: &HlcTimestamp, opened: i64) -> Option<HlcTimestamp> {
+    let ends_it = |at: &&HlcTimestamp| i128::from(at.physical_ms) >= i128::from(opened);
+    let first = held.iter().chain([leave]).filter(ends_it).min().cloned();
+    first.or(held)
+}
+
+/// What a new ask to join a server our identity left names and is stamped past.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AskFloor {
+    /// The leave that ended our membership as members fold it: an ask naming it counts by
+    /// its stamp, else members take it for one from before.
+    pub(crate) follows: Option<HlcTimestamp>,
+    /// Our identity's newest leave we hold. The ask is stamped past it and its admission
+    /// past the ask, so no leave of ours we know of ends the membership it opens.
+    pub(crate) past_ms: Option<u64>,
+}
+
+/// The ask that opened our identity's newest membership `state` records.
+pub(crate) fn opened_by(state: Option<&crate::crdt::server_state::ServerState>, local_master: &str) -> Option<i64> {
+    state?.member_record.get(local_master)?.last().map(|span| span.asked_at)
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -238,8 +280,8 @@ impl LeaveBook {
         }
     }
 
-    /// We left `server_id` with `op`: keep it, and its room and door, until it lands.
-    /// Returns a room a full book gave up to make space.
+    /// We left `server_id` with `op`, ending the membership ask `opened` began: keep it,
+    /// and its room and door, until it lands. Returns a room a full book gave up to make space.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn begin(
         &mut self,
@@ -249,6 +291,7 @@ impl LeaveBook {
         targets: Vec<String>,
         door: Option<(u64, Zeroizing<[u8; 32]>)>,
         local_device: &str,
+        opened: Option<i64>,
     ) -> Option<String> {
         let Ok(op_json) = serde_json::to_string(op) else { return None };
         let mut dropped = None;
@@ -276,22 +319,49 @@ impl LeaveBook {
             },
         );
         self.probes.remove(server_id);
-        self.keep_left(server_id, op_json, local_device, op.hlc.physical_ms);
+        // A span from before asks were recorded names no ask: our own leave is all we know.
+        let opened = opened.filter(|at| *at > 0).unwrap_or(i64::try_from(op.hlc.physical_ms).unwrap_or(i64::MAX));
+        let (closer, opened) = self.closer_with(server_id, op, Some(opened));
+        // A sibling's newer leave already held stays the newest one: a rejoin's ask is
+        // stamped past it.
+        let (op_json, from, at_ms) = match self.stored.left.get(server_id) {
+            Some(mark) if mark.at_ms > op.hlc.physical_ms => (mark.op_json.clone(), mark.from.clone(), mark.at_ms),
+            _ => (op_json, local_device.to_string(), op.hlc.physical_ms),
+        };
+        self.keep_left(server_id, LeftMark { op_json, from, at_ms, closer, opened });
         self.save();
         dropped
     }
 
     /// An own device told us our identity left `server_id` ([`own_leave`] passed).
-    pub(crate) fn note_left(&mut self, server_id: &str, op: &CrdtOp, from: &str) {
-        let held = self.stored.left.get(server_id).is_some_and(|m| m.at_ms >= op.hlc.physical_ms);
+    /// `opened`: the ask of the newest membership of ours we know of, when we know one.
+    pub(crate) fn note_left(&mut self, server_id: &str, op: &CrdtOp, from: &str, opened: Option<i64>) {
         let Ok(op_json) = serde_json::to_string(op) else { return };
-        if !held {
-            self.keep_left(server_id, op_json, from, op.hlc.physical_ms);
-            self.save();
+        let (closer, opened) = self.closer_with(server_id, op, opened);
+        match self.stored.left.get_mut(server_id) {
+            Some(mark) if mark.at_ms >= op.hlc.physical_ms => {
+                if mark.closer == closer && mark.opened == opened {
+                    return;
+                }
+                mark.closer = closer;
+                mark.opened = opened;
+            }
+            _ => {
+                let at_ms = op.hlc.physical_ms;
+                self.keep_left(server_id, LeftMark { op_json, from: from.to_string(), at_ms, closer, opened });
+            }
         }
+        self.save();
     }
 
-    fn keep_left(&mut self, server_id: &str, op_json: String, from: &str, at_ms: u64) {
+    /// The closer and opening ask `server_id`'s mark holds once it hears of leave `op`.
+    fn closer_with(&self, server_id: &str, op: &CrdtOp, opened: Option<i64>) -> (Option<HlcTimestamp>, i64) {
+        let held = self.stored.left.get(server_id);
+        let opened = held.map_or(0, |m| m.opened).max(opened.unwrap_or(0));
+        (first_leave_since(held.and_then(LeftMark::closer), &op.hlc, opened), opened)
+    }
+
+    fn keep_left(&mut self, server_id: &str, mark: LeftMark) {
         let left = &mut self.stored.left;
         if left.len() >= LEFT_CAP && !left.contains_key(server_id) {
             let mut per_device: HashMap<&str, usize> = HashMap::new();
@@ -308,7 +378,7 @@ impl LeaveBook {
                 left.remove(&victim);
             }
         }
-        left.insert(server_id.to_string(), LeftMark { op_json, from: from.to_string(), at_ms });
+        left.insert(server_id.to_string(), mark);
     }
 
     /// Our identity's newest leave of `server_id` we hold, for a join of it to fold in.
@@ -320,10 +390,12 @@ impl LeaveBook {
         }
     }
 
-    /// The clock of our identity's newest leave of `server_id` we hold: a new ask to join
-    /// it names that leave and is stamped later, or members take it for one from before.
-    pub(crate) fn ask_floor(&self, server_id: &str) -> Option<HlcTimestamp> {
-        self.left_op(server_id).map(|op| op.hlc)
+    /// What a new ask to join `server_id` names and is stamped past.
+    pub(crate) fn ask_floor(&self, server_id: &str) -> AskFloor {
+        let Some(mark) = self.stored.left.get(server_id) else { return AskFloor::default() };
+        let follows = mark.closer();
+        let past_ms = follows.as_ref().map(|c| c.physical_ms).into_iter().chain([mark.at_ms]).max();
+        AskFloor { follows, past_ms }
     }
 
     /// A join of `server_id` holds us a member past our leave: the leave is history.
@@ -513,7 +585,7 @@ mod tests {
     }
 
     fn mark(from: &str, at_ms: u64) -> LeftMark {
-        LeftMark { op_json: String::new(), from: from.to_string(), at_ms }
+        LeftMark { op_json: String::new(), from: from.to_string(), at_ms, ..Default::default() }
     }
 
     /// A full book of left marks gives up one of the device that told us the most,
@@ -525,7 +597,7 @@ mod tests {
         for i in 0..LEFT_CAP - 1 {
             b.stored.left.insert(format!("loud-{i:04}"), mark("loud", 100 + i as u64));
         }
-        b.keep_left("new", String::new(), "quiet", 10_000);
+        b.keep_left("new", mark("quiet", 10_000));
         assert_eq!(b.stored.left.len(), LEFT_CAP);
         assert!(b.stored.left.contains_key("quiet-old"), "the quiet device's old mark stays");
         assert!(!b.stored.left.contains_key("loud-0000"), "the busiest device's oldest mark goes");
@@ -616,6 +688,53 @@ mod tests {
         let (mut b, _) = waiting(&us);
         let deleted = signed(1, 900, CrdtPayload::ServerDeleted { deleted_at: 900 });
         assert!(b.on_answer("S", &json(&[&deleted]), Some(7), &owner, &us), "the owner's deletion closes it");
+    }
+
+    /// F2 of the w2-d re-check: a new ask names the leave members' folds end our membership
+    /// at (the first one at or past the ask that opened it, whichever device made it) and is
+    /// stamped past the newest leave we hold. A leave from an earlier membership, or one a
+    /// sibling's rejoin came before, moves the named leave as the fold would.
+    #[test]
+    fn a_new_ask_names_the_leave_that_ended_our_membership() {
+        let us = crate::crdt::testkeys::keys(2).1;
+        let leave = |ms: u64| signed(2, ms, CrdtPayload::MemberRemoved { peer_id: us.clone(), seen: None });
+        let floor = |b: &LeaveBook| {
+            let f = b.ask_floor("S");
+            (f.follows.map(|c| c.physical_ms), f.past_ms)
+        };
+        let mut b = book();
+        b.begin("S", &leave(1_000), None, Vec::new(), None, "dev-a", Some(900));
+        assert_eq!(floor(&b), (Some(1_000), Some(1_000)));
+        b.note_left("S", &leave(1_005), "dev-b", None);
+        assert_eq!(floor(&b), (Some(1_000), Some(1_005)), "a sibling's later leave of the same membership changes no name");
+        b.note_left("S", &leave(995), "dev-b", None);
+        assert_eq!(floor(&b), (Some(995), Some(1_005)), "a sibling's earlier leave of it ended it first");
+        b.note_left("S", &leave(850), "dev-b", None);
+        assert_eq!(floor(&b), (Some(995), Some(1_005)), "a leave from before the ask that opened it ended an earlier one");
+        b.note_left("S", &leave(1_200), "dev-b", Some(1_200));
+        assert_eq!(floor(&b), (Some(1_200), Some(1_200)), "a leave after a sibling's rejoin ends that membership");
+        b.forget_left("S");
+        assert_eq!(b.ask_floor("S"), AskFloor::default());
+
+        // A member that still holds the server names its membership's ask with the leave.
+        let mut b = book();
+        b.note_left("S", &leave(700), "dev-b", None);
+        b.note_left("S", &leave(1_100), "dev-b", Some(1_000));
+        assert_eq!(floor(&b), (Some(1_100), Some(1_100)), "the first leave of a newer membership");
+
+        // Our own leave of a span saved before asks were kept names itself.
+        let mut b = book();
+        b.note_left("S", &leave(500), "dev-b", None);
+        b.begin("S", &leave(1_000), None, Vec::new(), None, "dev-a", Some(0));
+        assert_eq!(floor(&b), (Some(1_000), Some(1_000)));
+
+        // A book saved before the named leave was kept names its newest leave, and learns.
+        let old = format!(r#"{{"left":{{"S":{{"op_json":{},"from":"dev-b","at_ms":1000}}}}}}"#, serde_json::to_string(&serde_json::to_string(&leave(1_000)).unwrap()).unwrap());
+        let mut b = book();
+        b.stored = serde_json::from_str(&old).expect("an old book loads");
+        assert_eq!(floor(&b), (Some(1_000), Some(1_000)));
+        b.note_left("S", &leave(990), "dev-b", None);
+        assert_eq!(floor(&b), (Some(990), Some(1_000)));
     }
 
     /// Only the recorded owner's own signed deletion, or its removal or ban of us, ends a

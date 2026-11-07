@@ -27598,7 +27598,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // settle tests (w3c1c: 3.0 s each): PC 1115.5 s, slack 2.5 s.
     // 2026-11-06: w3-c1d (the recovery window's 5.0 s absence) and w3-c1e (spawn and
     // set-online staggers, 4.5 s): 1125.0 s, slack 2.5 s.
-    const BUDGET_MS: u64 = 1_134_000;
+    // 2026-11-07: t14-w2d added two absences: old leaves handed back after a rejoin end
+    // nothing (1.5 s) and an away member serves no hidden join ask (3.0 s) (scan 1138.3 s,
+    // slack 2.5 s).
+    const BUDGET_MS: u64 = 1_140_800;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -64687,4 +64690,235 @@ async fn t14a_a_strangers_vector_ask_on_a_legacy_server_gets_no_op_log() {
         !to_s.iter().any(|(_, ops)| ops.contains("Secret name") || ops.contains("member_added")),
         "a stranger was served the op log of a legacy-id server by the vector: {to_s:?}",
     );
+}
+
+// t14-w2d
+
+/// Two devices of J's identity leave one server inside the same clock lead, each before
+/// it hears of the other's leave; J then rejoins from its first device. The owner's fold
+/// ends J's membership at the EARLIER leave, so J's ask must name that one: its stamp then
+/// counts and the rejoin is served at once, whichever device left first.
+async fn w2d_rejoin_after_both_devices_left(tags: [u8; 4], sibling_left_first: bool) {
+    use base64::Engine as _;
+    let [o_tag, jm_tag, d1_tag, d2_tag] = tags;
+    let relay = MockRelay::new();
+    let o_master = keys(o_tag).peer_id();
+    let j_master = keys(jm_tag).peer_id();
+    super::resolver::seed_self(&j_master, &[keys(d1_tag).peer_id(), keys(d2_tag).peer_id()]);
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&j_master]).await;
+    let mut j = spawn_node_with_friends(&relay, jm_tag, d1_tag, &[&o_master]).await;
+    let j2 = spawn_node_with_friends(&relay, jm_tag, d2_tag, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    expect_siblings_ready(&relay, &j, &j2, 20).await;
+    let server_id = create_server_and_wait(&mut o, "Both Left").await;
+    let joined = async |j: &mut TestNode, what: &str| {
+        drain_events(j);
+        j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+        assert!(
+            wait_event(j, std::time::Duration::from_secs(20), |e| matches!(e, NetworkEvent::ServerJoined { server_id: s, .. } if *s == server_id)).await,
+            "{what}",
+        );
+    };
+    joined(&mut j, "precondition: J joins").await;
+    let ahead = 120_000u64;
+    let renamed = forge_crdt_op(
+        &server_id, &o.master_id, crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "From ahead".into() },
+        ahead, Some(&o.master_kp),
+    );
+    send_as(&relay, &server_id, &o, &j, sync_response(&server_id, &[renamed])).await;
+    assert!(
+        wait_until(10, async || j.live_server_state(&server_id).await.is_some_and(|s| s.name() == "From ahead")).await,
+        "precondition: J's clock witnessed the op from ahead",
+    );
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    let floor = crate::crdt::hlc::wall_clock_ms() + ahead / 2;
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.and_then(|s| s.left_at(&j_master)).is_some_and(|l| l > floor)).await,
+        "precondition: the owner holds J's leave, stamped ahead of the wall clock",
+    );
+    let ours = o.live_server_state(&server_id).await.and_then(|s| s.left_by(&j_master).cloned()).expect("the leave's clock");
+    let ours_op = o.live_server_state(&server_id).await.and_then(|s| s.op_log.iter().find(|op| op.hlc == ours).cloned()).expect("the leave");
+
+    // The other device's own leave of the same membership, made before it heard ours; a
+    // later one far enough past ours that an ask stamped just past ours sorts below it.
+    let at_ms = if sibling_left_first { ours.physical_ms - 1 } else { ours.physical_ms + 50 };
+    let master_kp = keys(jm_tag);
+    let mut theirs = crate::crdt::operations::CrdtOp {
+        server_id: server_id.clone(),
+        hlc: crate::crdt::hlc::HlcTimestamp { physical_ms: at_ms, counter: 0, actor: j_master.clone() },
+        author: j_master.clone(),
+        payload: crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: j_master.clone(), seen: None },
+        auth: None,
+        dev: None,
+    };
+    theirs.sign(&master_kp, &base64::engine::general_purpose::STANDARD.encode(master_kp.public_key_protobuf()));
+    carry_as(&j2, &j, crdt_broadcast(&server_id, &theirs)).await;
+    carry_as(&j, &o, crdt_broadcast(&server_id, &theirs)).await;
+    // The fold refuses a later leave of a membership already ended; an earlier one moves
+    // its end back.
+    let closer = if sibling_left_first { theirs.hlc.clone() } else { ours.clone() };
+    let heard = theirs.hlc.physical_ms.to_string();
+    assert!(
+        wait_until(10, async || j.store().load_setting("leave_book").ok().flatten().is_some_and(|book| book.contains(&heard))).await,
+        "precondition: J's own device holds the other device's leave",
+    );
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.and_then(|s| s.left_by(&j_master).cloned()) == Some(closer.clone())).await,
+        "precondition: the owner's fold ends J's membership at the earlier leave",
+    );
+
+    joined(&mut j, "J's rejoin inside the lead is served at once").await;
+    assert!(o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j_master)), "the owner counts J again");
+    // The admission sorts after both leaves: handed to the owner again, neither ends it.
+    for leave in [&ours_op, &theirs] {
+        carry_as(&j, &o, crdt_broadcast(&server_id, leave)).await;
+    }
+    sleep_ms(1_500).await; // absence proof: a leave from before the rejoin removes nobody
+    assert!(o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j_master)), "an old leave ended J's rejoin");
+    drop(j2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_a_rejoin_after_both_devices_left_inside_a_lead_is_served() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    w2d_rejoin_after_both_devices_left([139, 140, 141, 142], false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_a_rejoin_after_the_sibling_left_first_inside_a_lead_is_served() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    w2d_rejoin_after_both_devices_left([143, 144, 145, 146], true).await;
+}
+
+/// Review F3 of w2-d, the hidden joiner's half: an away member's view of the room is
+/// frozen, so whom it thinks a hidden joiner's frame picked may not be whom the relay
+/// picked. It serves no such ask, leaving it to the on-screen picks; on screen, the same
+/// member serves one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_an_away_pick_serves_no_hidden_join_ask() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, _j, server_id) = owner_member_and_joiner(&relay, 147, 148, 149).await;
+    w2d_member_sees_room(&relay, &server_id, &m, &o).await;
+    let fakes: Vec<String> = [150u8, 151, 152].iter().map(|t| keys(*t).peer_id()).collect();
+    for fake in &fakes {
+        relay.inject_presence(&m.device_id, &server_id, fake);
+    }
+    let room: Vec<String> = fakes.iter().cloned().chain([o.device_id.clone(), m.device_id.clone()]).collect();
+    let now = super::frame_auth::now_ms();
+    let on_screen = keys(153).peer_id();
+    let sealed = w2d_seal_where(now, &keys(154).peer_id(), &room, &[&m.device_id], &[&o.device_id]);
+    relay.inject(&server_id, &keys(154).peer_id(), &m.device_id, w2d_hidden_ask(&relay, &server_id, 153, 154, sealed, now));
+    assert!(
+        wait_until(15, async || m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&on_screen))).await,
+        "precondition: on screen, the member a hidden ask picks serves it",
+    );
+    relay.set_background(&m, true);
+    let away = keys(155).peer_id();
+    let sealed = w2d_seal_where(now, &keys(156).peer_id(), &room, &[&m.device_id], &[&o.device_id]);
+    relay.inject(&server_id, &keys(156).peer_id(), &m.device_id, w2d_hidden_ask(&relay, &server_id, 155, 156, sealed, now));
+    sleep_ms(3_000).await; // absence proof: an away pick serves nothing
+    assert!(
+        !m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&away)),
+        "an away member served a hidden join ask from its frozen view",
+    );
+    drop(o);
+}
+
+/// The named leave after a rejoin this device only heard announced: J left, its other
+/// device announced a join of the server again (a rejoin J's device never saw complete),
+/// then a leave of J's came after that announce. That later leave ended the newer
+/// membership, so it is the one J's next ask names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_a_leave_after_a_siblings_announced_rejoin_is_the_one_named() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_tag, jm_tag, d1_tag, d2_tag) = (157u8, 158u8, 159u8, 160u8);
+    let o_master = keys(o_tag).peer_id();
+    let j_master = keys(jm_tag).peer_id();
+    super::resolver::seed_self(&j_master, &[keys(d1_tag).peer_id(), keys(d2_tag).peer_id()]);
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&j_master]).await;
+    let mut j = spawn_node_with_friends(&relay, jm_tag, d1_tag, &[&o_master]).await;
+    let j2 = spawn_node_with_friends(&relay, jm_tag, d2_tag, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    expect_siblings_ready(&relay, &j, &j2, 20).await;
+    let server_id = create_server_and_wait(&mut o, "Announced Rejoin").await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(20), |e| matches!(e, NetworkEvent::ServerJoined { server_id: s, .. } if *s == server_id)).await,
+        "precondition: J joins",
+    );
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&j_master) && s.left_at(&j_master).is_some())).await,
+        "precondition: the owner holds J's leave",
+    );
+    let closer = || {
+        let book: serde_json::Value = serde_json::from_str(&j.store().load_setting("leave_book").ok().flatten().unwrap_or_default()).unwrap_or_default();
+        book["left"][server_id.as_str()]["closer"]["physical_ms"].as_u64()
+    };
+    let first = closer().expect("J names its own leave");
+
+    let announce = super::types::HavenMessage::SiblingServerAnnounce {
+        server_id: server_id.clone(), owner: Some(o_master.clone()), join_key: invite_key(&server_id), fresh: true,
+    };
+    carry_as(&j2, &j, announce).await;
+    assert!(wait_until(10, async || j.pending_ask(&server_id).await.is_some()).await, "precondition: J runs the announced join");
+    let later = forge_crdt_op(
+        &server_id, &j_master,
+        crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: j_master.clone(), seen: None },
+        1_000, Some(&keys(jm_tag)),
+    );
+    carry_as(&j2, &j, crdt_broadcast(&server_id, &later)).await;
+    assert!(
+        wait_until(10, async || closer() == Some(later.hlc.physical_ms)).await,
+        "J still names {first}, the leave of the membership before the announced rejoin",
+    );
+    drop(o);
+}
+
+// A first-time joiner has no leave to sort after, so its
+// ask stamp moves no admitting member's server clock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w2d_a_first_time_joiners_ask_moves_no_admitters_clock() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, _j, server_id) = owner_member_and_joiner(&relay, 221, 222, 223).await;
+    w2d_member_sees_room(&relay, &server_id, &m, &o).await;
+    let stranger = keys(224).peer_id();
+    let device = keys(225).peer_id();
+    let fakes: Vec<String> = [226u8, 227, 228].iter().map(|t| keys(*t).peer_id()).collect();
+    for fake in &fakes {
+        relay.inject_presence(&m.device_id, &server_id, fake);
+    }
+    let room: Vec<String> = fakes.iter().cloned().chain([o.device_id.clone(), m.device_id.clone()]).collect();
+    let now = super::frame_auth::now_ms();
+    let sealed = w2d_seal_where(now, &device, &room, &[&m.device_id], &[&o.device_id]);
+    let ahead = now + 280_000;
+    relay.inject(&server_id, &device, &m.device_id, w2d_hidden_ask(&relay, &server_id, 224, 225, sealed, ahead));
+    assert!(
+        wait_until(15, async || m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&stranger))).await,
+        "precondition: the member admits the stranger",
+    );
+    let state = m.live_server_state(&server_id).await.expect("state");
+    let added = state.op_log.iter().find(|op| matches!(&op.payload, crate::crdt::operations::CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == stranger)).expect("the admission");
+    let lead = added.hlc.physical_ms as i64 - now;
+    hollow_log!("[HOLLOW-TEST] admission stamped {lead} ms past the wall clock");
+    assert!(lead < 60_000, "a stranger's ask moved the admitter's server clock {lead} ms ahead");
+    drop(o);
 }

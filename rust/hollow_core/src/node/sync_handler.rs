@@ -2082,8 +2082,8 @@ pub(crate) async fn handle_join_server(
     // already names.
     stored_key_package: Option<String>,
     stored_reply_secret: Option<String>,
-    // Our identity's newest leave of this server we hold (`LeaveBook::ask_floor`).
-    ask_floor: Option<crate::crdt::hlc::HlcTimestamp>,
+    // The leave of ours this ask names and the one it is stamped past (`LeaveBook::ask_floor`).
+    ask_floor: super::leave_book::AskFloor,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -2093,7 +2093,7 @@ pub(crate) async fn handle_join_server(
     hollow_log!("[HOLLOW-CRDT] Joining server {server_id}");
     // The request NONCE. Every answer names it, so an answer replayed out of a
     // three-day ring can never resolve the join the user made afterwards.
-    let requested_at = ask_stamp(ask_floor.as_ref().map(|left| left.physical_ms));
+    let requested_at = ask_stamp(ask_floor.past_ms);
     // Our own signed device list, built ONCE and cached for the re-sends. A member
     // serving this from the ring has never been online with us, so it is the only
     // thing that attributes the request to our MASTER rather than to this device.
@@ -2156,7 +2156,7 @@ pub(crate) async fn handle_join_server(
         card,
         avatar_b64,
         ask: Some(crate::crdt::operations::JoinAsk::sign(&server_id, requested_at, master_keypair)),
-        follows_leave: ask_floor,
+        follows_leave: ask_floor.follows,
         opened_at: requested_at,
         ..Default::default()
     };
@@ -3186,7 +3186,8 @@ pub(crate) async fn handle_leave_server(
             let msg = HavenMessage::CrdtOpBroadcast { server_id: server_id.clone(), op_json };
             super::olm_lane::carry_to_every_own_device(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, &msg);
         }
-        if let Some(dropped) = leave_book.begin(&server_id, &op, state.anchor_owner(), targets, door, local_device_id) {
+        let opened = super::leave_book::opened_by(Some(state), local_peer_str);
+        if let Some(dropped) = leave_book.begin(&server_id, &op, state.anchor_owner(), targets, door, local_device_id, opened) {
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: dropped });
         }
 

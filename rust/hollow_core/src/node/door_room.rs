@@ -100,8 +100,9 @@ pub(crate) fn seal_head(sealed_at: i64) -> [u8; REACH_SEED_BYTES] {
 /// Whether `us` is among the [`HIDDEN_REACH`] devices of `room` a frame the hidden
 /// `sender` sealed at `sealed_at` picks: the relay delivers it to those alone, and on a
 /// relay that does not pick, only they answer. Fresh per frame, so no device id can be
-/// ground to take the slots. Our view lists only on-screen peers, and the relay hands away
-/// ones only the slots on-screen ones leave, so the two agree.
+/// ground to take the slots. An on-screen view lists only on-screen peers, and the relay
+/// hands away ones only the slots on-screen ones leave, so the two agree; an away device's
+/// view is frozen, so it answers no such frame.
 pub(crate) fn reached(room: &str, sender: &str, sealed_at: i64, ws_room_peers: &WsRoomPeers, us: &str) -> bool {
     let head = seal_head(sealed_at);
     let ours = (reach_rank(sender, &head, us), us);
@@ -291,9 +292,9 @@ impl DoorRooms {
     }
 
     /// A device the relay hides in `room` asked for its door, in a frame sealed at
-    /// `sealed_at`. We answer when it is a device of a current member, we hold a door,
-    /// and the frame [`reached`] us. A former member's device is told of its removal
-    /// instead, when an Olm session with it can carry the notice.
+    /// `sealed_at`. We answer when we are on screen, it is a device of a current member,
+    /// we hold a door, and the frame [`reached`] us. A former member's device is told of
+    /// its removal instead, when an Olm session with it can carry the notice.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn answer_ask(
         &mut self,
@@ -308,6 +309,9 @@ impl DoorRooms {
         our_device: &str,
         ws_cmd_tx: &WsCmdTx,
     ) -> bool {
+        if super::ws_client::backgrounded() {
+            return false;
+        }
         let Some(state) = server_states.get(room).filter(|_| server_id == room) else { return false };
         let master = speaks_for(asker)
             .filter(|_| asker != our_device && !state.is_deleted() && state.keeps_peer(local_master));
@@ -584,6 +588,51 @@ mod tests {
             op_at(1, &sid, t + 4, CrdtPayload::MemberRemoved { peer_id: kicked.clone(), seen: None }),
         ]);
         assert!(ask(&mut doors, &states, &olm, "kicked-device"), "a second removal was never told");
+        assert!(matches!(rx.try_recv(), Ok(WsCommand::Carry { .. })));
+        resolver::clear_for_test();
+    }
+
+    /// Review F3 of w2-d: an away device's view of the room is frozen, so whom it thinks a
+    /// frame picked may not be whom the relay picked. It answers no door ask (no door, no
+    /// removal notice) until it is back on screen; a phone in a call never reports away.
+    #[test]
+    fn an_away_pick_answers_no_door_ask() {
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        let (kp, owner, pk) = keys(1);
+        let (_, founding) = ServerState::found("S".into(), owner.clone(), kp, pk);
+        let sid = founding.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let kicked = keys(2).1;
+        let mut state = ServerState::skeleton(sid.clone());
+        state.ingest_remote(&[
+            founding,
+            op_at(1, &sid, t + 1, CrdtPayload::MemberAdded {
+                peer_id: kicked.clone(),
+                display_name: "m".into(),
+                follow: None,
+                ask: Some(JoinAsk::sign(&sid, 1, &keys(2).0)),
+            }),
+            op_at(1, &sid, t + 2, CrdtPayload::MemberRemoved { peer_id: kicked.clone(), seen: None }),
+        ]);
+        let states = std::collections::HashMap::from([(sid.clone(), state)]);
+        resolver::update("kicked-device", &kicked);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut doors = DoorRooms::default();
+        let peers = std::collections::HashMap::new();
+        let mut olm = crate::crypto::OlmManager::new();
+        let mut theirs = crate::crypto::OlmManager::new();
+        let otk = theirs.generate_one_time_key();
+        olm.create_outbound_session("kicked-device", &theirs.identity_key_base64(), &otk).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let mut ask = |away: bool| {
+            let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(away));
+            rt.block_on(super::super::ws_client::with_test_away(flag, async {
+                doors.answer_ask(&sid, &sid, 0, "kicked-device", &olm, &states, &peers, &owner, "our-device", &tx)
+            }))
+        };
+        assert!(!ask(true) && rx.try_recv().is_err(), "an away pick answered from its frozen view");
+        assert!(ask(false), "back on screen, the same pick answers");
         assert!(matches!(rx.try_recv(), Ok(WsCommand::Carry { .. })));
         resolver::clear_for_test();
     }
