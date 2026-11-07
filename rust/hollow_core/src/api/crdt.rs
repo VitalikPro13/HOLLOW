@@ -502,6 +502,21 @@ pub fn rename_server(server_id: String, new_name: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Reset a server's invite link (owner only): every invite link made before stops
+/// working, and asks made with one are refused.
+#[frb]
+pub fn reset_server_invite_link(server_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+
+    get_runtime()
+        .block_on(cmd_tx.send(node::NodeCommand::ResetInviteLink { server_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
 /// Rename a channel in a server.
 #[frb]
 pub fn rename_channel(server_id: String, channel_id: String, new_name: String) -> Result<(), String> {

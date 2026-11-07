@@ -669,6 +669,7 @@ fn revert_reviewed(snap: &mut ServerState, r: &ServerState, key: &ElementKey, st
         }
         K::JoinSecret => {
             snap.join_secret = r.join_secret.clone();
+            snap.join_secrets_retired = r.join_secrets_retired.clone();
             true
         }
         K::Remove(m) | K::Ban(m) => {

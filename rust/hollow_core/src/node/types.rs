@@ -952,7 +952,11 @@ impl PendingJoin {
         // Never back past the first ask: it may sit past our own last leave.
         let at = at.max(self.requested_at.saturating_add(1));
         self.requested_at = at;
-        self.ask = Some(crate::crdt::operations::JoinAsk::sign(server_id, at, master));
+        // A key that is no key signs no ask: never a keyless one in its place.
+        self.ask = match self.join_key.as_deref() {
+            Some(key) => crate::crdt::operations::JoinAsk::sign_for_invite(server_id, at, key, master),
+            None => Some(crate::crdt::operations::JoinAsk::sign(server_id, at, master)),
+        };
     }
 }
 
@@ -1033,6 +1037,8 @@ pub(crate) enum NodeCommand {
     CreateChannel { server_id: String, channel_id: String, name: String, category: Option<String>, channel_type: String },
     RemoveChannel { server_id: String, channel_id: String },
     RenameServer { server_id: String, new_name: String },
+    /// The owner replaces the server's join key: every invite link made before stops working.
+    ResetInviteLink { server_id: String },
     RenameChannel { server_id: String, channel_id: String, new_name: String },
     UpdateServerSetting { server_id: String, key: String, value: String },
     DeleteServer { server_id: String },
@@ -1511,6 +1517,7 @@ impl NodeCommand {
             Self::CreateChannel { .. } => "CreateChannel",
             Self::RemoveChannel { .. } => "RemoveChannel",
             Self::RenameServer { .. } => "RenameServer",
+            Self::ResetInviteLink { .. } => "ResetInviteLink",
             Self::RenameChannel { .. } => "RenameChannel",
             Self::UpdateServerSetting { .. } => "UpdateServerSetting",
             Self::DeleteServer { .. } => "DeleteServer",

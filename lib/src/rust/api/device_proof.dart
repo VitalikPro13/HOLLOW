@@ -6,14 +6,13 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These functions are ignored because they are not marked as `pub`: `item_of`, `reviews_of`, `send_command`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The owner's reviews in `server_id` (empty for anyone else).
 Future<RefoldReviews> refoldReviews({required String serverId}) =>
     RustLib.instance.api.crateApiDeviceProofRefoldReviews(serverId: serverId);
 
-/// The owner's answer to one review: the item keys to undo and the channels to put back.
-/// Both empty = "Keep all".
 Future<RefoldApplied> answerRefoldReview({
   required String serverId,
   required String member,
@@ -371,7 +370,6 @@ class RestorePoint {
           namedByNames == other.namedByNames;
 }
 
-/// Where a server's restore stands after a phrase recovery (section 8.4, appendix A).
 enum RestoreStage {
   /// Checking with members.
   checking,

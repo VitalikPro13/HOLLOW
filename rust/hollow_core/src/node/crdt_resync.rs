@@ -730,6 +730,11 @@ impl CrdtResync {
         Some((ask.device.clone(), request(server_id, ask.nonce, Some(cursor))))
     }
 
+    /// Whether a paged fetch of the server's whole log is still due: we may lack ops.
+    pub(crate) fn whole_log_due(&self, server_id: &str) -> bool {
+        self.marks.get(server_id).is_some_and(|m| m.due)
+    }
+
     /// The server left our hands (left, kicked, deleted): its mark and kept ops go too.
     pub(crate) fn forget(&mut self, server_id: &str) {
         self.asks.remove(server_id);
@@ -796,6 +801,11 @@ impl CrdtResync {
             Some(json) => store.save_blob(server_id.to_string(), KEPT_KEY.to_string(), json),
             None => store.delete_blob(server_id.to_string(), KEPT_KEY.to_string()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_due_for_test(&mut self, server_id: &str) {
+        self.marks.entry(server_id.to_string()).or_default().due = true;
     }
 
     /// (marks, server -> asked device), for the harness.

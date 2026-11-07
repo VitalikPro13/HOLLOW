@@ -266,28 +266,57 @@ pub struct JoinAsk {
     pub at: i64,
     pub sig: String,
     pub pk: String,
+    /// The invite key (public half, `key=`) the ask was made with. Signed when present,
+    /// so an admission after an invite reset tells the old link from the new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 impl JoinAsk {
-    fn signing_payload(server_id: &str, joiner: &str, at: i64) -> Vec<u8> {
-        [b"hollow-join-ask1\0".as_slice(), server_id.as_bytes(), b"\0", joiner.as_bytes(), b"\0", at.to_string().as_bytes()]
-            .concat()
+    fn signing_payload(server_id: &str, joiner: &str, at: i64, key: Option<&str>) -> Vec<u8> {
+        let head: &[u8] = if key.is_some() { b"hollow-join-ask2\0" } else { b"hollow-join-ask1\0" };
+        let mut out = [head, server_id.as_bytes(), b"\0", joiner.as_bytes(), b"\0", at.to_string().as_bytes()].concat();
+        if let Some(key) = key {
+            out.push(0);
+            out.extend_from_slice(key.as_bytes());
+        }
+        out
     }
 
-    /// `keypair`'s ask to join `server_id`, made at `at`.
+    /// `keypair`'s ask to join `server_id`, made at `at`, naming no invite key.
     pub fn sign(server_id: &str, at: i64, keypair: &NativeKeypair) -> Self {
+        Self::sign_with(server_id, at, None, keypair)
+    }
+
+    /// `keypair`'s ask to join `server_id`, made at `at` with the invite key `key=`,
+    /// named in its canonical text form; `None` when `key` is no key.
+    pub fn sign_for_invite(server_id: &str, at: i64, key: &str, keypair: &NativeKeypair) -> Option<Self> {
+        let key = crate::node::sealed_box::key_from_text(key).map(|k| crate::node::sealed_box::key_to_text(&k))?;
+        Some(Self::sign_with(server_id, at, Some(key), keypair))
+    }
+
+    /// A key named in the one text form an honest signer writes (HOL-SEC-143).
+    fn canonical_key(key: &str) -> bool {
+        crate::node::sealed_box::key_from_text(key).is_some_and(|k| crate::node::sealed_box::key_to_text(&k) == key)
+    }
+
+    fn sign_with(server_id: &str, at: i64, key: Option<String>, keypair: &NativeKeypair) -> Self {
         let b64 = base64::engine::general_purpose::STANDARD;
-        let sig = keypair.sign(&Self::signing_payload(server_id, &keypair.peer_id(), at));
-        Self { at, sig: b64.encode(sig), pk: b64.encode(keypair.public_key_protobuf()) }
+        let sig = keypair.sign(&Self::signing_payload(server_id, &keypair.peer_id(), at, key.as_deref()));
+        Self { at, sig: b64.encode(sig), pk: b64.encode(keypair.public_key_protobuf()), key }
     }
 
     /// Whether `joiner`'s own key signed this ask for `server_id`.
     pub fn verifies(&self, server_id: &str, joiner: &str) -> bool {
         let b64 = base64::engine::general_purpose::STANDARD;
         let (Ok(pk), Ok(sig)) = (b64.decode(&self.pk), b64.decode(&self.sig)) else { return false };
+        if self.key.as_deref().is_some_and(|key| !Self::canonical_key(key)) {
+            return false;
+        }
+        let payload = Self::signing_payload(server_id, joiner, self.at, self.key.as_deref());
         NativeKeypair::peer_id_from_pubkey_protobuf(&pk).is_some_and(|id| id == joiner)
             && matches!(
-                NativeKeypair::verify_peer_signature(&pk, &sig, &Self::signing_payload(server_id, joiner, self.at)),
+                NativeKeypair::verify_peer_signature(&pk, &sig, &payload),
                 Ok(true)
             )
     }
@@ -867,10 +896,47 @@ mod tests {
         let b64 = base64::engine::general_purpose::STANDARD;
         let in_her_name = JoinAsk {
             at: 5,
-            sig: b64.encode(mallory.0.sign(&JoinAsk::signing_payload("srv", &carol.1, 5))),
+            sig: b64.encode(mallory.0.sign(&JoinAsk::signing_payload("srv", &carol.1, 5, None))),
             pk: mallory.2.clone(),
+            key: None,
         };
         assert!(!in_her_name.verifies("srv", &carol.1), "an ask in someone else's name");
+    }
+
+    /// Invite reset: the invite key an ask names is the joiner's own signed word, so a
+    /// member cannot move an old-link ask onto the new key, nor strip the key away.
+    #[test]
+    fn a_join_ask_binds_the_invite_key_it_names() {
+        let carol = crate::crdt::testkeys::keys(30);
+        let (old, new) = (crate::node::sealed_box::key_to_text(&[1; 32]), crate::node::sealed_box::key_to_text(&[2; 32]));
+        let ask = JoinAsk::sign_for_invite("srv", 5, &old, &carol.0).unwrap();
+        assert_eq!(ask.key.as_deref(), Some(old.as_str()));
+        assert!(ask.verifies("srv", &carol.1));
+        assert!(!JoinAsk { key: Some(new), ..ask.clone() }.verifies("srv", &carol.1), "moved to another key");
+        assert!(!JoinAsk { key: None, ..ask.clone() }.verifies("srv", &carol.1), "the key stripped");
+        let keyless = JoinAsk::sign("srv", 5, &carol.0);
+        assert!(!JoinAsk { key: Some(old), ..keyless }.verifies("srv", &carol.1), "a key added to a keyless ask");
+        let json = serde_json::to_string(&JoinAsk::sign("srv", 5, &carol.0)).unwrap();
+        assert!(!json.contains("\"key\""), "a keyless ask keeps the bytes it always had");
+    }
+
+    /// HOL-SEC-143/154 for the ask's key: the signer names only a key, and the verifier
+    /// takes a key only in the text form an honest signer writes, so a key field never
+    /// carries a separator or anything else the signing payload could be split on.
+    #[test]
+    fn a_join_ask_key_is_a_key_in_its_one_text_form() {
+        use base64::Engine as _;
+        let carol = crate::crdt::testkeys::keys(31);
+        assert!(JoinAsk::sign_for_invite("srv", 5, "not a key", &carol.0).is_none(), "the signer never downgrades to keyless");
+        let good = crate::node::sealed_box::key_to_text(&[7; 32]);
+        let hand_signed = |key: &str| {
+            let sig = carol.0.sign(&JoinAsk::signing_payload("srv", &carol.1, 5, Some(key)));
+            JoinAsk { at: 5, sig: base64::engine::general_purpose::STANDARD.encode(sig), pk: carol.2.clone(), key: Some(key.to_string()) }
+        };
+        assert!(hand_signed(&good).verifies("srv", &carol.1), "control: a canonical key");
+        for junk in ["not a key\0with nul", "", &format!("{good}=")] {
+            assert!(!hand_signed(junk).verifies("srv", &carol.1), "{junk:?} verified");
+        }
     }
 
     #[test]

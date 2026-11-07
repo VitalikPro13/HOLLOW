@@ -987,6 +987,11 @@ impl ServerState {
         for channel in snap.channels.values_mut() {
             channel.is_public = false;
         }
+        // A legacy joiner folds no reset, so the list is all that tells it one was made;
+        // capped, as each key costs every later join box an open.
+        let current = snap.join_secret.as_ref().map(|reg| reg.read().clone());
+        snap.join_secrets_retired = super::server_state::cap_retired(std::mem::take(&mut snap.join_secrets_retired));
+        snap.join_secrets_retired.retain(|(_, s)| Some(s) != current.as_ref());
         snap.owner_pin = Some(owner);
         snap.checkpoint_hlc = None;
         *snap.stamps = Default::default();
@@ -2709,7 +2714,7 @@ fn print_of<'a>(hashes: impl Iterator<Item = &'a [u8; 32]>) -> String {
 }
 
 /// Ops that can make a held op valid: an admission, a grant, a lock link the next one
-/// extends, or the anchor itself.
+/// extends, the join key an ask names, or the anchor itself.
 pub(super) fn enables_others(payload: &CrdtPayload) -> bool {
     matches!(
         payload,
@@ -2722,6 +2727,7 @@ pub(super) fn enables_others(payload: &CrdtPayload) -> bool {
             | CrdtPayload::LabelUpdated { .. }
             | CrdtPayload::ChannelAdded { .. }
             | CrdtPayload::ServerSettingChanged { .. }
+            | CrdtPayload::JoinKeySet { .. }
             | CrdtPayload::ServerCreated { .. }
             | CrdtPayload::ServerCheckpoint { .. }
     )
@@ -2787,6 +2793,113 @@ mod tests {
     fn add(sid: &str, tag: u8) -> P {
         let ask = crate::crdt::operations::JoinAsk::sign(sid, 1, &keys(tag).0);
         P::MemberAdded { peer_id: id(tag), display_name: "m".into(), follow: None, ask: Some(ask) }
+    }
+
+    /// Invite reset: an admission on an ask made with the link the owner's reset retired
+    /// counts nowhere the reset is held, whichever order the two arrive in, while one made
+    /// with the new link lands either way.
+    #[test]
+    fn an_old_link_admission_after_an_invite_reset_is_void_in_any_order() {
+        let (s, founding) = founded(1);
+        let sid = s.server_id.clone();
+        let t = super::super::hlc::wall_clock_ms();
+        let secret = |b: u8| crate::crdt::operations::JoinSecret(hex::encode([b; 32]));
+        let link = |b: u8| crate::node::sealed_box::key_to_text(&crate::node::sealed_box::public_of(&[b; 32]));
+        let admit = |tag: u8, key: &str| {
+            let ask = crate::crdt::operations::JoinAsk::sign_for_invite(&sid, 1, key, &keys(tag).0).unwrap();
+            P::MemberAdded { peer_id: id(tag), display_name: "m".into(), follow: None, ask: Some(ask) }
+        };
+        let first_key = op_at(1, &sid, t + 1, P::JoinKeySet { secret: secret(1) });
+        let reset = op_at(1, &sid, t + 2, P::JoinKeySet { secret: secret(2) });
+        let old_link = op_at(1, &sid, t + 3, admit(2, &link(1)));
+        let new_link = op_at(1, &sid, t + 4, admit(3, &link(2)));
+
+        let mut in_order = joiner(&sid, 9);
+        let _ = in_order.ingest_remote(&[founding.clone(), first_key.clone(), reset.clone(), old_link.clone(), new_link.clone()]);
+        let mut reset_last = joiner(&sid, 9);
+        let _ = reset_last.ingest_remote(&[founding, first_key, old_link, new_link]);
+        assert!(reset_last.is_member(&id(2)), "precondition: before the reset lands, the old link still holds");
+        let _ = reset_last.ingest_remote(&[reset]);
+        for s in [&in_order, &reset_last] {
+            assert!(!s.is_member(&id(2)), "an old-link admission after the reset counts for nothing");
+            assert!(s.is_member(&id(3)), "a new-link admission lands");
+        }
+    }
+
+    /// Invite reset: a keyless ask (an older client) folds before any reset and opens
+    /// no span after one, in order and when the reset arrives last and the log refolds.
+    #[test]
+    fn a_keyless_admission_counts_before_a_reset_and_not_after() {
+        let (s, founding) = founded(1);
+        let sid = s.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let keyless = |tag: u8| P::MemberAdded {
+            peer_id: id(tag), display_name: "m".into(), follow: None,
+            ask: Some(crate::crdt::operations::JoinAsk::sign(&sid, 1, &keys(tag).0)),
+        };
+        let first_key = op_at(1, &sid, t + 1, P::JoinKeySet { secret: crate::crdt::operations::JoinSecret(hex::encode([1u8; 32])) });
+        let add2 = op_at(1, &sid, t + 2, add(&sid, 2));
+        let before = op_at(2, &sid, t + 3, keyless(4));
+        let reset = op_at(1, &sid, t + 4, P::JoinKeySet { secret: crate::crdt::operations::JoinSecret(hex::encode([2u8; 32])) });
+        let after = op_at(2, &sid, t + 5, keyless(3));
+
+        let mut in_order = joiner(&sid, 9);
+        let _ = in_order.ingest_remote(&[founding.clone(), first_key.clone(), add2.clone(), before.clone(), reset.clone(), after.clone()]);
+        let mut reset_last = joiner(&sid, 9);
+        let _ = reset_last.ingest_remote(&[founding, first_key, add2, before, after]);
+        assert!(reset_last.is_member(&id(3)), "precondition: with no reset held, a keyless ask still opens a span");
+        let _ = reset_last.ingest_remote(&[reset]);
+        for s in [&in_order, &reset_last] {
+            assert!(s.is_member(&id(4)), "a keyless admission before the reset stays");
+            assert!(!s.is_member(&id(3)), "a keyless admission after the reset counts for nothing");
+        }
+    }
+
+    /// A member's legacy join snapshot brings the newest eight retired keys and never the
+    /// current one: a joiner folds no reset, and each key costs every later join box an open.
+    #[test]
+    fn a_join_snapshot_brings_the_newest_eight_retired_keys() {
+        let (legacy, _) = crate::crdt::testkeys::owned_state("s-legacy", "Old", 1);
+        let mut snap = legacy.lean_snapshot();
+        for i in 0..200u32 {
+            let at = HlcTimestamp { physical_ms: u64::from(i), counter: 0, actor: "x".into() };
+            snap.join_secrets_retired.push((at, crate::crdt::operations::JoinSecret(format!("{:064x}", i + 1))));
+        }
+        let got = ServerState::accept_join_snapshot(snap.clone(), "s-legacy", None).unwrap();
+        assert_eq!(got.join_secrets_retired.len(), 8, "kept {} retired keys from a member's snapshot", got.join_secrets_retired.len());
+        assert_eq!(got.join_secrets_retired[0].0.physical_ms, 199, "the newest");
+        let mut current = snap.clone();
+        let key = crate::crdt::operations::JoinSecret(format!("{:064x}", 200));
+        current.join_secret = Some(crate::crdt::admin_lww::AdminLwwReg::new(key.clone(), HlcTimestamp { physical_ms: 300, counter: 0, actor: "x".into() }, 4));
+        let got = ServerState::accept_join_snapshot(current, "s-legacy", None).unwrap();
+        assert!(!got.join_secrets_retired.iter().any(|(_, s)| *s == key), "the key in force is never retired");
+        let stored: ServerState = serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+        assert_eq!(stored.join_secrets_retired.len(), 8, "a stored state keeps the newest eight");
+        assert_eq!(stored.join_secrets_retired[0].0.physical_ms, 199, "newest first");
+        let mut rebased = ServerState::skeleton("s-legacy".into());
+        rebased.rebase_on(snap, "owner", &HlcTimestamp { physical_ms: 500, counter: 0, actor: "x".into() });
+        assert_eq!(rebased.join_secrets_retired.len(), 8, "and so does a checkpoint");
+    }
+
+    /// Invite reset: a request with no ask is refused for its link before any gate that
+    /// names the server.
+    #[test]
+    fn an_askless_request_meets_the_link_gate_first() {
+        let (s0, founding) = founded(1);
+        let sid = s0.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let mut s = joiner(&sid, 9);
+        let _ = s.ingest_remote(&[
+            founding,
+            op_at(1, &sid, t + 1, P::JoinKeySet { secret: crate::crdt::operations::JoinSecret(hex::encode([1u8; 32])) }),
+            op_at(1, &sid, t + 2, P::JoinKeySet { secret: crate::crdt::operations::JoinSecret(hex::encode([2u8; 32])) }),
+            op_at(1, &sid, t + 3, P::ServerSettingChanged { key: "is_private".into(), value: "true".into() }),
+        ]);
+        assert_eq!(s.retired_join_secrets().len(), 1);
+        let judge = |old_link: bool| crate::node::join_verdict::verdict(&s, &id(5), false, false, None, old_link, None, false, &id(1), |_| false);
+        let refused = |reason: &str| crate::node::join_verdict::Verdict::Refuse { reason: reason.into(), settles: true };
+        assert_eq!(judge(true), refused(crate::node::join_verdict::INVITE_RESET), "a retired key opened its box");
+        assert_eq!(judge(false), refused(crate::node::sync_handler::INVITE_OUTDATED), "it names no key");
     }
 
     fn general(s: &ServerState) -> String {

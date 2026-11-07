@@ -192,6 +192,8 @@ enum OpGate<'a> {
     SelfOrPerm(&'a str, u32),
     /// `state.setting_change_allowed(local, key, value)`, the ingest rule.
     Setting(&'a str, &'a str),
+    /// The local peer is the server's owner.
+    Owner,
     /// No gate (e.g. changing our own storage pledge).
     Always,
 }
@@ -210,6 +212,7 @@ fn gate_allows(state: &ServerState, local_peer: &str, gate: &OpGate<'_>) -> bool
             *target == local_peer || state.has_permission(local_peer, *bits)
         }
         OpGate::Setting(key, value) => state.setting_change_allowed(local_peer, key, value),
+        OpGate::Owner => state.current_owner().as_deref() == Some(local_peer),
         OpGate::Always => true,
     }
 }
@@ -391,13 +394,20 @@ pub(crate) fn author_missing_join_keys(
     gossip_overlays: &mut GossipOverlays,
     event_tx: &EventTx,
     local_peer_str: &str,
+    device_peer_id: &str,
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
+    caught_up: &super::join_hold::JoinHold,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    crdt_resync: &super::crdt_resync::CrdtResync,
 ) {
     let missing: Vec<String> = server_states
         .iter()
         .filter(|(_, s)| !s.is_deleted() && s.join_secret().is_none() && s.current_owner().as_deref() == Some(local_peer_str))
         .map(|(id, _)| id.clone())
+        .filter(|id| {
+            sets_missing_join_key(id, caught_up, pending_server_joins, crdt_resync, server_states, ws_room_peers, local_peer_str, device_peer_id)
+        })
         .collect();
     for server_id in missing {
         let Some(state) = server_states.get_mut(&server_id) else { continue };
@@ -411,6 +421,39 @@ pub(crate) fn author_missing_join_keys(
             mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op, crypto_store,
         );
     }
+}
+
+/// Whether this device sets a server's missing join key now. A second key is an invite
+/// reset, so only a device that knows none exists sets one: the lowest of the owner's
+/// devices the relay shows us in the room, with no join or whole-log fetch under way,
+/// once this connection's catch-up there finished or no other member is there.
+#[allow(clippy::too_many_arguments)]
+fn sets_missing_join_key(
+    server_id: &str,
+    join_hold: &super::join_hold::JoinHold,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    crdt_resync: &super::crdt_resync::CrdtResync,
+    server_states: &ServerStates,
+    ws_room_peers: &WsRoomPeers,
+    local_master: &str,
+    local_device: &str,
+) -> bool {
+    if pending_server_joins.contains_key(server_id) || crdt_resync.whole_log_due(server_id) {
+        return false;
+    }
+    let lower_sibling = ws_room_peers.get(server_id).is_some_and(|peers| {
+        peers.iter().any(|d| {
+            d.as_str() < local_device && super::resolver::is_device_of(d, local_master) && !super::resolver::is_revoked(d)
+        })
+    });
+    if lower_sibling {
+        return false;
+    }
+    let others: Vec<String> = super::join_hold::visible_members(server_id, server_states, ws_room_peers)
+        .into_iter()
+        .filter(|d| d != local_device)
+        .collect();
+    join_hold.caught_up(server_id, &others)
 }
 
 // ── Shared member-removal plumbing (kick / ban / leave) ───────────────
@@ -1628,6 +1671,38 @@ pub(crate) async fn handle_rename_server(
     ).await
 }
 
+// ── 4b. ResetInviteLink ───────────────────────────────────────────────
+
+/// The owner's invite reset: a new join key, so every invite link made before it stops
+/// working; the fold makes the lock due to move at once, as a kick does.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_reset_invite_link(
+    server_states: &mut ServerStates,
+    mls: &mut Option<MlsManager>,
+    event_tx: &EventTx,
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    gossip_overlays: &mut GossipOverlays,
+    local_peer_str: &str,
+    server_id: String,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    let Some(secret) = super::sealed_box::new_secret() else { return false };
+    let secret = crate::crdt::operations::JoinSecret(hex::encode(secret.as_slice()));
+    author_broadcast_op(
+        server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+        &server_id,
+        OpGate::Owner,
+        Some("Only the owner can reset the invite link"),
+        CrdtPayload::JoinKeySet { secret },
+        "Resetting the invite link",
+        NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+        OpBroadcast::MlsFirst { mls, crypto_store },
+        crdt_store,
+    ).await
+}
+
 // ── 5. RenameChannel ──────────────────────────────────────────────────
 
 pub(crate) async fn handle_rename_channel(
@@ -2094,6 +2169,10 @@ pub(crate) async fn handle_join_server(
     // The request NONCE. Every answer names it, so an answer replayed out of a
     // three-day ring can never resolve the join the user made afterwards.
     let requested_at = ask_stamp(ask_floor.past_ms);
+    let Some(ask) = crate::crdt::operations::JoinAsk::sign_for_invite(&server_id, requested_at, &join_key, master_keypair) else {
+        hollow_log!("[HOLLOW-CRDT] Join of {server_id} refused here: its invite's join key is no key");
+        return;
+    };
     // Our own signed device list, built ONCE and cached for the re-sends. A member
     // serving this from the ring has never been online with us, so it is the only
     // thing that attributes the request to our MASTER rather than to this device.
@@ -2149,13 +2228,13 @@ pub(crate) async fn handle_join_server(
         device_list,
         key_package,
         owner_pin,
+        ask: Some(ask),
         join_key: Some(join_key),
         reply_secret,
         // A lock read a moment ago for this same join still holds.
         lock: pending_server_joins.get(&server_id).and_then(|p| p.lock.clone()).filter(|l| l.fresh()),
         card,
         avatar_b64,
-        ask: Some(crate::crdt::operations::JoinAsk::sign(&server_id, requested_at, master_keypair)),
         follows_leave: ask_floor.follows,
         opened_at: requested_at,
         ..Default::default()
@@ -5193,6 +5272,47 @@ mod tests {
         assert_eq!((n, more), (200, None), "exactly 200 rows left is one page");
         let (_, _, more, _) = batch(1_449, &HashMap::from([("a".to_string(), 2_000), ("b".to_string(), 1_149)]));
         assert_eq!(more, Some(true), "201 is two");
+    }
+
+    /// A second join key is an invite reset, so the missing-key sweep sets one only on the
+    /// lowest of the owner's devices in the room, caught up there, nothing under way.
+    #[test]
+    fn only_the_lowest_caught_up_owner_device_sets_a_missing_join_key() {
+        use crate::identity::native_identity::NativeKeypair;
+        let id = |b: u8| NativeKeypair::from_secret_bytes(&[b; 32]).peer_id();
+        let (master, member) = (id(211), id(214));
+        let (mut lo, mut hi) = (id(212), id(213));
+        if hi < lo {
+            std::mem::swap(&mut lo, &mut hi);
+        }
+        crate::crdt::set_identity_resolver(super::super::resolver::resolve);
+        super::super::resolver::seed_self(&master, &[lo.clone(), hi.clone()]);
+        let mut state = ServerState::new("srv".into(), "S".into(), master.clone());
+        state.members.insert(member.clone(), crate::crdt::server_state::MemberInfo { peer_id: member.clone(), display_name: "m".into() });
+        let states: ServerStates = HashMap::from([("srv".to_string(), state)]);
+        let mut hold = super::super::join_hold::JoinHold::default();
+        hold.went_away(&states);
+        let mut resync = super::super::crdt_resync::CrdtResync::for_test();
+        let mut pending: HashMap<String, PendingJoin> = HashMap::new();
+        let room = |peers: &[&String]| -> WsRoomPeers { HashMap::from([("srv".to_string(), peers.iter().map(|p| (*p).clone()).collect())]) };
+        let sets = |hold: &super::super::join_hold::JoinHold, resync: &super::super::crdt_resync::CrdtResync, pending: &HashMap<String, PendingJoin>, peers: &WsRoomPeers, device: &str| {
+            sets_missing_join_key("srv", hold, pending, resync, &states, peers, &master, device)
+        };
+
+        assert!(!sets(&hold, &resync, &pending, &room(&[]), &lo), "the room is not shown yet");
+        hold.joined("srv", false);
+        assert!(sets(&hold, &resync, &pending, &room(&[]), &lo), "nobody else is there");
+        assert!(!sets(&hold, &resync, &pending, &room(&[&member]), &lo), "a member is, and has not answered");
+        assert!(!sets(&hold, &resync, &pending, &room(&[&hi]), &lo), "our sibling is, and has not answered");
+        assert!(!sets(&hold, &resync, &pending, &room(&[&lo]), &hi), "a lower device of ours sets it");
+        hold.synced(Some(("srv".into(), master.clone())));
+        assert!(sets(&hold, &resync, &pending, &room(&[&hi, &member]), &lo), "caught up, our lowest device");
+        assert!(!sets(&hold, &resync, &pending, &room(&[&lo, &member]), &hi), "never the higher one");
+        pending.insert("srv".into(), PendingJoin::default());
+        assert!(!sets(&hold, &resync, &pending, &room(&[]), &lo), "a join is under way");
+        pending.clear();
+        resync.mark_due_for_test("srv");
+        assert!(!sets(&hold, &resync, &pending, &room(&[]), &lo), "a whole-log fetch is due");
     }
 }
 

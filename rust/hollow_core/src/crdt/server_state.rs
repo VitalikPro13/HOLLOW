@@ -298,6 +298,25 @@ pub struct MemberSpan {
     pub admitted: Vec<(String, HlcTimestamp)>,
 }
 
+/// Join secrets kept after invite resets, to tell an old link's ask why it is refused.
+const JOIN_SECRETS_RETIRED: usize = 8;
+
+type RetiredSecrets = Vec<(HlcTimestamp, super::operations::JoinSecret)>;
+
+/// The newest `JOIN_SECRETS_RETIRED` distinct retired secrets, newest first: what a
+/// stored state or a checkpoint may bring, since every join box tries each one.
+pub(super) fn cap_retired(mut retired: RetiredSecrets) -> RetiredSecrets {
+    retired.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.0.cmp(&b.1.0)));
+    let mut seen = std::collections::HashSet::new();
+    retired.retain(|(_, s)| seen.insert(s.0.clone()));
+    retired.truncate(JOIN_SECRETS_RETIRED);
+    retired
+}
+
+fn retired_capped<'de, D: serde::Deserializer<'de>>(de: D) -> Result<RetiredSecrets, D::Error> {
+    <RetiredSecrets as serde::Deserialize>::deserialize(de).map(cap_retired)
+}
+
 /// Slack either side of a membership span when judging a post's time: post clocks
 /// are the author's own, span ends are the admitter's or remover's.
 pub const MEMBER_SPAN_SLACK_MS: u64 = 10 * 60 * 1000;
@@ -434,6 +453,11 @@ pub struct ServerState {
     /// The Owner's join secret (`JoinKeySet`), 64 hex. Carried by checkpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub join_secret: Option<AdminLwwReg<super::operations::JoinSecret>>,
+    /// Join secrets an invite reset replaced, newest first, at most
+    /// `JOIN_SECRETS_RETIRED`, each with the clock of the op that set it: read only to
+    /// tell an old link's ask it was reset. Carried by checkpoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "retired_capped")]
+    pub join_secrets_retired: RetiredSecrets,
     /// The join lock (`JoinLock`): chain, door secrets, sealed change keys. Carried by
     /// checkpoints.
     #[serde(default, skip_serializing_if = "super::lock_state::JoinLockState::is_empty")]
@@ -611,7 +635,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, join_secret, join_lock, owner_pin, checkpoint_hlc, member_events, stamps,
+            member_record, join_secret, join_secrets_retired, join_lock, owner_pin, checkpoint_hlc, member_events, stamps,
             cp_generation, cp_parent, cp_stamped, cp_floor, cp_lineage, cp_cut, cp_settled, cp_retired, cp_endorsed, cp_posts_until, cp_refolded, cp_settles: _, cp_roster: _, retained_print,
             op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, stored: _, base: _, parent: _, signer: _,
             quota: _, ahead: _, cp_retry_at_ms: _, authority: _, cut: _, endorsed: _, view_source: _, retire_rebuilds: _, first_folds: _, cp_rosters: _, settle_base: _, rival_settles: _, own_since: _, recovery: _, floor_base: _, refold_answers: _, post_rosters_wanted: _,
@@ -641,6 +665,7 @@ impl ServerState {
             deleted: *deleted,
             member_record: member_record.clone(),
             join_secret: join_secret.clone(),
+            join_secrets_retired: join_secrets_retired.clone(),
             join_lock: join_lock.clone(),
             owner_pin: owner_pin.clone(),
             checkpoint_hlc: checkpoint_hlc.clone(),
@@ -715,6 +740,7 @@ impl ServerState {
             deleted: false,
             member_record: HashMap::new(),
             join_secret: None,
+            join_secrets_retired: Vec::new(),
             join_lock: Default::default(),
             owner_pin: None,
             checkpoint_hlc: None,
@@ -1243,7 +1269,7 @@ impl ServerState {
             // write them, never through an LWW register.
             server_id: _, channels: _, members: _, pinned_messages: _,
             channel_layout: _, labels: _, label_assignments: _, emotes: _,
-            stickers: _, deleted: _, member_record: _, owner_pin: _,
+            stickers: _, deleted: _, member_record: _, owner_pin: _, join_secrets_retired: _,
             checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _, held: _,
             id_memo: _, stored: _, base: _, parent: _, signer: _, member_events: _,
             cp_generation: _, cp_parent: _, cp_stamped: _, cp_floor, cp_lineage: _, cp_cut: _, cp_settled: _, cp_retired: _, cp_endorsed: _, cp_posts_until: _, cp_refolded: _, cp_settles: _, cp_roster: _, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _, authority: _, cut: _, endorsed: _, view_source: _, retire_rebuilds: _, first_folds: _, cp_rosters: _, settle_base: _, rival_settles: _, own_since: _, recovery: _, floor_base: _, refold_answers: _, post_rosters_wanted: _,
@@ -1380,7 +1406,20 @@ impl ServerState {
             CrdtPayload::JoinKeySet { secret } => {
                 let remote = AdminLwwReg::new(secret.clone(), at.clone(), MemberRole::Owner.priority());
                 match self.join_secret.as_mut() {
-                    Some(reg) => reg.merge(&remote),
+                    Some(reg) => {
+                        let held = (reg.hlc().clone(), reg.read().clone());
+                        reg.merge(&remote);
+                        let current = reg.read().clone();
+                        let loser = if current == held.1 { (at.clone(), secret.clone()) } else { held };
+                        // An invite reset moves the lock, as a kick does: a member that
+                        // missed it cannot prove the newest door, so it reads no parked ask
+                        // until a member hands it the door together with the reset.
+                        if loser.1 != current {
+                            self.retire_join_secret(loser);
+                            self.join_lock.note_removal(at);
+                        }
+                        self.join_secrets_retired.retain(|(_, s)| *s != current);
+                    }
                     None => self.join_secret = Some(remote),
                 }
             }
@@ -1817,7 +1856,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, join_secret, join_lock, member_events, stamps,
+            member_record, join_secret, join_secrets_retired, join_lock, member_events, stamps,
             owner_pin: _, checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _,
             held: _, id_memo: _, stored: _, base: _, parent: _, signer: _,
             cp_generation: _, cp_parent: _, cp_stamped, cp_floor, cp_lineage: _, cp_cut: _, cp_settled: _, cp_retired: _, cp_endorsed: _, cp_posts_until: _, cp_refolded: _, cp_settles: _, cp_roster: _, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _, authority: _, cut: _, endorsed: _, view_source: _, retire_rebuilds: _, first_folds: _, cp_rosters: _, settle_base: _, rival_settles: _, own_since: _, recovery: _, floor_base: _, refold_answers: _, post_rosters_wanted: _,
@@ -1844,6 +1883,7 @@ impl ServerState {
         self.deleted = deleted;
         self.member_record = member_record;
         self.join_secret = join_secret;
+        self.join_secrets_retired = cap_retired(join_secrets_retired);
         self.join_lock = join_lock;
         self.member_events = member_events;
         self.stamps = stamps;
@@ -1871,7 +1911,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, join_secret, join_lock, checkpoint_hlc, member_events, stamps,
+            member_record, join_secret, join_secrets_retired, join_lock, checkpoint_hlc, member_events, stamps,
             owner_pin: _, op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _,
             stored: _, base: _, parent: _, signer: _,
             cp_generation: _, cp_parent: _, cp_stamped: _, cp_floor, cp_lineage: _, cp_cut: _, cp_settled: _, cp_retired: _, cp_endorsed: _, cp_posts_until: _, cp_refolded: _, cp_settles: _, cp_roster: _, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _, authority: _, cut: _, endorsed: _, view_source: _, retire_rebuilds: _, first_folds: _, cp_rosters: _, settle_base: _, rival_settles: _, own_since: _, recovery: _, floor_base: _, refold_answers: _, post_rosters_wanted: _,
@@ -1897,6 +1937,7 @@ impl ServerState {
         self.deleted = deleted;
         self.member_record = member_record;
         self.join_secret = join_secret;
+        self.join_secrets_retired = join_secrets_retired;
         self.join_lock = join_lock;
         self.member_events = member_events;
         self.stamps = stamps;
@@ -2028,6 +2069,23 @@ impl ServerState {
     /// The join secret the Owner set, if any.
     pub fn join_secret(&self) -> Option<zeroize::Zeroizing<[u8; 32]>> {
         join_secret_shape(&self.join_secret.as_ref()?.read().0)
+    }
+
+    /// The join secrets invite resets replaced, newest first.
+    pub fn retired_join_secrets(&self) -> Vec<zeroize::Zeroizing<[u8; 32]>> {
+        self.join_secrets_retired.iter().filter_map(|(_, s)| join_secret_shape(&s.0)).collect()
+    }
+
+    /// Keep `old` among the retired secrets: the newest few by the clock that set them,
+    /// so the order ops arrive in decides nothing.
+    fn retire_join_secret(&mut self, old: (HlcTimestamp, super::operations::JoinSecret)) {
+        if self.join_secrets_retired.iter().any(|(h, s)| *s == old.1 && *h >= old.0) {
+            return;
+        }
+        self.join_secrets_retired.retain(|(_, s)| *s != old.1);
+        let at = self.join_secrets_retired.partition_point(|(h, _)| *h > old.0);
+        self.join_secrets_retired.insert(at, old);
+        self.join_secrets_retired.truncate(JOIN_SECRETS_RETIRED);
     }
 
     /// The public half of the join secret, as invite links carry it.
@@ -2468,10 +2526,24 @@ impl ServerState {
             return false;
         }
         let event = MemberEvent::Admit { at: op.hlc.clone(), by: op.author.clone(), ask: ask.at, name: String::new() };
-        match super::members::admission(&self.events_of(target), &event) {
-            super::members::Admission::Repeat | super::members::Admission::Extends => return true,
+        let extends = match super::members::admission(&self.events_of(target), &event) {
+            super::members::Admission::Repeat => return true,
             super::members::Admission::Ignored | super::members::Admission::Rewrites => return false,
-            super::members::Admission::Opens => {}
+            super::members::Admission::Extends => true,
+            super::members::Admission::Opens => false,
+        };
+        // An ask made with a link an invite reset retired opens no span after the reset,
+        // nor does one naming no link (an older client) once any reset is held; before any
+        // key is in force (a joiner whose fold has not taken one) nothing compares.
+        let stale_link = match ask.key.as_ref() {
+            Some(key) => self.join_public_text().is_some_and(|current| current != *key),
+            None => !self.join_secrets_retired.is_empty(),
+        };
+        if stale_link {
+            return false;
+        }
+        if extends {
+            return true;
         }
         if self.is_private() || self.max_members().is_some_and(|max| self.members.len() as u32 >= max) {
             return false;
@@ -3219,6 +3291,16 @@ mod tests {
         let _ = s.apply_op(&settled);
         assert!(!s.join_lock.rotation_due());
 
+        // The first join key moves nothing; an invite reset moves the lock.
+        let mut reset = s.clone();
+        assert!(reset.join_secret.is_none());
+        let op = op_by(&mut reset, &owner, CrdtPayload::JoinKeySet { secret: JoinSecret("01".repeat(32)) });
+        let _ = reset.apply_op(&op);
+        assert!(!reset.join_lock.rotation_due(), "a first join key moves no lock");
+        let op = op_by(&mut reset, &owner, CrdtPayload::JoinKeySet { secret: JoinSecret("02".repeat(32)) });
+        let _ = reset.apply_op(&op);
+        assert!(reset.join_lock.rotation_due(), "an invite reset moves the lock");
+
         let demote = s.create_op(CrdtPayload::RoleChanged { peer_id: moder.clone(), role: MemberRole::Member, priority: 3 });
         let _ = s.apply_op(&demote);
         assert!(s.join_lock.rotation_due(), "a demoted mod still holds the change key");
@@ -3244,10 +3326,71 @@ mod tests {
         assert_eq!(s.join_secret().map(|k| *k), Some([2u8; 32]));
         assert_eq!(s.join_public_text(), replica.join_public_text(), "the later key wins in any order");
         assert!(!format!("{s:?}").contains(&"02".repeat(32)), "the secret never prints");
+        let retired = |st: &ServerState| st.retired_join_secrets().iter().map(|k| **k).collect::<Vec<_>>();
+        assert_eq!(retired(&s), vec![[1u8; 32]], "the reset keeps the old key to refuse its asks with");
+        assert_eq!(retired(&replica), retired(&s), "in any order");
+        assert!(!format!("{s:?}").contains(&"01".repeat(32)), "a retired secret never prints");
 
         let mut rebuilt = ServerState::skeleton("s1".into());
         rebuilt.rebase_on(s.lean_snapshot(), "owner", &second.hlc);
         assert_eq!(rebuilt.join_public_text(), s.join_public_text(), "a checkpoint carries the join key");
+        assert_eq!(retired(&rebuilt), retired(&s), "and the retired ones");
+
+        // Setting the old key again un-retires it: one key is never both.
+        let again = s.create_op(CrdtPayload::JoinKeySet { secret: JoinSecret("01".repeat(32)) });
+        let _ = s.apply_op(&again);
+        assert_eq!(s.join_secret().map(|k| *k), Some([1u8; 32]));
+        assert_eq!(retired(&s), vec![[2u8; 32]]);
+    }
+
+    /// Invite reset: after the owner's new key, an admission whose ask names the retired
+    /// key or no key opens no span; one naming the current key does, as do the old key
+    /// and a keyless ask before the reset.
+    #[test]
+    fn an_ask_with_a_reset_link_opens_no_span_after_the_reset() {
+        use crate::crdt::operations::JoinAsk;
+        let (mut base, _owner) = owned_state("s1", "S", 1);
+        let key_text = |b: u8| crate::node::sealed_box::key_to_text(&crate::node::sealed_box::public_of(&[b; 32]));
+        let set_key = |s: &mut ServerState, b: u8| {
+            let op = s.create_op(CrdtPayload::JoinKeySet { secret: JoinSecret(hex::encode([b; 32])) });
+            let _ = s.apply_op(&op);
+            op
+        };
+        let early_kp = NativeKeypair::from_secret_bytes(&[40; 32]);
+        let early = base.create_op(CrdtPayload::MemberAdded {
+            peer_id: early_kp.peer_id(), display_name: "e".into(), follow: None,
+            ask: JoinAsk::sign_for_invite("s1", 1, &key_text(1), &early_kp),
+        });
+        assert!(base.op_allowed(&early), "no key in force yet: nothing to compare the ask with");
+        set_key(&mut base, 1);
+        let before_kp = NativeKeypair::from_secret_bytes(&[41; 32]);
+        let before = base.create_op(CrdtPayload::MemberAdded {
+            peer_id: before_kp.peer_id(), display_name: "b".into(), follow: None,
+            ask: JoinAsk::sign_for_invite("s1", 1, &key_text(1), &before_kp),
+        });
+        assert!(base.op_allowed(&before), "an ask with the link of its day");
+        let _ = base.apply_op(&before);
+        let mut s = base.clone();
+        set_key(&mut s, 2);
+        let admit = |s: &mut ServerState, tag: u8, ask: fn(&str, &NativeKeypair, &str) -> JoinAsk, key: &str| {
+            let kp = NativeKeypair::from_secret_bytes(&[tag; 32]);
+            let op = s.create_op(CrdtPayload::MemberAdded {
+                peer_id: kp.peer_id(), display_name: "m".into(), follow: None, ask: Some(ask("s1", &kp, key)),
+            });
+            (op, kp.peer_id())
+        };
+        let keyed: fn(&str, &NativeKeypair, &str) -> JoinAsk = |sid, kp, key| JoinAsk::sign_for_invite(sid, 1, key, kp).unwrap();
+        let keyless: fn(&str, &NativeKeypair, &str) -> JoinAsk = |sid, kp, _| JoinAsk::sign(sid, 1, kp);
+
+        let (old_link, _) = admit(&mut s, 42, keyed, &key_text(1));
+        assert!(!s.op_allowed(&old_link), "an ask with the reset link");
+        let (new_link, _) = admit(&mut s, 43, keyed, &key_text(2));
+        assert!(s.op_allowed(&new_link), "an ask with the new link");
+        let (older, _) = admit(&mut s, 44, keyless, "");
+        assert!(!s.op_allowed(&older), "a keyless ask once a reset is held");
+        let (older_before, _) = admit(&mut base, 45, keyless, "");
+        assert!(base.op_allowed(&older_before), "a keyless ask before any reset");
+        assert!(s.is_member(&before_kp.peer_id()), "a member let in with the old link stays");
     }
 
     #[test]
@@ -5674,5 +5817,24 @@ mod tests {
         let newer = json.replace(r#""voice_chat":"off""#, r#""voice_chat":"members""#);
         let parsed = serde_json::from_str::<ServerState>(&newer);
         assert!(parsed.is_ok(), "one newer voice_chat value made the whole server state unreadable: {:?}", parsed.err());
+    }
+
+    /// A legacy joiner judges a keyless admission after a reset as the members do: its
+    /// join snapshot keeps the retired keys that tell it a reset was made.
+    #[test]
+    fn a_legacy_joiner_refuses_a_keyless_admission_after_a_reset_as_its_members_do() {
+        use crate::crdt::operations::JoinAsk;
+        let (mut s, _owner) = owned_state("s1", "S", 1);
+        for b in [1u8, 2] {
+            let op = s.create_op(CrdtPayload::JoinKeySet { secret: JoinSecret(hex::encode([b; 32])) });
+            let _ = s.apply_op(&op);
+        }
+        let joined = ServerState::accept_join_snapshot(s.lean_snapshot(), "s1", None).expect("a legacy snapshot");
+        let kp = NativeKeypair::from_secret_bytes(&[47; 32]);
+        let add = s.create_op(CrdtPayload::MemberAdded {
+            peer_id: kp.peer_id(), display_name: "k".into(), follow: None, ask: Some(JoinAsk::sign("s1", 1, &kp)),
+        });
+        assert!(!s.op_allowed(&add), "precondition: the members refuse it");
+        assert!(!joined.op_allowed(&add), "the legacy joiner admitted a keyless ask its members refuse");
     }
 }

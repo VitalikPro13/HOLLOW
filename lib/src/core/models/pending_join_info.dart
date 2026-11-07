@@ -72,5 +72,9 @@ String pendingJoinReasonText(String reason) {
     return 'This invite link is from before the update. Ask for a new one.';
   }
 
+  if (reason == 'invite_reset') {
+    return 'This invite link was reset. Ask for a new one.';
+  }
+
   return reason.trim().isEmpty ? 'The request was declined' : reason;
 }

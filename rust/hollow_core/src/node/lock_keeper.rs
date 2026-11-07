@@ -317,6 +317,12 @@ impl LockKeeper {
         // Another relay, or this one restarted: what it refused before says nothing now.
         self.misses.clear();
         self.quiet_until.clear();
+        self.reread(server_states, local_master, ws_cmd_tx);
+    }
+
+    /// Read every chain of a server we are in again, keeping what we know: a resumed
+    /// session whose ring overflowed may have missed a lock move.
+    pub(crate) fn reread(&mut self, server_states: &ServerStates, local_master: &str, ws_cmd_tx: &WsCmdTx) {
         let locks: Vec<(String, String)> = server_states
             .iter()
             .filter(|(_, s)| !s.is_deleted() && s.is_member(local_master))

@@ -107,6 +107,11 @@ Future<void> renameServer({
   newName: newName,
 );
 
+/// Reset a server's invite link (owner only): every invite link made before stops
+/// working, and asks made with one are refused.
+Future<void> resetServerInviteLink({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtResetServerInviteLink(serverId: serverId);
+
 /// Rename a channel in a server.
 Future<void> renameChannel({
   required String serverId,

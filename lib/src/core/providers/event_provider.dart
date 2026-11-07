@@ -1880,7 +1880,7 @@ class EventStreamNotifier extends Notifier<bool> {
                   'reached its member limit${max.isEmpty ? '' : ' ($max)'}.',
             );
           }
-        } else if (reason == 'invite_outdated') {
+        } else if (reason == 'invite_outdated' || reason == 'invite_reset') {
           final msg = pendingJoinReasonText(reason);
           final handled = handleTwitchJoinResult(success: false, error: msg);
           if (!handled) {

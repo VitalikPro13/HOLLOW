@@ -405,6 +405,68 @@ BUILT (session 16, the join lock; replaces the permanent join key for sealing):
   never forge one. Deploy order: the relay first (a 0.12 client on a relay without
   `lock_get` never gets a lock, so nobody can join), self-hosted relays included.
 
+BUILT (0.14, t14-reset, issue #124 in part; Vitalii decided owner only, 2026-11-06):
+- Reset invite link. The owner writes a new `JoinKeySet` (Access page, owner only; the
+  fold refuses anyone else's). Every invite link made before stops working: a member
+  holding the new key reads a box sealed to the old one only through
+  `join_lane::open_as_member`, which opens nothing but a request, and the live verdict
+  refuses it first (`invite_reset`, before any gate that names the server). The replaced
+  keys are kept (`join_secrets_retired`, the newest 8 by clock, carried by checkpoints)
+  only to give that refusal; without them an old link would hang.
+- A joiner's signed ask now names the invite key it was made with (`JoinAsk.key`,
+  `hollow-join-ask2`, the key only in its one text form, checked by signer and verifier;
+  a keyless ask keeps its v1 bytes). The box must be sealed to that key, and the fold
+  refuses an admission opening a span on an ask naming a key other than the current one
+  at its point, or naming none once a reset is held there, so a member that missed the
+  reset and admits an old-link ask is overruled everywhere the reset is held, itself
+  included once it syncs. A keyless ask from before any reset still folds; the live gate
+  refuses new ones (`invite_outdated`). With no key in force at an admission's point (a
+  joiner whose fold has not taken the owner's key yet) nothing compares; the key enables
+  held ops, so the admission is judged again once it lands.
+- A request a retired key opened is refused `invite_reset` on that fact alone, first,
+  whatever ask it carries (`join_verdict::OLD_LINK`); one with no ask is `invite_outdated`.
+- A reset moves the join lock at once, as a kick does (the hostile review found the case
+  the earlier "the lock stays" missed: a member that missed the reset, back while nobody
+  else is online, read the old link's parked ask from the ring and admitted it). Now that
+  member cannot prove the newest door, so under D1 it sees no ring, and it cannot open a
+  box an honest joiner sealed to the new door, until a member hands it the door together
+  with the reset. A member whose session resumes inside the relay's 60 s grace after the
+  move, with a gap that took the reset, still sees the ring: back from away it judges
+  asks only after this connection's lock read, and none while the relay's newest door is
+  not one its state holds (`join_hold`, `lock_keeper::reread` on a gapped resume): such
+  asks wait, up to the relay's 60 s grace, so a member handed the door before the sync
+  that brings the move still judges an honest parked ask once that sync lands.
+- A second join key IS a reset in the fold, so the owner's missing-key sweep sets one only
+  on the one owner device that knows none exists: the lowest of its devices in the room,
+  no join or whole-log fetch under way, after this connection's catch-up with a member
+  (or with none there). A legacy joiner's snapshot keeps the newest 8 retired keys, so it
+  refuses the keyless admissions its members refuse.
+- The relay is unchanged: it never holds the invite key, only door and change keys.
+- Residuals: the lock moves only once the owner's keeper puts it on the relay; an owner
+  that resets and drops at once leaves it to the next owner, admin or mod online, as for
+  a kick. A member that hears no lock read inside the 10 s hold judges as before
+  (HOL-SEC-121); a relay that withholds reads can withhold D1 too, and one that answers
+  with an older chain it once held, or an empty one, makes the read prove nothing. Two
+  concurrent first keys still fold as a reset; only the sweep gate keeps them from being
+  made. A lone owner of a keyless server with a whole-log fetch due sets no key until a
+  member answers that fetch.
+- Tests: harness `t14_reset_a_parked_old_link_ask_is_refused_and_the_new_link_joins`,
+  `t14_reset_a_member_back_from_away_refuses_an_old_link_ask`,
+  `t14_reset_only_the_owner_resets_and_an_old_link_admission_counts_for_nothing`,
+  `t14_reset_a_member_back_alone_admits_no_old_link_ask`,
+  `t14_reset_a_member_resumed_in_the_doors_grace_judges_no_ask`,
+  `t14_reset_two_owner_devices_sweep_one_join_key`,
+  `t14_reset_an_owner_sibling_mid_sync_mints_no_join_key`,
+  `authz_a_member_back_hidden_answers_no_direct_ask`; unit
+  `an_old_link_admission_after_an_invite_reset_is_void_in_any_order`,
+  `an_ask_with_a_reset_link_opens_no_span_after_the_reset`,
+  `a_keyless_admission_counts_before_a_reset_and_not_after`,
+  `a_join_ask_binds_the_invite_key_it_names`, `a_join_ask_key_is_a_key_in_its_one_text_form`,
+  `open_as_member_reads_an_old_link_only_to_refuse_it`,
+  `the_link_gate_comes_first_whatever_the_box_held`, `a_join_snapshot_brings_the_newest_eight_retired_keys`,
+  `a_legacy_joiner_refuses_a_keyless_admission_after_a_reset_as_its_members_do`,
+  `a_member_back_judges_nothing_behind_the_relays_lock`.
+
 ### A-D2. File content commitment (H8 remainder)
 
 No file carries a signed content hash: the message signature covers the file id only.

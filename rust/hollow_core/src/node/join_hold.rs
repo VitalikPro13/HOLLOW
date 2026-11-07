@@ -13,6 +13,9 @@ use super::types::{HavenMessage, ServerStates};
 /// Longest an ask waits, from our first roster of the server's room on this
 /// connection; short of a live joiner's window, so a held answer still reaches it.
 pub(crate) const HOLD_WAIT: Duration = Duration::from_secs(10);
+/// Longest an ask waits while the relay's lock is past every door we hold: the relay's
+/// grace for a moved lock, after which it hides us or a member's sync brought the move.
+const DOOR_WAIT: Duration = Duration::from_secs(60);
 /// Asks held per server: the relay keeps 200 frames per ring.
 const MAX_HELD: usize = 200;
 
@@ -21,6 +24,8 @@ pub(crate) struct HeldAsk {
     pub from: String,
     pub frame_ts: i64,
     pub msg: HavenMessage,
+    /// A key an invite reset retired opened its box (`join_verdict::OLD_LINK`).
+    pub old_link: bool,
     /// Whom the ask speaks for: their own sync never vouches for it.
     asker: [String; 2],
     parked: bool,
@@ -42,9 +47,15 @@ pub(crate) struct JoinHold {
     fresh: HashMap<String, Fresh>,
     /// Server -> members whose answer to an ask of this connection we merged.
     synced: HashMap<String, HashSet<String>>,
+    /// Servers any member's final answer to an ask of this connection reached, held
+    /// before the socket or not.
+    caught: HashSet<String>,
     /// The nonce this connection's sync asks carry; an answer the relay kept from an
     /// earlier ask carries an older one.
     ask: u64,
+    /// Server -> the newest door of the relay's join lock as this connection read it
+    /// (`None`: the relay holds no lock there).
+    doors: HashMap<String, Option<String>>,
 }
 
 impl JoinHold {
@@ -58,11 +69,19 @@ impl JoinHold {
         }
         self.fresh.clear();
         self.synced.clear();
+        self.caught.clear();
+        self.doors.clear();
         self.ask = (super::types::now_ms().max(0) as u64).max(self.ask + 1);
     }
 
     pub(crate) fn ask(&self) -> u64 {
         self.ask
+    }
+
+    /// The relay's verified chain for a server, read on this connection: its newest
+    /// door, or `None` where it holds no lock.
+    pub(crate) fn lock_read(&mut self, server: &str, newest_door: Option<&str>) {
+        self.doors.insert(server.to_string(), newest_door.map(str::to_string));
     }
 
     /// Our first roster of a server's room on this connection in which the relay shows
@@ -84,6 +103,7 @@ impl JoinHold {
         if dropped > 0 {
             hollow_log!("[HOLLOW-CRDT] Dropped {dropped} held join ask(s) for {server}: the relay hides us there now");
         }
+        self.caught.remove(server);
         self.known.insert(server.to_string());
     }
 
@@ -113,14 +133,23 @@ impl JoinHold {
         if x.as_ref().is_some_and(|x| x.roster_needed || x.base_unknown) {
             return None;
         }
-        (*nonce == self.ask && self.known.contains(server_id) && server_states.get(server_id)?.is_member(from))
+        (*nonce == self.ask && server_states.get(server_id)?.is_member(from))
             .then(|| (server_id.clone(), super::resolver::resolve(from)))
     }
 
     pub(crate) fn synced(&mut self, mark: Option<(String, String)>) {
         if let Some((server, member)) = mark {
-            self.synced.entry(server).or_default().insert(member);
+            self.caught.insert(server.clone());
+            if self.known.contains(&server) {
+                self.synced.entry(server).or_default().insert(member);
+            }
         }
+    }
+
+    /// Whether this connection caught up on `server`: the relay shows us its room, and a
+    /// member's final sync answer landed or none of `others` is there to give one.
+    pub(crate) fn caught_up(&self, server: &str, others: &[String]) -> bool {
+        self.fresh.contains_key(server) && (self.caught.contains(server) || others.is_empty())
     }
 
     /// `msg` back when it may be judged now; `None` when it waits or is dropped.
@@ -130,7 +159,9 @@ impl JoinHold {
         from: &str,
         frame_ts: i64,
         msg: HavenMessage,
+        old_link: bool,
         visible: &dyn Fn(&str) -> Vec<String>,
+        server_states: &ServerStates,
     ) -> Option<HavenMessage> {
         let (server, parked, asker) = match &msg {
             HavenMessage::ServerJoinRequest { server_id, parked, device_list, .. } => (
@@ -149,9 +180,19 @@ impl JoinHold {
             }
             return Some(msg);
         };
-        let waits = fresh.since.elapsed() < HOLD_WAIT
-            && ((parked && fresh.ring.is_some())
-                || (fresh.stale && !informed(&asker, self.synced.get(&server), &visible(&server))));
+        // Back from away, the relay may still show us the room for a grace after a lock
+        // move we missed, or a member handed us the newest door before its sync landed:
+        // nothing is judged until our state holds the relay's newest door.
+        let door = if fresh.stale { door_current(&self.doors, &server, server_states) } else { Some(true) };
+        if door == Some(false) && fresh.since.elapsed() >= DOOR_WAIT {
+            hollow_log!("[HOLLOW-SECURITY] Dropped a join ask from {from} for {server}: the relay's join lock is past every door we hold");
+            return None;
+        }
+        let waits = door == Some(false)
+            || (fresh.since.elapsed() < HOLD_WAIT
+                && ((parked && fresh.ring.is_some())
+                    || door.is_none()
+                    || (fresh.stale && !informed(&asker, self.synced.get(&server), &visible(&server)))));
         if !waits {
             return Some(msg);
         }
@@ -161,7 +202,7 @@ impl JoinHold {
             return None;
         }
         hollow_log!("[HOLLOW-CRDT] Holding a join ask from {from} for {server} (parked {parked}) until we know what we missed");
-        fresh.held.push(HeldAsk { from: from.to_string(), frame_ts, msg, asker, parked });
+        fresh.held.push(HeldAsk { from: from.to_string(), frame_ts, msg, old_link, asker, parked });
         None
     }
 
@@ -170,10 +211,18 @@ impl JoinHold {
     }
 
     /// The held asks that may be judged now, in arrival order per server.
-    pub(crate) fn due(&mut self, visible: &dyn Fn(&str) -> Vec<String>) -> Vec<HeldAsk> {
+    pub(crate) fn due(&mut self, visible: &dyn Fn(&str) -> Vec<String>, server_states: &ServerStates) -> Vec<HeldAsk> {
         let mut out = Vec::new();
         for (server, fresh) in &mut self.fresh {
             if fresh.held.is_empty() {
+                continue;
+            }
+            let door = if fresh.stale { door_current(&self.doors, server, server_states) } else { Some(true) };
+            if door == Some(false) {
+                if fresh.since.elapsed() >= DOOR_WAIT {
+                    let dropped = std::mem::take(&mut fresh.held).len();
+                    hollow_log!("[HOLLOW-SECURITY] Dropped {dropped} held join ask(s) for {server}: the relay's join lock is past every door we hold");
+                }
                 continue;
             }
             let expired = fresh.since.elapsed() >= HOLD_WAIT;
@@ -181,12 +230,14 @@ impl JoinHold {
             let synced = self.synced.get(server);
             let mut forced = 0usize;
             let (ready, wait): (Vec<HeldAsk>, Vec<HeldAsk>) = std::mem::take(&mut fresh.held).into_iter().partition(|ask| {
-                let known = (!ask.parked || fresh.ring.is_none()) && (!fresh.stale || informed(&ask.asker, synced, &room));
+                let known = (!ask.parked || fresh.ring.is_none())
+                    && door.is_some()
+                    && (!fresh.stale || informed(&ask.asker, synced, &room));
                 forced += usize::from(expired && !known);
                 expired || known
             });
             if forced > 0 {
-                hollow_log!("[HOLLOW-CRDT] Judging {forced} held join ask(s) for {server} without the ring's end or a member's sync: neither came in time");
+                hollow_log!("[HOLLOW-CRDT] Judging {forced} held join ask(s) for {server} without the ring's end, a member's sync or a read of the relay's lock: none came in time");
             }
             fresh.held = wait;
             out.extend(ready);
@@ -200,6 +251,13 @@ impl JoinHold {
             fresh.since = fresh.since.checked_sub(by).unwrap_or(fresh.since);
         }
     }
+}
+
+/// Whether this connection's read of the relay's lock shows a newest door we hold
+/// (`None` until a read came).
+fn door_current(doors: &HashMap<String, Option<String>>, server: &str, server_states: &ServerStates) -> Option<bool> {
+    let newest = doors.get(server)?;
+    Some(newest.as_deref().is_none_or(|door| server_states.get(server).is_some_and(|s| s.join_lock.holds_door(door))))
 }
 
 /// Whether we know what the members who could tell us more know: one besides the
@@ -258,6 +316,7 @@ mod tests {
             hold.went_away(&states(&[]));
         }
         hold.joined("srv", false);
+        hold.lock_read("srv", None);
         hold.ring_asked("srv", "~join");
         hold
     }
@@ -270,33 +329,34 @@ mod tests {
     fn a_parked_ask_waits_for_the_end_of_the_ring_replay() {
         let nobody = |_: &str| Vec::new();
         let mut hold = back(false);
-        assert!(hold.hold("j", 5, ask("srv", true), &nobody).is_none(), "read during the replay");
-        assert!(hold.hold("k", 5, ask("srv", false), &nobody).is_some(), "a live ask on a server we just made is judged");
-        assert!(hold.hold("j", 5, ask("other", true), &nobody).is_some(), "a server with no ring read");
-        assert!(hold.due(&nobody).is_empty());
+        assert!(hold.hold("j", 5, ask("srv", true), false, &nobody, &states(&[])).is_none(), "read during the replay");
+        assert!(hold.hold("k", 5, ask("srv", false), false, &nobody, &states(&[])).is_some(), "a live ask on a server we just made is judged");
+        assert!(hold.hold("j", 5, ask("other", true), false, &nobody, &states(&[])).is_some(), "a server with no ring read");
+        assert!(hold.due(&nobody, &states(&[])).is_empty());
         hold.ring_ended("srv", "~other");
-        assert!(hold.due(&nobody).is_empty(), "another ring's end");
+        assert!(hold.due(&nobody, &states(&[])).is_empty(), "another ring's end");
         hold.ring_ended("srv", "~join");
-        let due = hold.due(&nobody);
+        let due = hold.due(&nobody, &states(&[]));
         assert_eq!(due.iter().map(|a| (a.from.as_str(), a.frame_ts)).collect::<Vec<_>>(), [("j", 5)]);
-        assert!(hold.hold("j", 6, ask("srv", true), &nobody).is_some(), "after the end, judged at once");
+        assert!(hold.hold("j", 6, ask("srv", true), false, &nobody, &states(&[])).is_some(), "after the end, judged at once");
     }
 
     #[test]
     fn a_hidden_room_answers_nothing_and_starts_no_wait() {
         let nobody = |_: &str| Vec::new();
         let mut hold = JoinHold::default();
-        assert!(hold.hold("j", 5, ask("srv", false), &nobody).is_some(), "a server made on this socket");
+        assert!(hold.hold("j", 5, ask("srv", false), false, &nobody, &states(&[])).is_some(), "a server made on this socket");
         hold.went_away(&states(&[]));
-        assert!(hold.hold("j", 5, ask("srv", false), &nobody).is_none(), "held while away, its room not shown yet");
+        assert!(hold.hold("j", 5, ask("srv", false), false, &nobody, &states(&[])).is_none(), "held while away, its room not shown yet");
         hold.joined("srv", true);
         hold.ring_asked("srv", "~join");
-        assert!(hold.hold("j", 5, ask("srv", true), &nobody).is_none(), "the relay hides us there");
+        assert!(hold.hold("j", 5, ask("srv", true), false, &nobody, &states(&[])).is_none(), "the relay hides us there");
         assert!(!hold.holds_any(), "dropped, never held");
         hold.joined("srv", false);
-        assert!(hold.hold("j", 5, ask("srv", false), &nobody).is_some(), "shown, with nobody else to ask");
+        hold.lock_read("srv", None);
+        assert!(hold.hold("j", 5, ask("srv", false), false, &nobody, &states(&[])).is_some(), "shown, with nobody else to ask");
         hold.ring_asked("srv", "~join");
-        assert!(hold.hold("j", 5, ask("srv", true), &nobody).is_none());
+        assert!(hold.hold("j", 5, ask("srv", true), false, &nobody, &states(&[])).is_none());
         assert!(hold.holds_any(), "the wait began when the room showed");
     }
 
@@ -307,14 +367,14 @@ mod tests {
         let mut hold = JoinHold::default();
         hold.joined("srv", false);
         hold.ring_asked("srv", "~join");
-        assert!(hold.hold("j", 5, ask("srv", true), &nobody).is_none());
+        assert!(hold.hold("j", 5, ask("srv", true), false, &nobody, &states(&[])).is_none());
         assert!(hold.holds_any());
         hold.hidden("srv");
         assert!(!hold.holds_any(), "what waited is dropped");
-        assert!(hold.hold("j", 5, ask("srv", false), &x_here).is_none(), "a member the relay hides answers nothing");
+        assert!(hold.hold("j", 5, ask("srv", false), false, &x_here, &states(&[])).is_none(), "a member the relay hides answers nothing");
         assert!(!hold.holds_any());
         hold.joined("srv", false);
-        assert!(hold.hold("j", 5, ask("srv", false), &x_here).is_none(), "shown again, it waits for a sync");
+        assert!(hold.hold("j", 5, ask("srv", false), false, &x_here, &states(&[])).is_none(), "shown again, it waits for a sync");
         assert!(hold.holds_any());
     }
 
@@ -323,26 +383,85 @@ mod tests {
         let x_here = |_: &str| vec!["x".to_string(), "j".to_string()];
         let mut hold = back(true);
         hold.ring_ended("srv", "~join");
-        assert!(hold.hold("j", 5, ask("srv", false), &x_here).is_none(), "x could tell us what we missed");
-        assert!(hold.hold("j", 5, ask("srv", true), &x_here).is_none());
+        assert!(hold.hold("j", 5, ask("srv", false), false, &x_here, &states(&[])).is_none(), "x could tell us what we missed");
+        assert!(hold.hold("j", 5, ask("srv", true), false, &x_here, &states(&[])).is_none());
         let asker_only = |_: &str| vec!["j".to_string()];
-        assert!(hold.hold("j", 5, ask("srv", false), &asker_only).is_some(), "nobody but the asker to ask");
+        assert!(hold.hold("j", 5, ask("srv", false), false, &asker_only, &states(&[])).is_some(), "nobody but the asker to ask");
         hold.synced(Some(("srv".into(), "j".into())));
-        assert!(hold.due(&x_here).is_empty(), "the asker's own sync vouches for nothing");
+        assert!(hold.due(&x_here, &states(&[])).is_empty(), "the asker's own sync vouches for nothing");
         hold.synced(Some(("srv".into(), "x".into())));
-        assert_eq!(hold.due(&x_here).len(), 2);
-        assert!(hold.hold("k", 5, ask("srv", false), &x_here).is_some(), "x synced: judged at once");
+        assert_eq!(hold.due(&x_here, &states(&[])).len(), 2);
+        assert!(hold.hold("k", 5, ask("srv", false), false, &x_here, &states(&[])).is_some(), "x synced: judged at once");
+    }
+
+    /// Back from away, a member judges an ask only once this connection read the relay's
+    /// lock, and none while that lock is past every door it holds: the relay's grace after
+    /// a lock move can still show it the room and the ring, and a member can hand it the
+    /// newest door before the sync that brings the move. Such an ask waits for the move,
+    /// never judged before it and never past the grace.
+    #[test]
+    fn a_member_back_judges_nothing_behind_the_relays_lock() {
+        use crate::crdt::operations::{CrdtPayload, JoinSecret};
+        let nobody = |_: &str| Vec::new();
+        let (owner_kp, owner, _) = crate::crdt::testkeys::keys(1);
+        let dev = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[42; 32]);
+        let server = "0123456789abcdef0123456789abcdef";
+        let mut state = ServerState::new(server.into(), "S".into(), owner);
+        let behind: ServerStates = HashMap::from([("srv".to_string(), state.clone())]);
+        let (kp, _, pk) = crate::crdt::testkeys::keys(1);
+        state.set_signer(kp, pk);
+        let lock = crate::node::join_lock::mint_owner_base(server, 1, &owner_kp, None, &dev).unwrap();
+        let op = state.create_op(CrdtPayload::JoinLock {
+            link: lock.link.clone(),
+            door: Some(JoinSecret(hex::encode(lock.door.as_slice()))),
+            grants: Default::default(),
+        });
+        let _ = state.apply_op(&op);
+        assert!(state.join_lock.holds_door(&lock.link.door));
+        let held: ServerStates = HashMap::from([("srv".to_string(), state)]);
+
+        let mut hold = JoinHold::default();
+        hold.went_away(&held);
+        hold.joined("srv", false);
+        assert!(hold.hold("j", 5, ask("srv", false), false, &nobody, &held).is_none(), "no read of the lock yet");
+        assert!(hold.due(&nobody, &held).is_empty() && hold.holds_any(), "it waits for the read");
+        hold.lock_read("srv", Some(&lock.link.door));
+        assert!(hold.due(&nobody, &behind).is_empty(), "the lock moved past every door our state holds");
+        assert!(hold.hold("k", 6, ask("srv", true), false, &nobody, &behind).is_none(), "nothing new is judged");
+        hold.age("srv", HOLD_WAIT);
+        assert!(hold.due(&nobody, &behind).is_empty(), "the ordinary wait forces nothing past the lock");
+        assert_eq!(hold.fresh["srv"].held.len(), 2, "both wait for the move");
+        let due = hold.due(&nobody, &held);
+        assert_eq!(due.iter().map(|a| a.from.as_str()).collect::<Vec<_>>(), ["j", "k"], "the sync brought the door: judged in order");
+        assert!(hold.hold("j", 5, ask("srv", false), false, &nobody, &held).is_some(), "our door is the newest");
+
+        hold.went_away(&held);
+        hold.joined("srv", false);
+        hold.lock_read("srv", Some(&lock.link.door));
+        assert!(hold.hold("j", 5, ask("srv", false), false, &nobody, &behind).is_none());
+        hold.age("srv", DOOR_WAIT);
+        assert!(hold.due(&nobody, &behind).is_empty() && !hold.holds_any(), "past the grace, dropped unjudged");
+        assert!(hold.hold("j", 5, ask("srv", false), false, &nobody, &behind).is_none() && !hold.holds_any());
+        hold.went_away(&held);
+        hold.joined("srv", false);
+        assert!(hold.hold("j", 5, ask("srv", false), false, &nobody, &held).is_none(), "every connection reads it again");
+
+        let mut hold = back(false);
+        assert!(hold.hold("j", 5, ask("srv", true), true, &nobody, &held).is_none());
+        hold.ring_ended("srv", "~join");
+        let due = hold.due(&nobody, &held);
+        assert!(due.len() == 1 && due[0].old_link, "a held ask keeps what opened its box");
     }
 
     #[test]
     fn nothing_waits_past_the_hold() {
         let x_here = |_: &str| vec!["x".to_string()];
         let mut hold = back(true);
-        assert!(hold.hold("j", 5, ask("srv", true), &x_here).is_none());
-        assert!(hold.due(&x_here).is_empty());
+        assert!(hold.hold("j", 5, ask("srv", true), false, &x_here, &states(&[])).is_none());
+        assert!(hold.due(&x_here, &states(&[])).is_empty());
         hold.age("srv", HOLD_WAIT);
-        assert_eq!(hold.due(&x_here).len(), 1, "neither the ring's end nor a sync came");
-        assert!(hold.hold("j", 5, ask("srv", true), &x_here).is_some());
+        assert_eq!(hold.due(&x_here, &states(&[])).len(), 1, "neither the ring's end nor a sync came");
+        assert!(hold.hold("j", 5, ask("srv", true), false, &x_here, &states(&[])).is_some());
     }
 
     #[test]
@@ -350,13 +469,13 @@ mod tests {
         let x_here = |_: &str| vec!["x".to_string()];
         let mut hold = back(true);
         for _ in 0..MAX_HELD + 5 {
-            assert!(hold.hold("j", 5, ask("srv", true), &x_here).is_none());
+            assert!(hold.hold("j", 5, ask("srv", true), false, &x_here, &states(&[])).is_none());
         }
         assert_eq!(hold.fresh["srv"].held.len(), MAX_HELD);
         hold.went_away(&states(&[]));
         assert!(!hold.holds_any());
         hold.joined("srv", false);
-        assert!(hold.hold("j", 5, ask("srv", true), &x_here).is_none());
+        assert!(hold.hold("j", 5, ask("srv", true), false, &x_here, &states(&[])).is_none());
         assert_eq!(hold.fresh["srv"].held.len(), 1, "a new socket starts over");
     }
 
@@ -365,7 +484,21 @@ mod tests {
         let states = states(&["x"]);
         let mut hold = JoinHold::default();
         hold.went_away(&HashMap::new());
-        assert_eq!(hold.sync_mark(&answer(hold.ask()), "x", &states), None, "a server made on this socket");
+        hold.joined("srv", false);
+        let mark = hold.sync_mark(&answer(hold.ask()), "x", &states);
+        hold.synced(mark);
+        assert!(hold.caught_up("srv", &["x".into()]), "a server made on this socket caught up");
+        assert!(!hold.synced.contains_key("srv"), "but vouches for no held ask");
+        hold.went_away(&states);
+        assert!(!hold.caught_up("srv", &[]), "a new socket has not shown us the room");
+        hold.joined("srv", false);
+        assert!(hold.caught_up("srv", &[]), "nobody else is there to ask");
+        assert!(!hold.caught_up("srv", &["x".into()]), "x is, and has not answered");
+        hold.synced(Some(("srv".into(), "x".into())));
+        assert!(hold.caught_up("srv", &["x".into()]));
+        hold.hidden("srv");
+        hold.joined("srv", false);
+        assert!(!hold.caught_up("srv", &["x".into()]), "a hide means a move our answer may predate");
         hold.went_away(&states);
         let now = hold.ask();
         assert_eq!(hold.sync_mark(&answer(now), "x", &states), Some(("srv".into(), "x".into())));

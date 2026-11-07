@@ -4155,9 +4155,13 @@ async fn live_join_key(node: &TestNode, server_id: &str) -> Option<String> {
     node.live_server_state(server_id).await.and_then(|s| s.join_public_text())
 }
 
-/// `kp`'s signed ask to join `server_id`, as a real joiner's request carries it.
+/// `kp`'s signed ask to join `server_id`, as a real joiner's request carries it: naming
+/// the key of the invite the harness made at creation, when it made one.
 fn join_ask(server_id: &str, at: i64, kp: &NativeKeypair) -> Option<crate::crdt::operations::JoinAsk> {
-    Some(crate::crdt::operations::JoinAsk::sign(server_id, at, kp))
+    Some(match invite_key(server_id) {
+        Some(key) => crate::crdt::operations::JoinAsk::sign_for_invite(server_id, at, &key, kp)?,
+        None => crate::crdt::operations::JoinAsk::sign(server_id, at, kp),
+    })
 }
 
 /// A reply key for a hand-built join request.
@@ -27601,7 +27605,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-11-07: t14-w2d added two absences: old leaves handed back after a rejoin end
     // nothing (1.5 s) and an away member serves no hidden join ask (3.0 s) (scan 1138.3 s,
     // slack 2.5 s).
-    const BUDGET_MS: u64 = 1_140_800;
+    // 2026-11-07: t14-reset's missing-key sweep tests, a spawn stagger and two absence
+    // proofs (two batch ticks each with no key minted, 11.5 s).
+    // 2026-11-07: merged onto Track A, w2-d and t14-hidden: scan 1146.3 s, slack 2.2 s.
+    const BUDGET_MS: u64 = 1_148_500;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -65182,4 +65189,533 @@ async fn t14_hidden_a_cut_joiner_after_the_base_makers_removal_holds_the_newest_
     let tip = t14_hidden_remove_and_move(&relay, &d1, d2, &server_id).await;
     let mut j = spawn_node_on(&relay, 228, 229).await;
     t14_hidden_stranger_holds_the_newest_door(&relay, &d1, &mut j, &server_id, &tip).await;
+}
+
+// t14-reset
+/// The owner resets a server's invite link: every member takes the new key and the lock
+/// moves at once. An ask made with the old link and parked in the join ring is refused
+/// with that reason, never admitted, and the new link joins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_reset_a_parked_old_link_ask_is_refused_and_the_new_link_joins() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 91, 92, 93).await;
+    let old = invite_key(&server_id).expect("the harness made an invite");
+    let first = relay_tip(&relay, &server_id);
+
+    o.cmd_tx.send(NodeCommand::ResetInviteLink { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || live_join_key(&o, &server_id).await.is_some_and(|k| k != old)).await,
+        "the owner holds a new key",
+    );
+    let new = live_join_key(&o, &server_id).await.unwrap();
+    assert!(
+        wait_until(15, async || live_join_key(&m, &server_id).await.as_deref() == Some(new.as_str())).await,
+        "the member takes the new key",
+    );
+    assert!(
+        wait_until(20, async || {
+            let tip = relay_tip(&relay, &server_id).n;
+            tip > first.n && m.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip)
+        })
+        .await,
+        "the reset moves the lock at once, and the member holds the new door",
+    );
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the owner registers the join ring before it goes dark",
+    );
+
+    // Nobody is there: the old link's ask parks, and the owner reads it on its return.
+    go_offline(&relay, &o, &server_id).await;
+    go_offline(&relay, &m, &server_id).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_parked(&mut j, &server_id).await, "J parks with the old link");
+    relay.set_online(&o.device_id, true);
+    let refused = |j: &TestNode| j.pending_joins().iter().any(|(s, _, r)| *s == server_id && r == super::join_verdict::INVITE_RESET);
+    assert!(wait_until(30, async || refused(&j)).await, "the owner refuses the old link's parked ask, saying why");
+    o.crdt_committed().await;
+    assert!(!o.raw_crdt_member_keys(&server_id).contains(&j.master_id), "the old link admitted nobody");
+    assert!(!j.servers().contains(&server_id), "J holds no server from it");
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: Some(new),
+        })
+        .await
+        .unwrap();
+    assert!(expect_joined(&mut j, &server_id, 40).await, "the new link joins");
+    assert!(wait_until(10, async || o.raw_crdt_member_keys(&server_id).contains(&j.master_id)).await, "the owner admitted J");
+    drop(m);
+}
+
+/// A member offline during the reset learns it once back, and from then on refuses an
+/// ask made with the old link, saying why, while it admits one made with the new link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_reset_a_member_back_from_away_refuses_an_old_link_ask() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 94, 95, 96).await;
+    let old = invite_key(&server_id).expect("the harness made an invite");
+
+    go_offline(&relay, &m, &server_id).await;
+    o.cmd_tx.send(NodeCommand::ResetInviteLink { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || live_join_key(&o, &server_id).await.is_some_and(|k| k != old)).await,
+        "the owner holds a new key",
+    );
+    let new = live_join_key(&o, &server_id).await.unwrap();
+    assert!(live_join_key(&m, &server_id).await.as_deref() == Some(old.as_str()), "precondition: M missed the reset");
+
+    relay.set_online(&m.device_id, true);
+    let m_door_is_newest = async || {
+        let tip = relay_tip(&relay, &server_id).n;
+        m.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip)
+    };
+    assert!(
+        wait_until(30, async || live_join_key(&m, &server_id).await.as_deref() == Some(new.as_str()) && m_door_is_newest().await).await,
+        "back, M learns the reset and the lock it moved",
+    );
+
+    // M alone answers now.
+    go_offline(&relay, &o, &server_id).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    let refused = |j: &TestNode| j.pending_joins().iter().any(|(s, _, r)| *s == server_id && r == super::join_verdict::INVITE_RESET);
+    assert!(wait_until(30, async || refused(&j)).await, "M refuses the old link, saying why");
+    m.crdt_committed().await;
+    assert!(!m.raw_crdt_member_keys(&server_id).contains(&j.master_id), "M admitted nobody on the old link");
+    assert!(!j.servers().contains(&server_id), "J holds no server from it");
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: Some(new),
+        })
+        .await
+        .unwrap();
+    assert!(expect_joined(&mut j, &server_id, 40).await, "M admits the new link");
+    drop(o);
+}
+
+/// Only the owner resets the link, in the fold: an admin's new key counts for nothing.
+/// And after the owner's reset, an admission of an ask made with the old link (a member
+/// that missed the reset, or one that lies) counts for nothing anywhere the reset is
+/// held, while the same admission with the new link lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_reset_only_the_owner_resets_and_an_old_link_admission_counts_for_nothing() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, m, j, server_id) = owner_member_and_joiner(&relay, 97, 98, 99).await;
+    let old = invite_key(&server_id).expect("the harness made an invite");
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: m.master_id.clone(), new_role: "admin".to_string() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || m.live_server_state(&server_id).await.is_some_and(|s| s.get_role(&m.master_id) == crate::crdt::operations::MemberRole::Admin)).await,
+        "M is an admin",
+    );
+    let m_master = m.master_id.clone();
+    let barrier = async |o: &mut TestNode| {
+        carry_as(&m, o, super::types::HavenMessage::TypingIndicator { server_id: String::new(), channel_id: o.master_id.clone() }).await;
+        assert!(
+            wait_event(o, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::TypingStarted { peer_id, .. } if *peer_id == m_master)).await,
+            "the barrier arrives",
+        );
+        o.crdt_committed().await;
+    };
+
+    let admin_reset = forge_crdt_op(&server_id, &m.master_id, crate::crdt::operations::CrdtPayload::JoinKeySet {
+        secret: crate::crdt::operations::JoinSecret("ab".repeat(32)),
+    }, 1, Some(&m.master_kp));
+    carry_as(&m, &o, crdt_broadcast(&server_id, &admin_reset)).await;
+    barrier(&mut o).await;
+    assert_eq!(live_join_key(&o, &server_id).await.as_deref(), Some(old.as_str()), "an admin's reset counts for nothing");
+
+    o.cmd_tx.send(NodeCommand::ResetInviteLink { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || live_join_key(&m, &server_id).await.is_some_and(|k| k != old)).await,
+        "the owner's reset reaches M",
+    );
+    let new = live_join_key(&o, &server_id).await.unwrap();
+    let admit = |key: &str, at: i64, ahead: u64| {
+        crdt_broadcast(&server_id, &forge_crdt_op(&server_id, &m.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
+            peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+            ask: crate::crdt::operations::JoinAsk::sign_for_invite(&server_id, at, key, &j.master_kp),
+        }, ahead, Some(&m.master_kp)))
+    };
+    let now = super::types::now_ms();
+    carry_as(&m, &o, admit(&old, now, 2)).await;
+    barrier(&mut o).await;
+    assert!(!o.raw_crdt_member_keys(&server_id).contains(&j.master_id), "an admission on the old link counts for nothing");
+    carry_as(&m, &o, admit(&new, now + 1, 3)).await;
+    assert!(
+        wait_until(15, async || o.raw_crdt_member_keys(&server_id).contains(&j.master_id)).await,
+        "the same admission on the new link lands",
+    );
+}
+
+
+/// An ask made with the harness invite's old link, sealed to `door` as a joiner that kept
+/// an old lock read would seal it, for the join ring.
+fn old_link_ask_in_ring(server_id: &str, joiner: &TestNode, door: &super::join_lock::LockLink) -> Vec<u8> {
+    let asked_at = super::types::now_ms();
+    let ask = super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.to_string(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        requested_at: asked_at,
+        device_list: super::roster_book::own_roster(&joiner.master_id, &joiner.db_path, &joiner.passphrase),
+        parked: true,
+        key_package: None,
+        reply_key: fresh_reply_key(),
+        card: None,
+        avatar_b64: String::new(),
+        ask: join_ask(server_id, asked_at, &joiner.master_kp),
+        follows_leave: None,
+    };
+    let invite = super::sealed_box::public_of(&join_secret_of(server_id).expect("a harness-created server"));
+    super::join_lane::seal_to_members(&door.door_key().unwrap(), &invite, door.n, server_id, &joiner.device_id, &ask).expect("seals")
+}
+
+/// A member offline through the reset comes back while nobody else is online. The reset
+/// moved the lock, so the relay hides the room from it until a member hands it the new
+/// door with the reset: it reads no parked ask, and the old link's ask admits nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_reset_a_member_back_alone_admits_no_old_link_ask() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 81, 82, 83).await;
+    let old = invite_key(&server_id).expect("the harness made an invite");
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the join ring exists",
+    );
+    let first = relay_tip(&relay, &server_id);
+    go_offline(&relay, &m, &server_id).await;
+    o.cmd_tx.send(NodeCommand::ResetInviteLink { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || {
+            let tip = relay_tip(&relay, &server_id).n;
+            tip > first.n
+                && live_join_key(&o, &server_id).await.is_some_and(|k| k != old)
+                && o.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip)
+        })
+        .await,
+        "the owner resets the link and the lock moves at once",
+    );
+    expect_relay_drained(&relay, &o, "reset").await;
+    go_offline(&relay, &o, &server_id).await;
+    assert_eq!(live_join_key(&m, &server_id).await.as_deref(), Some(old.as_str()), "precondition: M missed the reset");
+
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_parked(&mut j, &server_id).await, "J parks with the old link and nobody there");
+    relay.set_online(&m.device_id, true);
+    assert!(
+        wait_until(15, async || relay.room_devices(&server_id).contains(&m.device_id)).await,
+        "M is back in the room",
+    );
+    assert!(!relay.sees_room(&server_id, &m.device_id), "the relay hides the room from M: it cannot prove the newest door");
+    let admitted = wait_until(20, async || m.raw_crdt_member_keys(&server_id).contains(&j.master_id)).await;
+    assert!(!admitted, "M, back alone with the old link in force, admitted the old link's parked ask");
+    assert!(!j.servers().contains(&server_id), "J holds no server from it");
+    assert_eq!(live_join_key(&m, &server_id).await.as_deref(), Some(old.as_str()), "nobody was there to tell M");
+}
+
+/// A member's session resumes inside the relay's grace after the reset moved the lock,
+/// with a gap that took the reset and the new door: the relay still shows it the room and
+/// its join ring. An ask sealed to the old door with the old link waits there: the member
+/// judges no ask while the relay's lock is past every door it holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_reset_a_member_resumed_in_the_doors_grace_judges_no_ask() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, m, j, server_id) = owner_member_and_joiner(&relay, 84, 85, 86).await;
+    let old = invite_key(&server_id).expect("the harness made an invite");
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the join ring exists",
+    );
+    assert!(expect_sees_room(&relay, &server_id, &m.device_id).await, "M proves the door");
+    let first = relay_tip(&relay, &server_id);
+
+    relay.set_ring_cap(&m.device_id, 1);
+    relay.suspend(&m.device_id);
+    assert!(wait_until(10, async || !o.sees_peer(&m.device_id).await).await, "O sees M leave");
+    o.cmd_tx.send(NodeCommand::ResetInviteLink { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || {
+            let tip = relay_tip(&relay, &server_id).n;
+            tip > first.n
+                && live_join_key(&o, &server_id).await.is_some_and(|k| k != old)
+                && o.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip)
+        })
+        .await,
+        "the owner resets the link and the lock moves",
+    );
+    // What M was sent falls out of its session ring behind these.
+    for i in 0..3 {
+        o.cmd_tx
+            .send(NodeCommand::SendMessage { peer_id: m.master_id.clone(), text: format!("after the reset {i}"), message_id: format!("t14-gap-{i}"), reply_to_mid: None, link_preview: None })
+            .await
+            .unwrap();
+    }
+    expect_relay_drained(&relay, &o, "reset").await;
+    drain_events(&mut o);
+    assert!(relay.ring_len(&m.device_id) >= 2, "M's session ring overflowed into a gap");
+    go_offline(&relay, &o, &server_id).await;
+
+    relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &j.device_id, old_link_ask_in_ring(&server_id, &j, &first));
+    relay.resume(&m.device_id);
+    assert!(
+        wait_until(15, async || relay.sees_room(&server_id, &m.device_id)).await,
+        "precondition: the relay still shows M the room, as in its grace",
+    );
+    let admitted = wait_until(20, async || m.raw_crdt_member_keys(&server_id).contains(&j.master_id)).await;
+    assert_eq!(live_join_key(&m, &server_id).await.as_deref(), Some(old.as_str()), "precondition: M lost the reset in the gap");
+    assert!(
+        m.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == first.n),
+        "precondition: and the new door",
+    );
+    assert!(!admitted, "M judged an old-door ask while the relay's lock was past its door");
+}
+
+/// The answers in a server's join ring sealed with `invite`: (from, joiner master, reason).
+fn ring_answers_under(relay: &MockRelay, server_id: &str, invite: &[u8; 32]) -> Vec<(String, String, String)> {
+    let doors = super::join_lock::test_door_secrets();
+    relay
+        .topic_frames(server_id, super::types::JOIN_TOPIC)
+        .into_iter()
+        .filter_map(|(from, data)| {
+            let super::types::HavenMessage::JoinSealed { eph, ct, n, .. } = serde_json::from_slice(&data).ok()? else {
+                return None;
+            };
+            match super::join_lane::open_for_members(invite, &doors, server_id, &from, n, &eph, &ct)? {
+                super::types::HavenMessage::ServerJoinResolved { joiner_master, reason, .. } => Some((from, joiner_master, reason)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// After a reset, a request sealed to the newest door with the old link that carries no
+/// ask, or a keyless one (an older client), parked or live, is refused as a reset link on
+/// the fact that a retired key opened its box, before any gate that names the server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_reset_a_box_a_retired_key_opens_is_refused_as_reset_whatever_it_asks() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let (o, m, j, server_id) = owner_member_and_joiner(&relay, 87, 88, 89).await;
+    let old = invite_key(&server_id).expect("the harness made an invite");
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the join ring exists",
+    );
+    go_offline(&relay, &m, &server_id).await;
+    let first = relay_tip(&relay, &server_id);
+    o.cmd_tx.send(NodeCommand::ResetInviteLink { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || {
+            let tip = relay_tip(&relay, &server_id).n;
+            tip > first.n
+                && live_join_key(&o, &server_id).await.is_some_and(|k| k != old)
+                && o.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip)
+        })
+        .await,
+        "the owner resets the link and the lock moves",
+    );
+    let new_secret = *o.live_server_state(&server_id).await.and_then(|s| s.join_secret()).expect("the new key");
+    expect_relay_drained(&relay, &o, "reset").await;
+    go_offline(&relay, &o, &server_id).await;
+
+    // An older client's asks, sealed to the newest door it read and the old link.
+    let tip = relay_tip(&relay, &server_id);
+    let old_invite = super::sealed_box::public_of(&join_secret_of(&server_id).expect("a harness-created server"));
+    let sealed = |ask: Option<crate::crdt::operations::JoinAsk>, parked: bool, reply_key: String, at: i64| {
+        let request = super::types::HavenMessage::ServerJoinRequest {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            requested_at: at,
+            device_list: super::roster_book::own_roster(&j.master_id, &j.db_path, &j.passphrase),
+            parked,
+            key_package: None,
+            reply_key,
+            card: None,
+            avatar_b64: String::new(),
+            ask,
+            follows_leave: None,
+        };
+        super::join_lane::seal_to_members(&tip.door_key().unwrap(), &old_invite, tip.n, &server_id, &j.device_id, &request).expect("seals")
+    };
+    let keyless = || Some(crate::crdt::operations::JoinAsk::sign(&server_id, 1, &j.master_kp));
+    let now = super::types::now_ms();
+    for (i, ask) in [None, keyless()].into_iter().enumerate() {
+        relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &j.device_id, sealed(ask, true, fresh_reply_key(), now + i as i64));
+    }
+    relay.set_online(&o.device_id, true);
+    let refusals = async || {
+        ring_answers_under(&relay, &server_id, &new_secret)
+            .into_iter()
+            .filter(|(from, joiner, _)| *from == o.device_id && *joiner == j.master_id)
+            .map(|(_, _, reason)| reason)
+            .collect::<Vec<_>>()
+    };
+    assert!(wait_until(30, async || refusals().await.len() >= 2).await, "the owner answers both asks: {:?}", refusals().await);
+    assert_eq!(refusals().await, vec![super::join_verdict::INVITE_RESET.to_string(); 2], "both refused as a reset link");
+
+    // The same keyless ask, live and straight to the owner.
+    let reply = super::join_lane::ReplySecret::new().unwrap();
+    relay.inject_direct(&server_id, &j.device_id, &o.device_id, sealed(keyless(), false, reply.public_text(), now + 5));
+    let door = super::sealed_box::key_from_text(&tip.door).unwrap();
+    let live_answer = || {
+        relay.wiretap().frames.iter().filter(|f| f.from == o.device_id && f.to.as_deref() == Some(j.device_id.as_str())).find_map(|f| {
+            let super::types::HavenMessage::JoinSealed { eph, ct, n, .. } = serde_json::from_slice(&f.body).ok()? else { return None };
+            match super::join_lane::open_for_joiner(&reply, &door, &server_id, &o.device_id, &j.device_id, n, &eph, &ct)? {
+                super::types::HavenMessage::ServerJoinRejected { reason, .. } => Some(reason),
+                _ => None,
+            }
+        })
+    };
+    assert!(wait_until(15, async || live_answer().is_some()).await, "the owner answers the live ask");
+    assert_eq!(live_answer().as_deref(), Some(super::join_verdict::INVITE_RESET), "refused as a reset link");
+    assert!(!o.raw_crdt_member_keys(&server_id).contains(&j.master_id), "and nobody admitted");
+}
+
+// t14-reset-sweep
+/// Two devices of one owner, the lower id first, both holding a server the higher one
+/// made, with its join key.
+async fn t14_owner_pair(relay: &MockRelay, m_tag: u8, a_tag: u8, b_tag: u8) -> (TestNode, TestNode, u8, u8, String) {
+    let m_master = keys(m_tag).peer_id();
+    let (lo_tag, hi_tag) = if keys(a_tag).peer_id() < keys(b_tag).peer_id() { (a_tag, b_tag) } else { (b_tag, a_tag) };
+    super::resolver::seed_self(&m_master, &[keys(lo_tag).peer_id(), keys(hi_tag).peer_id()]);
+    let lo = spawn_node_with_friends(relay, m_tag, lo_tag, &[]).await;
+    // The spawn stagger.
+    sleep_ms(1500).await;
+    let mut hi = spawn_node_with_friends(relay, m_tag, hi_tag, &[]).await;
+    expect_siblings_ready(relay, &lo, &hi, 15).await;
+    let server_id = create_server_and_wait(&mut hi, "Sweep Server").await;
+    let key = live_join_key(&hi, &server_id).await.expect("a new server has a join key");
+    assert!(
+        wait_until(30, async || live_join_key(&lo, &server_id).await.as_deref() == Some(key.as_str())).await,
+        "the sibling holds the server and its key",
+    );
+    (lo, hi, lo_tag, hi_tag, server_id)
+}
+
+/// Stop `node` and boot it again holding `server_id` as it was before its join key
+/// reached it.
+async fn t14_restart_without_join_key(relay: &MockRelay, node: TestNode, m_tag: u8, tag: u8, server_id: &str) -> TestNode {
+    let sid = server_id.to_string();
+    restart_node_with(relay, node, m_tag, tag, move |db, pass| {
+        let store = crate::storage::MessageStore::open(db, pass).expect("open store");
+        let c = store.conn_for_test();
+        let gone = c.execute("DELETE FROM crdt_ops WHERE server_id = ?1 AND op_json LIKE '%JoinKeySet%'", [&sid]).unwrap();
+        assert!(gone > 0, "the key op was stored");
+        let json: String = c.query_row("SELECT state_json FROM servers WHERE server_id = ?1", [&sid], |r| r.get(0)).unwrap();
+        let mut state: serde_json::Value = serde_json::from_str(&json).unwrap();
+        state.as_object_mut().unwrap().remove("join_secret");
+        store.save_server_state(&sid, &state.to_string()).unwrap();
+    })
+    .await
+}
+
+/// Both devices of the owner hold a server with no join key and hear each other only
+/// after several sweeps: exactly one of them sets the key, so nothing reads as a reset
+/// and no lock moves for one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_reset_two_owner_devices_sweep_one_join_key() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let m_tag = 101u8;
+    let (lo, hi, lo_tag, hi_tag, server_id) = t14_owner_pair(&relay, m_tag, 102, 103).await;
+    let (lo_id, hi_id) = (lo.device_id.clone(), hi.device_id.clone());
+    for (from, to) in [(&lo_id, &hi_id), (&hi_id, &lo_id)] {
+        relay.hold_direct(from, to);
+        relay.hold_broadcasts(from, to);
+    }
+    let lo = t14_restart_without_join_key(&relay, lo, m_tag, lo_tag, &server_id).await;
+    let hi = t14_restart_without_join_key(&relay, hi, m_tag, hi_tag, &server_id).await;
+    assert!(live_join_key(&lo, &server_id).await.is_none() && live_join_key(&hi, &server_id).await.is_none(), "precondition: neither holds a key");
+    assert!(
+        wait_until(15, async || {
+            let room = relay.room_devices(&server_id);
+            room.contains(&lo_id) && room.contains(&hi_id)
+        })
+        .await,
+        "both are back in the room",
+    );
+    // An absence proof: two sweeps (2 s batch ticks) pass while neither hears the other.
+    sleep_ms(5000).await;
+    for (from, to) in [(&lo_id, &hi_id), (&hi_id, &lo_id)] {
+        relay.release_held(from, to);
+        relay.release_broadcasts(from, to);
+    }
+    assert!(
+        wait_until(30, async || {
+            let key = live_join_key(&lo, &server_id).await;
+            key.is_some() && key == live_join_key(&hi, &server_id).await
+        })
+        .await,
+        "the owner's devices agree on one join key",
+    );
+    for node in [&lo, &hi] {
+        let state = node.live_server_state(&server_id).await.unwrap();
+        assert!(state.join_secrets_retired.is_empty(), "{} folded two first keys as an invite reset", node.device_id);
+    }
+}
+
+/// The owner's lower device comes back holding the server as it was before the join
+/// key reached it, while its sibling's sync is still on the way: it sets no key of its
+/// own, and takes the sibling's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_reset_an_owner_sibling_mid_sync_mints_no_join_key() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let m_tag = 104u8;
+    let (lo, hi, lo_tag, _, server_id) = t14_owner_pair(&relay, m_tag, 105, 106).await;
+    let key = live_join_key(&hi, &server_id).await.unwrap();
+    let (lo_id, hi_id) = (lo.device_id.clone(), hi.device_id.clone());
+    relay.hold_direct(&hi_id, &lo_id);
+    relay.hold_broadcasts(&hi_id, &lo_id);
+    let lo = t14_restart_without_join_key(&relay, lo, m_tag, lo_tag, &server_id).await;
+    assert!(live_join_key(&lo, &server_id).await.is_none(), "precondition: the sibling holds no key");
+    assert!(wait_until(15, async || relay.room_devices(&server_id).contains(&lo_id)).await, "the sibling is back in the room");
+    // An absence proof: two sweeps (2 s batch ticks) pass before its sync can land.
+    sleep_ms(5000).await;
+    assert!(live_join_key(&lo, &server_id).await.is_none(), "the sibling set a key of its own before its sync landed");
+    relay.release_held(&hi_id, &lo_id);
+    relay.release_broadcasts(&hi_id, &lo_id);
+    assert!(
+        wait_until(30, async || live_join_key(&lo, &server_id).await.as_deref() == Some(key.as_str())).await,
+        "the sibling takes the owner's key",
+    );
+    assert_eq!(live_join_key(&hi, &server_id).await.as_deref(), Some(key.as_str()), "the key in force never changed");
+    for node in [&lo, &hi] {
+        assert!(node.live_server_state(&server_id).await.unwrap().join_secrets_retired.is_empty(), "{} saw a reset", node.device_id);
+    }
 }

@@ -167,13 +167,33 @@ class _AccessPageState extends ConsumerState<AccessPage> {
     });
   }
 
+  /// Owner only: a new join key, so every invite link out there stops working.
+  Future<void> _confirmResetInviteLink() async {
+    final done = await showHollowConfirm(
+      context: context,
+      title: 'Reset the invite link?',
+      message: 'Every invite link to this server stops working, including '
+          'ones already shared. Anyone still waiting to join through an old '
+          'link is turned away. People already here stay, and Invite people '
+          'gives you the new link.',
+      confirmLabel: 'Reset link',
+      destructive: true,
+      onConfirm: () async => crdt_api.resetServerInviteLink(serverId: _sid),
+    );
+    if (done && mounted) {
+      HollowToast.show(context, 'Invite link reset',
+          type: HollowToastType.success);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final draft = ref.read(serverSettingsDraftProvider(_sid).notifier);
     final capacity = ref.watch(serverCapacityProvider(_sid));
-    final oldRelay = ref.watch(myRoleProvider(_sid)).valueOrNull == 'owner' &&
-        relayPredatesDeviceLock(ref.watch(relayStatusProvider));
+    final isOwner = ref.watch(myRoleProvider(_sid)).valueOrNull == 'owner';
+    final oldRelay =
+        isOwner && relayPredatesDeviceLock(ref.watch(relayStatusProvider));
     final twitchOn = _flag('twitch_verification_enabled');
     final catchup = _catchupDays;
     final channelName = _values['twitch_channel_name'] ?? '';
@@ -204,6 +224,12 @@ class _AccessPageState extends ConsumerState<AccessPage> {
         SettingsSection(
           title: 'Joining',
           children: [
+            if (oldRelay)
+              const SettingsNote(
+                "This server's relay needs an update before it can keep "
+                'removed devices out of your invite lock. Ask the person who '
+                'runs it to update.',
+              ),
             SettingsSwitchRow(
               title: 'Private server',
               subtitle: 'Nobody new can join, even with an invite link. '
@@ -235,11 +261,17 @@ class _AccessPageState extends ConsumerState<AccessPage> {
                 ),
               ),
             ),
-            if (oldRelay)
-              const SettingsNote(
-                "This server's relay needs an update before it can keep "
-                'removed devices out of your invite lock. Ask the person who '
-                'runs it to update.',
+            if (isOwner)
+              SettingsRow(
+                title: 'Reset invite link',
+                subtitle: 'Every invite link shared so far stops working. '
+                    'People already here stay.',
+                trailing: HollowButton.outline(
+                  danger: true,
+                  compact: true,
+                  onPressed: _confirmResetInviteLink,
+                  child: const Text('Reset link'),
+                ),
               ),
           ],
         ),

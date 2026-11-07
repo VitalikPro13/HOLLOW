@@ -1286,11 +1286,13 @@ async fn run_event_loop(
                         // re-deposit after a restart is the SAME leaf request.
                         key_package: row.key_package,
                         owner_pin: row.owner_pin,
+                        ask: row.join_key.as_deref().and_then(|key| {
+                            crate::crdt::operations::JoinAsk::sign_for_invite(&row.server_id, row.requested_at, key, &master_keypair)
+                        }),
                         join_key: row.join_key,
                         reply_secret: row.reply_secret.as_deref().and_then(super::join_lane::ReplySecret::from_stored),
                         refused,
                         card: card.clone(),
-                        ask: Some(crate::crdt::operations::JoinAsk::sign(&row.server_id, row.requested_at, &master_keypair)),
                         ..Default::default()
                     });
                     restored += 1;
@@ -1522,14 +1524,14 @@ async fn run_event_loop(
             let started = std::time::Instant::now();
             let due = {
                 let visible = |sid: &str| super::join_hold::visible_members(sid, &server_states, &ws_room_peers);
-                join_hold.due(&visible)
+                join_hold.due(&visible, &server_states)
             };
             for ask in due {
                 #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
                 let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
                 #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
                 let fwd_bridge: FwdBridge = std::marker::PhantomData;
-                Box::pin(handle_incoming_request(
+                super::join_verdict::OLD_LINK.scope(ask.old_link, Box::pin(handle_incoming_request(
                     &mut olm, &crypto_store, &crdt_store, &mut crdt_resync, &event_tx,
                     &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                     &mut server_states, &bundle_keypair,
@@ -1582,7 +1584,8 @@ async fn run_event_loop(
                     ask.msg,
                     ask.frame_ts,
                     &mut None,
-                )).await;
+                )))
+                .await;
             }
             loop_stall.check("join_hold", "release", started);
         }
@@ -1681,6 +1684,16 @@ async fn run_event_loop(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, new_name,
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
+                    NodeCommand::ResetInviteLink { server_id } => {
+                        lock_keeper.nudge(&server_id);
+                        if sync_handler::handle_reset_invite_link(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &mut gossip_overlays, &local_peer_str,
+                            server_id,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
                     }
@@ -4057,6 +4070,7 @@ async fn run_event_loop(
                                 mls.as_ref(), &master_keypair, &local_peer_str, &db_path, &db_passphrase,
                             ))
                             .await;
+                            lock_keeper.reread(&server_states, &local_peer_str, &ws_cmd_tx);
                         }
                         let _ = event_tx.send(NetworkEvent::RelayConnected).await;
                     }
@@ -5328,6 +5342,9 @@ async fn run_event_loop(
                             let counted = state.is_member(&local_peer_str);
                             let tip_before = lock_keeper.relay_tip(&server).map(|t| t.n);
                             let payload = lock_keeper.on_chain(&server, links.clone(), put, state).filter(|_| counted);
+                            if links.is_empty() || lock_keeper.relay_tip(&server) == links.last() {
+                                join_hold.lock_read(&server, links.last().map(|tip| tip.door.as_str()));
+                            }
                             if lock_keeper.relay_tip(&server).map(|t| t.n) > tip_before {
                                 crdt_resync.floor.reset_shell(&server, std::time::Instant::now());
                             }
@@ -5844,17 +5861,20 @@ async fn run_event_loop(
                                     // reply key from its door, in that server's room. What it holds is judged
                                     // as a frame of its own.
                                     let mut joining: Option<RecentJoin> = None;
+                                    let mut old_link = false;
                                     let msg = if let HavenMessage::JoinSealed { eph, ct, n, door } = &msg {
-                                        let as_member = server_states.get(&room).and_then(|s| {
-                                            let invite = s.join_secret()?;
-                                            super::join_lane::open_for_members(&invite, &s.join_lock.door_secrets(*n), &room, &from, *n, eph, ct)
-                                        });
+                                        let as_member = server_states
+                                            .get(&room)
+                                            .and_then(|s| super::join_lane::open_as_member(s, &room, &from, *n, eph, ct));
                                         let held = HeldAnswer {
                                             arrived_at: std::time::Instant::now(),
                                             from: from.clone(), eph: eph.clone(), ct: ct.clone(), n: *n, door: door.clone(), frame_ts, frame_nonce,
                                         };
                                         let opened = match (as_member, pending_server_joins.get_mut(&room)) {
-                                            (Some(inner), _) => Some(inner),
+                                            (Some((inner, retired)), _) => {
+                                                old_link = retired;
+                                                Some(inner)
+                                            }
                                             (None, Some(pending)) => {
                                                 if sync_handler::hold_join_answer(&ws_cmd_tx, &room, pending, held) {
                                                     hollow_log!("[HOLLOW-CRDT] Holding an answer to our join of {room} from {from} until the relay shows its lock");
@@ -5880,7 +5900,7 @@ async fn run_event_loop(
                                         }
                                         // A member just back judges an ask only once it knows what it missed.
                                         let visible = |sid: &str| super::join_hold::visible_members(sid, &server_states, &ws_room_peers);
-                                        let Some(inner) = join_hold.hold(&from, frame_ts, inner, &visible) else { continue };
+                                        let Some(inner) = join_hold.hold(&from, frame_ts, inner, old_link, &visible, &server_states) else { continue };
                                         inner
                                     } else if let HavenMessage::MeetingSealed { nonce, ct } = &msg {
                                         // The meeting lane: sealed under the meeting link's key, in that
@@ -5901,6 +5921,7 @@ async fn run_event_loop(
                                     };
                                     let mut next = Some((Box::new(msg), frame_ts));
                                     while let Some((msg, frame_ts)) = next.take() {
+                                        let old_link = std::mem::take(&mut old_link);
                                         if !super::mls_authority::frame_names_a_group(&msg, &from) {
                                             continue;
                                         }
@@ -5987,7 +6008,7 @@ async fn run_event_loop(
                                         if unwrapped {
                                             super::mls_turns::VIA_FORWARD.scope((), request).await;
                                         } else {
-                                            request.await;
+                                            super::join_verdict::OLD_LINK.scope(old_link, request).await;
                                         }
                                         join_hold.synced(synced);
                                     }
@@ -6098,7 +6119,8 @@ async fn run_event_loop(
                 ).await;
                 sync_handler::author_missing_join_keys(
                     &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers,
-                    &mut gossip_overlays, &event_tx, &local_peer_str, &crypto_store, &crdt_store,
+                    &mut gossip_overlays, &event_tx, &local_peer_str, &device_peer_id, &crypto_store, &crdt_store,
+                    &join_hold, &pending_server_joins, &crdt_resync,
                 );
                 // The join lock: made, moved, put back, compacted and granted where due.
                 let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
@@ -11843,6 +11865,7 @@ async fn handle_incoming_request_inner(
             requested_at, device_list, parked, key_package, reply_key, card, avatar_b64, ask, follows_leave,
         } => {
             hollow_log!("[HOLLOW-CRDT] ServerJoinRequest from {peer_str} for server {server_id} (nonce {requested_at}, parked {parked})");
+            let old_link = super::join_verdict::old_link();
 
             if !server_states.contains_key(&server_id) {
                 hollow_log!("[HOLLOW-CRDT] ServerJoinRequest for unknown server {server_id}");
@@ -11913,7 +11936,7 @@ async fn handle_incoming_request_inner(
             // locals size every swarm future's frame).
             let (keeps, owners_call) = {
                 let early = super::join_verdict::verdict(
-                    state, &member_master, member_master == master_peer_str, already_member,
+                    state, &member_master, member_master == master_peer_str, already_member, ask.as_ref(), old_link,
                     twitch_proof_json.as_deref(), nsfw_confirmed, local_peer_str, |id| peer_is_reachable(ws_room_peers, id),
                 );
                 let keeps = super::join_verdict::may_keep(
@@ -12091,7 +12114,7 @@ async fn handle_incoming_request_inner(
                 // keep above. Keyed by the joiner's MASTER, which is what the ban list
                 // holds: a parked request's raw device id resolves to itself.
                 match super::join_verdict::verdict(
-                    state, &member_master, is_sibling, already_member, twitch_proof_json.as_deref(), nsfw_confirmed,
+                    state, &member_master, is_sibling, already_member, ask.as_ref(), old_link, twitch_proof_json.as_deref(), nsfw_confirmed,
                     local_peer_str, |id| peer_is_reachable(ws_room_peers, id),
                 ) {
                     super::join_verdict::Verdict::Admit => {}

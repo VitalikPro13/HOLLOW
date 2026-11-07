@@ -203,13 +203,43 @@ pub(crate) fn open_for_members(
     let plain = doors.iter().find_map(|door| sealed_box::open_with_both(door, invite, JOIN_DOMAIN, &aad, eph, ct))?;
     let msg = serde_json::from_slice::<HavenMessage>(&plain).ok()?;
     let fits = match &msg {
-        HavenMessage::ServerJoinRequest { server_id, reply_key, .. } => {
-            server_id == room && sealed_box::key_from_text(reply_key).is_some()
+        // An ask naming its invite key names the one it was sealed to.
+        HavenMessage::ServerJoinRequest { server_id, reply_key, ask, .. } => {
+            server_id == room
+                && sealed_box::key_from_text(reply_key).is_some()
+                && ask.as_ref().and_then(|a| a.key.as_deref()).is_none_or(|key| {
+                    sealed_box::key_from_text(key) == Some(sealed_box::public_of(invite))
+                })
         }
         HavenMessage::ServerJoinResolved { server_id, .. } => server_id == room,
         _ => false,
     };
     fits.then_some(msg)
+}
+
+/// What a join box holds for a member of `state`'s server, and whether a key an invite
+/// reset retired opened it: then only a request, which earns nothing but that refusal
+/// (`join_verdict::link_refusal`).
+pub(crate) fn open_as_member(
+    state: &crate::crdt::server_state::ServerState,
+    room: &str,
+    from: &str,
+    n: u64,
+    eph: &str,
+    ct: &str,
+) -> Option<(HavenMessage, bool)> {
+    let doors = state.join_lock.door_secrets(n);
+    if let Some(invite) = state.join_secret()
+        && let Some(msg) = open_for_members(&invite, &doors, room, from, n, eph, ct)
+    {
+        return Some((msg, false));
+    }
+    state
+        .retired_join_secrets()
+        .iter()
+        .find_map(|old| open_for_members(old, &doors, room, from, n, eph, ct))
+        .filter(|msg| matches!(msg, HavenMessage::ServerJoinRequest { .. }))
+        .map(|msg| (msg, true))
 }
 
 /// What a reply box sealed to us from door `n` holds, when `door` is that door's
@@ -467,6 +497,58 @@ mod tests {
         let planted = request("srv", &reply.public_text());
         assert!(open(&answer(&planted), &door, "srv", "member", "joiner").is_none(), "no request rides a reply");
         assert!(open(&answer(&sync("elsewhere")), &door, "srv", "member", "joiner").is_none());
+    }
+
+    /// Invite reset: a member reads a box sealed to a retired invite key only as a
+    /// request, so it can refuse it with the reason; a resolution sealed to it opens
+    /// nothing, and an ask naming a key other than the one it was sealed to opens nothing.
+    #[test]
+    fn open_as_member_reads_an_old_link_only_to_refuse_it() {
+        use crate::crdt::operations::{CrdtPayload, JoinAsk, JoinSecret};
+        let (owner_kp, owner, _) = crate::crdt::testkeys::keys(1);
+        let dev = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[42; 32]);
+        let server = "0123456789abcdef0123456789abcdef";
+        let mut s = crate::crdt::server_state::ServerState::new(server.into(), "S".into(), owner);
+        let (kp, _, pk) = crate::crdt::testkeys::keys(1);
+        s.set_signer(kp, pk);
+        let lock = crate::node::join_lock::mint_owner_base(server, 1, &owner_kp, None, &dev).unwrap();
+        let door = JoinSecret(hex::encode(lock.door.as_slice()));
+        let op = s.create_op(CrdtPayload::JoinLock { link: lock.link.clone(), door: Some(door), grants: Default::default() });
+        let _ = s.apply_op(&op);
+        let (old_s, old) = key();
+        let (_, new) = key();
+        for secret in [&old_s, &sealed_box::new_secret().unwrap()] {
+            let op = s.create_op(CrdtPayload::JoinKeySet { secret: JoinSecret(hex::encode(secret.as_slice())) });
+            let _ = s.apply_op(&op);
+        }
+        let current = sealed_box::public_of(&s.join_secret().unwrap());
+        let joiner = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[43; 32]);
+        let ask_with = |key: &[u8; 32]| {
+            let mut msg = request(server, &ReplySecret::new().unwrap().public_text());
+            if let HavenMessage::ServerJoinRequest { ask, .. } = &mut msg {
+                *ask = JoinAsk::sign_for_invite(server, 5, &sealed_box::key_to_text(key), &joiner);
+            }
+            msg
+        };
+        let door_key = lock.link.door_key().unwrap();
+        let open = |invite: &[u8; 32], msg: &HavenMessage| {
+            let frame = seal_to_members(&door_key, invite, 1, server, "joiner", msg).unwrap();
+            let (eph, ct, n) = parts(&frame);
+            open_as_member(&s, server, "joiner", n, &eph, &ct)
+        };
+        assert!(matches!(open(&current, &ask_with(&current)), Some((HavenMessage::ServerJoinRequest { .. }, false))), "the current link");
+        assert!(
+            matches!(open(&old, &ask_with(&old)), Some((HavenMessage::ServerJoinRequest { .. }, true))),
+            "an old link's ask is read, to be refused",
+        );
+        let without_ask = request(server, &ReplySecret::new().unwrap().public_text());
+        assert!(
+            matches!(open(&old, &without_ask), Some((HavenMessage::ServerJoinRequest { ask: None, .. }, true))),
+            "a request naming no key says a retired key opened it",
+        );
+        assert!(open(&old, &resolved(server)).is_none(), "a resolution sealed to a retired key");
+        assert!(open(&old, &ask_with(&current)).is_none(), "an ask naming a key it was not sealed to");
+        assert!(open(&new, &ask_with(&new)).is_none(), "a key the server never held");
     }
 
     #[test]
