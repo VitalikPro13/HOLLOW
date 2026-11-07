@@ -12,6 +12,7 @@ import 'package:hollow/src/ui/server_settings/pages/channels_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/emotes_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/files_storage_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/labels_page.dart';
+import 'package:hollow/src/ui/server_settings/pages/lost_devices_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/members_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/notifications_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/overview_page.dart';
@@ -30,6 +31,7 @@ extension ServerSettingsPageMeta on ServerSettingsPage {
         ServerSettingsPage.emotes => 'Emotes & stickers',
         ServerSettingsPage.members => 'Members',
         ServerSettingsPage.storage => 'Files & storage',
+        ServerSettingsPage.lostDevices => 'Lost devices',
         ServerSettingsPage.profile => 'Profile',
         ServerSettingsPage.notifications => 'Notifications',
       };
@@ -43,6 +45,7 @@ extension ServerSettingsPageMeta on ServerSettingsPage {
         ServerSettingsPage.emotes => LucideIcons.smile,
         ServerSettingsPage.members => LucideIcons.users,
         ServerSettingsPage.storage => LucideIcons.hardDrive,
+        ServerSettingsPage.lostDevices => LucideIcons.history,
         ServerSettingsPage.profile => LucideIcons.user,
         ServerSettingsPage.notifications => LucideIcons.bell,
       };
@@ -70,10 +73,15 @@ extension ServerSettingsPageMeta on ServerSettingsPage {
       };
 }
 
-/// The pages [perms] may open, in rail order.
-List<ServerSettingsPage> serverSettingsPagesFor(int perms) => [
+/// The pages [perms] may open, in rail order. Lost devices shows only while
+/// the owner has [lostDevices] reviews (`hasRefoldReviews`).
+List<ServerSettingsPage> serverSettingsPagesFor(int perms,
+        {bool lostDevices = false}) =>
+    [
       for (final p in ServerSettingsPage.values)
-        if (p.requires == 0 || perms & p.requires != 0) p,
+        if ((p.requires == 0 || perms & p.requires != 0) &&
+            (p != ServerSettingsPage.lostDevices || lostDevices))
+          p,
     ];
 
 /// Overview for someone who runs the server, else their own Profile.
@@ -93,6 +101,7 @@ Widget serverSettingsPageFor(ServerSettingsPage page, String serverId) =>
       ServerSettingsPage.emotes => EmotesPage(serverId: serverId),
       ServerSettingsPage.members => MembersPage(serverId: serverId),
       ServerSettingsPage.storage => FilesStoragePage(serverId: serverId),
+      ServerSettingsPage.lostDevices => LostDevicesPage(serverId: serverId),
       ServerSettingsPage.profile => ServerProfilePage(serverId: serverId),
       ServerSettingsPage.notifications =>
         ServerNotificationsPage(serverId: serverId),

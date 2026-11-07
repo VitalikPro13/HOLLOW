@@ -45,6 +45,10 @@ class HollowListRow extends StatelessWidget {
   /// view's clip cuts the fill at the text edge.
   final bool? flush;
 
+  /// Title and subtitle wrap instead of ellipsizing, for a row whose words
+  /// carry the choice (a restore point and who named it).
+  final bool wrap;
+
   /// The smallest a [touch] row may be.
   static const double touchMinHeight = 48;
 
@@ -64,12 +68,14 @@ class HollowListRow extends StatelessWidget {
     this.semanticLabel,
     this.touch = false,
     this.flush,
+    this.wrap = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final inset = insetOf(touch: touch);
+    final flushed = flush ?? HollowFlushRows.of(context);
 
     final row = HollowPressable(
       onTap: onTap,
@@ -81,8 +87,11 @@ class HollowListRow extends StatelessWidget {
       // Hover colour only. A row must not scale or dim under the pointer: at
       // list density that reads as the whole list twitching.
       subtle: true,
-      borderRadius:
-          touch ? BorderRadius.zero : BorderRadius.circular(hollow.radiusMd),
+      // A phone row meets the screen edges square; inside a dialog's padding
+      // it keeps the rounded fill.
+      borderRadius: touch && !flushed
+          ? BorderRadius.zero
+          : BorderRadius.circular(hollow.radiusMd),
       backgroundColor: selected ? hollow.accentMuted : null,
       padding:
           EdgeInsets.symmetric(horizontal: inset, vertical: HollowSpacing.sm),
@@ -109,7 +118,7 @@ class HollowListRow extends StatelessWidget {
                         .copyWith(
                       color: selected ? hollow.accentText : hollow.textPrimary,
                     ),
-                    overflow: TextOverflow.ellipsis,
+                    overflow: wrap ? null : TextOverflow.ellipsis,
                   ),
                   if (subtitle != null)
                     Text(
@@ -118,7 +127,7 @@ class HollowListRow extends StatelessWidget {
                               ? HollowTypography.body
                               : HollowTypography.bodySmall)
                           .copyWith(color: hollow.textSecondary),
-                      overflow: TextOverflow.ellipsis,
+                      overflow: wrap ? null : TextOverflow.ellipsis,
                     ),
                 ],
               ),
@@ -131,7 +140,7 @@ class HollowListRow extends StatelessWidget {
         ),
       ),
     );
-    if (!(flush ?? HollowFlushRows.of(context))) return row;
+    if (!flushed) return row;
     return HollowBleed(horizontal: inset, child: row);
   }
 }

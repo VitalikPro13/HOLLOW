@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/device_proof_copy.dart' show kRestoreTitle;
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
@@ -14,10 +15,12 @@ import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
+import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/ui/dialogs/keychain_protection_dialogs.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
+import 'package:hollow/src/ui/dialogs/restore_chooser.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -1007,6 +1010,9 @@ class SecurityRecoverySection extends ConsumerWidget {
   }
 
   Future<void> _removeOthers(BuildContext context, WidgetRef ref) async {
+    // The section can leave the tree while the dialog is up; the container
+    // outlives it.
+    final container = ProviderScope.containerOf(context, listen: false);
     try {
       final status = await roster_api.rosterStatus();
       if (!context.mounted) return;
@@ -1020,8 +1026,10 @@ class SecurityRecoverySection extends ConsumerWidget {
         confirmLabel: 'Remove the rest',
         danger: true,
       );
-      if (!done || !context.mounted) return;
-      ref.invalidate(rosterStatusProvider);
+      if (!done) return;
+      askForRestoreChooser(container, fresh: false);
+      container.invalidate(rosterStatusProvider);
+      if (!context.mounted) return;
       HollowToast.show(context, 'Every other device was removed.',
           type: HollowToastType.success);
     } catch (e) {
@@ -1046,6 +1054,12 @@ class SecurityRecoverySection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final upgradePending = ref.watch(phraseUpgradePendingProvider).valueOrNull ?? false;
+    final restoring = ref
+            .watch(restoreChoicesProvider)
+            .valueOrNull
+            ?.servers
+            .any(restorePending) ??
+        false;
     return SettingsSection(
       title: 'Recovery',
       children: [
@@ -1081,6 +1095,17 @@ class SecurityRecoverySection extends ConsumerWidget {
             child: const Text('Use phrase'),
           ),
         ),
+        if (restoring)
+          SettingsRow(
+            key: const ValueKey('restore-servers-row'),
+            title: kRestoreTitle,
+            subtitle: 'Hollow is still restoring some of your servers.',
+            trailing: HollowButton.outline(
+              compact: true,
+              onPressed: () => showRestoreChooser(context),
+              child: const Text('Open'),
+            ),
+          ),
         const BackupFileRow(),
       ],
     );

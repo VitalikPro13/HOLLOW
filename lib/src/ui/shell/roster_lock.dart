@@ -6,6 +6,7 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
+import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -94,6 +95,8 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
   }
 
   Future<void> _usePhrase() async {
+    // A recovery that lets this device in closes this screen mid-await.
+    final container = ProviderScope.containerOf(context, listen: false);
     try {
       final status = await roster_api.rosterStatus();
       if (!mounted) return;
@@ -105,7 +108,9 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
             'every other device.',
         confirmLabel: 'Keep these devices',
       );
-      if (done) await ref.read(rosterGateProvider.notifier).refresh();
+      if (!done) return;
+      await container.read(rosterGateProvider.notifier).refresh();
+      askForRestoreChooser(container, fresh: true);
     } catch (e) {
       if (mounted) HollowToast.show(context, friendlyError(e), type: HollowToastType.error);
     }

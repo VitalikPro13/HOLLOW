@@ -134,6 +134,9 @@ class HollowButtonTouchScope extends InheritedWidget {
 
 class _HollowButtonState extends State<HollowButton>
     with SingleTickerProviderStateMixin {
+  Widget _flexibleLabel(Widget label) =>
+      widget.child is ParentDataWidget ? label : Flexible(child: label);
+
   late final AnimationController _controller;
   late final Animation<double> _scaleAnimation;
   late final Animation<double> _opacityAnimation;
@@ -249,11 +252,18 @@ class _HollowButtonState extends State<HollowButton>
         // IconTheme as well as the text style: an icon-only button passes its
         // glyph as the CHILD, not the icon slot, and without this it renders in
         // the ambient icon colour rather than the variant's foreground.
-        IconTheme(
-          data: IconThemeData(color: fg, size: iconGlyph),
-          child: DefaultTextStyle(
-            style: HollowTypography.label.copyWith(color: fg, height: 1.0),
-            child: widget.child,
+        // Loose: a button sized by its parent (full width, a stacked dialog
+        // row) wraps or ellipsizes its label instead of overflowing; an
+        // unbounded one still takes the label's own width. A caller that
+        // already made its label Flexible keeps its own.
+        _flexibleLabel(
+          IconTheme(
+            data: IconThemeData(color: fg, size: iconGlyph),
+            child: DefaultTextStyle(
+              style: HollowTypography.label.copyWith(color: fg, height: 1.0),
+              textAlign: TextAlign.center,
+              child: widget.child,
+            ),
           ),
         ),
       ],

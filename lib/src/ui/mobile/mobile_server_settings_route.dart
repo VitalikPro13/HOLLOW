@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_settings_provider.dart';
@@ -33,6 +34,10 @@ class MobileServerSettingsRoute extends ConsumerWidget {
   final String serverId;
 
   const MobileServerSettingsRoute({super.key, required this.serverId});
+
+  /// Pushes [page] of this server's settings on its own, as a notice's action does.
+  void openPage(BuildContext context, WidgetRef ref, ServerSettingsPage page) =>
+      _open(context, ref, page);
 
   void _open(BuildContext context, WidgetRef ref, ServerSettingsPage page) {
     // A phone opens any server's settings from the chat list: its channel
@@ -121,7 +126,10 @@ class MobileServerSettingsRoute extends ConsumerWidget {
       // Nothing until the permissions load: the wrong pages would flash.
       body = const Center(child: HollowSpinner.medium(delayed: true));
     } else {
-      final pages = serverSettingsPagesFor(access.perms);
+      final pages = serverSettingsPagesFor(access.perms,
+          lostDevices: showsLostDevices(
+              ref.watch(refoldReviewsProvider(serverId)),
+              role: access.role));
       Widget row(ServerSettingsPage p) => MobileSettingsNavRow(
             key: ValueKey(p),
             icon: p.icon,

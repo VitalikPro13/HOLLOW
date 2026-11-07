@@ -18,6 +18,7 @@ enum ServerSettingsPage {
   emotes,
   members,
   storage,
+  lostDevices,
   profile,
   notifications,
 }

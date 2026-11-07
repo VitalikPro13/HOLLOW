@@ -65,6 +65,7 @@ import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
+import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/sticker_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
@@ -153,6 +154,7 @@ import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/mobile/mobile_shell.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
+import 'package:hollow/src/ui/dialogs/restore_chooser.dart';
 import 'package:hollow/src/ui/shell/roster_lock.dart';
 import 'package:hollow/src/ui/shell/server_strip.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
@@ -558,7 +560,20 @@ class _HollowShellState extends ConsumerState<HollowShell>
     ref.listenManual<List<String>>(pendingDeviceAsksProvider, (_, asks) {
       if (asks.isNotEmpty) _askAboutPendingDevices();
     });
+    ref.listenManual<RestoreChooserAsk?>(restoreChooserAskProvider, (_, ask) {
+      if (ask != null) unawaited(_restoreOffers.afterRecovery(fresh: ask.fresh));
+    });
   }
+
+  /// The start's offers, which an after-recovery chooser waits behind.
+  Future<void> _startOffers = Future<void>.value();
+
+  late final _restoreOffers = RestoreChooserOffers(
+    ProviderScope.containerOf(context, listen: false),
+    alive: () => mounted,
+    show: ({required fresh}) => showRestoreChooser(context, fresh: fresh),
+    startChain: () => _startOffers,
+  );
 
   /// Nothing routes above the app lock's cover, so the roster lock goes up only
   /// once the cover has lifted.
@@ -625,10 +640,19 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
   /// The start's own offers, one after another so their dialogs never stack.
   Future<void> _offerAfterStart({required bool setUpThisLaunch}) async {
-    await _askTermsAgreement();
-    await _offerPhraseUpgrade();
-    await _offerProtection();
-    if (!setUpThisLaunch) await _offerKeychainLock();
+    // Read before the offers below, which wait for the roster to let this device in.
+    final counted = ref.read(rosterGateProvider).kind == RosterGateKind.none;
+    final done = Completer<void>();
+    _startOffers = done.future;
+    try {
+      await _askTermsAgreement();
+      await _offerPhraseUpgrade();
+      await _offerProtection();
+      if (!setUpThisLaunch) await _offerKeychainLock();
+      await _restoreOffers.atStart(countedAtStart: counted);
+    } finally {
+      done.complete();
+    }
   }
 
   /// An identity made before Welcome asked for the Terms agrees once, never

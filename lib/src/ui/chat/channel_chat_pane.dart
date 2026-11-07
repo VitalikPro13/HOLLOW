@@ -82,6 +82,7 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/services/attachment_export.dart';
+import 'package:hollow/src/ui/chat/server_recovery_notices.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -1413,6 +1414,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
           children: [
             _buildHeader(hollow),
 
+            if (!widget.serverId.startsWith('conf:'))
+              ServerRecoveryNotices(serverId: widget.serverId),
+
             if (ref.watch(chatSearchOpenProvider)) _buildSearchBar(hollow),
 
             _buildMessageArea(hollow, messages, allMessages),
@@ -2464,7 +2468,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
     // temporary grant emits no network event, so this timer is what evicts us.
     ref.watch(myChannelGrantProvider(
         (serverId: widget.serverId, channelId: widget.channelId)));
-    if (!canPost || mute != null) {
+    final removed =
+        _isConference ? null : recoveryComposerBlock(ref, widget.serverId);
+    if (!canPost || mute != null || removed != null) {
       return Container(
         padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.md,
@@ -2476,7 +2482,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
         ),
         child: Center(
           child: Text(
-            _muteBannerText(mute) ??
+            removed ??
+                _muteBannerText(mute) ??
                 'You don\'t have permission to send messages in this channel',
             style: HollowTypography.bodySmall.copyWith(
               color: hollow.textSecondary,

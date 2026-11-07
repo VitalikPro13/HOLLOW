@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_settings_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -74,7 +75,9 @@ class _ServerSettingsPlaceState extends ConsumerState<ServerSettingsPlace> {
       );
     }
 
-    final pages = serverSettingsPagesFor(access.perms);
+    final pages = serverSettingsPagesFor(access.perms,
+        lostDevices: showsLostDevices(ref.watch(refoldReviewsProvider(sid)),
+            role: access.role));
     final wanted = ref.watch(serverSettingsPageProvider);
     final page = wanted != null && pages.contains(wanted)
         ? wanted

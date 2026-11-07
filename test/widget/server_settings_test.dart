@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/device_proof_provider.dart';
+import 'package:hollow/src/rust/api/device_proof.dart' show RefoldReviews;
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -93,6 +95,8 @@ List<Override> _overrides({
       bannedMembersProvider(kServerId1).overrideWith((_) async => const []),
       serverEmotesProvider(kServerId1).overrideWith((_) async => const []),
       serverStickersProvider(kServerId1).overrideWith((_) async => const []),
+      refoldReviewsProvider(kServerId1).overrideWith(
+          (_) async => const RefoldReviews(reviews: [], moreReports: 0)),
       channelGrantsProvider.overrideWith((ref, a) async => const []),
       serverChannelsProvider(kServerId1)
           .overrideWith((_) async => testChannels),

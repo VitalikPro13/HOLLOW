@@ -86,6 +86,7 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
@@ -332,6 +333,9 @@ class EventStreamNotifier extends Notifier<bool> {
     ref.invalidate(myPermissionsProvider(serverId));
     ref.invalidate(myRoleProvider(serverId));
     ref.invalidate(myMuteStatusProvider(serverId));
+    ref.invalidate(serverRecoveryProvider(serverId));
+    ref.invalidate(refoldReviewsProvider(serverId));
+    ref.invalidate(restoreChoicesProvider);
     // Server events reach us once the CRDT actor has committed (the Rust event
     // forwarder waits up to 2 s), so a read here is current; the ramp covers a
     // commit slower than that wait. channelListProvider drives the desktop shell

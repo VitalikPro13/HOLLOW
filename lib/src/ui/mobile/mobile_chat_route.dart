@@ -109,6 +109,7 @@ import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/chat/server_recovery_notices.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -1507,6 +1508,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
               // Searching would bring a blocked person's messages back.
               if (_searchOpen && !_watchDmPeerBlocked()) _buildSearchBar(hollow),
               if (!widget.isDm) _buildSyncIndicator(hollow),
+              if (!widget.isDm && !_isConference)
+                ServerRecoveryNotices(serverId: widget.serverId!, touch: true),
               if (chatClosed)
                 const Expanded(
                   child: HollowEmptyState(
@@ -1837,20 +1840,23 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       )));
       final muteText = muteBannerText(
           ref.watch(myMuteStatusProvider(widget.serverId!)).valueOrNull);
+      final removed = _isConference
+          ? null
+          : recoveryComposerBlock(ref, widget.serverId!);
       final chatOpen = ref.watch(channelChatOpenProvider((
         serverId: widget.serverId!,
         channelId: widget.channelId!,
       )));
       // The message area says why (#107); nothing to type into.
       if (!chatOpen) return const SizedBox.shrink();
-      if (!canPost || muteText != null) {
-        return _buildBlockedBanner(hollow, muteText);
+      if (!canPost || muteText != null || removed != null) {
+        return _buildBlockedBanner(hollow, removed ?? muteText);
       }
     }
     return _buildInputArea();
   }
 
-  Widget _buildBlockedBanner(HollowTheme hollow, String? muteText) {
+  Widget _buildBlockedBanner(HollowTheme hollow, String? reason) {
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
@@ -1862,8 +1868,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       ),
       child: Center(
         child: Text(
-          muteText ??
+          reason ??
               'You don\'t have permission to send messages in this channel',
+          textAlign: TextAlign.center,
           style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
         ),
       ),

@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_settings_provider.dart';
@@ -25,6 +26,7 @@ import 'package:hollow/src/ui/server_settings/pages/members_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/roles_page.dart';
 import 'package:hollow/src/ui/server_settings/server_settings_catalog.dart';
 
+import '../helpers/device_proof_fixtures.dart';
 import '../helpers/test_app.dart';
 import '../helpers/test_data.dart';
 
@@ -82,6 +84,7 @@ List<Override> _overrides({required bool loaded}) => hollowTestOverrides(extra: 
       bannedMembersProvider(kServerId1).overrideWith((_) async => const []),
       serverEmotesProvider(kServerId1).overrideWith((_) async => const []),
       serverStickersProvider(kServerId1).overrideWith((_) async => const []),
+      refoldReviewsProvider(kServerId1).overrideWith((_) async => fixtureReviews),
       channelGrantsProvider.overrideWith((ref, a) async => const []),
       serverChannelsProvider(kServerId1)
           .overrideWith((_) async => testChannels),
