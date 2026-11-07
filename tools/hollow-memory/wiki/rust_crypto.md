@@ -801,3 +801,44 @@ Tables: `security_alerts` (alert_id PK, peer_id MASTER, kind, detail, created_at
 Harness coverage: `friend_is_warned_when_a_new_device_joins_their_contact` (test_harness.rs) proves the alert rides a device list that genuinely propagated, that first contact is silent, and that a re-ingest does not re-warn.
 
 **Since ID-1 the detection site is `roster_book::ingest_inner`** (members before vs after a contact's roster fold). A 0.11 identity's devices each upgrade on their own, so a friend's first 0.12 roster carries one consent and the sibling's later consent read as a new device (s36 finding). A device the upgrade's phrase admitted (`Roster::upgrade_admitted`: phrase admits at `UPGRADE_RECOVERY_AT_MS + 1`, only while the upgrade's base is current) and already in the friend's SAVED roster is not news when its consent arrives; any other device still alerts. Tests `an_upgraded_identitys_own_devices_are_no_news_to_its_friends`, `only_the_upgrades_own_base_counts_its_admissions`.
+
+## Fuzzing the Rust wire parsers (cargo-fuzz, 0.14)
+
+`rust/hollow_core/fuzz/` is a cargo-fuzz crate (libFuzzer, ASan, debug assertions on) whose
+targets each call one entry of `hollow_core::fuzz_entry` (`src/fuzz_entry.rs`, built only
+under cargo-fuzz's `--cfg fuzzing` and in tests). An entry takes the bytes a peer, the relay,
+a push or someone else's file controls and runs them through the code that reads them
+before anything is trusted; hooks for private parsers sit in a `fuzz_hooks` module at the end
+of their own file (`ws_client`, `link_preview`, `push_seal`, `profile_card`, `archive::loader`,
+`api::storage::fuzz_check_snapshot`). Targets: `relay_frames` (relay text and binary frames
+through the socket's own intake, then `frame_auth::open`, kill blobs, lock chains),
+`frame_seal` (what `seal` writes `open` takes; no changed seal opens to other contents),
+`haven_message`, `message_envelope` (parse, `lane`/`live_only`, write and parse again),
+`crdt_ops` (`parse_ops_tolerant`, `read_op`), `crdt_fold` (ops from five fixed identities,
+signed by the target, into `ingest_remote`: any order plus one catch-up round folds to the
+same state, which saves and loads), `crdt_digest`, `roster` and `kill_order` (cases shaped
+like `roster_vectors.json`/`kill_vectors.json`), `join_lock`, `file_names` (`safe_file_name`
+keeps only inert names, `parse_id`, file commitments), `message_sig` (two different messages
+never sign the same bytes), `share_wire`, `link_preview` (cards and our own fetch's page and
+FxEmbed readers), `hollowpack`, `snapshot_zip`, `archive_zip`, `push_wake` (the sidecar
+fixture's keys), `profile_card` (a sealed card's plaintext), `mls_message` (KeyPackages,
+frames, commits, Welcomes into a one-member group), `peer_images` (thumbs, card thumbs,
+stickers, overlays), `peer_ids`, and the older standalone `image_check`.
+
+Run (Mac, nightly toolchain): `rust/hollow_core/fuzz/run.sh build`, `run.sh seeds` (seed
+corpora from the test vectors, frames this build makes and the unit tests' JSON literals,
+written by the ignored test `fuzz_entry::seeds::write_fuzz_seeds`; dictionaries from
+`make_dicts.py`), `run.sh run [--secs N] [--par P] [--targets "a b"]`. State lives in
+`$FUZZ_RUST_ROOT` (default `~/dev/fuzz-rust`): `corpus/` (merged each run), `crashes/<stamp>/`,
+`logs/<stamp>/`, `summary.txt`. A crash ends one libFuzzer run, so a target runs again until
+its time is spent. Replay one input: `<target dir>/<triple>/release/<target> <file>`. An input
+worth keeping goes to `fuzz/regressions/<target>/` with its fix; the unit test
+`fuzz_entry::tests::fuzz_regressions_stay_fixed` replays every one on each suite.
+**Node-level replay**: the ignored harness test `fuzz_corpus_never_kills_a_node`
+(`HOLLOW_FUZZ_CORPUS=<root>/corpus`) sends every `haven_message` input as a sealed frame and
+every `message_envelope` input inside Olm and MLS into live nodes, as found and with their ids
+aimed at the real server, channel and sender, and fails if a node stops answering.
+**Nightly**: `relay-uws/fuzz/nightly.sh` runs the Rust stage after the relay targets
+(`FUZZ_NIGHTLY_RUST_SECS` per target, default 120, 0 skips; own snapshot, target dir and
+corpus under `~/dev/fuzz-nightly/rust`, lines and crashes as `rust_<target>`). Never in
+public CI, as for the relay.

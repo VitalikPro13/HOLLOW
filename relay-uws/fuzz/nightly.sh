@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The relay fuzz targets, nightly on the Mac mini. Fuzzing never runs in public CI:
+# The relay fuzz targets, then the Rust wire-parser ones (`rust/hollow_core/fuzz/run.sh`,
+# FUZZ_NIGHTLY_RUST_SECS each, 0 skips them), nightly on the Mac mini. Fuzzing never runs in public CI:
 # a public repo's workflow artifacts would publish every crash input.
 #
 #   nightly.sh run [--budget SECS] [--src DIR] [--par N]   one run (default 3600 s, ~/src/HOLLOW)
@@ -77,6 +78,45 @@ run_target() {
         "crashes=$(ls "$crashes/$t" | wc -l | tr -d ' ')"
 }
 
+# The Rust wire-parser targets (rust/hollow_core/fuzz/run.sh) after the relay's, each
+# FUZZ_NIGHTLY_RUST_SECS (default 120, 0 = skip) from a snapshot of the tree, with their
+# own persistent target dir and corpus under $ROOT/rust. Lines and crashes join the
+# relay's as rust_<target>.
+rust_stage() {
+    local src=$1 logs=$2 crashes=$3 par=$4 secs=${FUZZ_NIGHTLY_RUST_SECS:-120}
+    [ "$secs" -gt 0 ] && [ -f "$src/rust/hollow_core/fuzz/run.sh" ] || return 0
+    export PATH="$HOME/.cargo/bin:$PATH"
+    local snap=$ROOT/rust-src
+    mkdir -p "$snap/push-sidecar" "$snap/relay-uws"
+    rsync -a --delete --exclude target/ "$src/rust/" "$snap/rust/"
+    rsync -a --delete "$src/push-sidecar/test/" "$snap/push-sidecar/test/"
+    rsync -a --delete "$src/relay-uws/test/" "$snap/relay-uws/test/"
+    local run=$snap/rust/hollow_core/fuzz/run.sh
+    export FUZZ_RUST_ROOT=$ROOT/rust CARGO_TARGET_DIR=$ROOT/rust/target
+    if ! bash "$run" build > "$logs/rust_build.log" 2>&1; then
+        echo "rust_build rc=1 (logs/rust_build.log)"
+        return 0
+    fi
+    # Seeds come from a test build, so only when there are none yet; the corpus keeps the rest.
+    [ -d "$ROOT/rust/seeds" ] || bash "$run" seeds > "$logs/rust_seeds.log" 2>&1
+    python3 "$snap/rust/hollow_core/fuzz/make_dicts.py" "$ROOT/rust/dicts" > /dev/null 2>&1
+    bash "$run" run --secs "$secs" --par "$par" > "$logs/rust_run.log" 2>&1
+    local last
+    last=$(ls -td "$ROOT/rust/logs"/* 2> /dev/null | head -1)
+    [ -n "$last" ] || return 0
+    for f in "$last"/*.log; do
+        cp "$f" "$logs/rust_$(basename "$f")"
+    done
+    local stamp_dir
+    stamp_dir=$ROOT/rust/crashes/$(basename "$last")
+    if [ -d "$stamp_dir" ]; then
+        for d in "$stamp_dir"/*; do
+            mkdir -p "$crashes/rust_$(basename "$d")" && cp "$d"/* "$crashes/rust_$(basename "$d")/" 2> /dev/null
+        done
+    fi
+    sed -e 's/^/rust_/' "$last/summary.txt"
+}
+
 run_nightly() {
     local budget=3600 src=$HOME/src/HOLLOW par=5
     local args=("$@")
@@ -138,6 +178,7 @@ run_nightly() {
     printf '%s\n' "${TARGETS[@]}" |
         xargs -P "$par" -I{} bash -c 'run_target "$1" "$2" "$3" "$4" "$5"' _ {} "$secs" "$out" "$logs" "$crashes" \
             > "$logs/summary.txt"
+    rust_stage "$src" "$logs" "$crashes" "$par" >> "$logs/summary.txt"
     sort -o "$logs/summary.txt" "$logs/summary.txt"
     { echo "$stamp rev=$rev budget=${budget}s per_target=${secs}s"; cat "$logs/summary.txt"; } > "$ROOT/summary.txt"
 
@@ -172,5 +213,5 @@ case ${1:-} in
     run) shift; run_nightly "$@" ;;
     install) shift; install_agent "$@" ;;
     uninstall) uninstall_agent ;;
-    *) sed -n '2,15p' "$0"; exit 2 ;;
+    *) sed -n '2,16p' "$0"; exit 2 ;;
 esac

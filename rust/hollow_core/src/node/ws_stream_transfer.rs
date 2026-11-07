@@ -886,7 +886,7 @@ fn pad_id(id: &str) -> [u8; 64] {
 /// suffix, `_` for link snapshots, `-`). A `..` or a separator would
 /// walk out of the files directory on Windows, where `..` is collapsed lexically
 /// before the filesystem is consulted. Mirrors `parseWireTransferId` in Dart.
-fn parse_id(buf: &[u8]) -> Option<String> {
+pub(crate) fn parse_id(buf: &[u8]) -> Option<String> {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     let id = std::str::from_utf8(&buf[..end]).ok()?;
     let allowed = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-');

@@ -3101,6 +3101,54 @@ mod wire_tests;
 
 // -- Tests --
 
+/// What a relay can make this client read before anything is trusted: text frames
+/// (the auth reply, server messages) and binary frames, each through the code a live
+/// socket runs. Built for cargo-fuzz (`rust/hollow_core/fuzz`) and the replay tests.
+#[cfg(any(fuzzing, test))]
+pub(crate) mod fuzz_hooks {
+    use super::*;
+
+    /// Feed `frames` to a fresh client state in order; every event they raise is returned.
+    pub(crate) fn relay_frames(frames: &[(bool, &[u8])]) -> Vec<WsEvent> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut rooms = Rooms::default();
+        let mut joins = HashMap::new();
+        for &(text, data) in frames {
+            if text {
+                let Ok(text) = std::str::from_utf8(data) else { continue };
+                let _ = relay_session::relay_frame_counts(&Frame::text(text.to_string()));
+                let _ = reply_kind(text);
+                let _ = log_word(text);
+                if let Ok(reply) = serde_json::from_str::<AuthReply>(text) {
+                    let _ = relay_session::cooldown(&reply);
+                    if let AuthReply::AuthFailed { error, .. } = &reply {
+                        let _ = LicenseRefusal::from_code(error);
+                    }
+                    let asks = [relay_session::Ask::V2, relay_session::Ask::New, relay_session::Ask::Resume { sid: "s".repeat(43), in_h: 3 }];
+                    for (i, ask) in asks.iter().enumerate() {
+                        if let Ok(again) = serde_json::from_str::<AuthReply>(text) {
+                            let _ = relay_session::judge(ask, i == 2, again);
+                        }
+                    }
+                }
+                if let Ok(msg) = serde_json::from_str::<ServerMsg>(text) {
+                    handle_server_message(&tx, msg, &mut rooms, &mut joins, "relay.example", "me", false);
+                }
+            } else {
+                let _ = relay_session::relay_frame_counts(&Frame::Binary(data.to_vec().into()));
+                let _ = binary_payload(data).map(sealed_class);
+                let _ = sealed_parts(data);
+                dispatch_binary(&tx, data);
+            }
+        }
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

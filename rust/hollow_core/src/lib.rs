@@ -106,6 +106,12 @@ pub(crate) mod log {
         STDERR.store(true, Ordering::Relaxed);
     }
 
+    /// Fuzz runs log nothing to stderr: a crash report should hold the crash.
+    #[cfg(fuzzing)]
+    pub fn quiet_stderr() {
+        STDERR.store(false, Ordering::Relaxed);
+    }
+
     #[cfg(test)]
     thread_local! {
         static CAPTURED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
@@ -456,6 +462,9 @@ pub mod dfn_ffi;
 mod crdt;
 mod crypto;
 mod frb_generated;
+/// Entry points for the cargo-fuzz targets (`fuzz/`) and the tests that replay them.
+#[cfg(any(fuzzing, test))]
+pub mod fuzz_entry;
 /// Media forwarder: blind str0m packet relay for SFrame screen-share RTP, run
 /// headless on the VPS and embedded in desktop builds. Feature- AND desktop-gated
 /// (the flag reaches mobile cargokit builds, its deps do not) and outside `api` so

@@ -397,6 +397,18 @@ mod social {
         TikTok,
     }
 
+    /// What an adapter reads from a third-party answer (fuzzing and its replay tests).
+    #[cfg(any(fuzzing, test))]
+    pub(super) fn fuzz_answer(url: &str, body: &[u8]) {
+        if let Ok(url) = reqwest::Url::parse(url) {
+            let _ = classify(&url);
+            let _ = status_id(&url);
+        }
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+            let _ = parse_fxembed(&v);
+        }
+    }
+
     /// Which adapter, if any, owns this URL.
     pub(super) fn classify(url: &reqwest::Url) -> Option<Kind> {
         let host = url.host_str()?;
@@ -884,6 +896,27 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max_chars).collect()
+}
+
+/// What our own preview fetch reads from a page any site serves (fuzzing and its
+/// replay tests).
+#[cfg(any(fuzzing, test))]
+pub(crate) mod fuzz_hooks {
+    use super::*;
+
+    pub(crate) fn page(html: &str) {
+        let meta = parse_og_metadata(html);
+        let _ = declares_large_card(&meta);
+        let _ = declares_video(&meta);
+        let _ = wants_large_card(&meta, meta.image_w, Some(400));
+        let _ = truncate_chars(&meta.title, MAX_TITLE_CHARS);
+        let _ = truncate_chars(&meta.description, MAX_DESC_CHARS);
+        if let (Ok(page), Some(src)) = (reqwest::Url::parse("https://example.com/a/b"), meta.image_url.as_deref()) {
+            let _ = page.join(src);
+        }
+        let (url, body) = html.split_once('\n').unwrap_or((html, ""));
+        social::fuzz_answer(url, body.as_bytes());
+    }
 }
 
 #[cfg(test)]

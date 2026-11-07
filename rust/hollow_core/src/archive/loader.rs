@@ -512,6 +512,23 @@ fn export_timestamp_slug() -> String {
         .to_string()
 }
 
+/// An archive someone exported, loaded as the viewer loads it; whatever it unpacked
+/// is removed again (fuzzing and its replay tests).
+#[cfg(any(fuzzing, test))]
+pub(crate) mod fuzz_hooks {
+    pub(crate) fn load(zip_bytes: &[u8]) -> bool {
+        match super::load_archive(zip_bytes) {
+            Ok(loaded) => {
+                if let Some(dir) = loaded.files_dir {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -65719,3 +65719,100 @@ async fn t14_reset_an_owner_sibling_mid_sync_mints_no_join_key() {
         assert!(node.live_server_state(&server_id).await.unwrap().join_secrets_retired.is_empty(), "{} saw a reset", node.device_id);
     }
 }
+
+// w3-fuzz
+
+/// Point a fuzz input's ids at a live server: any string under a key naming a server,
+/// a channel or a peer becomes the real one, so the handler behind the parse runs.
+fn fuzz_aim(v: &mut serde_json::Value, server: &str, channel: &str, peer: &str) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, field) in map.iter_mut() {
+                if field.is_string() {
+                    let aimed = if k.contains("server") || k == "sid" || k == "group" {
+                        Some(server)
+                    } else if k.contains("channel") {
+                        Some(channel)
+                    } else if ["peer", "sender", "author", "master", "device", "from", "owner"].iter().any(|p| k.contains(p)) {
+                        Some(peer)
+                    } else {
+                        None
+                    };
+                    if let Some(id) = aimed {
+                        *field = serde_json::Value::String(id.to_string());
+                    }
+                } else {
+                    fuzz_aim(field, server, channel, peer);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|i| fuzz_aim(i, server, channel, peer)),
+        _ => {}
+    }
+}
+
+/// Every input of a fuzz corpus, into live nodes as their parsers meet it: each
+/// `haven_message` input as a sealed direct frame from a friend and co-member, each
+/// `message_envelope` input inside Olm and inside MLS, as found and aimed at the real
+/// server, channel and sender. A node that stops answering is a finding.
+/// `HOLLOW_FUZZ_CORPUS=<dir with haven_message/ and message_envelope/>`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+#[ignore = "replays a fuzz corpus; run by hand with HOLLOW_FUZZ_CORPUS"]
+async fn fuzz_corpus_never_kills_a_node() {
+    let Ok(corpus) = std::env::var("HOLLOW_FUZZ_CORPUS") else { return };
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, a, m, server_id) = vault_trio(&relay, 241, 242, 243).await;
+    let channel = general_channel_of(&server_id);
+    let dm = super::types::dm_room_code(&a.master_id, &m.master_id);
+    let inputs = |kind: &str| -> Vec<Vec<u8>> {
+        let mut files: Vec<_> = std::fs::read_dir(std::path::Path::new(&corpus).join(kind))
+            .map(|d| d.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        files.sort();
+        files.iter().filter_map(|p| std::fs::read(p).ok()).collect()
+    };
+    let aimed = |bytes: &[u8]| -> Option<Vec<u8>> {
+        let mut v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        fuzz_aim(&mut v, &server_id, &channel, &m.master_id);
+        serde_json::to_vec(&v).ok()
+    };
+    // The sender's own answer waits behind every input it was handed, so each check
+    // also paces the replay.
+    let alive = async |what: &str, n: usize| {
+        for node in [&m, &o, &a] {
+            assert!(node.debug_snapshot().await.is_some(), "{what} input {n} stopped {}", node.device_id);
+        }
+    };
+
+    let frames = inputs("haven_message");
+    for (n, bytes) in frames.iter().enumerate() {
+        for body in std::iter::once(bytes.clone()).chain(aimed(bytes)) {
+            relay.inject_direct(&dm, &m.device_id, &a.device_id, body.clone());
+            relay.inject_direct(&server_id, &m.device_id, &o.device_id, body);
+        }
+        if n % 25 == 24 {
+            alive("haven_message", n).await;
+        }
+    }
+    alive("haven_message", frames.len()).await;
+
+    let envelopes = inputs("message_envelope");
+    for (n, bytes) in envelopes.iter().enumerate() {
+        for body in std::iter::once(bytes.clone()).chain(aimed(bytes)) {
+            let Ok(env) = serde_json::from_slice::<super::types::MessageEnvelope>(&body) else { continue };
+            olm_envelope_as(&m, &a, env.clone()).await;
+            mls_envelope_as(&m, &server_id, env).await;
+        }
+        if n % 25 == 24 {
+            alive("message_envelope", n).await;
+        }
+    }
+    // Frames the last envelopes became reach the receivers after the sender answers.
+    for _ in 0..3 {
+        alive("message_envelope", envelopes.len()).await;
+    }
+}

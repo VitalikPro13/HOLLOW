@@ -258,6 +258,32 @@ pub(crate) fn store_card(card: &SignedCard, avatar: Option<&[u8]>, ceiling: i64,
         .unwrap_or(false)
 }
 
+/// A card a peer sealed to us, its plaintext of the peer's choosing (fuzzing and its
+/// replay tests).
+#[cfg(any(fuzzing, test))]
+pub(crate) mod fuzz_hooks {
+    use super::*;
+
+    pub(crate) fn open(plain: &[u8]) {
+        use aes_gcm::aead::{Aead, Payload};
+        static PAIR: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+        let (us, them) = PAIR.get_or_init(|| {
+            let us = NativeKeypair::from_secret_bytes(&[1; 32]);
+            let them = NativeKeypair::from_secret_bytes(&[2; 32]);
+            super::super::dm_room::register(&us);
+            super::super::dm_room::register(&them);
+            (us.peer_id(), them.peer_id())
+        });
+        let nonce = [7u8; 12];
+        let aad = seal_aad(them, us, 5);
+        let Some(cipher) = seal_cipher(them, us) else { return };
+        let Ok(ct) = cipher.encrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: plain, aad: &aad }) else { return };
+        let engine = base64::engine::general_purpose::STANDARD;
+        let sealed = SealedCard { nonce: engine.encode(nonce), ct: engine.encode(ct) };
+        let _ = open_from(&sealed, us, them, 5);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

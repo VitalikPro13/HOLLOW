@@ -1740,6 +1740,13 @@ fn snapshot_landing<R: std::io::Read>(entry: &zip::read::ZipFile<'_, R>) -> Resu
     }
 }
 
+/// Judge a snapshot as a link or restore would, landing nothing (fuzzing and its
+/// replay tests).
+#[cfg(any(fuzzing, test))]
+pub(crate) fn fuzz_check_snapshot(zip_bytes: &[u8]) -> bool {
+    check_snapshot(zip_bytes).is_ok()
+}
+
 /// A snapshot every entry of which was judged and measured: `(index, landing, bytes)`.
 struct CheckedSnapshot<'a> {
     archive: zip::ZipArchive<std::io::Cursor<&'a [u8]>>,

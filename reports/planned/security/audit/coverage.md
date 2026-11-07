@@ -58,7 +58,7 @@ Source keys used below. Paths are relative to the repository root unless noted.
 | Mutation passes | One mutation at a time, named tests expected to fail, file restored by hash | MUT, finding files, per track |
 | Fleet and phones | Throwaway-identity journeys on Windows, macOS, Linux, iOS Simulators, Android emulators | `reports/shipped/security/REGRESSION_PASS_0.12.md` |
 | Relay suites | `relay-uws/test/run_tests.sh` plain and with `SANITIZE=1` (ASan, UBSan) on the VPS before every deploy, and in CI job "Relay C++" | CLAUDE.md, `.github/workflows/ci.yml:350-372` |
-| Fuzzing | Nine relay libFuzzer targets; one Rust cargo-fuzz target for the image check | commit `22116aa5`, `relay-uws/fuzz/`, `rust/hollow_core/fuzz/` |
+| Fuzzing | Nine relay libFuzzer targets; 23 Rust cargo-fuzz targets for the wire parsers, ingest folds, zips, pushes and peer images (0.14), plus a harness replay of their corpora into live nodes | commit `22116aa5`, `relay-uws/fuzz/`, `rust/hollow_core/fuzz/` (wiki rust_crypto "Fuzzing the Rust wire parsers") |
 | Scale probes | G1 rerun on the merged 0.13 tree | SCALE |
 
 Attacker profiles (TM section 1) are applied with one standing rule: every peer attacker runs a

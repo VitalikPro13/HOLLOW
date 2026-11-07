@@ -1,6 +1,7 @@
-# cargo-fuzz harness for the AR-28 image check: `cargo +nightly fuzz run image_check`.
-# Compiles src/node/image_check.rs on its own (it depends on `image` alone), so it
-# never builds the whole app. Keep `image` on the app's exact version and features.
+# cargo-fuzz targets for the parsers a peer, the relay, a push or a file reaches before
+# trust: `run.sh` builds, seeds and runs them (wiki rust_crypto, "Fuzzing the Rust wire
+# parsers"). `image_check` compiles src/node/image_check.rs on its own (it depends on
+# `image` alone); keep `image` on the app's exact version and features.
 [package]
 name = "hollow_core_fuzz"
 version = "0.0.0"
@@ -13,6 +14,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 image = { version = "=0.25.10", default-features = false, features = ["webp", "png", "jpeg", "gif", "bmp"] }
+# The wire-parser targets reach the app's parsers through `hollow_core::fuzz_entry`,
+# a module that exists only under cargo-fuzz's `--cfg fuzzing` (and in its tests).
+hollow_core = { path = ".." }
 
 [[bin]]
 name = "image_check"
@@ -26,3 +30,157 @@ members = ["."]
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "relay_frames"
+path = "fuzz_targets/relay_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame_seal"
+path = "fuzz_targets/frame_seal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "haven_message"
+path = "fuzz_targets/haven_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message_envelope"
+path = "fuzz_targets/message_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crdt_ops"
+path = "fuzz_targets/crdt_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crdt_fold"
+path = "fuzz_targets/crdt_fold.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crdt_digest"
+path = "fuzz_targets/crdt_digest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roster"
+path = "fuzz_targets/roster.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kill_order"
+path = "fuzz_targets/kill_order.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "join_lock"
+path = "fuzz_targets/join_lock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "file_names"
+path = "fuzz_targets/file_names.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message_sig"
+path = "fuzz_targets/message_sig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "link_preview"
+path = "fuzz_targets/link_preview.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hollowpack"
+path = "fuzz_targets/hollowpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_zip"
+path = "fuzz_targets/snapshot_zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_zip"
+path = "fuzz_targets/archive_zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "push_wake"
+path = "fuzz_targets/push_wake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "profile_card"
+path = "fuzz_targets/profile_card.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mls_message"
+path = "fuzz_targets/mls_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "peer_images"
+path = "fuzz_targets/peer_images.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "peer_ids"
+path = "fuzz_targets/peer_ids.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "share_wire"
+path = "fuzz_targets/share_wire.rs"
+test = false
+doc = false
+bench = false

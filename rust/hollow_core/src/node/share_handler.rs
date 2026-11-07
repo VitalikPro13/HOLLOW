@@ -293,11 +293,11 @@ const FALLBACK_DOWNLOAD_NAME: &str = "download";
 ///
 /// Rules, in order: keep only the text after the last `/` or `\` (BOTH are
 /// separators on every platform here, so a Linux-minted name cannot become a
-/// traversal on Windows); trim whitespace then trailing dots and spaces (Windows
+/// traversal on Windows); trim leading whitespace and trailing dots and whitespace (Windows
 /// strips those at create time, so a check on the un-stripped form is bypassable);
 /// reject `.` and `..`; map control characters and the Windows-illegal set to `_`,
 /// including `:`, which kills drive-relative names and NTFS alternate data
-/// streams; prefix reserved device names with `_`; truncate on a char boundary.
+/// streams; truncate on a char boundary; prefix reserved device names with `_`.
 ///
 /// The result is always exactly one component, never empty and never `.`/`..`, so
 /// `dir.join(safe_file_name(x))` is always inside `dir`.
@@ -305,8 +305,8 @@ pub(crate) fn safe_file_name(raw: &str) -> String {
     // 1. Last component only, treating both separators as separators everywhere.
     let name = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
 
-    // 2. Windows-equivalent trailing junk.
-    let name = name.trim().trim_end_matches(['.', ' ']);
+    // 2. Windows-equivalent trailing junk, and whitespace at either end.
+    let name = name.trim_start().trim_end_matches(trailing_junk);
 
     // 3. Pure-dot components are traversal, not names.
     if name.is_empty() || name == "." || name == ".." {
@@ -315,31 +315,36 @@ pub(crate) fn safe_file_name(raw: &str) -> String {
 
     // 4. Neutralize control chars and everything Windows forbids in a component,
     //    plus the bidi override characters.
-    let mut cleaned: String = name
+    let cleaned: String = name
         .chars()
         .map(|c| if unsafe_name_char(c) { '_' } else { c })
         .collect();
 
-    // 5. Reserved device names.
-    if reserved_device_name(&cleaned) {
-        cleaned.insert(0, '_');
-    }
+    // 5. Byte-cap on a char boundary (never split a multi-byte character). The cut
+    //    can re-expose a trailing dot or space, and could empty the string.
+    let kept = cut_name(&cleaned);
 
-    // 6. Byte-cap on a char boundary (never split a multi-byte character).
-    if cleaned.len() > MAX_DOWNLOAD_NAME_BYTES {
-        let mut end = MAX_DOWNLOAD_NAME_BYTES;
-        while end > 0 && !cleaned.is_char_boundary(end) {
-            end -= 1;
-        }
-        cleaned.truncate(end);
-    }
-
-    // Truncation can re-expose a trailing dot/space, and could empty the string.
-    let cleaned = cleaned.trim_end_matches(['.', ' ']);
-    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+    // 6. Reserved device names, judged on the name as it is kept: a cut can leave one.
+    let kept = if reserved_device_name(kept) { cut_name(&format!("_{kept}")).to_string() } else { kept.to_string() };
+    if kept.is_empty() || kept == "." || kept == ".." {
         return FALLBACK_DOWNLOAD_NAME.to_string();
     }
-    cleaned.to_string()
+    kept
+}
+
+/// `name` cut to [`MAX_DOWNLOAD_NAME_BYTES`] on a char boundary, trailing dots and
+/// spaces trimmed after the cut.
+fn cut_name(name: &str) -> &str {
+    let mut end = name.len().min(MAX_DOWNLOAD_NAME_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].trim_end_matches(trailing_junk)
+}
+
+/// What a kept name never ends with: Windows strips dots and spaces at create time.
+fn trailing_junk(c: char) -> bool {
+    c == '.' || c.is_whitespace()
 }
 
 /// Control characters, everything Windows forbids in a component (`:` included, which
@@ -356,14 +361,17 @@ fn unsafe_name_char(c: char) -> bool {
         )
 }
 
-/// A Windows device name, with or without an extension (`CON.txt` counts).
+/// A Windows device name, with or without an extension (`CON.txt` counts) and with
+/// any spaces before it (`CON .txt`).
 fn reserved_device_name(name: &str) -> bool {
-    const RESERVED: [&str; 22] = [
+    const RESERVED: &[&str] = &[
         "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "COM\u{b9}", "COM\u{b2}", "COM\u{b3}",
+        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "LPT\u{b9}", "LPT\u{b2}", "LPT\u{b3}",
     ];
-    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
     RESERVED.contains(&stem.as_str())
 }
 
@@ -372,7 +380,8 @@ fn reserved_device_name(name: &str) -> bool {
 pub(crate) fn is_inert_file_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 255
-        && !name.ends_with(['.', ' '])
+        && !name.ends_with(trailing_junk)
+        && !name.starts_with(char::is_whitespace)
         && !name.chars().any(unsafe_name_char)
         && !reserved_device_name(name)
 }
@@ -2610,6 +2619,30 @@ mod tests {
         // Not reserved — must pass through untouched.
         assert_eq!(safe_file_name("CONTACT.txt"), "CONTACT.txt");
         assert_eq!(safe_file_name("COM10.txt"), "COM10.txt");
+    }
+
+    /// HOL-SEC-202: the device-name check judges the name as it is kept, after the cut
+    /// to length and the trim behind it, and every name Windows reserves.
+    #[test]
+    fn a_device_name_is_judged_on_the_name_kept() {
+        let cut = format!("CON{}x", " ".repeat(MAX_DOWNLOAD_NAME_BYTES));
+        assert_eq!(safe_file_name(&cut), "_CON");
+        for raw in ["CON .txt", "aux  .log", "COM0", "lpt0.txt", "COM\u{b9}", "LPT\u{b3}.pdf"] {
+            assert!(!is_inert_file_name(raw), "{raw:?} passed as inert");
+            assert_eq!(safe_file_name(raw), format!("_{raw}"), "{raw:?} was not escaped");
+        }
+        assert!(is_inert_file_name(&safe_file_name(&format!("{}{}", "a".repeat(199), "CON"))));
+    }
+
+    /// A trim that exposes whitespace trims it too, so a kept name passes the sanitizer
+    /// unchanged (the `file_names` fuzz target's stability property).
+    #[test]
+    fn a_kept_name_ends_and_starts_with_no_whitespace() {
+        for (raw, kept) in [("a\u{2000}.", "a"), ("b.\u{200a}", "b"), ("c \u{3000} .", "c"), ("\u{3000}d", "d")] {
+            assert_eq!(safe_file_name(raw), kept, "{raw:?}");
+            assert!(!is_inert_file_name(raw), "{raw:?} passed as inert");
+            assert_eq!(safe_file_name(kept), kept, "{kept:?} is not stable");
+        }
     }
 
     #[test]

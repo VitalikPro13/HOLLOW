@@ -1583,6 +1583,14 @@ fn persist_inline_image(
     }
 }
 
+/// The push fetch node's own frame readers (fuzzing and its replay tests).
+#[cfg(any(fuzzing, test))]
+pub(crate) fn fuzz_frames(body: &[u8]) {
+    let _ = split_relay_frame(body, false);
+    let _ = split_relay_frame(body, true);
+    handle_text_frame(&String::from_utf8_lossy(body));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -410,6 +410,52 @@ fn open_wake_at(
     }
 }
 
+/// A wake as a push delivers it, opened with the sidecar fixture's receiver keys
+/// (fuzzing and its replay tests): `[mode][bytes]`.
+#[cfg(any(fuzzing, test))]
+pub(crate) mod fuzz_hooks {
+    use super::*;
+
+    fn fixture() -> &'static (PushKeys, std::path::PathBuf) {
+        static FIXTURE: std::sync::OnceLock<(PushKeys, std::path::PathBuf)> = std::sync::OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            let v: serde_json::Value =
+                serde_json::from_str(include_str!("../../../../push-sidecar/test/sealed_wake_vectors.json")).expect("fixture");
+            let key = |name: &str| URL_SAFE_NO_PAD.decode(v[name].as_str().expect("key")).expect("key");
+            let secret = SecretKey::from_slice(&key("ua_private")).expect("secret");
+            let auth: [u8; 16] = key("auth").try_into().expect("auth");
+            let keys = PushKeys::from_parts(secret, auth, bind_tag("fixture"));
+            let root = std::env::temp_dir().join(format!("hollow-fuzz-push-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&root);
+            store(&root, &keys).expect("store");
+            (keys, root)
+        })
+    }
+
+    pub(crate) fn open(data: &[u8]) {
+        let (keys, root) = fixture();
+        let (&mode, rest) = data.split_first().unwrap_or((&0, &[]));
+        match mode % 4 {
+            0 => {
+                if let Ok(plain) = open_body(keys, rest) {
+                    let _ = parse_sealed_wake(&plain);
+                }
+            }
+            1 => {
+                let _ = parse_sealed_wake(rest);
+            }
+            2 => {
+                if let Ok(fields) = serde_json::from_slice::<BTreeMap<String, String>>(rest) {
+                    let _ = open_wake_at(root, &fields, Reader::Tap, now_secs());
+                }
+            }
+            _ => {
+                let _ = crate::push_enrich::fuzz_open_wake(&root.to_string_lossy(), &String::from_utf8_lossy(rest));
+            }
+        }
+    }
+}
+
 /// The sealed wakes the sidecar's own test wrote (`push-sidecar/test/sealed_wake.test.js`).
 #[cfg(test)]
 pub(crate) fn fixture_for_test() -> serde_json::Value {

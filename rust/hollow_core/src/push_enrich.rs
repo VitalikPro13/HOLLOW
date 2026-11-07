@@ -315,6 +315,12 @@ unsafe fn cstr(p: *const c_char) -> Option<String> {
     unsafe { CStr::from_ptr(p) }.to_str().ok().map(|s| s.to_string())
 }
 
+/// The extension's wake reader (fuzzing and its replay tests).
+#[cfg(any(fuzzing, test))]
+pub(crate) fn fuzz_open_wake(data_dir: &str, fields_json: &str) -> Option<String> {
+    open_wake_json(data_dir, fields_json)
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::{CStr, CString};
